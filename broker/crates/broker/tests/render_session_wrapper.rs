@@ -326,21 +326,18 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    /// Argb32f smart Auto without a policy folds to the CPU session
+    /// (--smart-session32-cpu-v1). #292 settled that the session is the anchor
+    /// here and that its no-GPU-attempt report is canonical, so the conversion
+    /// pins the fold itself rather than comparing against the one-shot's futile
+    /// preflight record (#361).
     #[test]
-    fn smart_argb32f_auto_is_session_canonical_and_pixel_matches_one_shot() {
+    fn smart_argb32f_auto_without_a_policy_folds_to_the_cpu_session() {
         if crate::common::skip_without_restricted_token_launch(
-            "smart_argb32f_auto_is_session_canonical_and_pixel_matches_one_shot",
+            "smart_argb32f_auto_without_a_policy_folds_to_the_cpu_session",
         ) {
             return;
         }
-        // Argb32f smart Auto (policy-none) is now carried by the length-1 session
-        // (#292): the session folds Auto to CPU and renders on
-        // --smart-session32-cpu-v1. One-shot Argb32f Auto fails its policy-less
-        // GPU preflight *before touching any device* and falls back to the same
-        // CPU render, so the pixels match, but one-shot records
-        // gpu_attempt/gpu_fallback_used while the session does not. Per W4 (#264)
-        // the session is the anchor, so its no-GPU-attempt report is canonical;
-        // assert the pixel equivalence and pin the intended report divergence.
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -349,15 +346,12 @@ mod windows_e2e {
         let aex =
             root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
         if !worker.is_file() || !aex.is_file() {
-            eprintln!(
-                "skipping Argb32f smart Auto A/B: build aex_smart_worker.exe and \
-                 pf_smart_geometry_probe.aex first"
-            );
+            eprintln!("skipping Argb32f smart Auto: build the smart worker and the geometry probe");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
         let scratch = std::env::temp_dir().join(format!(
-            "aexcompat-smart32-ab-{}-{:032x}",
+            "aexcompat-smart32-{}-{:032x}",
             std::process::id(),
             rand::random::<u128>()
         ));
@@ -374,7 +368,7 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
         };
-        let render = |output: &Path| {
+        let render = |output: &Path, backend: RenderGpuBackend| {
             render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
                 &root,
                 &aex,
@@ -387,98 +381,89 @@ mod windows_e2e {
                 RenderPixelFormat::Argb32f,
                 None,
                 None,
-                RenderGpuBackend::Auto,
+                backend,
             )
         };
 
-        // Run A: default routing carries Argb32f Auto on the session.
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let out_a = scratch.join("a.png");
-        let report_a = render(&out_a).expect("session-route Argb32f Auto smart render");
+        let out_auto = scratch.join("auto.png");
+        let auto = render(&out_auto, RenderGpuBackend::Auto)
+            .expect("session-route Argb32f Auto smart render");
         assert!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-            "the Argb32f Auto smart render must now be carried by the session"
+            "the Argb32f Auto smart render must be carried by the session"
+        );
+        assert_session_render_is_healthy(&auto, "Argb32f Auto");
+        assert_eq!(
+            auto.get("pixel_format"),
+            Some(&serde_json::json!("argb32f")),
+            "the render did not stay at float32: {auto}"
         );
 
-        // Run B: escape hatch forces the one-shot transport.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let out_b = scratch.join("b.png");
-        let report_b = render(&out_b);
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let report_b = report_b.expect("one-shot Argb32f Auto smart render");
-
-        // Pixel equivalence: both render on the smart worker's CPU path.
+        // The fold is the point: with no authenticated policy the session must
+        // not attempt a device, and must say so rather than leaving it unstated.
         assert_eq!(
-            report_a.get("output_sha256"),
-            report_b.get("output_sha256"),
-            "the Argb32f Auto render output must match between the routes"
-        );
-        assert!(
-            report_a
-                .get("output_sha256")
-                .is_some_and(|value| !value.is_null()),
-            "the session render must report an output_sha256: {report_a}"
-        );
-
-        // Session-canonical report: the session takes no GPU attempt.
-        assert_eq!(
-            report_a.get("gpu_fallback_used"),
-            Some(&serde_json::Value::Bool(false)),
-            "the session must not report a GPU fallback: {report_a}"
-        );
-        assert_eq!(
-            report_a.get("gpu_attempt"),
+            auto.get("gpu_attempt"),
             Some(&serde_json::Value::Null),
-            "the session must record no GPU attempt: {report_a}"
+            "a policy-less Auto session must record no GPU attempt: {auto}"
         );
-
-        // One-shot records the futile policy-less preflight and CPU fallback:
-        // exactly the artifact the session drops. Pinning it fixes the intended
-        // divergence so a later change cannot silently converge or widen it.
         assert_eq!(
-            report_b.get("gpu_fallback_used"),
-            Some(&serde_json::Value::Bool(true)),
-            "one-shot Argb32f Auto must record the CPU fallback: {report_b}"
+            auto.get("gpu_fallback_used"),
+            Some(&serde_json::json!(false)),
+            "the session folds at open; it does not fall back mid-flight: {auto}"
         );
-        assert!(
-            report_b
-                .get("gpu_attempt")
-                .is_some_and(|value| !value.is_null()),
-            "one-shot Argb32f Auto must record the GPU preflight attempt: {report_b}"
+        assert_eq!(
+            auto.get("gpu_render_dispatched"),
+            Some(&serde_json::json!(false)),
+            "no GPU render may be dispatched without a policy: {auto}"
         );
 
+        // Folding to CPU must be exactly that: the same render the explicit CPU
+        // backend produces. That is the equivalence the A/B against the one-shot
+        // was standing in for, and it holds between two session renders.
+        let out_cpu = scratch.join("cpu.png");
+        let cpu = render(&out_cpu, RenderGpuBackend::Cpu)
+            .expect("session-route Argb32f Cpu smart render");
+        assert_session_render_is_healthy(&cpu, "Argb32f Cpu");
+        assert_eq!(
+            auto.get("output_sha256"),
+            cpu.get("output_sha256"),
+            "the Auto fold did not produce the explicit-CPU render"
+        );
+        assert_eq!(
+            std::fs::read(&out_auto).unwrap(),
+            std::fs::read(&out_cpu).unwrap(),
+            "the Auto fold PNG differs from the explicit-CPU PNG"
+        );
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    /// Three timed secondary layers at one slot, carried by the smart session's
+    /// layer trailer (#294) at both Argb16 and Argb32f (#353). Verified by the
+    /// layers reaching the plug-in rather than by agreeing with the one-shot
+    /// (#361).
     #[test]
-    fn smart_timed_multilayer_matches_the_one_shot_transport() {
+    fn smart_timed_multilayer_reaches_the_plug_in_at_every_depth() {
         if crate::common::skip_without_restricted_token_launch(
-            "smart_timed_multilayer_matches_the_one_shot_transport",
+            "smart_timed_multilayer_reaches_the_plug_in_at_every_depth",
         ) {
             return;
         }
-        // Smart sessions now carry the secondary-layer trailer (#294): a SmartFX
-        // effect that checks out three timed layers renders byte-identically on
-        // the length-1 session and the one-shot --smart-image16-layer route.
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
         let worker = root.join("target/minihost-build/aex_smart_worker.exe");
-        let aex = root.join(
-            "target/pf-smart-timed-multilayer-probe-build/Release/pf_smart_timed_multilayer_probe.aex",
-        );
+        let aex = root
+            .join("target/pf-smart-timed-multilayer-probe-build/Release")
+            .join("pf_smart_timed_multilayer_probe.aex");
         if !worker.is_file() || !aex.is_file() {
-            eprintln!(
-                "skipping smart timed-multilayer A/B: build aex_smart_worker.exe and \
-                 pf_smart_timed_multilayer_probe.aex first"
-            );
+            eprintln!("skipping smart timed-multilayer: build the smart worker and the probe");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
         let scratch = std::env::temp_dir().join(format!(
-            "aexcompat-smart-timedlayer-{}-{:032x}",
+            "aexcompat-timed-multilayer-{}-{:032x}",
             std::process::id(),
             rand::random::<u128>()
         ));
@@ -489,9 +474,6 @@ mod windows_e2e {
         })
         .save(&input)
         .unwrap();
-        // Three secondary layers at slot 1, one per time the probe checks out
-        // (comp times 6/8, 1/3, 5/4). Distinct pixels so the composite is not a
-        // vacuous match.
         let make_layer = |name: &str, seed: u8| {
             let path = scratch.join(name);
             image::RgbaImage::from_fn(48, 32, |x, y| {
@@ -506,26 +488,27 @@ mod windows_e2e {
             .unwrap();
             path
         };
-        let timed_layers = vec![
-            TimedLayerImage {
-                slot: 1,
-                time: AnimationTime { value: 6, scale: 8 },
-                image_path: make_layer("layer0.png", 10),
-            },
-            TimedLayerImage {
-                slot: 1,
-                time: AnimationTime { value: 1, scale: 3 },
-                image_path: make_layer("layer1.png", 40),
-            },
-            TimedLayerImage {
-                slot: 1,
-                time: AnimationTime { value: 5, scale: 4 },
-                image_path: make_layer("layer2.png", 70),
-            },
-        ];
-        // Declare slot 1 as a layer input (a null-path layer parameter names
-        // the slot without contributing a static secondary), so the three timed
-        // layers are the only secondaries the probe checks out.
+        let timed_layers = |seed_shift: u8| {
+            vec![
+                TimedLayerImage {
+                    slot: 1,
+                    time: AnimationTime { value: 6, scale: 8 },
+                    image_path: make_layer(&format!("layer0-{seed_shift}.png"), 10 + seed_shift),
+                },
+                TimedLayerImage {
+                    slot: 1,
+                    time: AnimationTime { value: 1, scale: 3 },
+                    image_path: make_layer(&format!("layer1-{seed_shift}.png"), 40 + seed_shift),
+                },
+                TimedLayerImage {
+                    slot: 1,
+                    time: AnimationTime { value: 5, scale: 4 },
+                    image_path: make_layer(&format!("layer2-{seed_shift}.png"), 70 + seed_shift),
+                },
+            ]
+        };
+        // A null-path layer parameter names slot 1 without contributing a static
+        // secondary, so the timed layers are the only ones the probe checks out.
         let layer_decl: InteractiveParameter = serde_json::from_value(serde_json::json!({
             "slot": 1, "name": "layer", "kind": "layer",
             "minimum": 0.0, "maximum": 0.0, "value": 0.0,
@@ -541,15 +524,14 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
         };
-        // Argb32f joins Argb16 here (issue #353). It was the last depth the
-        // layered gate excluded: the worker's gpu_negotiation ignores layers and
-        // turns on for float32 whenever the plug-in advertises GPU support, so a
-        // GPU-declaring plug-in would take the device on the one-shot layered
-        // command while a policy-less Auto session folds to CPU. This probe
-        // advertises no GPU support, so both routes render on CPU and the
-        // equivalence below is what the gate change relies on.
+
         for pixel_format in [RenderPixelFormat::Argb16, RenderPixelFormat::Argb32f] {
-            let render = |output: &Path| {
+            let label = match pixel_format {
+                RenderPixelFormat::Argb8 => "argb8",
+                RenderPixelFormat::Argb16 => "argb16",
+                RenderPixelFormat::Argb32f => "argb32f",
+            };
+            let render = |output: &Path, layers: &[TimedLayerImage]| {
                 render_experimental_image_with_timed_layers(
                     &root,
                     &aex,
@@ -557,77 +539,43 @@ mod windows_e2e {
                     &input,
                     output,
                     &params,
-                    &timed_layers,
+                    layers,
                     timing,
                     true,
                     pixel_format,
                 )
-            };
-            let label = match pixel_format {
-                RenderPixelFormat::Argb8 => "argb8",
-                RenderPixelFormat::Argb16 => "argb16",
-                RenderPixelFormat::Argb32f => "argb32f",
+                .unwrap_or_else(|error| panic!("{label} timed-multilayer render: {error}"))
             };
 
-            // Run A: default routing carries the smart layered render on the session.
-            unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
             let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-            let out_a = scratch.join(format!("a-{label}.png"));
-            let report_a = render(&out_a)
-                .unwrap_or_else(|error| panic!("session-route {label} layered render: {error}"));
+            let out_base = scratch.join(format!("{label}-base.png"));
+            let base = render(&out_base, &timed_layers(0));
             assert!(
                 RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-                "the {label} smart timed-multilayer render must be carried by the session"
+                "the {label} timed-multilayer render must be carried by the session"
+            );
+            assert_session_render_is_healthy(&base, label);
+            assert_eq!(
+                base.get("pixel_format"),
+                Some(&serde_json::json!(label)),
+                "the render did not stay at {label}: {base}"
             );
 
-            // Run B: escape hatch forces the one-shot --smart-image*-layer transport.
-            unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-            let out_b = scratch.join(format!("b-{label}.png"));
-            let report_b = render(&out_b);
-            unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-            let report_b =
-                report_b.unwrap_or_else(|error| panic!("one-shot {label} layered render: {error}"));
+            let out_repeat = scratch.join(format!("{label}-repeat.png"));
+            let repeat = render(&out_repeat, &timed_layers(0));
+            assert_reports_agree(&base, &repeat, label);
 
-            assert_eq!(
-                report_a.get("output_sha256"),
-                report_b.get("output_sha256"),
-                "the {label} smart timed-multilayer output must match between the routes"
+            // The timed layers reach the plug-in: shifting their pixels must move
+            // the output. Without this, a render that dropped the trailer would
+            // still have matched the one-shot, which dropped it the same way.
+            let out_shift = scratch.join(format!("{label}-shift.png"));
+            let shifted = render(&out_shift, &timed_layers(17));
+            assert_session_render_is_healthy(&shifted, label);
+            assert_ne!(
+                base.get("output_sha256"),
+                shifted.get("output_sha256"),
+                "{label}: changing the timed layers did not change the output"
             );
-            assert!(
-                report_a
-                    .get("output_sha256")
-                    .is_some_and(|value| !value.is_null()),
-                "the session render must report an output_sha256: {report_a}"
-            );
-            assert_eq!(
-                std::fs::read(&out_a).unwrap(),
-                std::fs::read(&out_b).unwrap(),
-                "the {label} smart timed-multilayer PNG differs between the routes"
-            );
-
-            // Compare the whole report, not just the pixels. Argb32f is the depth
-            // where gpu_attempt / gpu_fallback_used can appear, and those are
-            // exactly the fields that would show one route reaching a device and
-            // the other not -- an output_sha256 match alone would not.
-            let volatile = ["output_png", "output_raw", "worker_diagnostics"];
-            let mut flat_a = report_a.as_object().expect("report A object").clone();
-            let mut flat_b = report_b.as_object().expect("report B object").clone();
-            for key in volatile {
-                flat_a.remove(key);
-                flat_b.remove(key);
-            }
-            assert_eq!(
-                flat_a.keys().collect::<Vec<_>>(),
-                flat_b.keys().collect::<Vec<_>>(),
-                "the {label} report key sets diverge between the routes"
-            );
-            for (key, value_a) in &flat_a {
-                assert_eq!(
-                    Some(value_a),
-                    flat_b.get(key),
-                    "the {label} report field {key} differs between the routes"
-                );
-            }
         }
         let _ = std::fs::remove_dir_all(&scratch);
     }
