@@ -295,7 +295,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // depends on the compat host that produced it (the L2 worker and this DLL's
     // in-process broker). Invalidate the whole cache when the host build changed,
     // so effects that previously failed to load are re-discovered (issue #304).
-    let build = build_fingerprint(&repository, &dirs, &dependency.dirs);
+    let build = build_fingerprint(&repository, &dirs, &dependency);
     let cache = load_cache(build);
 
     // Register (host callback, main thread only) each AEX whose discovery already
@@ -706,16 +706,17 @@ struct BuildFingerprint {
     worker: Option<(u64, u32, u64)>,
     #[serde(default)]
     host: Option<(u64, u32, u64)>,
-    /// Digest of every file a dependency closure could draw on (issue #304): the
-    /// configured search folders plus the scanned tree, minus the `*.aex`
-    /// themselves, each as `(path, mtime, len)`.
+    /// Digest of everything outside the AEX that decides its closure (issue
+    /// #304): the ordered search folders, the ceilings, and every file those
+    /// folders and the scanned tree could contribute, minus the `*.aex`
+    /// themselves.
     ///
-    /// A discovery result depends on those DLLs as much as on the AEX's own
-    /// bytes, in both directions: an Adobe update that rewrites `dvacore.dll` in
-    /// place invalidates a positive entry, and a helper DLL that only appears
-    /// later invalidates a negative one. Neither shows up in the AEX's own
-    /// `(mtime, len)` or in the host build, so without this the stale result
-    /// would survive both.
+    /// A discovery result depends on all of it as much as on the AEX's own bytes:
+    /// an Adobe update that rewrites `dvacore.dll` in place invalidates a
+    /// positive entry, a helper DLL that only appears later invalidates a
+    /// negative one, and reordering two folders that both hold a name changes
+    /// which DLL is sealed. None of that shows up in the AEX's own `(mtime, len)`
+    /// or in the host build.
     #[serde(default)]
     dependency_environment: u64,
 }
@@ -747,7 +748,7 @@ fn cache_path() -> Option<PathBuf> {
 fn build_fingerprint(
     repository: &Path,
     scan_dirs: &[PathBuf],
-    dependency_dirs: &[PathBuf],
+    dependency: &DependencyConfig,
 ) -> BuildFingerprint {
     let worker = repository
         .join("target")
@@ -757,21 +758,36 @@ fn build_fingerprint(
     BuildFingerprint {
         worker: file_meta(&worker).map(flatten),
         host: self_module_path().as_deref().and_then(file_meta).map(flatten),
-        dependency_environment: dependency_environment_fingerprint(scan_dirs, dependency_dirs),
+        dependency_environment: dependency_environment_fingerprint(scan_dirs, dependency),
     }
 }
 
-/// A digest of every file a closure could seal: the search folders and the
-/// scanned tree, each folder's `*.aex` excluded (those are tracked per entry, and
-/// folding them in here would re-discover everything whenever one plug-in
-/// changed). Only equality matters, so the leading 8 bytes of the SHA-256 are
-/// enough and keep the fingerprint `Copy`.
+/// A digest of everything outside the AEX itself that decides its closure: the
+/// resolution inputs (the ordered search folders and the ceilings) and every file
+/// those folders and the scanned tree could contribute, each folder's `*.aex`
+/// excluded (those are tracked per entry, and folding them in here would
+/// re-discover everything whenever one plug-in changed).
 ///
-/// Cost is one `stat` per candidate file — a few hundred on an AE install — so it
-/// stays inside the startup budget that must not block AviUtl2.
-fn dependency_environment_fingerprint(scan_dirs: &[PathBuf], dependency_dirs: &[PathBuf]) -> u64 {
+/// The folder *order* is hashed as given, not sorted with the files: two folders
+/// holding the same basename resolve to whichever comes first, so swapping them
+/// changes which DLL is sealed while leaving the file set identical.
+///
+/// Only equality matters, so the leading 8 bytes of the SHA-256 are enough and
+/// keep the fingerprint `Copy`. Cost is one `stat` per candidate file — a few
+/// hundred on an AE install — so it stays inside the startup budget that must not
+/// block AviUtl2.
+fn dependency_environment_fingerprint(scan_dirs: &[PathBuf], dependency: &DependencyConfig) -> u64 {
+    let mut hasher = Sha256::new();
+    for dir in &dependency.dirs {
+        hasher.update(dir.to_string_lossy().to_lowercase().as_bytes());
+        hasher.update([0]);
+    }
+    hasher.update(b"limits\0");
+    hasher.update(dependency.module_limit.unwrap_or(usize::MAX).to_le_bytes());
+    hasher.update(dependency.byte_limit.unwrap_or(u64::MAX).to_le_bytes());
+
     let mut entries: Vec<(String, (u64, u32), u64)> = Vec::new();
-    for dir in dependency_dirs {
+    for dir in &dependency.dirs {
         collect_dependency_files(dir, 0, 0, &mut entries);
     }
     for dir in scan_dirs {
@@ -779,7 +795,7 @@ fn dependency_environment_fingerprint(scan_dirs: &[PathBuf], dependency_dirs: &[
     }
     entries.sort();
     entries.dedup();
-    let mut hasher = Sha256::new();
+    hasher.update(b"files\0");
     for (path, mtime, len) in entries {
         hasher.update(path.as_bytes());
         hasher.update(mtime.0.to_le_bytes());
