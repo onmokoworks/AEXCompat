@@ -397,54 +397,94 @@ mod windows_e2e {
             total_time: 300,
             time_scale: 30,
         };
-        let render = |output: &Path| {
-            render_experimental_image_with_timed_layers(
-                &root,
-                &aex,
-                &sha,
-                &input,
-                output,
-                &params,
-                &timed_layers,
-                timing,
-                true,
-                RenderPixelFormat::Argb16,
-            )
-        };
+        // Argb32f joins Argb16 here (issue #353). It was the last depth the
+        // layered gate excluded: the worker's gpu_negotiation ignores layers and
+        // turns on for float32 whenever the plug-in advertises GPU support, so a
+        // GPU-declaring plug-in would take the device on the one-shot layered
+        // command while a policy-less Auto session folds to CPU. This probe
+        // advertises no GPU support, so both routes render on CPU and the
+        // equivalence below is what the gate change relies on.
+        for pixel_format in [RenderPixelFormat::Argb16, RenderPixelFormat::Argb32f] {
+            let render = |output: &Path| {
+                render_experimental_image_with_timed_layers(
+                    &root,
+                    &aex,
+                    &sha,
+                    &input,
+                    output,
+                    &params,
+                    &timed_layers,
+                    timing,
+                    true,
+                    pixel_format,
+                )
+            };
+            let label = match pixel_format {
+                RenderPixelFormat::Argb8 => "argb8",
+                RenderPixelFormat::Argb16 => "argb16",
+                RenderPixelFormat::Argb32f => "argb32f",
+            };
 
-        // Run A: default routing carries the smart layered render on the session.
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let out_a = scratch.join("a.png");
-        let report_a = render(&out_a).expect("session-route smart timed-multilayer render");
-        assert!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-            "the smart timed-multilayer render must be carried by the session"
-        );
+            // Run A: default routing carries the smart layered render on the session.
+            unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+            let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+            let out_a = scratch.join(format!("a-{label}.png"));
+            let report_a = render(&out_a)
+                .unwrap_or_else(|error| panic!("session-route {label} layered render: {error}"));
+            assert!(
+                RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+                "the {label} smart timed-multilayer render must be carried by the session"
+            );
 
-        // Run B: escape hatch forces the one-shot --smart-image16-layer transport.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let out_b = scratch.join("b.png");
-        let report_b = render(&out_b);
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let report_b = report_b.expect("one-shot smart timed-multilayer render");
+            // Run B: escape hatch forces the one-shot --smart-image*-layer transport.
+            unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+            let out_b = scratch.join(format!("b-{label}.png"));
+            let report_b = render(&out_b);
+            unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+            let report_b =
+                report_b.unwrap_or_else(|error| panic!("one-shot {label} layered render: {error}"));
 
-        assert_eq!(
-            report_a.get("output_sha256"),
-            report_b.get("output_sha256"),
-            "the smart timed-multilayer output must match between the routes"
-        );
-        assert!(
-            report_a
-                .get("output_sha256")
-                .is_some_and(|value| !value.is_null()),
-            "the session render must report an output_sha256: {report_a}"
-        );
-        assert_eq!(
-            std::fs::read(&out_a).unwrap(),
-            std::fs::read(&out_b).unwrap(),
-            "the smart timed-multilayer PNG differs between the routes"
-        );
+            assert_eq!(
+                report_a.get("output_sha256"),
+                report_b.get("output_sha256"),
+                "the {label} smart timed-multilayer output must match between the routes"
+            );
+            assert!(
+                report_a
+                    .get("output_sha256")
+                    .is_some_and(|value| !value.is_null()),
+                "the session render must report an output_sha256: {report_a}"
+            );
+            assert_eq!(
+                std::fs::read(&out_a).unwrap(),
+                std::fs::read(&out_b).unwrap(),
+                "the {label} smart timed-multilayer PNG differs between the routes"
+            );
+
+            // Compare the whole report, not just the pixels. Argb32f is the depth
+            // where gpu_attempt / gpu_fallback_used can appear, and those are
+            // exactly the fields that would show one route reaching a device and
+            // the other not -- an output_sha256 match alone would not.
+            let volatile = ["output_png", "output_raw", "worker_diagnostics"];
+            let mut flat_a = report_a.as_object().expect("report A object").clone();
+            let mut flat_b = report_b.as_object().expect("report B object").clone();
+            for key in volatile {
+                flat_a.remove(key);
+                flat_b.remove(key);
+            }
+            assert_eq!(
+                flat_a.keys().collect::<Vec<_>>(),
+                flat_b.keys().collect::<Vec<_>>(),
+                "the {label} report key sets diverge between the routes"
+            );
+            for (key, value_a) in &flat_a {
+                assert_eq!(
+                    Some(value_a),
+                    flat_b.get(key),
+                    "the {label} report field {key} differs between the routes"
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
