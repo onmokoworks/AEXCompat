@@ -133,10 +133,28 @@ fn dispatch_approved_image_with_dependencies(
     })
 }
 
-struct RuntimeAuthorizationTransport {
+pub(crate) struct RuntimeAuthorizationTransport {
     path: PathBuf,
     artifact: ApprovedImageArtifact,
     basename: String,
+    /// The per-render session identity embedded in the manifest. The GPU
+    /// module-audit preflight (#290) needs it to bind the worker's report to the
+    /// same session the render dispatch authorizes; the params-inspect path
+    /// ignores it.
+    session_identity: [u8; 32],
+}
+
+impl RuntimeAuthorizationTransport {
+    /// The sealed manifest basename to pass as the worker's
+    /// `--runtime-module-authorization-v1` trailer.
+    pub(crate) fn basename(&self) -> &str {
+        &self.basename
+    }
+
+    /// The manifest as a sealed dependency for the worker's load tree.
+    pub(crate) fn artifact(&self) -> ApprovedImageArtifact {
+        self.artifact.clone()
+    }
 }
 
 impl Drop for RuntimeAuthorizationTransport {
@@ -145,7 +163,7 @@ impl Drop for RuntimeAuthorizationTransport {
     }
 }
 
-fn prepare_runtime_authorization_transport(
+pub(crate) fn prepare_runtime_authorization_transport(
     repository: &Path,
     policy: &RuntimeModulePolicy,
     backend: RuntimeBackend,
@@ -153,6 +171,29 @@ fn prepare_runtime_authorization_transport(
     let mut session_identity = rand::random::<[u8; 32]>();
     if session_identity.iter().all(|byte| *byte == 0) {
         session_identity[0] = 1;
+    }
+    prepare_runtime_authorization_transport_with_identity(
+        repository,
+        policy,
+        backend,
+        session_identity,
+    )
+}
+
+/// Like [`prepare_runtime_authorization_transport`] but embeds a caller-supplied
+/// `session_identity` instead of a fresh random one. A GPU render reuses the
+/// preflight's session identity here so the render worker parses the same
+/// identity the [`PreparedGpuRuntimePolicy`] report was authenticated against,
+/// keeping the manifest/report/session binding intact (#301 review). The identity
+/// must be nonzero (the preflight's is, by construction and prior authentication).
+pub(crate) fn prepare_runtime_authorization_transport_with_identity(
+    repository: &Path,
+    policy: &RuntimeModulePolicy,
+    backend: RuntimeBackend,
+    session_identity: [u8; 32],
+) -> io::Result<RuntimeAuthorizationTransport> {
+    if session_identity.iter().all(|byte| *byte == 0) {
+        return Err(invalid("runtime module session identity must be nonzero"));
     }
     let manifest = encode_runtime_module_authorization(
         policy,
@@ -179,6 +220,167 @@ fn prepare_runtime_authorization_transport(
             expected_size: manifest.size,
         },
         basename,
+        session_identity,
+    })
+}
+
+/// A broker-owned GPU runtime-module policy assembled by a preflight worker run
+/// (#290). Owns everything a GPU single-image render borrows as a
+/// [`GpuRuntimePolicyInput`]: the authenticated policy, the classified module
+/// report the preflight worker emitted, the per-render session identity, and the
+/// canonical System32 path.
+///
+/// The sealed and trusted module tables are intentionally empty. The report only
+/// classifies the authorized GPU runtime modules (`policy`), which live at stable
+/// System32 / driver-store paths the render-time re-authentication can resolve
+/// and re-hash. The plug-in and worker load through the sealed load tree and the
+/// trusted worker stage under ephemeral, per-dispatch temp paths, so reporting
+/// them would fail re-authentication once those directories are gone; the
+/// always-on DLL-load module audit covers them instead.
+pub struct PreparedGpuRuntimePolicy {
+    policy: RuntimeModulePolicy,
+    module_report_json: Vec<u8>,
+    session_identity: [u8; 32],
+    system32: PathBuf,
+}
+
+impl PreparedGpuRuntimePolicy {
+    /// The classified GPU module report the preflight worker emitted, as UTF-8
+    /// JSON. Exposed for diagnostics and the A/B gate; the render path uses
+    /// [`Self::as_input`] instead.
+    pub fn report_json(&self) -> &str {
+        std::str::from_utf8(&self.module_report_json).unwrap_or_default()
+    }
+
+    /// Borrows the owned fields as the input the render path authenticates and
+    /// dispatches with. Safe to call for each render on the same session.
+    pub fn as_input(&self) -> GpuRuntimePolicyInput<'_> {
+        GpuRuntimePolicyInput {
+            policy: &self.policy,
+            module_report_json: &self.module_report_json,
+            session_identity: self.session_identity,
+            sealed_modules: &[],
+            trusted_modules: &[],
+            system32: &self.system32,
+        }
+    }
+}
+
+fn canonical_system32() -> io::Result<PathBuf> {
+    let root = std::env::var_os("SystemRoot")
+        .ok_or_else(|| invalid("the SystemRoot environment variable is not set"))?;
+    fs::canonicalize(PathBuf::from(root).join("System32"))
+}
+
+/// Runs the GPU module-audit preflight worker under `policy` and assembles the
+/// authenticated [`PreparedGpuRuntimePolicy`] a GPU single-image render borrows
+/// (#290). The preflight authorizes the policy's GPU runtime modules for
+/// `gpu_backend`, loads them, and emits the classified report; the report is
+/// authenticated here (fail-fast) and again at render dispatch.
+///
+/// `policy` must already be parsed and validated (see
+/// [`crate::runtime_module_policy::parse_and_validate`]). An explicit CPU backend
+/// is rejected: only a GPU backend has a runtime module policy.
+///
+/// `dependencies` must be the same approved dependency artifacts the render will
+/// dispatch with. The preflight loads the staged plug-in natively, so a plug-in
+/// that imports an approved helper DLL fails the preflight unless that DLL is
+/// sealed next to it here too (#301 review).
+pub fn prepare_gpu_runtime_policy(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    gpu_backend: RenderGpuBackend,
+    policy: RuntimeModulePolicy,
+    dependencies: Vec<ApprovedImageArtifact>,
+) -> io::Result<PreparedGpuRuntimePolicy> {
+    let backend = runtime_backend(gpu_backend)
+        .ok_or_else(|| invalid("the CPU backend has no GPU runtime module policy"))?;
+    let authorization = prepare_runtime_authorization_transport(repository, &policy, backend)?;
+    let session_identity = authorization.session_identity;
+    let args_before_plugin = vec!["--gpu-module-report-v1".to_owned()];
+    let args_after_plugin = vec![
+        approved_sha256.to_ascii_lowercase(),
+        "--runtime-module-authorization-v1".to_owned(),
+        authorization.basename.clone(),
+    ];
+    // The manifest rides as a sealed dependency next to the plug-in, exactly like
+    // the params-inspect path, so the worker resolves it by basename. The caller's
+    // approved dependency artifacts are sealed alongside it: the preflight loads
+    // the plug-in natively, so its imports must resolve here just as they do for
+    // the render dispatch (#301 review).
+    let mut preflight_dependencies = dependencies;
+    preflight_dependencies.push(authorization.artifact.clone());
+    let isolated = dispatch_approved_image_with_dependencies(
+        repository,
+        WorkerKind::Smart,
+        plugin_path,
+        approved_sha256,
+        preflight_dependencies,
+        &args_before_plugin,
+        &args_after_plugin,
+        Duration::from_millis(30_000),
+    )?;
+    // The synchronous dispatch has returned, so the worker has consumed the
+    // manifest; drop the transport to remove the temp file.
+    drop(authorization);
+    if isolated.classification.as_str() != "ok" {
+        return Err(invalid(format!(
+            "GPU module-audit preflight worker did not succeed (classification: {})",
+            isolated.classification.as_str()
+        )));
+    }
+    let stdout = isolated.stdout.trim();
+    if stdout.is_empty() {
+        return Err(invalid("GPU module-audit preflight produced no report"));
+    }
+    // The preflight prints a combined report: the DLL-load `module_audit` the
+    // secure dispatch already validated (require_module_audit), plus the
+    // classified `gpu_module_report` this producer authenticates. Extract the
+    // latter and authenticate it on its own.
+    let combined: Value = serde_json::from_slice(stdout.as_bytes()).map_err(|error| {
+        invalid(format!(
+            "GPU module-audit preflight report is not valid JSON: {error}"
+        ))
+    })?;
+    let report = combined.get("gpu_module_report").ok_or_else(|| {
+        invalid("GPU module-audit preflight output is missing the gpu_module_report")
+    })?;
+    // Defense in depth: a report with an empty `modules` array authenticates
+    // vacuously (zero modules to validate), so reject it here regardless of the
+    // worker's own guarantee. A valid preflight loaded at least one authorized
+    // module (the manifest carries at least one for the backend).
+    if !report
+        .get("modules")
+        .and_then(Value::as_array)
+        .is_some_and(|modules| !modules.is_empty())
+    {
+        return Err(invalid(
+            "GPU module-audit preflight reported no authorized modules",
+        ));
+    }
+    let module_report_json = serde_json::to_vec(report).map_err(|error| {
+        invalid(format!("could not re-serialize the GPU module report: {error}"))
+    })?;
+    let system32 = canonical_system32()?;
+    // Fail-fast: the render path re-authenticates before dispatch, but validate
+    // here too so a mismatched policy/report surfaces at prepare time.
+    authenticate_gpu_worker_report(
+        &module_report_json,
+        &session_identity,
+        backend,
+        WorkerModuleValidation {
+            policy: &policy,
+            sealed: &[],
+            trusted: &[],
+            system32: &system32,
+        },
+    )?;
+    Ok(PreparedGpuRuntimePolicy {
+        policy,
+        module_report_json,
+        session_identity,
+        system32,
     })
 }
 
@@ -698,6 +900,12 @@ pub enum RenderGpuBackend {
 
 /// Inputs produced by a GPU module-audit preflight for one render session.
 /// The raw report is authenticated again immediately before worker dispatch.
+///
+/// Every field is a shared borrow or a small `Copy` value, so the whole input is
+/// `Copy`: the length-one session wrapper reads it out of a `&SessionWrapperRequest`
+/// (#290) without moving, and copying only duplicates references, never the
+/// underlying policy, report bytes, or module tables.
+#[derive(Clone, Copy)]
 pub struct GpuRuntimePolicyInput<'a> {
     pub policy: &'a RuntimeModulePolicy,
     pub module_report_json: &'a [u8],
@@ -4779,13 +4987,27 @@ fn render_with_artifact(
             //     session is the anchor and that futile preflight record is an
             //     artifact being removed, so the session's no-GPU-attempt report
             //     is canonical (issue #292).
+            //   - Argb32f Auto with a policy / explicit GPU backends (#290): the
+            //     session opens the GPU command with the same authenticated
+            //     runtime-module policy the one-shot GPU path uses, so both
+            //     dispatch to the real device and the pixels match. Only the
+            //     success path is equivalent: on a GPU failure the one-shot Auto
+            //     path retries on CPU and records gpu_attempt/gpu_fallback_used,
+            //     while the session fails closed (it cannot retry mid-flight).
+            //     Per W4 (#264) the session is the anchor, so its no-CPU-retry
+            //     GPU behavior is canonical.
             // Excluded here:
             //   - Argb8/Argb16 Cpu: the one-shot table has no CPU arm for these
             //     depths (falls through to the error arm), so routing them to
             //     the session would succeed while the forced one-shot fails.
-            //   - Argb32f Auto with a policy / explicit GPU backends: the GPU
-            //     session path is unreached (no policy producer exists); defer
-            //     to the GPU session stage (#290).
+            //   - Argb32f Auto/explicit-GPU without a policy: no authenticated
+            //     policy means the GPU dispatch cannot be authorized, so these
+            //     stay off the GPU session arm (Auto-none folds to the CPU
+            //     session below; explicit-GPU-none is ineligible and the
+            //     one-shot path fails it closed).
+            //   - Layered (secondary/timed) renders with a policy: the one-shot
+            //     gpu_initial_attempt requires no layers, so a GPU render never
+            //     happens there and the GPU session arm stays off too (#290).
             // Static context trailers (host_context) are still not carried by
             // smart sessions; secondary layers now are (issue #294).
             host_context.is_none()
@@ -4793,6 +5015,9 @@ fn render_with_artifact(
                     (gpu_backend == RenderGpuBackend::Cpu
                         && pixel_format == RenderPixelFormat::Argb32f)
                         || (gpu_backend == RenderGpuBackend::Auto && gpu_runtime_policy.is_none())
+                        || (pixel_format == RenderPixelFormat::Argb32f
+                            && runtime_backend(gpu_backend).is_some()
+                            && gpu_runtime_policy.is_some())
                 } else {
                     // Smart layered: admit Argb8/Argb16 under Auto only. The
                     // one-shot layered arms (--smart-image*-layer) are Auto-only
@@ -4904,6 +5129,11 @@ fn render_with_artifact(
             custom_ui_action: custom_ui_action.as_ref(),
             smart,
             gpu_backend,
+            // Copy (not move): GpuRuntimePolicyInput is Copy, so the one-shot
+            // fall-through below still sees the same policy if this render is
+            // ineligible for the session. The gate above only reaches this
+            // construction with a policy present for Argb32f + a GPU backend.
+            gpu_runtime_policy,
         }) {
             SessionWrapperOutcome::Report(report) => return Ok(report),
             SessionWrapperOutcome::Failure(error) => return Err(error),
@@ -5114,15 +5344,6 @@ fn render_with_artifact(
     }
     let mut args_before_plugin = vec![command.into()];
     let started = Instant::now();
-    let initial_dispatch = SecureImageDispatch {
-        repository,
-        worker_kind,
-        plugin: plugin.clone(),
-        dependencies: dependencies.clone(),
-        args_before_plugin: &args_before_plugin,
-        args_after_plugin: &args_after_plugin,
-        timeout: Duration::from_millis(timeout_ms),
-    };
     let gpu_initial_attempt = smart
         && pixel_format == RenderPixelFormat::Argb32f
         && secondaries.is_empty()
@@ -5133,9 +5354,92 @@ fn render_with_artifact(
         && smart
         && pixel_format == RenderPixelFormat::Argb32f
         && gpu_initial_attempt;
+    // A GPU render carries its authenticated policy's modules to the worker as an
+    // AEXRMA1 manifest (#300) so the GPU runtime DLLs classify as authorized
+    // `policy` in the required module audit instead of `unknown`. Added before the
+    // initial dispatch so it is sealed for it. The transport lives to the end of
+    // this render, past every dispatch that seals it.
+    let mut dependencies = dependencies;
+    // Snapshot the policy-free args/dependencies before the GPU authorization
+    // trailer is appended. An Auto GPU->CPU fallback dispatches with these instead
+    // of the GPU args: the worker treats a `--runtime-module-authorization-v1`
+    // trailer as authorize_runtime_modules before loading the plug-in, so carrying
+    // it into a CPU retry (which loads no GPU DLL) could fail on runtime-policy or
+    // manifest validation, e.g. if the policy expired during the GPU attempt
+    // (#301 review).
+    let cpu_fallback_args_after_plugin = args_after_plugin.clone();
+    let cpu_fallback_dependencies = dependencies.clone();
     let mut gpu_fallback_used = false;
     let mut gpu_fallback_reason: Option<String> = None;
     let mut gpu_attempt: Option<Value> = None;
+    // Building the manifest is fallible (an expired policy, an unwritable
+    // transport). On an Auto render a runtime-module failure here must take the
+    // same policy-free CPU fallback as any other caught GPU preflight error
+    // instead of aborting the render, so it is captured rather than propagated;
+    // failures that are not preflight conditions still fail the render
+    // (#301 review).
+    let mut manifest_fallback_error: Option<io::Error> = None;
+    let _runtime_authorization = match (gpu_initial_attempt, gpu_runtime_policy) {
+        (true, Some(policy_input)) => {
+            let backend =
+                runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
+            // Reuse the preflight's session identity so the manifest the worker
+            // parses matches the identity the report was authenticated against
+            // (#301 review).
+            match prepare_runtime_authorization_transport_with_identity(
+                repository,
+                policy_input.policy,
+                backend,
+                policy_input.session_identity,
+            ) {
+                Ok(transport) => {
+                    args_after_plugin.push("--runtime-module-authorization-v1".to_owned());
+                    args_after_plugin.push(transport.basename().to_owned());
+                    dependencies.push(transport.artifact());
+                    Some(transport)
+                }
+                Err(error) if auto_gpu_cpu_fallback && is_auto_gpu_preflight_error(&error) => {
+                    manifest_fallback_error = Some(error);
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        _ => None,
+    };
+    // A captured manifest failure degrades this render to the policy-free CPU
+    // command before the initial dispatch is built, so the GPU attempt is skipped
+    // and the fallback is reported exactly like a caught GPU preflight error.
+    let gpu_initial_attempt = if let Some(error) = &manifest_fallback_error {
+        gpu_fallback_used = true;
+        gpu_fallback_reason = Some(error.to_string());
+        gpu_attempt = Some(json!({
+            "classification": "gpu_preflight_error",
+            "error": error.to_string(),
+        }));
+        args_before_plugin[0] =
+            image_worker_command(smart, pixel_format, false, RenderGpuBackend::Cpu)?.into();
+        false
+    } else {
+        gpu_initial_attempt
+    };
+    let initial_dispatch = SecureImageDispatch {
+        repository,
+        worker_kind,
+        plugin: plugin.clone(),
+        dependencies: if manifest_fallback_error.is_some() {
+            cpu_fallback_dependencies.clone()
+        } else {
+            dependencies.clone()
+        },
+        args_before_plugin: &args_before_plugin,
+        args_after_plugin: if manifest_fallback_error.is_some() {
+            &cpu_fallback_args_after_plugin
+        } else {
+            &args_after_plugin
+        },
+        timeout: Duration::from_millis(timeout_ms),
+    };
     let mut isolated = if gpu_initial_attempt {
         let gpu_result = (|| -> io::Result<_> {
             let policy_input = gpu_runtime_policy.ok_or_else(|| {
@@ -5175,13 +5479,16 @@ fn render_with_artifact(
                 }));
                 args_before_plugin[0] =
                     image_worker_command(smart, pixel_format, false, RenderGpuBackend::Cpu)?.into();
+                // Dispatch the CPU retry with the policy-free args/dependencies so
+                // the worker does not authorize_runtime_modules for a CPU render
+                // that loads no GPU DLL (#301 review).
                 dispatch_secure_image(SecureImageDispatch {
                     repository,
                     worker_kind,
                     plugin: plugin.clone(),
-                    dependencies: dependencies.clone(),
+                    dependencies: cpu_fallback_dependencies.clone(),
                     args_before_plugin: &args_before_plugin,
-                    args_after_plugin: &args_after_plugin,
+                    args_after_plugin: &cpu_fallback_args_after_plugin,
                     timeout: Duration::from_millis(timeout_ms),
                 })?
             }
@@ -5248,13 +5555,18 @@ fn render_with_artifact(
         )?
         .into();
         let retry_started = Instant::now();
+        // Dispatch the CPU retry with the policy-free args/dependencies: a GPU
+        // worker that launched but reported a GPU failure must not carry its
+        // runtime-module authorization trailer into the CPU retry, which loads no
+        // GPU DLL and should not depend on the (possibly expired) policy manifest
+        // (#301 review).
         isolated = dispatch_secure_image(SecureImageDispatch {
             repository,
             worker_kind,
             plugin,
-            dependencies,
+            dependencies: cpu_fallback_dependencies.clone(),
             args_before_plugin: &args_before_plugin,
-            args_after_plugin: &args_after_plugin,
+            args_after_plugin: &cpu_fallback_args_after_plugin,
             timeout: Duration::from_millis(timeout_ms),
         })?;
         diagnostics = isolated_worker_diagnostics(&isolated, retry_started.elapsed().as_millis());
@@ -5547,6 +5859,12 @@ struct SessionWrapperRequest<'a> {
     custom_ui_action: Option<&'a RenderUiAction>,
     smart: bool,
     gpu_backend: RenderGpuBackend,
+    /// Authenticated GPU runtime-module policy for this render (#290), threaded
+    /// into the length-one session so a GPU single-image render routes through
+    /// the session like the CPU shapes do instead of staying on the one-shot
+    /// transport. `None` for CPU or policy-less renders; the session-eligibility
+    /// gate only sets `Some` for Argb32f with a GPU backend.
+    gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
 }
 
 enum SessionWrapperOutcome {
@@ -5617,7 +5935,12 @@ fn render_classic_via_length_one_session(
         frame_deadline: Duration::from_millis(request.timeout_ms),
         smart: request.smart,
         gpu_backend: request.gpu_backend,
-        gpu_runtime_policy: None,
+        // Threaded from the wrapper request (#290): a GPU single-image render
+        // carries its authenticated runtime-module policy into the session so the
+        // session opens the GPU command and authorizes the device dispatch,
+        // exactly like the one-shot GPU path. `None` keeps CPU/policy-less
+        // renders on the CPU session command.
+        gpu_runtime_policy: request.gpu_runtime_policy,
     }) {
         Ok(session) => session,
         Err(error) => {

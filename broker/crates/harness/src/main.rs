@@ -5607,6 +5607,127 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    if args.len() == 7 && args[1] == "--render-experimental-smart-32-gpu-policy" {
+        // GPU single-image render routed through the length-one session (#290):
+        // parse the runtime-module policy JSON, run the GPU module-audit preflight
+        // to assemble the authenticated policy input, then render an Argb32f smart
+        // frame on the requested GPU backend. Setting
+        // AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER forces the one-shot GPU path for
+        // the A/B comparison; the default routes through the session.
+        use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat, RenderTiming};
+        let plugin = Path::new(&args[2]);
+        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let gpu_backend = match args[5].to_string_lossy().as_ref() {
+            "auto" => RenderGpuBackend::Auto,
+            "cuda" => RenderGpuBackend::Cuda,
+            "opencl" => RenderGpuBackend::OpenCl,
+            "directx" => RenderGpuBackend::DirectX,
+            _ => {
+                eprintln!("gpu backend must be auto, cuda, opencl, or directx");
+                std::process::exit(1);
+            }
+        };
+        let policy = match fs::read(&args[6])
+            .and_then(|bytes| aexcompat_broker::runtime_module_policy::parse_and_validate(&bytes))
+        {
+            Ok(policy) => policy,
+            Err(error) => {
+                eprintln!("runtime module policy rejected: {error}");
+                std::process::exit(1);
+            }
+        };
+        let (parameters, _inspection) =
+            aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+                &repository, plugin, &hash,
+            )
+            .unwrap_or_default();
+        // The preflight seals the same approved dependency artifacts the render
+        // dispatches with, so a plug-in that imports one loads in both.
+        let render_dependencies: Vec<
+            aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact,
+        > = Vec::new();
+        let prepared = match aexcompat_broker::image_render::prepare_gpu_runtime_policy(
+            &repository,
+            plugin,
+            &hash,
+            gpu_backend,
+            policy,
+            render_dependencies.clone(),
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                eprintln!("GPU runtime policy preparation failed: {error}");
+                std::process::exit(1);
+            }
+        };
+        let report = aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy(
+            &repository,
+            plugin,
+            &hash,
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+            &parameters,
+            RenderTiming::default(),
+            true,
+            RenderPixelFormat::Argb32f,
+            None,
+            None,
+            gpu_backend,
+            render_dependencies,
+            Some(prepared.as_input()),
+        );
+        match report {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+    if args.len() == 5 && args[1] == "--inspect-gpu-module-report" {
+        // Runs the GPU module-audit preflight in isolation (#290) and prints the
+        // classified module report the render path re-authenticates. Mirrors
+        // --inspect-experimental-runtime-policy but for the render (not params)
+        // producer; used by the A/B gate to verify the preflight independently.
+        use aexcompat_broker::image_render::RenderGpuBackend;
+        let plugin = Path::new(&args[2]);
+        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let gpu_backend = match args[3].to_string_lossy().as_ref() {
+            "auto" => RenderGpuBackend::Auto,
+            "cuda" => RenderGpuBackend::Cuda,
+            "opencl" => RenderGpuBackend::OpenCl,
+            "directx" => RenderGpuBackend::DirectX,
+            _ => {
+                eprintln!("gpu backend must be auto, cuda, opencl, or directx");
+                std::process::exit(1);
+            }
+        };
+        let policy = match fs::read(&args[4])
+            .and_then(|bytes| aexcompat_broker::runtime_module_policy::parse_and_validate(&bytes))
+        {
+            Ok(policy) => policy,
+            Err(error) => {
+                eprintln!("runtime module policy rejected: {error}");
+                std::process::exit(1);
+            }
+        };
+        match aexcompat_broker::image_render::prepare_gpu_runtime_policy(
+            &repository,
+            plugin,
+            &hash,
+            gpu_backend,
+            policy,
+            Vec::new(),
+        ) {
+            Ok(prepared) => println!("{}", prepared.report_json()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 5
         && matches!(
             args[1].to_string_lossy().as_ref(),

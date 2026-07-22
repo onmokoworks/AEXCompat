@@ -1069,6 +1069,37 @@ impl RenderSession {
         // The session always launches at the render dimensions; an expand grows
         // the output slot in place mid-session (#262), so there is no launch-time
         // output-capacity trailer.
+        // A GPU render carries its authenticated policy's modules to the render
+        // worker as an AEXRMA1 manifest (#300): the worker parses it so the GPU
+        // runtime DLLs it loads classify as authorized `policy` in the required
+        // module audit instead of `unknown` (which fails the audit and the GPU
+        // device setup). The transport lives until this `open` returns; the worker
+        // reads the sealed copy at admission, before that.
+        let mut dependencies = request.dependencies;
+        let _runtime_authorization = if gpu_attempt {
+            let policy_input = request
+                .gpu_runtime_policy
+                .expect("gpu attempt was validated to carry a policy at open");
+            let backend =
+                runtime_backend(effective_backend).expect("GPU attempt has a runtime backend");
+            // Reuse the preflight's session identity so the manifest the worker
+            // parses matches the identity the report was authenticated against
+            // below, keeping the manifest/report/session binding intact
+            // (#301 review).
+            let transport =
+                crate::image_render::prepare_runtime_authorization_transport_with_identity(
+                    request.repository,
+                    policy_input.policy,
+                    backend,
+                    policy_input.session_identity,
+                )?;
+            args_after_plugin.push("--runtime-module-authorization-v1".to_owned());
+            args_after_plugin.push(transport.basename().to_owned());
+            dependencies.push(transport.artifact());
+            Some(transport)
+        } else {
+            None
+        };
         let dispatch = SecureImageDispatch {
             repository: request.repository,
             worker_kind: if request.smart {
@@ -1077,7 +1108,7 @@ impl RenderSession {
                 WorkerKind::Render
             },
             plugin,
-            dependencies: request.dependencies,
+            dependencies,
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
             timeout: request.frame_deadline,
