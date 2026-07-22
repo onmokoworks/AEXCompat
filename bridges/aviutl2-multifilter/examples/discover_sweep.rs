@@ -170,7 +170,25 @@ fn main() {
     let mut buckets: std::collections::BTreeMap<String, usize> = Default::default();
     for (index, plugin) in plugins.iter().enumerate() {
         let started = Instant::now();
+        // Every plug-in gets exactly one record and one bucket, including the
+        // ones that fail before dispatch: a sweep that silently drops them
+        // reports a total that disagrees with its own buckets.
+        let record = |bucket: &str, extra: Value| {
+            let mut row = json!({
+                "plugin": plugin.file_name().unwrap().to_string_lossy(),
+                "bucket": bucket,
+                "elapsed_ms": started.elapsed().as_millis(),
+            });
+            if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
+                for (key, value) in extra {
+                    row.insert(key.clone(), value.clone());
+                }
+            }
+            row
+        };
         let Ok(bytes) = std::fs::read(plugin) else {
+            records.push(record("unreadable_file", json!({})));
+            *buckets.entry("unreadable_file".into()).or_default() += 1;
             continue;
         };
         let sha = format!("{:x}", Sha256::digest(&bytes));
@@ -199,13 +217,15 @@ fn main() {
         if options.survey_only {
             match survey_dependency_closure(plugin, &roots) {
                 Ok(survey) => {
-                    records.push(json!({
-                        "plugin": plugin.file_name().unwrap().to_string_lossy(),
-                        "bucket": "surveyed",
-                        "closure_modules": survey.modules.len(),
-                        "closure_bytes": survey.total_bytes,
-                        "unresolved": survey.unresolved.len(),
-                    }));
+                    records.push(record(
+                        "surveyed",
+                        json!({
+                            "closure_modules": survey.modules.len(),
+                            "closure_bytes": survey.total_bytes,
+                            "unresolved": survey.unresolved.len(),
+                            "unreadable_images": survey.unreadable_images,
+                        }),
+                    ));
                     *buckets.entry("surveyed".into()).or_default() += 1;
                     eprintln!(
                         "[{}/{}] {} -> {} modules, {} bytes",
@@ -217,61 +237,76 @@ fn main() {
                     );
                 }
                 Err(error) => {
-                    *buckets.entry(format!("survey_error: {error}")).or_default() += 1;
+                    let bucket = format!("survey_error: {error}");
+                    records.push(record(&bucket, json!({})));
+                    *buckets.entry(bucket).or_default() += 1;
                 }
             }
             continue;
         }
-        let closure = resolve_dependency_closure(DependencyClosureRequest::new(plugin, &roots));
-        let (dependencies, sealed_bytes, unresolved): (Vec<ApprovedImageArtifact>, u64, usize) =
+        // The baseline must not depend on the resolver at all: it reproduces the
+        // pre-#304 dispatch, which passed an empty dependency list without ever
+        // reading the plug-in's import table. Running the resolver here would let
+        // a parse failure bucket a plug-in as `closure_error` in a run whose whole
+        // point is what the worker does with no dependencies.
+        let closure = options
+            .seal
+            .then(|| resolve_dependency_closure(DependencyClosureRequest::new(plugin, &roots)));
+        // `unresolved` is `null` rather than 0 in the baseline: nothing was
+        // resolved there, so reporting a count would read as "nothing was
+        // missing" when the honest answer is "not measured".
+        let (dependencies, sealed_bytes, unresolved): (Vec<ApprovedImageArtifact>, u64, Value) =
             match &closure {
-                Ok(closure) => (
+                Some(Ok(closure)) => (
                     closure.dependencies().to_vec(),
                     closure.total_bytes(),
-                    closure.unresolved().len(),
+                    json!(closure.unresolved().len()),
                 ),
-                Err(_) => (Vec::new(), 0, 0),
+                Some(Err(_)) => (Vec::new(), 0, json!(null)),
+                None => (Vec::new(), 0, json!(null)),
             };
         let bucket = match &closure {
-            Err(error) => format!("closure_error: {error}"),
-            Ok(_) => match inspect_experimental_with_approved_dependencies_and_diagnostics(
-                &repository,
-                plugin,
-                &sha,
-                dependencies.clone(),
-            ) {
-                Ok((parameters, _)) => {
-                    records.push(json!({
-                        "plugin": plugin.file_name().unwrap().to_string_lossy(),
-                        "bucket": "loaded",
-                        "parameters": parameters.len(),
-                        "sealed": dependencies.len(),
-                        "sealed_bytes": sealed_bytes,
-                        "unresolved": unresolved,
-                        "elapsed_ms": started.elapsed().as_millis(),
-                    }));
-                    *buckets.entry("loaded".into()).or_default() += 1;
-                    eprintln!(
-                        "[{}/{}] {} -> loaded ({} params, {} deps)",
-                        index + 1,
-                        plugins.len(),
-                        plugin.file_name().unwrap().to_string_lossy(),
-                        parameters.len(),
-                        dependencies.len()
-                    );
-                    continue;
+            Some(Err(error)) => format!("closure_error: {error}"),
+            Some(Ok(_)) | None => {
+                match inspect_experimental_with_approved_dependencies_and_diagnostics(
+                    &repository,
+                    plugin,
+                    &sha,
+                    dependencies.clone(),
+                ) {
+                    Ok((parameters, _)) => {
+                        records.push(record(
+                            "loaded",
+                            json!({
+                                "parameters": parameters.len(),
+                                "sealed": dependencies.len(),
+                                "sealed_bytes": sealed_bytes,
+                                "unresolved": unresolved,
+                            }),
+                        ));
+                        *buckets.entry("loaded".into()).or_default() += 1;
+                        eprintln!(
+                            "[{}/{}] {} -> loaded ({} params, {} deps)",
+                            index + 1,
+                            plugins.len(),
+                            plugin.file_name().unwrap().to_string_lossy(),
+                            parameters.len(),
+                            dependencies.len()
+                        );
+                        continue;
+                    }
+                    Err(error) => bucket_of(&error.to_string()),
                 }
-                Err(error) => bucket_of(&error.to_string()),
-            },
+            }
         };
-        records.push(json!({
-            "plugin": plugin.file_name().unwrap().to_string_lossy(),
-            "bucket": bucket,
-            "sealed": dependencies.len(),
-            "sealed_bytes": sealed_bytes,
-            "unresolved": unresolved,
-            "elapsed_ms": started.elapsed().as_millis(),
-        }));
+        records.push(record(
+            &bucket,
+            json!({
+                "sealed": dependencies.len(),
+                "sealed_bytes": sealed_bytes,
+                "unresolved": unresolved,
+            }),
+        ));
         *buckets.entry(bucket.clone()).or_default() += 1;
         eprintln!(
             "[{}/{}] {} -> {} ({} deps)",
