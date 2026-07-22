@@ -114,7 +114,7 @@ pub fn run(
                 repository,
                 require_module_audit: true,
             },
-            timeout,
+            Some(timeout),
         )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));

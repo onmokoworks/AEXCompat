@@ -57,7 +57,7 @@ fn build_launch_args(
 pub fn secure_launch(
     tree: SealedLoadTree,
     request: SecureLaunchRequest<'_>,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> io::Result<SecureLaunchResult> {
     let args = build_launch_args(&tree, &request)?;
     secure_launch_impl(
@@ -81,7 +81,7 @@ fn secure_launch_impl(
     args: &[String],
     require_module_audit: bool,
     repository: &Path,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> io::Result<SecureLaunchResult> {
     use crate::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
     use crate::restricted_worker_token::create_restricted_worker_token;
@@ -191,9 +191,10 @@ impl SecureSessionProcess {
     }
 
     /// Waits up to `timeout` for the worker to exit and collects stdout,
-    /// stderr, and job accounting. Applies the same module-audit validation
-    /// as the one-shot `secure_launch` when the exit classified as ok.
-    pub fn finish(mut self, timeout: Duration) -> io::Result<SecureLaunchResult> {
+    /// stderr, and job accounting; `None` waits indefinitely (issue #354).
+    /// Applies the same module-audit validation as the one-shot
+    /// `secure_launch` when the exit classified as ok.
+    pub fn finish(mut self, timeout: Option<Duration>) -> io::Result<SecureLaunchResult> {
         let result = self
             .launched
             .take()
@@ -299,7 +300,7 @@ fn secure_launch_impl(
     _args: &[String],
     _require_module_audit: bool,
     _repository: &Path,
-    _timeout: Duration,
+    _timeout: Option<Duration>,
 ) -> io::Result<SecureLaunchResult> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -350,7 +351,7 @@ mod tests {
                 repository: Path::new("."),
                 require_module_audit: false,
             };
-            let error = secure_launch(tree, request, Duration::from_secs(1)).unwrap_err();
+            let error = secure_launch(tree, request, Some(Duration::from_secs(1))).unwrap_err();
             assert_eq!(error.kind(), kind);
             fs::remove_dir_all(source).unwrap();
         }
@@ -370,7 +371,7 @@ mod tests {
             repository: Path::new("."),
             require_module_audit: false,
         };
-        let error = secure_launch(tree, request, Duration::from_secs(1)).unwrap_err();
+        let error = secure_launch(tree, request, Some(Duration::from_secs(1))).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         fs::remove_dir_all(source).unwrap();
     }

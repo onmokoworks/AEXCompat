@@ -51,31 +51,39 @@ pub fn run(workers: &Workers, output: &Path) -> io::Result<bool> {
     let scenarios = vec![
         scenario(
             "normal_exit",
-            run_isolated(&workers.exit0, &[], Duration::from_secs(2))?,
+            run_isolated(&workers.exit0, &[], Some(Duration::from_secs(2)))?,
             crate::ExitClassification::Ok,
             None,
         ),
         scenario(
             "timeout",
-            run_isolated(&workers.sleep, &["500".into()], Duration::from_millis(25))?,
+            run_isolated(
+                &workers.sleep,
+                &["500".into()],
+                Some(Duration::from_millis(25)),
+            )?,
             crate::ExitClassification::TimeoutKilled,
             None,
         ),
         scenario(
             "crash",
-            run_isolated(&workers.abort, &[], Duration::from_secs(2))?,
+            run_isolated(&workers.abort, &[], Some(Duration::from_secs(2)))?,
             crate::ExitClassification::Crashed,
             None,
         ),
         scenario(
             "hang_kill",
-            run_isolated(&workers.sleep, &["30000".into()], Duration::from_millis(40))?,
+            run_isolated(
+                &workers.sleep,
+                &["30000".into()],
+                Some(Duration::from_millis(40)),
+            )?,
             crate::ExitClassification::TimeoutKilled,
             None,
         ),
         scenario(
             "sentinel_not_inherited",
-            run_sentinel_check(&workers.exit0, Duration::from_secs(2))?,
+            run_sentinel_check(&workers.exit0, Some(Duration::from_secs(2)))?,
             crate::ExitClassification::Ok,
             Some("sentinel_inherited=false"),
         ),

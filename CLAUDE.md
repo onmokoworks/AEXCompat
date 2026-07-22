@@ -8,13 +8,23 @@ and bounded image input/output are now the main implementation path.
 ## Execution Tiers and Safety Rules
 
 - Two execution tiers. The default tier is a crash-contained dev/observation
-  worker: separate process, kill-on-close Job Object, and timeout. This is the
+  worker: separate process and kill-on-close Job Object. This is the
   floor for running any AEX and needs no approval receipt, allowlist, or enforced
   pre-selection hash match. It exists so an in-development or unknown AEX can be
   loaded, dispatched, and observed (Project Direction 1/3) without the evidence
   apparatus, and so a rebuilt plug-in re-runs without re-approval. Failure
-  isolation comes from process + Job Object + timeout, not from identity pinning;
-  hashing the plug-in buys nothing for crash containment.
+  isolation comes from process + Job Object, not from identity pinning; hashing
+  the plug-in buys nothing for crash containment.
+- A deadline is not part of that floor. Where a wrong answer is worse than a
+  slow one, there is none: parameter inspection (discovery) waits indefinitely,
+  because a watchdog there contains nothing the Job Object does not already
+  contain and instead decides results by wall-clock — a plug-in still mapping a
+  sealed closure was reported as "timed out" and that verdict was cached
+  (issue #354). Deadlines stay where a caller cannot wait: the interactive
+  render session's frame deadline, `l1`'s configured per-plug-in timeout, and
+  the broker's own probe workers in `selftest`. A worker that blocks on a modal
+  dialog is a UI-containment problem (issue #351), not a reason to reintroduce a
+  discovery deadline.
 - The evidence tier adds the authenticated sealed load tree, receipt-pinned
   identity, dependency manifest, and module audit. Treat these as provenance
   for a trustworthy AE-equivalence/regression corpus (Project Direction 4), not
@@ -156,8 +166,8 @@ artifacts from a previous checkout.
 3. Verify image input/output across Classic, SmartFX, depths, and multiple inputs.
 4. Build an After Effects oracle corpus and distinguish host regression evidence
    from Adobe-equivalence evidence.
-5. Keep crash containment (process isolation, Job Object, timeout), output
-   bounds, and fail-closed suite/handle ownership (stale, foreign, exhausted, or
+5. Keep crash containment (process isolation, Job Object), output bounds, and
+   fail-closed suite/handle ownership (stale, foreign, exhausted, or
    double-disposed references) always on as host-protection invariants; treat
    module identity, receipt pinning, and load-tree ownership as the evidence tier
    rather than a universal requirement.

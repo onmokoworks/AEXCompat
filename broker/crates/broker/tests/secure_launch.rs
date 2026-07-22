@@ -60,7 +60,7 @@ mod windows_e2e {
             require_module_audit: false,
         };
 
-        let result = secure_launch(tree, request, Duration::from_secs(10)).unwrap();
+        let result = secure_launch(tree, request, Some(Duration::from_secs(10))).unwrap();
 
         assert_eq!(
             result.classification,
@@ -94,7 +94,7 @@ mod windows_e2e {
             require_module_audit: false,
         };
 
-        let error = secure_launch(tree, request, Duration::from_secs(2)).unwrap_err();
+        let error = secure_launch(tree, request, Some(Duration::from_secs(2))).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("trusted worker staging"));
@@ -154,7 +154,7 @@ mod windows_e2e {
         // creation plus antivirus scanning of the freshly compiled fixture can
         // exceed hundreds of milliseconds) while still firing during the
         // fixture's 30 s sleep. 250 ms raced against startup and flaked.
-        let result = secure_launch(tree, request, Duration::from_secs(5)).unwrap();
+        let result = secure_launch(tree, request, Some(Duration::from_secs(5))).unwrap();
 
         assert_eq!(result.classification, ExitClassification::TimeoutKilled);
         assert!(

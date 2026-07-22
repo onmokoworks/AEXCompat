@@ -40,7 +40,7 @@ pub struct SecureImageDispatch<'a> {
     pub dependencies: Vec<ApprovedImageArtifact>,
     pub args_before_plugin: &'a [String],
     pub args_after_plugin: &'a [String],
-    pub timeout: Duration,
+    pub timeout: Option<Duration>,
 }
 
 pub struct GpuRuntimeAuthorization<'a> {
@@ -236,7 +236,7 @@ mod tests {
             dependencies: vec![],
             args_before_plugin: &[],
             args_after_plugin: &[],
-            timeout: Duration::from_secs(1),
+            timeout: Some(Duration::from_secs(1)),
         })
         .unwrap_err();
         assert_eq!(
@@ -265,7 +265,7 @@ mod tests {
             dependencies: vec![],
             args_before_plugin: &[],
             args_after_plugin: &[],
-            timeout: Duration::from_secs(1),
+            timeout: Some(Duration::from_secs(1)),
         })
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -291,7 +291,7 @@ mod tests {
             dependencies: vec![dependency],
             args_before_plugin: &["--before".into()],
             args_after_plugin: &["--after".into()],
-            timeout: Duration::from_secs(1),
+            timeout: Some(Duration::from_secs(1)),
         })
         .unwrap_err();
 
@@ -317,7 +317,7 @@ mod tests {
             dependencies: vec![],
             args_before_plugin: &[],
             args_after_plugin: &[],
-            timeout: Duration::from_secs(1),
+            timeout: Some(Duration::from_secs(1)),
         };
 
         let cpu = dispatch_secure_gpu_image(
