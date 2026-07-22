@@ -1,6 +1,7 @@
 use aexcompat_broker::runtime_module_policy::{
-    RuntimeBackend, WorkerModuleValidation, authenticate_gpu_worker_report_at,
-    parse_and_validate_at, path_token, validate_worker_report,
+    GpuPlatformIdentity, RuntimeBackend, WorkerModuleValidation, authenticate_gpu_worker_report_at,
+    parse_and_validate_at, parse_and_validate_for_platform_at, path_token,
+    validate_platform_binding, validate_worker_report,
 };
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -137,6 +138,16 @@ impl Fixture {
         format!(r#"{{"schema_version":1,"expires":"2099-01-02T03:04:05Z","modules":[{{"path":{},"basename":"runtime.dll","sha256":"{}","size":16,"backend":"cuda"{extra}}}]}}"#,
             serde_json::to_string(&self.module).unwrap(), self.digest).into_bytes()
     }
+
+    fn v2_json(&self, platform_extra: &str, module_backend: &str) -> Vec<u8> {
+        format!(
+            r#"{{"schema_version":2,"expires":"2099-01-02T03:04:05Z","platform":{{"backend":"cuda","adapter_luid":"0123456789abcdef","pci_vendor_id":"10de","pci_device_id":"2782","pci_subsystem_id":"40cb1458","pci_revision_id":"a1","driver_inf":"oem3.inf","driver_catalog_sha256":"{}","driver_version":"32.0.15.9579","os_build":22631{platform_extra}}},"modules":[{{"path":{},"basename":"runtime.dll","sha256":"{}","size":16,"backend":"{module_backend}"}}]}}"#,
+            hex(&[0xab; 32]),
+            serde_json::to_string(&self.module).unwrap(),
+            self.digest
+        )
+        .into_bytes()
+    }
 }
 
 impl Drop for Fixture {
@@ -169,6 +180,117 @@ fn parses_v1_and_validates_policy_worker_report() {
         },
     )
     .unwrap();
+}
+
+fn observed_platform() -> GpuPlatformIdentity {
+    GpuPlatformIdentity {
+        backend: RuntimeBackend::Cuda,
+        adapter_luid: 0x0123_4567_89ab_cdef,
+        pci_vendor_id: 0x10de,
+        pci_device_id: 0x2782,
+        pci_subsystem_id: 0x40cb_1458,
+        pci_revision_id: 0xa1,
+        driver_inf: "oem3.inf".to_owned(),
+        driver_catalog_sha256: [0xab; 32],
+        driver_version: "32.0.15.9579".to_owned(),
+        os_build: 22631,
+    }
+}
+
+#[test]
+fn v2_policy_binds_adapter_driver_os_and_backend() {
+    let f = Fixture::new();
+    let observed = observed_platform();
+    assert!(parse_and_validate_at(&f.v2_json("", "cuda"), UNIX_EPOCH).is_err());
+
+    let policy =
+        parse_and_validate_for_platform_at(&f.v2_json("", "cuda"), &observed, UNIX_EPOCH).unwrap();
+    assert_eq!(policy.platform(), Some(&observed));
+    validate_platform_binding(&policy, &observed).unwrap();
+    assert!(
+        parse_and_validate_for_platform_at(&f.v2_json("", "opencl"), &observed, UNIX_EPOCH)
+            .is_err()
+    );
+}
+
+#[test]
+fn v2_policy_rejects_every_platform_identity_change() {
+    let f = Fixture::new();
+    let expected = observed_platform();
+    let policy =
+        parse_and_validate_for_platform_at(&f.v2_json("", "cuda"), &expected, UNIX_EPOCH).unwrap();
+    let mut changed = Vec::new();
+    let mut identity = expected.clone();
+    identity.backend = RuntimeBackend::Opencl;
+    changed.push(identity);
+    let mut identity = expected.clone();
+    identity.adapter_luid ^= 1;
+    changed.push(identity);
+    let mut identity = expected.clone();
+    identity.pci_vendor_id ^= 1;
+    changed.push(identity);
+    let mut identity = expected.clone();
+    identity.pci_device_id ^= 1;
+    changed.push(identity);
+    let mut identity = expected.clone();
+    identity.pci_subsystem_id ^= 1;
+    changed.push(identity);
+    let mut identity = expected.clone();
+    identity.pci_revision_id ^= 1;
+    changed.push(identity);
+    let mut identity = expected.clone();
+    identity.driver_inf = "oem4.inf".to_owned();
+    changed.push(identity);
+    let mut identity = expected.clone();
+    identity.driver_catalog_sha256[0] ^= 1;
+    changed.push(identity);
+    let mut identity = expected.clone();
+    identity.driver_version = "32.0.15.9580".to_owned();
+    changed.push(identity);
+    let mut identity = expected.clone();
+    identity.os_build += 1;
+    changed.push(identity);
+
+    for identity in changed {
+        assert!(
+            parse_and_validate_for_platform_at(&f.v2_json("", "cuda"), &identity, UNIX_EPOCH)
+                .is_err()
+        );
+        assert!(validate_platform_binding(&policy, &identity).is_err());
+    }
+}
+
+#[test]
+fn v2_policy_rejects_missing_malformed_or_extra_platform_fields() {
+    let f = Fixture::new();
+    let observed = observed_platform();
+    let valid = String::from_utf8(f.v2_json("", "cuda")).unwrap();
+    for invalid in [
+        valid.replace("\"platform\":{", "\"not_platform\":{"),
+        valid.replace("0123456789abcdef", "0123456789ABCDEf"),
+        valid.replace(
+            "\"driver_inf\":\"oem3.inf\"",
+            "\"driver_inf\":\"../oem3.inf\"",
+        ),
+        valid.replace("32.0.15.9579", "32..9579"),
+        valid.replace("\"os_build\":22631", "\"os_build\":0"),
+        valid.replace("0123456789abcdef", "0000000000000000"),
+        valid.replace("\"pci_vendor_id\":\"10de\"", "\"pci_vendor_id\":\"0000\""),
+        valid.replace("\"pci_device_id\":\"2782\"", "\"pci_device_id\":\"0000\""),
+        valid.replace(&hex(&[0xab; 32]), &hex(&[0; 32])),
+        String::from_utf8(f.v2_json(",\"private_path\":\"C:\\\\DriverStore\"", "cuda")).unwrap(),
+    ] {
+        assert!(
+            parse_and_validate_for_platform_at(invalid.as_bytes(), &observed, UNIX_EPOCH).is_err()
+        );
+    }
+
+    let v1_with_platform = String::from_utf8(f.json(""))
+        .unwrap()
+        .replace("\"modules\"", "\"platform\":{},\"modules\"");
+    assert!(parse_and_validate_at(v1_with_platform.as_bytes(), UNIX_EPOCH).is_err());
+    let v1 = parse_and_validate_at(&f.json(""), UNIX_EPOCH).unwrap();
+    validate_platform_binding(&v1, &observed).unwrap();
 }
 
 #[test]

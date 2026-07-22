@@ -24,7 +24,24 @@ pub enum RuntimeBackend {
 struct PolicyDto {
     schema_version: u32,
     expires: String,
+    #[serde(default)]
+    platform: Option<PlatformDto>,
     modules: Vec<ModuleDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct PlatformDto {
+    backend: RuntimeBackend,
+    adapter_luid: String,
+    pci_vendor_id: String,
+    pci_device_id: String,
+    pci_subsystem_id: String,
+    pci_revision_id: String,
+    driver_inf: String,
+    driver_catalog_sha256: String,
+    driver_version: String,
+    os_build: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -52,9 +69,27 @@ pub struct RuntimeModule {
     pub version: Option<String>,
 }
 
+/// Privacy-bounded identity of the adapter and active Windows driver package
+/// that a GPU runtime policy was generated from. This contract deliberately
+/// carries an INF basename and catalog digest, never a DriverStore path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GpuPlatformIdentity {
+    pub backend: RuntimeBackend,
+    pub adapter_luid: u64,
+    pub pci_vendor_id: u16,
+    pub pci_device_id: u16,
+    pub pci_subsystem_id: u32,
+    pub pci_revision_id: u8,
+    pub driver_inf: String,
+    pub driver_catalog_sha256: [u8; 32],
+    pub driver_version: String,
+    pub os_build: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeModulePolicy {
     expires: SystemTime,
+    platform: Option<GpuPlatformIdentity>,
     modules: Vec<RuntimeModule>,
 }
 
@@ -65,6 +100,9 @@ impl RuntimeModulePolicy {
     pub fn modules(&self) -> &[RuntimeModule] {
         &self.modules
     }
+    pub fn platform(&self) -> Option<&GpuPlatformIdentity> {
+        self.platform.as_ref()
+    }
 }
 
 pub fn parse_and_validate(json: &[u8]) -> io::Result<RuntimeModulePolicy> {
@@ -72,12 +110,58 @@ pub fn parse_and_validate(json: &[u8]) -> io::Result<RuntimeModulePolicy> {
 }
 
 pub fn parse_and_validate_at(json: &[u8], now: SystemTime) -> io::Result<RuntimeModulePolicy> {
+    parse_and_validate_with_platform_at(json, None, now)
+}
+
+/// Parses a policy against a trusted, freshly observed adapter/driver/OS
+/// identity. Schema v2 requires this input and fails closed without it; schema
+/// v1 remains accepted for the existing recorded OpenGL gate.
+pub fn parse_and_validate_for_platform(
+    json: &[u8],
+    observed: &GpuPlatformIdentity,
+) -> io::Result<RuntimeModulePolicy> {
+    parse_and_validate_for_platform_at(json, observed, SystemTime::now())
+}
+
+pub fn parse_and_validate_for_platform_at(
+    json: &[u8],
+    observed: &GpuPlatformIdentity,
+    now: SystemTime,
+) -> io::Result<RuntimeModulePolicy> {
+    parse_and_validate_with_platform_at(json, Some(observed), now)
+}
+
+fn parse_and_validate_with_platform_at(
+    json: &[u8],
+    observed: Option<&GpuPlatformIdentity>,
+    now: SystemTime,
+) -> io::Result<RuntimeModulePolicy> {
     let dto: PolicyDto = serde_json::from_slice(json).map_err(|e| invalid(e.to_string()))?;
-    if dto.schema_version != 1 {
-        return Err(invalid("unsupported runtime module policy schema"));
-    }
+    let platform = match dto.schema_version {
+        1 if dto.platform.is_none() => None,
+        1 => return Err(invalid("runtime module policy v1 cannot bind a platform")),
+        2 => {
+            let platform =
+                parse_platform(dto.platform.ok_or_else(|| {
+                    invalid("runtime module policy v2 requires platform identity")
+                })?)?;
+            let observed = observed.ok_or_else(|| {
+                invalid("runtime module policy v2 requires observed platform identity")
+            })?;
+            if &platform != observed {
+                return Err(invalid(
+                    "runtime module policy platform identity does not match observation",
+                ));
+            }
+            Some(platform)
+        }
+        _ => return Err(invalid("unsupported runtime module policy schema")),
+    };
     if dto.modules.len() > MAX_RUNTIME_MODULES {
         return Err(invalid("runtime module limit exceeded"));
+    }
+    if platform.is_some() && dto.modules.is_empty() {
+        return Err(invalid("runtime module policy v2 requires modules"));
     }
     let expires = parse_utc_rfc3339(&dto.expires)?;
     if expires <= now {
@@ -87,6 +171,14 @@ pub fn parse_and_validate_at(json: &[u8], now: SystemTime) -> io::Result<Runtime
     let mut names = HashSet::new();
     let mut modules = Vec::with_capacity(dto.modules.len());
     for module in dto.modules {
+        if platform
+            .as_ref()
+            .is_some_and(|identity| module.backend != identity.backend)
+        {
+            return Err(invalid(
+                "runtime module backend does not match platform identity",
+            ));
+        }
         validate_basename(&module.basename)?;
         validate_optional(
             "signer thumbprint",
@@ -121,7 +213,87 @@ pub fn parse_and_validate_at(json: &[u8], now: SystemTime) -> io::Result<Runtime
             version: module.version,
         });
     }
-    Ok(RuntimeModulePolicy { expires, modules })
+    Ok(RuntimeModulePolicy {
+        expires,
+        platform,
+        modules,
+    })
+}
+
+/// Rechecks the platform binding immediately before a policy is used for a GPU
+/// launch. A v1 policy has no platform binding and preserves its legacy gate;
+/// every v2 field must match the fresh observation exactly.
+pub fn validate_platform_binding(
+    policy: &RuntimeModulePolicy,
+    observed: &GpuPlatformIdentity,
+) -> io::Result<()> {
+    if policy
+        .platform
+        .as_ref()
+        .is_some_and(|expected| expected != observed)
+    {
+        return Err(invalid(
+            "runtime module policy platform identity changed before launch",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_platform(dto: PlatformDto) -> io::Result<GpuPlatformIdentity> {
+    if dto.backend == RuntimeBackend::Cpu {
+        return Err(invalid("runtime module platform backend must be GPU"));
+    }
+    validate_basename(&dto.driver_inf)?;
+    if !dto.driver_inf.to_ascii_lowercase().ends_with(".inf") {
+        return Err(invalid("runtime module driver INF must end with .inf"));
+    }
+    if dto.driver_version.len() > 64
+        || dto.driver_version.is_empty()
+        || dto
+            .driver_version
+            .split('.')
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(invalid("invalid runtime module driver version"));
+    }
+    if dto.os_build == 0 {
+        return Err(invalid("runtime module OS build must be nonzero"));
+    }
+    let identity = GpuPlatformIdentity {
+        backend: dto.backend,
+        adapter_luid: decode_fixed_hex_u64("adapter LUID", &dto.adapter_luid, 16)?,
+        pci_vendor_id: decode_fixed_hex_u64("PCI vendor id", &dto.pci_vendor_id, 4)? as u16,
+        pci_device_id: decode_fixed_hex_u64("PCI device id", &dto.pci_device_id, 4)? as u16,
+        pci_subsystem_id: decode_fixed_hex_u64("PCI subsystem id", &dto.pci_subsystem_id, 8)?
+            as u32,
+        pci_revision_id: decode_fixed_hex_u64("PCI revision id", &dto.pci_revision_id, 2)? as u8,
+        driver_inf: dto.driver_inf,
+        driver_catalog_sha256: decode_sha256(&dto.driver_catalog_sha256)?,
+        driver_version: dto.driver_version,
+        os_build: dto.os_build,
+    };
+    if identity.adapter_luid == 0
+        || identity.pci_vendor_id == 0
+        || identity.pci_device_id == 0
+        || identity.driver_catalog_sha256.iter().all(|byte| *byte == 0)
+    {
+        return Err(invalid(
+            "runtime module platform identity contains a zero identifier",
+        ));
+    }
+    Ok(identity)
+}
+
+fn decode_fixed_hex_u64(kind: &str, value: &str, width: usize) -> io::Result<u64> {
+    if value.len() != width
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || value.bytes().any(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(invalid(format!(
+            "{kind} must be {width} lowercase hexadecimal characters"
+        )));
+    }
+    u64::from_str_radix(value, 16).map_err(|_| invalid(format!("invalid {kind}")))
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
