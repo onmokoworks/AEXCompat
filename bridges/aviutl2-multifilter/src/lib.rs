@@ -470,7 +470,9 @@ fn alias_possible(
 /// under this one would not register, or the effect goes unregistered for the
 /// launch — which deletes it out of saved projects that use it (issue #307). Not
 /// only on an outright miss: only the walked spelling is refreshed by discovery,
-/// so a copy left under another one can be the newer of the two.
+/// so a copy left under another one can be the newer of the two. Also when this
+/// spelling holds a `stale` entry, which registers but on a payload that may
+/// describe older bytes, so a sound copy elsewhere is worth preferring.
 #[allow(clippy::too_many_arguments)]
 fn resolve_cached<'a>(
     cache: &'a HashMap<String, CacheEntry>,
@@ -483,7 +485,14 @@ fn resolve_cached<'a>(
     aliases: &mut Option<HashMap<PathBuf, Vec<String>>>,
 ) -> (Option<&'a CacheEntry>, Option<String>) {
     let direct = cache.get(key);
-    if !alias_possible || classify(direct, meta, build).register {
+    let direct_registers = classify(direct, meta, build).register;
+    // Look further when this spelling holds nothing usable, and also when what it
+    // holds is only usable in the weaker sense of `alias_rank` — a stale entry
+    // registers, but on a payload that may describe older bytes, so its sessions
+    // fail to open and its frames pass through unrendered. Another spelling can
+    // hold a sound entry for the same file.
+    let direct_is_sound = direct_registers && direct.is_some_and(|entry| !entry.stale);
+    if !alias_possible || direct_is_sound {
         return (direct, None);
     }
     // Built lazily, so a launch where every spelling matches never pays for it.
@@ -496,7 +505,11 @@ fn resolve_cached<'a>(
     // usable one and leave the effect unregistered.
     for alias in candidates {
         let candidate = cache.get(alias);
-        if classify(candidate, meta, build).register {
+        // Take it if this spelling had nothing usable, or if the candidate is
+        // strictly sounder — never a lateral move, which would just churn.
+        let improves =
+            !direct_registers || alias_rank(candidate, build) > alias_rank(direct, build);
+        if improves && classify(candidate, meta, build).register {
             return (candidate, Some(alias.clone()));
         }
     }
@@ -3133,5 +3146,129 @@ mod tests {
         let merged = keep_best(Some(&stale), fresh, replacement).unwrap();
         assert_eq!(merged.sha, "replacement");
         assert!(!merged.stale, "no longer queued");
+    }
+
+    /// A stale entry registers, but on a payload that may describe older bytes,
+    /// so its sessions fail to open and its frames pass through unrendered. When
+    /// another spelling of the same file holds a sound entry, that one must be
+    /// used instead of stopping at the stale direct hit.
+    #[cfg(windows)]
+    #[test]
+    fn a_stale_direct_hit_still_looks_for_a_sound_alias() {
+        let root = temp_root("stale-vs-sound");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+        let walked = real.join("foo.aex");
+        let other = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+
+        let mut stale = discovered(5, 64, build(1));
+        stale.stale = true;
+        stale.sha = "older-bytes".into();
+        let mut sound = discovered(5, 64, build(1));
+        sound.sha = "current".into();
+
+        let mut cache = HashMap::new();
+        cache.insert(walked.to_string_lossy().into_owned(), stale);
+        cache.insert(other.clone(), sound);
+
+        let mut aliases = None;
+        let (entry, alias) = resolve_cached(
+            &cache,
+            &walked.to_string_lossy(),
+            &walked,
+            META,
+            build(1),
+            std::slice::from_ref(&root),
+            true,
+            &mut aliases,
+        );
+        assert_eq!(entry.map(|entry| entry.sha.as_str()), Some("current"));
+        assert_eq!(alias.as_deref(), Some(other.as_str()));
+    }
+
+    /// But a stale direct hit is kept when no sounder spelling exists: dropping
+    /// it would unregister the effect (#307).
+    #[cfg(windows)]
+    #[test]
+    fn a_stale_direct_hit_is_kept_when_no_alias_is_sounder() {
+        let root = temp_root("stale-only");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+        let walked = real.join("foo.aex");
+
+        let mut stale = discovered(5, 64, build(1));
+        stale.stale = true;
+        stale.sha = "older-bytes".into();
+        let mut also_stale = discovered(5, 64, build(1));
+        also_stale.stale = true;
+        also_stale.sha = "other-older".into();
+
+        let mut cache = HashMap::new();
+        cache.insert(walked.to_string_lossy().into_owned(), stale);
+        cache.insert(
+            root.join("link").join("foo.aex").to_string_lossy().into_owned(),
+            also_stale,
+        );
+
+        let mut aliases = None;
+        let (entry, alias) = resolve_cached(
+            &cache,
+            &walked.to_string_lossy(),
+            &walked,
+            META,
+            build(1),
+            std::slice::from_ref(&root),
+            true,
+            &mut aliases,
+        );
+        assert_eq!(
+            entry.map(|entry| entry.sha.as_str()),
+            Some("older-bytes"),
+            "kept the walked spelling, still registered"
+        );
+        assert_eq!(alias, None, "no lateral move");
+    }
+
+    /// `alias_rank` cannot see whether an entry still describes the file, so a
+    /// top-ranked direct hit can still fail to register. Choosing only strictly
+    /// sounder candidates would then skip an equally ranked but usable spelling
+    /// and leave the effect unregistered (#307).
+    #[cfg(windows)]
+    #[test]
+    fn an_unusable_top_ranked_direct_hit_adopts_an_equal_ranked_alias() {
+        let root = temp_root("equal-rank-adopt");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+        let walked = real.join("foo.aex");
+        let other = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+
+        let mut cache = HashMap::new();
+        // Same rank as the alias (ok, not stale, current build) but its meta does
+        // not match the file, so it cannot be registered.
+        cache.insert(
+            walked.to_string_lossy().into_owned(),
+            discovered(9, 99, build(1)),
+        );
+        cache.insert(other.clone(), discovered(5, 64, build(1)));
+
+        let mut aliases = None;
+        let (entry, alias) = resolve_cached(
+            &cache,
+            &walked.to_string_lossy(),
+            &walked,
+            META,
+            build(1),
+            std::slice::from_ref(&root),
+            true,
+            &mut aliases,
+        );
+        assert_eq!(entry.map(|entry| entry.len), Some(64), "took the usable one");
+        assert_eq!(alias.as_deref(), Some(other.as_str()));
     }
 }
