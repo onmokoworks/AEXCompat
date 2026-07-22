@@ -2464,6 +2464,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 smart: config.smart,
                 gpu_backend: RenderGpuBackend::Auto,
                 gpu_runtime_policy: None,
+                payload_override: None,
             }) {
                 Ok(session) => session,
                 Err(error) => {
