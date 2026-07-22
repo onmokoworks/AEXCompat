@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -110,6 +110,16 @@ pub extern "C" fn InitializePlugin(version: u32) -> bool {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn UninitializePlugin() {
+    // Stop the background discovery thread (if still warming the cache) and join
+    // it, so it does not outlive the plugin or leave an L2 worker orphaned. The
+    // flag makes its work-steal loop exit after the current in-flight worker, so
+    // the join is bounded by one worker deadline.
+    DISCOVERY_SHUTDOWN.store(true, Ordering::Relaxed);
+    let discovery = DISCOVERY_THREAD.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(handle) = discovery {
+        let _ = handle.join();
+    }
+
     // Drain every registered filter's sessions so their MfSessions drop: each
     // disconnects its channel, lets the session thread run RenderSession::close,
     // and joins it. Copy the map references out first, then drain each map and
@@ -141,8 +151,14 @@ pub extern "C" fn GetCommonPluginTable() -> *mut COMMON_PLUGIN_TABLE {
 /// vars override `dir`/`repository`. Absent fields fall back to those env vars.
 #[derive(Default, serde::Deserialize)]
 struct Config {
-    /// Folder scanned for `*.aex`.
+    /// A single folder scanned for `*.aex` (backward-compatible; merged with
+    /// `dirs`). Kept so existing single-folder configs keep working.
     dir: Option<PathBuf>,
+    /// Folders scanned recursively for `*.aex`. When neither this, `dir`, nor the
+    /// env override is set, the default After Effects / MediaCore plug-in folders
+    /// are used (see [`default_dirs`]).
+    #[serde(default)]
+    dirs: Vec<PathBuf>,
     /// Repo root holding the built workers.
     repository: Option<PathBuf>,
     /// Effect names to skip (matched against each AEX's file stem, case- and
@@ -202,39 +218,245 @@ fn is_ignored(path: &Path, ignore: &[String]) -> bool {
         .any(|entry| strip_aex_ext(entry).eq_ignore_ascii_case(stem))
 }
 
+/// Cap on concurrent discovery workers. Each spawns an L2 worker subprocess that
+/// loads the AEX + the compat runtime (memory-heavy). Kept low: too much
+/// concurrency causes resource contention that pushes a plain ~2 s discovery past
+/// the worker's 5 s deadline, so a discoverable effect times out and is wrongly
+/// cached as a non-effect. Discovery runs on a background thread, so a low cap is
+/// cheap. (Measured: 8-way ≈ 68% false timeouts, serial ≈ 3%.)
+const MAX_DISCOVERY_PARALLELISM: usize = 3;
+/// Recursion depth cap for the folder scan (guards symlink loops / pathological
+/// trees); the AE plug-in tree is only a few levels deep.
+const MAX_SCAN_DEPTH: usize = 8;
+
+/// The background discovery saves the cache after each chunk of this many AEX, so
+/// progress survives a restart/shutdown mid-scan (rather than only at the end of a
+/// multi-minute scan).
+const DISCOVERY_SAVE_CHUNK: usize = 24;
+
+/// Set on plugin unload so the background discovery thread stops promptly.
+static DISCOVERY_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+/// The background discovery thread's join handle, so `UninitializePlugin` can
+/// stop and join it (bounded by one in-flight worker deadline).
+static DISCOVERY_THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     if host.is_null() {
         return;
     }
     let config = load_config();
-    // Env vars override the TOML values (backward compatible; useful for tests).
-    let dir = std::env::var_os(ENV_DIR)
-        .map(PathBuf::from)
-        .or(config.dir);
     let repository = std::env::var_os(ENV_REPOSITORY)
         .map(PathBuf::from)
-        .or(config.repository);
-    let (Some(dir), Some(repository)) = (dir, repository) else {
+        .or_else(|| config.repository.clone());
+    let Some(repository) = repository else {
         return;
     };
+    let dirs = resolve_scan_dirs(&config);
+    if dirs.is_empty() {
+        return;
+    }
 
-    let mut entries: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(read) => read
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| {
-                path.extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("aex"))
-            })
-            .filter(|path| !is_ignored(path, &config.ignore))
-            .collect(),
-        Err(_) => return,
+    // Recursively collect the *.aex to expose (minus ignored), deduped + sorted.
+    let plugins = collect_aex(&dirs, &config.ignore);
+    if plugins.is_empty() {
+        return;
+    }
+
+    // Discovery (an L2 worker per AEX) is slow — hundreds of AE effects take
+    // minutes — and can only ever populate the cache, since AviUtl2 freezes a
+    // filter's config at load and cannot register a filter discovered later. So
+    // register from the cache immediately (never blocking startup) and discover
+    // the rest on a background thread whose results appear on the NEXT launch.
+    // The cache is keyed by AEX (path, mtime, len), but a discovery *result* also
+    // depends on the compat host that produced it (the L2 worker and this DLL's
+    // in-process broker). Invalidate the whole cache when the host build changed,
+    // so effects that previously failed to load are re-discovered (issue #304).
+    let build = build_fingerprint(&repository);
+    let cache = load_cache(build);
+
+    // Register (host callback, main thread only) each AEX whose discovery already
+    // succeeded and is fresh. A changed/undiscovered AEX is a miss for the
+    // background pass; it renders (appears) once the next launch reads its cache.
+    let mut misses: Vec<PathBuf> = Vec::new();
+    for plugin in &plugins {
+        let key = plugin.to_string_lossy().into_owned();
+        match cache.get(&key) {
+            Some(entry)
+                if file_meta(plugin)
+                    .is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len) =>
+            {
+                if entry.ok {
+                    register_discovered(host, &repository, plugin, entry);
+                }
+            }
+            _ => misses.push(plugin.clone()),
+        }
+    }
+
+    if !misses.is_empty() {
+        spawn_background_discovery(repository, plugins, cache, misses, build);
+    }
+}
+
+/// Discovers the misses on a background thread and rewrites the cache, so startup
+/// is never blocked. Newly-discovered effects appear on the next launch.
+fn spawn_background_discovery(
+    repository: PathBuf,
+    plugins: Vec<PathBuf>,
+    mut cache: HashMap<String, CacheEntry>,
+    misses: Vec<PathBuf>,
+    build: BuildFingerprint,
+) {
+    let handle = std::thread::Builder::new()
+        .name("aex-multifilter-discovery".into())
+        .spawn(move || {
+            let current: std::collections::HashSet<String> = plugins
+                .iter()
+                .map(|plugin| plugin.to_string_lossy().into_owned())
+                .collect();
+            // Prune stale entries (removed/renamed AEX) up front so an early
+            // shutdown still leaves a pruned cache.
+            cache.retain(|key, _| current.contains(key));
+
+            // Discover in chunks and save the cache after each, so a restart or
+            // shutdown mid-scan keeps the progress so far (effects appear across
+            // successive launches) instead of discarding a multi-minute scan. The
+            // full scan of hundreds of AE effects can only ever populate the cache
+            // — AviUtl2 freezes a filter's config at load — so the results show on
+            // the next launch.
+            for chunk in misses.chunks(DISCOVERY_SAVE_CHUNK) {
+                if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+                let results = discover_all(&repository, chunk);
+                let discovered = results.len();
+                for (plugin, entry) in results {
+                    cache.insert(plugin.to_string_lossy().into_owned(), entry);
+                }
+                // discover_all returns fewer than the chunk only if it was cut
+                // short by the shutdown flag; save what we have and stop.
+                save_cache(&cache, build);
+                if discovered < chunk.len() {
+                    break;
+                }
+            }
+        });
+    if let Ok(handle) = handle
+        && let Ok(mut slot) = DISCOVERY_THREAD.lock()
+    {
+        // A previous launch's thread cannot exist (RegisterPlugin runs once), so
+        // just store this one for UninitializePlugin to join.
+        *slot = Some(handle);
+    }
+}
+
+/// The folders to scan: the env override wins, else `dir` + `dirs` from the
+/// config, else the default After Effects / MediaCore plug-in folders.
+fn resolve_scan_dirs(config: &Config) -> Vec<PathBuf> {
+    if let Some(dir) = std::env::var_os(ENV_DIR) {
+        return vec![PathBuf::from(dir)];
+    }
+    let mut dirs: Vec<PathBuf> = config.dir.clone().into_iter().collect();
+    dirs.extend(config.dirs.iter().cloned());
+    if dirs.is_empty() {
+        dirs = default_dirs();
+    }
+    dirs
+}
+
+/// The default scan folders: the latest installed After Effects `Plug-ins`
+/// folder and the shared Adobe MediaCore folder. Only existing paths are kept.
+fn default_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(ae) = latest_after_effects_plugins() {
+        dirs.push(ae);
+    }
+    if let Some(mediacore) = mediacore_dir() {
+        dirs.push(mediacore);
+    }
+    dirs
+}
+
+/// `%ProgramFiles%\Adobe`, the root of Adobe app installs.
+fn adobe_root() -> Option<PathBuf> {
+    let program_files = std::env::var_os("ProgramFiles")?;
+    Some(PathBuf::from(program_files).join("Adobe"))
+}
+
+/// The newest `Adobe After Effects <year>\Support Files\Plug-ins`, or `None`.
+fn latest_after_effects_plugins() -> Option<PathBuf> {
+    let adobe = adobe_root()?;
+    let mut best: Option<(String, PathBuf)> = None;
+    for entry in std::fs::read_dir(&adobe).ok()?.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(version) = name.strip_prefix("Adobe After Effects ") {
+            let plugins = entry.path().join("Support Files").join("Plug-ins");
+            if plugins.is_dir()
+                && best
+                    .as_ref()
+                    .is_none_or(|(best_version, _)| version_key(version) > version_key(best_version))
+            {
+                best = Some((version.to_string(), plugins));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// The newest `Adobe\Common\Plug-ins\<version>\MediaCore`, or `None`.
+fn mediacore_dir() -> Option<PathBuf> {
+    let root = adobe_root()?.join("Common").join("Plug-ins");
+    let mut best: Option<(String, PathBuf)> = None;
+    for entry in std::fs::read_dir(&root).ok()?.flatten() {
+        let mediacore = entry.path().join("MediaCore");
+        if mediacore.is_dir() {
+            let version = entry.file_name().to_string_lossy().into_owned();
+            if best
+                .as_ref()
+                .is_none_or(|(best_version, _)| version_key(&version) > version_key(best_version))
+            {
+                best = Some((version, mediacore));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// Recursively collects `*.aex` under `dirs` (minus ignored), deduped + sorted.
+fn collect_aex(dirs: &[PathBuf], ignore: &[String]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for dir in dirs {
+        collect_aex_into(dir, ignore, 0, &mut found);
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn collect_aex_into(dir: &Path, ignore: &[String], depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > MAX_SCAN_DEPTH {
+        return;
+    }
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
     };
-    // Deterministic registration order (read_dir order is unspecified).
-    entries.sort();
-    for plugin in entries {
-        register_aex(host, &repository, &plugin);
+    for entry in read.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_aex_into(&path, ignore, depth + 1, out);
+        } else if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("aex"))
+            && !is_ignored(&path, ignore)
+        {
+            out.push(path);
+        }
     }
 }
 
@@ -342,29 +564,269 @@ struct FilterCtx {
     sessions: Mutex<HashMap<i64, MfSession>>,
 }
 
-fn register_aex(host: *mut HOST_APP_TABLE, repository: &Path, plugin: &Path) {
-    let Ok(bytes) = std::fs::read(plugin) else {
-        return;
-    };
-    let sha = hex_lower(&Sha256::digest(&bytes));
-    let Ok((params, diagnostics)) =
-        inspect_experimental_with_diagnostics(repository, plugin, &sha)
-    else {
-        return;
-    };
-    // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
-    let smart = diagnostics
-        .get("advertised_out_flags2")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0)
-        & (1 << 10)
-        != 0;
+/// The cached discovery result for one AEX. Keyed in the cache file by the AEX
+/// path; `(mtime, len)` invalidates the entry when the file changes. `ok` records
+/// a non-discoverable `.aex` (e.g. a format/codec plug-in, not an effect) so it
+/// is skipped without being re-probed every launch.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct CacheEntry {
+    mtime: (u64, u32),
+    len: u64,
+    ok: bool,
+    sha: String,
+    smart: bool,
+    #[serde(default)]
+    params: Vec<InteractiveParameter>,
+}
 
+/// Bump when [`CacheEntry`]'s meaning changes, to invalidate stale cache files.
+const CACHE_VERSION: u32 = 1;
+
+/// Fingerprints the compat host that produces a discovery result, so the cache is
+/// invalidated when the host changes (e.g. it gains support for an effect that
+/// previously failed to load — issue #304). A cached result depends on the host,
+/// not just the AEX bytes: on the L2 worker exe that loads the AEX and runs
+/// `EffectMain`, and on this multifilter DLL, whose in-process broker does the
+/// sealed-load-tree staging and dispatch that decide whether a load even succeeds.
+/// `(mtime_secs, mtime_nanos, len)` per file; `None` when a file cannot be stat'd.
+#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Eq, Clone, Copy)]
+struct BuildFingerprint {
+    #[serde(default)]
+    worker: Option<(u64, u32, u64)>,
+    #[serde(default)]
+    host: Option<(u64, u32, u64)>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct CacheFile {
+    version: u32,
+    /// The host build the entries were discovered with; a mismatch (worker or
+    /// this DLL rebuilt) invalidates the whole cache so everything is re-discovered.
+    #[serde(default)]
+    build: BuildFingerprint,
+    entries: HashMap<String, CacheEntry>,
+}
+
+/// The discovery cache path, next to the config in `%APPDATA%`.
+fn cache_path() -> Option<PathBuf> {
+    let appdata = std::env::var_os("APPDATA")?;
+    Some(
+        PathBuf::from(appdata)
+            .join("aexcompat-multifilter")
+            .join("discovery-cache.json"),
+    )
+}
+
+/// Fingerprints the L2 discovery worker and this multifilter DLL. Either side can
+/// change a discovery result: the worker exe loads the AEX and runs `EffectMain`,
+/// while the in-DLL broker does the sealed-load-tree staging that decides whether
+/// the load succeeds (issue #304's dep-sealing lives broker-side, in this DLL).
+fn build_fingerprint(repository: &Path) -> BuildFingerprint {
+    let worker = repository
+        .join("target")
+        .join("minihost-build")
+        .join("aex_l2_worker.exe");
+    let flatten = |m: ((u64, u32), u64)| (m.0.0, m.0.1, m.1);
+    BuildFingerprint {
+        worker: file_meta(&worker).map(flatten),
+        host: self_module_path().as_deref().and_then(file_meta).map(flatten),
+    }
+}
+
+/// The path of this running DLL, resolved from an address inside it. Used to
+/// fingerprint the in-process broker (its bytes ship in this module, not the
+/// worker exe), so a rebuilt-and-redeployed DLL invalidates the discovery cache.
+fn self_module_path() -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | _UNCHANGED_REFCOUNT: resolve the
+    // module owning `addr` without touching its refcount (no matching FreeLibrary).
+    const FROM_ADDRESS_UNCHANGED: u32 = 0x0000_0004 | 0x0000_0002;
+    unsafe extern "system" {
+        fn GetModuleHandleExW(flags: u32, addr: *const u16, module: *mut isize) -> i32;
+        fn GetModuleFileNameW(module: isize, buf: *mut u16, size: u32) -> u32;
+    }
+
+    let anchor = self_module_path as *const () as *const u16;
+    let mut module: isize = 0;
+    // SAFETY: `anchor` points into this module's code; out-params are valid.
+    if unsafe { GetModuleHandleExW(FROM_ADDRESS_UNCHANGED, anchor, &mut module) } == 0 {
+        return None;
+    }
+    let mut buf = [0u16; 32768];
+    // SAFETY: `module` is a valid HMODULE from the call above; `buf` is sized.
+    let len = unsafe { GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    // 0 = failure; len == buf.len() means truncation (path longer than the buffer).
+    if len == 0 || len >= buf.len() {
+        return None;
+    }
+    Some(PathBuf::from(OsString::from_wide(&buf[..len])))
+}
+
+fn load_cache(build: BuildFingerprint) -> HashMap<String, CacheEntry> {
+    let Some(path) = cache_path() else {
+        return HashMap::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    let file: CacheFile = serde_json::from_str(&text).unwrap_or_default();
+    // Reuse the cache only when both the schema version and the host build that
+    // produced it match; otherwise re-discover everything.
+    if file.version == CACHE_VERSION && file.build == build {
+        file.entries
+    } else {
+        HashMap::new()
+    }
+}
+
+fn save_cache(entries: &HashMap<String, CacheEntry>, build: BuildFingerprint) {
+    let Some(path) = cache_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = CacheFile {
+        version: CACHE_VERSION,
+        build,
+        // Clone is unavoidable through the borrow; the cache is small vs the AEX
+        // bytes and this runs once per launch.
+        entries: entries
+            .iter()
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect(),
+    };
+    // Write atomically (temp + rename) so a crash or process exit mid-write (the
+    // background thread can still be writing when AviUtl2 quits) never leaves a
+    // truncated, unparseable cache file behind. The temp name carries the PID so
+    // two AviUtl2 instances do not clobber each other's temp before the rename.
+    if let Ok(text) = serde_json::to_string(&file) {
+        let temp = path.with_file_name(format!("discovery-cache.{}.tmp", std::process::id()));
+        if std::fs::write(&temp, text).is_ok() && std::fs::rename(&temp, &path).is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+    }
+}
+
+/// `(mtime, len)` for cache invalidation; `mtime` degrades to `(0, 0)` if the
+/// platform cannot report it (then `len` alone guards, as on the aviutl2 bridge).
+fn file_meta(path: &Path) -> Option<((u64, u32), u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| (d.as_secs(), d.subsec_nanos()))
+        .unwrap_or((0, 0));
+    Some((mtime, meta.len()))
+}
+
+/// A negative (`ok = false`) cache entry for a plug-in that failed discovery.
+fn negative_entry(plugin: &Path) -> CacheEntry {
+    let (mtime, len) = file_meta(plugin).unwrap_or(((0, 0), 0));
+    CacheEntry {
+        mtime,
+        len,
+        ok: false,
+        sha: String::new(),
+        smart: false,
+        params: Vec::new(),
+    }
+}
+
+/// Discovers one AEX, always returning a cache entry (cache-all): `ok = true` for
+/// a discoverable effect, `ok = false` for any failure (a genuine non-effect, or
+/// an AEX the compat host cannot load, or a timeout). Discovery runs on the
+/// background thread, so caching every outcome — even a timeout — means it is not
+/// re-probed on later launches; a spurious negative is cleared by re-touching the
+/// AEX or deleting the cache file (documented in the README).
+fn discover_one(repository: &Path, plugin: &Path) -> CacheEntry {
+    let mut entry = negative_entry(plugin);
+    let Ok(bytes) = std::fs::read(plugin) else {
+        return entry;
+    };
+    entry.sha = hex_lower(&Sha256::digest(&bytes));
+    if let Ok((params, diagnostics)) =
+        inspect_experimental_with_diagnostics(repository, plugin, &entry.sha)
+    {
+        // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
+        entry.smart = diagnostics
+            .get("advertised_out_flags2")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+            & (1 << 10)
+            != 0;
+        entry.params = params;
+        entry.ok = true;
+    }
+    entry
+}
+
+/// Discovers the given AEX with low bounded parallelism (to keep each discovery
+/// under the worker deadline — high concurrency causes contention false-timeouts),
+/// work-stealing over the slice and caching every result. Stops promptly when
+/// `DISCOVERY_SHUTDOWN` is set (plugin unload); unprocessed paths stay misses and
+/// are retried next launch. A panic in `discover_one` (arbitrary third-party AEX)
+/// is caught and turned into a negative entry, so one bad plug-in cannot abort the
+/// process by unwinding out of the scoped thread.
+fn discover_all(repository: &Path, paths: &[PathBuf]) -> Vec<(PathBuf, CacheEntry)> {
+    let parallelism = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(MAX_DISCOVERY_PARALLELISM)
+        .min(paths.len().max(1));
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<(PathBuf, CacheEntry)>> = Mutex::new(Vec::with_capacity(paths.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..parallelism {
+            scope.spawn(|| {
+                loop {
+                    if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= paths.len() {
+                        break;
+                    }
+                    let plugin = &paths[index];
+                    let entry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        discover_one(repository, plugin)
+                    }))
+                    .unwrap_or_else(|_| negative_entry(plugin));
+                    if let Ok(mut results) = results.lock() {
+                        results.push((plugin.clone(), entry));
+                    }
+                }
+            });
+        }
+    });
+    results.into_inner().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// A numerically-comparable key for a version token ("25.0" > "7.0", unlike a
+/// lexical compare), falling back to 0 for non-numeric components.
+fn version_key(version: &str) -> Vec<u64> {
+    version
+        .split(['.', ' '])
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+/// Registers one discovered AEX as an AviUtl2 filter. Runs on the RegisterPlugin
+/// (host callback) thread only.
+fn register_discovered(
+    host: *mut HOST_APP_TABLE,
+    repository: &Path,
+    plugin: &Path,
+    entry: &CacheEntry,
+) {
     // Build config items + readers + normalized defaults from the exposed params.
     let mut items: Vec<*const c_void> = Vec::new();
     let mut readers: Vec<ItemReader> = Vec::new();
     let mut defaults: Vec<InteractiveParameter> = Vec::new();
-    for parameter in &params {
+    for parameter in &entry.params {
         if !parameter.visible {
             continue;
         }
@@ -380,8 +842,8 @@ fn register_aex(host: *mut HOST_APP_TABLE, repository: &Path, plugin: &Path) {
     let userdata = Box::leak(Box::new(FilterCtx {
         repository: repository.to_path_buf(),
         plugin: plugin.to_path_buf(),
-        sha,
-        smart,
+        sha: entry.sha.clone(),
+        smart: entry.smart,
         defaults,
         readers,
         sessions: Mutex::new(HashMap::new()),
