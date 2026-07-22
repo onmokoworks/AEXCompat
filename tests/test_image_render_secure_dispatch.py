@@ -298,18 +298,23 @@ def test_a_policy_below_float32_or_on_classic_does_not_exclude_a_render():
         "(pixel_format == RenderPixelFormat::Argb32f && runtime_backend(gpu_backend).is_some() "
         "&& gpu_runtime_policy.is_some())" in gate
     )
-    # Layered: Auto alone carries it at every depth (issue #353). The depth bound
-    # that used to exclude Argb32f is gone -- it was the last real one-shot gap --
-    # and no policy clause replaced it, because layered + policy is unreachable.
+    # Layered (issue #353): Argb32f is admitted under Auto *without* a policy --
+    # that was the last real one-shot gap, and the A/B in
+    # render_session_wrapper.rs::smart_timed_multilayer_matches_the_one_shot_transport
+    # measures the equivalence. With a policy it stays excluded; see below.
     layered_start = gate.index("Smart layered: Auto only, at every depth")
     layered = gate[layered_start : gate.index("} else {", layered_start)]
     assert "gpu_backend == RenderGpuBackend::Auto" in layered
-    assert "pixel_format != RenderPixelFormat::Argb32f" not in layered, (
-        "Argb32f layered is session-eligible now; the A/B in "
-        "render_session_wrapper.rs::smart_timed_multilayer_matches_the_one_shot_transport "
-        "measures the equivalence")
-    assert "gpu_runtime_policy" not in layered, (
-        "layered + policy is unreachable, so admitting it would be a dead condition")
+    # Layered float32 + policy must stay EXCLUDED. Dropping the depth bound
+    # removed the clause that had been keeping it out, and for that shape the
+    # polarity of the divergence flips: the session opens the real GPU session
+    # (its CPU fold only fires when the policy is absent) while the one-shot
+    # skips its GPU preflight for layered renders and stays on the CPU. That is
+    # a different divergence from the accepted one and has no A/B behind it.
+    assert (
+        "gpu_backend == RenderGpuBackend::Auto && (pixel_format "
+        "!= RenderPixelFormat::Argb32f || gpu_runtime_policy.is_none())" in flat(layered)
+    ), "layered float32 + policy must be excluded, not merely unadmitted"
 
     # Classic Auto is already admitted by the image-render gate. RenderSession::open
     # must accept the same policy-carrying request and only attach the manifest when
@@ -326,23 +331,47 @@ def test_no_corpus_fixture_is_both_layered_and_gpu_declaring():
     """The layered gate's Argb32f admission rests on this, so pin it.
 
     The worker turns gpu_negotiation on for float32 whenever the plug-in
-    advertises PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 -- layers do not enter into
-    it (worker_smart_setup.cpp). A plug-in that is both layered and
-    GPU-declaring would therefore take the device on the one-shot layered
-    command while a policy-less Auto session folds to CPU, which is the one
-    divergence issue #353 accepts as session-canonical.
+    advertises GPU support -- layers do not enter into it
+    (worker_smart_setup.cpp reads bit 25 of out_flags2). A plug-in that is both
+    layered and GPU-declaring would therefore take the device on the one-shot
+    layered command while a policy-less Auto session folds to CPU, which is the
+    one divergence issue #353 accepts as session-canonical.
 
-    No fixture in this repository is both, so every measured A/B compares CPU
-    against CPU. If a probe ever declares both, the equivalence the gate relies
-    on stops holding for it and this test says so.
+    "Layered" is really a property of the *request* (the broker builds
+    secondaries from caller-supplied parameters with a layer_path, and never
+    cross-checks them against the plug-in's parameter table). The harness ties
+    the two together -- assign_layer_paths refuses a slot the inspection did not
+    report as a layer -- so scanning sources is a proxy for "a shipped caller can
+    produce a layered request against this plug-in", not the invariant itself.
+
+    The detector matches bit 25 the way the worker does, by value as well as by
+    macro name, so a probe spelling it numerically cannot slip past. It is
+    checked against a known-positive spelling first, because no fixture in
+    instruments/ sets the bit at all and a silently non-matching detector would
+    make the whole test vacuous.
     """
     root = SOURCE.parents[4]
+    assert (root / "instruments").is_dir() and (root / "broker").is_dir(), (
+        f"expected {root} to be the repository root")
+
+    def declares_gpu(text: str) -> bool:
+        # PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 == 1 << 25 == 0x2000000 == 33554432.
+        return any(marker in text for marker in (
+            "PF_OutFlag2_SUPPORTS_GPU_RENDER_F32",
+            "1 << 25", "1L << 25", "1u << 25", "1UL << 25",
+            "0x2000000", "0x02000000", "33554432",
+        ))
+
+    assert declares_gpu("out_flags2 |= PF_OutFlag2_SUPPORTS_GPU_RENDER_F32;")
+    assert declares_gpu("out_flags2 |= (1L << 25);")
+    assert not declares_gpu("out_flags2 |= PF_OutFlag2_SUPPORTS_SMART_RENDER;")
+
     layered, gpu_declaring = set(), set()
     for source in sorted((root / "instruments").rglob("*.cpp")):
         text = source.read_text(encoding="utf-8")
         if "PF_ADD_LAYER" in text or "PF_Param_LAYER" in text:
             layered.add(source.name)
-        if "PF_OutFlag2_SUPPORTS_GPU_RENDER_F32" in text:
+        if declares_gpu(text):
             gpu_declaring.add(source.name)
     assert layered, "expected the layered probes to still exist"
     both = layered & gpu_declaring

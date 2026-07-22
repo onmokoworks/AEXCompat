@@ -5101,10 +5101,24 @@ fn render_with_artifact(
                 // canonical. This generalizes #292, which settled the same
                 // anchor question for the non-layered Auto case.
                 //
-                // Layered + policy is unreachable (the only GpuRuntimePolicyInput
-                // producer never assigns layer paths), so admitting it would be a
-                // dead condition; Auto alone is the whole rule here.
+                // Layered float32 *with* a policy stays out, and the condition
+                // is an exclusion rather than the omission it looks like. The
+                // session's CPU fold only fires when the policy is absent
+                // (render_session.rs), so a policy-carrying layered float32
+                // render would open the real GPU session, while the one-shot
+                // skips its GPU preflight entirely when layers are present
+                // (gpu_initial_attempt requires no secondaries) and renders on
+                // the CPU. That is the divergence inverted -- session on the
+                // device, one-shot not -- and it is not the one accepted above:
+                // it has no A/B behind it, and an expired policy or an absent
+                // device would fail the render closed where it used to succeed
+                // on the CPU. No shipped caller can build the shape today
+                // (inspect_experimental_with_diagnostics never sets layer_path),
+                // but render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy
+                // is public and takes arbitrary parameters, so the gate states it
+                // instead of relying on the current caller set.
                 gpu_backend == RenderGpuBackend::Auto
+                    && (pixel_format != RenderPixelFormat::Argb32f || gpu_runtime_policy.is_none())
             }
         } else {
             // Classic audio + layers is session-canonical (#341). The legacy

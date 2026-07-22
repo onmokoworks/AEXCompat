@@ -420,9 +420,9 @@ mod windows_e2e {
                 )
             };
             let label = match pixel_format {
+                RenderPixelFormat::Argb8 => "argb8",
                 RenderPixelFormat::Argb16 => "argb16",
                 RenderPixelFormat::Argb32f => "argb32f",
-                _ => "argb8",
             };
 
             // Run A: default routing carries the smart layered render on the session.
@@ -460,6 +460,30 @@ mod windows_e2e {
                 std::fs::read(&out_b).unwrap(),
                 "the {label} smart timed-multilayer PNG differs between the routes"
             );
+
+            // Compare the whole report, not just the pixels. Argb32f is the depth
+            // where gpu_attempt / gpu_fallback_used can appear, and those are
+            // exactly the fields that would show one route reaching a device and
+            // the other not -- an output_sha256 match alone would not.
+            let volatile = ["output_png", "output_raw", "worker_diagnostics"];
+            let mut flat_a = report_a.as_object().expect("report A object").clone();
+            let mut flat_b = report_b.as_object().expect("report B object").clone();
+            for key in volatile {
+                flat_a.remove(key);
+                flat_b.remove(key);
+            }
+            assert_eq!(
+                flat_a.keys().collect::<Vec<_>>(),
+                flat_b.keys().collect::<Vec<_>>(),
+                "the {label} report key sets diverge between the routes"
+            );
+            for (key, value_a) in &flat_a {
+                assert_eq!(
+                    Some(value_a),
+                    flat_b.get(key),
+                    "the {label} report field {key} differs between the routes"
+                );
+            }
         }
         let _ = std::fs::remove_dir_all(&scratch);
     }
