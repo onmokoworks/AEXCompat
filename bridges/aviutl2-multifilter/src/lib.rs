@@ -338,16 +338,41 @@ struct LoadDecision {
 /// The two are independent on purpose: an entry discovered by an older host is
 /// still registered while it is re-verified, because not registering it would let
 /// AviUtl2 delete every object that uses it out of a saved project (issue #307).
+///
+/// `meta` is `None` when the AEX could not be stat'd even though the scan just
+/// found the path (a sharing violation, a deploy race between `read_dir` and
+/// `metadata`). As in [`keep_best`], that is not evidence the file changed, so the
+/// cached result keeps being registered — a failed stat must not be able to
+/// unregister a filter for a launch. Re-discovery is queued either way, since
+/// freshness could not be confirmed.
 fn classify(
     cached: Option<&CacheEntry>,
     meta: Option<((u64, u32), u64)>,
     build: BuildFingerprint,
 ) -> LoadDecision {
-    let current = cached
-        .filter(|entry| meta.is_some_and(|(mtime, len)| entry.mtime == mtime && entry.len == len));
-    LoadDecision {
-        register: current.is_some_and(|entry| entry.ok),
-        discover: current.is_none_or(|entry| entry.build != build),
+    let Some(entry) = cached else {
+        return LoadDecision {
+            register: false,
+            discover: true,
+        };
+    };
+    match meta {
+        // Confirmed unchanged: re-verify only when the host build moved.
+        Some((mtime, len)) if entry.mtime == mtime && entry.len == len => LoadDecision {
+            register: entry.ok,
+            discover: entry.build != build,
+        },
+        // Confirmed changed: a different plug-in, whose parameters the cached
+        // entry does not describe, so it is not registered (tracked as #309).
+        Some(_) => LoadDecision {
+            register: false,
+            discover: true,
+        },
+        // Unknown: keep what we have and re-check in the background.
+        None => LoadDecision {
+            register: entry.ok,
+            discover: true,
+        },
     }
 }
 
@@ -865,6 +890,17 @@ fn keep_best(
     discovered: CacheEntry,
     meta: Option<((u64, u32), u64)>,
 ) -> CacheEntry {
+    // Stamp the `(mtime, len)` just read over whatever discovery recorded.
+    // Discovery's own stat can fail — [`negative_entry`] then falls back to
+    // `(0, 0), 0` — and the file can be replaced between that stat and the read,
+    // either of which would store a successful entry under a `(mtime, len)` that
+    // never matches the file again, so the next launch treats it as changed and
+    // stops registering it (issue #307).
+    let mut discovered = discovered;
+    if let Some((mtime, len)) = meta {
+        discovered.mtime = mtime;
+        discovered.len = len;
+    }
     let Some(old) = cached else {
         return discovered;
     };
@@ -1663,6 +1699,25 @@ mod tests {
         assert!(keep_best(None, discovered(5, 64, build(1)), META).ok);
     }
 
+    /// Discovery records the AEX's meta itself, and its own stat can fail (or the
+    /// file can be replaced between that stat and the read). Storing a successful
+    /// entry under the `(0, 0), 0` fallback would make every later launch see a
+    /// mismatch and stop registering it, so the merge stamps the meta it read.
+    #[test]
+    fn a_successful_discovery_takes_the_meta_read_at_merge_time() {
+        let mut fresh = discovered(0, 0, build(1)); // discovery could not stat it
+        fresh.mtime = (0, 0);
+        fresh.len = 0;
+        let merged = keep_best(None, fresh, META);
+        assert_eq!(merged.mtime, (5, 0));
+        assert_eq!(merged.len, 64);
+        assert_eq!(
+            classify(Some(&merged), META, build(1)),
+            LoadDecision { register: true, discover: false },
+            "the entry matches the file, so it registers next launch"
+        );
+    }
+
     // --- classify: an older host must not unregister a filter ---------------
 
     /// The other half of issue #307: an entry from an older host keeps being
@@ -1696,6 +1751,38 @@ mod tests {
         );
         assert_eq!(
             classify(Some(&entry), META, build(2)),
+            LoadDecision { register: false, discover: true }
+        );
+    }
+
+    /// A stat failure on a path the scan just found is not evidence the AEX
+    /// changed, so the cached result keeps being registered. Unregistering it for
+    /// this launch would delete objects from saved projects that use it (#307).
+    #[test]
+    fn an_unstattable_aex_stays_registered() {
+        let entry = discovered(5, 64, build(1));
+        assert_eq!(
+            classify(Some(&entry), NO_META, build(1)),
+            LoadDecision { register: true, discover: true },
+            "registered from cache, and re-checked in the background"
+        );
+    }
+
+    /// ...but an unknown AEX with no cached entry still has nothing to register.
+    #[test]
+    fn an_unstattable_aex_without_a_cache_entry_is_only_discovered() {
+        assert_eq!(
+            classify(None, NO_META, build(1)),
+            LoadDecision { register: false, discover: true }
+        );
+    }
+
+    /// A cached negative is not resurrected by a stat failure.
+    #[test]
+    fn an_unstattable_negative_is_still_not_registered() {
+        let entry = failed(5, 64, build(1));
+        assert_eq!(
+            classify(Some(&entry), NO_META, build(1)),
             LoadDecision { register: false, discover: true }
         );
     }
