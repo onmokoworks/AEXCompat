@@ -1390,6 +1390,7 @@ fn discover_one(repository: &Path, plugin: &Path, build: BuildFingerprint) -> Ca
                 & (1 << 10)
                 != 0;
             entry.params = params;
+            normalize_parameters_for_cache(&mut entry.params);
             entry.ok = true;
         }
         Err(error) => {
@@ -1397,6 +1398,34 @@ fn discover_one(repository: &Path, plugin: &Path, build: BuildFingerprint) -> Ca
         }
     }
     entry
+}
+
+/// Keep broker parameters JSON-round-trippable before they enter the persistent
+/// discovery cache (#322). `serde_json` writes non-finite `f64` values as `null`,
+/// which the typed `InteractiveParameter` loader rejects on the next launch and
+/// sends the same effect through discovery again forever.
+fn normalize_parameters_for_cache(parameters: &mut [InteractiveParameter]) {
+    for parameter in parameters {
+        let minimum = parameter.minimum.is_finite().then_some(parameter.minimum);
+        let maximum = parameter.maximum.is_finite().then_some(parameter.maximum);
+        if let (Some(minimum), Some(maximum)) = (minimum, maximum)
+            && minimum < maximum
+        {
+            parameter.minimum = minimum;
+            parameter.maximum = maximum;
+        } else {
+            parameter.minimum = 0.0;
+            parameter.maximum = 1.0;
+        }
+        if !parameter.value.is_finite() {
+            parameter.value = parameter.minimum;
+        }
+        for component in &mut parameter.components {
+            if !component.is_finite() {
+                *component = 0.0;
+            }
+        }
+    }
 }
 
 /// Discovers the given AEX with low bounded parallelism (to keep each discovery
@@ -2620,6 +2649,43 @@ mod tests {
         for key in frozen.as_object().unwrap().keys() {
             assert!(value.get(key).is_some(), "field `{key}` disappeared from the schema");
         }
+    }
+
+    #[test]
+    fn non_finite_parameters_are_normalized_before_cache_round_trip() {
+        let mut parameters = vec![InteractiveParameter {
+            slot: 1,
+            name: "Broken range".into(),
+            kind: "float".into(),
+            minimum: f64::NAN,
+            maximum: f64::INFINITY,
+            value: f64::NEG_INFINITY,
+            choices: Vec::new(),
+            color: [0, 0, 0, 255],
+            components: [f64::NAN, 0.5, f64::INFINITY],
+            component_count: 3,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        }];
+
+        normalize_parameters_for_cache(&mut parameters);
+        let parameter = &parameters[0];
+        assert_eq!(
+            (parameter.minimum, parameter.maximum, parameter.value),
+            (0.0, 1.0, 0.0)
+        );
+        assert_eq!(parameter.components, [0.0, 0.5, 0.0]);
+
+        let encoded = serde_json::to_value(&parameters).expect("finite parameters serialize");
+        let decoded: Vec<InteractiveParameter> =
+            serde_json::from_value(encoded).expect("normalized parameters deserialize");
+        assert_eq!(decoded[0].value, 0.0);
+        assert!(decoded[0].components.iter().all(|value| value.is_finite()));
     }
 
     /// The same hazard for this crate's own entry shape: adding a field without
