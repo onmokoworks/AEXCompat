@@ -23,21 +23,13 @@ void apply_common(const request_parser::WorkerInvocation& source,
                   InvocationState& target) {
   const auto& mode = source.mode;
   target.external_pixel_bytes = mode.external_pixel_bytes;
-  target.external_rgba = source.rgba;
   target.external_layers = source.layers;
-  target.external_output = source.output;
   target.external_width = source.width;
   target.external_height = source.height;
   target.external_current_time = source.current_time;
   target.external_time_step = source.time_step;
   target.external_total_time = source.total_time;
   target.external_time_scale = source.time_scale;
-}
-void apply_click_draw(const request_parser::WorkerInvocation& source,
-                      const ApplyHooks& hooks) {
-  if (source.mode.image_click_context && hooks.set_click)
-    hooks.set_click(source.click_x, source.click_y, source.picker_color);
-  if (source.mode.image_draw_context && hooks.enable_draw) hooks.enable_draw();
 }
 }  // namespace
 
@@ -143,35 +135,25 @@ void apply_render(const request_parser::WorkerInvocation& source,
                   InvocationState& target, const ApplyHooks& hooks) {
   apply_common(source, target);
   const auto& mode = source.mode;
-  target.audio_mode = mode.audio_mode;
-  target.image_audio_mode = mode.image_audio_mode;
-  target.transport_argc = mode.transport_argc;
-  target.image_click_context = mode.image_click_context;
-  target.image_draw_context = mode.image_draw_context;
-  target.image_click_argc = mode.image_click_argc;
   target.image_render_environment = mode.image_render_environment;
   target.image_environment_argc = mode.image_environment_argc;
   target.image_spatial_context = mode.image_spatial_context;
   target.image_trailer_argc = mode.image_trailer_argc;
   target.image_mask_context = mode.image_mask_context;
   target.image_argc = mode.image_argc;
-  target.layered_image_mode = mode.layered_image_mode;
-  target.image_mode = mode.image_mode;
   target.render_session_mode = mode.render_session_mode;
   target.audio_session_mode = mode.audio_session_mode;
   target.audio_session_max_samples = source.audio_session_max_samples;
   target.audio_session_channels = source.audio_session_channels;
   target.request_mode = mode.request_mode;
   target.external_audio = source.audio;
-  target.external_audio_output = source.audio_output;
   target.external_audio_samples = source.audio_samples;
   target.external_audio_rate = source.audio_rate;
-  apply_click_draw(source, hooks);
-  // The one-shot carries its audio under --render-image-audio; a session carries
-  // the same span in the `session-audio:v1|` launch trailer (issue #339). Both
-  // hand the plug-in one static source for the whole invocation, so the hook is
-  // the same and only the argv shape differs.
-  if ((mode.image_audio_mode || mode.session_audio) && hooks.set_audio_source)
+  // The session carries its audio span in the `session-audio:v1|` launch
+  // trailer (issue #339) and hands the plug-in one static source for the whole
+  // invocation. The one-shot `--render-image-audio` that also drove this hook
+  // was deleted in #365.
+  if (mode.session_audio && hooks.set_audio_source)
     hooks.set_audio_source(&target.external_audio, target.external_audio_samples);
 }
 
@@ -182,17 +164,12 @@ void apply_smart(const request_parser::WorkerInvocation& source,
   target.smart_force_cpu = mode.force_cpu;
   target.smart_opencl = mode.opencl;
   target.smart_directx = mode.directx;
-  target.smart_image_click_context = mode.image_click_context;
-  target.smart_image_draw_context = mode.image_draw_context;
-  target.smart_image_click_argc = mode.image_click_argc;
   target.smart_image_render_environment = mode.image_render_environment;
   target.smart_image_environment_argc = mode.image_environment_argc;
   target.smart_image_spatial_context = mode.image_spatial_context;
   target.smart_image_trailer_argc = mode.image_trailer_argc;
   target.smart_image_mask_context = mode.image_mask_context;
   target.smart_image_argc = mode.image_argc;
-  target.smart_layered_image_mode = mode.layered_image_mode;
-  target.smart_image_mode = mode.image_mode;
   target.render_session_mode = mode.render_session_mode;
   target.mask_request_mode = mode.mask_request_mode;
   target.mask_scene_request_mode = mode.mask_scene_request_mode;
@@ -216,7 +193,6 @@ void apply_smart(const request_parser::WorkerInvocation& source,
   if (hooks.set_mask_mode) hooks.set_mask_mode(mode.mask_model_enabled);
   if (hooks.set_mask_fault)
     hooks.set_mask_fault(mode.mask_count_error_mode, mode.mask_count_crash_mode);
-  apply_click_draw(source, hooks);
 }
 }  // namespace aexcompat::worker_runtime::invocation
 
@@ -520,10 +496,14 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
     render_error = render_once(entry, input, output, case_id, render_width, render_height,
                                render_rowbytes, input_hash, output_hash, guards_intact,
                                invocation.request_mode ? &invocation.requested_parameters : nullptr,
-                               invocation.image_mode ? &invocation.external_rgba : nullptr,
-                               invocation.image_mode ? &invocation.external_output : nullptr,
+                               // No external image or layers: the one-shot argv
+                               // transport that supplied them was deleted with
+                               // W4 (#365), so this arm is only the
+                               // --render/--render-request probe, which renders
+                               // the worker's own generated frame.
+                               nullptr, nullptr,
                                invocation.external_width, invocation.external_height,
-                               invocation.layered_image_mode ? &invocation.external_layers : nullptr,
+                               nullptr,
                                invocation.external_current_time, invocation.external_time_step,
                                invocation.external_total_time, invocation.external_time_scale,
                                invocation.external_pixel_bytes);
@@ -586,10 +566,11 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
       smart_render_supported
       ? smart_render_once(entry, input, output, case_id,
                           invocation.request_mode ? &invocation.requested_parameters : nullptr,
-                          invocation.smart_image_mode ? &invocation.external_rgba : nullptr,
-                          invocation.smart_image_mode ? &invocation.external_output : nullptr,
+                          // No external image or layers here either (#365): this
+                          // arm is the --smart/--smart-*-request probe family.
+                          nullptr, nullptr,
                           invocation.external_width, invocation.external_height,
-                          invocation.smart_layered_image_mode ? &invocation.external_layers : nullptr,
+                          nullptr,
                           invocation.external_current_time, invocation.external_time_step,
                           invocation.external_total_time, invocation.external_time_scale,
                           invocation.external_pixel_bytes)

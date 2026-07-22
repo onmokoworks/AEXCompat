@@ -26,7 +26,13 @@ def test_broker_uses_structured_report_not_stderr_for_missing_suites():
     source = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(
         encoding="utf-8"
     )
-    diagnostics = source[source.index("fn worker_diagnostics(") : source.index("fn diagnostics_contains_gpu_stage")]
+    # The slice used to end at fn diagnostics_contains_gpu_stage, which existed
+    # only to infer a GPU failure for the one-shot CPU retry and went with the
+    # one-shot transport (#365). fn failed_module_audit_summary is the next
+    # top-level item after worker_diagnostics now.
+    diagnostics = source[
+        source.index("fn worker_diagnostics(") : source.index("fn failed_module_audit_summary(")
+    ]
     assert "missing_suite_event" not in diagnostics
     assert 'worker_report["missing_suites"]' in diagnostics
     assert "propagate_missing_suites(&mut diagnostics, report)" in source

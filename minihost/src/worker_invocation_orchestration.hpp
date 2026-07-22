@@ -41,36 +41,23 @@ namespace aexcompat::worker_runtime::invocation {
 using parameters::RequestedAssignments;
 struct InvocationState {
     bool request_mode{};
-    bool audio_mode{};
-    bool image_audio_mode{};
-    bool image_mode{};
     bool render_session_mode{};
     bool audio_session_mode{};
     int32_t audio_session_max_samples{};
     int32_t audio_session_channels{1};
-    bool layered_image_mode{};
     bool smart_force_cpu{};
     bool smart_opencl{};
     bool smart_directx{};
-    bool smart_image_mode{};
-    bool smart_layered_image_mode{};
     int32_t external_pixel_bytes{4};
-    int transport_argc{};
-    int image_click_argc{};
     int image_environment_argc{};
     int image_trailer_argc{};
     int image_argc{};
-    int smart_image_click_argc{};
     int smart_image_environment_argc{};
     int smart_image_trailer_argc{};
     int smart_image_argc{};
-    bool image_click_context{};
-    bool image_draw_context{};
     bool image_render_environment{};
     bool image_spatial_context{};
     bool image_mask_context{};
-    bool smart_image_click_context{};
-    bool smart_image_draw_context{};
     bool smart_image_render_environment{};
     bool smart_image_spatial_context{};
     bool smart_image_mask_context{};
@@ -124,11 +111,9 @@ struct InvocationState {
     RequestedAssignments user_changed_parameters;
     RequestedAssignments requested_parameters;
     RequestedAssignments ui_event_assignments;
-    std::vector<unsigned char> external_rgba;
+
     std::vector<request_parser::LayerInput> external_layers;
-    std::filesystem::path external_output;
     std::vector<float> external_audio;
-    std::filesystem::path external_audio_output;
     int32_t external_width{};
     int32_t external_height{};
     int32_t external_current_time{};
@@ -147,8 +132,6 @@ struct InvocationState {
   };
 
 struct ApplyHooks {
-  void (*set_click)(int32_t, int32_t, const std::array<float, 4>&){};
-  void (*enable_draw)(){};
   void (*set_mask_mode)(bool){};
   void (*set_mask_fault)(bool, bool){};
   void (*set_audio_source)(std::vector<float>*, int32_t){};

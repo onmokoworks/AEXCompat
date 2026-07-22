@@ -131,42 +131,12 @@ WorkerMode classify_worker_mode(
       }
       return WorkerMode{};
     }
-    const bool image16 = equals(command, L"--render-image16") ||
-        equals(command, L"--render-image16-layer");
-    const bool image32 = equals(command, L"--render-image32") ||
-        equals(command, L"--render-image32-layer");
-    mode.audio_mode = effective_argc == 9 && equals(command, L"--render-audio");
-    mode.image_audio_mode = effective_argc == 16 && equals(command, L"--render-image-audio");
-    mode.external_pixel_bytes = image32 ? 16 : (image16 ? 8 : 4);
-    mode.transport_argc = mode.image_audio_mode ? 13 : effective_argc;
-    mode.image_click_context = mode.transport_argc >= 14 &&
-        starts_with(argv[mode.transport_argc - 1], L"click:v1|");
-    mode.image_draw_context = mode.transport_argc >= 14 &&
-        equals(argv[mode.transport_argc - 1], L"draw:v1");
-    mode.image_click_argc = mode.transport_argc -
-        ((mode.image_click_context || mode.image_draw_context) ? 1 : 0);
-    mode.image_render_environment = mode.image_click_argc >= 14 &&
-        starts_with(argv[mode.image_click_argc - 1], L"render:v1|");
-    mode.image_environment_argc = mode.image_click_argc -
-        (mode.image_render_environment ? 1 : 0);
-    mode.image_spatial_context = mode.image_environment_argc >= 14 &&
-        starts_with(argv[mode.image_environment_argc - 1], L"spatial:v");
-    mode.image_trailer_argc = mode.image_environment_argc -
-        (mode.image_spatial_context ? 1 : 0);
-    mode.image_mask_context = mode.image_trailer_argc >= 14 &&
-        starts_with(argv[mode.image_trailer_argc - 1], L"v2|");
-    mode.image_argc = mode.image_trailer_argc - (mode.image_mask_context ? 1 : 0);
-    mode.layered_image_mode = mode.image_argc >= 17 &&
-        (mode.image_argc - 13) % 4 == 0 && (mode.image_argc - 13) / 4 <= 64 &&
-        (equals(command, L"--render-image-layer") ||
-         equals(command, L"--render-image16-layer") ||
-         equals(command, L"--render-image32-layer"));
-    mode.image_mode = mode.image_audio_mode ||
-        (mode.image_argc == 13 && (equals(command, L"--render-image") ||
-         equals(command, L"--render-image16") ||
-         equals(command, L"--render-image32"))) || mode.layered_image_mode;
-    mode.request_mode = (effective_argc == 5 && has_command(argc, argv, L"--render-request")) ||
-        mode.image_mode || mode.audio_mode;
+    // The one-shot render commands (--render-image[16|32][-layer],
+    // --render-image-audio, --render-audio) were deleted with W4 (#365): the
+    // resident session commands above are the only image and audio transports,
+    // so anything that is not one of them, or the --render/--render-request
+    // probes below, is refused here instead of being reinterpreted.
+    mode.request_mode = effective_argc == 5 && has_command(argc, argv, L"--render-request");
     mode.command_accepted = mode.request_mode ||
         (effective_argc == 5 && has_command(argc, argv, L"--render"));
     return mode;
@@ -221,38 +191,10 @@ WorkerMode classify_worker_mode(
       return WorkerMode{};
     }
   }
-  mode.force_cpu = equals(command, L"--smart-image32-cpu") ||
-      equals(command, L"--smart-image32-cpu-layer");
-  mode.opencl = equals(command, L"--smart-image32-opencl");
-  mode.directx = equals(command, L"--smart-image32-directx");
-  const bool image16 = equals(command, L"--smart-image16") ||
-      equals(command, L"--smart-image16-layer");
-  const bool image32 = equals(command, L"--smart-image32") ||
-      equals(command, L"--smart-image32-layer") || mode.force_cpu || mode.opencl || mode.directx;
-  mode.external_pixel_bytes = image32 ? 16 : (image16 ? 8 : 4);
-  mode.image_click_context = effective_argc >= 14 &&
-      starts_with(argv[effective_argc - 1], L"click:v1|");
-  mode.image_draw_context = effective_argc >= 14 && equals(argv[effective_argc - 1], L"draw:v1");
-  mode.image_click_argc = effective_argc -
-      ((mode.image_click_context || mode.image_draw_context) ? 1 : 0);
-  mode.image_render_environment = mode.image_click_argc >= 14 &&
-      starts_with(argv[mode.image_click_argc - 1], L"render:v1|");
-  mode.image_environment_argc = mode.image_click_argc - (mode.image_render_environment ? 1 : 0);
-  mode.image_spatial_context = mode.image_environment_argc >= 14 &&
-      starts_with(argv[mode.image_environment_argc - 1], L"spatial:v");
-  mode.image_trailer_argc = mode.image_environment_argc - (mode.image_spatial_context ? 1 : 0);
-  mode.image_mask_context = mode.image_trailer_argc >= 14 &&
-      starts_with(argv[mode.image_trailer_argc - 1], L"v2|");
-  mode.image_argc = mode.image_trailer_argc - (mode.image_mask_context ? 1 : 0);
-  mode.layered_image_mode = mode.image_argc >= 17 && (mode.image_argc - 13) % 4 == 0 &&
-      (mode.image_argc - 13) / 4 <= 64 &&
-      (equals(command, L"--smart-image-layer") || equals(command, L"--smart-image16-layer") ||
-       equals(command, L"--smart-image32-layer") ||
-       equals(command, L"--smart-image32-cpu-layer"));
-  mode.image_mode = (mode.image_argc == 13 &&
-      (equals(command, L"--smart-image") || equals(command, L"--smart-image16") ||
-       equals(command, L"--smart-image32") || equals(command, L"--smart-image32-cpu") ||
-       mode.opencl || mode.directx)) || mode.layered_image_mode;
+  // The one-shot --smart-image[16|32][-cpu|-opencl|-directx][-layer] family was
+  // deleted with W4 (#365). The smart session commands above carry every depth,
+  // backend, and layered shape it did; what remains here is the diagnostic
+  // request family, none of which renders an image.
   mode.mask_request_mode = argc == 5 && has_command(argc, argv, L"--smart-mask-request");
   mode.mask_scene_request_mode = argc == 6 && has_command(argc, argv, L"--smart-mask-scene-request");
   mode.mask_context_request_mode = argc == 6 && has_command(argc, argv, L"--smart-mask-context-request");
@@ -271,7 +213,7 @@ WorkerMode classify_worker_mode(
   mode.pixel_format_registry_mode = argc == 5 && has_command(argc, argv, L"--smart-pixel-format-registry-request");
   mode.outline_mutation_mode = argc == 5 && has_command(argc, argv, L"--smart-outline-mutation-request");
   mode.mask_attribute_mode = argc == 5 && has_command(argc, argv, L"--smart-mask-attribute-request");
-  mode.request_mode = mode.image_mode || mode.mask_request_mode || mode.mask_scene_request_mode ||
+  mode.request_mode = mode.mask_request_mode || mode.mask_scene_request_mode ||
       mode.mask_context_request_mode || mode.mask_count_error_mode || mode.mask_count_crash_mode ||
       mode.mask_double_dispose_mode || mode.stream_live_value_dispose_mode ||
       mode.stream_metadata_ownership_mode || mode.keyframe_ownership_mode ||
