@@ -300,26 +300,23 @@ def test_a_policy_below_float32_or_on_classic_does_not_exclude_a_render():
     )
     # Layered: the depth bound alone carries it; the redundant policy clause is gone.
     # The smart arm ends where the classic arm begins; the classic arm's own first
-    # comment is the delimiter (issue #339 added an audio/layer exclusion there, so
-    # it is no longer a bare `gpu_backend == RenderGpuBackend::Auto`).
+    # comment is the delimiter. Issue #341 makes that arm session-canonical, so it
+    # is once again a bare `gpu_backend == RenderGpuBackend::Auto`.
     layered_start = gate.index("Smart layered: admit Argb8/Argb16 under Auto only")
-    layered = gate[layered_start : gate.index("Classic layered + audio stays off the session")]
+    layered = gate[layered_start : gate.index("Classic audio + layers is session-canonical")]
     assert (
         "gpu_backend == RenderGpuBackend::Auto && pixel_format != RenderPixelFormat::Argb32f"
         in layered
     )
     assert "gpu_runtime_policy.is_none()" not in layered
 
-    # Classic (issue #339): audio rides the session, but not together with
-    # secondary layers -- the one-shot's --render-image-audio arm is pinned to a
-    # fixed argv arity and cannot express layers, so routing that shape to the
-    # session would break the A/B escape hatch (#341).
-    classic_start = gate.index("Classic layered + audio stays off the session")
+    # Classic (#339/#341): audio and secondary layers use independent session
+    # transports. The legacy one-shot command still cannot express the combined
+    # shape, but #264/#291 make the verified session route canonical.
+    classic_start = gate.index("Classic audio + layers is session-canonical")
     classic = gate[classic_start:]
-    assert (
-        "gpu_backend == RenderGpuBackend::Auto && (audio.is_none() "
-        "|| (secondaries.is_empty() && timed_secondaries.is_empty()))" in classic
-    )
+    assert "gpu_backend == RenderGpuBackend::Auto" in classic
+    assert "audio.is_none() ||" not in classic
 
     # Classic Auto is already admitted by the image-render gate. RenderSession::open
     # must accept the same policy-carrying request and only attach the manifest when

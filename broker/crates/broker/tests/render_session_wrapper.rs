@@ -2384,6 +2384,166 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    /// Combined classic audio + secondary layer (#341): unlike the legacy
+    /// `--render-image-audio` command, the session has independent transports
+    /// for its audio trailer and inherited layer handles. The fixture folds the
+    /// checked-out audio window and the layer pixels into the PNG, so changing
+    /// either input independently must change the output. This is deliberately
+    /// session-canonical per #264/#291; the final assertion keeps the one-shot
+    /// 16-argv limitation visible instead of pretending the routes are equal.
+    #[test]
+    fn image_audio_and_secondary_layer_are_jointly_consumed_by_session() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let Some(aex) = visual_audio_probe(&root, "pf_visual_audio_layer_sidecar_probe") else {
+            eprintln!(
+                "skipping image+audio+layer session test: run \
+                 tools/build-pf-visual-audio-probe.ps1 \
+                 -Target pf_visual_audio_layer_sidecar_probe first"
+            );
+            return;
+        };
+        if !worker.is_file() {
+            eprintln!("skipping image+audio+layer session test: build aex_render_worker.exe first");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-image-audio-layer-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x * 5) as u8, (y * 3) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        let layer_a = scratch.join("layer-a.png");
+        image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x + y) as u8, (x * 3) as u8, (y * 7) as u8, 255])
+        })
+        .save(&layer_a)
+        .unwrap();
+        let layer_b = scratch.join("layer-b.png");
+        image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x * 2) as u8, (y * 5) as u8, (x * y) as u8, 255])
+        })
+        .save(&layer_b)
+        .unwrap();
+
+        let write_audio = |name: &str, start: f32, end: f32| {
+            let mut samples = [0.0f32; 10];
+            samples[4] = start;
+            samples[9] = end;
+            let path = scratch.join(name);
+            std::fs::write(
+                &path,
+                samples
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+            )
+            .unwrap();
+            path
+        };
+        let audio_a = write_audio("audio-a.f32", 0.25, 0.5625);
+        let audio_b = write_audio("audio-b.f32", 0.75, 0.125);
+
+        let render = |output: &Path, audio: &Path, layer: &Path| {
+            unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+            let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+            let parameters = vec![layer_parameter(1, layer)];
+            let report = render_experimental_image_with_audio_sidecar(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                audio,
+                output,
+                &parameters,
+                RenderTiming::default(),
+            )
+            .expect("combined audio+layer session render");
+            assert!(
+                RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+                "combined audio+layer render did not use the session"
+            );
+            report
+        };
+
+        let baseline = scratch.join("baseline.png");
+        let baseline_report = render(&baseline, &audio_a, &layer_a);
+        assert_eq!(
+            baseline_report.get("audio_checkout_calls"),
+            Some(&serde_json::json!(1)),
+            "the combined fixture did not consume the audio window"
+        );
+        assert_eq!(
+            baseline_report.get("last_audio_checkout_start_time"),
+            Some(&serde_json::json!(4))
+        );
+        assert_eq!(
+            baseline_report.get("last_audio_checkout_duration"),
+            Some(&serde_json::json!(6))
+        );
+        assert_eq!(
+            baseline_report.get("secondary_layers"),
+            Some(&serde_json::json!([{"slot": 1, "width": 48, "height": 32}])),
+            "the combined fixture did not receive secondary-layer slot 1"
+        );
+        let baseline_bytes = std::fs::read(&baseline).unwrap();
+
+        let changed_audio = scratch.join("changed-audio.png");
+        render(&changed_audio, &audio_b, &layer_a);
+        assert_ne!(
+            baseline_bytes,
+            std::fs::read(&changed_audio).unwrap(),
+            "changing only the audio window did not change the output"
+        );
+
+        let changed_layer = scratch.join("changed-layer.png");
+        render(&changed_layer, &audio_a, &layer_b);
+        assert_ne!(
+            baseline_bytes,
+            std::fs::read(&changed_layer).unwrap(),
+            "changing only the secondary-layer pixels did not change the output"
+        );
+
+        // The fixed-arity one-shot remains intentionally unchanged. Disabling
+        // the canonical session must expose that old limitation, not silently
+        // drop either input or count as another session render.
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let before_one_shot = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let one_shot_output = scratch.join("forced-one-shot.png");
+        let parameters = vec![layer_parameter(1, &layer_a)];
+        let one_shot = render_experimental_image_with_audio_sidecar(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &audio_a,
+            &one_shot_output,
+            &parameters,
+            RenderTiming::default(),
+        );
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        one_shot.expect_err("the 16-argv one-shot cannot carry audio and a layer");
+        assert_eq!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
+            before_one_shot,
+            "the forced one-shot unexpectedly entered the session"
+        );
+        assert!(!one_shot_output.exists());
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     /// The audio gate must apply on the session route too (issue #339): a
     /// plug-in that never advertised `PF_OutFlag_I_USE_AUDIO` cannot be handed
     /// an audio source, and both routes must refuse it.

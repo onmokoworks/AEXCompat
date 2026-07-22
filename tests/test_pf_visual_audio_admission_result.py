@@ -56,6 +56,21 @@ def test_worker_checks_admission_before_source_availability():
     assert "Audio sidecar requires plain classic ARGB8 rendering." in harness
 
 
+def test_combined_audio_layer_fixture_consumes_both_inputs():
+    fixture = (ROOT / "instruments" / "pf-visual-audio-probe" /
+               "pf_visual_audio_probe.cpp").read_text(encoding="utf-8")
+    cmake = (ROOT / "instruments" / "pf-visual-audio-probe" /
+             "CMakeLists.txt").read_text(encoding="utf-8")
+    assert "pf_visual_audio_layer_sidecar_probe" in cmake
+    assert "AEXCOMPAT_AUDIO_LAYER_PROBE=1" in cmake
+    assert 'PF_ADD_LAYER("Layer", PF_LayerDefault_MYSELF, 1)' in fixture
+    assert "audio_window_start = reinterpret_cast<float*>(samples)[0]" in fixture
+    assert "audio_window_end = reinterpret_cast<float*>(samples)[5]" in fixture
+    assert "sample_layer(layer, x, y)" in fixture
+    assert "source.green ^ audio_start" in fixture
+    assert "source.blue ^ audio_end" in fixture
+
+
 def test_audio_checkout_windows_are_bounded_owned_and_time_scaled():
     data = json.loads((ROOT / "analysis" / "PF_AUDIO_CHECKOUT_WINDOW_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
     cases = {case["fixture"]: case for case in data["cases"]}

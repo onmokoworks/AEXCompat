@@ -5011,9 +5011,9 @@ fn render_with_artifact(
     // the former session_section_fits carve-out is gone (#264): every eligible
     // render below can be carried by the length-1 session.
     // An audio sidecar rides the session's launch trailer the same way the static
-    // context trailers do (issue #339), so on its own it no longer excludes a
-    // render. It still excludes one when secondary layers are also present; see
-    // the classic arm below for why.
+    // context trailers do (issue #339), while secondary layers use inherited file
+    // handles. The two transports are orthogonal, and the combined native fixture
+    // proves that a classic session consumes both in one render (issue #341).
     let session_eligible = payload
         == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
@@ -5090,16 +5090,12 @@ fn render_with_artifact(
                 gpu_backend == RenderGpuBackend::Auto && pixel_format != RenderPixelFormat::Argb32f
             }
         } else {
-            // Classic layered + audio stays off the session: the one-shot's
-            // --render-image-audio arm is pinned to exactly 16 argv slots
-            // (l2_cli_dispatch.cpp), so it cannot express secondary layers at
-            // all, and the shape currently fails the forced one-shot outright.
-            // Routing it to the session would render it, which is arguably
-            // better, but it would also silently break the A/B escape hatch this
-            // gate exists to preserve. Tracked separately (#341); the exclusion
-            // goes away with the one-shot itself.
+            // Classic audio + layers is session-canonical (#341). The legacy
+            // --render-image-audio command is pinned to 16 argv slots and still
+            // cannot express a layer, but #264/#291 remove that transport rather
+            // than extending it. Keep that constraint isolated to forced one-shot;
+            // the combined fixture proves the session consumes both inputs.
             gpu_backend == RenderGpuBackend::Auto
-                && (audio.is_none() || (secondaries.is_empty() && timed_secondaries.is_empty()))
         };
     if session_eligible {
         // Only a layered session touches target/image-transport: RenderSession::
