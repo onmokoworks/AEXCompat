@@ -242,7 +242,17 @@ fn cleanup_stale_roots(parent: &Path, now: SystemTime, age: Duration) -> io::Res
             Ok(modified) => modified,
             Err(_) => continue,
         };
-        if now.duration_since(modified).unwrap_or_default() >= age {
+        // A killed worker can leave a large, otherwise-unlocked tree behind
+        // immediately.  Try non-empty roots regardless of age; a live tree's
+        // retained FILE_SHARE_READ-only handles naturally make remove_file
+        // fail.  Keep the age gate for empty roots so a concurrent creator is
+        // not raced while it is between create_dir and its first child.
+        let old_enough = now.duration_since(modified).unwrap_or_default() >= age;
+        let has_children = fs::read_dir(&root)
+            .ok()
+            .and_then(|mut children| children.next())
+            .is_some();
+        if old_enough || has_children {
             let _ = remove_owned_root(&root, parent);
         }
     }
@@ -579,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_cleanup_removes_only_old_owned_roots_with_regular_children() {
+    fn stale_cleanup_removes_unlocked_owned_roots_without_waiting_a_day() {
         let parent = fs::canonicalize(source_dir()).unwrap();
         let root = parent.join(format!("{ROOT_PREFIX}{:032x}", 1u128));
         fs::create_dir(&root).unwrap();
@@ -587,11 +597,28 @@ mod tests {
 
         cleanup_stale_roots(
             &parent,
-            SystemTime::now() + Duration::from_secs(2 * 24 * 60 * 60),
-            Duration::from_secs(60),
+            SystemTime::now(),
+            Duration::from_secs(24 * 60 * 60),
         )
         .unwrap();
         assert!(!root.exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn stale_cleanup_keeps_a_fresh_empty_owned_root() {
+        let parent = fs::canonicalize(source_dir()).unwrap();
+        let root = parent.join(format!("{ROOT_PREFIX}{:032x}", 3u128));
+        fs::create_dir(&root).unwrap();
+
+        cleanup_stale_roots(
+            &parent,
+            SystemTime::now(),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .unwrap();
+        assert!(root.exists());
+        fs::remove_dir(root).unwrap();
         fs::remove_dir_all(parent).unwrap();
     }
 
