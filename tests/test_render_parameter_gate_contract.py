@@ -148,25 +148,27 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
 
     ROUTE = ROOT / "broker/crates/broker/src/render_request.rs"
 
-    def production_source(self, route):
-        """`route` with the `#[cfg(test)]` module dropped.
+    def route_source(self):
+        """render_request.rs with its `#[cfg(test)]` module dropped.
 
-        Every count in this class is about production launch sites, so a Rust unit
-        test that legitimately calls `secure_launch(` must not desynchronise them.
+        Every assertion here is about production launch sites and reports. Both sides
+        of each `== launches` comparison must count the same text, so the whole class
+        reads through this rather than the raw file: otherwise a Rust unit test that
+        mentions one marker but not another desynchronises the counts.
         """
+        route = self.ROUTE.read_text(encoding="utf-8")
         cut = route.find("#[cfg(test)]")
         return route if cut == -1 else route[:cut]
 
     def launch_sites(self, route):
-        """Number of real `secure_launch(` call sites in the production module.
+        """Number of real `secure_launch(` call sites in `route`.
 
-        Line comments and the `#[cfg(test)]` module are stripped first, so a mention
-        in either cannot inflate the count and desynchronise the equality assertions
-        below. Asserts a floor so a module that lost every launch cannot make the
-        `== launches` checks pass vacuously as `0 == 0`.
+        Line comments are stripped and occurrences counted individually. Asserts a
+        floor so a module that lost every launch cannot make the `== launches` checks
+        pass vacuously as `0 == 0`.
         """
         sites = 0
-        for line in self.production_source(route).splitlines():
+        for line in route.splitlines():
             code = line.split("//", 1)[0]
             sites += len(re.findall(r"(?<![a-z_])secure_launch\(", code))
         self.assertGreaterEqual(sites, 4, "render_request.rs lost its sealed launches")
@@ -175,33 +177,66 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
     def report_object(self, route, marker_at, stage):
         """The full `let report = json!({ ... })` text enclosing `marker_at`.
 
-        The end is found by balancing braces from the opening one rather than by the
-        first `});`, so a nested `json!({...})` value cannot truncate the slice and
-        hide the outer keys this check exists to inspect.
+        The end is found by balancing braces from the opening one, skipping string and
+        char literals and comments. A `}` inside a literal would otherwise drive the
+        depth to zero early and return a truncated body, dropping later keys from the
+        check unnoticed -- `"stage"` is the second key in every report, so the marker
+        assertion below would not catch it. Brace-in-literal is idiomatic here
+        (`format!("{byte:02x}")`).
+
+        Known limitation: `declared` is the schema's top-level properties only, so a
+        report value that is itself a `json!({...})` would have its inner keys
+        reported as undeclared. No report does that today.
         """
         anchor = "let report = json!({"
         opening = route.rfind(anchor, 0, marker_at)
         self.assertNotEqual(opening, -1, f"{stage} marker has no `{anchor}` before it")
-        brace = route.index("{", opening + len(anchor) - 2)
+        brace = opening + len(anchor) - 1
+        self.assertEqual(route[brace], "{", f"{stage} anchor does not end at its brace")
         depth = 0
-        for index in range(brace, len(route)):
-            if route[index] == "{":
+        index = brace
+        end = len(route)
+        while index < end:
+            char = route[index]
+            if char == '"':
+                index += 1
+                while index < end and route[index] != '"':
+                    index += 2 if route[index] == "\\" else 1
+                index += 1
+                continue
+            if char == "'":
+                # A char literal ('x' or '\n'); anything else is a lifetime, which
+                # carries no brace and is safe to walk through one char at a time.
+                closing = index + (3 if route[index + 1 : index + 2] == "\\" else 2)
+                if route[closing : closing + 1] == "'":
+                    index = closing + 1
+                    continue
+            if char == "/" and route[index + 1 : index + 2] in ("/", "*"):
+                if route[index + 1] == "/":
+                    line_end = route.find("\n", index)
+                    index = end if line_end == -1 else line_end + 1
+                else:
+                    block_end = route.find("*/", index + 2)
+                    index = end if block_end == -1 else block_end + 2
+                continue
+            if char == "{":
                 depth += 1
-            elif route[index] == "}":
+            elif char == "}":
                 depth -= 1
                 if depth == 0:
                     body = route[opening : index + 1]
                     self.assertIn(f'"stage":"{stage}"', body)
                     return body
+            index += 1
         self.fail(f"{stage} report object is unterminated")
 
     def test_no_route_launches_with_normal_token_run_isolated(self):
-        route = self.ROUTE.read_text(encoding="utf-8")
+        route = self.route_source()
         self.assertNotIn("run_isolated", route)
         self.assertNotIn("windows_process", route)
 
     def test_every_route_launches_through_the_sealed_load_tree(self):
-        route = self.ROUTE.read_text(encoding="utf-8")
+        route = self.route_source()
         # Counted against the number of launches rather than a fixed 4, so a
         # correctly-sealed fifth route passes while an unsealed one fails:
         # execute (parameter request), execute_smart, execute_smart_suite_fault,
@@ -215,7 +250,7 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
             self.assertEqual(route.count(marker), launches, marker)
 
     def test_every_launch_pins_the_approval_across_determinism_runs(self):
-        route = self.ROUTE.read_text(encoding="utf-8")
+        route = self.route_source()
         # The receipt is reloaded per determinism run, so each route must compare
         # the whole approved identity between runs. The sealed manifest digest
         # covers every dependency; the fixture digest alone would miss a swapped
@@ -226,14 +261,14 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         self.assertEqual(route.count("approval changed between determinism runs"), launches)
 
     def test_no_route_passes_the_plugin_as_an_argv_path(self):
-        route = self.ROUTE.read_text(encoding="utf-8")
+        route = self.route_source()
         # secure_launch injects the sealed plug-in between the before/after argv
         # slices, so no route may serialize a plug-in path into its own args.
         self.assertNotIn("plugin_path.to_string_lossy()", route)
         self.assertIn("plugin_basename: &plugin_basename", route)
 
     def test_each_launch_is_pinned_to_the_receipt_worker(self):
-        route = self.ROUTE.read_text(encoding="utf-8")
+        route = self.route_source()
         # The profile-declared executable must match the receipt's trusted worker,
         # compared canonically so a symlink or junction cannot substitute it.
         launches = self.launch_sites(route)
@@ -244,7 +279,7 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         self.assertEqual(route.count("worker_program: &receipt_worker"), launches)
 
     def test_migrated_reports_take_identity_from_the_receipt(self):
-        route = self.ROUTE.read_text(encoding="utf-8")
+        route = self.route_source()
         # The schema-v1 `approved_entry` / `render::entry` helpers no longer supply
         # the reported identity; it comes from the schema-v2 receipt and the
         # approval policy, so the report names the same approval the launch used.
@@ -262,7 +297,7 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         `secure_launch_*` keys that its schema does not declare (tracked separately);
         the migrated routes must not add to that divergence.
         """
-        route = self.ROUTE.read_text(encoding="utf-8")
+        route = self.route_source()
         stages = {
             "parameterized_classic_render": "parameterized_classic_render_report",
             "smartfx_suite_fault": "smartfx_suite_fault_report",
