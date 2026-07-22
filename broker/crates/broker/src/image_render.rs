@@ -5414,13 +5414,18 @@ fn render_with_artifact(
         )?
         .into();
         let retry_started = Instant::now();
+        // Dispatch the CPU retry with the policy-free args/dependencies: a GPU
+        // worker that launched but reported a GPU failure must not carry its
+        // runtime-module authorization trailer into the CPU retry, which loads no
+        // GPU DLL and should not depend on the (possibly expired) policy manifest
+        // (#301 review).
         isolated = dispatch_secure_image(SecureImageDispatch {
             repository,
             worker_kind,
             plugin,
-            dependencies,
+            dependencies: cpu_fallback_dependencies.clone(),
             args_before_plugin: &args_before_plugin,
-            args_after_plugin: &args_after_plugin,
+            args_after_plugin: &cpu_fallback_args_after_plugin,
             timeout: Duration::from_millis(timeout_ms),
         })?;
         diagnostics = isolated_worker_diagnostics(&isolated, retry_started.elapsed().as_millis());
