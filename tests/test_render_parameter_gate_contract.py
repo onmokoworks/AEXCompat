@@ -1,3 +1,4 @@
+import re
 import json
 import unittest
 from pathlib import Path
@@ -58,7 +59,16 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn("load_manifest", route)
         self.assertIn("encode_worker_payload", route)
         self.assertIn("native_process_started: false", route)
-        self.assertIn("run_isolated", route)
+        # The route still launches a worker for the accepted path, but through the
+        # sealed load tree under a restricted token instead of normal-token
+        # run_isolated with an argv plug-in path (issue #312). Every launch in this
+        # module goes through secure_launch, and none may regress to run_isolated:
+        # an argv path is a TOCTOU window the worker would re-open.
+        self.assertNotIn("run_isolated", route)
+        self.assertIn("secure_launch(", route)
+        self.assertIn("SealedLoadTree::create(", route)
+        self.assertIn("load_v2_load_tree(", route)
+        self.assertIn("require_module_audit: true", route)
         self.assertIn("argb8_hash", route)
         self.assertIn('args[1] == "validate-render-request"', main)
         self.assertIn('args[1] == "render-parameter-request"', main)
@@ -128,3 +138,85 @@ class RenderParameterGateContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RenderRequestSecureLaunchContractTests(unittest.TestCase):
+    """Every worker launch in render_request.rs goes through the sealed load tree.
+
+    Before issue #312 three of the four routes (execute, execute_smart_suite_fault,
+    execute_smart_mask_scene) launched with normal-token run_isolated and handed the
+    worker the plug-in as an argv path, which the worker re-opened. That is a TOCTOU
+    window: the path can be swapped between the broker's check and the worker's open.
+    These assertions keep all four routes on secure_launch.
+    """
+
+    ROUTE = ROOT / "broker/crates/broker/src/render_request.rs"
+
+    def test_no_route_launches_with_normal_token_run_isolated(self):
+        route = self.ROUTE.read_text(encoding="utf-8")
+        self.assertNotIn("run_isolated", route)
+        self.assertNotIn("windows_process", route)
+
+    def test_every_route_launches_through_the_sealed_load_tree(self):
+        route = self.ROUTE.read_text(encoding="utf-8")
+        # execute (parameter request), execute_smart, execute_smart_suite_fault,
+        # execute_smart_mask_scene.
+        for marker in (
+            "secure_launch(",
+            "SealedLoadTree::create(",
+            "load_v2_load_tree(",
+            "require_module_audit: true",
+        ):
+            self.assertEqual(route.count(marker), 4, marker)
+
+    def test_no_route_passes_the_plugin_as_an_argv_path(self):
+        route = self.ROUTE.read_text(encoding="utf-8")
+        # secure_launch injects the sealed plug-in between the before/after argv
+        # slices, so no route may serialize a plug-in path into its own args.
+        self.assertNotIn("plugin_path.to_string_lossy()", route)
+        self.assertIn("plugin_basename: &plugin_basename", route)
+
+    def test_each_launch_is_pinned_to_the_receipt_worker(self):
+        route = self.ROUTE.read_text(encoding="utf-8")
+        # The profile-declared executable must match the receipt's trusted worker,
+        # compared canonically so a symlink or junction cannot substitute it.
+        self.assertEqual(route.count("fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)?"), 4)
+        self.assertEqual(route.count("worker_program: &receipt_worker"), 4)
+
+    def test_migrated_reports_take_identity_from_the_receipt(self):
+        route = self.ROUTE.read_text(encoding="utf-8")
+        # The schema-v1 `approved_entry` / `render::entry` helpers no longer supply
+        # the reported identity; it comes from the schema-v2 receipt and the
+        # approval policy, so the report names the same approval the launch used.
+        self.assertNotIn("approved_entry", route)
+        self.assertNotIn("crate::render::entry", route)
+        self.assertEqual(route.count('"receipt_id":worker_spec.approval.receipt_id'), 4)
+        self.assertEqual(route.count('"fixture_sha256":approved_fixture_sha256'), 4)
+
+    def test_migrated_reports_add_no_keys_outside_their_contract_schema(self):
+        """The three migrated routes must not grow report keys their schema forbids.
+
+        Each report schema is `additionalProperties: false`, so emitting sealed-launch
+        provenance would break contract conformance. `execute_smart` already emits
+        `secure_launch_*` keys that its schema does not declare (tracked separately);
+        the migrated routes must not add to that divergence.
+        """
+        route = self.ROUTE.read_text(encoding="utf-8")
+        stages = {
+            "parameterized_classic_render": "parameterized_classic_render_report",
+            "smartfx_suite_fault": "smartfx_suite_fault_report",
+            "smartfx_mask_scene": "smartfx_mask_scene_report",
+        }
+        for stage, schema_name in stages.items():
+            schema = json.loads(
+                (ROOT / "contracts/aex" / f"{schema_name}.schema.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(schema["additionalProperties"], stage)
+            declared = set(schema["properties"])
+            start = route.index(f'"stage":"{stage}"')
+            body = route[start : route.index("});", start)]
+            emitted = set(re.findall(r'"([a-z0-9_]+)"\s*:', body))
+            self.assertTrue(
+                emitted <= declared,
+                f"{stage} emits keys absent from {schema_name}: {sorted(emitted - declared)}",
+            )

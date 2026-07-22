@@ -12,7 +12,6 @@ use crate::host_core::parameter::{
 };
 use crate::sealed_load_tree::SealedLoadTree;
 use crate::secure_launch::{SecureLaunchRequest, secure_launch};
-use crate::windows_process::run_isolated;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
@@ -670,24 +669,63 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         output.write_all(b"\n")?;
         return Ok(false);
     }
-    let approved = crate::render::entry(repository, &request.plugin_id)?;
-    if !manifest
-        .plugin_sha256
-        .eq_ignore_ascii_case(&approved.sha256)
-    {
-        return Err(invalid("descriptor manifest plugin digest mismatch"));
-    }
     let worker = repository.join(worker_spec.executable);
     let expected = expected_hash(profile.parameterized_render, &effective);
-    let args = [
-        worker_spec.request_mode.to_string(),
-        approved.plugin_path.to_string_lossy().into_owned(),
-        approved.sha256.to_ascii_lowercase(),
-        encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
-    ];
+    let payload = encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?;
     let mut runs = Vec::new();
+    let mut approved_fixture_sha256 = String::new();
     for _ in 0..2 {
-        let isolated = run_isolated(&worker, &args, Duration::from_millis(approved.timeout_ms))?;
+        // secure_launch consumes both the sealed tree and the worker stage, so
+        // reload the schema-v2 receipt for each determinism run rather than
+        // reusing mutable state. The plug-in reaches the worker through the
+        // sealed tree instead of an argv path, closing the TOCTOU window a
+        // worker-side re-open would leave (issue #312).
+        let approved = load_v2_load_tree(repository, &request.plugin_id, worker_spec.approval)?;
+        let receipt_worker = if approved.worker_path.is_absolute() {
+            approved.worker_path.clone()
+        } else {
+            repository.join(&approved.worker_path)
+        };
+        if fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)? {
+            return Err(invalid(
+                "classic worker differs from approved trusted worker",
+            ));
+        }
+        let plugin_basename = approved.main.relative_basename.clone();
+        let fixture_sha256 = approved
+            .main
+            .expected_sha256
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if !manifest.plugin_sha256.eq_ignore_ascii_case(&fixture_sha256) {
+            return Err(invalid("descriptor manifest plugin digest mismatch"));
+        }
+        if approved_fixture_sha256.is_empty() {
+            approved_fixture_sha256 = fixture_sha256.to_ascii_uppercase();
+        } else if !approved_fixture_sha256.eq_ignore_ascii_case(&fixture_sha256) {
+            return Err(invalid("classic fixture approval changed between runs"));
+        }
+        let worker_sha256 = approved.worker_sha256;
+        let worker_byte_size = approved.worker_byte_size;
+        let timeout_ms = approved.timeout_ms;
+        let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        let args_before_plugin = [worker_spec.request_mode.to_string()];
+        let args_after_plugin = [fixture_sha256, payload.clone()];
+        let isolated = secure_launch(
+            tree,
+            SecureLaunchRequest {
+                worker_program: &receipt_worker,
+                worker_expected_sha256: worker_sha256,
+                worker_expected_size: worker_byte_size,
+                plugin_basename: &plugin_basename,
+                args_before_plugin: &args_before_plugin,
+                args_after_plugin: &args_after_plugin,
+                repository,
+                require_module_audit: true,
+            },
+            Duration::from_millis(timeout_ms),
+        )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
         runs.push((isolated.classification, report));
@@ -716,8 +754,8 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         "requested_parameters":item.1.get("requested_parameters")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_classic_render",
-        "plugin_id":request.plugin_id,"receipt_id":approved.receipt_id,
-        "fixture_sha256":approved.sha256.to_ascii_uppercase(),"assignment_count":assignment_count,
+        "plugin_id":request.plugin_id,"receipt_id":worker_spec.approval.receipt_id,
+        "fixture_sha256":approved_fixture_sha256,"assignment_count":assignment_count,
         "accepted":true,"native_process_started":true,"parameters":effective,
         "expected_oracle_sha256":expected,
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),"deterministic":deterministic,
@@ -1230,23 +1268,61 @@ pub fn execute_smart_suite_fault(
         .ok_or_else(|| invalid("profile has no approved mask-suite fault capability"))?;
     let manifest = descriptors(repository, plugin_id, profile)?;
     let effective = apply_defaults(&manifest.profile, &ValidatedAssignments::new());
-    let approved = crate::smart::approved_entry(repository, plugin_id)?;
-    if !manifest
-        .plugin_sha256
-        .eq_ignore_ascii_case(&approved.sha256)
-    {
-        return Err(invalid("descriptor manifest plugin digest mismatch"));
-    }
     let worker = repository.join(worker_spec.executable);
-    let args = [
-        worker_mode.to_string(),
-        approved.plugin_path.to_string_lossy().into_owned(),
-        approved.sha256.to_ascii_lowercase(),
-        encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
-    ];
+    let payload = encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?;
     let mut runs = Vec::new();
+    let mut approved_fixture_sha256 = String::new();
     for _ in 0..2 {
-        let isolated = run_isolated(&worker, &args, Duration::from_millis(approved.timeout_ms))?;
+        // secure_launch consumes both the sealed tree and the worker stage, so
+        // reload the schema-v2 receipt for each determinism run. The plug-in
+        // reaches the worker through the sealed tree instead of an argv path
+        // (issue #312).
+        let approved = load_v2_load_tree(repository, plugin_id, worker_spec.approval)?;
+        let receipt_worker = if approved.worker_path.is_absolute() {
+            approved.worker_path.clone()
+        } else {
+            repository.join(&approved.worker_path)
+        };
+        if fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)? {
+            return Err(invalid(
+                "SmartFX worker differs from approved trusted worker",
+            ));
+        }
+        let plugin_basename = approved.main.relative_basename.clone();
+        let fixture_sha256 = approved
+            .main
+            .expected_sha256
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if !manifest.plugin_sha256.eq_ignore_ascii_case(&fixture_sha256) {
+            return Err(invalid("descriptor manifest plugin digest mismatch"));
+        }
+        if approved_fixture_sha256.is_empty() {
+            approved_fixture_sha256 = fixture_sha256.to_ascii_uppercase();
+        } else if !approved_fixture_sha256.eq_ignore_ascii_case(&fixture_sha256) {
+            return Err(invalid("SmartFX fixture approval changed between runs"));
+        }
+        let worker_sha256 = approved.worker_sha256;
+        let worker_byte_size = approved.worker_byte_size;
+        let timeout_ms = approved.timeout_ms;
+        let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        let args_before_plugin = [worker_mode.to_string()];
+        let args_after_plugin = [fixture_sha256, payload.clone()];
+        let isolated = secure_launch(
+            tree,
+            SecureLaunchRequest {
+                worker_program: &receipt_worker,
+                worker_expected_sha256: worker_sha256,
+                worker_expected_size: worker_byte_size,
+                plugin_basename: &plugin_basename,
+                args_before_plugin: &args_before_plugin,
+                args_after_plugin: &args_after_plugin,
+                repository,
+                require_module_audit: true,
+            },
+            Duration::from_millis(timeout_ms),
+        )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
         runs.push((isolated.classification, report));
@@ -1451,7 +1527,7 @@ pub fn execute_smart_suite_fault(
     };
     let report = json!({
         "schema_version":1,"stage":"smartfx_suite_fault","plugin_id":plugin_id,
-        "receipt_id":approved.receipt_id,"fixture_sha256":approved.sha256.to_ascii_uppercase(),
+        "receipt_id":worker_spec.approval.receipt_id,"fixture_sha256":approved_fixture_sha256,
         "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else if expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection || expect_world_rejection || expect_pixel_format_rejection || expect_outline_rejection { "callback_error_rejected" } else { "plugin_fallback" },
         "expected_fallback_sha256":if expect_crash || expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection || expect_world_rejection || expect_pixel_format_rejection || expect_outline_rejection { Value::Null } else { json!(fallback_hash) },
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
@@ -1498,24 +1574,61 @@ pub fn execute_smart_mask_scene(
     effective.insert("mask_index".into(), ParameterValue::Numeric(mask_index));
     let expected = mask_scene_argb8_hash(&effective, scene_id)
         .ok_or_else(|| invalid("mask scene has no independent oracle"))?;
-    let approved = crate::smart::approved_entry(repository, plugin_id)?;
-    if !manifest
-        .plugin_sha256
-        .eq_ignore_ascii_case(&approved.sha256)
-    {
-        return Err(invalid("descriptor manifest plugin digest mismatch"));
-    }
     let worker = repository.join(worker_spec.executable);
-    let args = [
-        "--smart-mask-scene-request".to_string(),
-        approved.plugin_path.to_string_lossy().into_owned(),
-        approved.sha256.to_ascii_lowercase(),
-        encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?,
-        scene_id.to_string(),
-    ];
+    let payload = encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?;
     let mut runs = Vec::new();
+    let mut approved_fixture_sha256 = String::new();
     for _ in 0..2 {
-        let isolated = run_isolated(&worker, &args, Duration::from_millis(approved.timeout_ms))?;
+        // secure_launch consumes both the sealed tree and the worker stage, so
+        // reload the schema-v2 receipt for each determinism run. The plug-in
+        // reaches the worker through the sealed tree instead of an argv path
+        // (issue #312).
+        let approved = load_v2_load_tree(repository, plugin_id, worker_spec.approval)?;
+        let receipt_worker = if approved.worker_path.is_absolute() {
+            approved.worker_path.clone()
+        } else {
+            repository.join(&approved.worker_path)
+        };
+        if fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)? {
+            return Err(invalid(
+                "SmartFX worker differs from approved trusted worker",
+            ));
+        }
+        let plugin_basename = approved.main.relative_basename.clone();
+        let fixture_sha256 = approved
+            .main
+            .expected_sha256
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if !manifest.plugin_sha256.eq_ignore_ascii_case(&fixture_sha256) {
+            return Err(invalid("descriptor manifest plugin digest mismatch"));
+        }
+        if approved_fixture_sha256.is_empty() {
+            approved_fixture_sha256 = fixture_sha256.to_ascii_uppercase();
+        } else if !approved_fixture_sha256.eq_ignore_ascii_case(&fixture_sha256) {
+            return Err(invalid("SmartFX fixture approval changed between runs"));
+        }
+        let worker_sha256 = approved.worker_sha256;
+        let worker_byte_size = approved.worker_byte_size;
+        let timeout_ms = approved.timeout_ms;
+        let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        let args_before_plugin = ["--smart-mask-scene-request".to_string()];
+        let args_after_plugin = [fixture_sha256, payload.clone(), scene_id.to_string()];
+        let isolated = secure_launch(
+            tree,
+            SecureLaunchRequest {
+                worker_program: &receipt_worker,
+                worker_expected_sha256: worker_sha256,
+                worker_expected_size: worker_byte_size,
+                plugin_basename: &plugin_basename,
+                args_before_plugin: &args_before_plugin,
+                args_after_plugin: &args_after_plugin,
+                repository,
+                require_module_audit: true,
+            },
+            Duration::from_millis(timeout_ms),
+        )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
         runs.push((isolated.classification, report));
@@ -1551,7 +1664,7 @@ pub fn execute_smart_mask_scene(
     };
     let report = json!({
         "schema_version":1,"stage":"smartfx_mask_scene","plugin_id":plugin_id,
-        "receipt_id":approved.receipt_id,"fixture_sha256":approved.sha256.to_ascii_uppercase(),
+        "receipt_id":worker_spec.approval.receipt_id,"fixture_sha256":approved_fixture_sha256,
         "scene_case_id":scene_case_id,"host_scene_id":scene_id,"mask_index":mask_index,
         "expected_mask_count":expected_count,"expected_oracle_sha256":expected,
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),

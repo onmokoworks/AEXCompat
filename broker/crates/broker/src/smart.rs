@@ -1,4 +1,4 @@
-use crate::host_core::approved_artifact::{ApprovedArtifact, load, load_v2_load_tree};
+use crate::host_core::approved_artifact::load_v2_load_tree;
 use crate::sealed_load_tree::SealedLoadTree;
 use crate::secure_launch::{SecureLaunchRequest, secure_launch};
 use serde_json::{Value, json};
@@ -218,16 +218,9 @@ fn encode_sha256(bytes: [u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02X}")).collect()
 }
 
-// Kept for parameterized render callers that still use the schema-v1 approval model.
-// The SmartFX production path above never calls this compatibility helper.
-pub(crate) fn approved_entry(repository: &Path, id: &str) -> io::Result<ApprovedArtifact> {
-    let profile =
-        crate::fixture_profiles::find(id).ok_or_else(|| invalid("unknown plugin profile"))?;
-    let worker = profile
-        .smart_worker
-        .ok_or_else(|| invalid("SmartFX render is not approved for profile"))?;
-    load(repository, id, worker.approval)
-}
+// The schema-v1 `approved_entry` compatibility helper is gone: the SmartFX
+// request routes it served (suite fault, mask scene) now load the schema-v2
+// receipt and launch through the sealed load tree (issue #312).
 
 #[cfg(test)]
 mod tests {
