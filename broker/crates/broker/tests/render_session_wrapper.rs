@@ -741,172 +741,11 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    #[test]
-    fn wrapper_layer_and_slider_match_across_routes() {
-        if crate::common::skip_without_restricted_token_launch(
-            "wrapper_layer_and_slider_match_across_routes",
-        ) {
-            return;
-        }
-        let _env_guard = SESSION_ROUTE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
-        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
-        if !worker.is_file() || !aex.is_file() {
-            eprintln!(
-                "skipping layer+slider A/B: build aex_render_worker.exe and \
-                 pf_layer_param_probe.aex first"
-            );
-            return;
-        }
-        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
-        let scratch = std::env::temp_dir().join(format!(
-            "aexcompat-wrapper-layer-ab-{}-{:032x}",
-            std::process::id(),
-            rand::random::<u128>()
-        ));
-        std::fs::create_dir_all(&scratch).unwrap();
-        let input = scratch.join("input.png");
-        image::RgbaImage::from_fn(64, 32, |x, y| {
-            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
-        })
-        .save(&input)
-        .unwrap();
-        // The secondary layer carries a pattern unrelated to the input so the
-        // green (layer-derived) and blue (input+layer) output channels differ
-        // from a pass-through of either source.
-        let secondary = scratch.join("layer.png");
-        image::RgbaImage::from_fn(64, 32, |x, y| {
-            image::Rgba([(x + y) as u8, (x * 7) as u8, (y * 9) as u8, 255])
-        })
-        .save(&secondary)
-        .unwrap();
-
-        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
-        let render = |output: &Path,
-                      params: &[InteractiveParameter],
-                      timing: RenderTiming,
-                      disable_session: bool| {
-            if disable_session {
-                unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-            }
-            let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-            let report = render_experimental_image_at_time(
-                &root, &aex, &sha, &input, output, params, timing,
-            )
-            .expect("layer+slider render");
-            let carried = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before;
-            if disable_session {
-                unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-            }
-            (report, carried)
-        };
-
-        let params = vec![layer_parameter(1, &secondary), float_parameter(2, 200.0)];
-        for (label, timing) in [
-            ("time0", RenderTiming::default()),
-            (
-                "timed",
-                RenderTiming {
-                    current_time: 7,
-                    time_step: 1,
-                    total_time: 300,
-                    time_scale: 30,
-                },
-            ),
-        ] {
-            let out_a = scratch.join(format!("{label}-a.png"));
-            let (report_a, carried_a) = render(&out_a, &params, timing, false);
-            assert!(
-                carried_a,
-                "the session wrapper did not carry run A ({label})"
-            );
-            let out_b = scratch.join(format!("{label}-b.png"));
-            let (report_b, carried_b) = render(&out_b, &params, timing, true);
-            assert!(
-                !carried_b,
-                "the escape hatch did not force the one-shot transport ({label})"
-            );
-
-            let mut flat_a = report_a.as_object().expect("report A object").clone();
-            let mut flat_b = report_b.as_object().expect("report B object").clone();
-            for key in volatile {
-                flat_a.remove(key);
-                flat_b.remove(key);
-            }
-            assert_eq!(
-                flat_a.keys().collect::<Vec<_>>(),
-                flat_b.keys().collect::<Vec<_>>(),
-                "report key sets diverge ({label})"
-            );
-            for (key, value_a) in &flat_a {
-                assert_eq!(
-                    Some(value_a),
-                    flat_b.get(key),
-                    "report field {key} differs between the routes ({label})"
-                );
-            }
-            // A declared layer slot filled with a secondary layer must render
-            // cleanly (pf_sampling_probe's missing slot faulted the render). The
-            // probe must see all three slots, and slot 1 must carry the secondary.
-            assert_eq!(
-                flat_a.get("passed"),
-                Some(&serde_json::json!(true)),
-                "layer render did not pass ({label}): {report_a}"
-            );
-            assert_eq!(
-                flat_a.get("in_data_num_params"),
-                Some(&serde_json::json!(3)),
-                "probe did not expose input + layer + slider ({label})"
-            );
-            assert_eq!(
-                flat_a.get("secondary_layers"),
-                Some(&serde_json::json!([{"slot": 1, "width": 64, "height": 32}])),
-                "the secondary layer was not delivered to slot 1 ({label})"
-            );
-            assert_eq!(
-                std::fs::read(&out_a).unwrap(),
-                std::fs::read(&out_b).unwrap(),
-                "PNG bytes differ between the session and one-shot routes ({label})"
-            );
-        }
-
-        // Consumption checks (session route): the match above is only meaningful
-        // if the probe actually reads both inputs. Changing the slider value, and
-        // separately the secondary-layer pixels, must each change the output.
-        let base = scratch.join("consume-base.png");
-        render(&base, &params, RenderTiming::default(), false);
-        let base_bytes = std::fs::read(&base).unwrap();
-
-        let other_slider = vec![layer_parameter(1, &secondary), float_parameter(2, 40.0)];
-        let slider_out = scratch.join("consume-slider.png");
-        render(&slider_out, &other_slider, RenderTiming::default(), false);
-        assert_ne!(
-            base_bytes,
-            std::fs::read(&slider_out).unwrap(),
-            "changing the slider did not change the output; the user parameter was not consumed"
-        );
-
-        let secondary2 = scratch.join("layer2.png");
-        image::RgbaImage::from_fn(64, 32, |x, y| {
-            image::Rgba([(y * 5) as u8, (x * 2) as u8, (x * y) as u8, 255])
-        })
-        .save(&secondary2)
-        .unwrap();
-        let other_layer = vec![layer_parameter(1, &secondary2), float_parameter(2, 200.0)];
-        let layer_out = scratch.join("consume-layer.png");
-        render(&layer_out, &other_layer, RenderTiming::default(), false);
-        assert_ne!(
-            base_bytes,
-            std::fs::read(&layer_out).unwrap(),
-            "changing the secondary layer did not change the output; the layer was not consumed"
-        );
-
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
-
+    /// A secondary layer plus a slider, verified without the one-shot.
+    ///
+    /// pf_layer_param_probe documents its output as a pure integer function of
+    /// (input, layer, slider), so each of those three can be varied and the
+    /// output must follow. That is a stronger statement than "the two routes
     fn scalar_key(
         time: (i32, u32),
         interpolation: AnimationInterpolation,
@@ -936,6 +775,122 @@ mod windows_e2e {
     /// over time (so a cross-route match is not a vacuous "animation ignored"
     /// pass). Gated on the locally built worker and the pf-layer-param-probe
     /// fixture, like the sibling A/B tests.
+
+    /// agree", which held even when a parameter was ignored on both (#361).
+    #[test]
+    fn layer_and_slider_reach_the_plug_in_through_the_session() {
+        if crate::common::skip_without_restricted_token_launch(
+            "layer_and_slider_reach_the_plug_in_through_the_session",
+        ) {
+            return;
+        }
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping layer+slider render: build aex_render_worker.exe and                  pf_layer_param_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-layer-slider-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 32, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        let write_layer = |name: &str, seed: u32| {
+            let path = scratch.join(name);
+            image::RgbaImage::from_fn(64, 32, |x, y| {
+                image::Rgba([
+                    ((x + y) as u32 + seed) as u8,
+                    ((x * 7) as u32 + seed) as u8,
+                    (y * 9) as u8,
+                    255,
+                ])
+            })
+            .save(&path)
+            .unwrap();
+            path
+        };
+        let secondary = write_layer("layer.png", 0);
+
+        let render = |output: &Path, params: &[InteractiveParameter]| {
+            let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+            let report = render_experimental_image_at_time(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                output,
+                params,
+                RenderTiming::default(),
+            )
+            .expect("layer+slider session render");
+            assert!(
+                RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+                "the layer+slider render must be carried by the session"
+            );
+            report
+        };
+
+        let base_params = vec![layer_parameter(1, &secondary), float_parameter(2, 200.0)];
+        let out_base = scratch.join("base.png");
+        let base = render(&out_base, &base_params);
+        assert_session_render_is_healthy(&base, "layer+slider");
+        assert_eq!(
+            base.get("secondary_layers")
+                .and_then(|layers| layers.as_array())
+                .map(|layers| layers.len()),
+            Some(1),
+            "the secondary layer did not reach the report: {base}"
+        );
+
+        let out_repeat = scratch.join("repeat.png");
+        let repeat = render(&out_repeat, &base_params);
+        assert_reports_agree(&base, &repeat, "layer+slider repeat");
+
+        // The slider must move the output: a render that dropped the parameter
+        // would still have matched the one-shot, because the one-shot dropped it
+        // the same way.
+        let out_slider = scratch.join("slider.png");
+        let slider = render(
+            &out_slider,
+            &[layer_parameter(1, &secondary), float_parameter(2, 40.0)],
+        );
+        assert_session_render_is_healthy(&slider, "layer+slider (other slider)");
+        assert_ne!(
+            base.get("output_sha256"),
+            slider.get("output_sha256"),
+            "changing the slider did not change the output"
+        );
+
+        // Same for the secondary layer's pixels.
+        let other_layer = write_layer("layer2.png", 83);
+        let out_layer = scratch.join("layer-out.png");
+        let other = render(
+            &out_layer,
+            &[layer_parameter(1, &other_layer), float_parameter(2, 200.0)],
+        );
+        assert_session_render_is_healthy(&other, "layer+slider (other layer)");
+        assert_ne!(
+            base.get("output_sha256"),
+            other.get("output_sha256"),
+            "changing the secondary layer did not change the output"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     #[test]
     fn wrapper_parameter_animation_matches_the_one_shot_transport() {
         if crate::common::skip_without_restricted_token_launch(
@@ -1810,18 +1765,16 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    /// A zero-duration render (total_time == 0) is the single t=0 frame; the
+    /// session carries it since #272. Verified against the timing contract
+    /// rather than against the one-shot (#361).
     #[test]
-    fn zero_duration_render_matches_the_one_shot_transport() {
+    fn zero_duration_render_produces_the_single_frame_on_the_session() {
         if crate::common::skip_without_restricted_token_launch(
-            "zero_duration_render_matches_the_one_shot_transport",
+            "zero_duration_render_produces_the_single_frame_on_the_session",
         ) {
             return;
         }
-        // A zero-duration render (total_time == 0) is the single t=0 frame the
-        // one-shot worker produces; the session now carries it too (#272), so it
-        // is no longer routed to one-shot. Prove the session renders it (the
-        // wrapper counter advances) byte-for-byte identically to the one-shot
-        // escape-hatch route.
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1830,8 +1783,7 @@ mod windows_e2e {
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping zero-duration A/B: build aex_render_worker.exe and \
-                 pf_sampling_probe.aex first"
+                "skipping zero-duration render: build aex_render_worker.exe and                  pf_sampling_probe.aex first"
             );
             return;
         }
@@ -1848,42 +1800,65 @@ mod windows_e2e {
         })
         .save(&input)
         .unwrap();
-        let timing = RenderTiming {
+        let zero = RenderTiming {
             current_time: 0,
             time_step: 1,
             total_time: 0,
             time_scale: 30,
         };
 
-        // Run A: default routing, the zero-duration render now carried by the
-        // session (the counter must advance, or the comparison is vacuous).
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_a = scratch.join("out-a.png");
-        render_experimental_image_at_time(&root, &aex, &sha, &input, &output_a, &[], timing)
-            .expect("session-route zero-duration render");
+        let out_zero = scratch.join("zero.png");
+        let report =
+            render_experimental_image_at_time(&root, &aex, &sha, &input, &out_zero, &[], zero)
+                .expect("session-route zero-duration render");
         assert!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-            "the zero-duration render must now be carried by the session"
+            "the zero-duration render must be carried by the session"
+        );
+        assert_session_render_is_healthy(&report, "zero-duration render");
+        // The timing the caller asked for has to be the timing the report
+        // describes; a zero duration must not be silently widened.
+        assert_eq!(
+            report.get("total_time"),
+            Some(&serde_json::json!(0)),
+            "the report did not preserve the zero duration: {report}"
+        );
+        assert_eq!(
+            report.get("current_time"),
+            Some(&serde_json::json!(0)),
+            "the single frame must be t=0: {report}"
         );
 
-        // Run B: the escape hatch forces the one-shot argv transport.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_b = scratch.join("out-b.png");
-        let result_b =
-            render_experimental_image_at_time(&root, &aex, &sha, &input, &output_b, &[], timing);
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        result_b.expect("one-shot zero-duration render");
+        // The frame a zero duration produces is the same one a non-zero duration
+        // produces at t=0. That is the property the A/B against the one-shot was
+        // standing in for, and it is checkable without the one-shot.
+        let out_span = scratch.join("span.png");
+        let span_report = render_experimental_image_at_time(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &out_span,
+            &[],
+            RenderTiming {
+                current_time: 0,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+            },
+        )
+        .expect("session-route t=0 render over a non-zero duration");
+        assert_session_render_is_healthy(&span_report, "t=0 over a span");
         assert_eq!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
-            after_a,
-            "the escape hatch did not force the one-shot transport"
+            report.get("output_sha256"),
+            span_report.get("output_sha256"),
+            "the zero-duration frame differs from t=0 of a non-zero duration"
         );
         assert_eq!(
-            std::fs::read(&output_a).unwrap(),
-            std::fs::read(&output_b).unwrap(),
-            "the zero-duration PNG differs between the session and one-shot routes"
+            std::fs::read(&out_zero).unwrap(),
+            std::fs::read(&out_span).unwrap(),
+            "the zero-duration PNG differs from the t=0 PNG"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }
