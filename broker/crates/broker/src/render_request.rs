@@ -674,6 +674,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     let payload = encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?;
     let mut runs = Vec::new();
     let mut approved_fixture_sha256 = String::new();
+    let mut approved_identity = None;
     for _ in 0..2 {
         // secure_launch consumes both the sealed tree and the worker stage, so
         // reload the schema-v2 receipt for each determinism run rather than
@@ -710,6 +711,25 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         let worker_byte_size = approved.worker_byte_size;
         let timeout_ms = approved.timeout_ms;
         let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        // The receipt is reloaded per determinism run, so pin the whole approved
+        // identity across runs. The sealed manifest digest covers the main entry and
+        // every dependency; the fixture digest alone would miss a swapped worker
+        // build or dependency set (#312 review).
+        let identity = (
+            tree.manifest_digest(),
+            worker_sha256,
+            worker_byte_size,
+            timeout_ms,
+        );
+        if approved_identity
+            .as_ref()
+            .is_some_and(|approved| approved != &identity)
+        {
+            return Err(invalid(
+                "classic approval changed between determinism runs",
+            ));
+        }
+        approved_identity = Some(identity);
         let args_before_plugin = [worker_spec.request_mode.to_string()];
         let args_after_plugin = [fixture_sha256, payload.clone()];
         let isolated = secure_launch(
@@ -891,6 +911,7 @@ pub fn execute_smart(
     let mut runs = Vec::new();
     let mut secure_launches = Vec::new();
     let mut approved_fixture_sha256 = String::new();
+    let mut approved_identity = None;
     for _ in 0..2 {
         // secure_launch consumes both the sealed tree and worker stage. Reload the
         // schema-v2 receipt so each determinism run has an independent stage.
@@ -924,6 +945,25 @@ pub fn execute_smart(
         let worker_byte_size = approved.worker_byte_size;
         let timeout_ms = approved.timeout_ms;
         let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        // The receipt is reloaded per determinism run, so pin the whole approved
+        // identity across runs. The sealed manifest digest covers the main entry and
+        // every dependency; the fixture digest alone would miss a swapped worker
+        // build or dependency set (#312 review).
+        let identity = (
+            tree.manifest_digest(),
+            worker_sha256,
+            worker_byte_size,
+            timeout_ms,
+        );
+        if approved_identity
+            .as_ref()
+            .is_some_and(|approved| approved != &identity)
+        {
+            return Err(invalid(
+                "SmartFX approval changed between determinism runs",
+            ));
+        }
+        approved_identity = Some(identity);
         let sealed_manifest_sha256 = tree
             .manifest_digest()
             .iter()
@@ -1272,6 +1312,7 @@ pub fn execute_smart_suite_fault(
     let payload = encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?;
     let mut runs = Vec::new();
     let mut approved_fixture_sha256 = String::new();
+    let mut approved_identity = None;
     for _ in 0..2 {
         // secure_launch consumes both the sealed tree and the worker stage, so
         // reload the schema-v2 receipt for each determinism run. The plug-in
@@ -1307,6 +1348,25 @@ pub fn execute_smart_suite_fault(
         let worker_byte_size = approved.worker_byte_size;
         let timeout_ms = approved.timeout_ms;
         let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        // The receipt is reloaded per determinism run, so pin the whole approved
+        // identity across runs. The sealed manifest digest covers the main entry and
+        // every dependency; the fixture digest alone would miss a swapped worker
+        // build or dependency set (#312 review).
+        let identity = (
+            tree.manifest_digest(),
+            worker_sha256,
+            worker_byte_size,
+            timeout_ms,
+        );
+        if approved_identity
+            .as_ref()
+            .is_some_and(|approved| approved != &identity)
+        {
+            return Err(invalid(
+                "SmartFX approval changed between determinism runs",
+            ));
+        }
+        approved_identity = Some(identity);
         let args_before_plugin = [worker_mode.to_string()];
         let args_after_plugin = [fixture_sha256, payload.clone()];
         let isolated = secure_launch(
@@ -1578,6 +1638,7 @@ pub fn execute_smart_mask_scene(
     let payload = encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?;
     let mut runs = Vec::new();
     let mut approved_fixture_sha256 = String::new();
+    let mut approved_identity = None;
     for _ in 0..2 {
         // secure_launch consumes both the sealed tree and the worker stage, so
         // reload the schema-v2 receipt for each determinism run. The plug-in
@@ -1613,6 +1674,25 @@ pub fn execute_smart_mask_scene(
         let worker_byte_size = approved.worker_byte_size;
         let timeout_ms = approved.timeout_ms;
         let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        // The receipt is reloaded per determinism run, so pin the whole approved
+        // identity across runs. The sealed manifest digest covers the main entry and
+        // every dependency; the fixture digest alone would miss a swapped worker
+        // build or dependency set (#312 review).
+        let identity = (
+            tree.manifest_digest(),
+            worker_sha256,
+            worker_byte_size,
+            timeout_ms,
+        );
+        if approved_identity
+            .as_ref()
+            .is_some_and(|approved| approved != &identity)
+        {
+            return Err(invalid(
+                "SmartFX approval changed between determinism runs",
+            ));
+        }
+        approved_identity = Some(identity);
         let args_before_plugin = ["--smart-mask-scene-request".to_string()];
         let args_after_plugin = [fixture_sha256, payload.clone(), scene_id.to_string()];
         let isolated = secure_launch(

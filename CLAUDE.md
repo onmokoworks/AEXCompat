@@ -42,10 +42,11 @@ and bounded image input/output are now the main implementation path.
   (`image_render.rs` via `dispatch_secure_image`, which uses per-session
   `ApprovedImageArtifact` from `selection.sha256` enforcing a pre-selection hash
   match, not a schema-v2 receipt, and already admits the locally built worker at
-  dispatch time per `docs/EVIDENCE_POLICY_2026-07-18.md` §3). Other broker CLI
-  routes still call normal-token `run_isolated`: `render-parameter-request`,
-  `smart-suite-fault`, `smart-mask-scene` (`render_request.rs`) and `l1`
-  (`l1.rs`). So neither claim holds globally: the crash-containment-only default
+  dispatch time per `docs/EVIDENCE_POLICY_2026-07-18.md` §3). One broker CLI
+  route still calls normal-token `run_isolated`: `l1` (`l1.rs`). The
+  `render_request.rs` routes (`render-parameter-request`, `smart-suite-fault`,
+  `smart-mask-scene`) moved onto the sealed load tree in #312; only `l1` is
+  left. So neither claim holds globally: the crash-containment-only default
   tier is not yet the standard path, and not every dispatch is sealed either.
   Restoring an explicit receipt-free default tier is tracked work (#36). Do not
   assume every production route is already sealed, nor that the light path is

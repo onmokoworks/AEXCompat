@@ -159,15 +159,29 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
 
     def test_every_route_launches_through_the_sealed_load_tree(self):
         route = self.ROUTE.read_text(encoding="utf-8")
+        # Counted against the number of launches rather than a fixed 4, so a
+        # correctly-sealed fifth route passes while an unsealed one fails:
         # execute (parameter request), execute_smart, execute_smart_suite_fault,
-        # execute_smart_mask_scene.
+        # execute_smart_mask_scene today.
+        launches = route.count("secure_launch(")
+        self.assertGreaterEqual(launches, 4)
         for marker in (
-            "secure_launch(",
             "SealedLoadTree::create(",
             "load_v2_load_tree(",
             "require_module_audit: true",
         ):
-            self.assertEqual(route.count(marker), 4, marker)
+            self.assertEqual(route.count(marker), launches, marker)
+
+    def test_every_launch_pins_the_approval_across_determinism_runs(self):
+        route = self.ROUTE.read_text(encoding="utf-8")
+        # The receipt is reloaded per determinism run, so each route must compare
+        # the whole approved identity between runs. The sealed manifest digest
+        # covers every dependency; the fixture digest alone would miss a swapped
+        # worker build or dependency set.
+        launches = route.count("secure_launch(")
+        self.assertEqual(route.count("let identity = (\n            tree.manifest_digest(),"), launches)
+        self.assertEqual(route.count("approved_identity = Some(identity);"), launches)
+        self.assertEqual(route.count("approval changed between determinism runs"), launches)
 
     def test_no_route_passes_the_plugin_as_an_argv_path(self):
         route = self.ROUTE.read_text(encoding="utf-8")
@@ -180,8 +194,12 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         route = self.ROUTE.read_text(encoding="utf-8")
         # The profile-declared executable must match the receipt's trusted worker,
         # compared canonically so a symlink or junction cannot substitute it.
-        self.assertEqual(route.count("fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)?"), 4)
-        self.assertEqual(route.count("worker_program: &receipt_worker"), 4)
+        launches = route.count("secure_launch(")
+        self.assertEqual(
+            route.count("fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)?"),
+            launches,
+        )
+        self.assertEqual(route.count("worker_program: &receipt_worker"), launches)
 
     def test_migrated_reports_take_identity_from_the_receipt(self):
         route = self.ROUTE.read_text(encoding="utf-8")
@@ -190,8 +208,9 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         # approval policy, so the report names the same approval the launch used.
         self.assertNotIn("approved_entry", route)
         self.assertNotIn("crate::render::entry", route)
-        self.assertEqual(route.count('"receipt_id":worker_spec.approval.receipt_id'), 4)
-        self.assertEqual(route.count('"fixture_sha256":approved_fixture_sha256'), 4)
+        launches = route.count("secure_launch(")
+        self.assertEqual(route.count('"receipt_id":worker_spec.approval.receipt_id'), launches)
+        self.assertEqual(route.count('"fixture_sha256":approved_fixture_sha256'), launches)
 
     def test_migrated_reports_add_no_keys_outside_their_contract_schema(self):
         """The three migrated routes must not grow report keys their schema forbids.
@@ -213,10 +232,19 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
             )
             self.assertFalse(schema["additionalProperties"], stage)
             declared = set(schema["properties"])
-            start = route.index(f'"stage":"{stage}"')
-            body = route[start : route.index("});", start)]
-            emitted = set(re.findall(r'"([a-z0-9_]+)"\s*:', body))
-            self.assertTrue(
-                emitted <= declared,
-                f"{stage} emits keys absent from {schema_name}: {sorted(emitted - declared)}",
-            )
+            marker = f'"stage":"{stage}"'
+            # A stage can be emitted more than once (the classic route writes a
+            # pre-dispatch rejection report as well as the success report), so every
+            # occurrence is checked -- not just the first.
+            occurrences = 0
+            start = route.find(marker)
+            while start != -1:
+                occurrences += 1
+                body = route[start : route.index("});", start)]
+                emitted = set(re.findall(r'"([a-z0-9_]+)"\s*:', body))
+                self.assertTrue(
+                    emitted <= declared,
+                    f"{stage} emits keys absent from {schema_name}: {sorted(emitted - declared)}",
+                )
+                start = route.find(marker, start + 1)
+            self.assertGreater(occurrences, 0, stage)
