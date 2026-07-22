@@ -470,6 +470,14 @@ pub struct SessionOpenRequest<'a> {
     /// Static render-environment trailer (`render:v1|`), already encoded by
     /// `encode_render_environment`.
     pub render_environment_trailer: Option<String>,
+    /// Static audio-source trailer (`session-audio:v1|<samples>|<rate>|<path>`),
+    /// carrying the same span the one-shot passes as three bare argv slots under
+    /// `--render-image-audio` (issue #339). The plug-in sees one source for the
+    /// whole session, so it rides the launch argv rather than the frame message.
+    /// Rides at the tail of the *positional* section, behind the other optional
+    /// trailers, so the worker peels it first of those. The auxiliary option
+    /// pairs are appended after it and are stripped before any of this.
+    pub audio_trailer: Option<String>,
     /// Alpha-as-coverage parameter slots (`--alpha-as-coverage-v1`), issue #98
     /// W1-4c. The worker publishes the alpha-coverage provider once at launch
     /// (a global the classic render runtime reads on every frame), matching the
@@ -891,8 +899,13 @@ impl RenderSession {
         // Layers are static and no longer occupy the section (#268): stream each
         // layer's RGBA8 to its own file under target/image-transport and hand the
         // worker an inherited, path-authenticated read HANDLE. The worker reads it
-        // once at open into a private vector and never re-opens a path for
-        // transport (issue #18 TOCTOU lesson). Because the pixels leave the
+        // once at open into a private vector and never re-opens a path for *pixel*
+        // transport (issue #18 TOCTOU lesson). Broker-written sidecars whose
+        // contents are not pixels still travel by path (`--aux-manifest-v1`,
+        // `--parameter-animation-v1`, and the audio source of #339); those are
+        // read during argv parsing, before the plug-in module is loaded, so no
+        // plug-in code is running in that process to swap the leaf. Because the
+        // pixels leave the
         // bounded section, layer count/size no longer feed the aggregate section
         // cap, so the one-shot per-file layered path has no capability the session
         // lacks. `layer_files` keeps the broker's inheritable read handles alive
@@ -986,6 +999,12 @@ impl RenderSession {
         }
         if let Some(render_environment) = &request.render_environment_trailer {
             args_after_plugin.push(render_environment.clone());
+        }
+        // The audio trailer sits after the context trailers so the worker peels it
+        // first and the context/layer chain keeps the positions it already had
+        // (issue #339). Auxiliary option pairs are stripped before any of this.
+        if let Some(audio) = &request.audio_trailer {
+            args_after_plugin.push(audio.clone());
         }
         // Auxiliary option pairs ride argv's tail; the worker peels them
         // before the positional session contract (strip_auxiliary_options)
@@ -2319,6 +2338,7 @@ pub fn run_video_batch(
         mask_trailer: None,
         spatial_trailer: None,
         render_environment_trailer: None,
+        audio_trailer: None,
         alpha_as_coverage_params: &request.alpha_as_coverage_params,
         // The video-batch entry does not apply conformance render settings.
         conformance_render_settings: None,
@@ -3367,6 +3387,7 @@ mod tests {
                 mask_trailer: None,
                 spatial_trailer: None,
                 render_environment_trailer: None,
+                audio_trailer: None,
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
                 layers: &[],

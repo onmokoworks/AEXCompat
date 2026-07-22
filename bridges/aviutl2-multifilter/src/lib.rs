@@ -2419,6 +2419,10 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 mask_trailer: None,
                 spatial_trailer: None,
                 render_environment_trailer: None,
+                // The multifilter bridge renders video frames only; an audio
+                // source would come from the host's audio graph, which it
+                // does not read (issue #339).
+                audio_trailer: None,
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
                 layers: &[],

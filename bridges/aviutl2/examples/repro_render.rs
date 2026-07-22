@@ -90,6 +90,8 @@ fn main() {
         mask_trailer: None,
         spatial_trailer: None,
         render_environment_trailer: None,
+        // Video repro only; no audio source (issue #339).
+        audio_trailer: None,
         alpha_as_coverage_params: &[],
         conformance_render_settings: None,
         layers: &[],
