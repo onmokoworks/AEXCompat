@@ -402,10 +402,10 @@ fn default_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// The extra folders searched for an AEX's dependency DLLs: the env override
-/// wins, else the config, else the default After Effects runtime folder
-/// (issue #304). An AEX's own folder is not listed here; it is always searched
-/// first, per plug-in.
+/// How dependency closures are resolved for this launch (issue #304): the extra
+/// folders to search — the env override wins, else the config, else the default
+/// After Effects runtime folder — plus the operator's optional ceilings. An AEX's
+/// own folder is not listed; it is always searched first, per plug-in.
 fn resolve_dependency_config(config: &Config) -> DependencyConfig {
     let dirs = if let Some(dirs) = std::env::var_os(ENV_DEPENDENCY_DIRS) {
         dirs.to_string_lossy()

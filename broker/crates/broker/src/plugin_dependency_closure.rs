@@ -14,10 +14,10 @@
 //!
 //! What this module does *not* do:
 //!
-//! - It never widens the worker's DLL search path. Every module it returns is
-//!   authenticated by `session_dependency_manifest::validate` and then copied,
-//!   re-hashed, and pinned by `SealedLoadTree`, exactly like a hand-declared
-//!   dependency.
+//! - It never widens the worker's DLL search path. Every module it returns goes
+//!   through the same `session_dependency_manifest` authentication a hand-written
+//!   dependency does, and is then copied, re-hashed, and pinned by
+//!   `SealedLoadTree`.
 //! - It resolves only what the PE import tables name. A module the plug-in loads
 //!   later by absolute path at runtime, rather than through its import tables,
 //!   is invisible here and stays an unknown module in the worker's module audit.
