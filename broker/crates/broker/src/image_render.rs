@@ -4986,8 +4986,10 @@ fn render_with_artifact(
     // config the one-shot per-file path accepts now always fits the session, so
     // the former session_section_fits carve-out is gone (#264): every eligible
     // render below can be carried by the length-1 session.
-    let session_eligible = audio.is_none()
-        && payload == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
+    // An audio sidecar rides the session's launch trailer the same way the static
+    // context trailers do (issue #339), so it no longer excludes a render.
+    let session_eligible = payload
+        == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
         && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
         && timing.time_scale <= i32::MAX as u32
         && if smart {
@@ -5062,7 +5064,16 @@ fn render_with_artifact(
                 gpu_backend == RenderGpuBackend::Auto && pixel_format != RenderPixelFormat::Argb32f
             }
         } else {
+            // Classic layered + audio stays off the session: the one-shot's
+            // --render-image-audio arm is pinned to exactly 16 argv slots
+            // (l2_cli_dispatch.cpp), so it cannot express secondary layers at
+            // all, and the shape currently fails the forced one-shot outright.
+            // Routing it to the session would render it, which is arguably
+            // better, but it would also silently break the A/B escape hatch this
+            // gate exists to preserve. Tracked separately (#341); the exclusion
+            // goes away with the one-shot itself.
             gpu_backend == RenderGpuBackend::Auto
+                && (audio.is_none() || (secondaries.is_empty() && timed_secondaries.is_empty()))
         };
     if session_eligible {
         // Only a layered session touches target/image-transport: RenderSession::
@@ -5124,7 +5135,46 @@ fn render_with_artifact(
             Some(context) => crate::render_request::encode_render_environment(context)?,
             None => None,
         };
-        match render_classic_via_length_one_session(&SessionWrapperRequest {
+        // The worker loads the span from a file, exactly as it does for the
+        // one-shot's --render-image-audio, so the session writes the same sidecar
+        // before opening and names it in the trailer (issue #339). The one-shot
+        // writes its copy further below, after this branch has returned.
+        // One binding, so "a sidecar was written" and "a trailer was emitted"
+        // cannot come apart: there is no shape here that writes the file and
+        // then renders as if the render carried no audio.
+        let session_audio = match &audio {
+            Some(bytes) => {
+                fs::create_dir_all(&root)?;
+                cleanup_stale_image_transport(&root, SystemTime::now())?;
+                let path = root.join(format!("audio-{nonce}.f32"));
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)?
+                    .write_all(bytes)?;
+                Some((
+                    SessionAudioSource {
+                        trailer: format!(
+                            "session-audio:v1|{}|44100|{}",
+                            bytes.len() / 4,
+                            path.to_string_lossy()
+                        ),
+                        input_sha256: format!("{:x}", Sha256::digest(bytes)),
+                    },
+                    path,
+                ))
+            }
+            None => None,
+        };
+        // The sidecar outlives the session open (the worker reads it at launch)
+        // and must not outlive this scope. The RAII guard removes it on every
+        // exit including a panic, matching how the aux manifest and the one-shot
+        // transport files are handled in this same function.
+        let (session_audio, _audio_cleanup) = match session_audio {
+            Some((source, path)) => (Some(source), Some(Cleanup(vec![path]))),
+            None => (None, None),
+        };
+        let session_outcome = render_classic_via_length_one_session(&SessionWrapperRequest {
             repository,
             plugin_id,
             plugin_path,
@@ -5138,6 +5188,7 @@ fn render_with_artifact(
             mask_trailer,
             spatial_trailer,
             render_environment_trailer,
+            audio: session_audio,
             alpha_as_coverage_params,
             conformance_render_settings: conformance_render_settings.as_deref(),
             aux_manifest: aux_transport
@@ -5163,7 +5214,8 @@ fn render_with_artifact(
             // ineligible for the session. The gate above only reaches this
             // construction with a policy present for Argb32f + a GPU backend.
             gpu_runtime_policy,
-        }) {
+        });
+        match session_outcome {
             SessionWrapperOutcome::Report(report) => return Ok(report),
             SessionWrapperOutcome::Failure(error) => return Err(error),
             // Fail closed (#98 W4, #264): a resident-session infrastructure
@@ -5845,6 +5897,17 @@ fn forced_audio_session_fallback() -> Option<AudioWrapperOutcome> {
 pub static RENDER_SESSION_WRAPPER_RENDERS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// The audio source handed to a length-1 session: the launch trailer naming the
+/// sidecar the worker reads, plus the digest of the bytes that were written.
+/// One value carries both so no route can gate on audio being present and then
+/// report it absent, or the reverse (issue #339).
+struct SessionAudioSource {
+    /// `session-audio:v1|<samples>|<rate>|<path>`, the session's form of the
+    /// three bare argv slots the one-shot spends under `--render-image-audio`.
+    trailer: String,
+    input_sha256: String,
+}
+
 struct SessionWrapperRequest<'a> {
     repository: &'a Path,
     plugin_id: &'a str,
@@ -5859,6 +5922,11 @@ struct SessionWrapperRequest<'a> {
     mask_trailer: Option<String>,
     spatial_trailer: Option<String>,
     render_environment_trailer: Option<String>,
+    /// The session's audio source, or `None` when the render carries no audio.
+    /// The trailer and the sidecar digest travel together so the gate, the
+    /// launch argv, and the public report cannot disagree about whether this
+    /// render had audio (issue #339).
+    audio: Option<SessionAudioSource>,
     alpha_as_coverage_params: &'a [u32],
     /// Conformance render-settings trailer (`--conformance-render-settings-v1`),
     /// forwarded so the session worker reports the same render_settings block the
@@ -5951,6 +6019,7 @@ fn render_classic_via_length_one_session(
         mask_trailer: request.mask_trailer.clone(),
         spatial_trailer: request.spatial_trailer.clone(),
         render_environment_trailer: request.render_environment_trailer.clone(),
+        audio_trailer: request.audio.as_ref().map(|audio| audio.trailer.clone()),
         alpha_as_coverage_params: request.alpha_as_coverage_params,
         conformance_render_settings: request.conformance_render_settings,
         dependencies: request.dependencies.to_vec(),
@@ -6033,7 +6102,12 @@ fn render_classic_via_length_one_session(
             expected_shutter_angle: request.expected_shutter_angle,
             expected_shutter_phase: request.expected_shutter_phase,
             custom_ui_action: request.custom_ui_action,
-            audio_present: false,
+            // The session carries an audio source whenever the caller supplied
+            // the `session-audio:v1|` trailer, so the audio gate must apply on
+            // this route exactly as it does on the one-shot (issue #339). A
+            // hardcoded `false` here would let a plug-in that never advertises
+            // audio usage pass the session while the one-shot rejects it.
+            audio_present: request.audio.is_some(),
             interactive_parameters: request.interactive_parameters,
             classification: &classification,
             time_step: request.timing.time_step,
@@ -6171,7 +6245,10 @@ fn render_classic_via_length_one_session(
         output_origin_ok,
         parameter_count_ok,
         spatial_ok,
-        audio_input_sha256: None,
+        audio_input_sha256: request
+            .audio
+            .as_ref()
+            .map(|audio| audio.input_sha256.clone()),
     };
     RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     SessionWrapperOutcome::Report(build_interactive_image_report(&final_report, facts))
@@ -6239,6 +6316,7 @@ impl InteractiveRenderSession {
                 mask_trailer: None,
                 spatial_trailer: None,
                 render_environment_trailer: None,
+                audio_trailer: None,
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
                 layers: &[],
@@ -6839,6 +6917,148 @@ pub(crate) fn build_interactive_image_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal facts for the public-report flattening; only the audio field
+    /// varies across the audio projection tests below.
+    fn audio_report_facts(audio_input_sha256: Option<&str>) -> InteractiveImageReportFacts {
+        InteractiveImageReportFacts {
+            plugin_id: "probe".into(),
+            smart: false,
+            pixel_format: RenderPixelFormat::Argb8,
+            rendered_width: 4,
+            rendered_height: 4,
+            input_width: 4,
+            input_height: 4,
+            output_png: PathBuf::from("out.png"),
+            timing: RenderTiming::default(),
+            worker_classification: "ok".into(),
+            diagnostics: json!({}),
+            gpu_fallback_used: false,
+            gpu_fallback_reason: None,
+            gpu_attempt: None,
+            secondary_layers: json!([]),
+            empty_smart_result: false,
+            output_raw: None,
+            deep_png_output: false,
+            deep_overrange_samples: None,
+            world_dump_display: None,
+            minidump_display: None,
+            output_checksum_detail: false,
+            output_origin_ok: true,
+            parameter_count_ok: true,
+            spatial_ok: true,
+            audio_input_sha256: audio_input_sha256.map(str::to_owned),
+        }
+    }
+
+    /// The session route synthesizes the public report from its own final
+    /// report, so the audio telemetry must be projected from the same facts the
+    /// one-shot uses. Before issue #339 the session passed `None` here and the
+    /// whole audio block silently vanished from an audio render's report.
+    #[test]
+    fn audio_telemetry_is_projected_exactly_when_a_sidecar_was_supplied() {
+        let worker_report = json!({
+            "audio_usage_advertised": true,
+            "audio_checkout_allowed": true,
+            "audio_checkout_calls": 1,
+            "audio_checkin_calls": 1,
+            "audio_get_data_calls": 1,
+            "invalid_audio_operations": 0,
+            "audio_lifetimes_balanced": true,
+            "last_audio_window_sample_count": 6,
+        });
+        let with_audio =
+            build_interactive_image_report(&worker_report, audio_report_facts(Some("abc123")));
+        assert_eq!(
+            with_audio.get("audio_sidecar_transport"),
+            Some(&json!("mono_f32le_44100"))
+        );
+        assert_eq!(
+            with_audio.get("audio_sidecar_input_sha256"),
+            Some(&json!("abc123"))
+        );
+        for field in [
+            "audio_usage_advertised",
+            "audio_checkout_allowed",
+            "audio_checkout_calls",
+            "audio_lifetimes_balanced",
+            "last_audio_window_sample_count",
+        ] {
+            assert_eq!(
+                with_audio.get(field),
+                worker_report.get(field),
+                "{field} must reach the public report"
+            );
+        }
+
+        // A render without a sidecar must not grow audio keys, so the absence
+        // of the block stays a reliable signal that no audio was carried.
+        let without_audio =
+            build_interactive_image_report(&worker_report, audio_report_facts(None));
+        assert!(
+            without_audio
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|key| !key.contains("audio")),
+            "a render with no sidecar reported audio keys: {without_audio}"
+        );
+    }
+
+    /// The audio gate rejects a plug-in that never advertised audio usage. The
+    /// session route hardcoded `audio_present: false` before issue #339, which
+    /// let exactly this report pass the session while the one-shot rejected it.
+    #[test]
+    fn the_audio_gate_rejects_an_unadvertised_plugin_when_a_sidecar_is_present() {
+        let unadvertised = json!({
+            "guard_bytes_intact": true,
+            "render_error": 0,
+            "gpu_memory_lifetimes_balanced": true,
+            "pf_path_lifetimes_balanced": true,
+            "pixel_format": "argb8",
+            "audio_usage_advertised": false,
+            "audio_checkout_allowed": false,
+            "audio_source_available": true,
+            "audio_lifetimes_balanced": true,
+            "invalid_audio_operations": 0,
+        });
+        let unit = crate::render_request::RationalScale {
+            numerator: 1,
+            denominator: 1,
+        };
+        let facts = |audio_present| InteractiveGateFacts {
+            smart: false,
+            pixel_format: RenderPixelFormat::Argb8,
+            spatial: crate::render_request::SpatialContext {
+                downsample_x: unit,
+                downsample_y: unit,
+                pixel_aspect_ratio: unit,
+                full_resolution_width: None,
+                full_resolution_height: None,
+                pre_effect_source_origin_x: None,
+                pre_effect_source_origin_y: None,
+            },
+            expected_quality: 1,
+            expected_field: 0,
+            expected_shutter_angle: 0,
+            expected_shutter_phase: 0,
+            custom_ui_action: None,
+            audio_present,
+            interactive_parameters: None,
+            classification: "ok",
+            time_step: 1,
+            input_width: 4,
+            input_height: 4,
+        };
+        assert!(
+            validate_interactive_worker_report(&unadvertised, &json!({}), &facts(true)).is_err(),
+            "an unadvertised plug-in must not pass the gate once a sidecar is present"
+        );
+        assert!(
+            validate_interactive_worker_report(&unadvertised, &json!({}), &facts(false)).is_ok(),
+            "the same report is fine when the render carried no audio"
+        );
+    }
 
     #[test]
     fn smart_render_advertised_follows_out_flags2_bit_10() {

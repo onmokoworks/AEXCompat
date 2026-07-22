@@ -86,9 +86,16 @@ WorkerMode classify_worker_mode(
     // (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md §3). Auxiliary option
     // pairs were already stripped from the tail.
     if (equals(command, L"--render-session-v1") || session16 || session32) {
-      mode.image_render_environment = effective_argc >= 11 &&
-          starts_with(argv[effective_argc - 1], L"render:v1|");
-      mode.image_environment_argc = effective_argc -
+      // The audio-source trailer sits at the very tail, so it is peeled first and
+      // the existing context/layer chain below is unchanged (issue #339). Audio is
+      // classic-only on both routes (the broker rejects it for SmartFX), so the
+      // smart session command does not peel it.
+      mode.session_audio = effective_argc >= 11 &&
+          starts_with(argv[effective_argc - 1], L"session-audio:v1|");
+      mode.session_audio_argc = effective_argc - (mode.session_audio ? 1 : 0);
+      mode.image_render_environment = mode.session_audio_argc >= 11 &&
+          starts_with(argv[mode.session_audio_argc - 1], L"render:v1|");
+      mode.image_environment_argc = mode.session_audio_argc -
           (mode.image_render_environment ? 1 : 0);
       mode.image_spatial_context = mode.image_environment_argc >= 11 &&
           starts_with(argv[mode.image_environment_argc - 1], L"spatial:v");

@@ -597,3 +597,89 @@ swap した後、input/output world を `register_world(..., GPU_BGRA128)` で�
 **transport の +24 上書きと dispatch-format 登録の順序不整合**であり、GPU compute 自体
 (cl_mem 転送・kernel) は健全だった。SmartRenderGPU に到達する前に PF_GetPixelFormat で
 弾かれていた。
+
+## 2026-07-22 #339 classic session の audio sidecar 経路 (観察 → 実装 → A/B)
+
+`--render-experimental-image-audio-sidecar` は session 不適格として one-shot に落ちていた
+唯一の classic 系 shape だった。one-shot 撤廃 (W4) には session 側にこの経路が必要。
+
+### 設計 (実装済み)
+one-shot は `--render-image-audio` という専用 command word の下で sample 数・rate・path を
+**3つの裸の argv slot** に置く。session の tail は他の optional trailer (`render:v1|` /
+`spatial:v` / `v2|` mask / `session-layers:v2|`) と共有されているため裸の slot は取れない。
+そこで 1 つの marked trailer `session-audio:v1|<samples>|<rate>|<path>` に載せ、他と同じ
+peel チェーンで剥がす。path を最後に置いているのは、path 中の `|` が数値フィールドを
+ずらさないようにするため。audio は両経路とも classic 限定 (broker が SmartFX で拒否) なので
+smart session 側は peel しない。
+
+### 観察 1: fixture が動かなかった (実装とは無関係)
+`instruments/pf-visual-audio-probe` の 7 target は `.rc` を持たず PiPL が無い。#84 で
+worker が PiPL から Effect entrypoint を解決するようになって以降、これらは
+`plugin_kind:"unknown_no_effect_entrypoint"` / exit 12 で load 前に弾かれ、**dispatch 不能**に
+なっていた (`analysis/PF_VISUAL_AUDIO_ADMISSION_RESULT_2026-07-15.json` の凍結値は #84 以前の
+観測)。#339 の A/B に必要なので、この PR で PiPL `.rc` と
+`tools/build-pf-visual-audio-probe.ps1` を追加した (子 CMakeLists は add_subdirectory 用で
+project() を持たないため、configure は `instruments` root から始める)。
+`instruments/` 配下には同様に `.rc` を持たない target が他に 13 ある (未調査)。
+
+### 観察 2: session が audio gate を素通ししていた (修正済み)
+session wrapper は `InteractiveGateFacts.audio_present` を `false` にハードコードしていた。
+実測: audio を advertise しない `SDK_Invert_ProcAmp_OpenCL.aex` に sidecar を渡すと
+one-shot は validation で拒否、**session は exit 0 で通った**。同様に
+`InteractiveImageReportFacts.audio_input_sha256` も `None` 固定で、session の公開 report からは
+audio_* 24 キーが丸ごと消えていた。trailer と digest を 1 つの `SessionAudioSource` に束ねて、
+gate・launch argv・公開 report が audio の有無で食い違えないようにした。
+
+### A/B (確定)
+fixture: `pf_visual_audio_sidecar_probe.aex` (PiPL 追加後)。sidecar は probe が期待する
+window (`start=4, duration=6, scale=44100`) にちょうど合う 10 sample。
+
+| 経路 | exit | output_sha256 | audio_checkout_calls | audio_lifetimes_balanced |
+|------|------|---------------|----------------------|--------------------------|
+| session (default) | 0 | 56a20c36...05b0 | 1 | true |
+| one-shot (WRAPPER 無効) | 0 | 56a20c36...05b0 | 1 | true |
+
+- **output_sha256 一致 = byte 等価**。PNG 実体も一致 (`a3e57d4d...`)。
+- 公開 report の**キー集合が完全一致**し、値の差は `output_png` (出力先パス) と
+  `worker_diagnostics` (elapsed_ms / メモリ / stage_events: session は sequence setup/setdown を
+  frame から hoist するため必然的に異なる) のみ。
+
+### 回帰テスト (否定側で検証済み)
+`tests/test_render_session_worker.py` に worker session を直接叩く behavioral test を追加。
+probe は読み戻した sample が完全一致したときだけ `PF_Err_NONE` を返すので、
+`render_error == 0` がそのまま audio 到達の assertion になる。
+
+peel (`l2_cli_dispatch.cpp`) を stash して worker を再ビルドすると、この test は
+`worker closed the response pipe early` で fail した (trailer が余分な positional として
+launch を fail-close させる)。peel を戻すと pass。**peel が必要十分であることを確認**。
+trailer 無しの negative test も併せて追加 (`audio_source_available is False`)。
+
+### ローカルレビューで出た指摘と対応
+
+- **audio + secondary layer が session だけ通るようになっていた** (最重要)。
+  one-shot の `--render-image-audio` は `effective_argc == 16` 完全一致なので layer を
+  表現できない。gate から `audio.is_none()` を外した結果、この shape は session なら通り
+  one-shot では失敗する = A/B 逃げ道が壊れる状態になっていた。classic 側の gate に
+  `audio.is_none() || (secondaries.is_empty() && timed_secondaries.is_empty())` を足して
+  #339 以前の挙動に戻し、#341 で追跡する。
+- **修正した 2 つの分岐に回帰テストが無かった**。`build_interactive_image_report` /
+  `validate_interactive_worker_report` を直接叩く unit test は、どちらも**修正前から
+  正しかった純関数**を検証しているだけで、ハードコードを戻しても緑のままだった。
+  `render_session_wrapper.rs` に A/B 統合テストを 2 本追加し、それぞれ該当行を戻すと
+  fail することを実測で確認した。
+  - `image_audio_sidecar_matches_the_one_shot_transport`: `audio_input_sha256` を
+    `None` に戻すと key 集合比較で fail。
+  - `an_unadvertised_plugin_with_a_sidecar_is_refused_on_both_routes`: `audio_present` を
+    `false` に戻すと「session が受理した」で fail。fixture は `pf_sampling_probe`
+    (audio を advertise せず、audio suite に一切触らない)。
+    `pf_visual_audio_unadvertised_probe` は**使えない**: 意図的に unadvertised checkout を
+    試みるので worker 側が先に `status: render_failed` を立て、gate に届く前に
+    session が close で拒否してしまう。
+- `tools/build-pf-visual-audio-probe.ps1` が共有の `target/instruments-build` を
+  multi-config generator で configure しており、CI が同じディレクトリを Ninja で
+  configure する (`.github/workflows/ae-sdk-tests.yml`) のと衝突していた。専用の
+  `target/pf-visual-audio-probe-build` に変更し、テスト側は両レイアウトを探索する。
+
+### 未解決 (この PR の範囲外)
+- `tests/test_ae_reference_capture_automation.py::test_reference_capture_fails_closed_without_loaded_module_identity`
+  が clean main でも fail する。#175 に追加観察をコメント済み。

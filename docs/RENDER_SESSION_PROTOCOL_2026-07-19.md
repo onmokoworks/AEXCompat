@@ -95,6 +95,7 @@ aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
     <max_width> <max_height> <time_step> <total_time> <time_scale>
     [session-layers:v2|<slot,w,h,handle | slot,w,h,time,scale,handle;...>]
     [v2|<mask context>] [spatial:v*|<...>] [render:v1|<...>]
+    [session-audio:v1|<samples>|<rate>|<path>]
     [--alpha-as-coverage-v1 <slot,slot,...>]
     [--conformance-render-settings-v1 <v1|mode|0|-|0|renderer>]
     [--aux-manifest-v1 <path>] [--parameter-animation-v1 <path>]
@@ -103,9 +104,18 @@ aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
 
 静的コンテキスト trailer は one-shot と同じ位置引数順 (mask → spatial →
 render) で、auxiliary option ペアより前 (argv 上ではコンテキストが先、
-auxiliary option が tail)。worker は auxiliary option を tail から剥がした
-後、render → spatial → mask の順に位置引数末尾から剥がして 10 スロットの
-セッション契約に還元する。W1-3 では mask (`v2|`)、spatial (`spatial:v1/v2/v3`)、
+auxiliary option が tail)。audio-source trailer (`session-audio:v1|`) は
+静的コンテキストのさらに後ろ、位置引数の最末尾に置く (#339)。worker は
+auxiliary option を tail から剥がした後、audio → render → spatial → mask の
+順に位置引数末尾から剥がして 10 スロットのセッション契約に還元する。
+
+`session-audio:v1|<samples>|<rate>|<path>` は classic session 専用 (broker が
+SmartFX + audio を拒否するため smart session 側は剥がさない)。one-shot の
+`--render-image-audio` は同じ 3 値を**裸の位置引数 3 スロット**に置くが、
+session の tail は他の optional trailer と共有されているため裸のスロットを
+取れない。よって 1 つの marked trailer に載せ、他と同じ peel チェーンで剥がす。
+path を最後に置くのは、path 中の `|` が数値フィールドをずらさないようにするため
+(worker は先頭 2 つの区切りだけを見て、残り全部を path とする)。W1-3 では mask (`v2|`)、spatial (`spatial:v1/v2/v3`)、
 render-environment (`render:v1|`) を broker が送出する (host_context がある
 ときは one-shot と同じく mask trailer を常に送る、空 mask scene でも "v2|")。
 W1-4c では alpha-as-coverage の parameter slot 群を `--alpha-as-coverage-v1

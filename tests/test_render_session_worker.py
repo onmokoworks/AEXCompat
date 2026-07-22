@@ -631,3 +631,118 @@ def test_session_launch_rejects_time_scale_above_int32():
          str(WIDTH), str(HEIGHT), "1", "300", str(2**31)],
         cwd=ROOT, capture_output=True, text=True, timeout=60)
     assert result.returncode == 3
+
+
+def _visual_audio_probe(target):
+    """Resolve a pf-visual-audio-probe artifact across the layouts its build can
+    produce: tools/build-pf-visual-audio-probe.ps1 uses a private multi-config
+    tree, while a Ninja configure of `instruments` (as CI does) writes the
+    single-config path. Returns None when the probe is unbuilt."""
+    for candidate in (
+            ROOT / "target" / "pf-visual-audio-probe-build" / "pf-visual-audio-probe"
+            / "Release" / (target + ".aex"),
+            ROOT / "target" / "instruments-build" / "pf-visual-audio-probe"
+            / (target + ".aex"),
+            ROOT / "target" / "instruments-build" / "pf-visual-audio-probe" / "Release"
+            / (target + ".aex")):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+SIDECAR_AEX = _visual_audio_probe("pf_visual_audio_sidecar_probe")
+# pf_visual_audio_sidecar_probe checks out samples 4..9 at 44100 and returns
+# PF_Err_NONE only when the window it reads back is exactly
+# [0.25, 0, 0, 0, 0, 0.5625] followed by one silence sample past the end. A
+# sidecar the worker never loaded therefore fails the render outright, which is
+# what makes this a real test of the trailer rather than of the report shape.
+SIDECAR_SAMPLES = [0.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.5625]
+
+
+def _sidecar_path(tmp_path):
+    path = tmp_path / "session-audio.f32"
+    path.write_bytes(struct.pack("<%df" % len(SIDECAR_SAMPLES), *SIDECAR_SAMPLES))
+    return path
+
+
+def test_session_audio_trailer_feeds_the_plug_in_the_same_window_as_the_one_shot(tmp_path):
+    """The classic session carries an audio source through `session-audio:v1|`.
+
+    The one-shot spends three bare argv slots on the sample count, rate, and
+    path under its own command word; a session cannot, because its tail is
+    shared with the other optional trailers, so the values ride one marked
+    argument peeled like the rest (issue #339).
+    """
+    if not WORKER.is_file():
+        pytest.skip("aex_render_worker.exe is not built; run the minihost build")
+    if SIDECAR_AEX is None:
+        pytest.skip("pf_visual_audio_sidecar_probe.aex is not built; run "
+                    "tools/build-pf-visual-audio-probe.ps1")
+    sidecar = _sidecar_path(tmp_path)
+    trailer = "session-audio:v1|%d|44100|%s" % (len(SIDECAR_SAMPLES), sidecar)
+    transport = SessionTransport()
+    aex_sha = hashlib.sha256(SIDECAR_AEX.read_bytes()).hexdigest()
+    process = subprocess.Popen(
+        [str(WORKER), "--render-session-v1", str(SIDECAR_AEX), aex_sha, "v5|",
+         str(WIDTH), str(HEIGHT), "1", "300", str(TIME_SCALE), trailer],
+        cwd=ROOT, env=transport.environment(), close_fds=False,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    transport.close_child_ends()
+    try:
+        transport.write_input(11, 1)
+        transport.send(render_frame_message(0, 0))
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["status"] == "ok", done
+        # The probe returns INTERNAL_STRUCT_DAMAGED (512) unless every sample it
+        # read back matched, so a zero render error is the audio assertion.
+        assert done["render_error"] == 0, done
+        transport.send({"v": 1, "type": "close"})
+        code, stdout, stderr = _finish(process)
+        assert code == 0, (code, stderr[-500:])
+        report = json.loads(stdout.strip())
+        assert report["audio_usage_advertised"] is True
+        assert report["audio_source_available"] is True
+        assert report["audio_checkout_allowed"] is True
+        assert report["audio_checkout_calls"] == 1
+        assert report["audio_checkin_calls"] == 1
+        assert report["audio_get_data_calls"] == 1
+        assert report["invalid_audio_operations"] == 0
+        assert report["audio_lifetimes_balanced"] is True
+        assert report["last_audio_checkout_start_time"] == 4
+        assert report["last_audio_checkout_duration"] == 6
+        assert report["last_audio_checkout_time_scale"] == 44100
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_session_without_the_audio_trailer_leaves_the_plug_in_no_source(tmp_path):
+    """Without the trailer the same plug-in must fail, not silently render.
+
+    This is the negative half of the pair: it fails if the worker ever invents
+    an audio source the broker did not hand it, and it is what would have
+    caught the trailer being dropped on the session route.
+    """
+    if not WORKER.is_file():
+        pytest.skip("aex_render_worker.exe is not built; run the minihost build")
+    if SIDECAR_AEX is None:
+        pytest.skip("pf_visual_audio_sidecar_probe.aex is not built; run "
+                    "tools/build-pf-visual-audio-probe.ps1")
+    transport = SessionTransport()
+    process = _spawn(transport, aex=SIDECAR_AEX)
+    try:
+        transport.write_input(11, 1)
+        transport.send(render_frame_message(0, 0))
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["render_error"] != 0, done
+        transport.send({"v": 1, "type": "close"})
+        code, stdout, stderr = _finish(process)
+        report = json.loads(stdout.strip()) if stdout.strip() else {}
+        assert report.get("audio_source_available") is False, report
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
