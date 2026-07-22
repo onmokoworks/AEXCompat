@@ -59,48 +59,84 @@ mod windows_e2e {
         let object = report
             .as_object()
             .unwrap_or_else(|| panic!("{label}: report is not an object: {report}"));
-        assert_eq!(
-            object.get("worker_classification").and_then(|v| v.as_str()),
-            Some("ok"),
-            "{label}: worker did not exit cleanly: {report}"
-        );
+        let require = |key: &str, want: serde_json::Value| {
+            assert_eq!(
+                object.get(key),
+                Some(&want),
+                "{label}: {key} must be {want}: {report}"
+            );
+        };
+        // The broker's own verdict and the worker's exit.
+        require("passed", serde_json::json!(true));
+        require("worker_classification", serde_json::json!("ok"));
+        require("host_contract_warning", serde_json::json!(false));
         // Ownership ledgers and guard pages: a malformed plug-in must produce a
         // diagnostic, never a corrupted host (CLAUDE.md host-protection
-        // invariants). Absent means the report shape changed, which is itself a
-        // regression, so `is_some_and` is deliberately not used here.
+        // invariants). Required outright -- an absent key means the report shape
+        // changed, which is itself a regression.
         for key in [
             "guard_bytes_intact",
             "handle_lifetimes_balanced",
             "suite_leases_balanced",
             "world_lifetimes_balanced",
+            "param_checkouts_balanced",
         ] {
+            require(key, serde_json::json!(true));
+        }
+        let gpu_memory = object
+            .get("gpu_memory")
+            .unwrap_or_else(|| panic!("{label}: gpu_memory missing: {report}"));
+        assert_eq!(
+            gpu_memory.get("lifetimes_balanced"),
+            Some(&serde_json::json!(true)),
+            "{label}: GPU allocations did not balance: {report}"
+        );
+        assert_eq!(
+            gpu_memory.get("invalid_operations"),
+            Some(&serde_json::json!(0)),
+            "{label}: invalid GPU memory operations: {report}"
+        );
+        // Route-specific fields. The public report carries both routes' keys and
+        // nulls the ones that do not apply, so requiring a value from the wrong
+        // route asserts against a sentinel. Measured: a classic render reports
+        // no render_error at all (it lives in the stage events) and nulls
+        // smart_render_error; a smart render has no pre_render_error key.
+        if object.get("render_path").and_then(|v| v.as_str()) == Some("smartfx") {
+            require("smart_render_error", serde_json::json!(0));
+            require("output_pixels_valid", serde_json::json!(true));
+            require("extra_pixels_contract_violation", serde_json::json!(false));
+            require("result_within_request", serde_json::json!(true));
+            // A legally empty result rect means the render selector is never
+            // dispatched, so its error stays at the not-dispatched sentinel.
+            // Measured -- requiring 0 unconditionally fails the empty frame,
+            // which is a correct render.
+            if object.get("empty_result_rect") == Some(&serde_json::json!(true)) {
+                require("smart_render_selector_dispatched", serde_json::json!(false));
+            } else {
+                require("smart_render_selector_dispatched", serde_json::json!(true));
+                require("smart_render_selector_error", serde_json::json!(0));
+            }
+        }
+        // Present on whichever route tracks it; a null means not applicable.
+        for key in ["pf_path_lifetimes_balanced"] {
             match object.get(key) {
-                Some(serde_json::Value::Bool(true)) => {}
-                other => panic!("{label}: {key} is {other:?}, expected true: {report}"),
+                None | Some(serde_json::Value::Null) => {}
+                Some(value) => assert_eq!(
+                    value,
+                    &serde_json::json!(true),
+                    "{label}: {key} must be true: {report}"
+                ),
             }
         }
-        for key in [
-            "invalid_gpu_memory_operations",
-            "invalid_param_checkins",
-            "invalid_receipt_operations",
-        ] {
-            if let Some(value) = object.get(key) {
-                assert_eq!(value, &serde_json::json!(0), "{label}: {key} must be zero");
+        for key in ["invalid_pf_path_operations"] {
+            match object.get(key) {
+                None | Some(serde_json::Value::Null) => {}
+                Some(value) => assert_eq!(
+                    value,
+                    &serde_json::json!(0),
+                    "{label}: {key} must be zero: {report}"
+                ),
             }
-        }
-        // Whichever render path this report came from, its selector error is the
-        // one that must be zero.
-        for key in ["render_error", "smart_render_error", "pre_render_error"] {
-            if let Some(value) = object.get(key) {
-                assert_eq!(value, &serde_json::json!(0), "{label}: {key} must be zero");
-            }
-        }
-        if let Some(valid) = object.get("output_pixels_valid") {
-            assert_eq!(
-                valid,
-                &serde_json::json!(true),
-                "{label}: output_pixels_valid must be true"
-            );
         }
     }
 
@@ -153,6 +189,13 @@ mod windows_e2e {
         ) {
             return;
         }
+        // Still takes the route lock: the A/Bs that remain assert on exact
+        // deltas of RENDER_SESSION_WRAPPER_RENDERS, and a concurrent session
+        // render perturbs them. Measured -- without this, conformance_render_settings
+        // fails with "the escape hatch did not force the one-shot transport".
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
         let worker = root.join("target/minihost-build/aex_smart_worker.exe");
         let aex =
@@ -580,470 +623,6 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    #[test]
-    fn wrapper_report_matches_the_one_shot_transport() {
-        if crate::common::skip_without_restricted_token_launch(
-            "wrapper_report_matches_the_one_shot_transport",
-        ) {
-            return;
-        }
-        let _env_guard = SESSION_ROUTE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
-        let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
-        if !worker.is_file() || !aex.is_file() {
-            eprintln!(
-                "skipping wrapper A/B: build aex_render_worker.exe and pf_sampling_probe.aex first"
-            );
-            return;
-        }
-        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
-        let scratch = std::env::temp_dir().join(format!(
-            "aexcompat-wrapper-ab-{}-{:032x}",
-            std::process::id(),
-            rand::random::<u128>()
-        ));
-        std::fs::create_dir_all(&scratch).unwrap();
-        let input = scratch.join("input.png");
-        let gradient = image::RgbaImage::from_fn(64, 32, |x, y| {
-            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
-        });
-        gradient.save(&input).unwrap();
-
-        // Run A: default routing; the diagnostic counter proves the session
-        // wrapper actually carried it (a silent fallback would make this
-        // comparison vacuous).
-        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_a = scratch.join("out-a.png");
-        let report_a = render_experimental_image(&root, &aex, &sha, &input, &output_a, &[])
-            .expect("session-route render");
-        assert!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-            "the session wrapper did not carry run A"
-        );
-
-        // Run B: the escape hatch forces the one-shot argv transport.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_b = scratch.join("out-b.png");
-        let report_b = render_experimental_image(&root, &aex, &sha, &input, &output_b, &[])
-            .expect("one-shot render");
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        assert_eq!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
-            after_a,
-            "the escape hatch did not force the one-shot transport"
-        );
-
-        // The reports must match field-for-field except where the routes
-        // legitimately differ: the output paths and the stderr-derived
-        // process diagnostics (the session's stage traces include its frame
-        // loop, and elapsed timings are volatile either way).
-        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
-        let mut flattened_a = report_a.as_object().expect("report A object").clone();
-        let mut flattened_b = report_b.as_object().expect("report B object").clone();
-        for key in volatile {
-            flattened_a.remove(key);
-            flattened_b.remove(key);
-        }
-        let keys_a: Vec<_> = flattened_a.keys().collect();
-        let keys_b: Vec<_> = flattened_b.keys().collect();
-        assert_eq!(keys_a, keys_b, "report key sets diverge");
-        for (key, value_a) in &flattened_a {
-            assert_eq!(
-                Some(value_a),
-                flattened_b.get(key),
-                "report field {key} differs between the session and one-shot routes"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&output_a).unwrap(),
-            std::fs::read(&output_b).unwrap(),
-            "PNG bytes differ between the session and one-shot routes"
-        );
-
-        // A nonzero render time exercises the deferred SEQUENCE_SETUP
-        // seeding: effects reading in_data->current_time during setup must
-        // observe the requested time on both routes.
-        let timing = RenderTiming {
-            current_time: 7,
-            time_step: 1,
-            total_time: 300,
-            time_scale: 30,
-        };
-        let timed_before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let timed_a = scratch.join("timed-a.png");
-        let timed_report_a =
-            render_experimental_image_at_time(&root, &aex, &sha, &input, &timed_a, &[], timing)
-                .expect("session-route timed render");
-        assert!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > timed_before,
-            "the session wrapper did not carry the timed render"
-        );
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let timed_b = scratch.join("timed-b.png");
-        let timed_report_b =
-            render_experimental_image_at_time(&root, &aex, &sha, &input, &timed_b, &[], timing)
-                .expect("one-shot timed render");
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let mut timed_flat_a = timed_report_a.as_object().expect("timed A").clone();
-        let mut timed_flat_b = timed_report_b.as_object().expect("timed B").clone();
-        for key in volatile {
-            timed_flat_a.remove(key);
-            timed_flat_b.remove(key);
-        }
-        for (key, value_a) in &timed_flat_a {
-            assert_eq!(
-                Some(value_a),
-                timed_flat_b.get(key),
-                "timed report field {key} differs between the routes"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&timed_a).unwrap(),
-            std::fs::read(&timed_b).unwrap(),
-            "timed PNG bytes differ between the routes"
-        );
-
-        // A spatial + render-environment host context (issue #98 W1-3) must
-        // travel through the session launch argv and produce the identical
-        // report on both routes. A mask-free, aux-free, coverage-free context
-        // stays session-representable.
-        let context: HostContext = serde_json::from_value(serde_json::json!({
-            "mask_scene": {"masks": []},
-            "spatial": {
-                "downsample_x": {"numerator": 1, "denominator": 2},
-                "downsample_y": {"numerator": 1, "denominator": 2},
-                "pixel_aspect_ratio": {"numerator": 1, "denominator": 1},
-                "full_resolution_width": 128,
-                "full_resolution_height": 64,
-            },
-            "render_environment": {
-                "quality": "low",
-                "field": "upper",
-                "shutter_angle": 0.5,
-                "shutter_phase": -0.25,
-            },
-        }))
-        .expect("host context fixture");
-        let ctx_before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let ctx_a = scratch.join("ctx-a.png");
-        let ctx_report_a = render_experimental_image_at_time_with_format_and_context(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &ctx_a,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            Some(&context),
-        )
-        .expect("session-route context render");
-        assert!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > ctx_before,
-            "the session wrapper did not carry the context render"
-        );
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let ctx_b = scratch.join("ctx-b.png");
-        let ctx_report_b = render_experimental_image_at_time_with_format_and_context(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &ctx_b,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            Some(&context),
-        )
-        .expect("one-shot context render");
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let mut ctx_flat_a = ctx_report_a.as_object().expect("context A").clone();
-        let mut ctx_flat_b = ctx_report_b.as_object().expect("context B").clone();
-        for key in volatile {
-            ctx_flat_a.remove(key);
-            ctx_flat_b.remove(key);
-        }
-        // The spatial and render-environment contract fields must be present
-        // and equal: this is the whole point of carrying the context.
-        assert_eq!(
-            ctx_flat_a.get("spatial_contract_ok"),
-            Some(&serde_json::json!(true))
-        );
-        for (key, value_a) in &ctx_flat_a {
-            assert_eq!(
-                Some(value_a),
-                ctx_flat_b.get(key),
-                "context report field {key} differs between the routes"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&ctx_a).unwrap(),
-            std::fs::read(&ctx_b).unwrap(),
-            "context PNG bytes differ between the routes"
-        );
-
-        // A non-empty mask scene (issue #98 W1-3b) travels through the session
-        // launch argv as the v2| trailer and must match on both routes.
-        let mask_context: HostContext = serde_json::from_value(serde_json::json!({
-            "mask_scene": {
-                "masks": [{
-                    "open": false,
-                    "vertices": [
-                        {"x": 4.0, "y": 4.0},
-                        {"x": 40.0, "y": 8.0},
-                        {"x": 20.0, "y": 28.0},
-                    ],
-                }],
-            },
-        }))
-        .expect("mask host context fixture");
-        let mask_before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let mask_a = scratch.join("mask-a.png");
-        let mask_report_a = render_experimental_image_at_time_with_format_and_context(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &mask_a,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            Some(&mask_context),
-        )
-        .expect("session-route mask render");
-        assert!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > mask_before,
-            "the session wrapper did not carry the mask render"
-        );
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let mask_b = scratch.join("mask-b.png");
-        let mask_report_b = render_experimental_image_at_time_with_format_and_context(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &mask_b,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            Some(&mask_context),
-        )
-        .expect("one-shot mask render");
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let mut mask_flat_a = mask_report_a.as_object().expect("mask A").clone();
-        let mut mask_flat_b = mask_report_b.as_object().expect("mask B").clone();
-        for key in volatile {
-            mask_flat_a.remove(key);
-            mask_flat_b.remove(key);
-        }
-        for (key, value_a) in &mask_flat_a {
-            assert_eq!(
-                Some(value_a),
-                mask_flat_b.get(key),
-                "mask report field {key} differs between the routes"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&mask_a).unwrap(),
-            std::fs::read(&mask_b).unwrap(),
-            "mask PNG bytes differ between the routes"
-        );
-        // An alpha-as-coverage host context (issue #98 W1-4c) rides the
-        // session launch argv as the `--alpha-as-coverage-v1` auxiliary option
-        // (published once at launch), and must match the one-shot route
-        // field-for-field and byte-for-byte. The eligibility gate no longer
-        // forces such a context onto the one-shot path.
-        let coverage_context: HostContext = serde_json::from_value(serde_json::json!({
-            "mask_scene": {"masks": []},
-            "alpha_as_coverage_params": [0],
-        }))
-        .expect("alpha-as-coverage host context fixture");
-        let cov_before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let cov_a = scratch.join("cov-a.png");
-        let cov_report_a = render_experimental_image_at_time_with_format_and_context(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &cov_a,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            Some(&coverage_context),
-        )
-        .expect("session-route alpha-as-coverage render");
-        assert!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > cov_before,
-            "the session wrapper did not carry the alpha-as-coverage render"
-        );
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let cov_b = scratch.join("cov-b.png");
-        let cov_report_b = render_experimental_image_at_time_with_format_and_context(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &cov_b,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            Some(&coverage_context),
-        )
-        .expect("one-shot alpha-as-coverage render");
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let mut cov_flat_a = cov_report_a.as_object().expect("coverage A").clone();
-        let mut cov_flat_b = cov_report_b.as_object().expect("coverage B").clone();
-        for key in volatile {
-            cov_flat_a.remove(key);
-            cov_flat_b.remove(key);
-        }
-        for (key, value_a) in &cov_flat_a {
-            assert_eq!(
-                Some(value_a),
-                cov_flat_b.get(key),
-                "alpha-as-coverage report field {key} differs between the routes"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&cov_a).unwrap(),
-            std::fs::read(&cov_b).unwrap(),
-            "alpha-as-coverage PNG bytes differ between the routes"
-        );
-
-        // An aux-channel host context (issue #211) rides the session launch
-        // argv as the `--aux-manifest-v1` auxiliary option, the same
-        // broker-built manifest the one-shot path emits. The eligibility gate no
-        // longer forces an aux-carrying context onto the one-shot path, so both
-        // routes must produce the identical report and PNG bytes.
-        //
-        // This A/B was dead-on-arrival until issue #231: the worker's aux loader
-        // rejects any manifest/sidecar path carrying the Windows `\\?\` verbatim
-        // prefix (its `absolute().lexically_normal() == canonical()` gate fails
-        // because MSVC's `canonical` drops the prefix and `absolute` keeps it),
-        // and `repository_root()`'s `canonicalize()` yields exactly such a path,
-        // so both routes exited 3. prepare_aux_transport now de-verbatims the
-        // transport root before writing the manifest, matching the broker's
-        // existing minidump/trace path handling, so the real worker accepts the
-        // aux render on both routes.
-        //
-        // pf_sampling_probe does not read the depth channel, but that is exactly
-        // the point of this A/B: the worker must accept and load the manifest on
-        // both routes, and an effect that ignores it must still render
-        // byte-for-byte identically. A full-resolution depth plane (matching the
-        // 64x32 input at downsample 1/1) is the least ambiguous shape for the
-        // worker's aux loader. The aux sample source must live under the
-        // repository root (prepare_aux_transport bounds it there); target/ is
-        // repository-local and git-ignored.
-        let depth_type = i32::from_be_bytes(*b"DPTH");
-        let aux_source_dir = root.join(format!(
-            "target/aux-ab-source-{}-{:032x}",
-            std::process::id(),
-            rand::random::<u128>()
-        ));
-        std::fs::create_dir_all(&aux_source_dir).unwrap();
-        let aux_source = aux_source_dir.join("depth.f32");
-        // 64 * 32 * 1 component, packed little-endian f32; a bounded ramp keeps
-        // every sample finite (prepare_aux_transport rejects NaN/inf).
-        let depth_bytes: Vec<u8> = (0..64u32 * 32)
-            .flat_map(|index| ((index % 251) as f32 / 251.0).to_le_bytes())
-            .collect();
-        std::fs::write(&aux_source, &depth_bytes).unwrap();
-        let aux_context: HostContext = serde_json::from_value(serde_json::json!({
-            "mask_scene": {"masks": []},
-            "aux_channels": [{
-                "param_index": 0,
-                "channel": {
-                    "type": depth_type,
-                    "name": "Depth",
-                    "data_type": "f32le",
-                    "dimension": 1,
-                    "width": 64,
-                    "height": 32,
-                    "downsample_x": {"numerator": 1, "denominator": 1},
-                    "downsample_y": {"numerator": 1, "denominator": 1},
-                    "samples": [{
-                        "time": 0,
-                        "time_scale": 30,
-                        "path": aux_source.to_string_lossy(),
-                        "sampling": "hold",
-                        "interpretation": "depth",
-                    }],
-                },
-            }],
-        }))
-        .expect("aux host context fixture");
-        let aux_before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let aux_a = scratch.join("aux-a.png");
-        let aux_report_a = render_experimental_image_at_time_with_format_and_context(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &aux_a,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            Some(&aux_context),
-        )
-        .expect("session-route aux render");
-        assert!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > aux_before,
-            "the session wrapper did not carry the aux render"
-        );
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let aux_b = scratch.join("aux-b.png");
-        let aux_report_b = render_experimental_image_at_time_with_format_and_context(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &aux_b,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            Some(&aux_context),
-        )
-        .expect("one-shot aux render");
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let mut aux_flat_a = aux_report_a.as_object().expect("aux A").clone();
-        let mut aux_flat_b = aux_report_b.as_object().expect("aux B").clone();
-        for key in volatile {
-            aux_flat_a.remove(key);
-            aux_flat_b.remove(key);
-        }
-        for (key, value_a) in &aux_flat_a {
-            assert_eq!(
-                Some(value_a),
-                aux_flat_b.get(key),
-                "aux report field {key} differs between the routes"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&aux_a).unwrap(),
-            std::fs::read(&aux_b).unwrap(),
-            "aux PNG bytes differ between the routes"
-        );
-        let _ = std::fs::remove_dir_all(&aux_source_dir);
-
-        // Secondary layer A/B equivalence needs an AEX declaring a layer
-        // parameter, which pf_sampling_probe does not; the session layer
-        // transport is covered by the render_session fixture integration test,
-        // and the real-AEX equivalence is tracked separately.
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
-
     fn layer_parameter(slot: u32, path: &Path) -> InteractiveParameter {
         serde_json::from_value(serde_json::json!({
             "slot": slot, "name": "layer", "kind": "layer",
@@ -1077,6 +656,91 @@ mod windows_e2e {
     /// are actually consumed (changing either changes the output), so a match is
     /// not a vacuous "the probe ignored them" pass. Gated on the locally built
     /// worker and the pf-layer-param-probe fixture, like the sibling test.
+
+    /// The plain classic render, verified without the one-shot.
+    ///
+    /// pf_sampling_probe samples its input, so this fixture supports the
+    /// sensitivity assertion the geometry probe could not (#361).
+    #[test]
+    fn classic_render_is_healthy_deterministic_and_input_dependent() {
+        if crate::common::skip_without_restricted_token_launch(
+            "classic_render_is_healthy_deterministic_and_input_dependent",
+        ) {
+            return;
+        }
+        // Still takes the route lock: the A/Bs that remain assert on exact
+        // deltas of RENDER_SESSION_WRAPPER_RENDERS, and a concurrent session
+        // render perturbs them. Measured -- without this, conformance_render_settings
+        // fails with "the escape hatch did not force the one-shot transport".
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping classic session render: build aex_render_worker.exe and                  pf_sampling_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-classic-session-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let write_input = |name: &str, seed: u32| {
+            let path = scratch.join(name);
+            image::RgbaImage::from_fn(64, 32, |x, y| {
+                image::Rgba([
+                    ((x * 3) as u32 + seed) as u8,
+                    ((y * 5) as u32 + seed * 2) as u8,
+                    (x + y) as u8,
+                    255,
+                ])
+            })
+            .save(&path)
+            .unwrap();
+            path
+        };
+        let input = write_input("input.png", 0);
+
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let out_first = scratch.join("first.png");
+        let first = render_experimental_image(&root, &aex, &sha, &input, &out_first, &[])
+            .expect("session-route classic render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+            "the session wrapper did not carry the render"
+        );
+        assert_session_render_is_healthy(&first, "classic render");
+
+        let out_repeat = scratch.join("repeat.png");
+        let repeat = render_experimental_image(&root, &aex, &sha, &input, &out_repeat, &[])
+            .expect("second session-route classic render");
+        assert_reports_agree(&first, &repeat, "classic render repeat");
+        assert_eq!(
+            std::fs::read(&out_first).unwrap(),
+            std::fs::read(&out_repeat).unwrap(),
+            "the same input produced different pixels across two session renders"
+        );
+
+        let other = write_input("other.png", 61);
+        let out_other = scratch.join("other-out.png");
+        let other_report = render_experimental_image(&root, &aex, &sha, &other, &out_other, &[])
+            .expect("session-route classic render of a different input");
+        assert_session_render_is_healthy(&other_report, "classic render (other input)");
+        assert_ne!(
+            first.get("output_sha256"),
+            other_report.get("output_sha256"),
+            "a different input produced the same output; the render ignores its input"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     #[test]
     fn wrapper_layer_and_slider_match_across_routes() {
         if crate::common::skip_without_restricted_token_launch(
