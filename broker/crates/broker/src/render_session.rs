@@ -2229,16 +2229,41 @@ impl RenderSession {
 
 /// A clean session close requires the final report to agree, not just the
 /// exit code: the hoisted sequence must have set up and torn down without
-/// error, guards must be intact, and every ownership ledger must balance.
+/// error, guards must be intact, and every hard ownership ledger must balance.
+/// The worker contract explicitly classifies a known suite lease residue as a
+/// warning, so that one warning is accepted only when its diagnostics prove it
+/// is an explicit, non-faulting live lease rather than a malformed report.
 /// Missing keys fail closed. The classic and smart workers report session
 /// mechanics under different keys (the classic report reuses its
 /// persistent-sequence fields; the smart report carries dedicated session_*
 /// fields, protocol v1.1).
+fn suite_lease_state_clean(report: &Value) -> bool {
+    if report.get("suite_leases_balanced") == Some(&Value::Bool(true)) {
+        return true;
+    }
+    let acquires = report.get("suite_acquires").and_then(Value::as_u64);
+    let releases = report.get("suite_releases").and_then(Value::as_u64);
+    report.get("suite_leases_balanced") == Some(&Value::Bool(false))
+        && report.get("suite_lease_warning") == Some(&Value::Bool(true))
+        && report.get("suite_fault_observed") == Some(&Value::Bool(false))
+        && acquires
+            .zip(releases)
+            .is_some_and(|(acquires, releases)| acquires > releases)
+        && report
+            .get("live_suite_lease_count")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0)
+        && report
+            .get("live_suite_leases")
+            .and_then(Value::as_str)
+            .is_some_and(|leases| !leases.is_empty())
+}
+
 fn final_report_clean(report: &Value, smart: bool) -> bool {
     let shared = report.get("status") == Some(&json!("render_completed"))
         && report.get("global_setdown_error") == Some(&json!(0))
         && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
-        && report.get("suite_leases_balanced") == Some(&Value::Bool(true))
+        && suite_lease_state_clean(report)
         && report.get("handle_lifetimes_balanced") == Some(&Value::Bool(true))
         && report.get("world_lifetimes_balanced") == Some(&Value::Bool(true))
         && report.get("param_checkouts_balanced") == Some(&Value::Bool(true));
@@ -3398,6 +3423,49 @@ mod tests {
                 !final_report_clean(&missing, true),
                 "missing {key} must fail closed"
             );
+        }
+    }
+
+    #[test]
+    fn final_report_clean_accepts_only_explicit_nonfaulting_suite_lease_warning() {
+        let mut warned = serde_json::json!({
+            "status": "render_completed",
+            "global_setdown_error": 0,
+            "guard_bytes_intact": true,
+            "suite_leases_balanced": false,
+            "suite_lease_warning": true,
+            "suite_fault_observed": false,
+            "suite_acquires": 123,
+            "suite_releases": 24,
+            "live_suite_lease_count": 1,
+            "live_suite_leases": "PF World Suite@2=99",
+            "handle_lifetimes_balanced": true,
+            "world_lifetimes_balanced": true,
+            "param_checkouts_balanced": true,
+            "session_mode": true,
+            "session_render_error": 0,
+            "session_sequence_setup_error": 0,
+            "session_sequence_setdown_error": 0,
+        });
+        assert!(final_report_clean(&warned, true));
+
+        for (key, value) in [
+            ("suite_lease_warning", serde_json::json!(false)),
+            ("suite_fault_observed", serde_json::json!(true)),
+            ("suite_acquires", serde_json::json!(24)),
+            ("live_suite_lease_count", serde_json::json!(0)),
+            ("live_suite_leases", serde_json::json!("")),
+        ] {
+            warned[key] = value;
+            assert!(!final_report_clean(&warned, true), "{key} must fail closed");
+            warned[key] = match key {
+                "suite_lease_warning" => serde_json::json!(true),
+                "suite_fault_observed" => serde_json::json!(false),
+                "suite_acquires" => serde_json::json!(123),
+                "live_suite_lease_count" => serde_json::json!(1),
+                "live_suite_leases" => serde_json::json!("PF World Suite@2=99"),
+                _ => unreachable!(),
+            };
         }
     }
 
