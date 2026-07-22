@@ -1200,20 +1200,14 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// A/B equivalence for render-path custom UI (issue #242): a click driven
-    /// during render must produce the same public `custom_ui_*` report fields
-    /// and the same PNG bytes on the length-1 session route (default) as on the
-    /// one-shot argv transport, for a real custom-UI AEX. The fixture is the
-    /// authored pf_custom_ui_probe (instruments/pf-custom-ui-probe): its
-    /// DO_CLICK opens the color picker once, invalidates once, sets
-    /// PF_ChangeFlag_CHANGED_VALUE on the color param (index 1), and RENDER
-    /// fills from that param, so the click deterministically changes the
-    /// output. Requires the render worker and the probe fixture
-    /// (tools/build-pf-custom-ui-probe.ps1); skips when missing.
+    /// A custom-UI click rides the session's per-frame message and reaches the
+    /// plug-in. Verified by what the click is supposed to do -- change the
+    /// colour param, which RENDER then fills the frame from -- rather than by
+    /// agreeing with the one-shot (#361).
     #[test]
-    fn custom_ui_click_report_matches_the_one_shot_transport() {
+    fn custom_ui_click_reaches_the_plug_in_and_changes_the_render() {
         if crate::common::skip_without_restricted_token_launch(
-            "custom_ui_click_report_matches_the_one_shot_transport",
+            "custom_ui_click_reaches_the_plug_in_and_changes_the_render",
         ) {
             return;
         }
@@ -1224,15 +1218,12 @@ mod windows_e2e {
         let worker = root.join("target/minihost-build/aex_render_worker.exe");
         let aex = root.join("target/pf-custom-ui-probe-build/Release/pf_custom_ui_probe.aex");
         if !worker.is_file() || !aex.is_file() {
-            eprintln!(
-                "skipping custom UI A/B: build aex_render_worker.exe and pf_custom_ui_probe.aex \
-                 (tools/build-pf-custom-ui-probe.ps1) first"
-            );
+            eprintln!("skipping custom UI click: build the worker and pf_custom_ui_probe.aex");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
         let scratch = std::env::temp_dir().join(format!(
-            "aexcompat-customui-ab-{}-{:032x}",
+            "aexcompat-customui-click-{}-{:032x}",
             std::process::id(),
             rand::random::<u128>()
         ));
@@ -1244,119 +1235,130 @@ mod windows_e2e {
         .save(&input)
         .unwrap();
 
-        // A click at this point drives DO_CLICK; the host picker returns this
-        // color, which the probe stores in its color param and RENDER fills the
-        // whole frame from (the click coordinates do not affect the output).
-        let click = || RenderUiAction::Click {
-            point: [20, 16],
-            color: [0.85, 0.2, 0.6, 1.0],
+        let render = |output: &Path, action: Option<RenderUiAction>| {
+            render_experimental_image_at_time_with_format_context_and_ui_action(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                output,
+                &[],
+                RenderTiming::default(),
+                false,
+                RenderPixelFormat::Argb8,
+                None,
+                action,
+            )
+            .expect("custom UI session render")
         };
 
-        // Run A: default routing through the length-1 image session. The
-        // diagnostic counter proves the session carried it (a silent one-shot
-        // fallback would make the comparison vacuous).
+        // Baseline: no click, so the probe renders from its default colour.
+        let out_plain = scratch.join("plain.png");
+        let plain = render(&out_plain, None);
+        assert_session_render_is_healthy(&plain, "custom UI baseline");
+        assert_eq!(
+            plain.get("custom_ui_click_dispatched"),
+            Some(&serde_json::json!(false)),
+            "no click was requested: {plain}"
+        );
+
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_a = scratch.join("out-a.png");
-        let report_a = render_experimental_image_at_time_with_format_context_and_ui_action(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &output_a,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            None,
-            Some(click()),
-        )
-        .expect("session-route custom UI click render");
+        let out_click = scratch.join("click.png");
+        let clicked = render(
+            &out_click,
+            Some(RenderUiAction::Click {
+                point: [20, 16],
+                color: [0.85, 0.2, 0.6, 1.0],
+            }),
+        );
         assert!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-            "the session wrapper did not carry run A"
+            "the custom UI click render must be carried by the session"
         );
-        // The click was actually dispatched and changed the color param.
+        assert_session_render_is_healthy(&clicked, "custom UI click");
+
+        // The click was dispatched, the host picker ran, and the param moved.
         assert_eq!(
-            report_a.get("custom_ui_click_dispatched"),
+            clicked.get("custom_ui_click_dispatched"),
             Some(&serde_json::json!(true))
         );
         assert_eq!(
-            report_a.get("custom_ui_click_changed_value"),
+            clicked.get("custom_ui_click_changed_value"),
             Some(&serde_json::json!(true))
         );
+        // app_color_picker_calls is a worker-report field and is not flattened
+        // into the public report (measured: it comes back null). What the public
+        // report does expose is the suite timeline, which records the App Suite
+        // being taken and returned inside the EVENT selector -- that is the
+        // picker call, observed through the lease ledger.
+        let timeline = clicked
+            .get("suite_timeline")
+            .and_then(|value| value.as_array())
+            .unwrap_or_else(|| panic!("no suite_timeline in the report: {clicked}"));
+        let picker_leases: Vec<_> = timeline
+            .iter()
+            .filter(|entry| {
+                entry.get("name").and_then(|v| v.as_str()) == Some("PF AE App Suite")
+                    && entry.get("selector").and_then(|v| v.as_str()) == Some("EVENT")
+            })
+            .collect();
         assert_eq!(
-            report_a.get("custom_ui_context_closed"),
-            Some(&serde_json::json!(true))
+            picker_leases.len(),
+            2,
+            "expected one acquire and one release of the App Suite during EVENT: {clicked}"
+        );
+        assert!(
+            picker_leases
+                .iter()
+                .all(|entry| entry.get("result") == Some(&serde_json::json!(0))),
+            "an App Suite lease failed during the click: {clicked}"
         );
         assert_eq!(
-            report_a.get("custom_ui_lifecycle_errors"),
-            Some(&serde_json::json!([0, 0, 0, 0]))
+            clicked.get("custom_ui_lifecycle_errors"),
+            Some(&serde_json::json!([0, 0, 0, 0])),
+            "the custom UI lifecycle reported an error: {clicked}"
+        );
+        assert_eq!(
+            clicked.get("custom_ui_context_closed"),
+            Some(&serde_json::json!(true)),
+            "the custom UI context was not closed: {clicked}"
         );
 
-        // Run B: the escape hatch forces the one-shot argv transport.
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_b = scratch.join("out-b.png");
-        let report_b = render_experimental_image_at_time_with_format_context_and_ui_action(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &output_b,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            None,
-            Some(click()),
-        );
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let report_b = report_b.expect("one-shot custom UI click render");
-        assert_eq!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
-            after_a,
-            "the escape hatch did not force the one-shot transport"
+        // And it reached the pixels: the probe fills the frame from the colour
+        // the click stored, so the clicked render cannot equal the baseline.
+        assert_ne!(
+            plain.get("output_sha256"),
+            clicked.get("output_sha256"),
+            "the click changed the param but not the render"
         );
 
-        // Reports must match field-for-field except the volatile output/stderr
-        // fields (the custom_ui_* fields are covered by this same comparison).
-        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
-        let mut flattened_a = report_a.as_object().expect("report A object").clone();
-        let mut flattened_b = report_b.as_object().expect("report B object").clone();
-        for key in volatile {
-            flattened_a.remove(key);
-            flattened_b.remove(key);
-        }
-        assert_eq!(
-            flattened_a.keys().collect::<Vec<_>>(),
-            flattened_b.keys().collect::<Vec<_>>(),
-            "custom UI report key sets diverge"
+        // A second click with a different colour must move the output again;
+        // otherwise the first difference could have been the click's mere
+        // presence rather than its value.
+        let out_second = scratch.join("second.png");
+        let second = render(
+            &out_second,
+            Some(RenderUiAction::Click {
+                point: [20, 16],
+                color: [0.1, 0.9, 0.35, 1.0],
+            }),
         );
-        for (key, value_a) in &flattened_a {
-            assert_eq!(
-                Some(value_a),
-                flattened_b.get(key),
-                "custom UI report field {key} differs between the session and one-shot routes"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&output_a).unwrap(),
-            std::fs::read(&output_b).unwrap(),
-            "PNG bytes differ between the session and one-shot routes"
+        assert_session_render_is_healthy(&second, "custom UI click (other colour)");
+        assert_ne!(
+            clicked.get("output_sha256"),
+            second.get("output_sha256"),
+            "a different picked colour produced the same render"
         );
-
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// A/B equivalence for a render-path custom UI *draw* (issue #242): a draw
-    /// event driven during render must produce the same public custom_ui_draw_*
-    /// report fields and the same PNG bytes on the session route (default) as on
-    /// the one-shot argv transport. pf_custom_ui_probe's DRAW paints one drawbot
-    /// rectangle onto the control surface and flags the event handled.
+    /// A custom-UI draw rides the session's per-frame message. Verified by the
+    /// draw's own lifecycle and out-flags rather than by agreeing with the
+    /// one-shot (#361).
     #[test]
-    fn custom_ui_draw_report_matches_the_one_shot_transport() {
+    fn custom_ui_draw_reaches_the_plug_in_and_completes_its_lifecycle() {
         if crate::common::skip_without_restricted_token_launch(
-            "custom_ui_draw_report_matches_the_one_shot_transport",
+            "custom_ui_draw_reaches_the_plug_in_and_completes_its_lifecycle",
         ) {
             return;
         }
@@ -1367,15 +1369,12 @@ mod windows_e2e {
         let worker = root.join("target/minihost-build/aex_render_worker.exe");
         let aex = root.join("target/pf-custom-ui-probe-build/Release/pf_custom_ui_probe.aex");
         if !worker.is_file() || !aex.is_file() {
-            eprintln!(
-                "skipping custom UI draw A/B: build aex_render_worker.exe and \
-                 pf_custom_ui_probe.aex (tools/build-pf-custom-ui-probe.ps1) first"
-            );
+            eprintln!("skipping custom UI draw: build the worker and pf_custom_ui_probe.aex");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
         let scratch = std::env::temp_dir().join(format!(
-            "aexcompat-customui-draw-ab-{}-{:032x}",
+            "aexcompat-customui-draw-{}-{:032x}",
             std::process::id(),
             rand::random::<u128>()
         ));
@@ -1387,92 +1386,79 @@ mod windows_e2e {
         .save(&input)
         .unwrap();
 
+        let render = |output: &Path, action: Option<RenderUiAction>| {
+            render_experimental_image_at_time_with_format_context_and_ui_action(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                output,
+                &[],
+                RenderTiming::default(),
+                false,
+                RenderPixelFormat::Argb8,
+                None,
+                action,
+            )
+            .expect("custom UI draw session render")
+        };
+
+        let out_plain = scratch.join("plain.png");
+        let plain = render(&out_plain, None);
+        assert_session_render_is_healthy(&plain, "custom UI draw baseline");
+        assert_eq!(
+            plain.get("custom_ui_draw_dispatched"),
+            Some(&serde_json::json!(false)),
+            "no draw was requested: {plain}"
+        );
+
         let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_a = scratch.join("out-a.png");
-        let report_a = render_experimental_image_at_time_with_format_context_and_ui_action(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &output_a,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            None,
-            Some(RenderUiAction::Draw),
-        )
-        .expect("session-route custom UI draw render");
+        let out_draw = scratch.join("draw.png");
+        let drawn = render(&out_draw, Some(RenderUiAction::Draw));
         assert!(
             RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
-            "the session wrapper did not carry run A"
+            "the custom UI draw render must be carried by the session"
         );
+        assert_session_render_is_healthy(&drawn, "custom UI draw");
+
         assert_eq!(
-            report_a.get("custom_ui_draw_dispatched"),
+            drawn.get("custom_ui_draw_dispatched"),
             Some(&serde_json::json!(true))
         );
         assert_eq!(
-            report_a.get("custom_ui_draw_error"),
-            Some(&serde_json::json!(0))
+            drawn.get("custom_ui_draw_error"),
+            Some(&serde_json::json!(0)),
+            "the draw selector reported an error: {drawn}"
+        );
+        // PF_EO_HANDLED_EVENT: the plug-in must claim the event it drew for.
+        let out_flags = drawn
+            .get("custom_ui_draw_out_flags")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_else(|| panic!("no draw out-flags: {drawn}"));
+        assert_eq!(
+            out_flags & 1,
+            1,
+            "the draw did not report the handled-event flag: {drawn}"
         );
         assert_eq!(
-            report_a.get("custom_ui_context_closed"),
-            Some(&serde_json::json!(true))
+            drawn.get("custom_ui_lifecycle_errors"),
+            Some(&serde_json::json!([0, 0, 0, 0])),
+            "the custom UI lifecycle reported an error: {drawn}"
         );
         assert_eq!(
-            report_a.get("custom_ui_lifecycle_errors"),
-            Some(&serde_json::json!([0, 0, 0, 0]))
+            drawn.get("custom_ui_context_closed"),
+            Some(&serde_json::json!(true)),
+            "the custom UI context was not closed: {drawn}"
         );
 
-        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
-        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
-        let output_b = scratch.join("out-b.png");
-        let report_b = render_experimental_image_at_time_with_format_context_and_ui_action(
-            &root,
-            &aex,
-            &sha,
-            &input,
-            &output_b,
-            &[],
-            RenderTiming::default(),
-            false,
-            RenderPixelFormat::Argb8,
-            None,
-            Some(RenderUiAction::Draw),
-        );
-        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
-        let report_b = report_b.expect("one-shot custom UI draw render");
+        // A draw paints the UI, not the frame: the rendered pixels must be the
+        // same as without it. That direction is as important as the click's --
+        // a draw that leaked into the render would be a defect.
         assert_eq!(
-            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
-            after_a,
-            "the escape hatch did not force the one-shot transport"
+            plain.get("output_sha256"),
+            drawn.get("output_sha256"),
+            "the draw changed the rendered frame: {drawn}"
         );
-
-        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
-        let mut flattened_a = report_a.as_object().expect("report A object").clone();
-        let mut flattened_b = report_b.as_object().expect("report B object").clone();
-        for key in volatile {
-            flattened_a.remove(key);
-            flattened_b.remove(key);
-        }
-        assert_eq!(
-            flattened_a.keys().collect::<Vec<_>>(),
-            flattened_b.keys().collect::<Vec<_>>(),
-            "custom UI draw report key sets diverge"
-        );
-        for (key, value_a) in &flattened_a {
-            assert_eq!(
-                Some(value_a),
-                flattened_b.get(key),
-                "custom UI draw report field {key} differs between routes"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&output_a).unwrap(),
-            std::fs::read(&output_b).unwrap(),
-            "PNG bytes differ between the session and one-shot routes"
-        );
-
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
