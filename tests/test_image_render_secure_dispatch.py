@@ -299,13 +299,27 @@ def test_a_policy_below_float32_or_on_classic_does_not_exclude_a_render():
         "&& gpu_runtime_policy.is_some())" in gate
     )
     # Layered: the depth bound alone carries it; the redundant policy clause is gone.
+    # The smart arm ends where the classic arm begins; the classic arm's own first
+    # comment is the delimiter (issue #339 added an audio/layer exclusion there, so
+    # it is no longer a bare `gpu_backend == RenderGpuBackend::Auto`).
     layered_start = gate.index("Smart layered: admit Argb8/Argb16 under Auto only")
-    layered = gate[layered_start : gate.index("} else { gpu_backend == RenderGpuBackend::Auto };")]
+    layered = gate[layered_start : gate.index("Classic layered + audio stays off the session")]
     assert (
         "gpu_backend == RenderGpuBackend::Auto && pixel_format != RenderPixelFormat::Argb32f"
         in layered
     )
     assert "gpu_runtime_policy.is_none()" not in layered
+
+    # Classic (issue #339): audio rides the session, but not together with
+    # secondary layers -- the one-shot's --render-image-audio arm is pinned to a
+    # fixed argv arity and cannot express layers, so routing that shape to the
+    # session would break the A/B escape hatch (#341).
+    classic_start = gate.index("Classic layered + audio stays off the session")
+    classic = gate[classic_start:]
+    assert (
+        "gpu_backend == RenderGpuBackend::Auto && (audio.is_none() "
+        "|| (secondaries.is_empty() && timed_secondaries.is_empty()))" in classic
+    )
 
     # Classic Auto is already admitted by the image-render gate. RenderSession::open
     # must accept the same policy-carrying request and only attach the manifest when

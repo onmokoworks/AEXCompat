@@ -12,22 +12,16 @@ description: >-
 
 # Codex Review Loop
 
-## Server-side merge rule (where the plan offers it)
+## Merge window (client-side only)
 
 Inline review comments do not change the head SHA, so no client-side
 fetch-then-merge sequence can enforce the never-merge invariant atomically.
-GitHub's **Require conversation resolution before merging** rule
-(`required_conversation_resolution.enabled=true`, branch protection or a
-ruleset) closes that window server-side, so `codex-merge-guard.sh` requires it
-**whenever the plan offers the feature**: reachable-but-disabled or an unknown
-lookup failure still REFUSEs. On plans that provably do not sell branch
-protection/rulesets at all (private repo on GitHub Free — protection 404 and
-the rules API answers with its explicit upgrade message), the guard falls back
-to the FINAL OWNER SNAPSHOT plus `--match-head-commit`, accepting a documented
-sub-second residual race (owner feedback landing between the last snapshot and
-the merge API call) as the best guarantee available on that plan. Demanding an
-unpurchasable feature would leave the guard permanently unable to merge and
-push operators to bypass it entirely.
+`codex-merge-guard.sh` closes that window as far as a client can: it re-fetches
+every owner surface (FINAL OWNER SNAPSHOT) immediately before merging and
+merges with `--match-head-commit`. A sub-second residual race remains (owner
+feedback landing between the last snapshot and the merge API call) and is
+accepted as the best available client-side guarantee. The guard does not
+require or inspect any server-side branch protection / ruleset rule.
 
 PR を Codex にレビューさせ、指摘ゼロになるまで対応を繰り返すループ。
 
@@ -146,8 +140,8 @@ merge 側 (`codex-merge-guard.sh` が head 拘束 clean なしに merge を拒�
   4. 返信したコメントが属する review thread を GraphQL の
      `resolveReviewThread` で resolve:
      `gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}' -F id='{thread_id}'`
-     Require conversation resolution は Codex を含む全review threadを対象にするため、
-     対応済みthreadを未解決のまま残さない。
+     merge-guard は GraphQL の `reviewThreads.isResolved` を owner フィードバックの
+     解決状態の正とするため、対応済みthreadを未解決のまま残さない。
   5. 手順 1 に戻る (新しい `since` で再トリガー)
 - **CLEAN (Codex 指摘なし)**: **merge は `codex-merge-guard.sh` 経由でのみ行う**。
   これが (a) owner blocker の不在 (owner_review_gate の CHANGES_REQUESTED、

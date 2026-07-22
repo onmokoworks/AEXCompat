@@ -17,6 +17,7 @@ mod windows_e2e {
         render_experimental_image_at_time_with_format_and_context,
         render_experimental_image_at_time_with_format_context_and_ui_action,
         render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend,
+        render_experimental_image_with_audio_sidecar,
         render_experimental_image_with_parameter_animation,
         render_experimental_image_with_timed_layers, render_experimental_smart_image,
         render_experimental_smart_image_at_time,
@@ -2212,6 +2213,246 @@ mod windows_e2e {
             !output.exists(),
             "a fail-closed audio render must not write an output file (a silent one-shot would)"
         );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// Resolve a pf-visual-audio-probe artifact across the layouts its build can
+    /// produce. `tools/build-pf-visual-audio-probe.ps1` uses a private
+    /// multi-config tree and takes `-Configuration Debug|Release`, so both
+    /// config subdirectories are searched. The `instruments-build` candidates
+    /// cover a hand-run configure of `instruments` (single-config Ninja, or
+    /// multi-config); CI does not build this probe at all, since its Ninja
+    /// configure of `instruments` deliberately runs without AE_SDK_ROOT and the
+    /// probe lives inside that guard. Returns `None` when the probe is unbuilt.
+    fn visual_audio_probe(root: &Path, target: &str) -> Option<PathBuf> {
+        let private = root.join("target/pf-visual-audio-probe-build/pf-visual-audio-probe");
+        ["Release", "Debug"]
+            .into_iter()
+            .map(|configuration| private.join(configuration).join(format!("{target}.aex")))
+            .chain([
+                root.join(format!(
+                    "target/instruments-build/pf-visual-audio-probe/{target}.aex"
+                )),
+                root.join(format!(
+                    "target/instruments-build/pf-visual-audio-probe/Release/{target}.aex"
+                )),
+            ])
+            .find(|path| path.is_file())
+    }
+
+    /// Image render + audio sidecar (#98 W4, issue #339): the classic session
+    /// carries the audio source through its `session-audio:v1|` launch trailer,
+    /// so the public report and PNG must match the one-shot `--render-image-audio`
+    /// transport field for field.
+    ///
+    /// This is the A/B that covers the two divergences the session route had:
+    /// `audio_present` and `audio_input_sha256` were both hardcoded on the
+    /// session side, so the audio gate never applied and the whole audio_*
+    /// block vanished from the report. Reverting either one fails the key-set
+    /// comparison below.
+    #[test]
+    fn image_audio_sidecar_matches_the_one_shot_transport() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let Some(aex) = visual_audio_probe(&root, "pf_visual_audio_sidecar_probe") else {
+            eprintln!("skipping image+audio A/B: run tools/build-pf-visual-audio-probe.ps1 first");
+            return;
+        };
+        if !worker.is_file() {
+            eprintln!("skipping image+audio A/B: build aex_render_worker.exe first");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-image-audio-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(48, 32, |x, y| {
+            image::Rgba([(x * 5) as u8, (y * 3) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        // pf_visual_audio_sidecar_probe checks out samples 4..9 at 44100 and
+        // returns PF_Err_NONE only when it reads back 0.25 at the window start
+        // and 0.5625 at its last in-range sample, so a render that reaches this
+        // test's assertions is itself proof the audio arrived.
+        let mut samples = [0.0f32; 10];
+        samples[4] = 0.25;
+        samples[9] = 0.5625;
+        let sidecar = scratch.join("audio.f32");
+        std::fs::write(
+            &sidecar,
+            samples
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        )
+        .unwrap();
+
+        // Run A: default routing carries the audio render on the session.
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output_a = scratch.join("out-a.png");
+        let report_a = render_experimental_image_with_audio_sidecar(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &sidecar,
+            &output_a,
+            &[],
+            RenderTiming::default(),
+        )
+        .expect("session-route audio render");
+        assert!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+            "the audio-sidecar render must now be carried by the session"
+        );
+
+        // Run B: the escape hatch forces the one-shot argv transport.
+        unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+        let after_a = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+        let output_b = scratch.join("out-b.png");
+        let report_b = render_experimental_image_with_audio_sidecar(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &sidecar,
+            &output_b,
+            &[],
+            RenderTiming::default(),
+        );
+        unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+        let report_b = report_b.expect("one-shot audio render");
+        assert_eq!(
+            RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst),
+            after_a,
+            "the escape hatch did not force the one-shot transport"
+        );
+
+        // The audio telemetry must be present on both routes, not just equal:
+        // two reports that both dropped the block would compare equal.
+        for (label, report) in [("session", &report_a), ("one-shot", &report_b)] {
+            assert_eq!(
+                report.get("audio_sidecar_transport"),
+                Some(&serde_json::json!("mono_f32le_44100")),
+                "the {label} route lost the audio sidecar transport"
+            );
+            assert_eq!(
+                report.get("audio_usage_advertised"),
+                Some(&serde_json::json!(true)),
+                "the {label} route lost the audio telemetry"
+            );
+            assert_eq!(
+                report.get("audio_checkout_calls"),
+                Some(&serde_json::json!(1)),
+                "the {label} route did not observe the plug-in's audio checkout"
+            );
+        }
+
+        let volatile = ["output_png", "output_raw", "worker_diagnostics"];
+        let mut flat_a = report_a.as_object().expect("report A object").clone();
+        let mut flat_b = report_b.as_object().expect("report B object").clone();
+        for key in volatile {
+            flat_a.remove(key);
+            flat_b.remove(key);
+        }
+        assert_eq!(
+            flat_a.keys().collect::<Vec<_>>(),
+            flat_b.keys().collect::<Vec<_>>(),
+            "audio report key sets diverge between the routes"
+        );
+        for (key, value_a) in &flat_a {
+            assert_eq!(
+                Some(value_a),
+                flat_b.get(key),
+                "audio report field {key} differs between the session and one-shot routes"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&output_a).unwrap(),
+            std::fs::read(&output_b).unwrap(),
+            "the audio render PNG differs between the session and one-shot routes"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The audio gate must apply on the session route too (issue #339): a
+    /// plug-in that never advertised `PF_OutFlag_I_USE_AUDIO` cannot be handed
+    /// an audio source, and both routes must refuse it.
+    ///
+    /// The session wrapper hardcoded `audio_present: false` before this issue,
+    /// so it skipped the gate entirely and rendered a plug-in the one-shot
+    /// rejected. The byte-equivalence A/B above cannot catch that, because its
+    /// fixture does advertise audio and passes the gate either way.
+    #[test]
+    fn an_unadvertised_plugin_with_a_sidecar_is_refused_on_both_routes() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        // pf_sampling_probe never advertises audio and never touches the audio
+        // suite, so the rest of its report is clean and the only thing that can
+        // refuse it is the audio gate itself. pf_visual_audio_unadvertised_probe
+        // does not work here: it deliberately *attempts* an unadvertised
+        // checkout, so the worker already marks the render failed and the
+        // session refuses at close, before the broker gate is consulted.
+        let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping unadvertised-audio gate check: build aex_render_worker.exe and \
+                 pf_sampling_probe.aex first"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-unadvertised-audio-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([20, 40, 60, 255]))
+            .save(&input)
+            .unwrap();
+        let sidecar = scratch.join("audio.f32");
+        std::fs::write(&sidecar, [0u8; 40]).unwrap();
+
+        for (label, force_one_shot) in [("session", false), ("one-shot", true)] {
+            if force_one_shot {
+                unsafe { std::env::set_var(DISABLE_SESSION_WRAPPER_ENV, "1") };
+            } else {
+                unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+            }
+            let output = scratch.join(format!("out-{label}.png"));
+            let result = render_experimental_image_with_audio_sidecar(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                &sidecar,
+                &output,
+                &[],
+                RenderTiming::default(),
+            );
+            unsafe { std::env::remove_var(DISABLE_SESSION_WRAPPER_ENV) };
+            let error = result.err().unwrap_or_else(|| {
+                panic!("the {label} route accepted a sidecar for an unadvertised plug-in")
+            });
+            assert!(
+                error.to_string().contains("failed validation"),
+                "the {label} route refused for the wrong reason: {error}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&scratch);
     }
 }

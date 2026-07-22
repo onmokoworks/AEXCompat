@@ -109,6 +109,27 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
           !hooks.parse_spatial_context(argv[mode.image_trailer_argc]))) throw 1;
       if (mode.image_render_environment && (!hooks.parse_render_environment ||
           !hooks.parse_render_environment(argv[mode.image_environment_argc]))) throw 1;
+      // Audio source for the session (`session-audio:v1|<samples>|<rate>|<path>`,
+      // issue #339). The one-shot spends argv[13..15] on the same three values
+      // under --render-image-audio; a session packs them into one marked trailer
+      // because its tail is shared. The path is last so a separator inside it
+      // cannot shift the numeric fields. Same load_audio validation as the
+      // one-shot, so a malformed span fails the launch rather than the frame.
+      if (mode.session_audio) {
+        const std::wstring trailer(argv[mode.session_audio_argc]);
+        const std::wstring body = trailer.substr(std::wcslen(L"session-audio:v1|"));
+        const std::size_t rate_at = body.find(L'|');
+        if (rate_at == std::wstring::npos) throw 1;
+        const std::size_t path_at = body.find(L'|', rate_at + 1);
+        if (path_at == std::wstring::npos) throw 1;
+        result.invocation.audio_samples = std::stoi(body.substr(0, rate_at));
+        result.invocation.audio_rate =
+            std::stoi(body.substr(rate_at + 1, path_at - rate_at - 1));
+        if (!load_audio(body.substr(path_at + 1).c_str(),
+                        result.invocation.audio_samples,
+                        result.invocation.audio_rate,
+                        result.invocation.audio)) throw 1;
+      }
       // Secondary layer metadata:
       // `session-layers:v2|slot,w,h,handle;slot,w,h,time,scale,handle;...`.
       // The pixels travel as inherited per-layer file HANDLEs (#268); the slot,
