@@ -5051,15 +5051,20 @@ fn render_with_artifact(
             //     stay off the GPU session arm (Auto-none folds to the CPU
             //     session below; explicit-GPU-none is ineligible and the
             //     one-shot path fails it closed).
-            //   - Layered (secondary/timed) renders with a policy: the one-shot
-            //     gpu_initial_attempt requires no layers, so a GPU render never
-            //     happens there and the GPU session arm stays off too (#290).
+            //
+            // A policy is inert below ARGB32f on both routes (#337): the one-shot's
+            // gpu_initial_attempt requires float32, so it never reads the policy and
+            // renders through --smart-image/--smart-image16; the session's gpu_capable
+            // is likewise false, so it neither folds the backend nor attaches the
+            // authorization manifest. Carrying one therefore does not exclude a render.
             // Static context trailers (host_context) ride the smart session's
             // positional tail the same way they ride the classic one (issue #331),
             // as do secondary layers (issue #294), so neither excludes a render.
             if secondaries.is_empty() && timed_secondaries.is_empty() {
                 (gpu_backend == RenderGpuBackend::Cpu && pixel_format == RenderPixelFormat::Argb32f)
-                    || (gpu_backend == RenderGpuBackend::Auto && gpu_runtime_policy.is_none())
+                    || (gpu_backend == RenderGpuBackend::Auto
+                        && (gpu_runtime_policy.is_none()
+                            || pixel_format != RenderPixelFormat::Argb32f))
                     || (pixel_format == RenderPixelFormat::Argb32f
                         && runtime_backend(gpu_backend).is_some()
                         && gpu_runtime_policy.is_some())
@@ -5073,9 +5078,9 @@ fn render_with_artifact(
                 // it to CPU, and a GPU-declaring float32 plug-in would
                 // negotiate GPU in the worker on the one-shot route, which a
                 // CPU-folded session cannot reproduce (issue #296 review).
-                gpu_backend == RenderGpuBackend::Auto
-                    && gpu_runtime_policy.is_none()
-                    && pixel_format != RenderPixelFormat::Argb32f
+                // The depth bound already makes a policy inert here (#337), so it
+                // is not a separate condition.
+                gpu_backend == RenderGpuBackend::Auto && pixel_format != RenderPixelFormat::Argb32f
             }
         } else {
             gpu_backend == RenderGpuBackend::Auto

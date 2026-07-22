@@ -267,3 +267,50 @@ def test_smart_sessions_carry_static_context_trailers():
             "const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);"
             in branch
         ), name
+
+
+def test_a_policy_below_float32_does_not_exclude_a_render():
+    """A runtime module policy is inert below ARGB32f, so it must not force one-shot.
+
+    The one-shot's gpu_initial_attempt requires float32, so it never reads the policy
+    for Argb8/Argb16 and renders through --smart-image/--smart-image16. The session's
+    gpu_capable is false for the same reason, so it neither folds the backend nor
+    attaches the authorization manifest. Excluding these renders sent a shape both
+    routes handle identically to the transport being deleted (#337).
+    """
+
+    def flat(text):
+        # rustfmt decides where these conditions wrap, so compare on collapsed
+        # whitespace rather than pinning a particular line break.
+        return " ".join(text.split())
+
+    body = render_function()
+    gate = flat(body[body.index("let session_eligible ="): body.index("if session_eligible")])
+
+    # Non-layered: Auto is admitted when there is no policy OR the depth makes one
+    # inert. The float32 GPU arm still requires an authenticated policy.
+    assert (
+        "(gpu_backend == RenderGpuBackend::Auto && (gpu_runtime_policy.is_none() "
+        "|| pixel_format != RenderPixelFormat::Argb32f))" in gate
+    )
+    assert (
+        "(pixel_format == RenderPixelFormat::Argb32f && runtime_backend(gpu_backend).is_some() "
+        "&& gpu_runtime_policy.is_some())" in gate
+    )
+    # Layered: the depth bound alone carries it; the redundant policy clause is gone.
+    layered_start = gate.index("Smart layered: admit Argb8/Argb16 under Auto only")
+    layered = gate[layered_start : gate.index("} else { gpu_backend == RenderGpuBackend::Auto };")]
+    assert (
+        "gpu_backend == RenderGpuBackend::Auto && pixel_format != RenderPixelFormat::Argb32f"
+        in layered
+    )
+    assert "gpu_runtime_policy.is_none()" not in layered
+
+    # The session only refuses a policy for classic sessions, and only attaches the
+    # manifest when it actually attempts GPU -- both are what make the policy inert.
+    session = (SOURCE.parent / "render_session.rs").read_text(encoding="utf-8")
+    assert "if !request.smart && request.gpu_runtime_policy.is_some()" in session
+    assert (
+        "let gpu_capable = request.smart && request.pixel_format == RenderPixelFormat::Argb32f"
+        in session
+    )
