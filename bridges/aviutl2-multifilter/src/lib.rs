@@ -1045,6 +1045,12 @@ struct CacheEntry {
     /// (see [`RETRY_BUDGET`]) instead of running on every launch forever.
     #[serde(default)]
     attempts: u8,
+    /// Classification of the most recent failed discovery attempt. Timeout
+    /// classes are deliberately retained so transient runner pressure cannot
+    /// demote a valid stale entry; deterministic worker failures may converge
+    /// it to a negative cache entry (#328).
+    #[serde(default)]
+    failure_classification: Option<String>,
 }
 
 /// How many times a re-verification may fail for one host build before the entry
@@ -1274,6 +1280,22 @@ fn keep_best(
         ..discovered
     };
     match cached {
+        Some(old)
+            if old.ok
+                && old.stale
+                && !discovered.ok
+                && old.mtime == mtime
+                && old.len == len
+                && deterministic_failure(discovered.failure_classification.as_deref()) =>
+        {
+            // The current bytes were rechecked and failed deterministically.
+            // Unlike a timeout, this is safe to converge: keeping the stale
+            // payload would register an effect whose SHA no longer opens.
+            Some(CacheEntry {
+                stale: false,
+                ..discovered
+            })
+        }
         Some(old) if old.ok && !discovered.ok && old.mtime == mtime && old.len == len => {
             Some(CacheEntry {
                 // Provenance stays with the host that actually produced the
@@ -1325,7 +1347,25 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         stale: false,
         checked: build,
         attempts: 0,
+        failure_classification: None,
     }
+}
+
+/// Extract the broker's already-normalized worker classification from the
+/// diagnostic JSON embedded in an inspection error. Missing or malformed
+/// diagnostics stay unknown and therefore retain the old safe behavior.
+fn inspection_failure_classification(error: &std::io::Error) -> Option<String> {
+    let message = error.to_string();
+    let payload = message.split_once("diagnostics=")?.1;
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()?
+        .get("classification")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn deterministic_failure(classification: Option<&str>) -> bool {
+    matches!(classification, Some("nonzero_exit" | "crashed"))
 }
 
 /// Discovers one AEX, always returning a cache entry (cache-all): `ok = true` for
@@ -1340,18 +1380,21 @@ fn discover_one(repository: &Path, plugin: &Path, build: BuildFingerprint) -> Ca
         return entry;
     };
     entry.sha = hex_lower(&Sha256::digest(&bytes));
-    if let Ok((params, diagnostics)) =
-        inspect_experimental_with_diagnostics(repository, plugin, &entry.sha)
-    {
-        // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
-        entry.smart = diagnostics
-            .get("advertised_out_flags2")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0)
-            & (1 << 10)
-            != 0;
-        entry.params = params;
-        entry.ok = true;
+    match inspect_experimental_with_diagnostics(repository, plugin, &entry.sha) {
+        Ok((params, diagnostics)) => {
+            // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
+            entry.smart = diagnostics
+                .get("advertised_out_flags2")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0)
+                & (1 << 10)
+                != 0;
+            entry.params = params;
+            entry.ok = true;
+        }
+        Err(error) => {
+            entry.failure_classification = inspection_failure_classification(&error);
+        }
     }
     entry
 }
@@ -2068,6 +2111,7 @@ mod tests {
             stale: false,
             checked: build,
             attempts: 0,
+            failure_classification: None,
         }
     }
 
@@ -3243,6 +3287,59 @@ mod tests {
         // not converge" means here.
         assert_eq!((merged.ok, merged.stale, &merged.sha), (stale.ok, stale.stale, &stale.sha));
         assert_eq!((merged.mtime, merged.len, merged.build), (stale.mtime, stale.len, stale.build));
+    }
+
+    #[test]
+    fn a_stale_entry_converges_on_a_deterministic_failure() {
+        let mut stale = discovered(9, 128, build(1));
+        stale.stale = true;
+        stale.sha = "older-bytes".into();
+        let mut failed = failed(9, 128, build(1));
+        failed.failure_classification = Some("nonzero_exit".into());
+
+        let merged = keep_best(Some(&stale), failed, Some(((9, 0), 128))).unwrap();
+        assert!(
+            !merged.ok,
+            "the deterministically rejected replacement is negative"
+        );
+        assert!(!merged.stale, "a permanent failure is no longer queued");
+        assert_eq!(
+            classify(Some(&merged), Some(((9, 0), 128)), build(1)),
+            LoadDecision {
+                register: false,
+                discover: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_stale_entry_keeps_retrying_after_a_timeout_failure() {
+        let mut stale = discovered(9, 128, build(1));
+        stale.stale = true;
+        let mut failed = failed(9, 128, build(1));
+        failed.failure_classification = Some("timeout_killed".into());
+
+        let merged = keep_best(Some(&stale), failed, Some(((9, 0), 128))).unwrap();
+        assert!(merged.ok);
+        assert!(merged.stale);
+        assert_eq!(
+            classify(Some(&merged), Some(((9, 0), 128)), build(1)),
+            LoadDecision {
+                register: true,
+                discover: true
+            }
+        );
+    }
+
+    #[test]
+    fn inspection_errors_preserve_the_broker_failure_classification() {
+        let error = std::io::Error::other(
+            r#"inspection failed: diagnostics={"classification":"crashed","exit_code":3221225477}"#,
+        );
+        assert_eq!(
+            inspection_failure_classification(&error).as_deref(),
+            Some("crashed")
+        );
     }
 
     /// The same entry does converge as soon as a re-check succeeds.
