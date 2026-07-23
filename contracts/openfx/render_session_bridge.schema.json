@@ -1,6 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/onmokoworks/AEXCompat/contracts/openfx/render_session_bridge.schema.json",
+  "schema_name": "AEXCompat host-neutral OpenFX RenderSession bridge schema",
+  "schema_version": 1,
   "title": "AEXCompat host-neutral OpenFX RenderSession bridge packet",
   "type": "object",
   "additionalProperties": false,
