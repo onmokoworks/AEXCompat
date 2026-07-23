@@ -30,6 +30,7 @@ pub mod selftest;
 pub mod session_dependency_manifest;
 #[cfg(windows)]
 pub mod smart;
+pub mod staging_trust;
 #[cfg(test)]
 mod test_pe;
 pub mod trace_policy;

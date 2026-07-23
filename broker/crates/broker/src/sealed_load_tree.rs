@@ -1,3 +1,4 @@
+use crate::staging_trust;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -103,7 +104,7 @@ impl SealedLoadTree {
             reject_reparse(&entry.source)?;
             let mut source = open_source(&entry.source)?;
             validate_regular_unique(&source)?;
-            let (size, digest) = hash_file(&mut source)?;
+            let (size, digest) = staging_trust::hash_file_trusted(&mut source, hash_file)?;
             if size != entry.expected_size {
                 return Err(invalid("source size mismatch"));
             }
@@ -143,7 +144,8 @@ impl SealedLoadTree {
             } else {
                 validate_regular_unique(&retained)?;
             }
-            let (retained_size, retained_digest) = hash_file(&mut retained)?;
+            let (retained_size, retained_digest) =
+                staging_trust::hash_file_trusted(&mut retained, hash_file)?;
             if retained_size != entry.expected_size || retained_digest != entry.expected_sha256 {
                 return Err(invalid("retained destination verification failed"));
             }
@@ -740,6 +742,47 @@ mod tests {
         )
         .unwrap();
         assert!(root.exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn trusted_profile_restages_unchanged_sources() {
+        crate::staging_trust::set_enabled_override_for_testing(Some(true));
+        // A private parent keeps this test's sweeps out of the shared temp root.
+        let parent = source_dir();
+        let main = fixture(&parent, "main.plugin", b"main");
+        let dependency = fixture(&parent, "helper.dll", b"dependency");
+        let first =
+            SealedLoadTree::create_at(&parent, main.clone(), vec![dependency.clone()]).unwrap();
+        drop(first);
+
+        let second = SealedLoadTree::create_at(&parent, main, vec![dependency]).unwrap();
+        assert_eq!(
+            second.manifest_basenames(),
+            &["main.plugin".to_owned(), "helper.dll".to_owned()]
+        );
+        assert_eq!(
+            fs::read(second.root().join("helper.dll")).unwrap(),
+            b"dependency"
+        );
+        drop(second);
+        crate::staging_trust::set_enabled_override_for_testing(None);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn trusted_profile_still_fails_closed_on_a_modified_source() {
+        crate::staging_trust::set_enabled_override_for_testing(Some(true));
+        let parent = source_dir();
+        let main = fixture(&parent, "main.plugin", b"main");
+        let first = SealedLoadTree::create_at(&parent, main.clone(), vec![]).unwrap();
+        drop(first);
+
+        // Different length, so the cache miss cannot hinge on mtime granularity.
+        fs::write(&main.source, b"main-with-more-bytes").unwrap();
+        let error = SealedLoadTree::create_at(&parent, main, vec![]).unwrap_err();
+        assert_eq!(error.to_string(), "source size mismatch");
+        crate::staging_trust::set_enabled_override_for_testing(None);
         fs::remove_dir_all(parent).unwrap();
     }
 
