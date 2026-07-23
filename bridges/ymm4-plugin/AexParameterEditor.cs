@@ -1,15 +1,23 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
+using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Win32;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Media;
 using YukkuriMovieMaker.Commons;
+
+using WpfButton = System.Windows.Controls.Button;
+using WpfCheckBox = System.Windows.Controls.CheckBox;
+using WpfComboBox = System.Windows.Controls.ComboBox;
+using WpfTextBox = System.Windows.Controls.TextBox;
+using WpfHorizontalAlignment = System.Windows.HorizontalAlignment;
 
 namespace AEXCompat.Ymm4;
 
@@ -220,7 +228,7 @@ internal sealed class AexParameterEditorAttribute : PropertyEditorAttribute2
         => ((AexParameterEditorControl)control).Attach(null);
 }
 
-internal sealed class AexParameterEditorControl : UserControl, IPropertyEditorControl
+internal sealed class AexParameterEditorControl : System.Windows.Controls.UserControl, IPropertyEditorControl
 {
     private readonly StackPanel panel = new();
     private AexCompatVideoEffect? effect;
@@ -234,6 +242,8 @@ internal sealed class AexParameterEditorControl : UserControl, IPropertyEditorCo
         {
             Content = panel,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalContentAlignment = WpfHorizontalAlignment.Stretch,
             MaxHeight = 420,
         };
     }
@@ -271,6 +281,9 @@ internal sealed class AexParameterEditorControl : UserControl, IPropertyEditorCo
             return;
         }
 
+        panel.HorizontalAlignment = WpfHorizontalAlignment.Stretch;
+        panel.Children.Add(CreatePathRow("AEXファイル", effect.PluginPath, isDirectory: false));
+        panel.Children.Add(CreatePathRow("実行フォルダ", effect.RepositoryPath, isDirectory: true));
         panel.Children.Add(Label(effect.Parameters.Status));
         foreach (var parameter in effect.Parameters.Items)
         {
@@ -284,7 +297,11 @@ internal sealed class AexParameterEditorControl : UserControl, IPropertyEditorCo
 
     private FrameworkElement CreateParameterRow(AexParameter parameter)
     {
-        var row = new Grid { Margin = new Thickness(0, 2, 0, 2) };
+        var row = new Grid
+        {
+            Margin = new Thickness(0, 2, 0, 2),
+            HorizontalAlignment = WpfHorizontalAlignment.Stretch,
+        };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         var name = new TextBlock
@@ -310,7 +327,7 @@ internal sealed class AexParameterEditorControl : UserControl, IPropertyEditorCo
 
     private FrameworkElement CreatePopup(AexParameter parameter)
     {
-        var combo = new ComboBox
+        var combo = new WpfComboBox
         {
             ItemsSource = parameter.Choices,
             SelectedIndex = Math.Clamp((int)Math.Round(parameter.Value) - 1, 0, parameter.Choices.Count - 1),
@@ -330,7 +347,7 @@ internal sealed class AexParameterEditorControl : UserControl, IPropertyEditorCo
 
     private FrameworkElement CreateCheckbox(AexParameter parameter)
     {
-        var checkBox = new CheckBox { IsChecked = parameter.Value != 0 };
+        var checkBox = new WpfCheckBox { IsChecked = parameter.Value != 0 };
         checkBox.Checked += (_, _) => SetParameterValue(parameter, 1);
         checkBox.Unchecked += (_, _) => SetParameterValue(parameter, 0);
         return checkBox;
@@ -339,7 +356,7 @@ internal sealed class AexParameterEditorControl : UserControl, IPropertyEditorCo
     private FrameworkElement CreateSlider(AexParameter parameter)
     {
         var dock = new DockPanel();
-        var text = new TextBox
+        var text = new WpfTextBox
         {
             Text = parameter.Value.ToString("G6", CultureInfo.InvariantCulture),
             Width = 75,
@@ -352,6 +369,8 @@ internal sealed class AexParameterEditorControl : UserControl, IPropertyEditorCo
             Minimum = parameter.Minimum,
             Maximum = parameter.Maximum,
             Value = Math.Clamp(parameter.Value, parameter.Minimum, parameter.Maximum),
+            Width = 180,
+            HorizontalAlignment = WpfHorizontalAlignment.Left,
             IsSnapToTickEnabled = parameter.Kind == "integer",
             TickFrequency = parameter.Kind == "integer" ? 1 : Math.Max((parameter.Maximum - parameter.Minimum) / 100, 0.001),
         };
@@ -386,10 +405,101 @@ internal sealed class AexParameterEditorControl : UserControl, IPropertyEditorCo
         return dock;
     }
 
+    private FrameworkElement CreatePathRow(string label, string value, bool isDirectory)
+    {
+        var row = new Grid
+        {
+            Margin = new Thickness(0, 2, 0, 4),
+            HorizontalAlignment = WpfHorizontalAlignment.Stretch,
+        };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        row.Children.Add(new TextBlock
+        {
+            Text = label,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0),
+        });
+
+        var text = new WpfTextBox
+        {
+            Text = value,
+            MinWidth = 180,
+            VerticalContentAlignment = VerticalAlignment.Center,
+        };
+        text.LostFocus += (_, _) => CommitPath(text.Text, isDirectory);
+        Grid.SetColumn(text, 1);
+        row.Children.Add(text);
+
+        var browse = new WpfButton
+        {
+            Content = "参照...",
+            Margin = new Thickness(6, 0, 0, 0),
+            Padding = new Thickness(8, 0, 8, 0),
+            MinWidth = 64,
+        };
+        browse.Click += (_, _) =>
+        {
+            if (isDirectory)
+            {
+                using var dialog = new System.Windows.Forms.FolderBrowserDialog
+                {
+                    Description = "AEXCompatの実行フォルダを選択してください",
+                    SelectedPath = Directory.Exists(text.Text) ? text.Text : AexCompatRuntime.AssemblyDirectory,
+                    UseDescriptionForTitle = true,
+                };
+                if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                {
+                    text.Text = dialog.SelectedPath;
+                    CommitPath(text.Text, isDirectory: true);
+                }
+            }
+            else
+            {
+                var dialog = new Microsoft.Win32.OpenFileDialog
+                {
+                    Title = "After Effectsプラグインを選択",
+                    Filter = "After Effectsプラグイン (*.aex)|*.aex|すべてのファイル (*.*)|*.*",
+                    CheckFileExists = true,
+                    FileName = File.Exists(text.Text) ? text.Text : string.Empty,
+                };
+                if (dialog.ShowDialog() == true)
+                {
+                    text.Text = dialog.FileName;
+                    CommitPath(text.Text, isDirectory: false);
+                }
+            }
+        };
+        Grid.SetColumn(browse, 2);
+        row.Children.Add(browse);
+        return row;
+    }
+
+    private void CommitPath(string value, bool isDirectory)
+    {
+        if (effect is null)
+        {
+            return;
+        }
+
+        BeginEdit?.Invoke(this, EventArgs.Empty);
+        if (isDirectory)
+        {
+            effect.RepositoryPath = value.Trim();
+        }
+        else
+        {
+            effect.PluginPath = value.Trim();
+        }
+        EndEdit?.Invoke(this, EventArgs.Empty);
+    }
+
     private FrameworkElement CreateColor(AexParameter parameter)
     {
         var dock = new DockPanel();
-        var text = new TextBox
+        var text = new WpfTextBox
         {
             Text = ToColorText(parameter.Color),
             MinWidth = 100,

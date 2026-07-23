@@ -1,5 +1,8 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.ComponentModel;
+using System.IO;
+using System.Reflection;
 using System.ComponentModel.DataAnnotations;
 using Vortice.DCommon;
 using Vortice.Direct2D1;
@@ -23,7 +26,7 @@ public sealed class AexCompatVideoEffect : VideoEffectBase
     public AexCompatVideoEffect()
     {
         pluginPath = Environment.GetEnvironmentVariable("AEXCOMPAT_YMM4_PLUGIN") ?? string.Empty;
-        repositoryPath = Environment.GetEnvironmentVariable("AEXCOMPAT_YMM4_REPOSITORY") ?? string.Empty;
+        repositoryPath = AexCompatRuntime.ResolveRepositoryPath();
         Parameters = AexParameterSet.Discover(repositoryPath, pluginPath);
         Remark = "AEXファイルを指定すると、対応するパラメータをこのエフェクトのGUIから編集できます";
     }
@@ -31,7 +34,7 @@ public sealed class AexCompatVideoEffect : VideoEffectBase
     public override string Label => "AEXCompat";
 
     [Display(GroupName = "AEXCompat", Name = "AEXファイル", Description = "読み込むAfter Effectsプラグインのパス")]
-    [YukkuriMovieMaker.Controls.TextEditor]
+    [Browsable(false)]
     public string PluginPath
     {
         get => pluginPath;
@@ -48,7 +51,7 @@ public sealed class AexCompatVideoEffect : VideoEffectBase
     }
 
     [Display(GroupName = "AEXCompat", Name = "AEXCompatリポジトリ", Description = "aex_render_worker.exeを含むAEXCompatリポジトリのパス")]
-    [YukkuriMovieMaker.Controls.TextEditor]
+    [Browsable(false)]
     public string RepositoryPath
     {
         get => repositoryPath;
@@ -94,9 +97,6 @@ public sealed class AexCompatVideoEffect : VideoEffectBase
 
 internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
 {
-    private const string PluginEnvironment = "AEXCOMPAT_YMM4_PLUGIN";
-    private const string RepositoryEnvironment = "AEXCOMPAT_YMM4_REPOSITORY";
-
     private readonly ID2D1DeviceContext6 deviceContext;
     private readonly AexCompatVideoEffect effect;
     private readonly object gate = new();
@@ -108,6 +108,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
     private int sessionFps;
     private int sessionDuration;
     private string? sessionPluginPath;
+    private string? sessionRepositoryPath;
     private uint frameSerial;
     private string? lastError;
 
@@ -210,7 +211,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         string pluginPath,
         string repositoryPath)
     {
-        if (session != 0 && (sessionWidth != width || sessionHeight != height || sessionFps != fps || sessionDuration != duration || !string.Equals(sessionPluginPath, pluginPath, StringComparison.OrdinalIgnoreCase)))
+        if (session != 0 && (sessionWidth != width || sessionHeight != height || sessionFps != fps || sessionDuration != duration || !string.Equals(sessionPluginPath, pluginPath, StringComparison.OrdinalIgnoreCase) || !string.Equals(sessionRepositoryPath, repositoryPath, StringComparison.OrdinalIgnoreCase)))
         {
             CloseSession();
         }
@@ -220,8 +221,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         }
         if (string.IsNullOrWhiteSpace(pluginPath) || string.IsNullOrWhiteSpace(repositoryPath))
         {
-            throw new InvalidOperationException(
-                $"Set {PluginEnvironment} and {RepositoryEnvironment} before using the effect");
+            throw new InvalidOperationException("AEXファイルとAEXCompat実行フォルダを指定してください");
         }
         session = NativeMethods.Open(
             repositoryPath,
@@ -241,6 +241,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         sessionFps = fps;
         sessionDuration = duration;
         sessionPluginPath = pluginPath;
+        sessionRepositoryPath = repositoryPath;
         frameSerial = 0;
     }
 
@@ -265,7 +266,6 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         finally
         {
             deviceContext.Target = previousTarget;
-            previousTarget?.Dispose();
         }
         readable.CopyFromBitmap(target);
         var mapped = readable.Map(MapOptions.Read);
@@ -353,6 +353,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
             session = 0;
         }
         sessionPluginPath = null;
+        sessionRepositoryPath = null;
     }
 
     private static byte Premultiply(byte value, byte alpha)
@@ -364,7 +365,28 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
 
 internal static partial class NativeMethods
 {
-    [LibraryImport("aexcompat_ymm4_native.dll", EntryPoint = "aexcompat_ymm4_open", StringMarshalling = StringMarshalling.Utf16)]
+    private const string NativeLibraryName = "aexcompat_ymm4_native.dll";
+
+    static NativeMethods()
+    {
+        NativeLibrary.SetDllImportResolver(typeof(NativeMethods).Assembly, ResolveNativeLibrary);
+    }
+
+    private static nint ResolveNativeLibrary(
+        string libraryName,
+        Assembly assembly,
+        DllImportSearchPath? searchPath)
+    {
+        if (!string.Equals(libraryName, NativeLibraryName, StringComparison.OrdinalIgnoreCase))
+        {
+            return nint.Zero;
+        }
+
+        var path = Path.Combine(AexCompatRuntime.AssemblyDirectory, NativeLibraryName);
+        return File.Exists(path) ? NativeLibrary.Load(path) : nint.Zero;
+    }
+
+    [LibraryImport(NativeLibraryName, EntryPoint = "aexcompat_ymm4_open", StringMarshalling = StringMarshalling.Utf16)]
     internal static partial nint Open(
         string repository,
         string plugin,
@@ -375,7 +397,7 @@ internal static partial class NativeMethods
         uint timeScale,
         byte smart);
 
-    [LibraryImport("aexcompat_ymm4_native.dll", EntryPoint = "aexcompat_ymm4_discover", StringMarshalling = StringMarshalling.Utf16)]
+    [LibraryImport(NativeLibraryName, EntryPoint = "aexcompat_ymm4_discover", StringMarshalling = StringMarshalling.Utf16)]
     [return: MarshalAs(UnmanagedType.I4)]
     internal static partial int Discover(
         string repository,
@@ -383,7 +405,7 @@ internal static partial class NativeMethods
         [Out] byte[] output,
         nuint outputLength);
 
-    [LibraryImport("aexcompat_ymm4_native.dll", EntryPoint = "aexcompat_ymm4_render")]
+    [LibraryImport(NativeLibraryName, EntryPoint = "aexcompat_ymm4_render")]
     [return: MarshalAs(UnmanagedType.I4)]
     internal static partial int Render(
         nint session,
@@ -398,9 +420,41 @@ internal static partial class NativeMethods
         [In] byte[] parameters,
         nuint parametersLength);
 
-    [LibraryImport("aexcompat_ymm4_native.dll", EntryPoint = "aexcompat_ymm4_last_error")]
+    [LibraryImport(NativeLibraryName, EntryPoint = "aexcompat_ymm4_last_error")]
     internal static partial nuint LastError(nint session, [Out] byte[] output, nuint outputLength);
 
-    [LibraryImport("aexcompat_ymm4_native.dll", EntryPoint = "aexcompat_ymm4_close")]
+    [LibraryImport(NativeLibraryName, EntryPoint = "aexcompat_ymm4_close")]
     internal static partial void Close(nint session);
+}
+
+internal static class AexCompatRuntime
+{
+    private const string RenderWorkerRelativePath = "target\\minihost-build\\aex_render_worker.exe";
+
+    public static string AssemblyDirectory
+        => Path.GetDirectoryName(typeof(AexCompatRuntime).Assembly.Location)
+            ?? AppContext.BaseDirectory;
+
+    public static string ResolveRepositoryPath()
+    {
+        foreach (var candidate in CandidateRoots())
+        {
+            if (File.Exists(Path.Combine(candidate, RenderWorkerRelativePath)))
+            {
+                return candidate;
+            }
+        }
+
+        var configured = Environment.GetEnvironmentVariable("AEXCOMPAT_YMM4_REPOSITORY");
+        return string.IsNullOrWhiteSpace(configured) ? string.Empty : configured;
+    }
+
+    private static IEnumerable<string> CandidateRoots()
+    {
+        var current = new DirectoryInfo(AssemblyDirectory);
+        for (var depth = 0; current is not null && depth < 8; depth++, current = current.Parent)
+        {
+            yield return current.FullName;
+        }
+    }
 }
