@@ -250,17 +250,42 @@ fn cleanup_stale_roots(parent: &Path, now: SystemTime, age: Duration) -> io::Res
             Ok(modified) => modified,
             Err(_) => continue,
         };
-        // A killed worker can leave a large, otherwise-unlocked tree behind
-        // immediately.  Try non-empty roots regardless of age; a live tree's
-        // retained FILE_SHARE_READ-only handles naturally make remove_file
-        // fail.  Keep the age gate for empty roots so a concurrent creator is
-        // not raced while it is between create_dir and its first child.
-        let old_enough = now.duration_since(modified).unwrap_or_default() >= age;
-        let has_children = fs::read_dir(&root)
-            .ok()
-            .and_then(|mut children| children.next())
-            .is_some();
-        if old_enough || has_children {
+        // Require both the root and every direct child to be stale. A creator
+        // can expose a fresh non-empty root between create_dir and population;
+        // keeping it until observed entries age out avoids deleting a live or
+        // incomplete tree. remove_owned_root retains the fail-closed checks.
+        let root_old_enough = now.duration_since(modified).unwrap_or_default() >= age;
+        if !root_old_enough {
+            continue;
+        }
+
+        let children = match fs::read_dir(&root) {
+            Ok(children) => children,
+            Err(_) => continue,
+        };
+        let mut all_children_stale = true;
+        for child in children {
+            let child = match child {
+                Ok(child) => child,
+                Err(_) => {
+                    all_children_stale = false;
+                    break;
+                }
+            };
+            let child_modified =
+                match fs::symlink_metadata(child.path()).and_then(|metadata| metadata.modified()) {
+                    Ok(modified) => modified,
+                    Err(_) => {
+                        all_children_stale = false;
+                        break;
+                    }
+                };
+            if now.duration_since(child_modified).unwrap_or_default() < age {
+                all_children_stale = false;
+                break;
+            }
+        }
+        if all_children_stale {
             let _ = remove_owned_root(&root, parent);
         }
     }
@@ -569,7 +594,7 @@ mod tests {
 
         cleanup_stale_roots(
             &parent,
-            SystemTime::now(),
+            SystemTime::now() + Duration::from_secs(24 * 60 * 60),
             Duration::from_secs(24 * 60 * 60),
         )
         .unwrap();
@@ -693,9 +718,26 @@ mod tests {
     }
 
     #[test]
-    fn stale_cleanup_removes_unlocked_owned_roots_without_waiting_a_day() {
+    fn stale_cleanup_removes_stale_unlocked_owned_roots() {
         let parent = fs::canonicalize(source_dir()).unwrap();
         let root = parent.join(format!("{ROOT_PREFIX}{:032x}", 1u128));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("partial.dll"), b"partial").unwrap();
+
+        cleanup_stale_roots(
+            &parent,
+            SystemTime::now() + Duration::from_secs(24 * 60 * 60),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .unwrap();
+        assert!(!root.exists());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn stale_cleanup_keeps_fresh_non_empty_owned_root() {
+        let parent = fs::canonicalize(source_dir()).unwrap();
+        let root = parent.join(format!("{ROOT_PREFIX}{:032x}", 5u128));
         fs::create_dir(&root).unwrap();
         fs::write(root.join("partial.dll"), b"partial").unwrap();
 
@@ -705,7 +747,7 @@ mod tests {
             Duration::from_secs(24 * 60 * 60),
         )
         .unwrap();
-        assert!(!root.exists());
+        assert!(root.exists());
         fs::remove_dir_all(parent).unwrap();
     }
 
