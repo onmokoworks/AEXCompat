@@ -79,6 +79,19 @@ def test_camera_lookup_is_fail_closed_and_preserves_output_on_error():
     assert "get_effect_camera(&g_effect, &before_in, &camera) == 0 && camera == nullptr" in source
 
 
+def test_single_layer_authored_transform_is_bounded_and_fail_closed():
+    source = scene_source() + (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
+        encoding="utf-8")
+    assert "struct AegpLayerTransform" in source
+    assert "std::array<AegpLayerTransform, 3> layer_transforms{}" in source
+    assert "T(position) * Rz * Ry * Rx" in source
+    assert "authored.scale[index] == 0.0" in source
+    assert "finite_bounded(authored.rotation_degrees[index], kRotationLimit)" in source
+    assert "std::isfinite(result.mat[row][column])" in source
+    assert "*transform = result" in source
+    assert "std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0" in source
+
+
 def test_native_self_test_covers_all_three_release_workers():
     for worker_name in ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe"):
         worker = BUILD / worker_name

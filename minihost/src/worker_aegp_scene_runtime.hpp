@@ -87,6 +87,16 @@ struct AegpSelectionCollection {
   bool live{};
 };
 
+// Authored transform data used by the bounded single-layer scene contract.
+// Position and anchor are composition pixels; scale is an AE-style percent.
+struct AegpLayerTransform {
+  std::array<double, 3> anchor{};
+  std::array<double, 3> position{};
+  std::array<double, 3> scale{{100.0, 100.0, 100.0}};
+  std::array<double, 3> rotation_degrees{};
+  bool is_3d{};
+};
+
 // All synthetic-scene identity and lease state has one owning translation
 // unit. Callbacks obtain it through this accessor; no SDK-shaped handle is
 // ever reconstituted from a second scene copy.
@@ -154,6 +164,7 @@ struct SceneRuntimeState {
       {0, 30}, {0, 30}, {0, 30}}};
   std::array<aexcompat::suite_abi::AegpTime, 3> layer_durations{{
       {300, 30}, {300, 30}, {300, 30}}};
+  std::array<AegpLayerTransform, 3> layer_transforms{};
   int32_t active_camera_layer_index{-1};
   AegpSelectionCollection selection{};
 

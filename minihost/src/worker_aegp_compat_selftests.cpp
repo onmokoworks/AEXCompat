@@ -572,6 +572,7 @@ bool verify_aegp_resizer_3d_chain() {
   g_hooks.get_dimensions(&saved_width, &saved_height);
   const auto saved_in_points = g_aegp_layer_in_points;
   const auto saved_durations = g_aegp_layer_durations;
+  const auto saved_transforms = g_aegp_layer_transforms;
   g_aegp_active_camera_layer_index = 2;
   g_aegp_layer_in_points[2] = {0, 30};
   g_aegp_layer_durations[2] = {300, 30};
@@ -597,6 +598,41 @@ bool verify_aegp_resizer_3d_chain() {
     for (std::size_t column = 0; column < 4; ++column)
       ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
   }
+  g_aegp_layer_transforms[2] = {};
+  g_aegp_layer_transforms[2].anchor = {{1.0, 2.0, 3.0}};
+  g_aegp_layer_transforms[2].position = {{10.0, 20.0, 30.0}};
+  g_aegp_layer_transforms[2].scale = {{200.0, 50.0, 100.0}};
+  g_aegp_layer_transforms[2].rotation_degrees = {{0.0, 0.0, 90.0}};
+  g_aegp_layer_transforms[2].is_3d = true;
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0;
+  const auto near = [](double actual, double expected) {
+    return std::abs(actual - expected) < 1.0e-9;
+  };
+  const double expected[4][4] = {
+      {0.0, -0.5, 0.0, 11.0},
+      {2.0, 0.0, 0.0, 18.0},
+      {0.0, 0.0, 1.0, 27.0},
+      {0.0, 0.0, 0.0, 1.0}};
+  for (std::size_t row = 0; row < 4; ++row)
+    for (std::size_t column = 0; column < 4; ++column)
+      ok = ok && near(matrix.mat[row][column], expected[row][column]);
+  AegpMatrix4 matrix_sentinel{};
+  std::memset(&matrix_sentinel, 0x5a, sizeof(matrix_sentinel));
+  g_aegp_layer_transforms[2].scale[0] = 0.0;
+  matrix = matrix_sentinel;
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  g_aegp_layer_transforms[2].scale[0] = 200.0;
+  g_aegp_layer_transforms[2].rotation_degrees[1] =
+      std::numeric_limits<double>::quiet_NaN();
+  matrix = matrix_sentinel;
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  int foreign_layer = 0;
+  matrix = matrix_sentinel;
+  ok = ok && aegp_get_layer_to_world_xform(&foreign_layer, &time, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  g_aegp_layer_transforms[2] = saved_transforms[2];
   AegpLegacyStreamVal zoom{-1.0};
   int32_t type = -1;
   ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
@@ -616,8 +652,6 @@ bool verify_aegp_resizer_3d_chain() {
       &time, 0, &sentinel, &type) != 0 && sentinel.one_d == -2.0 && type == -2 &&
       aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 10, 1,
       &time, 0, &sentinel, &type) != 0 && sentinel.one_d == -2.0 && type == -2;
-  AegpMatrix4 matrix_sentinel{};
-  std::memset(&matrix_sentinel, 0x5a, sizeof(matrix_sentinel));
   matrix = matrix_sentinel;
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &invalid, &matrix) != 0 &&
       std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
@@ -637,6 +671,7 @@ bool verify_aegp_resizer_3d_chain() {
   g_hooks.set_dimensions(saved_width, saved_height);
   g_aegp_layer_in_points = saved_in_points;
   g_aegp_layer_durations = saved_durations;
+  g_aegp_layer_transforms = saved_transforms;
   return ok && suite_leases_balanced();
 }
 
