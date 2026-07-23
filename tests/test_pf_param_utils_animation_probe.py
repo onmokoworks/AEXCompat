@@ -1,14 +1,16 @@
-import hashlib
 import json
 import os
 import subprocess
 from pathlib import Path
+
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments/pf-param-utils-animation-probe/pf_param_utils_animation_probe.cpp"
 RC = ROOT / "instruments/pf-param-utils-animation-probe/pf_param_utils_animation_probe.rc"
 SCRIPT = ROOT / "tools/build-pf-param-utils-animation-probe.ps1"
 PROBE = ROOT / "target/pf-param-utils-animation-probe-build/Release/pf_param_utils_animation_probe.aex"
+HARNESS = ROOT / "broker/target/release/aexcompat-harness.exe"
 
 
 def _worker():
@@ -42,9 +44,10 @@ def test_real_aex_animation_sidecar_adversarial_probe(tmp_path):
     worker = _worker()
     assert worker is not None, "build the VS2022 C++ render worker first"
     assert PROBE.is_file(), "run the focused build test first"
-    input_path = tmp_path / "input.rgba"
-    output_path = tmp_path / "output.rgba"
-    input_path.write_bytes(bytes([255, 0, 0, 0]) * (7 * 5))
+    assert HARNESS.is_file(), "build the broker Release harness first"
+    input_path = tmp_path / "input.png"
+    output_path = tmp_path / "output.png"
+    Image.frombytes("RGBA", (7, 5), bytes([255, 0, 0, 0]) * (7 * 5)).save(input_path)
     sidecar_dir = ROOT / "target/image-transport"
     sidecar_dir.mkdir(parents=True, exist_ok=True)
     sidecar = sidecar_dir / "pf-param-utils-animation-probe.json"
@@ -54,16 +57,16 @@ def test_real_aex_animation_sidecar_adversarial_probe(tmp_path):
         {"time": {"value": 24, "scale": 24}, "interpolation": "hold", "value": {"type": "scalar", "value": 30}},
     ]}]}), encoding="utf-8")
     try:
-        completed = subprocess.run([str(worker), "--render-image", str(PROBE),
-            hashlib.sha256(PROBE.read_bytes()).hexdigest(), "v5|", str(input_path), str(output_path),
-            "7", "5", "12", "1", "24", "1", "--parameter-animation-v1", str(sidecar.resolve())],
+        completed = subprocess.run([str(HARNESS), "--render-experimental-session-animation",
+            str(PROBE), str(input_path), str(output_path), "12", "24", "1", str(sidecar.resolve())],
             cwd=ROOT, text=True, encoding="utf-8", errors="replace", capture_output=True,
             timeout=30, check=False)
     finally:
         sidecar.unlink(missing_ok=True)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     report = json.loads(completed.stdout)
-    assert report["render_error"] == 0 and report["suite_leases_balanced"] is True
-    assert report["return_message"].startswith("PFPUAP:v1 status=pass mask=0")
-    assert "reject=double,foreign identical=T,F lease=released" in report["return_message"]
-    assert output_path.read_bytes() == bytes([0, 211, 0, 255]) * (7 * 5)
+    assert report["passed"] is True
+    assert report["output_transport"] == "rgba8_png"
+    assert report["suite_leases_balanced"] is True
+    assert report["worker_diagnostics"]["exit_code"] == 0
+    assert Image.open(output_path).convert("RGBA").tobytes() == bytes([0, 211, 0, 255]) * (7 * 5)

@@ -9,6 +9,8 @@ def test_built_artifact_probes_have_a_supported_session_only_entrypoint():
     source = HARNESS_SOURCE.read_text(encoding="utf-8")
     assert 'session_command == Some("--render-experimental-session")' in source
     assert 'session_command == Some("--render-experimental-session-param")' in source
+    assert '"--render-experimental-session-animation"' in source
+    assert "render_experimental_image_with_parameter_animation" in source
     assert "parameter.value = value" in source
     assert "render_experimental_image_at_time_with_format" in source
     assert "the deleted one-shot image argv" in source
@@ -29,6 +31,7 @@ def test_built_artifact_probes_have_a_supported_session_only_entrypoint():
         "test_pf_transfer_mask_probe.py",
         "test_pf_transfer_rect_probe.py",
         "test_pf_transform_affine_probe.py",
+        "test_pf_param_utils_animation_probe.py",
         "test_worker_parameter_discovery.py",
     )
     for name in migrated:
