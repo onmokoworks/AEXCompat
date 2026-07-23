@@ -1,10 +1,6 @@
-import os
 from pathlib import Path
 
-import hashlib
-import json
-import subprocess
-import source_owners
+from _render_session import run_session_render
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,22 +32,19 @@ def test_current_host_needs_a_pre_claim_gate_for_deterministic_cancellation():
     assert "found->second->gate_changed.notify_one()" in runtime
 
 
-def test_real_probe_deterministically_cancels_before_completion(tmp_path):
-    worker = ROOT / "target/minihost-build/aex_render_worker.exe"
+def test_real_probe_deterministically_cancels_before_completion(tmp_path, monkeypatch):
     probe = ROOT / "target/pf-aegp-async-cancel-probe-build/Release/pf_aegp_async_cancel_probe.aex"
     source = ROOT / "target/gpu-effects/opencl-input.rgba"
     output = tmp_path / "async-canceled-output.rgba"
-    env = os.environ.copy()
-    env["AEXCOMPAT_TEST_ASYNC_CANCEL_GATE"] = "1"
-    completed = subprocess.run(
-        [str(worker), "--render-image", str(probe),
-         hashlib.sha256(probe.read_bytes()).hexdigest(), "v5|", str(source),
-         str(output), "37", "23", "0", "1", "1", "1"],
-        cwd=ROOT, env=env, text=True, encoding="utf-8", errors="replace",
-        capture_output=True, timeout=30,
+    monkeypatch.setenv("AEXCOMPAT_TEST_ASYNC_CANCEL_GATE", "1")
+    report = run_session_render(
+        tmp_path,
+        probe,
+        source,
+        output,
+        width=37,
+        height=23,
     )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    report = json.loads(completed.stdout)
     assert report["status"] == "render_completed"
     assert report["async_layer_requests_balanced"] is True
     assert report["async_layer_requests_created"] == 1
