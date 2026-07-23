@@ -10,10 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aexcompat_broker::image_render::{
     InteractiveParameter, RenderGpuBackend, RenderPixelFormat,
@@ -24,6 +24,8 @@ use serde_json;
 use sha2::{Digest, Sha256};
 
 const FRAME_DEADLINE_MS: u64 = 30_000;
+const OPEN_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+const CLOSE_JOIN_GRACE_MS: u64 = 100;
 
 struct RenderRequest {
     frame_index: u32,
@@ -137,15 +139,16 @@ fn open_session(
     total_time: i32,
     time_scale: u32,
     smart: bool,
-    parameters: Vec<InteractiveParameter>,
     rx: Receiver<RenderRequest>,
 ) -> Result<(), String> {
-    let baseline = (!parameters.is_empty()).then_some(parameters.as_slice());
     let mut session = RenderSession::open(SessionOpenRequest {
         repository: &repository,
         plugin_path: &plugin,
         plugin_sha256: &plugin_sha256,
-        parameters: baseline,
+        // YMM4 sends the complete current parameter payload with every frame.
+        // Avoid rediscovering parameters on Open, which can block before the
+        // managed processor has rendered once when an AEX is unresponsive.
+        parameters: None,
         parameter_animation: None,
         aux_manifest: None,
         world_dump_dir: None,
@@ -218,7 +221,18 @@ impl Drop for AexYmm4Session {
     fn drop(&mut self) {
         self.tx.take();
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            // A misbehaving worker is already protected by RenderSession's
+            // frame watchdog. Do not let YMM4's processor teardown wait
+            // indefinitely if the owning thread is inside a broken open or
+            // render call; dropping the handle detaches it and lets the
+            // broker's watchdog finish cleanup.
+            let deadline = Instant::now() + Duration::from_millis(CLOSE_JOIN_GRACE_MS);
+            while !join.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if join.is_finished() {
+                let _ = join.join();
+            }
         }
     }
 }
@@ -241,8 +255,6 @@ pub unsafe extern "C" fn aexcompat_ymm4_open(
             return Err("invalid YMM4 session geometry or timing".to_string());
         }
         let plugin_sha256 = plugin_sha256(&plugin)?;
-        let parameters =
-            discover_parameters(&repository, &plugin, &plugin_sha256).unwrap_or_default();
         let (tx, rx) = channel::<RenderRequest>();
         let (open_tx, open_rx) = channel::<Result<(), String>>();
         let join = thread::Builder::new()
@@ -258,7 +270,6 @@ pub unsafe extern "C" fn aexcompat_ymm4_open(
                     total_time,
                     time_scale,
                     smart != 0,
-                    parameters,
                     rx,
                 );
                 if let Err(error) = &result {
@@ -268,7 +279,7 @@ pub unsafe extern "C" fn aexcompat_ymm4_open(
                 }
             })
             .map_err(|error| format!("spawn session thread failed: {error}"))?;
-        match open_rx.recv() {
+        match open_rx.recv_timeout(Duration::from_millis(OPEN_HANDSHAKE_TIMEOUT_MS)) {
             Ok(Ok(())) => Ok(AexYmm4Session {
                 tx: Some(tx),
                 join: Some(join),
@@ -278,9 +289,19 @@ pub unsafe extern "C" fn aexcompat_ymm4_open(
                 let _ = join.join();
                 Err(error)
             }
-            Err(error) => {
+            Err(RecvTimeoutError::Disconnected) => {
                 let _ = join.join();
-                Err(format!("session open handshake failed: {error}"))
+                Err("session open handshake failed: session thread stopped".to_string())
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                // The sender is dropped as this scope unwinds, so a session
+                // that eventually finishes opening observes a closed request
+                // channel and cleans itself up. The native ABI must not keep
+                // YMM4 blocked while an AEX or loader is unresponsive.
+                drop(join);
+                Err(format!(
+                    "YMM4 session open exceeded the {OPEN_HANDSHAKE_TIMEOUT_MS}ms deadline"
+                ))
             }
         }
     })();
@@ -378,29 +399,36 @@ pub unsafe extern "C" fn aexcompat_ymm4_render(
                 reply: reply_tx,
             })
             .map_err(|_| "YMM4 session thread stopped".to_string())?;
-        match reply_rx
-            .recv()
-            .map_err(|_| "YMM4 render reply lost".to_string())?
-        {
-            RenderReply::Rendered {
-                pixels,
-                width,
-                height,
-            } => {
-                if pixels.len() > output_len {
-                    return Err(format!(
-                        "AEX output {} bytes exceeds YMM4 buffer {output_len}",
-                        pixels.len()
-                    ));
+        match reply_rx.recv_timeout(Duration::from_millis(FRAME_DEADLINE_MS + 1_000)) {
+            Ok(reply) => match reply {
+                RenderReply::Rendered {
+                    pixels,
+                    width,
+                    height,
+                } => {
+                    if pixels.len() > output_len {
+                        return Err(format!(
+                            "AEX output {} bytes exceeds YMM4 buffer {output_len}",
+                            pixels.len()
+                        ));
+                    }
+                    unsafe {
+                        ptr::copy_nonoverlapping(pixels.as_ptr(), output, pixels.len());
+                        *output_width = width;
+                        *output_height = height;
+                    }
+                    Ok(())
                 }
-                unsafe {
-                    ptr::copy_nonoverlapping(pixels.as_ptr(), output, pixels.len());
-                    *output_width = width;
-                    *output_height = height;
-                }
-                Ok(())
+                RenderReply::Error(error) => Err(error),
+            },
+            Err(RecvTimeoutError::Timeout) => {
+                session.tx.take();
+                Err(format!(
+                    "YMM4 render reply exceeded the {}ms deadline",
+                    FRAME_DEADLINE_MS + 1_000
+                ))
             }
-            RenderReply::Error(error) => Err(error),
+            Err(RecvTimeoutError::Disconnected) => Err("YMM4 render reply lost".to_string()),
         }
     })();
 

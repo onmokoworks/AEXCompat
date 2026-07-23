@@ -182,22 +182,39 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
                         $"AEX changed frame size to {outputWidth}x{outputHeight}; YMM4 bridge requires fixed size");
                 }
 
-                ReplaceOutput(CreateOutputBitmap(rgbaOutput, size));
+                UpdateOutputBitmap(rgbaOutput, size);
                 lastError = null;
             }
         }
         catch (Exception ex)
         {
-            UseInput(ex.Message);
+            lock (gate)
+            {
+                if (IsSessionFatal(ex.Message))
+                {
+                    CloseSession();
+                }
+
+                UseInput(ex.Message);
+            }
         }
 
         return effectDescription.DrawDescription;
+    }
+
+    private static bool IsSessionFatal(string message)
+    {
+        return message.StartsWith("YMM4 render reply exceeded", StringComparison.Ordinal)
+            || message.StartsWith("YMM4 render reply lost", StringComparison.Ordinal)
+            || message.StartsWith("YMM4 session thread stopped", StringComparison.Ordinal)
+            || message.StartsWith("YMM4 session is closed", StringComparison.Ordinal);
     }
 
     public void Dispose()
     {
         lock (gate)
         {
+            input = null;
             CloseSession();
             ReplaceOutput(null);
         }
@@ -295,7 +312,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         }
     }
 
-    private ID2D1Bitmap1 CreateOutputBitmap(byte[] rgba, System.Drawing.Size size)
+    private void UpdateOutputBitmap(byte[] rgba, System.Drawing.Size size)
     {
         var bgra = new byte[rgba.Length];
         for (var index = 0; index < rgba.Length; index += 4)
@@ -310,12 +327,24 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         var handle = GCHandle.Alloc(bgra, GCHandleType.Pinned);
         try
         {
-            var format = new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlphaMode.Premultiplied);
-            return deviceContext.CreateBitmap(
-                new SizeI(size.Width, size.Height),
-                handle.AddrOfPinnedObject(),
-                size.Width * 4,
-                new BitmapProperties1(format, 96, 96, BitmapOptions.None));
+            if (output is null
+                || output.PixelSize.Width != size.Width
+                || output.PixelSize.Height != size.Height)
+            {
+                var format = new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlphaMode.Premultiplied);
+                var next = deviceContext.CreateBitmap(
+                    new SizeI(size.Width, size.Height),
+                    handle.AddrOfPinnedObject(),
+                    size.Width * 4,
+                    new BitmapProperties1(format, 96, 96, BitmapOptions.None));
+                var previous = output;
+                output = next;
+                previous?.Dispose();
+            }
+            else
+            {
+                output.CopyFromMemory(handle.AddrOfPinnedObject(), size.Width * 4);
+            }
         }
         finally
         {
