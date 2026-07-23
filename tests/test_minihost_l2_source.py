@@ -100,8 +100,12 @@ class MinihostL2SourceTests(unittest.TestCase):
             "PluginDataEntryFunction",
             "invoke_plugin_data_entry2_seh",
             "invoke_plugin_data_entry1_seh",
+            "resolve_plugin_data_entrypoints",
+            "&g_basic_suite",
             "plugin_data_callback2",
             "plugin_data_callback1",
+            "kPluginDataRejected = 3",
+            "value == 0x7f",
             'L"--self-test-plugin-data-entrypoint"',
             '"invalid_pipl"',
         ):

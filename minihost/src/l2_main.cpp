@@ -644,7 +644,7 @@ constexpr std::size_t kPluginDataNameBytes = 256;
 constexpr std::size_t kPluginDataCategoryBytes = 256;
 constexpr std::size_t kPluginDataEntryBytes = 128;
 constexpr std::size_t kPluginDataSupportUrlBytes = 1024;
-constexpr int32_t kPluginDataRejected = 4;  // A_Err_PARAMETER
+constexpr int32_t kPluginDataRejected = 3;  // A_Err_PARAMETER
 constexpr int32_t kPluginDataException = 512;
 constexpr int32_t kPluginDataReservedInfo = 8;
 constexpr int32_t kPluginDataApiMajor = 13;
@@ -659,14 +659,14 @@ struct BoundedPluginDataText {
   std::size_t length{};
   bool readable{};
   bool terminated{};
-  bool printable{};
+  bool safe_bytes{};
 };
 
 template <std::size_t Capacity>
 BoundedPluginDataText<Capacity> copy_bounded_plugin_data_text(
     const unsigned char* source) noexcept {
   BoundedPluginDataText<Capacity> copy;
-  copy.printable = true;
+  copy.safe_bytes = true;
   if (!source) return copy;
   __try {
     for (; copy.length < Capacity; ++copy.length) {
@@ -675,7 +675,10 @@ BoundedPluginDataText<Capacity> copy_bounded_plugin_data_text(
         copy.terminated = true;
         break;
       }
-      if (value < 0x20 || value > 0x7e) copy.printable = false;
+      // Metadata is an opaque byte string in the PluginData ABI.  Preserve
+      // bounded/NUL-terminated copying and reject C0 controls and DEL, but do
+      // not reject valid non-ASCII localized names, categories, or URLs.
+      if (value < 0x20 || value == 0x7f) copy.safe_bytes = false;
       copy.text[copy.length] = static_cast<char>(value);
     }
     copy.readable = true;
@@ -713,7 +716,7 @@ struct PluginDataContext {
 };
 
 bool valid_plugin_data_export_name(const BoundedPluginDataText<kPluginDataEntryBytes>& text) {
-  if (!text.readable || !text.terminated || !text.printable || text.length == 0 ||
+  if (!text.readable || !text.terminated || !text.safe_bytes || text.length == 0 ||
       text.length > 127) return false;
   if (!(text.text[0] == '_' || (text.text[0] >= 'A' && text.text[0] <= 'Z') ||
         (text.text[0] >= 'a' && text.text[0] <= 'z')))
@@ -735,7 +738,7 @@ bool plugin_data_effect_kind(int32_t kind) {
 template <std::size_t Capacity>
 bool valid_plugin_data_text(const BoundedPluginDataText<Capacity>& text,
                             bool required) {
-  return text.readable && text.terminated && text.printable &&
+  return text.readable && text.terminated && text.safe_bytes &&
       (!required || text.length != 0);
 }
 
@@ -837,7 +840,7 @@ int32_t invoke_plugin_data_entry2_seh(PluginDataEntry2 entry,
   if (!entry || !context) return kPluginDataRejected;
   int32_t result = kPluginDataRejected;
   __try {
-    result = entry(context, &plugin_data_callback2, nullptr,
+    result = entry(context, &plugin_data_callback2, &g_basic_suite,
                    "AEXCompat", "2025");
   } __except(plugin_data_exception_filter(GetExceptionInformation(),
                                            &context->exception_code)) {
@@ -851,7 +854,7 @@ int32_t invoke_plugin_data_entry1_seh(PluginDataEntry1 entry,
   if (!entry || !context) return kPluginDataRejected;
   int32_t result = kPluginDataRejected;
   __try {
-    result = entry(context, &plugin_data_callback1, nullptr,
+    result = entry(context, &plugin_data_callback1, &g_basic_suite,
                    "AEXCompat", "2025");
   } __except(plugin_data_exception_filter(GetExceptionInformation(),
                                            &context->exception_code)) {
@@ -860,12 +863,8 @@ int32_t invoke_plugin_data_entry1_seh(PluginDataEntry1 entry,
   return result;
 }
 
-PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
-  if (!module) return {PiplPluginKind::Unknown, {}};
-  const auto entry2 = reinterpret_cast<PluginDataEntry2>(
-      GetProcAddress(module, "PluginDataEntryFunction2"));
-  const auto entry1 = reinterpret_cast<PluginDataEntry1>(
-      GetProcAddress(module, "PluginDataEntryFunction"));
+PiplEntrypoint resolve_plugin_data_entrypoints(PluginDataEntry2 entry2,
+                                               PluginDataEntry1 entry1) {
   if (!entry2 && !entry1) return {PiplPluginKind::Unknown, {}};
   PluginDataContext context;
   const int32_t result = entry2
@@ -879,10 +878,21 @@ PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
                       context.registration.entrypoint_length)};
 }
 
+PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
+  if (!module) return {PiplPluginKind::Unknown, {}};
+  const auto entry2 = reinterpret_cast<PluginDataEntry2>(
+      GetProcAddress(module, "PluginDataEntryFunction2"));
+  const auto entry1 = reinterpret_cast<PluginDataEntry1>(
+      GetProcAddress(module, "PluginDataEntryFunction"));
+  return resolve_plugin_data_entrypoints(entry2, entry1);
+}
+
 int32_t __cdecl synthetic_plugin_data_entry2(
-    PluginDataOpaque* in_ptr, PluginDataCallback2 callback, void*, const char*,
-    const char*) {
-  if (!callback) return kPluginDataRejected;
+    PluginDataOpaque* in_ptr, PluginDataCallback2 callback, void* basic_suite,
+    const char* host, const char* version) {
+  if (!callback || !basic_suite || !host || !version ||
+      std::strcmp(host, "AEXCompat") != 0 || std::strcmp(version, "2025") != 0)
+    return kPluginDataRejected;
   return callback(in_ptr,
       reinterpret_cast<const unsigned char*>("Synthetic Effect"),
       reinterpret_cast<const unsigned char*>("AEXCompat Synthetic"),
@@ -894,9 +904,11 @@ int32_t __cdecl synthetic_plugin_data_entry2(
 }
 
 int32_t __cdecl synthetic_plugin_data_entry1(
-    PluginDataOpaque* in_ptr, PluginDataCallback1 callback, void*, const char*,
-    const char*) {
-  if (!callback) return kPluginDataRejected;
+    PluginDataOpaque* in_ptr, PluginDataCallback1 callback, void* basic_suite,
+    const char* host, const char* version) {
+  if (!callback || !basic_suite || !host || !version ||
+      std::strcmp(host, "AEXCompat") != 0 || std::strcmp(version, "2025") != 0)
+    return kPluginDataRejected;
   return callback(in_ptr,
       reinterpret_cast<const unsigned char*>("Synthetic v1 Effect"),
       reinterpret_cast<const unsigned char*>("AEXCompat Synthetic v1"),
@@ -907,17 +919,13 @@ int32_t __cdecl synthetic_plugin_data_entry1(
 }
 
 bool verify_plugin_data_entrypoint() {
-  PluginDataContext v2;
-  if (invoke_plugin_data_entry2_seh(&synthetic_plugin_data_entry2, &v2) != 0 ||
-      !v2.registration.valid || v2.registration.support_url_length == 0 ||
-      std::string(v2.registration.entrypoint.data(),
-                  v2.registration.entrypoint_length) != "entryPointFunc")
+  const auto v2 = resolve_plugin_data_entrypoints(&synthetic_plugin_data_entry2,
+                                                  &synthetic_plugin_data_entry1);
+  if (v2.kind != PiplPluginKind::Effect || v2.symbol != "entryPointFunc")
     return false;
-  PluginDataContext v1;
-  if (invoke_plugin_data_entry1_seh(&synthetic_plugin_data_entry1, &v1) != 0 ||
-      !v1.registration.valid || v1.registration.support_url_present ||
-      std::string(v1.registration.entrypoint.data(),
-                  v1.registration.entrypoint_length) != "EffectMain")
+  const auto v1 = resolve_plugin_data_entrypoints(nullptr,
+                                                  &synthetic_plugin_data_entry1);
+  if (v1.kind != PiplPluginKind::Effect || v1.symbol != "EffectMain")
     return false;
   PluginDataContext duplicate;
   // Duplicate registrations are accepted and ignored: both calls must succeed
@@ -939,6 +947,19 @@ bool verify_plugin_data_entrypoint() {
       duplicate.callback_count != 2 ||
       std::string(duplicate.registration.name.data(),
                   duplicate.registration.name_length) != "Name")
+    return false;
+  PluginDataContext localized;
+  const unsigned char localized_name[] = {0xe3, 0x83, 0x86, 0x00};
+  const unsigned char localized_match[] = {0xe3, 0x82, 0xb9, 0x00};
+  const unsigned char localized_category[] = {0xe3, 0x83, 0x88, 0x00};
+  const unsigned char localized_url[] = {0x68, 0x74, 0x74, 0x70, 0x73,
+                                          0x3a, 0x2f, 0x2f, 0xe3, 0x00};
+  if (plugin_data_callback2(
+          &localized, localized_name, localized_match, localized_category,
+          reinterpret_cast<const unsigned char*>("EffectMain"),
+          static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+          kPluginDataApiMinor, kPluginDataReservedInfo, localized_url) != 0 ||
+      !localized.registration.valid || !localized.registration.support_url_present)
     return false;
   PluginDataContext invalid_pointer;
   return plugin_data_callback1(
