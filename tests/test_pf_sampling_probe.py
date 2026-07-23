@@ -6,13 +6,14 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from _render_session import run_session_render
+from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / "instruments" / "pf-sampling-probe"
+SOURCE = PROBE / "pf_sampling_probe.cpp"
 WORKER = ROOT / "target/minihost-build/aex_render_worker.exe"
 AEX = ROOT / "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex"
 INPUT = ROOT / "target/gpu-effects/opencl-input.rgba"
@@ -160,6 +161,7 @@ def _expected_output(raw, width, height, format_name):
     ("argb32f", "argb32f"),
 ))
 def test_real_probe_depth_matrix_has_numeric_oracle(tmp_path, pixel_format, format_name):
+    assert_artifact_fresh(AEX, SOURCE, WORKER, HARNESS)
     output = tmp_path / f"sampling-{format_name}.rgba"
     report = run_session_render(
         tmp_path, AEX, INPUT, output, width=37, height=23,

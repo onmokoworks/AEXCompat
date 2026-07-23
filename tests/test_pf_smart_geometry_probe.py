@@ -2,10 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from _render_session import run_session_render
+from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SOURCE = ROOT / "instruments" / "pf-smart-geometry-probe" / "pf_smart_geometry_probe.cpp"
 WORKER = ROOT / "target" / "minihost-build" / "aex_smart_worker.exe"
 PROBE = ROOT / "target" / "pf-smart-geometry-probe-build" / "Release" / "pf_smart_geometry_probe.aex"
 WIDTH, HEIGHT = 16, 12
@@ -67,6 +68,7 @@ def _run(tmp_path, pixel_format, mode):
     assert PROBE.exists(), (
         "build the probe first: tools/build-pf-smart-geometry-probe.ps1"
     )
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
     input_path = tmp_path / f"input-{pixel_format}-{mode}.rgba"
     input_path.write_bytes(bytes(index % 251 for index in range(WIDTH * HEIGHT * 4)))
     output_path = tmp_path / f"output-{pixel_format}-{mode}.bin"

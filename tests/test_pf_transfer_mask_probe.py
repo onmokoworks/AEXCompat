@@ -3,7 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from _render_session import run_session_render
+from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +28,7 @@ def test_probe_builds_with_exact_mask_abi_and_flags():
 
 
 def test_real_mask_probe_crosses_the_aex_boundary(tmp_path):
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
     output = tmp_path / "transfer-mask-output.rgba"
     report = run_session_render(tmp_path, PROBE, INPUT, output, width=37, height=23)
     assert report["status"] == "render_completed" and report["render_error"] == 0

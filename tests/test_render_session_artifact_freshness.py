@@ -15,6 +15,12 @@ SESSION_PROBE_TESTS = (
     "test_pf_aegp_owned_world_probe.py",
     "test_pf_aegp_platform_world_probe.py",
     "test_pf_aegp_render_options4_tail_probe.py",
+    "test_pf_convolve_depth_probe.py",
+    "test_pf_sampling_probe.py",
+    "test_pf_smart_geometry_probe.py",
+    "test_pf_transfer_mask_probe.py",
+    "test_pf_transfer_rect_probe.py",
+    "test_pf_transform_affine_probe.py",
     "test_worker_parameter_discovery.py",
 )
 
@@ -23,7 +29,7 @@ SESSION_PROBE_TESTS = (
 def test_session_probe_callers_guard_artifact_provenance(filename):
     source = Path(__file__).with_name(filename).read_text(encoding="utf-8")
     assert "assert_artifact_fresh" in source
-    assert "PROBE, SOURCE, WORKER, HARNESS" in source
+    assert "SOURCE, WORKER, HARNESS" in source
 
 
 def test_stale_artifact_is_rejected_with_rebuild_diagnostic(tmp_path):

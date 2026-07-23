@@ -3,7 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from _render_session import run_session_render
+from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-convolve-depth-probe" / "pf_convolve_depth_probe.cpp"
@@ -38,6 +38,7 @@ def test_probe_has_exact_identity_border_and_alias_vectors():
 
 def test_real_probe_validates_argb8_convolution_and_aliasing(tmp_path):
     assert WORKER.is_file() and PROBE.is_file() and INPUT.is_file()
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
     output = tmp_path / "convolve-depth-output.rgba"
     report = run_session_render(tmp_path, PROBE, INPUT, output, width=37, height=23)
     assert report["status"] == "render_completed"

@@ -3,7 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from _render_session import run_session_render
+from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-transfer-rect-probe" / "pf_transfer_rect_probe.cpp"
@@ -33,6 +33,7 @@ def test_host_accepts_all_public_sdk_transfer_modes_and_rejects_reserved_values(
     assert "hash & 0x00ffffffu" in source
 
 def test_real_probe_validates_transfer_pixels(tmp_path):
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
     output = tmp_path / "transfer-output.rgba"
     report = run_session_render(tmp_path, PROBE, INPUT, output, width=37, height=23)
     assert report["status"] == "render_completed" and report["render_error"] == 0
