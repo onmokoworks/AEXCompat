@@ -92,6 +92,18 @@ def test_single_layer_authored_transform_is_bounded_and_fail_closed():
     assert "std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0" in source
 
 
+def test_parent_layer_transform_chain_is_bounded_and_fail_closed():
+    source = scene_source() + (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
+        encoding="utf-8")
+    assert "std::array<int32_t, 3> layer_parent_indices{{-1, -1, -1}}" in source
+    assert "constexpr std::size_t kMaxParentDepth = 8" in source
+    assert "visited[current]" in source
+    assert "world = multiply(local, world)" in source
+    assert "g_aegp_layer_parent_indices" in source
+    assert "parent_index < 0" in source
+    assert "parent_index >= 0" not in source
+
+
 def test_native_self_test_covers_all_three_release_workers():
     for worker_name in ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe"):
         worker = BUILD / worker_name

@@ -127,6 +127,7 @@ extern uint32_t& g_aegp_legacy_effect_stream_generation;
 extern std::array<AegpTime, 3>& g_aegp_layer_in_points;
 extern std::array<AegpTime, 3>& g_aegp_layer_durations;
 extern std::array<AegpLayerTransform, 3>& g_aegp_layer_transforms;
+extern std::array<int32_t, 3>& g_aegp_layer_parent_indices;
 
 extern AegpItemSuite g_aegp_item_suite;
 extern AegpLegacyItemSuite6 g_aegp_legacy_item_suite6;
