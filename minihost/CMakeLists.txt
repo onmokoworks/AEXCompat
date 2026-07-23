@@ -22,6 +22,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/gpu_opencl_backend.cpp
     src/host_audio_runtime.cpp
     src/aex_string_table_impl.cpp
+    src/extended_inter_memory.cpp
     src/l2_cli_dispatch.cpp
     src/l2_mode_execution.cpp
     src/l2_main.cpp
@@ -169,6 +170,13 @@ target_compile_features(aex_string_table_selftest PRIVATE cxx_std_17)
 target_include_directories(aex_string_table_selftest PRIVATE src)
 target_compile_definitions(aex_string_table_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+add_executable(extended_inter_memory_selftest
+  ../tests/native/extended_inter_memory_selftest.cpp
+  src/extended_inter_memory.cpp
+)
+target_compile_features(extended_inter_memory_selftest PRIVATE cxx_std_17)
+target_include_directories(extended_inter_memory_selftest PRIVATE src)
 
 add_executable(worker_classic_runtime_selftest
   ../tests/native/worker_classic_runtime_selftest.cpp
