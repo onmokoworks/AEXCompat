@@ -23,6 +23,7 @@ struct WorldView {
   int32_t width{};
   int32_t height{};
   int32_t pixel_bytes{};
+  int32_t pixel_format{};
 };
 
 struct HostHooks {

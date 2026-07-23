@@ -5,6 +5,7 @@
 #include "worker_handle_runtime.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_pf_path_runtime.hpp"
+#include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
 
 #include <algorithm>
@@ -1350,11 +1351,31 @@ bool snapshot_pf_path(void* handle, aexcompat::mask_runtime::CurveSnapshot& curv
 bool bounded_pf_path_world(void* world,
     aexcompat::pf_path_runtime::WorldView& view) {
   if (!world) return false;
-  int32_t flags{};
-  std::memcpy(&flags, static_cast<std::byte*>(world) + 16, sizeof(flags));
-  view.pixel_bytes = (flags & 1) != 0 ? 8 : 4;
-  return bounded_typed_world(world, view.pixel_bytes, view.pixels, view.rowbytes,
-                             view.width, view.height);
+  aexcompat::world_safety::DispatchWorldFormat resolved{};
+  if (!aexcompat::world_registry::resolve_dispatch_world_format(world, resolved))
+    return false;
+  int32_t pixel_bytes{};
+  switch (resolved.pixel_format) {
+    case aexcompat::world_registry::kPixelFormatArgb32:
+      pixel_bytes = 4;
+      break;
+    case aexcompat::world_registry::kPixelFormatArgb64:
+      pixel_bytes = 8;
+      break;
+    case aexcompat::world_registry::kPixelFormatArgb128:
+      pixel_bytes = 16;
+      break;
+    default:
+      return false;
+  }
+  unsigned char* pixels{};
+  int32_t rowbytes{}, width{}, height{};
+  if (!bounded_typed_world(world, pixel_bytes, pixels, rowbytes, width, height) ||
+      resolved.data != pixels || resolved.rowbytes != rowbytes ||
+      resolved.width != width || resolved.height != height)
+    return false;
+  view = {pixels, rowbytes, width, height, pixel_bytes, resolved.pixel_format};
+  return true;
 }
 
 std::size_t distinct_vertex_count(const OutlineData& mask) {

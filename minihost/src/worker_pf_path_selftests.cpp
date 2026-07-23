@@ -1,8 +1,13 @@
 #include "worker_pf_path_selftests.hpp"
 #include "worker_pf_path_runtime.hpp"
+#include "worker_world_registry.hpp"
+#include "worker_world_safety.hpp"
 
+#include <cstddef>
 #include <cmath>
+#include <cstring>
 #include <utility>
+#include <vector>
 
 namespace aexcompat::l2_detail {
 
@@ -114,6 +119,94 @@ bool verify_pf_path_data_hardening(aexcompat::pf_path_runtime::HostHooks path_ho
           {{0, 0, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 0}},
           1.0, 1e-10, 0.5, 0.0, 1e-8, false))
     return false;
+  if (!install_scene({{20, false, {{0, 0, 0, 0, 0, 0},
+                                  {4, 0, 0, 0, 0, 0},
+                                  {4, 4, 0, 0, 0, 0},
+                                  {0, 0, 0, 0, 0, 0}}}}))
+    return false;
+  void* render_path = nullptr;
+  if (aexcompat::pf_path_runtime::checkout_path(effect_ref(), 20, 0, 1, 1,
+                                                  &render_path) != 0)
+    return false;
+  const auto checkin_render_path = [&] {
+    return aexcompat::pf_path_runtime::checkin_path(effect_ref(), 20, 0,
+                                                     render_path) == 0;
+  };
+  const auto render_format = [&](int32_t pixel_format, int32_t pixel_bytes) {
+    constexpr int32_t width = 8;
+    constexpr int32_t height = 8;
+    const int32_t rowbytes = width * pixel_bytes + pixel_bytes;
+    std::vector<std::byte> pixels(static_cast<std::size_t>(rowbytes) * height,
+                                  std::byte{0xcd});
+    const auto set_channel = [&](int32_t x, int32_t y) {
+      auto* pixel = pixels.data() + static_cast<std::size_t>(y) * rowbytes +
+          static_cast<std::size_t>(x) * pixel_bytes;
+      if (pixel_format == aexcompat::world_registry::kPixelFormatArgb32) {
+        pixel[0] = std::byte{0xff};
+      } else if (pixel_format == aexcompat::world_registry::kPixelFormatArgb64) {
+        const uint16_t value = 0xffff;
+        std::memcpy(pixel, &value, sizeof(value));
+      } else {
+        const float value = 1.0f;
+        std::memcpy(pixel, &value, sizeof(value));
+      }
+    };
+    set_channel(1, 1);
+    aexcompat::world_safety::LocalEffectWorld world{};
+    world.world_flags = 2 | (pixel_format == aexcompat::world_registry::kPixelFormatArgb32 ? 0 : 1);
+    world.data = pixels.data();
+    world.rowbytes = rowbytes;
+    world.width = width;
+    world.height = height;
+    world.extent_hint = {0, 0, width, height};
+    aexcompat::world_safety::DispatchWorldFormatScope scope;
+    if (!scope.register_world(&world, pixel_format)) return false;
+    aexcompat::pf_path_runtime::LegacyRect bounds{0, 0, width, height};
+    if (aexcompat::pf_path_runtime::mask_world_with_path(
+            effect_ref(), &render_path, 0, 0, 0, .5, 0, &world, &bounds) != 0)
+      return false;
+    const auto* pixel = pixels.data() + rowbytes + pixel_bytes;
+    if (pixel_format == aexcompat::world_registry::kPixelFormatArgb32) {
+      if (pixel[0] != std::byte{0x80}) return false;
+    } else if (pixel_format == aexcompat::world_registry::kPixelFormatArgb64) {
+      uint16_t value{};
+      std::memcpy(&value, pixel, sizeof(value));
+      if (value != 32768) return false;
+    } else {
+      float value{};
+      std::memcpy(&value, pixel, sizeof(value));
+      if (std::abs(value - .5f) > 1e-6f) return false;
+    }
+    const auto* padding = pixels.data() + rowbytes - pixel_bytes;
+    for (int32_t index = 0; index < pixel_bytes; ++index)
+      if (padding[index] != std::byte{0xcd}) return false;
+    return true;
+  };
+  if (!render_format(aexcompat::world_registry::kPixelFormatArgb32, 4) ||
+      !render_format(aexcompat::world_registry::kPixelFormatArgb64, 8) ||
+      !render_format(aexcompat::world_registry::kPixelFormatArgb128, 16)) {
+    checkin_render_path();
+    return false;
+  }
+  {
+    constexpr int32_t width = 8;
+    constexpr int32_t height = 8;
+    std::vector<std::byte> pixels(width * height * 4, std::byte{0xcd});
+    aexcompat::world_safety::LocalEffectWorld world{};
+    world.world_flags = 2;
+    world.data = pixels.data();
+    world.rowbytes = width * 4 - 1;
+    world.width = width;
+    world.height = height;
+    aexcompat::world_safety::DispatchWorldFormatScope scope;
+    if (!scope.register_world(&world, aexcompat::world_registry::kPixelFormatArgb32) ||
+        aexcompat::pf_path_runtime::mask_world_with_path(
+            effect_ref(), &render_path, 0, 0, 0, .5, 0, &world, nullptr) == 0) {
+      checkin_render_path();
+      return false;
+    }
+  }
+  if (!checkin_render_path()) return false;
   return aexcompat::pf_path_runtime::lifetimes_balanced();
 }
 

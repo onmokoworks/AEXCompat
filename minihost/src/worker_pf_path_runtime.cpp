@@ -1,4 +1,5 @@
 #include "worker_pf_path_runtime.hpp"
+#include "worker_world_registry.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -129,6 +130,14 @@ bool flatten(const mask_runtime::CurveSnapshot& curve,int quality,std::vector<Ra
 }
 bool inside(const std::vector<RasterPoint>& p,double x,double y){bool value=false;for(size_t i=0,j=p.size()-1;i<p.size();j=i++){if(((p[i].y>y)!=(p[j].y>y))&&(x<(p[j].x-p[i].x)*(y-p[i].y)/(p[j].y-p[i].y)+p[i].x))value=!value;}return value;}
 double edge_distance(const std::vector<RasterPoint>& p,double x,double y,double fx,double fy){fx=std::max(fx,1e-6);fy=std::max(fy,1e-6);double best=std::numeric_limits<double>::infinity();for(size_t i=0,j=p.size()-1;i<p.size();j=i++){double ax=p[j].x/fx,ay=p[j].y/fy,bx=p[i].x/fx,by=p[i].y/fy,px=x/fx,py=y/fy,dx=bx-ax,dy=by-ay,l=dx*dx+dy*dy,t=l==0?0:std::clamp(((px-ax)*dx+(py-ay)*dy)/l,0.0,1.0);best=std::min(best,std::hypot(px-(ax+t*dx),py-(ay+t*dy)));}return best;}
+bool supported_world_view(const WorldView& view) {
+  return (view.pixel_format == aexcompat::world_registry::kPixelFormatArgb32 &&
+          view.pixel_bytes == 4) ||
+      (view.pixel_format == aexcompat::world_registry::kPixelFormatArgb64 &&
+       view.pixel_bytes == 8) ||
+      (view.pixel_format == aexcompat::world_registry::kPixelFormatArgb128 &&
+       view.pixel_bytes == 16);
+}
 } // namespace
 
 void configure(HostHooks hooks){g_hooks=hooks;}
@@ -151,5 +160,87 @@ int32_t __cdecl path_cleanup_seg_length(void* effect,void* path,int32_t segment,
 int32_t __cdecl path_is_inverted(void* effect,int32_t id,int8_t*out){auto p=paths();auto*f=find(p,id);if(!effect||!f||!out)return 4;*out=f->inverted?1:0;return 0;}
 int32_t __cdecl path_get_mask_mode(void* effect,int32_t id,int32_t*out){auto p=paths();auto*f=find(p,id);if(!effect||!f||!out)return 4;*out=f->mode;return 0;}
 int32_t __cdecl path_get_name(void* effect,int32_t id,char*out){auto p=paths();auto*f=find(p,id);if(!effect||!f||!out)return 4;auto value="Mask "+std::to_string(f->dynamic_order+1);if(value.size()>31)return 4;std::memcpy(out,value.c_str(),value.size()+1);return 0;}
-int32_t __cdecl mask_world_with_path(void* effect,void** path,double fx,double fy,int32_t invert,double opacity,int32_t quality,void* world,LegacyRect*bounds){std::lock_guard lock(g_mutex);void* handle=path?*path:nullptr;mask_runtime::CurveSnapshot curve;g_report.last_feather_x=fx;g_report.last_feather_y=fy;g_report.last_opacity=opacity;g_report.last_quality=quality;g_report.reject_reason=!effect||!world?1:(!checked(handle,curve)||curve.open?2:(!std::isfinite(fx)||!std::isfinite(fy)||fx<0||fy<0||fx>32768||fy>32768?3:(!std::isfinite(opacity)||opacity<0||opacity>1?4:((invert!=0&&invert!=1)||(quality!=0&&quality!=1)?5:0))));if(g_report.reject_reason){++g_report.invalid_operations;return 4;}WorldView view;if(!g_hooks.bounded_world||!g_hooks.bounded_world(world,view)){g_report.reject_reason=6;++g_report.invalid_operations;return 4;}LegacyRect area{0,0,view.width,view.height};if(bounds){std::memcpy(g_report.last_bounds.data(),bounds,sizeof(*bounds));area=*bounds;}if(area.left<0||area.top<0||area.right<area.left||area.bottom<area.top||area.right>view.width||area.bottom>view.height){g_report.reject_reason=7;++g_report.invalid_operations;return 4;}std::vector<RasterPoint> points;if(!flatten(curve,quality,points)){g_report.reject_reason=8;++g_report.invalid_operations;return 4;}for(int y=area.top;y<area.bottom;++y)for(int x=area.left;x<area.right;++x){bool in=inside(points,x+.5,y+.5);double coverage=in?1:0;if(fx>0||fy>0){double d=edge_distance(points,x+.5,y+.5,fx,fy);coverage=std::clamp(.5+(in?d:-d),0.0,1.0);}if(invert)coverage=1-coverage;auto*pixel=view.pixels+static_cast<size_t>(y)*view.rowbytes+static_cast<size_t>(x)*view.pixel_bytes;if(view.pixel_bytes==4)pixel[0]=static_cast<uint8_t>(std::lround(pixel[0]*opacity*coverage));else reinterpret_cast<uint16_t*>(pixel)[0]=static_cast<uint16_t>(std::lround(reinterpret_cast<uint16_t*>(pixel)[0]*opacity*coverage));}++g_report.mask_calls;g_report.reject_reason=0;return 0;}
+int32_t __cdecl mask_world_with_path(void* effect, void** path, double fx,
+    double fy, int32_t invert, double opacity, int32_t quality, void* world,
+    LegacyRect* bounds) {
+  std::lock_guard lock(g_mutex);
+  void* handle = path ? *path : nullptr;
+  mask_runtime::CurveSnapshot curve;
+  g_report.last_feather_x = fx;
+  g_report.last_feather_y = fy;
+  g_report.last_opacity = opacity;
+  g_report.last_quality = quality;
+  g_report.reject_reason = !effect || !world ? 1 :
+      (!checked(handle, curve) || curve.open ? 2 :
+       (!std::isfinite(fx) || !std::isfinite(fy) || fx < 0 || fy < 0 ||
+        fx > 32768 || fy > 32768 ? 3 :
+        (!std::isfinite(opacity) || opacity < 0 || opacity > 1 ? 4 :
+         ((invert != 0 && invert != 1) || (quality != 0 && quality != 1) ? 5 : 0))));
+  if (g_report.reject_reason) {
+    ++g_report.invalid_operations;
+    return 4;
+  }
+  WorldView view;
+  if (!g_hooks.bounded_world || !g_hooks.bounded_world(world, view) ||
+      !supported_world_view(view)) {
+    g_report.reject_reason = 6;
+    ++g_report.invalid_operations;
+    return 4;
+  }
+  LegacyRect area{0, 0, view.width, view.height};
+  if (bounds) {
+    std::memcpy(g_report.last_bounds.data(), bounds, sizeof(*bounds));
+    area = *bounds;
+  }
+  if (area.left < 0 || area.top < 0 || area.right < area.left ||
+      area.bottom < area.top || area.right > view.width ||
+      area.bottom > view.height) {
+    g_report.reject_reason = 7;
+    ++g_report.invalid_operations;
+    return 4;
+  }
+  std::vector<RasterPoint> points;
+  if (!flatten(curve, quality, points)) {
+    g_report.reject_reason = 8;
+    ++g_report.invalid_operations;
+    return 4;
+  }
+  if (view.pixel_format == aexcompat::world_registry::kPixelFormatArgb128) {
+    for (int y = area.top; y < area.bottom; ++y)
+      for (int x = area.left; x < area.right; ++x) {
+        const auto* pixel = view.pixels + static_cast<size_t>(y) * view.rowbytes +
+            static_cast<size_t>(x) * view.pixel_bytes;
+        if (!std::isfinite(reinterpret_cast<const float*>(pixel)[0])) {
+          g_report.reject_reason = 10;
+          ++g_report.invalid_operations;
+          return 4;
+        }
+      }
+  }
+  for (int y = area.top; y < area.bottom; ++y)
+    for (int x = area.left; x < area.right; ++x) {
+      const bool in = inside(points, x + .5, y + .5);
+      double coverage = in ? 1 : 0;
+      if (fx > 0 || fy > 0) {
+        const double distance = edge_distance(points, x + .5, y + .5, fx, fy);
+        coverage = std::clamp(.5 + (in ? distance : -distance), 0.0, 1.0);
+      }
+      if (invert) coverage = 1 - coverage;
+      auto* pixel = view.pixels + static_cast<size_t>(y) * view.rowbytes +
+          static_cast<size_t>(x) * view.pixel_bytes;
+      const double factor = opacity * coverage;
+      if (view.pixel_format == aexcompat::world_registry::kPixelFormatArgb32) {
+        pixel[0] = static_cast<uint8_t>(std::lround(pixel[0] * factor));
+      } else if (view.pixel_format == aexcompat::world_registry::kPixelFormatArgb64) {
+        auto* channel = reinterpret_cast<uint16_t*>(pixel);
+        *channel = static_cast<uint16_t>(std::lround(*channel * factor));
+      } else {
+        auto* channel = reinterpret_cast<float*>(pixel);
+        *channel = std::clamp(*channel * static_cast<float>(factor), 0.0f, 1.0f);
+      }
+    }
+  ++g_report.mask_calls;
+  g_report.reject_reason = 0;
+  return 0;
+}
 } // namespace aexcompat::pf_path_runtime
