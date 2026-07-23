@@ -82,7 +82,10 @@ def test_seh_classification_uses_an_explicit_diagnostics_sink():
     assert "GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT" in SOURCE
     assert "diagnostics.module.push_back" in SOURCE
     assert "GetModuleHandleExW(" not in MAIN
-    assert "GetModuleFileNameW(" not in MAIN
+    # l2_main may use GetModuleFileNameW for the independent read-only AEX
+    # string-table loader; only the minidump SEH classification API must stay
+    # inside worker_minidump_runtime.
+    assert "load_aex_string_table(module, aex_string_table)" in MAIN
 
 
 def test_l2_and_selector_filters_delegate_without_owning_classification():
