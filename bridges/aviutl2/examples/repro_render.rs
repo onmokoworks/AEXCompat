@@ -15,8 +15,9 @@ use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRe
 use sha2::{Digest, Sha256};
 
 fn main() {
-    let plugin =
-        PathBuf::from(std::env::var_os("AEXCOMPAT_AVIUTL2_PLUGIN").expect("AEXCOMPAT_AVIUTL2_PLUGIN"));
+    let plugin = PathBuf::from(
+        std::env::var_os("AEXCOMPAT_AVIUTL2_PLUGIN").expect("AEXCOMPAT_AVIUTL2_PLUGIN"),
+    );
     let repository = PathBuf::from(
         std::env::var_os("AEXCOMPAT_AVIUTL2_REPOSITORY").expect("AEXCOMPAT_AVIUTL2_REPOSITORY"),
     );
