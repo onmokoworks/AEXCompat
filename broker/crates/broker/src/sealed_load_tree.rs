@@ -116,25 +116,33 @@ impl SealedLoadTree {
             if destination.parent() != Some(root.as_path()) {
                 return Err(invalid("destination must be a direct child"));
             }
-            let mut output = create_destination(&destination)?;
-            io::copy(&mut source, &mut output)?;
-            output.flush()?;
-            output.sync_all()?;
-            reject_reparse(&destination)?;
-            validate_regular_unique(&output)?;
-            let mut verify = output.try_clone()?;
-            let (copied_size, copied_digest) = hash_file(&mut verify)?;
-            if copied_size != entry.expected_size || copied_digest != entry.expected_sha256 {
-                return Err(invalid("destination verification failed"));
+            let staged_by_hard_link = fs::hard_link(&entry.source, &destination).is_ok();
+            if !staged_by_hard_link {
+                let mut output = create_destination(&destination)?;
+                io::copy(&mut source, &mut output)?;
+                output.flush()?;
+                output.sync_all()?;
+                reject_reparse(&destination)?;
+                validate_regular_unique(&output)?;
+                let mut verify = output.try_clone()?;
+                let (copied_size, copied_digest) = hash_file(&mut verify)?;
+                if copied_size != entry.expected_size || copied_digest != entry.expected_sha256 {
+                    return Err(invalid("destination verification failed"));
+                }
+                drop(verify);
+                drop(output);
             }
-            drop(verify);
-            drop(output);
+            reject_reparse(&destination)?;
 
             // A retained write-capable handle conflicts with the Windows image loader,
             // whose reopen does not share writes. Reopen read-only and authenticate the
             // exact path again before retaining the no-write/no-delete-share handle.
             let mut retained = open_source(&destination)?;
-            validate_regular_unique(&retained)?;
+            if staged_by_hard_link {
+                validate_regular_staged(&retained)?;
+            } else {
+                validate_regular_unique(&retained)?;
+            }
             let (retained_size, retained_digest) = hash_file(&mut retained)?;
             if retained_size != entry.expected_size || retained_digest != entry.expected_sha256 {
                 return Err(invalid("retained destination verification failed"));
@@ -279,7 +287,7 @@ fn remove_owned_root(root: &Path, parent: &Path) -> io::Result<bool> {
             Ok(file) => file,
             Err(_) => return Ok(false),
         };
-        if validate_regular_unique(&file).is_err() {
+        if validate_regular_staged(&file).is_err() {
             return Ok(false);
         }
         file.rewind()?;
@@ -391,7 +399,7 @@ fn create_destination(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(windows)]
-fn validate_regular_unique(file: &File) -> io::Result<()> {
+fn validate_regular_staged(file: &File) -> io::Result<()> {
     use std::mem::zeroed;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -404,22 +412,58 @@ fn validate_regular_unique(file: &File) -> io::Result<()> {
     }
     if info.dwFileAttributes & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
         != 0
-        || info.nNumberOfLinks != 1
+        || info.nNumberOfLinks == 0
         || !file.metadata()?.is_file()
     {
-        return Err(invalid(
-            "file must be regular, non-reparse, and have one link",
-        ));
+        return Err(invalid("file must be regular and non-reparse"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_regular_staged(file: &File) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() == 0 {
+        return Err(invalid("file must be regular and have a link"));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(windows, unix)))]
+fn validate_regular_staged(file: &File) -> io::Result<()> {
+    if !file.metadata()?.is_file() {
+        return Err(invalid("file must be regular"));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_regular_unique(file: &File) -> io::Result<()> {
+    validate_regular_staged(file)?;
+    use std::mem::zeroed;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.nNumberOfLinks != 1 {
+        return Err(invalid("file must have one link"));
     }
     Ok(())
 }
 
 #[cfg(unix)]
 fn validate_regular_unique(file: &File) -> io::Result<()> {
+    validate_regular_staged(file)?;
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.nlink() != 1 {
-        return Err(invalid("file must be regular and have one link"));
+    if metadata.nlink() != 1 {
+        return Err(invalid("file must have one link"));
     }
     Ok(())
 }
@@ -458,6 +502,30 @@ mod tests {
         path
     }
 
+    #[cfg(windows)]
+    fn file_identity(path: &Path) -> (u32, u64) {
+        use std::mem::zeroed;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let file = File::open(path).unwrap();
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+        assert_ne!(ok, 0);
+        (
+            info.dwVolumeSerialNumber,
+            ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+        )
+    }
+
+    #[cfg(unix)]
+    fn file_identity(path: &Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
+    }
+
     #[test]
     fn seals_main_and_dependencies_and_excludes_unknown_files() {
         let source = source_dir();
@@ -473,6 +541,42 @@ mod tests {
         assert!(!tree.root().join("unknown.dll").exists());
         assert_ne!(tree.manifest_digest(), [0; 32]);
         fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn stages_a_same_volume_source_as_a_hard_link() {
+        let parent = source_dir();
+        let main = fixture(&parent, "main.plugin", b"main");
+        let source_path = main.source.clone();
+        let tree = SealedLoadTree::create_at(&parent, main, vec![]).unwrap();
+        let staged_path = tree.root().join("main.plugin");
+
+        assert_eq!(file_identity(&source_path), file_identity(&staged_path));
+        assert_eq!(fs::read(staged_path).unwrap(), b"main");
+        drop(tree);
+        assert!(source_path.is_file());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn stale_cleanup_removes_hard_linked_children_without_removing_source() {
+        let parent = fs::canonicalize(source_dir()).unwrap();
+        let source = parent.join("source.dll");
+        fs::write(&source, b"source").unwrap();
+        let root = parent.join(format!("{ROOT_PREFIX}{:032x}", 4u128));
+        fs::create_dir(&root).unwrap();
+        fs::hard_link(&source, root.join("source.dll")).unwrap();
+
+        cleanup_stale_roots(
+            &parent,
+            SystemTime::now(),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .unwrap();
+
+        assert!(!root.exists());
+        assert_eq!(fs::read(source).unwrap(), b"source");
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
