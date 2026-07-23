@@ -1042,12 +1042,19 @@ pub(crate) fn resolve_managed_dump_dir(
             "world dump directory must not contain traversal components",
         ));
     }
+    // On Windows, `canonicalize()` returns an extended-length (`\\?\\`) path
+    // while callers commonly pass the repository as a plain absolute path.
+    // Normalize every lexical-boundary operand to the same representation so
+    // a wrapper that has already canonicalized the directory is not mistaken
+    // for an escape from the managed tree (#372).
+    let repository_root = strip_extended_prefix(&repository.canonicalize()?);
+    let requested = strip_extended_prefix(requested);
     let resolved = if requested.is_absolute() {
-        requested.to_path_buf()
+        requested
     } else {
-        repository.join(requested)
+        repository_root.join(requested)
     };
-    let target_root = repository.join("target");
+    let target_root = repository_root.join("target");
     // Lexical pre-check before creating anything, so a rejected request never
     // leaves a directory outside the broker-managed target tree behind.
     if !resolved.starts_with(&target_root) {
@@ -1056,8 +1063,8 @@ pub(crate) fn resolve_managed_dump_dir(
         ));
     }
     fs::create_dir_all(&resolved)?;
-    let canonical = resolved.canonicalize()?;
-    let canonical_target = target_root.canonicalize()?;
+    let canonical = strip_extended_prefix(&resolved.canonicalize()?);
+    let canonical_target = strip_extended_prefix(&target_root.canonicalize()?);
     if !canonical.starts_with(&canonical_target) {
         return Err(invalid(
             "world dump directory must stay under the repository target tree",
@@ -7126,6 +7133,17 @@ mod tests {
             resolve_world_dump_dir(&repository, Path::new("target/world-dumps")).unwrap();
         assert!(accepted.path.is_dir());
         assert_eq!(accepted.display, "target/world-dumps");
+
+        // The length-one session wrapper resolves the environment value once
+        // before passing it to `RenderSession::open`, so the second resolver
+        // receives the canonical Windows path. Keep that production shape in
+        // the contract test (#372).
+        let canonical_request = repository.join("target/canonical-world-dumps");
+        fs::create_dir_all(&canonical_request).unwrap();
+        let canonical_request = canonical_request.canonicalize().unwrap();
+        let canonical_accepted =
+            resolve_managed_dump_dir(&repository, &canonical_request, true).unwrap();
+        assert_eq!(canonical_accepted.display, "target/canonical-world-dumps");
 
         // A non-empty directory is refused so stale snapshots cannot be
         // mistaken for the coming run's output.
