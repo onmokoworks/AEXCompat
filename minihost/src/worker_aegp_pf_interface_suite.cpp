@@ -6,6 +6,7 @@
 #include "worker_pf_state_runtime.hpp"
 #include "worker_smart_runtime.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 
@@ -27,6 +28,23 @@ auto& g_aegp_layers = scene_runtime_state().layers;
 int32_t& g_aegp_active_camera_layer_index =
     scene_runtime_state().active_camera_layer_index;
 auto smart_state() -> decltype(smart_state_ref()) { return smart_state_ref(); }
+
+bool valid_spatial_ratio(const aexcompat::render::SpatialRatio& ratio) {
+  constexpr int32_t kSpatialNumeratorLimit = 1000000;
+  constexpr uint32_t kSpatialDenominatorLimit = 1000000;
+  if (ratio.numerator <= 0 || ratio.numerator > kSpatialNumeratorLimit ||
+      ratio.denominator == 0 || ratio.denominator > kSpatialDenominatorLimit)
+    return false;
+  const long double value = static_cast<long double>(ratio.numerator) /
+      static_cast<long double>(ratio.denominator);
+  return std::isfinite(value) && value > 0.0L && value <= 1000000.0L;
+}
+
+bool valid_camera_spatial_context() {
+  return valid_spatial_ratio(g_render_context_state.downsample_x) &&
+      valid_spatial_ratio(g_render_context_state.downsample_y) &&
+      valid_spatial_ratio(g_render_context_state.pixel_aspect_ratio);
+}
 }  // namespace
 
 int32_t __cdecl get_effect_layer(void* effect, void** layer) {
@@ -139,6 +157,7 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
   if (effect != &g_effect || !effect_is_live() || !comp_time ||
       !camera_matrix || !distance_to_image_plane || !image_plane_width ||
       !image_plane_height || !valid_comp_time(*comp_time)) return 4;
+  if (!valid_camera_spatial_context()) return 4;
   const int32_t width = g_full_resolution_width > 0
       ? g_full_resolution_width : smart_state().width;
   const int32_t height = g_full_resolution_height > 0

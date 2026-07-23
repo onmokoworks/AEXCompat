@@ -7,6 +7,7 @@
 #include "worker_handle_runtime.hpp"
 #include "worker_pf_helper_runtime.hpp"
 #include "worker_pf_state_runtime.hpp"
+#include "render_subsystem.h"
 
 #include <algorithm>
 #include <array>
@@ -189,8 +190,13 @@ bool verify_matrix_case(bool smart_case) {
   g_hooks.get_dimensions(&saved_width, &saved_height);
   const auto saved_transforms = scene_runtime_state().layer_transforms;
   const auto saved_parent_indices = scene_runtime_state().layer_parent_indices;
+  const auto saved_spatial = aexcompat::render::render_context_state();
   pf_state_runtime::reset_effect_lifetime(true);
   g_hooks.set_dimensions(smart_case ? 1920 : 640, smart_case ? 1080 : 480);
+  auto& spatial = aexcompat::render::render_context_state();
+  spatial.downsample_x = {1, 1};
+  spatial.downsample_y = {1, 1};
+  spatial.pixel_aspect_ratio = {1, 1};
   g_hooks.set_camera_index(-1);
   const suite_abi::AegpTime time{smart_case ? 45 : 15, 30};
   AegpMatrix4 matrix{};
@@ -207,8 +213,34 @@ bool verify_matrix_case(bool smart_case) {
   for (std::size_t row = 0; row < 4; ++row)
     for (std::size_t column = 0; column < 4; ++column)
       ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
+
+  spatial.downsample_x = {1, 2};
+  spatial.downsample_y = {1, 2};
+  spatial.pixel_aspect_ratio = {10, 11};
+  matrix = {};
+  distance = -1.0;
+  width = -1;
+  height = -1;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
+      &width, &height) == 0 && distance == expected_width &&
+      width == expected_width && height == expected_height;
+  for (std::size_t row = 0; row < 4; ++row)
+    for (std::size_t column = 0; column < 4; ++column)
+      ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
+
+  spatial.pixel_aspect_ratio.denominator = 0;
   AegpMatrix4 sentinel{};
   std::memset(&sentinel, 0x5a, sizeof(sentinel));
+  matrix = sentinel;
+  distance = -2.0;
+  width = -2;
+  height = -2;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
+      &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0 &&
+      distance == -2.0 && width == -2 && height == -2;
+  spatial.downsample_x = {1, 1};
+  spatial.downsample_y = {1, 1};
+  spatial.pixel_aspect_ratio = {1, 1};
 
   scene_runtime_state().layer_transforms[2] = {};
   scene_runtime_state().layer_transforms[2].position = {{100.0, 200.0, 0.0}};
@@ -245,6 +277,7 @@ bool verify_matrix_case(bool smart_case) {
   pf_state_runtime::reset_effect_lifetime(false);
   ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
       &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0;
+  spatial = saved_spatial;
   g_hooks.set_dimensions(saved_width, saved_height);
   g_hooks.set_camera_index(saved_camera_index);
   pf_state_runtime::reset_effect_lifetime(saved_live);

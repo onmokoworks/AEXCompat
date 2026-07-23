@@ -60,6 +60,9 @@ def test_pf_interface_slot_4_camera_matrix_uses_exact_sdk_shape_and_offset():
 def test_camera_matrix_is_atomic_bounded_and_deterministic():
     source = scene_source()
     assert "!camera_matrix || !distance_to_image_plane || !image_plane_width" in source
+    assert "bool valid_spatial_ratio(const aexcompat::render::SpatialRatio& ratio)" in source
+    assert "bool valid_camera_spatial_context()" in source
+    assert "if (!valid_camera_spatial_context()) return 4;" in source
     assert "width > INT16_MAX || height > INT16_MAX" in source
     assert "result.mat[index][index] = 1.0" in source
     assert "*distance_to_image_plane = static_cast<double>(width);" in source
