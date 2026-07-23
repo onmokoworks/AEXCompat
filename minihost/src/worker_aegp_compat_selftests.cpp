@@ -181,18 +181,26 @@ bool verify_camera_case(bool smart_case) {
 
 bool verify_matrix_case(bool smart_case) {
   if (!g_hooks.get_camera_matrix || !g_hooks.get_dimensions ||
-      !g_hooks.set_dimensions) return false;
+      !g_hooks.set_dimensions || !g_hooks.set_camera_index ||
+      !g_hooks.camera_index) return false;
   const bool saved_live = pf_state_runtime::effect_is_live();
+  const int32_t saved_camera_index = g_hooks.camera_index();
   int32_t saved_width = 0, saved_height = 0;
   g_hooks.get_dimensions(&saved_width, &saved_height);
+  const auto saved_transforms = scene_runtime_state().layer_transforms;
+  const auto saved_parent_indices = scene_runtime_state().layer_parent_indices;
   pf_state_runtime::reset_effect_lifetime(true);
   g_hooks.set_dimensions(smart_case ? 1920 : 640, smart_case ? 1080 : 480);
+  g_hooks.set_camera_index(-1);
   const suite_abi::AegpTime time{smart_case ? 45 : 15, 30};
   AegpMatrix4 matrix{};
   double distance = -1.0;
   int16_t width = -1, height = -1;
   const int16_t expected_width = smart_case ? 1920 : 640;
   const int16_t expected_height = smart_case ? 1080 : 480;
+  const auto near = [](double actual, double expected) {
+    return std::abs(actual - expected) < 1.0e-9;
+  };
   bool ok = g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
       &width, &height) == 0 && distance == expected_width &&
       width == expected_width && height == expected_height;
@@ -201,6 +209,33 @@ bool verify_matrix_case(bool smart_case) {
       ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
   AegpMatrix4 sentinel{};
   std::memset(&sentinel, 0x5a, sizeof(sentinel));
+
+  scene_runtime_state().layer_transforms[2] = {};
+  scene_runtime_state().layer_transforms[2].position = {{100.0, 200.0, 0.0}};
+  scene_runtime_state().layer_transforms[2].scale = {{100.0, 100.0, 100.0}};
+  scene_runtime_state().layer_transforms[2].is_3d = true;
+  scene_runtime_state().layer_parent_indices[2] = -1;
+  g_hooks.set_camera_index(2);
+  matrix = {};
+  distance = -1.0;
+  width = -1;
+  height = -1;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
+      &width, &height) == 0 && near(matrix.mat[0][3], -100.0) &&
+      near(matrix.mat[1][3], -200.0) && near(matrix.mat[2][3], 0.0) &&
+      distance == expected_width && width == expected_width && height == expected_height;
+
+  scene_runtime_state().layer_transforms[2].scale[0] = 0.0;
+  matrix = sentinel;
+  distance = -2.0;
+  width = -2;
+  height = -2;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
+      &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0 &&
+      distance == -2.0 && width == -2 && height == -2;
+  g_hooks.set_camera_index(-1);
+  scene_runtime_state().layer_transforms = saved_transforms;
+  scene_runtime_state().layer_parent_indices = saved_parent_indices;
   matrix = sentinel; distance = -2.0; width = -2; height = -2;
   suite_abi::AegpTime invalid{time.value, 0};
   ok = ok && g_hooks.get_camera_matrix(nullptr, &time, &matrix, &distance,
@@ -211,6 +246,7 @@ bool verify_matrix_case(bool smart_case) {
   ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
       &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0;
   g_hooks.set_dimensions(saved_width, saved_height);
+  g_hooks.set_camera_index(saved_camera_index);
   pf_state_runtime::reset_effect_lifetime(saved_live);
   return ok;
 }
