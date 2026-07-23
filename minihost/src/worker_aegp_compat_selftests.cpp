@@ -573,6 +573,7 @@ bool verify_aegp_resizer_3d_chain() {
   const auto saved_in_points = g_aegp_layer_in_points;
   const auto saved_durations = g_aegp_layer_durations;
   const auto saved_transforms = g_aegp_layer_transforms;
+  const auto saved_parent_indices = g_aegp_layer_parent_indices;
   g_aegp_active_camera_layer_index = 2;
   g_aegp_layer_in_points[2] = {0, 30};
   g_aegp_layer_durations[2] = {300, 30};
@@ -633,6 +634,37 @@ bool verify_aegp_resizer_3d_chain() {
   ok = ok && aegp_get_layer_to_world_xform(&foreign_layer, &time, &matrix) != 0 &&
       std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
   g_aegp_layer_transforms[2] = saved_transforms[2];
+  g_aegp_layer_transforms[2].position = {{10.0, 20.0, 30.0}};
+  g_aegp_layer_transforms[2].scale = {{100.0, 100.0, 100.0}};
+  g_aegp_layer_transforms[2].is_3d = true;
+  g_aegp_layer_transforms[1] = {};
+  g_aegp_layer_transforms[1].position = {{100.0, 200.0, 0.0}};
+  g_aegp_layer_transforms[1].scale = {{100.0, 100.0, 100.0}};
+  g_aegp_layer_transforms[1].is_3d = true;
+  g_aegp_layer_parent_indices[2] = 1;
+  void* parent = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && aegp_get_layer_parent(&g_aegp_layers[2], &parent) == 0 &&
+      parent == &g_aegp_layers[1];
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0 &&
+      near(matrix.mat[0][3], 110.0) && near(matrix.mat[1][3], 220.0) &&
+      near(matrix.mat[2][3], 30.0);
+  g_aegp_layer_parent_indices[1] = 2;
+  matrix = matrix_sentinel;
+  parent = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
+  ok = ok && aegp_get_layer_parent(&g_aegp_layers[2], &parent) == 0 &&
+      parent == &g_aegp_layers[1] &&
+      aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  g_aegp_layer_parent_indices[1] = -1;
+  g_aegp_layer_parent_indices[2] = 7;
+  matrix = matrix_sentinel;
+  parent = reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc));
+  ok = ok && aegp_get_layer_parent(&g_aegp_layers[2], &parent) != 0 &&
+      parent == reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc)) &&
+      aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  g_aegp_layer_parent_indices = saved_parent_indices;
+  g_aegp_layer_transforms[1] = saved_transforms[1];
   AegpLegacyStreamVal zoom{-1.0};
   int32_t type = -1;
   ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
@@ -672,6 +704,7 @@ bool verify_aegp_resizer_3d_chain() {
   g_aegp_layer_in_points = saved_in_points;
   g_aegp_layer_durations = saved_durations;
   g_aegp_layer_transforms = saved_transforms;
+  g_aegp_layer_parent_indices = saved_parent_indices;
   return ok && suite_leases_balanced();
 }
 

@@ -145,6 +145,31 @@ bool build_layer_transform(const AegpLayerTransform& authored, AegpMatrix4& outp
   output = result;
   return true;
 }
+
+bool build_layer_world_transform(std::size_t index, AegpMatrix4& output) {
+  constexpr std::size_t kMaxParentDepth = 8;
+  if (index >= g_aegp_layer_transforms.size()) return false;
+  std::array<bool, 3> visited{};
+  AegpMatrix4 world{};
+  set_identity(world);
+  std::size_t current = index;
+  for (std::size_t depth = 0; depth < kMaxParentDepth; ++depth) {
+    if (current >= g_aegp_layer_transforms.size() || visited[current]) return false;
+    visited[current] = true;
+    AegpMatrix4 local{};
+    if (!build_layer_transform(g_aegp_layer_transforms[current], local)) return false;
+    world = multiply(local, world);
+    const int32_t parent = g_aegp_layer_parent_indices[current];
+    if (parent == -1) {
+      output = world;
+      return true;
+    }
+    if (parent < 0 || static_cast<std::size_t>(parent) >=
+        g_aegp_layer_parent_indices.size()) return false;
+    current = static_cast<std::size_t>(parent);
+  }
+  return false;
+}
 }  // namespace
 
 bool configure_scene_context(const SceneContext& context) noexcept {
@@ -332,6 +357,7 @@ AegpLegacyItemSuite6 g_aegp_legacy_item_suite6{};
 std::array<AegpTime, 3>& g_aegp_layer_in_points = state().layer_in_points;
 std::array<AegpTime, 3>& g_aegp_layer_durations = state().layer_durations;
 std::array<AegpLayerTransform, 3>& g_aegp_layer_transforms = state().layer_transforms;
+std::array<int32_t, 3>& g_aegp_layer_parent_indices = state().layer_parent_indices;
 
 int32_t __cdecl aegp_get_item_current_time(void* item, AegpTime* time) {
   if (item != &g_aegp_comp_item || !time) return 4;
@@ -410,8 +436,7 @@ int32_t __cdecl aegp_get_layer_to_world_xform(
   const int32_t index = aegp_layer_index(layer);
   if (index < 0 || !comp_time || !transform || !valid_comp_time(*comp_time)) return 4;
   AegpMatrix4 result{};
-  if (!build_layer_transform(g_aegp_layer_transforms[static_cast<std::size_t>(index)],
-                             result)) return 4;
+  if (!build_layer_world_transform(static_cast<std::size_t>(index), result)) return 4;
   *transform = result;
   return 0;
 }
@@ -492,8 +517,16 @@ int32_t __cdecl aegp_get_layer_name(
   return 0;
 }
 int32_t __cdecl aegp_get_layer_parent(void* layer, void** parent) {
-  if (aegp_layer_index(layer) < 0 || !parent) return 4;
-  *parent = nullptr;
+  const int32_t index = aegp_layer_index(layer);
+  if (index < 0 || !parent) return 4;
+  const int32_t parent_index = g_aegp_layer_parent_indices[static_cast<std::size_t>(index)];
+  if (parent_index == -1) {
+    *parent = nullptr;
+    return 0;
+  }
+  if (parent_index < 0 || static_cast<std::size_t>(parent_index) >=
+      g_aegp_layers.size()) return 4;
+  *parent = &g_aegp_layers[static_cast<std::size_t>(parent_index)];
   return 0;
 }
 int32_t __cdecl aegp_get_layer_from_id(void* comp, int32_t id, void** layer) {

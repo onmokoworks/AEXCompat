@@ -165,6 +165,7 @@ struct SceneRuntimeState {
   std::array<aexcompat::suite_abi::AegpTime, 3> layer_durations{{
       {300, 30}, {300, 30}, {300, 30}}};
   std::array<AegpLayerTransform, 3> layer_transforms{};
+  std::array<int32_t, 3> layer_parent_indices{{-1, -1, -1}};
   int32_t active_camera_layer_index{-1};
   AegpSelectionCollection selection{};
 
