@@ -611,6 +611,8 @@ bool verify_aegp_resizer_3d_chain() {
   const auto saved_transforms = g_aegp_layer_transforms;
   const auto saved_parent_indices = g_aegp_layer_parent_indices;
   const auto saved_keyframes = scene_runtime_state().layer_transform_keyframes;
+  const auto saved_camera_zoom = scene_runtime_state().layer_camera_zoom;
+  const auto saved_camera_zoom_keyframes = scene_runtime_state().layer_camera_zoom_keyframes;
   g_aegp_active_camera_layer_index = 2;
   g_aegp_layer_in_points[2] = {0, 30};
   g_aegp_layer_durations[2] = {300, 30};
@@ -728,8 +730,34 @@ bool verify_aegp_resizer_3d_chain() {
   scene_runtime_state().layer_transform_keyframes = saved_keyframes;
   AegpLegacyStreamVal zoom{-1.0};
   int32_t type = -1;
+  scene_runtime_state().layer_camera_zoom[2] = 0.0;
   ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
       &time, 0, &zoom, &type) == 0 && zoom.one_d == 1920.0 && type == 5;
+  scene_runtime_state().layer_camera_zoom[2] = 1400.0;
+  zoom = {-1.0};
+  type = -1;
+  ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
+      &time, 0, &zoom, &type) == 0 && near(zoom.one_d, 1400.0) && type == 5;
+  auto& zoom_keyframes = scene_runtime_state().layer_camera_zoom_keyframes[2];
+  zoom_keyframes = {};
+  zoom_keyframes[0].valid = true;
+  zoom_keyframes[0].time = {0, 30};
+  zoom_keyframes[0].zoom = 1000.0;
+  zoom_keyframes[1].valid = true;
+  zoom_keyframes[1].time = {60, 30};
+  zoom_keyframes[1].zoom = 2000.0;
+  const AegpTime zoom_midpoint{30, 30};
+  zoom = {-1.0};
+  type = -1;
+  ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
+      &zoom_midpoint, 0, &zoom, &type) == 0 && near(zoom.one_d, 1500.0) && type == 5;
+  zoom_keyframes[1].time = {0, 30};
+  zoom = {123.0};
+  type = 77;
+  ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
+      &zoom_midpoint, 0, &zoom, &type) != 0 && near(zoom.one_d, 123.0) && type == 77;
+  scene_runtime_state().layer_camera_zoom = saved_camera_zoom;
+  scene_runtime_state().layer_camera_zoom_keyframes = saved_camera_zoom_keyframes;
   void* item = nullptr;
   int32_t width = -1;
   int32_t height = -1;
@@ -767,6 +795,8 @@ bool verify_aegp_resizer_3d_chain() {
   g_aegp_layer_transforms = saved_transforms;
   g_aegp_layer_parent_indices = saved_parent_indices;
   scene_runtime_state().layer_transform_keyframes = saved_keyframes;
+  scene_runtime_state().layer_camera_zoom = saved_camera_zoom;
+  scene_runtime_state().layer_camera_zoom_keyframes = saved_camera_zoom_keyframes;
   return ok && suite_leases_balanced();
 }
 

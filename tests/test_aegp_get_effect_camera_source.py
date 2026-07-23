@@ -129,6 +129,20 @@ def test_animated_layer_transform_snapshot_is_rational_and_fail_closed():
     assert "!keyframes[0].valid || !keyframes[1].valid" in source
 
 
+def test_camera_zoom_snapshot_is_rational_and_fail_closed():
+    source = (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
+        encoding="utf-8")
+    runtime = (ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp").read_text(
+        encoding="utf-8")
+    assert "struct AegpCameraZoomKeyframe" in runtime
+    assert "layer_camera_zoom_keyframes" in runtime
+    assert "resolve_layer_camera_zoom" in source
+    assert "kZoomLimit" in source
+    assert "fallback <= 0.0" in source
+    assert "!(first_time < second_time)" in source
+    assert "value->one_d = zoom" in source
+
+
 def test_native_self_test_covers_all_three_release_workers():
     for worker_name in ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe"):
         worker = BUILD / worker_name
