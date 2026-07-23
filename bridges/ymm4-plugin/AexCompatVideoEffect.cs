@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.ComponentModel.DataAnnotations;
 using Vortice.DCommon;
 using Vortice.Direct2D1;
 using Vortice.DXGI;
@@ -15,17 +16,60 @@ using D2DAlphaMode = Vortice.DCommon.AlphaMode;
 [VideoEffect("AEXCompat", ["AEXCompat"], ["AEX", "After Effects"])]
 public sealed class AexCompatVideoEffect : VideoEffectBase
 {
+    private string pluginPath;
+    private string repositoryPath;
+    private AexParameterSet parameters = new();
+
     public AexCompatVideoEffect()
     {
-        Remark = "AEXCOMPAT_YMM4_PLUGIN と AEXCOMPAT_YMM4_REPOSITORY を設定して使用";
+        pluginPath = Environment.GetEnvironmentVariable("AEXCOMPAT_YMM4_PLUGIN") ?? string.Empty;
+        repositoryPath = Environment.GetEnvironmentVariable("AEXCOMPAT_YMM4_REPOSITORY") ?? string.Empty;
+        Parameters = AexParameterSet.Discover(repositoryPath, pluginPath);
+        Remark = "AEXファイルを指定すると、対応するパラメータをこのエフェクトのGUIから編集できます";
     }
 
     public override string Label => "AEXCompat";
 
-    protected override IEnumerable<IAnimatable> GetAnimatables() => [];
+    [Display(GroupName = "AEXCompat", Name = "AEXファイル", Description = "読み込むAfter Effectsプラグインのパス")]
+    [YukkuriMovieMaker.Controls.TextEditor]
+    public string PluginPath
+    {
+        get => pluginPath;
+        set
+        {
+            if (string.Equals(pluginPath, value, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+            pluginPath = value ?? string.Empty;
+            OnPropertyChanged(nameof(PluginPath));
+            SetParameters(AexParameterSet.Discover(repositoryPath, pluginPath));
+        }
+    }
+
+    [Display(GroupName = "AEXCompat", Name = "AEXパラメータ", Description = "検出された対応パラメータ")]
+    [AexParameterEditor]
+    public AexParameterSet Parameters
+    {
+        get => parameters;
+        set => SetParameters(value ?? new AexParameterSet());
+    }
+
+    public string RepositoryPath => repositoryPath;
+
+    protected override IEnumerable<IAnimatable> GetAnimatables() => [Parameters];
+
+    internal byte[] CreateParameterPayload()
+        => Parameters.CreatePayload();
+
+    private void SetParameters(AexParameterSet next)
+    {
+        parameters = next;
+        OnPropertyChanged(nameof(Parameters));
+    }
 
     public override IVideoEffectProcessor CreateVideoEffect(IGraphicsDevicesAndContext devices)
-        => new AexCompatVideoEffectProcessor(devices);
+        => new AexCompatVideoEffectProcessor(devices, this);
 
     public override IEnumerable<string> CreateExoVideoFilters(
         int keyFrameIndex,
@@ -39,8 +83,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
     private const string RepositoryEnvironment = "AEXCOMPAT_YMM4_REPOSITORY";
 
     private readonly ID2D1DeviceContext6 deviceContext;
-    private readonly string? pluginPath;
-    private readonly string? repositoryPath;
+    private readonly AexCompatVideoEffect effect;
     private readonly object gate = new();
     private ID2D1Image? input;
     private ID2D1Bitmap1? output;
@@ -49,14 +92,14 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
     private int sessionHeight;
     private int sessionFps;
     private int sessionDuration;
+    private string? sessionPluginPath;
     private uint frameSerial;
     private string? lastError;
 
-    public AexCompatVideoEffectProcessor(IGraphicsDevicesAndContext devices)
+    public AexCompatVideoEffectProcessor(IGraphicsDevicesAndContext devices, AexCompatVideoEffect effect)
     {
         deviceContext = devices.DeviceContext;
-        pluginPath = Environment.GetEnvironmentVariable(PluginEnvironment);
-        repositoryPath = Environment.GetEnvironmentVariable(RepositoryEnvironment);
+        this.effect = effect;
     }
 
     public ID2D1Image Output => output ?? input!;
@@ -93,9 +136,12 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         {
             lock (gate)
             {
-                EnsureSession(size.Width, size.Height, fps, duration);
+                var pluginPath = effect.PluginPath;
+                var repositoryPath = effect.RepositoryPath;
+                EnsureSession(size.Width, size.Height, fps, duration, pluginPath, repositoryPath);
                 var rgbaInput = ReadInput(size);
                 var rgbaOutput = new byte[rgbaInput.Length];
+                var parameters = effect.CreateParameterPayload();
                 var outputWidth = 0u;
                 var outputHeight = 0u;
                 var result = NativeMethods.Render(
@@ -107,7 +153,9 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
                     rgbaOutput,
                     (nuint)rgbaOutput.Length,
                     ref outputWidth,
-                    ref outputHeight);
+                    ref outputHeight,
+                    parameters,
+                    (nuint)parameters.Length);
                 if (result != 0)
                 {
                     throw new InvalidOperationException(ReadNativeError());
@@ -139,9 +187,15 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         }
     }
 
-    private void EnsureSession(int width, int height, int fps, int duration)
+    private void EnsureSession(
+        int width,
+        int height,
+        int fps,
+        int duration,
+        string pluginPath,
+        string repositoryPath)
     {
-        if (session != 0 && (sessionWidth != width || sessionHeight != height || sessionFps != fps || sessionDuration != duration))
+        if (session != 0 && (sessionWidth != width || sessionHeight != height || sessionFps != fps || sessionDuration != duration || !string.Equals(sessionPluginPath, pluginPath, StringComparison.OrdinalIgnoreCase)))
         {
             CloseSession();
         }
@@ -171,6 +225,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         sessionHeight = height;
         sessionFps = fps;
         sessionDuration = duration;
+        sessionPluginPath = pluginPath;
         frameSerial = 0;
     }
 
@@ -282,6 +337,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
             NativeMethods.Close(session);
             session = 0;
         }
+        sessionPluginPath = null;
     }
 
     private static byte Premultiply(byte value, byte alpha)
@@ -304,6 +360,14 @@ internal static partial class NativeMethods
         uint timeScale,
         byte smart);
 
+    [LibraryImport("aexcompat_ymm4_native.dll", EntryPoint = "aexcompat_ymm4_discover", StringMarshalling = StringMarshalling.Utf16)]
+    [return: MarshalAs(UnmanagedType.I4)]
+    internal static partial int Discover(
+        string repository,
+        string plugin,
+        [Out] byte[] output,
+        nuint outputLength);
+
     [LibraryImport("aexcompat_ymm4_native.dll", EntryPoint = "aexcompat_ymm4_render")]
     [return: MarshalAs(UnmanagedType.I4)]
     internal static partial int Render(
@@ -315,7 +379,9 @@ internal static partial class NativeMethods
         [Out] byte[] output,
         nuint outputLength,
         ref uint outputWidth,
-        ref uint outputHeight);
+        ref uint outputHeight,
+        [In] byte[] parameters,
+        nuint parametersLength);
 
     [LibraryImport("aexcompat_ymm4_native.dll", EntryPoint = "aexcompat_ymm4_last_error")]
     internal static partial nuint LastError(nint session, [Out] byte[] output, nuint outputLength);

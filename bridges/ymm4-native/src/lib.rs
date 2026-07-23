@@ -15,8 +15,12 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
+use aexcompat_broker::image_render::{
+    InteractiveParameter, RenderGpuBackend, RenderPixelFormat,
+    inspect_experimental_with_diagnostics,
+};
 use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
+use serde_json;
 use sha2::{Digest, Sha256};
 
 const FRAME_DEADLINE_MS: u64 = 30_000;
@@ -25,6 +29,7 @@ struct RenderRequest {
     frame_index: u32,
     current_time: i32,
     rgba: Vec<u8>,
+    parameters: Option<Vec<InteractiveParameter>>,
     reply: Sender<RenderReply>,
 }
 
@@ -80,6 +85,48 @@ fn plugin_sha256(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+fn discover_parameters(
+    repository: &Path,
+    plugin: &Path,
+    plugin_sha256: &str,
+) -> Result<Vec<InteractiveParameter>, String> {
+    inspect_experimental_with_diagnostics(repository, plugin, plugin_sha256)
+        .map(|(parameters, _)| exposed_parameters(&parameters))
+        .map_err(|error| format!("AEX parameter discovery failed: {error}"))
+}
+
+/// Keep the YMM4 surface aligned with the InteractiveParameter subset that can
+/// be safely sent through the existing v:2 parameter payload. Unsupported
+/// kinds stay at the AEX default instead of becoming a malformed render.
+fn exposed_parameters(parameters: &[InteractiveParameter]) -> Vec<InteractiveParameter> {
+    parameters
+        .iter()
+        .filter(|parameter| parameter.visible)
+        .filter_map(|parameter| {
+            let mut parameter = parameter.clone();
+            match parameter.kind.as_str() {
+                "float" if bounded_range(&parameter) => Some(parameter),
+                "integer" if !parameter.choices.is_empty() => {
+                    let count = parameter.choices.len() as f64;
+                    parameter.minimum = 1.0;
+                    parameter.maximum = count;
+                    parameter.value = parameter.value.clamp(1.0, count);
+                    Some(parameter)
+                }
+                "integer" if bounded_range(&parameter) => Some(parameter),
+                "color" => Some(parameter),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn bounded_range(parameter: &InteractiveParameter) -> bool {
+    parameter.minimum.is_finite()
+        && parameter.maximum.is_finite()
+        && parameter.minimum < parameter.maximum
+}
+
 fn open_session(
     repository: PathBuf,
     plugin: PathBuf,
@@ -90,13 +137,15 @@ fn open_session(
     total_time: i32,
     time_scale: u32,
     smart: bool,
+    parameters: Vec<InteractiveParameter>,
     rx: Receiver<RenderRequest>,
 ) -> Result<(), String> {
+    let baseline = (!parameters.is_empty()).then_some(parameters.as_slice());
     let mut session = RenderSession::open(SessionOpenRequest {
         repository: &repository,
         plugin_path: &plugin,
         plugin_sha256: &plugin_sha256,
-        parameters: None,
+        parameters: baseline,
         parameter_animation: None,
         aux_manifest: None,
         world_dump_dir: None,
@@ -124,34 +173,38 @@ fn open_session(
     .map_err(|error| format!("RenderSession::open failed: {error}"))?;
 
     for request in rx {
-        let reply =
-            match session.render_frame(request.frame_index, request.current_time, &request.rgba) {
-                Ok(outcome) => match outcome.status {
-                    FrameStatus::Rendered {
-                        pixels,
-                        width,
-                        height,
-                        ..
-                    } => RenderReply::Rendered {
-                        pixels,
-                        width,
-                        height,
-                    },
-                    FrameStatus::FrameError {
-                        render_error,
-                        missing_dependency,
-                    } => RenderReply::Error(format!(
-                        "AEX frame error {render_error}{}",
-                        missing_dependency
-                            .as_deref()
-                            .map(|value| format!("; missing dependency: {value}"))
-                            .unwrap_or_default()
-                    )),
+        let reply = match session.render_frame_with_parameters(
+            request.frame_index,
+            request.current_time,
+            &request.rgba,
+            request.parameters.as_deref(),
+        ) {
+            Ok(outcome) => match outcome.status {
+                FrameStatus::Rendered {
+                    pixels,
+                    width,
+                    height,
+                    ..
+                } => RenderReply::Rendered {
+                    pixels,
+                    width,
+                    height,
                 },
-                Err(error) => {
-                    RenderReply::Error(format!("RenderSession::render_frame failed: {error}"))
-                }
-            };
+                FrameStatus::FrameError {
+                    render_error,
+                    missing_dependency,
+                } => RenderReply::Error(format!(
+                    "AEX frame error {render_error}{}",
+                    missing_dependency
+                        .as_deref()
+                        .map(|value| format!("; missing dependency: {value}"))
+                        .unwrap_or_default()
+                )),
+            },
+            Err(error) => {
+                RenderReply::Error(format!("RenderSession::render_frame failed: {error}"))
+            }
+        };
         if request.reply.send(reply).is_err() {
             break;
         }
@@ -188,6 +241,8 @@ pub unsafe extern "C" fn aexcompat_ymm4_open(
             return Err("invalid YMM4 session geometry or timing".to_string());
         }
         let plugin_sha256 = plugin_sha256(&plugin)?;
+        let parameters =
+            discover_parameters(&repository, &plugin, &plugin_sha256).unwrap_or_default();
         let (tx, rx) = channel::<RenderRequest>();
         let (open_tx, open_rx) = channel::<Result<(), String>>();
         let join = thread::Builder::new()
@@ -203,6 +258,7 @@ pub unsafe extern "C" fn aexcompat_ymm4_open(
                     total_time,
                     time_scale,
                     smart != 0,
+                    parameters,
                     rx,
                 );
                 if let Err(error) = &result {
@@ -238,6 +294,42 @@ pub unsafe extern "C" fn aexcompat_ymm4_open(
     }
 }
 
+/// Discover the bounded parameter set for the managed YMM4 property editor.
+/// The caller owns the UTF-8 output buffer; failures are available through the
+/// existing last-error ABI so the managed bridge can remain pass-through.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aexcompat_ymm4_discover(
+    repository: *const u16,
+    plugin: *const u16,
+    output: *mut u8,
+    output_len: usize,
+) -> i32 {
+    let result = (|| {
+        let repository = utf16_path(repository)?;
+        let plugin = utf16_path(plugin)?;
+        let plugin_sha256 = plugin_sha256(&plugin)?;
+        let parameters = discover_parameters(&repository, &plugin, &plugin_sha256)?;
+        let bytes = serde_json::to_vec(&parameters)
+            .map_err(|error| format!("serialize YMM4 parameter metadata failed: {error}"))?;
+        if output.is_null() || output_len < bytes.len() {
+            return Err(format!(
+                "YMM4 parameter metadata buffer is too small (need {} bytes)",
+                bytes.len()
+            ));
+        }
+        unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), output, bytes.len()) };
+        i32::try_from(bytes.len()).map_err(|_| "YMM4 parameter metadata is too large".to_string())
+    })();
+
+    match result {
+        Ok(length) => length,
+        Err(error) => {
+            set_open_error(error);
+            -1
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn aexcompat_ymm4_render(
     session: *mut AexYmm4Session,
@@ -249,6 +341,8 @@ pub unsafe extern "C" fn aexcompat_ymm4_render(
     output_len: usize,
     output_width: *mut u32,
     output_height: *mut u32,
+    parameters: *const u8,
+    parameters_len: usize,
 ) -> i32 {
     let result = (|| {
         if session.is_null() || rgba.is_null() || output.is_null() {
@@ -257,6 +351,18 @@ pub unsafe extern "C" fn aexcompat_ymm4_render(
         if output_width.is_null() || output_height.is_null() {
             return Err("null YMM4 output dimension argument".to_string());
         }
+        let parameters = if parameters_len == 0 {
+            None
+        } else {
+            if parameters.is_null() {
+                return Err("null YMM4 parameter payload".to_string());
+            }
+            let bytes = unsafe { slice::from_raw_parts(parameters, parameters_len) };
+            let decoded = serde_json::from_slice::<Vec<InteractiveParameter>>(bytes)
+                .map_err(|error| format!("invalid YMM4 parameter payload: {error}"))?;
+            let exposed = exposed_parameters(&decoded);
+            (!exposed.is_empty()).then_some(exposed)
+        };
         let session = unsafe { &mut *session };
         let rgba = unsafe { slice::from_raw_parts(rgba, rgba_len) }.to_vec();
         let (reply_tx, reply_rx) = channel();
@@ -268,6 +374,7 @@ pub unsafe extern "C" fn aexcompat_ymm4_render(
                 frame_index,
                 current_time,
                 rgba,
+                parameters,
                 reply: reply_tx,
             })
             .map_err(|_| "YMM4 session thread stopped".to_string())?;
@@ -353,6 +460,28 @@ const _: Option<*mut c_void> = None;
 mod tests {
     use super::*;
 
+    fn parameter(kind: &str, minimum: f64, maximum: f64) -> InteractiveParameter {
+        InteractiveParameter {
+            slot: 1,
+            name: "fixture".to_string(),
+            kind: kind.to_string(),
+            minimum,
+            maximum,
+            value: minimum,
+            choices: Vec::new(),
+            color: [255, 1, 2, 3],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        }
+    }
+
     #[test]
     fn utf16_path_rejects_null() {
         assert!(utf16_path(ptr::null()).is_err());
@@ -369,5 +498,36 @@ mod tests {
                 .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
         );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn exposed_parameters_are_bounded_and_json_roundtrip_safe() {
+        let mut popup = parameter("integer", 0.0, 0.0);
+        popup.choices = vec!["A".to_string(), "B".to_string()];
+        popup.value = 99.0;
+        let hidden = InteractiveParameter {
+            visible: false,
+            ..parameter("float", 0.0, 1.0)
+        };
+        let unsupported = parameter("point", 0.0, 1.0);
+        let exposed = exposed_parameters(&[
+            parameter("float", 0.0, 1.0),
+            parameter("integer", 0.0, 1.0),
+            popup,
+            parameter("color", 0.0, 0.0),
+            hidden,
+            unsupported,
+        ]);
+
+        assert_eq!(exposed.len(), 4);
+        assert_eq!(exposed[2].minimum, 1.0);
+        assert_eq!(exposed[2].maximum, 2.0);
+        assert_eq!(exposed[2].value, 2.0);
+
+        let encoded = serde_json::to_vec(&exposed).expect("encode exposed parameters");
+        let decoded: Vec<InteractiveParameter> =
+            serde_json::from_slice(&encoded).expect("decode exposed parameters");
+        assert_eq!(decoded.len(), exposed.len());
+        assert_eq!(decoded[2].choices, vec!["A", "B"]);
     }
 }

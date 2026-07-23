@@ -29,6 +29,7 @@ name = "aexcompat-ymm4-native"
 version = "0.1.0"
 dependencies = [
  "aexcompat-broker",
+ "serde_json",
  "sha2",
 ]
 

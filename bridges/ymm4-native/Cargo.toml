@@ -14,4 +14,5 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aexcompat-broker = { path = "../../broker/crates/broker" }
+serde_json = "1"
 sha2 = "0.10"
