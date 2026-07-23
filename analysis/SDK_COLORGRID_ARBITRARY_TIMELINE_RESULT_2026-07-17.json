@@ -5,13 +5,13 @@
     "authenticated_artifacts":  {
                                     "source":  {
                                                    "path":  "minihost/src/l2_main.cpp",
-                                                   "size_bytes":  154909,
-                                                   "sha256":  "295cd60a80ae1f6e0421098362b52a0840b6ec5767642d21f97b30ad9943d229"
+                                                   "size_bytes":  153719,
+                                                   "sha256":  "ba7ee18b06aa8e4803d7ee6ca58464844431d0dfcd214fa21605a301c16b508c"
                                                },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_render_worker.exe",
-                                                   "size_bytes":  1229312,
-                                                   "sha256":  "33ba80b615bf94d3c184b449630c07a8d749b1f30468e82c6d0cb09621917620"
+                                                   "size_bytes":  1221632,
+                                                   "sha256":  "8a60c79afc1b0eb77c2b6498783066a756c5d53cd6c0c460ae078301ab869e22"
                                                },
                                     "fixture":  {
                                                     "path":  "target/sdk-fixtures/colorgrid/ColorGrid.aex",

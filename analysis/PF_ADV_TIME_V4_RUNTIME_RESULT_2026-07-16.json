@@ -4,13 +4,13 @@
     "authenticated_artifacts":  {
                                     "source":  {
                                                    "path":  "minihost/src/l2_main.cpp",
-                                                   "size_bytes":  154909,
-                                                   "sha256":  "295cd60a80ae1f6e0421098362b52a0840b6ec5767642d21f97b30ad9943d229"
+                                                   "size_bytes":  153719,
+                                                   "sha256":  "ba7ee18b06aa8e4803d7ee6ca58464844431d0dfcd214fa21605a301c16b508c"
                                                },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_render_worker.exe",
-                                                   "size_bytes":  1229312,
-                                                   "sha256":  "33ba80b615bf94d3c184b449630c07a8d749b1f30468e82c6d0cb09621917620"
+                                                   "size_bytes":  1221632,
+                                                   "sha256":  "8a60c79afc1b0eb77c2b6498783066a756c5d53cd6c0c460ae078301ab869e22"
                                                },
                                     "probe":  {
                                                   "path":  "target/pf-adv-time-probe-build/Release/pf_adv_time_probe.aex",
@@ -39,7 +39,7 @@
                                                 }
                                 },
     "runtime":  {
-                    "command":  "target/minihost-build/aex_render_worker.exe --render-image target/pf-adv-time-probe-build/Release/pf_adv_time_probe.aex 672b0bb2ec8fc4b3474177528d8ecea672fbbb00ee09ba90fc33bc94223b8ee3 v5| target/gpu-effects/opencl-input.rgba target/gpu-effects/pf-adv-time-probe-output-20260717-nativeaux4.rgba 37 23 0 1 1 1",
+                    "command":  "python tools/refresh-runtime-session.py --plugin \"target/pf-adv-time-probe-build/Release/pf_adv_time_probe.aex\" --plugin-sha256 3ccc33424f3091f58500dd79e3a6223a944537aaade0e54c952b8383075befa3 --input \"target/gpu-effects/opencl-input.rgba\" --output \"target/gpu-effects/pf-adv-time-probe-output-20260717-nativeaux4.rgba\" --width 37 --height 23 --pixel-format argb8 --current-time 0 --total-time 1 --time-scale 1",
                     "exit_code":  0,
                     "status":  "render_completed",
                     "suite_acquires":  2,

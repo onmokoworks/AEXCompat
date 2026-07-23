@@ -4,7 +4,7 @@
     "side_effects_performed":  false,
     "blocker":  "After Effects is already running; capture was not launched.",
     "running_process_ids":  [
-                                39032
+                                8872
                             ],
     "fixture":  {
                     "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\sdk-fixtures\\colorgrid\\ColorGrid.aex",
@@ -67,34 +67,34 @@
     "current_artifact_snapshot":  {
                                       "source":  {
                                                      "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\minihost\\src\\l2_main.cpp",
-                                                     "size_bytes":  154909,
-                                                     "sha256":  "295cd60a80ae1f6e0421098362b52a0840b6ec5767642d21f97b30ad9943d229"
+                                                     "size_bytes":  153719,
+                                                     "sha256":  "ba7ee18b06aa8e4803d7ee6ca58464844431d0dfcd214fa21605a301c16b508c"
                                                  },
                                       "l2_worker":  {
                                                         "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_l2_worker.exe",
-                                                        "size_bytes":  1229312,
-                                                        "sha256":  "3e9cc339caccda07f25dd177239d3b9ab94a330379552cb0f8a0310ba5b892aa"
+                                                        "size_bytes":  1221632,
+                                                        "sha256":  "c5398d594e524e648818902bdbe43d80aaf1c51a6468d3501562e748920b4740"
                                                     },
                                       "render_worker":  {
                                                             "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_render_worker.exe",
-                                                            "size_bytes":  1229312,
-                                                            "sha256":  "33ba80b615bf94d3c184b449630c07a8d749b1f30468e82c6d0cb09621917620"
+                                                            "size_bytes":  1221632,
+                                                            "sha256":  "8a60c79afc1b0eb77c2b6498783066a756c5d53cd6c0c460ae078301ab869e22"
                                                         },
                                       "smart_worker":  {
                                                            "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\minihost-build\\aex_smart_worker.exe",
-                                                           "size_bytes":  1229312,
-                                                           "sha256":  "6a5a47e3d98e3e8b01a3d5e61ef930f8348c335a47ec674fcb0bef3ef95afa55"
+                                                           "size_bytes":  1221632,
+                                                           "sha256":  "3abdb1611d1a9b0595a29120644d10421b4eaded9b3dd6a0c97029104f496bbe"
                                                        },
                                       "harness":  {
                                                       "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\broker\\target\\debug\\aexcompat-harness.exe",
-                                                      "size_bytes":  23152640,
-                                                      "sha256":  "6e4e18a2c0076a4647994418752dbe700d4b09bc1e4c7833544494a462655497"
+                                                      "size_bytes":  23411712,
+                                                      "sha256":  "a8e2bdeff335a85f9ddbaa61345550694402fbd844431446740b76ad6b7ceff6"
                                                   }
                                   },
     "runtime_evidence_authentication":  {
                                             "path":  "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\analysis\\SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",
                                             "size_bytes":  10042,
-                                            "sha256":  "7ea75ebe7406450d2c715038f33650b70142b2a18649a8d813ad890bc90a86f5"
+                                            "sha256":  "9072ada0fbc43cee1b05bad6e77aef3469bb8a212ce4250663f470df8a6a46dd"
                                         },
     "expected_raw_provenance":  {
                                     "runtime_evidence":  "analysis/SDK_COLORGRID_ARBITRARY_TIMELINE_RESULT_2026-07-17.json",
