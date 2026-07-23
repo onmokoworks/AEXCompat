@@ -6,8 +6,10 @@
 namespace aexcompat::worker_runtime::effect_bootstrap {
 namespace {
 
-constexpr std::array<std::size_t, 9> kInputCallbackOffsets{
-    0, 8, 16, 24, 32, 40, 48, 56, 64};
+constexpr std::array<std::size_t, 12> kInputCallbackOffsets{
+    0, 8, 16, 24, 32, 40, 48, 56, 64,
+    // Extended inter slots bundled effects call (issue #382).
+    96, 104, 112};
 constexpr std::array<std::size_t, 31> kUtilityCallbackOffsets{
     0, 8, 16, 32, 48, 56, 64, 72, 96, 104, 488, 496,
     88, 112, 120, 152, 224, 248, 296, 304, 328, 336, 432, 528, 536,
@@ -53,7 +55,9 @@ Result run(State& state, EffectEntry entry, const AbiHooks& abi,
   install_callback_tables(state, abi);
   write(state.input, 192, request.quality);
   write<int16_t>(state.input, 196, 13);
-  write<int16_t>(state.input, 198, 28);
+  // Present the version bundled effects themselves register (13.29, #326
+  // probe), matching the AE 2025 host they ship with.
+  write<int16_t>(state.input, 198, 29);
   write<uint32_t>(state.input, 204, 0x46585443u);
   write<int32_t>(state.input, 208, 1);
   write<int32_t>(state.input, 224, 0);
