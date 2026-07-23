@@ -83,6 +83,57 @@ public sealed class AexParameterSet : Animatable
     };
 }
 
+internal sealed class ByteArrayJsonConverter : JsonConverter<byte[]>
+{
+    public override byte[] Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            return Convert.FromBase64String(reader.GetString() ?? string.Empty);
+        }
+
+        if (reader.TokenType != JsonTokenType.StartArray)
+        {
+            throw new JsonException("Expected a numeric byte array or a Base64 string.");
+        }
+
+        var values = new List<byte>();
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+        {
+            if (reader.TokenType != JsonTokenType.Number || !reader.TryGetByte(out var value))
+            {
+                throw new JsonException("Expected byte values in the color array.");
+            }
+
+            values.Add(value);
+        }
+
+        if (reader.TokenType != JsonTokenType.EndArray)
+        {
+            throw new JsonException("The color array was not terminated.");
+        }
+
+        return values.ToArray();
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        byte[] value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteStartArray();
+        foreach (var item in value)
+        {
+            writer.WriteNumberValue(item);
+        }
+
+        writer.WriteEndArray();
+    }
+}
+
 public sealed class AexParameter : Animatable
 {
     [JsonPropertyName("slot")]
@@ -107,6 +158,7 @@ public sealed class AexParameter : Animatable
     public List<string> Choices { get; set; } = [];
 
     [JsonPropertyName("color")]
+    [JsonConverter(typeof(ByteArrayJsonConverter))]
     public byte[] Color { get; set; } = [0, 0, 0, 255];
 
     [JsonPropertyName("components")]
