@@ -5532,6 +5532,115 @@ fn show_viewer_texture(
     );
 }
 
+fn inspect_dependency_roots(
+    plugin: &Path,
+    requested_roots: &[std::ffi::OsString],
+) -> Result<Vec<PathBuf>, String> {
+    const MAX_ROOTS: usize = aexcompat_broker::plugin_dependency_closure::MAX_SEARCH_ROOTS;
+    let plugin = plugin
+        .canonicalize()
+        .map_err(|error| format!("selected AEX could not be resolved: {error}"))?;
+    let mut roots = Vec::with_capacity(requested_roots.len() + 1);
+    if let Some(parent) = plugin.parent() {
+        roots.push(parent.to_path_buf());
+    }
+    for requested in requested_roots {
+        let root = PathBuf::from(requested)
+            .canonicalize()
+            .map_err(|error| format!("dependency root could not be resolved: {error}"))?;
+        if !root.is_dir() {
+            return Err(format!(
+                "dependency root is not a directory: {}",
+                root.display()
+            ));
+        }
+        if !roots.iter().any(|existing| existing == &root) {
+            roots.push(root);
+        }
+    }
+    if roots.len() > MAX_ROOTS {
+        return Err(format!(
+            "at most {MAX_ROOTS} total dependency search roots may be supplied"
+        ));
+    }
+    Ok(roots)
+}
+
+fn inspect_experimental_with_dependency_roots(
+    repository: &Path,
+    plugin: &Path,
+    approved_sha256: &str,
+    requested_roots: &[std::ffi::OsString],
+) -> Result<serde_json::Value, String> {
+    let roots = inspect_dependency_roots(plugin, requested_roots)?;
+    let closure = aexcompat_broker::plugin_dependency_closure::resolve_dependency_closure(
+        aexcompat_broker::plugin_dependency_closure::DependencyClosureRequest::new(plugin, &roots),
+    )
+    .map_err(|error| format!("dependency closure resolution failed: {error}"))?;
+    let dependencies = closure.dependencies().to_vec();
+    let (parameters, diagnostics) =
+        aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics(
+            repository,
+            plugin,
+            approved_sha256,
+            dependencies.clone(),
+        )
+        .map_err(|error| format!("parameter inspection failed: {error}"))?;
+    let plugin_size = fs::metadata(plugin)
+        .map_err(|error| format!("selected AEX metadata failed: {error}"))?
+        .len();
+    let dependency_report = dependencies
+        .iter()
+        .map(|dependency| {
+            let basename = dependency
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<non-unicode>");
+            let sha256 = dependency
+                .expected_sha256
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<String>();
+            serde_json::json!({
+                "basename": basename,
+                "size_bytes": dependency.expected_size,
+                "sha256": sha256,
+            })
+        })
+        .collect::<Vec<_>>();
+    let provenance = closure
+        .provenance()
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "basename": item.basename,
+                "import_derived": item.import_derived,
+                "string_derived": item.string_derived,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "stage": "parameter_inspection",
+        "plugin_identity": {
+            "sha256": approved_sha256,
+            "size_bytes": plugin_size,
+        },
+        "parameters": parameters,
+        "worker_diagnostics": diagnostics,
+        "dependency_closure": {
+            "search_roots": roots,
+            "dependencies": dependency_report,
+            "dependency_count": dependencies.len(),
+            "total_bytes": closure.total_bytes(),
+            "unresolved_import_count": closure.unresolved().len(),
+            "unresolved_imports": closure.unresolved(),
+            "rejected_import_name_count": closure.rejected_names(),
+            "provenance": provenance,
+        },
+    }))
+}
+
 fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
     let typed_conformance_request = args.get(1).is_some_and(|command| {
         matches!(
@@ -6560,6 +6669,25 @@ fn main() -> eframe::Result {
         };
         match report {
             Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+    if args.len() >= 4 && args[1] == "--inspect-experimental-with-deps" {
+        let plugin = Path::new(&args[2]);
+        let hash = match fs::read(plugin) {
+            Ok(bytes) => format!("{:X}", Sha256::digest(bytes)),
+            Err(error) => {
+                eprintln!("selected AEX could not be read: {error}");
+                std::process::exit(1);
+            }
+        };
+        let roots = &args[3..];
+        match inspect_experimental_with_dependency_roots(&repository, plugin, &hash, roots) {
+            Ok(report) => println!("{}", serde_json::to_string_pretty(&report).unwrap()),
             Err(error) => {
                 eprintln!("{error}");
                 std::process::exit(1);
