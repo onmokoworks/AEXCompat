@@ -41,13 +41,16 @@ use crate::secure_image_dispatch::ApprovedImageArtifact;
 use crate::session_dependency_manifest::{
     SessionDependencyDto, SessionDependencyManifestDto, validate_with_limit,
 };
+use crate::staging_trust;
 use object::LittleEndian;
 use object::read::pe::{ImageNtHeaders, PeFile32, PeFile64};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 /// Upper bound on the search roots one resolution may consult. Roots are tried
 /// in order and the first match wins, which mirrors how the Windows loader
@@ -660,6 +663,9 @@ fn read_image_dependencies(
     image: &Path,
     identity: ImageIdentity,
 ) -> io::Result<(WalkedImage, ImageDependencyNames)> {
+    if staging_trust::trusted_staging_enabled() {
+        return read_image_dependencies_trusted(image, identity);
+    }
     let bytes = read_bounded(image)?;
     let names = dependency_names_from_bytes(&bytes)?;
     Ok((
@@ -673,6 +679,105 @@ fn read_image_dependencies(
         },
         names,
     ))
+}
+
+struct TrustedImageCacheEntry {
+    size: u64,
+    last_write_time: SystemTime,
+    sha256: Option<[u8; 32]>,
+    imports: Vec<String>,
+    runtime_literals: Vec<String>,
+}
+
+thread_local! {
+    /// Path-keyed reuse of read + parse + hash results across the per-dispatch
+    /// walks of one trusted-profile process. `staging_trust` carries the
+    /// inode-keyed half the sealed tree consults; this half skips the read.
+    static TRUSTED_IMAGE_CACHE: RefCell<HashMap<PathBuf, TrustedImageCacheEntry>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The trusted-profile read: an unchanged image (same size and last-write time
+/// at the same path) is served from the thread-local cache instead of being
+/// re-read, and a miss feeds the inode-keyed `staging_trust` cache so the
+/// sealed tree can skip its own re-hashes. A changed image evicts its entry
+/// and is re-read, so nothing stale is ever sealed.
+fn read_image_dependencies_trusted(
+    image: &Path,
+    identity: ImageIdentity,
+) -> io::Result<(WalkedImage, ImageDependencyNames)> {
+    if let Some(cached) = trusted_cached_image(image, identity) {
+        return Ok(cached);
+    }
+    let mut file = fs::File::open(image)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_PARSED_IMAGE_BYTES {
+        return Err(invalid("dependency image is too large to authenticate"));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let names = dependency_names_from_bytes(&bytes)?;
+    let sha256 = match identity {
+        ImageIdentity::Bind => {
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            staging_trust::store(&file, digest);
+            Some(digest)
+        }
+        ImageIdentity::Measure => None,
+    };
+    if let Ok(modified) = metadata.modified() {
+        TRUSTED_IMAGE_CACHE.with(|cache| {
+            cache.borrow_mut().insert(
+                image.to_path_buf(),
+                TrustedImageCacheEntry {
+                    size: bytes.len() as u64,
+                    last_write_time: modified,
+                    sha256,
+                    imports: names.imports.clone(),
+                    runtime_literals: names.runtime_literals.clone(),
+                },
+            );
+        });
+    }
+    Ok((
+        WalkedImage {
+            path: image.to_path_buf(),
+            size: bytes.len() as u64,
+            sha256,
+        },
+        names,
+    ))
+}
+
+fn trusted_cached_image(
+    image: &Path,
+    identity: ImageIdentity,
+) -> Option<(WalkedImage, ImageDependencyNames)> {
+    let metadata = fs::metadata(image).ok()?;
+    let modified = metadata.modified().ok()?;
+    TRUSTED_IMAGE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let entry = cache.get(image)?;
+        if entry.size != metadata.len() || entry.last_write_time != modified {
+            cache.remove(image);
+            return None;
+        }
+        // A measuring walk caches no digest, so it cannot serve a binding one.
+        if identity == ImageIdentity::Bind && entry.sha256.is_none() {
+            return None;
+        }
+        Some((
+            WalkedImage {
+                path: image.to_path_buf(),
+                size: entry.size,
+                sha256: entry.sha256,
+            },
+            ImageDependencyNames {
+                imports: entry.imports.clone(),
+                runtime_literals: entry.runtime_literals.clone(),
+            },
+        ))
+    })
 }
 
 fn dependency_names_from_bytes(bytes: &[u8]) -> io::Result<ImageDependencyNames> {
@@ -1494,6 +1599,49 @@ mod tests {
             resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap();
         assert!(closure.is_empty());
         assert!(closure.unresolved().is_empty());
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn trusted_profile_serves_identical_results_for_an_unchanged_image() {
+        let install = temp_dir("trusted");
+        let image = write_pe(&install, "effect.aex", &["dvacore.dll"]);
+
+        crate::staging_trust::set_enabled_override_for_testing(Some(false));
+        let strict = read_image_dependencies(&image, ImageIdentity::Bind).unwrap();
+        crate::staging_trust::set_enabled_override_for_testing(Some(true));
+        let first = read_image_dependencies(&image, ImageIdentity::Bind).unwrap();
+        let second = read_image_dependencies(&image, ImageIdentity::Bind).unwrap();
+        crate::staging_trust::set_enabled_override_for_testing(None);
+
+        for (walked, names) in [&first, &second] {
+            assert_eq!(*walked, strict.0);
+            assert_eq!(names.imports, strict.1.imports);
+            assert_eq!(names.runtime_literals, strict.1.runtime_literals);
+        }
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn trusted_profile_does_not_serve_stale_results_after_the_image_changes() {
+        crate::staging_trust::set_enabled_override_for_testing(Some(true));
+        let install = temp_dir("trusted-stale");
+        let image = write_pe(&install, "effect.aex", &["dvacore.dll"]);
+        let first = read_image_dependencies(&image, ImageIdentity::Bind).unwrap();
+        assert_eq!(first.1.imports, ["dvacore.dll".to_owned()]);
+
+        // Different length, so the cache miss cannot hinge on mtime granularity.
+        let image = write_pe(&install, "effect.aex", &["much-longer-dependency-name.dll"]);
+        let second = read_image_dependencies(&image, ImageIdentity::Bind).unwrap();
+        crate::staging_trust::set_enabled_override_for_testing(None);
+
+        assert_eq!(
+            second.1.imports,
+            ["much-longer-dependency-name.dll".to_owned()]
+        );
+        let bytes = fs::read(&image).unwrap();
+        assert_eq!(second.0.sha256, Some(Sha256::digest(&bytes).into()));
+        assert_eq!(second.0.size, bytes.len() as u64);
         fs::remove_dir_all(install).unwrap();
     }
 }
