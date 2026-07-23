@@ -3888,7 +3888,7 @@ impl HarnessApp {
                     timing,
                 )
             } else if !smart && use_registered_default && dependencies.is_empty() {
-                aexcompat_broker::image_render::render_image(
+                aexcompat_broker::image_render::render_scattermap_fixture(
                     &repository,
                     "scattermap",
                     &input,
@@ -5702,6 +5702,12 @@ fn cli_contract() -> serde_json::Value {
                 "result": "parameter-inspection-json"
             },
             {
+                "name": "--render-scattermap-fixture",
+                "argv": ["--render-scattermap-fixture", "<input-image>", "<output-image>"],
+                "result": "session-render-report-json",
+                "note": "Approved ScatterMap fixture only; this is not a generic AEX path."
+            },
+            {
                 "name": "--inspect-experimental-with-deps",
                 "argv": ["--inspect-experimental-with-deps", "<aex>", "<dependency-root>..."],
                 "result": "parameter-inspection-and-dependency-closure-json"
@@ -5776,7 +5782,7 @@ fn cli_contract() -> serde_json::Value {
 
 fn print_cli_help() {
     println!(
-        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI."
+        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI."
     );
 }
 
@@ -5932,8 +5938,8 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    if args.len() == 4 && args[1] == "--render-image" {
-        let report = aexcompat_broker::image_render::render_image(
+    if args.len() == 4 && args[1] == "--render-scattermap-fixture" {
+        let report = aexcompat_broker::image_render::render_scattermap_fixture(
             &repository,
             "scattermap",
             Path::new(&args[2]),
