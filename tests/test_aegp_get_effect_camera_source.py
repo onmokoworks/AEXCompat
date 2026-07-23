@@ -66,6 +66,16 @@ def test_camera_matrix_is_atomic_bounded_and_deterministic():
     assert "std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0" in source
 
 
+def test_active_camera_matrix_uses_scene_world_transform_and_fail_closed():
+    source = (ROOT / "minihost" / "src" / "worker_aegp_pf_interface_suite.cpp").read_text(
+        encoding="utf-8")
+    assert "bool invert_affine_matrix(const AegpMatrix4& input, AegpMatrix4& output)" in source
+    assert "aegp_get_layer_to_world_xform(camera_layer, comp_time, &world)" in source
+    assert "std::abs(determinant) <= kDeterminantEpsilon" in source
+    assert "!invert_affine_matrix(world, result)" in source
+    assert "*camera_matrix = result" in source
+
+
 def test_camera_lookup_is_fail_closed_and_preserves_output_on_error():
     source = scene_source()
     assert "effect != &g_effect || !effect_is_live()" in source
