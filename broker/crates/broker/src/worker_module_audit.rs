@@ -6,6 +6,7 @@ use std::path::{Component, Path};
 
 const MAX_AUDITED_MODULES: usize = 128;
 const MIN_REQUIRED_PHASES: u32 = 3;
+const MAX_DIAGNOSTIC_SAMPLES_PER_CATEGORY: usize = 4;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,15 +87,6 @@ fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
             "secure worker {label} module audit failed"
         )));
     }
-    let count = snapshot.worker.len()
-        + snapshot.plugin.len()
-        + snapshot.system32.len()
-        + snapshot.winsxs.len()
-        + snapshot.policy.as_ref().map_or(0, Vec::len)
-        + snapshot.unknown.len();
-    if count > MAX_AUDITED_MODULES {
-        return Err(invalid("secure worker module audit limit exceeded"));
-    }
     let mut names = HashSet::new();
     for name in snapshot
         .worker
@@ -110,7 +102,49 @@ fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
             return Err(invalid("secure worker module audit contains duplicates"));
         }
     }
+    let count = snapshot.worker.len()
+        + snapshot.plugin.len()
+        + snapshot.system32.len()
+        + snapshot.winsxs.len()
+        + snapshot.policy.as_ref().map_or(0, Vec::len)
+        + snapshot.unknown.len();
+    if count > MAX_AUDITED_MODULES {
+        return Err(module_audit_limit_error(snapshot, label, count));
+    }
     Ok(())
+}
+
+fn module_audit_limit_error(snapshot: &AuditSnapshot, label: &str, total: usize) -> io::Error {
+    let samples = |values: &[String]| {
+        values
+            .iter()
+            .take(MAX_DIAGNOSTIC_SAMPLES_PER_CATEGORY)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    invalid_diagnostics(serde_json::json!({
+        "classification": "module_audit_limit_exceeded",
+        "failure_stage": "module_audit_validation",
+        "reason": format!("secure worker {label} module audit limit exceeded"),
+        "limit": MAX_AUDITED_MODULES,
+        "total": total,
+        "category_counts": {
+            "worker": snapshot.worker.len(),
+            "plugin": snapshot.plugin.len(),
+            "system32": snapshot.system32.len(),
+            "winsxs": snapshot.winsxs.len(),
+            "policy": snapshot.policy.as_ref().map_or(0, Vec::len),
+            "unknown": snapshot.unknown.len(),
+        },
+        "sample_basenames": {
+            "worker": samples(&snapshot.worker),
+            "plugin": samples(&snapshot.plugin),
+            "system32": samples(&snapshot.system32),
+            "winsxs": samples(&snapshot.winsxs),
+            "policy": snapshot.policy.as_ref().map_or_else(Vec::new, |values| samples(values)),
+            "unknown": samples(&snapshot.unknown),
+        },
+    }))
 }
 
 fn require_optional_subset(
@@ -163,11 +197,14 @@ fn invalid(message: impl Into<String>) -> io::Error {
 }
 
 fn invalid_classified(classification: &str, reason: &str) -> io::Error {
-    let diagnostics = serde_json::json!({
+    invalid_diagnostics(serde_json::json!({
         "classification": classification,
         "failure_stage": "module_audit_validation",
         "reason": reason,
-    });
+    }))
+}
+
+fn invalid_diagnostics(diagnostics: Value) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!("secure worker module audit failed: diagnostics={diagnostics}"),
@@ -291,5 +328,37 @@ mod tests {
             .collect();
         report["module_audit"]["observed_union"]["policy"] = json!(names);
         assert!(validate_required_worker_audit(&report.to_string(), false).is_err());
+    }
+    #[test]
+    fn classifies_module_audit_limit_with_bounded_counts_and_samples() {
+        let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
+        let names: Vec<_> = (0..129)
+            .map(|index| format!("sealed-{index}.dll"))
+            .collect();
+        report["module_audit"]["observed_union"]["system32"] = json!(names);
+
+        let error = validate_required_worker_audit(&report.to_string(), false)
+            .expect_err("an over-limit audit must fail closed");
+        let error_text = error.to_string();
+        let diagnostics = error_text
+            .split_once("diagnostics=")
+            .map(|(_, value)| value)
+            .expect("structured diagnostic marker");
+        let diagnostics: Value =
+            serde_json::from_str(diagnostics).expect("diagnostic must be valid JSON");
+        assert_eq!(diagnostics["classification"], "module_audit_limit_exceeded");
+        assert_eq!(diagnostics["failure_stage"], "module_audit_validation");
+        assert_eq!(diagnostics["limit"], MAX_AUDITED_MODULES);
+        assert_eq!(diagnostics["total"], 132);
+        assert_eq!(diagnostics["category_counts"]["system32"], 129);
+        assert_eq!(
+            diagnostics["sample_basenames"]["system32"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+        assert!(!error_text.contains("D:\\"));
+        assert!(!error_text.contains("sealed-128.dll"));
     }
 }
