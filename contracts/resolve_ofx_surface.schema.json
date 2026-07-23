@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AEXCompat Resolve OFX surface contract",
+  "type": "object",
+  "required": ["schema_version", "provenance", "package", "lifecycle", "pixel_contract", "identity", "control_render", "aex_render_gate", "host_evidence"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "provenance": {
+      "type": "object",
+      "required": ["source", "license", "vendored_headers"],
+      "properties": {
+        "source": {"type": "string", "format": "uri"},
+        "license": {"const": "BSD-3-Clause"},
+        "vendored_headers": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "package": {
+      "type": "object",
+      "required": ["bundle_suffix", "windows_architecture", "binary_suffix"],
+      "properties": {
+        "bundle_suffix": {"const": ".ofx.bundle"},
+        "binary_suffix": {"const": ".ofx"},
+        "windows_architecture": {"const": "Win64"}
+      },
+      "additionalProperties": false
+    },
+    "lifecycle": {
+      "type": "object",
+      "required": ["exports", "actions"],
+      "properties": {
+        "exports": {"type": "array", "items": {"type": "string"}, "minItems": 4},
+        "actions": {"type": "array", "items": {"type": "string"}, "minItems": 6}
+      },
+      "additionalProperties": false
+    },
+    "pixel_contract": {
+      "type": "object",
+      "required": ["components", "depth", "channel_order", "alpha", "stride", "frame_time", "render_window"],
+      "properties": {
+        "components": {"const": "RGBA"},
+        "depth": {"const": "8-bit"},
+        "channel_order": {"const": "RGBA"},
+        "alpha": {"enum": ["premultiplied", "straight"]},
+        "stride": {"type": "string"},
+        "frame_time": {"const": "OfxTime double"},
+        "render_window": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "identity": {
+      "type": "object",
+      "required": ["plugin_identifier", "source_sha256", "binary_sha256", "worker_identity", "input_sha256", "output_sha256", "pixel_diff"],
+      "properties": {
+        "plugin_identifier": {"type": "string"},
+        "source_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "binary_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "worker_identity": {"type": "string"},
+        "input_sha256": {"type": ["string", "null"]},
+        "output_sha256": {"type": ["string", "null"]},
+        "pixel_diff": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "control_render": {
+      "type": "object",
+      "required": ["state", "status", "render_claim", "aex_render_claim", "width", "height", "render_window", "source_rowbytes", "output_rowbytes", "frame_time", "input_sha256", "output_sha256", "pixel_diff", "alpha_preserved", "padding_preserved"],
+      "properties": {
+        "state": {"const": "verified_local_fixture"},
+        "status": {"const": "kOfxStatOK"},
+        "render_claim": {"const": "builtin_rgba8_control"},
+        "aex_render_claim": {"const": "blocked_missing_aex_rendersession"},
+        "width": {"const": 3},
+        "height": {"const": 2},
+        "render_window": {"const": [1, 0, 3, 2]},
+        "source_rowbytes": {"const": 20},
+        "output_rowbytes": {"const": 24},
+        "frame_time": {"const": 7.0},
+        "input_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "output_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "pixel_diff": {"const": 12},
+        "alpha_preserved": {"const": true},
+        "padding_preserved": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "aex_render_gate": {
+      "type": "object",
+      "required": ["state", "success_status", "blocked_status", "reason"],
+      "properties": {
+        "state": {"const": "blocked"},
+        "success_status": {"const": "not_claimed"},
+        "blocked_status": {"const": "kOfxStatErrUnsupported"},
+        "reason": {"const": "approved bounded AEX RenderSession dependency is not available on this branch"}
+      },
+      "additionalProperties": false
+    },
+    "host_evidence": {
+      "type": "object",
+      "required": ["resolve_version", "resolve_exe_sha256", "ofxloader_exe_sha256", "internal_openfx_plugin_sha256", "standard_external_path_entries", "real_resolve_smoke"],
+      "properties": {
+        "resolve_version": {"type": "string"},
+        "resolve_exe_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "ofxloader_exe_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "internal_openfx_plugin_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "standard_external_path_entries": {"const": 0},
+        "real_resolve_smoke": {"const": "blocked_external_path_empty"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
