@@ -17,8 +17,8 @@
                                               },
                                     "session_harness":  {
                                                             "path":  "broker/target/release/aexcompat-harness.exe",
-                                                            "size_bytes":  11551744,
-                                                            "sha256":  "43247aba45cc49b1dc08565d78cc9a9fa398669809e8022759cc926ba81afdb5"
+                                                            "size_bytes":  11545600,
+                                                            "sha256":  "ada7ea48285029ea6852f5a325f0db4b96b8d816988d38ba13486ad68c7cf1d4"
                                                         },
                                     "release_worker":  {
                                                            "path":  "target/minihost-build/aex_render_worker.exe",
