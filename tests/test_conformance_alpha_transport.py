@@ -16,6 +16,10 @@ def test_alpha_mode_is_wired_to_primary_and_all_secondary_transports():
         "let mut rgba = decoded.into_rgba8().into_raw();",
         ordinary,
     )
-    transport_write = text.index(".write_all(&rgba)?;")
-    assert primary < ordinary < timed < transport_write
+    # The pre-transform has to happen before the pixels leave for the worker.
+    # That used to be the one-shot's `.write_all(&rgba)?` into a raw sidecar;
+    # #365 deleted it, and the session hands the same buffer over by reference
+    # in the wrapper request instead.
+    transport_handoff = text.index("rgba: &rgba,")
+    assert primary < ordinary < timed < transport_handoff
 

@@ -4,13 +4,13 @@
     "authenticated_current_sampling_artifacts":  {
                                                      "source":  {
                                                                     "path":  "minihost/src/l2_main.cpp",
-                                                                    "size_bytes":  139615,
-                                                                    "sha256":  "4ccae13e08ee5e00083136887ac36c48141c8e14d4315e282d468c6f56a42ac9"
+                                                                    "size_bytes":  154909,
+                                                                    "sha256":  "295cd60a80ae1f6e0421098362b52a0840b6ec5767642d21f97b30ad9943d229"
                                                                 },
                                                      "worker":  {
                                                                     "path":  "target/minihost-build/aex_render_worker.exe",
-                                                                    "size_bytes":  1218048,
-                                                                    "sha256":  "47daaf75e1bde6f09cfde040415da1e29f357b0d3b2fdbccc2b454f484a1b594"
+                                                                    "size_bytes":  1229312,
+                                                                    "sha256":  "33ba80b615bf94d3c184b449630c07a8d749b1f30468e82c6d0cb09621917620"
                                                                 },
                                                      "input":  {
                                                                    "path":  "target/gpu-effects/opencl-input.rgba",
@@ -20,12 +20,12 @@
                                                      "probe":  {
                                                                    "path":  "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
                                                                    "size_bytes":  18944,
-                                                                   "sha256":  "a5875332f7176aebba5dfaf4b8cfa32a4de72135f18ef89a463ef5addb31a31e"
+                                                                   "sha256":  "689acb93be08c69bc9164451ed5a1dad1665bce3c19d32e77d285ca8e53bc2b2"
                                                                },
                                                      "fill_probe":  {
                                                                         "path":  "target/pf-fill-premultiply-probe/pf_fill_premultiply_probe.aex",
                                                                         "size_bytes":  14848,
-                                                                        "sha256":  "daf8dfdc97506ec01f83422bd1f4966d6bc3e4648f8ece0f9d3beb89be3d83e9"
+                                                                        "sha256":  "d7a3d26a08e0e111cb55ca62ffa5edada7892c42dd7378ccca6fc94242314f09"
                                                                     },
                                                      "sampling_output":  {
                                                                              "path":  "target/sampling-depth-8.rgba",
@@ -51,8 +51,8 @@
     "sampling_probe":  {
                            "artifact":  "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex",
                            "size_bytes":  18944,
-                           "sha256":  "a5875332f7176aebba5dfaf4b8cfa32a4de72135f18ef89a463ef5addb31a31e",
-                           "command":  "target/minihost-build/aex_render_worker.exe --render-image target/pf-sampling-probe-build/Release/pf_sampling_probe.aex a5875332f7176aebba5dfaf4b8cfa32a4de72135f18ef89a463ef5addb31a31e v5| target/gpu-effects/opencl-input.rgba target/sampling-probe-output-20260717-current.rgba 37 23 0 1 1 1",
+                           "sha256":  "689acb93be08c69bc9164451ed5a1dad1665bce3c19d32e77d285ca8e53bc2b2",
+                           "command":  "target/minihost-build/aex_render_worker.exe --render-image target/pf-sampling-probe-build/Release/pf_sampling_probe.aex 689acb93be08c69bc9164451ed5a1dad1665bce3c19d32e77d285ca8e53bc2b2 v5| target/gpu-effects/opencl-input.rgba target/sampling-probe-output-20260717-current.rgba 37 23 0 1 1 1",
                            "report":  "target/sampling-probe-report-20260717-current.json",
                            "width":  37,
                            "height":  23,
@@ -71,8 +71,8 @@
     "fill_premultiply_probe":  {
                                    "artifact":  "target/pf-fill-premultiply-probe/pf_fill_premultiply_probe.aex",
                                    "size_bytes":  14848,
-                                   "sha256":  "daf8dfdc97506ec01f83422bd1f4966d6bc3e4648f8ece0f9d3beb89be3d83e9",
-                                   "command":  "target/minihost-build/aex_render_worker.exe --render-image target/pf-fill-premultiply-probe/pf_fill_premultiply_probe.aex daf8dfdc97506ec01f83422bd1f4966d6bc3e4648f8ece0f9d3beb89be3d83e9 v5| target/gpu-effects/opencl-input.rgba target/fill-premultiply-probe-output-20260717-current.rgba 37 23 0 1 1 1",
+                                   "sha256":  "d7a3d26a08e0e111cb55ca62ffa5edada7892c42dd7378ccca6fc94242314f09",
+                                   "command":  "target/minihost-build/aex_render_worker.exe --render-image target/pf-fill-premultiply-probe/pf_fill_premultiply_probe.aex d7a3d26a08e0e111cb55ca62ffa5edada7892c42dd7378ccca6fc94242314f09 v5| target/gpu-effects/opencl-input.rgba target/fill-premultiply-probe-output-20260717-current.rgba 37 23 0 1 1 1",
                                    "report":  "target/fill-premultiply-probe-report-20260717-current.json",
                                    "exit_code":  0,
                                    "status":  "render_completed",

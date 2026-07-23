@@ -7,6 +7,8 @@
 //! demand, so per-frame validation, the frame-deadline watchdog, and crash
 //! invalidation are exercised without a native minihost build.
 
+mod common;
+
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::image_render::{
@@ -128,6 +130,7 @@ mod windows_e2e {
             plugin_path: plugin,
             plugin_sha256: sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -238,6 +241,11 @@ mod windows_e2e {
 
     #[test]
     fn audio_session_renders_spans_and_closes_clean() {
+        if crate::common::skip_without_restricted_token_launch(
+            "audio_session_renders_spans_and_closes_clean",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_audio_repository();
         let mut session = AudioRenderSession::open(AudioSessionOpenRequest {
@@ -295,6 +303,11 @@ mod windows_e2e {
     /// host-protection invariant breach, not published as a valid span.
     #[test]
     fn audio_session_rejects_out_of_range_output_start() {
+        if crate::common::skip_without_restricted_token_launch(
+            "audio_session_rejects_out_of_range_output_start",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("audio_out_of_range_start"));
         let (repository, plugin, sha) = temp_audio_repository();
         let mut session = AudioRenderSession::open(AudioSessionOpenRequest {
@@ -323,6 +336,11 @@ mod windows_e2e {
 
     #[test]
     fn smart_session_dispatches_the_smart_worker_and_closes_clean() {
+        if crate::common::skip_without_restricted_token_launch(
+            "smart_session_dispatches_the_smart_worker_and_closes_clean",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let mut session = RenderSession::open(SessionOpenRequest {
@@ -330,6 +348,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -376,6 +395,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -409,6 +429,11 @@ mod windows_e2e {
 
     #[test]
     fn smart_auto_backend_without_a_policy_degrades_to_the_cpu_session() {
+        if crate::common::skip_without_restricted_token_launch(
+            "smart_auto_backend_without_a_policy_degrades_to_the_cpu_session",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Auto + no policy opens the CPU smart session command; the fixture
@@ -420,6 +445,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -497,6 +523,11 @@ mod windows_e2e {
 
     #[test]
     fn secondary_layers_reach_their_shared_slots() {
+        if crate::common::skip_without_restricted_token_launch(
+            "secondary_layers_reach_their_shared_slots",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Each layer's slot is filled with its slot number as a byte; the
@@ -523,6 +554,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -557,6 +589,11 @@ mod windows_e2e {
 
     #[test]
     fn timed_layers_travel_the_session_trailer_into_their_slots() {
+        if crate::common::skip_without_restricted_token_launch(
+            "timed_layers_travel_the_session_trailer_into_their_slots",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Two timed entries share slot 5 at different rational times, plus a
@@ -592,6 +629,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -651,6 +689,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -684,6 +723,11 @@ mod windows_e2e {
 
     #[test]
     fn open_admits_a_static_and_timed_layer_at_the_same_slot() {
+        if crate::common::skip_without_restricted_token_launch(
+            "open_admits_a_static_and_timed_layer_at_the_same_slot",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // A static entry and a timed entry share slot 4: the valid one-shot
@@ -712,6 +756,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -771,6 +816,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -804,6 +850,11 @@ mod windows_e2e {
 
     #[test]
     fn alpha_as_coverage_params_travel_the_session_launch() {
+        if crate::common::skip_without_restricted_token_launch(
+            "alpha_as_coverage_params_travel_the_session_launch",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // The slots ride the `--alpha-as-coverage-v1` auxiliary option, which
@@ -815,6 +866,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -858,6 +910,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -906,6 +959,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -953,6 +1007,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -981,8 +1036,99 @@ mod windows_e2e {
         assert!(error.to_string().contains("slot or dimensions"), "{error}");
     }
 
+    /// `payload_override` must reach the worker's payload argv slot byte for
+    /// byte (#365).
+    ///
+    /// The fixture-manifest route (`render_image`, scattermap) builds its
+    /// payload from a descriptor profile via `encode_worker_payload`, which the
+    /// `InteractiveParameter` list cannot express: ids are the profile's, not
+    /// `param_<slot>`. That was the last reason a second (one-shot) transport
+    /// had to exist, so the session grew this passthrough instead. The fixture
+    /// echoes the slot it received as `launch_payload`, which is the only way to
+    /// see what actually arrived.
+    ///
+    /// Two claims, and the first is what makes the second non-vacuous:
+    ///   1. with no override, the slot carries exactly what
+    ///      `encode_interactive_payload` produces for `parameters`;
+    ///   2. with an override, the slot carries the override verbatim -- an id
+    ///      shape the encoder in (1) can never emit, so a passthrough that
+    ///      silently re-encoded `parameters` would fail here.
+    #[test]
+    fn a_payload_override_reaches_the_worker_verbatim() {
+        if crate::common::skip_without_restricted_token_launch(
+            "a_payload_override_reaches_the_worker_verbatim",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let parameters = [float_parameter(1)];
+
+        let launch_payload = |override_payload: Option<&str>| -> String {
+            let mut session = RenderSession::open(SessionOpenRequest {
+                repository: &repository.0,
+                plugin_path: &plugin,
+                plugin_sha256: &sha,
+                parameters: Some(&parameters),
+                payload_override: override_payload,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                width: WIDTH,
+                height: HEIGHT,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                frame_deadline: Duration::from_secs(30),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+            })
+            .expect("open render session");
+            let outcome = session
+                .render_frame(0, 0, &input_pattern(3))
+                .expect("frame");
+            assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+            let close = session.close();
+            assert_eq!(close["session_clean"], true, "close: {close}");
+            close["final_report"]["launch_payload"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no launch_payload in the report: {close}"))
+                .to_owned()
+        };
+
+        // (1) No override: the encoder's own output reaches the worker. This
+        // also pins the encoding the fixture route has to be distinguishable
+        // from.
+        let encoded = aexcompat_broker::image_render::encode_interactive_payload(&parameters)
+            .expect("encode the parameter payload");
+        assert_eq!(encoded, "v2|param_1@1:f64=1");
+        assert_eq!(launch_payload(None), encoded);
+
+        // (2) An override in the fixture route's shape: a descriptor id that is
+        // not `param_<slot>`, so re-encoding `parameters` could not produce it.
+        let fixture_payload = "v3|density@1:i32=7;tint@2:argb8=255,10,20,30";
+        assert_ne!(fixture_payload, encoded);
+        assert_eq!(launch_payload(Some(fixture_payload)), fixture_payload);
+    }
+
     #[test]
     fn animation_sidecar_rides_the_session_and_is_cleaned_up() {
+        if crate::common::skip_without_restricted_token_launch(
+            "animation_sidecar_rides_the_session_and_is_cleaned_up",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let parameters = [float_parameter(1)];
@@ -992,6 +1138,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: Some(&parameters),
+            payload_override: None,
             parameter_animation: Some(&animations),
             aux_manifest: None,
             world_dump_dir: None,
@@ -1036,6 +1183,11 @@ mod windows_e2e {
 
     #[test]
     fn arbitrary_data_parameters_accept_arbitrary_animation() {
+        if crate::common::skip_without_restricted_token_launch(
+            "arbitrary_data_parameters_accept_arbitrary_animation",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let parameters: [InteractiveParameter; 1] = [serde_json::from_value(serde_json::json!({
@@ -1060,6 +1212,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: Some(&parameters),
+            payload_override: None,
             parameter_animation: Some(&animations),
             aux_manifest: None,
             world_dump_dir: None,
@@ -1093,6 +1246,11 @@ mod windows_e2e {
 
     #[test]
     fn auxiliary_options_ride_the_session_argv_tail() {
+        if crate::common::skip_without_restricted_token_launch(
+            "auxiliary_options_ride_the_session_argv_tail",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // A manifest the real worker's loader would accept: one depth channel
@@ -1144,6 +1302,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: Some(&manifest),
             world_dump_dir: Some(&dump_dir),
@@ -1187,6 +1346,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: Some(&reused),
@@ -1225,6 +1385,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: Some(&missing),
@@ -1263,6 +1424,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: Some(&animations),
             aux_manifest: None,
             world_dump_dir: None,
@@ -1298,6 +1460,11 @@ mod windows_e2e {
 
     #[test]
     fn session_renders_frames_and_validates_slot_transfers() {
+        if crate::common::skip_without_restricted_token_launch(
+            "session_renders_frames_and_validates_slot_transfers",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1315,7 +1482,7 @@ mod windows_e2e {
                     assert_eq!(pixels, expected, "slot transfer round-trips the render");
                     checksums.push(checksum);
                 }
-                FrameStatus::FrameError { render_error } => {
+                FrameStatus::FrameError { render_error, .. } => {
                     panic!("frame {frame_index} unexpectedly errored: {render_error}")
                 }
             }
@@ -1334,6 +1501,11 @@ mod windows_e2e {
 
     #[test]
     fn zero_duration_session_renders_the_single_frame() {
+        if crate::common::skip_without_restricted_token_launch(
+            "zero_duration_session_renders_the_single_frame",
+        ) {
+            return;
+        }
         // A zero-duration render (total_time == 0) is valid and renders the
         // single current_time == 0 frame, matching the one-shot worker (#272).
         // It is no longer routed to the one-shot path.
@@ -1344,6 +1516,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -1393,6 +1566,11 @@ mod windows_e2e {
 
     #[test]
     fn per_frame_parameters_ride_the_v2_message_and_reach_the_worker() {
+        if crate::common::skip_without_restricted_token_launch(
+            "per_frame_parameters_ride_the_v2_message_and_reach_the_worker",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1443,6 +1621,11 @@ mod windows_e2e {
 
     #[test]
     fn per_frame_ui_action_rides_the_v2_message_and_reaches_the_worker() {
+        if crate::common::skip_without_restricted_token_launch(
+            "per_frame_ui_action_rides_the_v2_message_and_reaches_the_worker",
+        ) {
+            return;
+        }
         use aexcompat_broker::image_render::RenderUiAction;
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
@@ -1527,6 +1710,11 @@ mod windows_e2e {
 
     #[test]
     fn interactive_session_renders_reports_and_previews_across_frames() {
+        if crate::common::skip_without_restricted_token_launch(
+            "interactive_session_renders_reports_and_previews_across_frames",
+        ) {
+            return;
+        }
         use aexcompat_broker::image_render::{InteractiveRenderSession, InteractiveSessionOpen};
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
@@ -1573,6 +1761,11 @@ mod windows_e2e {
 
     #[test]
     fn rejected_per_frame_parameters_leave_the_session_usable() {
+        if crate::common::skip_without_restricted_token_launch(
+            "rejected_per_frame_parameters_leave_the_session_usable",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1598,6 +1791,11 @@ mod windows_e2e {
 
     #[test]
     fn frame_local_error_keeps_the_session_usable() {
+        if crate::common::skip_without_restricted_token_launch(
+            "frame_local_error_keeps_the_session_usable",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("error_frame_0"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1606,7 +1804,10 @@ mod windows_e2e {
             .expect("frame-local errors do not invalidate the session");
         assert!(matches!(
             outcome.status,
-            FrameStatus::FrameError { render_error: -40 }
+            FrameStatus::FrameError {
+                render_error: -40,
+                missing_dependency: None,
+            }
         ));
         let outcome = session
             .render_frame(1, 1, &input_pattern(2))
@@ -1620,6 +1821,11 @@ mod windows_e2e {
 
     #[test]
     fn empty_smart_result_frame_is_accepted_as_a_valid_empty_render() {
+        if crate::common::skip_without_restricted_token_launch(
+            "empty_smart_result_frame_is_accepted_as_a_valid_empty_render",
+        ) {
+            return;
+        }
         // A SmartFX frame whose PreRender returned a legally empty result_rect
         // (#278) reports a 0x0 ok frame with the explicit empty_result flag. The
         // session accepts it as a valid empty render (not a dimension invariant
@@ -1633,6 +1839,7 @@ mod windows_e2e {
             plugin_path: &plugin,
             plugin_sha256: &sha,
             parameters: None,
+            payload_override: None,
             parameter_animation: None,
             aux_manifest: None,
             world_dump_dir: None,
@@ -1683,6 +1890,11 @@ mod windows_e2e {
 
     #[test]
     fn frame_deadline_watchdog_terminates_the_job() {
+        if crate::common::skip_without_restricted_token_launch(
+            "frame_deadline_watchdog_terminates_the_job",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("hang_frame"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(2));
@@ -1702,6 +1914,11 @@ mod windows_e2e {
 
     #[test]
     fn modal_ui_worker_uses_a_private_desktop_before_session_timeout() {
+        if crate::common::skip_without_restricted_token_launch(
+            "modal_ui_worker_uses_a_private_desktop_before_session_timeout",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("modal_frame"));
         let report_path = std::env::temp_dir().join(format!(
             "aexcompat-session-desktop-{:032x}.txt",
@@ -1735,6 +1952,11 @@ mod windows_e2e {
 
     #[test]
     fn worker_crash_invalidates_the_session_with_diagnostics() {
+        if crate::common::skip_without_restricted_token_launch(
+            "worker_crash_invalidates_the_session_with_diagnostics",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("crash_frame"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1750,6 +1972,11 @@ mod windows_e2e {
 
     #[test]
     fn a_crashing_resident_session_captures_an_opt_in_minidump() {
+        if crate::common::skip_without_restricted_token_launch(
+            "a_crashing_resident_session_captures_an_opt_in_minidump",
+        ) {
+            return;
+        }
         // Opt-in on: the broker creates one inherited dump pipe for the session
         // launch (the same launch-boundary plumbing the one-shot path uses,
         // issue #18/#224) because AEXCOMPAT_MINIDUMP_DIR resolves under the
@@ -1805,6 +2032,11 @@ mod windows_e2e {
 
     #[test]
     fn a_reserved_fatal_session_error_invalidates_instead_of_continuing() {
+        if crate::common::skip_without_restricted_token_launch(
+            "a_reserved_fatal_session_error_invalidates_instead_of_continuing",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("fatal_error_frame_0"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1826,6 +2058,11 @@ mod windows_e2e {
 
     #[test]
     fn a_framing_violation_from_a_live_worker_invalidates_promptly() {
+        if crate::common::skip_without_restricted_token_launch(
+            "a_framing_violation_from_a_live_worker_invalidates_promptly",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("bad_framing_frame_0"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1849,6 +2086,11 @@ mod windows_e2e {
 
     #[test]
     fn reused_frame_indices_are_rejected_without_killing_the_session() {
+        if crate::common::skip_without_restricted_token_launch(
+            "reused_frame_indices_are_rejected_without_killing_the_session",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1874,6 +2116,11 @@ mod windows_e2e {
 
     #[test]
     fn error_response_with_a_mutated_header_is_fail_closed() {
+        if crate::common::skip_without_restricted_token_launch(
+            "error_response_with_a_mutated_header_is_fail_closed",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("error_mutates_header"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1889,6 +2136,11 @@ mod windows_e2e {
 
     #[test]
     fn a_unilateral_worker_exit_breaks_the_close_handshake_contract() {
+        if crate::common::skip_without_restricted_token_launch(
+            "a_unilateral_worker_exit_breaks_the_close_handshake_contract",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("exit_after_frame_0"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1911,6 +2163,11 @@ mod windows_e2e {
 
     #[test]
     fn process_death_is_seen_even_when_a_descendant_holds_the_pipe() {
+        if crate::common::skip_without_restricted_token_launch(
+            "process_death_is_seen_even_when_a_descendant_holds_the_pipe",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("exit_leaving_descendant"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1935,6 +2192,11 @@ mod windows_e2e {
 
     #[test]
     fn stale_generation_and_missing_header_update_are_fail_closed() {
+        if crate::common::skip_without_restricted_token_launch(
+            "stale_generation_and_missing_header_update_are_fail_closed",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("stale_generation"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1950,6 +2212,11 @@ mod windows_e2e {
 
     #[test]
     fn mutated_static_header_is_fail_closed() {
+        if crate::common::skip_without_restricted_token_launch(
+            "mutated_static_header_is_fail_closed",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("mutate_header"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1965,6 +2232,11 @@ mod windows_e2e {
 
     #[test]
     fn output_checksum_mismatch_is_fail_closed() {
+        if crate::common::skip_without_restricted_token_launch(
+            "output_checksum_mismatch_is_fail_closed",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("bad_checksum"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
@@ -1998,6 +2270,11 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_cli_renders_a_png_sequence_through_one_session() {
+        if crate::common::skip_without_restricted_token_launch(
+            "video_batch_cli_renders_a_png_sequence_through_one_session",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 3);
@@ -2042,6 +2319,11 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_reports_an_empty_smart_frame_without_a_png() {
+        if crate::common::skip_without_restricted_token_launch(
+            "video_batch_reports_an_empty_smart_frame_without_a_png",
+        ) {
+            return;
+        }
         // A SmartFX batch frame that legally renders an empty result (#278) has
         // no pixels, so there is no PNG or raw to write. The batch must report it
         // as a legal empty frame and keep going, not abort on a 0x0 image. The
@@ -2096,6 +2378,11 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_empty_frame_rejects_a_stale_output_png() {
+        if crate::common::skip_without_restricted_token_launch(
+            "video_batch_empty_frame_rejects_a_stale_output_png",
+        ) {
+            return;
+        }
         // The empty-frame arm writes no PNG, but it must still honor the
         // fresh-output contract the non-empty arm enforces (#278): a stale
         // frame-*.png left in the output directory from a previous run would
@@ -2138,6 +2425,11 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_aborts_on_a_frame_error_by_default() {
+        if crate::common::skip_without_restricted_token_launch(
+            "video_batch_aborts_on_a_frame_error_by_default",
+        ) {
+            return;
+        }
         let _behavior = BehaviorGuard::set(Some("error_frame_0"));
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 2);

@@ -85,6 +85,15 @@ fn is_fatal_session_error(render_error: i64) -> bool {
     matches!(render_error, -47 | -45..=-41)
 }
 
+fn valid_dependency_basename(name: &str) -> bool {
+    name.len() >= 5
+        && name.len() <= 260
+        && name.to_ascii_lowercase().ends_with(".dll")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 /// Resize-output bounds mirroring the worker's `validate_output_extent`
 /// (render_subsystem.cpp): each dimension <= 4096 and <= 16,777,216 pixels
 /// total. The broker re-caps a resize_needed request so a misbehaving worker
@@ -128,7 +137,7 @@ fn depth_code(pixel_format: RenderPixelFormat) -> u32 {
 
 /// Maps the session flavor to the worker command word (protocol §3, v1.1).
 /// SmartFX ARGB32f carries the GPU backend in the command word, mirroring the
-/// one-shot `--smart-image32[-cpu|-opencl|-directx]` family; every other
+/// deleted one-shot `--smart-image32[-cpu|-opencl|-directx]` family; every other
 /// depth is CPU-only, and classic sessions reject explicit GPU backends.
 fn session_command(
     pixel_format: RenderPixelFormat,
@@ -446,6 +455,14 @@ pub struct SessionOpenRequest<'a> {
     pub plugin_path: &'a Path,
     pub plugin_sha256: &'a str,
     pub parameters: Option<&'a [InteractiveParameter]>,
+    /// A pre-encoded worker payload used verbatim instead of encoding
+    /// `parameters`. The fixture-manifest route (`render_image`) builds its
+    /// payload from a descriptor profile via `encode_worker_payload`, which the
+    /// `InteractiveParameter` list cannot represent; before #365 that route was
+    /// the reason a one-shot argv transport had to exist at all. Both encoders
+    /// emit the same `v2|`/`v3|` grammar the worker decodes, so the session
+    /// carries either one in the same argv slot. `None` encodes `parameters`.
+    pub payload_override: Option<&'a str>,
     /// Parameter animation timeline evaluated by the worker at each frame's
     /// current_time (issue #132). Bindings are validated against `parameters`
     /// before launch, exactly like the one-shot entry.
@@ -472,7 +489,7 @@ pub struct SessionOpenRequest<'a> {
     pub render_environment_trailer: Option<String>,
     /// Static audio-source trailer (`session-audio:v1|<samples>|<rate>|<path>`),
     /// carrying the same span the one-shot passes as three bare argv slots under
-    /// `--render-image-audio` (issue #339). The plug-in sees one source for the
+    /// deleted `--render-image-audio` (issue #339). The plug-in sees one source for the
     /// whole session, so it rides the launch argv rather than the frame message.
     /// Rides at the tail of the *positional* section, behind the other optional
     /// trailers, so the worker peels it first of those. The auxiliary option
@@ -556,7 +573,10 @@ pub enum FrameStatus {
     },
     /// A frame-local compatibility diagnostic (selector error, time scale
     /// mismatch). The session stays usable; continuing is the caller's call.
-    FrameError { render_error: i64 },
+    FrameError {
+        render_error: i64,
+        missing_dependency: Option<String>,
+    },
     // An expand-output effect that overruns the launch slot no longer surfaces to
     // the caller: `render_frame` grows the shared section in place and waits for
     // the worker's follow-up ok (protocol §3, issue #262), so it always resolves
@@ -607,6 +627,8 @@ struct FrameDone {
     #[serde(default)]
     output: Option<FrameDoneOutput>,
     render_error: i64,
+    #[serde(default)]
+    missing_dependency: Option<String>,
     #[serde(default)]
     generation: Option<u32>,
     /// Present only on a "resize_needed" status (#262): the dimensions the
@@ -849,7 +871,18 @@ impl RenderSession {
             ));
         }
         let command = session_command(request.pixel_format, request.smart, effective_backend)?;
-        let payload = encode_interactive_payload(request.parameters.unwrap_or_default())?;
+        // A pre-encoded payload is bounded here the way `encode_interactive_payload`
+        // bounds the one it builds, so no caller can widen the launch argv past
+        // the limit the worker's parser is written against.
+        let payload = match request.payload_override {
+            Some(payload) => {
+                if payload.len() > 16384 {
+                    return Err(invalid("interactive parameter payload is too large"));
+                }
+                payload.to_owned()
+            }
+            None => encode_interactive_payload(request.parameters.unwrap_or_default())?,
+        };
         // The sidecar mirrors the one-shot transport: validated bindings,
         // JSON under <repository>/target/image-transport (the only directory
         // the worker's strict sidecar loader accepts), removed when the
@@ -1551,6 +1584,18 @@ impl RenderSession {
             // response; deny_unknown_fields treats them as known for every status,
             // so reject them here on ok/error to keep the frame_done schema strict.
             let carries_resize_fields = done.width.is_some() || done.height.is_some();
+            if done
+                .missing_dependency
+                .as_deref()
+                .is_some_and(|name| !valid_dependency_basename(name))
+            {
+                return Err(self.invalidate(
+                    "malformed_dependency_diagnostic",
+                    format!("frame {frame_index} carried an unsafe dependency name"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
             match done.status.as_str() {
                 "error" => {
                     if done.output.is_some()
@@ -1597,11 +1642,16 @@ impl RenderSession {
                         // that exit instead of racing it with a job termination:
                         // collection terminates the job anyway if the worker does
                         // not leave within the timeout.
+                        let dependency = done
+                            .missing_dependency
+                            .as_deref()
+                            .map(|name| format!(", missing dependency {name}"))
+                            .unwrap_or_default();
                         return Err(self.invalidate(
                             "worker_invariant_failure",
                             format!(
-                                "frame {frame_index} reported the fatal session error {}",
-                                done.render_error
+                                "frame {frame_index} reported the fatal session error {}{}",
+                                done.render_error, dependency
                             ),
                             false,
                             CLOSE_COLLECT_TIMEOUT,
@@ -1615,6 +1665,7 @@ impl RenderSession {
                         frame_index,
                         status: FrameStatus::FrameError {
                             render_error: done.render_error,
+                            missing_dependency: done.missing_dependency,
                         },
                     });
                 }
@@ -1627,7 +1678,7 @@ impl RenderSession {
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     };
-                    if carries_resize_fields {
+                    if carries_resize_fields || done.missing_dependency.is_some() {
                         return Err(self.invalidate(
                             "malformed_ok_response",
                             format!("frame {frame_index} ok response carried resize fields"),
@@ -2394,6 +2445,7 @@ pub fn run_video_batch(
         plugin_path: &plugin_path,
         plugin_sha256: &plugin_sha256,
         parameters: (!request.parameters.is_empty()).then_some(request.parameters.as_slice()),
+        payload_override: None,
         parameter_animation: (!request.parameter_animation.is_empty())
             .then_some(request.parameter_animation.as_slice()),
         aux_manifest: request.aux_manifest.as_deref().map(Path::new),
@@ -2510,10 +2562,14 @@ pub fn run_video_batch(
                         "output_png": output_png.file_name().and_then(|name| name.to_str()),
                     }))
                 }
-                FrameStatus::FrameError { render_error } => Ok(json!({
+                FrameStatus::FrameError {
+                    render_error,
+                    missing_dependency,
+                } => Ok(json!({
                     "frame_index": frame_index,
                     "status": "error",
                     "render_error": render_error,
+                    "missing_dependency": missing_dependency,
                 })),
             }
         })();
@@ -3328,6 +3384,16 @@ mod tests {
         assert!(error_shape.output.is_none());
         assert!(error_shape.generation.is_none());
         assert_eq!(error_shape.render_error, -40);
+        assert!(error_shape.missing_dependency.is_none());
+        let dependency_error: FrameDone = serde_json::from_str(
+            r#"{"v":1,"type":"frame_done","frame_index":4,"status":"error",
+                "render_error":-47,"missing_dependency":"fixture_delay.dll"}"#,
+        )
+        .unwrap();
+        assert!(valid_dependency_basename(
+            dependency_error.missing_dependency.as_deref().unwrap()
+        ));
+        assert!(!valid_dependency_basename("..\\escape.dll"));
     }
 
     #[test]
@@ -3487,6 +3553,7 @@ mod tests {
                 plugin_path: Path::new("missing-plugin.aex"),
                 plugin_sha256: &"0".repeat(64),
                 parameters: None,
+                payload_override: None,
                 parameter_animation: None,
                 aux_manifest: None,
                 world_dump_dir: None,

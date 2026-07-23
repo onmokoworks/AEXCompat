@@ -41,11 +41,8 @@ struct Hooks {
 struct WorkerInvocation {
   aexcompat::l2cli::WorkerMode mode;
   int effective_argc{};
-  std::vector<unsigned char> rgba;
   std::vector<LayerInput> layers;
-  std::filesystem::path output;
   std::vector<float> audio;
-  std::filesystem::path audio_output;
   int32_t width{};
   int32_t height{};
   int32_t current_time{};
@@ -56,9 +53,6 @@ struct WorkerInvocation {
   int32_t audio_rate{};
   int32_t audio_session_max_samples{};
   int32_t audio_session_channels{1};
-  int32_t click_x{};
-  int32_t click_y{};
-  std::array<float, 4> picker_color{};
 };
 
 struct ParseResult {

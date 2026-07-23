@@ -21,6 +21,10 @@ BROKER_MAIN = ROOT / "broker" / "crates" / "broker" / "src" / "main.rs"
 BROKER = ROOT / "broker" / "target" / "release" / "broker.exe"
 WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
 AEX = ROOT / "target" / "pf-sampling-probe-build" / "Release" / "pf_sampling_probe.aex"
+# STATUS_DLL_INIT_FAILED: what a process exits with when a restricted token
+# cannot initialize it. The Rust integration tests detect the same condition
+# through their own probe (broker/crates/broker/tests/common, issue #335).
+STATUS_DLL_INIT_FAILED = 0xC0000142
 GENERATOR = ROOT / "tools" / "generate-oracle-rgba-input.py"
 
 
@@ -94,7 +98,23 @@ def test_video_batch_renders_a_sequence_through_one_resident_worker(tmp_path: Pa
         text=True,
         timeout=300,
     )
-    assert completed.returncode == 0, completed.stderr[-800:]
+    if completed.returncode != 0:
+        # The CLI exits 3 with nothing on stderr when the batch ran but did not
+        # pass; the diagnosis is in the report. Surface it either way, and skip
+        # only for the one environment limitation that provably has nothing to
+        # do with this code: a host whose restricted token cannot initialize the
+        # worker at all (STATUS_DLL_INIT_FAILED, issue #335). Any other failure
+        # is reported with the full report so it can be diagnosed.
+        detail = (report_path.read_text(encoding="utf-8")
+                  if report_path.is_file() else "<no report written>")
+        allow_skip = os.environ.get("AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP") == "1"
+        if allow_skip and f'"exit_code": {STATUS_DLL_INIT_FAILED}' in detail:
+            pytest.skip(
+                "this environment cannot launch a restricted-token worker "
+                "(STATUS_DLL_INIT_FAILED, issue #335)")
+        raise AssertionError(
+            "broker exited {}; stderr: {}; report: {}".format(
+                completed.returncode, completed.stderr[-800:], detail[:2000]))
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["passed"] is True
     assert report["frame_count"] == 3

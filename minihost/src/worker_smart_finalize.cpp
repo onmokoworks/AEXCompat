@@ -1,12 +1,10 @@
 #include "worker_smart_finalize.hpp"
-#include "render_pixel_transport.hpp"
 #include "render_subsystem.h"
 #include "worker_handle_runtime.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
 #include <algorithm>
 #include <cstring>
-#include <fstream>
 
 namespace aexcompat::worker_runtime::smart_finalize {
 namespace {
@@ -18,7 +16,7 @@ T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
 bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result) {
   if (!r.entry || !r.input || !r.output || !r.parameters || !r.output_world ||
       !r.lifecycle || !r.source || !r.guarded || !r.pre_output || !h.close_ui ||
-      !h.end_lifecycle || !h.dump_world || !h.record_checksum || !h.sha256 ||
+      !h.end_lifecycle || !h.dump_world || !h.sha256 ||
       !h.ui_active) return false;
   void* pre_render_data = read<void*>(*r.pre_output, 40);
   if (auto cleanup = read<void(__cdecl*)(void*)>(*r.pre_output, 48)) {
@@ -66,20 +64,6 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
   std::memcpy(result.output_extent_hint.data(), r.output_world->data() + 44,
               sizeof(result.output_extent_hint));
   if (result.empty_result_rect) result.output_extent_hint = {0, 0, 0, 0};
-  if (r.external_output && result.render_error == 0) {
-    std::vector<unsigned char> rgba(static_cast<std::size_t>(result.output_width) *
-                                    result.output_height * r.pixel_bytes);
-    for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(result.output_width) *
-                                      result.output_height; ++pixel)
-      render_pixel_transport::argb_to_rgba_native(
-          rgba.data() + pixel * r.pixel_bytes,
-          logical_output.data() + pixel * r.pixel_bytes, r.pixel_bytes);
-    h.record_checksum(rgba.data(), result.output_width, result.output_height,
-                      r.pixel_bytes);
-    std::ofstream file(*r.external_output, std::ios::binary | std::ios::out);
-    if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size()))
-      result.render_error = -4;
-  }
   result.guards_intact = r.guarded->sentinels_intact();
   return true;
 }

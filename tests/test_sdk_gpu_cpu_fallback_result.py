@@ -6,6 +6,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_sdk_gpu_failure_uses_a_fresh_cpu_worker_and_rejects_gpu_output():
+    """Historical record: the Auto GPU->CPU retry this measured is removed.
+
+    #365 (W4) deleted the one-shot argv transport, and the retry lived only
+    there -- a resident session cannot re-dispatch mid-flight, so a GPU session
+    failure now fails closed instead of re-rendering on the CPU and reporting
+    `gpu_fallback_used`. The frozen JSON below stays as a record of what was
+    observed when the retry existed; it no longer describes the shipped host.
+    Retiring or re-labelling it is an evidence-corpus decision, tracked
+    separately rather than made here.
+    """
     result = json.loads(
         (ROOT / "analysis" / "SDK_GPU_CPU_FALLBACK_RESULT_2026-07-15.json").read_text(encoding="utf-8")
     )
@@ -21,11 +31,3 @@ def test_sdk_gpu_failure_uses_a_fresh_cpu_worker_and_rejects_gpu_output():
     assert render["gpu_fallback_used"] is True
     assert render["guard_bytes_intact"] is True
     assert render["passed"] is True
-
-
-def test_broker_removes_gpu_output_before_fresh_cpu_retry():
-    source = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
-    remove = source.index("fs::remove_file(&output_raw)")
-    cpu_command = source.index("RenderGpuBackend::Cpu", remove)
-    retry = source.index("isolated = dispatch_secure_image", cpu_command)
-    assert remove < cpu_command < retry

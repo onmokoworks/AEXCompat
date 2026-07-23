@@ -1,5 +1,6 @@
 pub mod conformance;
 pub mod fixture_profiles;
+pub mod gpu_platform_collector;
 pub mod host_core;
 #[cfg(windows)]
 pub mod image_render;
@@ -35,6 +36,7 @@ pub mod trace_policy;
 pub mod trusted_worker_stage;
 #[cfg(windows)]
 pub mod windows_process;
+pub mod worker_dialog;
 pub mod worker_module_audit;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -30,19 +30,13 @@ fetch() {
 }
 
 fetch_review_threads() {
-  local out query comment_query encoded thread id resolved comments result='[]'
-  query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{id isResolved}pageInfo{hasNextPage endCursor}}}}}'
+  local out query
+  query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{id isResolved comments(first:100){nodes{databaseId author{login} body createdAt path line originalLine replyTo{databaseId}} pageInfo{hasNextPage}}}pageInfo{hasNextPage endCursor}}}}}'
   out=$(gh api graphql --paginate -F owner="$OWNER" -F repo="$REPO" -F pr="$PR" -f query="$query") || return 1
-  comment_query='query($id:ID!,$endCursor:String){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$endCursor){nodes{databaseId author{login} body createdAt path line originalLine replyTo{databaseId}}pageInfo{hasNextPage endCursor}}}}}'
-  # Windows jq emits CRLF; strip CR or base64 --decode rejects the tokens.
-  for encoded in $(jq -r -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]] | .[] | @base64' <<<"$out" | tr -d '\r'); do
-    thread=$(printf '%s' "$encoded" | base64 --decode) || return 1
-    id=$(jq -r '.id' <<<"$thread" | tr -d '\r'); resolved=$(jq -r '.isResolved' <<<"$thread" | tr -d '\r')
-    comments=$(gh api graphql --paginate -F id="$id" -f query="$comment_query") || return 1
-    comments=$(jq -s '[.[].data.node.comments.nodes[] | {id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine,in_reply_to_id:(.replyTo.databaseId // null)}]' <<<"$comments") || return 1
-    result=$(jq -c --argjson resolved "$resolved" --argjson comments "$comments" '. + [{isResolved:$resolved,comments:$comments}]' <<<"$result") || return 1
-  done
-  printf '%s\n' "$result"
+  # Nested comments are fetched with the thread page in one request. If a
+  # thread has more than 100 comments, preserve the fail-closed truncated
+  # marker rather than issuing a per-thread follow-up request.
+  jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[] | {isResolved, truncated:(.comments.pageInfo.hasNextPage // false), comments:[.comments.nodes[] | {id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine,in_reply_to_id:(.replyTo.databaseId // null)}]}]' <<<"$out"
 }
 
 required_ci_gate() {

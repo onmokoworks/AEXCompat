@@ -63,21 +63,38 @@ def test_native_provider_oracle_normalizes_8_16_float_and_pins_receipt():
 def test_broker_requires_explicit_coverage_contract():
     request = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(encoding="utf-8")
     transport = (ROOT / "broker/crates/broker/src/image_render.rs").read_text(encoding="utf-8")
+    session = (ROOT / "broker/crates/broker/src/render_session.rs").read_text(encoding="utf-8")
     assert "alpha_as_coverage_params" in request
-    assert '"--alpha-as-coverage-v1"' in transport
-    assert "alpha-as-coverage parameter slots are invalid" in transport
+    # The launch argv is built by the session since #365 deleted the one-shot
+    # transport; the validation message stays where the shared helpers live.
+    assert '"--alpha-as-coverage-v1".to_owned()' in session
+    assert "alpha-as-coverage parameter slots are invalid" in session
+    assert "alpha_as_coverage_params" in transport
 
 
-def test_coverage_transport_follows_positional_ui_trailers():
+def test_coverage_transport_follows_the_positional_trailers():
+    """The named auxiliary pairs must sit behind every positional trailer.
+
+    The worker strips `--flag value` pairs off argv's tail before it decodes the
+    positional session contract, so a named transport pushed *ahead* of a
+    positional trailer would shift where the contract lands. Before #365 the
+    trailer this had to follow was the one-shot's positional UI field; the
+    session sends its UI action per frame in the v:2 message instead, and its
+    positional tail is the layer trailer plus the mask/spatial/render/audio
+    trailers.
+    """
+    session = (ROOT / "broker/crates/broker/src/render_session.rs").read_text(encoding="utf-8")
+    coverage = session.index('"--alpha-as-coverage-v1".to_owned()')
+    for positional in (
+        "args_after_plugin.push(mask.clone());",
+        "args_after_plugin.push(spatial.clone());",
+        "args_after_plugin.push(render_environment.clone());",
+        "args_after_plugin.push(audio.clone());",
+    ):
+        assert session.index(positional) < coverage, positional
+    # The click/draw grammar the UI trailer carried still lives in
+    # encode_ui_field, which now feeds the per-frame `ui_action` attribute.
     transport = (ROOT / "broker/crates/broker/src/image_render.rs").read_text(encoding="utf-8")
-    # #238 moved the inline click:v1 / draw:v1 pushes into RenderUiAction::
-    # encode_ui_field, so the command builder now pushes a single encoded UI
-    # field. The named --alpha-as-coverage-v1 transport must still follow that
-    # positional UI trailer.
-    ui_action = transport.index("args_after_plugin.push(action.encode_ui_field()?)")
-    coverage = transport.index('"--alpha-as-coverage-v1".into()')
-    assert coverage > ui_action
-    # The click/draw fields the trailer order protects still live in
-    # encode_ui_field.
-    assert '"click:v1|' in transport
+    assert "\"click:v1|" in transport
     assert '"draw:v1".into()' in transport
+    assert '"ui_action".into()' in session

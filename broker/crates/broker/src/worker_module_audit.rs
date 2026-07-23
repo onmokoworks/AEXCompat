@@ -31,6 +31,8 @@ struct AuditSnapshot {
     winsxs: Vec<String>,
     #[serde(default)]
     policy: Option<Vec<String>>,
+    #[serde(default)]
+    unknown: Vec<String>,
 }
 
 pub fn validate_required_worker_audit(stdout: &str, stdout_truncated: bool) -> io::Result<()> {
@@ -69,11 +71,13 @@ pub fn validate_required_worker_audit(stdout: &str, stdout_truncated: bool) -> i
     require_subset(&audit.pre_unload.winsxs, &audit.observed_union.winsxs)?;
     require_optional_subset(&audit.post_load.policy, &audit.observed_union.policy)?;
     require_optional_subset(&audit.pre_unload.policy, &audit.observed_union.policy)?;
+    require_subset(&audit.post_load.unknown, &audit.observed_union.unknown)?;
+    require_subset(&audit.pre_unload.unknown, &audit.observed_union.unknown)?;
     Ok(())
 }
 
 fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
-    if snapshot.status != "passed" || snapshot.unknown_count != 0 {
+    if snapshot.status != "passed" || snapshot.unknown_count != 0 || !snapshot.unknown.is_empty() {
         return Err(invalid(format!(
             "secure worker {label} module audit failed"
         )));
@@ -82,7 +86,8 @@ fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
         + snapshot.plugin.len()
         + snapshot.system32.len()
         + snapshot.winsxs.len()
-        + snapshot.policy.as_ref().map_or(0, Vec::len);
+        + snapshot.policy.as_ref().map_or(0, Vec::len)
+        + snapshot.unknown.len();
     if count > MAX_AUDITED_MODULES {
         return Err(invalid("secure worker module audit limit exceeded"));
     }
@@ -94,6 +99,7 @@ fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
         .chain(&snapshot.system32)
         .chain(&snapshot.winsxs)
         .chain(snapshot.policy.iter().flatten())
+        .chain(&snapshot.unknown)
     {
         validate_basename(name)?;
         if !names.insert(name.to_ascii_lowercase()) {
@@ -180,7 +186,8 @@ mod tests {
             "worker": ["trusted-worker.exe"],
             "plugin": ["fixture.plugin"],
             "system32": ["kernel32.dll"],
-            "winsxs": ["comctl32.dll"]
+            "winsxs": ["comctl32.dll"],
+            "unknown": []
         })
     }
 
@@ -213,6 +220,14 @@ mod tests {
 
         let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
         report["module_audit"]["post_load"]["plugin"] = json!(["other.plugin"]);
+        assert!(validate_required_worker_audit(&report.to_string(), false).is_err());
+
+        let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
+        report["module_audit"]["observed_union"]["unknown"] = json!(["outside.dll"]);
+        assert!(validate_required_worker_audit(&report.to_string(), false).is_err());
+
+        let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
+        report["module_audit"]["observed_union"]["unknown"] = json!(["..\\outside.dll"]);
         assert!(validate_required_worker_audit(&report.to_string(), false).is_err());
     }
 

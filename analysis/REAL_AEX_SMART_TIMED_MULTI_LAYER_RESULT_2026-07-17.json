@@ -111,8 +111,8 @@
     "artifacts":  {
                       "source":  {
                                      "path":  "minihost/src/l2_main.cpp",
-                                     "size_bytes":  139615,
-                                     "sha256":  "4ccae13e08ee5e00083136887ac36c48141c8e14d4315e282d468c6f56a42ac9"
+                                     "size_bytes":  154909,
+                                     "sha256":  "295cd60a80ae1f6e0421098362b52a0840b6ec5767642d21f97b30ad9943d229"
                                  },
                       "probe_source":  {
                                            "path":  "instruments/pf-smart-timed-multilayer-probe/pf_smart_timed_multilayer_probe.cpp",
@@ -122,12 +122,12 @@
                       "probe":  {
                                     "path":  "target/pf-smart-timed-multilayer-probe-build/Release/pf_smart_timed_multilayer_probe.aex",
                                     "size_bytes":  14848,
-                                    "sha256":  "ef485b4c389b31da3e8a2b13cf2d2a20e2aca113bff18e1dffb117a5c69fa8c7"
+                                    "sha256":  "94fb4f111640a65950cbd0f05c85a05027fcca608f7c2ade117099d4b466c306"
                                 },
                       "worker":  {
                                      "path":  "target/minihost-build/aex_smart_worker.exe",
-                                     "size_bytes":  1218048,
-                                     "sha256":  "76306f8c4ee003292f673edaf180956ae173913d5e57246cb857a8a8b88e1906"
+                                     "size_bytes":  1229312,
+                                     "sha256":  "6a5a47e3d98e3e8b01a3d5e61ef930f8348c335a47ec674fcb0bef3ef95afa55"
                                  },
                       "runner":  {
                                      "path":  "target/evidence-runner/target/debug/evidence-runner.exe",

@@ -30,8 +30,8 @@ use aexcompat_broker::image_render::{
     inspect_experimental_with_approved_dependencies_and_diagnostics,
 };
 use aexcompat_broker::plugin_dependency_closure::{
-    DependencyClosureRequest, ResolvedDependencyClosure, resolve_dependency_closure,
-    survey_dependency_closure,
+    DependencyClosureRequest, DependencyProvenance, ResolvedDependencyClosure,
+    resolve_dependency_closure, survey_dependency_closure,
 };
 use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
 use aviutl2_sys::filter2::{
@@ -122,7 +122,10 @@ pub extern "C" fn UninitializePlugin() {
     // flag makes its work-steal loop exit after the current in-flight worker, so
     // the join is bounded by one worker deadline.
     DISCOVERY_SHUTDOWN.store(true, Ordering::Relaxed);
-    let discovery = DISCOVERY_THREAD.lock().ok().and_then(|mut slot| slot.take());
+    let discovery = DISCOVERY_THREAD
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
     if let Some(handle) = discovery {
         let _ = handle.join();
     }
@@ -526,10 +529,11 @@ fn index_by_real_path(
     build: BuildFingerprint,
 ) -> HashMap<PathBuf, Vec<String>> {
     let mut index: HashMap<PathBuf, Vec<String>> = HashMap::new();
-    for key in cache
-        .keys()
-        .filter(|key| roots.iter().any(|root| Path::new(key.as_str()).starts_with(root)))
-    {
+    for key in cache.keys().filter(|key| {
+        roots
+            .iter()
+            .any(|root| Path::new(key.as_str()).starts_with(root))
+    }) {
         let Ok(real) = Path::new(key).canonicalize() else {
             continue;
         };
@@ -609,9 +613,8 @@ fn resolve_cached<'a>(
     // registers, but on a payload that may describe older bytes, so its sessions
     // fail to open and its frames pass through unrendered. Another spelling can
     // hold a sound entry for the same file.
-    let direct_is_sound = direct_registers
-        && direct_matches
-        && direct.is_some_and(|entry| !entry.stale);
+    let direct_is_sound =
+        direct_registers && direct_matches && direct.is_some_and(|entry| !entry.stale);
     if !alias_possible || direct_is_sound {
         return (direct, None);
     }
@@ -1003,7 +1006,11 @@ fn latest_after_effects_plugins() -> (Option<PathBuf>, bool) {
     let Some(adobe) = adobe_root() else {
         return (None, false);
     };
-    newest_versioned(&adobe, "Adobe After Effects ", &["Support Files", "Plug-ins"])
+    newest_versioned(
+        &adobe,
+        "Adobe After Effects ",
+        &["Support Files", "Plug-ins"],
+    )
 }
 
 /// The newest `Adobe\Common\Plug-ins\<version>\MediaCore`, or `None`.
@@ -1046,7 +1053,9 @@ fn newest_versioned(root: &Path, prefix: &str, leaf: &[&str]) -> (Option<PathBuf
         // A numbered name is what an install in progress looks like. Unnumbered
         // ones (`... (Beta)`) are still picked when nothing numbered exists, but a
         // missing leaf under them is not evidence of an incomplete install.
-        let numbered = version.split(['.', ' ']).any(|part| part.parse::<u64>().is_ok());
+        let numbered = version
+            .split(['.', ' '])
+            .any(|part| part.parse::<u64>().is_ok());
         let key = version_key(version);
         let mut candidate = entry.path();
         // Tested through the path, not `DirEntry::file_type`, which reports a
@@ -1192,10 +1201,23 @@ fn collect_aex_into(
 /// Reads one config item's current (keyframed) value back into the parameter it
 /// drives. AviUtl2 updates each item struct's value right before proc_video.
 enum ItemReader {
-    Track { ptr: *const FILTER_ITEM_TRACK, slot: u32, integer: bool },
-    Checkbox { ptr: *const FILTER_ITEM_CHECKBOX, slot: u32 },
-    Select { ptr: *const FILTER_ITEM_SELECT, slot: u32 },
-    Color { ptr: *const FILTER_ITEM_COLOR, slot: u32 },
+    Track {
+        ptr: *const FILTER_ITEM_TRACK,
+        slot: u32,
+        integer: bool,
+    },
+    Checkbox {
+        ptr: *const FILTER_ITEM_CHECKBOX,
+        slot: u32,
+    },
+    Select {
+        ptr: *const FILTER_ITEM_SELECT,
+        slot: u32,
+    },
+    Color {
+        ptr: *const FILTER_ITEM_COLOR,
+        slot: u32,
+    },
 }
 
 /// The launch-fixed geometry/time of a session (the AEX identity is fixed per
@@ -1378,6 +1400,19 @@ struct CachedClosure {
     /// would only cost startup `stat` calls.
     #[serde(default)]
     missing: Vec<String>,
+    /// Resolver provenance for every sealed basename. This is diagnostic-only:
+    /// worker module audit still classifies each authenticated file through the
+    /// existing plug-in-tree policy. Additive/defaulted so pre-#360 caches remain
+    /// readable and are naturally refreshed by the rebuilt host fingerprint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    provenance: Vec<CachedDependencyProvenance>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct CachedDependencyProvenance {
+    basename: String,
+    import_derived: bool,
+    string_derived: bool,
 }
 
 /// One sealed dependency's identity, as cheap to re-check as a `stat`.
@@ -1386,6 +1421,17 @@ struct CachedDependency {
     path: String,
     mtime: (u64, u32),
     len: u64,
+}
+
+fn cached_provenance(sources: &[DependencyProvenance]) -> Vec<CachedDependencyProvenance> {
+    sources
+        .iter()
+        .map(|source| CachedDependencyProvenance {
+            basename: source.basename.clone(),
+            import_derived: source.import_derived,
+            string_derived: source.string_derived,
+        })
+        .collect()
 }
 
 /// Whether this entry should be re-discovered because its dependency closure
@@ -1553,7 +1599,10 @@ fn build_fingerprint(repository: &Path, dependency: &DependencyConfig) -> BuildF
     let flatten = |m: ((u64, u32), u64)| (m.0.0, m.0.1, m.1);
     BuildFingerprint {
         worker: file_meta(&worker).map(flatten),
-        host: self_module_path().as_deref().and_then(file_meta).map(flatten),
+        host: self_module_path()
+            .as_deref()
+            .and_then(file_meta)
+            .map(flatten),
         dependency_inputs: dependency_inputs_fingerprint(dependency),
     }
 }
@@ -1917,6 +1966,7 @@ fn discover_one(
                     roots: recorded_roots,
                     sealed,
                     missing,
+                    provenance: cached_provenance(&survey.provenance),
                 }
             }
             Err(_) => CachedClosure {
@@ -1932,6 +1982,7 @@ fn discover_one(
         .map(|sealed| sealed.path.clone())
         .collect();
     let (sealed, vanished) = cached_dependencies(&sealed_paths);
+    let provenance = cached_provenance(closure.provenance());
     let mut missing = cached_missing(closure.unresolved());
     missing.extend(vanished);
     missing.sort();
@@ -1940,6 +1991,7 @@ fn discover_one(
         roots: recorded_roots,
         sealed,
         missing,
+        provenance,
     };
     match inspect_experimental_with_approved_dependencies_and_diagnostics(
         repository,
@@ -2037,7 +2089,9 @@ fn discover_all(
             });
         }
     });
-    results.into_inner().unwrap_or_else(|poison| poison.into_inner())
+    results
+        .into_inner()
+        .unwrap_or_else(|poison| poison.into_inner())
 }
 
 /// A numerically-comparable key for a version token ("25.0" > "7.0", unlike a
@@ -2124,33 +2178,74 @@ fn build_item(
         "float" => {
             let (min, max) = bounded_range(parameter)?;
             let ptr = leak_track(item_name, parameter.value, min, max, track_step(max - min));
-            Some((ptr as *const c_void, ItemReader::Track { ptr, slot: parameter.slot, integer: false }, parameter.clone()))
+            Some((
+                ptr as *const c_void,
+                ItemReader::Track {
+                    ptr,
+                    slot: parameter.slot,
+                    integer: false,
+                },
+                parameter.clone(),
+            ))
         }
         "integer" => {
             if !parameter.choices.is_empty() {
                 // Popup -> dropdown (AE popups are 1-based).
                 let count = parameter.choices.len() as i32;
-                let ptr = leak_select(item_name, (parameter.value as i32).clamp(1, count), &parameter.choices);
+                let ptr = leak_select(
+                    item_name,
+                    (parameter.value as i32).clamp(1, count),
+                    &parameter.choices,
+                );
                 let mut sent = parameter.clone();
                 sent.minimum = 1.0;
                 sent.maximum = count as f64;
                 sent.value = sent.value.clamp(1.0, count as f64);
-                return Some((ptr as *const c_void, ItemReader::Select { ptr, slot: parameter.slot }, sent));
+                return Some((
+                    ptr as *const c_void,
+                    ItemReader::Select {
+                        ptr,
+                        slot: parameter.slot,
+                    },
+                    sent,
+                ));
             }
             let (min, max) = bounded_range(parameter)?;
             if min == 0.0 && max == 1.0 {
                 let ptr = leak_checkbox(item_name, parameter.value != 0.0);
-                Some((ptr as *const c_void, ItemReader::Checkbox { ptr, slot: parameter.slot }, parameter.clone()))
+                Some((
+                    ptr as *const c_void,
+                    ItemReader::Checkbox {
+                        ptr,
+                        slot: parameter.slot,
+                    },
+                    parameter.clone(),
+                ))
             } else {
                 let ptr = leak_track(item_name, parameter.value.round(), min, max, 1.0);
-                Some((ptr as *const c_void, ItemReader::Track { ptr, slot: parameter.slot, integer: true }, parameter.clone()))
+                Some((
+                    ptr as *const c_void,
+                    ItemReader::Track {
+                        ptr,
+                        slot: parameter.slot,
+                        integer: true,
+                    },
+                    parameter.clone(),
+                ))
             }
         }
         "color" => {
             // InteractiveParameter.color is ARGB; AviUtl2 color code is 0x00RRGGBB.
             let (r, g, b) = (parameter.color[1], parameter.color[2], parameter.color[3]);
             let ptr = leak_color(item_name, r, g, b);
-            Some((ptr as *const c_void, ItemReader::Color { ptr, slot: parameter.slot }, parameter.clone()))
+            Some((
+                ptr as *const c_void,
+                ItemReader::Color {
+                    ptr,
+                    slot: parameter.slot,
+                },
+                parameter.clone(),
+            ))
         }
         // "angle" and others are not exposed (stay at the AEX default).
         _ => None,
@@ -2235,7 +2330,10 @@ fn leak_select(name: &str, value: i32, choices: &[String]) -> *const FILTER_ITEM
         })
         .collect();
     // Null-name terminator.
-    list.push(FILTER_ITEM_SELECT_ITEM { name: std::ptr::null(), value: 0 });
+    list.push(FILTER_ITEM_SELECT_ITEM {
+        name: std::ptr::null(),
+        value: 0,
+    });
     let items = Box::leak(list.into_boxed_slice()).as_ptr();
     Box::leak(Box::new(FILTER_ITEM_SELECT {
         r#type: wide_leak("select"),
@@ -2278,8 +2376,10 @@ unsafe extern "C" fn render_callback(
     let video = unsafe { *(*args as *const *mut FILTER_PROC_VIDEO) };
     // Never let a panic unwind across the C boundary (that aborts AviUtl2). On
     // panic report failure and leave the frame's pixels unchanged.
-    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render_frame(userdata, video)))
-        .unwrap_or(false);
+    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render_frame(userdata, video)
+    }))
+    .unwrap_or(false);
     *result = ok as u8;
 }
 
@@ -2319,8 +2419,14 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
 
     // Current pixels (RGBA8, packed).
     let count = (width as usize) * (height as usize);
-    let mut pixels: Vec<PIXEL_RGBA> =
-        (0..count).map(|_| PIXEL_RGBA { r: 0, g: 0, b: 0, a: 0 }).collect();
+    let mut pixels: Vec<PIXEL_RGBA> = (0..count)
+        .map(|_| PIXEL_RGBA {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        })
+        .collect();
     unsafe { ((*video).get_image_data)(pixels.as_mut_ptr()) };
     let rgba = pixels_to_bytes(&pixels);
 
@@ -2334,7 +2440,13 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
     };
 
     let effect_id = unsafe { (*object).effect_id };
-    let identity = GeomIdentity { width, height, time_step, total_time, time_scale };
+    let identity = GeomIdentity {
+        width,
+        height,
+        time_step,
+        total_time,
+        time_scale,
+    };
 
     // Reuse a live matching session, else open one outside the map lock (open
     // blocks for seconds spawning the worker). The blocking render round-trip
@@ -2437,6 +2549,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 smart: config.smart,
                 gpu_backend: RenderGpuBackend::Auto,
                 gpu_runtime_policy: None,
+                payload_override: None,
             }) {
                 Ok(session) => session,
                 Err(error) => {
@@ -2463,10 +2576,17 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 frame_index = frame_index.wrapping_add(1);
                 let reply = match outcome {
                     Ok(outcome) => match outcome.status {
-                        FrameStatus::Rendered { pixels, width, height, .. } => {
-                            FrameReply::Rendered(RenderedFrame { pixels, width, height })
-                        }
-                        FrameStatus::FrameError { render_error } => {
+                        FrameStatus::Rendered {
+                            pixels,
+                            width,
+                            height,
+                            ..
+                        } => FrameReply::Rendered(RenderedFrame {
+                            pixels,
+                            width,
+                            height,
+                        }),
+                        FrameStatus::FrameError { render_error, .. } => {
                             FrameReply::FrameLocal(render_error)
                         }
                     },
@@ -2524,7 +2644,12 @@ fn render_on(
 ) -> FrameReply {
     let (reply_tx, reply_rx) = channel();
     if tx
-        .send(RenderReq { current_time, rgba, parameters, reply: reply_tx })
+        .send(RenderReq {
+            current_time,
+            rgba,
+            parameters,
+            reply: reply_tx,
+        })
         .is_err()
     {
         return FrameReply::SessionLost("session thread is gone".to_string());
@@ -2698,7 +2823,12 @@ fn pixels_to_bytes(pixels: &[PIXEL_RGBA]) -> Vec<u8> {
 fn bytes_to_pixels(bytes: &[u8]) -> Vec<PIXEL_RGBA> {
     bytes
         .chunks_exact(4)
-        .map(|c| PIXEL_RGBA { r: c[0], g: c[1], b: c[2], a: c[3] })
+        .map(|c| PIXEL_RGBA {
+            r: c[0],
+            g: c[1],
+            b: c[2],
+            a: c[3],
+        })
         .collect()
 }
 
@@ -2789,7 +2919,10 @@ mod tests {
         assert_eq!(merged.attempts, 1);
         assert_eq!(
             classify(Some(&merged), META, build(2)),
-            LoadDecision { register: true, discover: true },
+            LoadDecision {
+                register: true,
+                discover: true
+            },
             "still registered, and tried again"
         );
     }
@@ -2806,13 +2939,19 @@ mod tests {
         }
         assert_eq!(
             classify(Some(&entry), META, build(2)),
-            LoadDecision { register: true, discover: false },
+            LoadDecision {
+                register: true,
+                discover: false
+            },
             "converged: still registered, no longer queued"
         );
         // A different host starts the budget over, since it may well succeed.
         assert_eq!(
             classify(Some(&entry), META, build(3)),
-            LoadDecision { register: true, discover: true }
+            LoadDecision {
+                register: true,
+                discover: true
+            }
         );
     }
 
@@ -2823,8 +2962,16 @@ mod tests {
         let old = discovered(5, 64, build(1));
         let newer = Some(((9, 0), 64));
         let resized = Some(((5, 0), 99));
-        assert!(!keep_best(Some(&old), failed(9, 64, build(1)), newer).unwrap().ok);
-        assert!(!keep_best(Some(&old), failed(5, 99, build(1)), resized).unwrap().ok);
+        assert!(
+            !keep_best(Some(&old), failed(9, 64, build(1)), newer)
+                .unwrap()
+                .ok
+        );
+        assert!(
+            !keep_best(Some(&old), failed(5, 99, build(1)), resized)
+                .unwrap()
+                .ok
+        );
     }
 
     /// The point of re-verifying at all (issue #304): a host that gained support
@@ -2840,7 +2987,11 @@ mod tests {
     #[test]
     fn a_first_discovery_is_taken_as_is() {
         assert!(!keep_best(None, failed(5, 64, build(1)), META).unwrap().ok);
-        assert!(keep_best(None, discovered(5, 64, build(1)), META).unwrap().ok);
+        assert!(
+            keep_best(None, discovered(5, 64, build(1)), META)
+                .unwrap()
+                .ok
+        );
     }
 
     /// Discovery records the AEX's meta itself, and the file can change between
@@ -2858,7 +3009,10 @@ mod tests {
         assert!(merged.stale);
         assert_eq!(
             classify(Some(&merged), META, build(1)),
-            LoadDecision { register: true, discover: true },
+            LoadDecision {
+                register: true,
+                discover: true
+            },
             "registered (no object loss) and re-discovered (self-heals)"
         );
     }
@@ -2871,7 +3025,10 @@ mod tests {
         assert!(!merged.stale);
         assert_eq!(
             classify(Some(&merged), META, build(1)),
-            LoadDecision { register: true, discover: false }
+            LoadDecision {
+                register: true,
+                discover: false
+            }
         );
     }
 
@@ -2884,7 +3041,10 @@ mod tests {
         let old = discovered(5, 64, build(1));
         assert_eq!(
             classify(Some(&old), META, build(2)),
-            LoadDecision { register: true, discover: true }
+            LoadDecision {
+                register: true,
+                discover: true
+            }
         );
     }
 
@@ -2893,7 +3053,10 @@ mod tests {
         let entry = discovered(5, 64, build(1));
         assert_eq!(
             classify(Some(&entry), META, build(1)),
-            LoadDecision { register: true, discover: false }
+            LoadDecision {
+                register: true,
+                discover: false
+            }
         );
     }
 
@@ -2904,11 +3067,17 @@ mod tests {
         let entry = failed(5, 64, build(1));
         assert_eq!(
             classify(Some(&entry), META, build(1)),
-            LoadDecision { register: false, discover: false }
+            LoadDecision {
+                register: false,
+                discover: false
+            }
         );
         assert_eq!(
             classify(Some(&entry), META, build(2)),
-            LoadDecision { register: false, discover: true }
+            LoadDecision {
+                register: false,
+                discover: true
+            }
         );
     }
 
@@ -2920,7 +3089,10 @@ mod tests {
         let entry = discovered(5, 64, build(1));
         assert_eq!(
             classify(Some(&entry), NO_META, build(1)),
-            LoadDecision { register: true, discover: true },
+            LoadDecision {
+                register: true,
+                discover: true
+            },
             "registered from cache, and re-checked in the background"
         );
     }
@@ -2930,7 +3102,10 @@ mod tests {
     fn an_unstattable_aex_without_a_cache_entry_is_only_discovered() {
         assert_eq!(
             classify(None, NO_META, build(1)),
-            LoadDecision { register: false, discover: true }
+            LoadDecision {
+                register: false,
+                discover: true
+            }
         );
     }
 
@@ -2940,7 +3115,10 @@ mod tests {
         let entry = failed(5, 64, build(1));
         assert_eq!(
             classify(Some(&entry), NO_META, build(1)),
-            LoadDecision { register: false, discover: true }
+            LoadDecision {
+                register: false,
+                discover: true
+            }
         );
     }
 
@@ -2948,7 +3126,10 @@ mod tests {
     fn an_unknown_aex_is_only_discovered() {
         assert_eq!(
             classify(None, META, build(1)),
-            LoadDecision { register: false, discover: true },
+            LoadDecision {
+                register: false,
+                discover: true
+            },
             "never seen"
         );
     }
@@ -2988,7 +3169,12 @@ mod tests {
     #[test]
     fn a_complete_scan_prunes_entries_whose_aex_is_gone() {
         let mut cache = cache_of(&["a.aex", "gone.aex"]);
-        prune_cache(&mut cache, &[PathBuf::from("a.aex")], &[PathBuf::from("")], true);
+        prune_cache(
+            &mut cache,
+            &[PathBuf::from("a.aex")],
+            &[PathBuf::from("")],
+            true,
+        );
         assert_eq!(cache.len(), 1);
         assert!(cache.contains_key("a.aex"));
     }
@@ -2999,7 +3185,12 @@ mod tests {
     #[test]
     fn an_incomplete_scan_prunes_nothing() {
         let mut cache = cache_of(&["a.aex", "unscanned.aex"]);
-        prune_cache(&mut cache, &[PathBuf::from("a.aex")], &[PathBuf::from("")], false);
+        prune_cache(
+            &mut cache,
+            &[PathBuf::from("a.aex")],
+            &[PathBuf::from("")],
+            false,
+        );
         assert_eq!(cache.len(), 2, "the unscanned entry survived");
     }
 
@@ -3008,10 +3199,7 @@ mod tests {
         let root = PathBuf::from("scan-root");
         let cached = root.join("temporarily-hidden.aex");
         let outside = PathBuf::from("other-root").join("outside.aex");
-        let cache = cache_of(&[
-            &cached.to_string_lossy(),
-            &outside.to_string_lossy(),
-        ]);
+        let cache = cache_of(&[&cached.to_string_lossy(), &outside.to_string_lossy()]);
         let fallback = cached_fallback_plugins(
             &cache,
             &[root.join("visible.aex")],
@@ -3028,10 +3216,7 @@ mod tests {
         let first_root = PathBuf::from("first-root");
         let first = first_root.join("first.aex");
         let second = PathBuf::from("second-root").join("second.aex");
-        let cache = cache_of(&[
-            &first.to_string_lossy(),
-            &second.to_string_lossy(),
-        ]);
+        let cache = cache_of(&[&first.to_string_lossy(), &second.to_string_lossy()]);
         let fallback = cached_fallback_plugins(
             &cache,
             &[],
@@ -3050,15 +3235,17 @@ mod tests {
         let root = PathBuf::from("scan-root");
         let cached = root.join("gone.aex");
         let cache = cache_of(&[&cached.to_string_lossy()]);
-        assert!(cached_fallback_plugins(
-            &cache,
-            &[root.join("visible.aex")],
-            std::slice::from_ref(&root),
-            true,
-            false,
-            &[],
-        )
-        .is_empty());
+        assert!(
+            cached_fallback_plugins(
+                &cache,
+                &[root.join("visible.aex")],
+                std::slice::from_ref(&root),
+                true,
+                false,
+                &[],
+            )
+            .is_empty()
+        );
     }
 
     // --- cache file acceptance ----------------------------------------------
@@ -3135,10 +3322,14 @@ mod tests {
 
     #[test]
     fn an_unreadable_folder_marks_the_scan_incomplete() {
-        let missing = std::env::temp_dir().join(format!("aexcompat-mf-{}-missing", std::process::id()));
+        let missing =
+            std::env::temp_dir().join(format!("aexcompat-mf-{}-missing", std::process::id()));
         let scan = collect_aex(&[missing], &[]);
         assert!(scan.plugins.is_empty());
-        assert!(!scan.complete, "a folder that could not be read is not a complete scan");
+        assert!(
+            !scan.complete,
+            "a folder that could not be read is not a complete scan"
+        );
     }
 
     // --- default folder resolution ------------------------------------------
@@ -3165,6 +3356,7 @@ mod tests {
                 })
                 .collect(),
             missing: missing.iter().map(|name| name.to_string()).collect(),
+            provenance: Vec::new(),
         };
         entry
     }
@@ -3291,7 +3483,8 @@ mod tests {
 
     #[test]
     fn a_missing_root_is_incomplete() {
-        let root = std::env::temp_dir().join(format!("aexcompat-mf-{}-no-root", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("aexcompat-mf-{}-no-root", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
         assert!(picked.is_none());
@@ -3324,8 +3517,14 @@ mod tests {
     #[test]
     fn one_unparseable_entry_does_not_discard_the_rest() {
         let mut entries = json_entries(&["good.aex"]);
-        entries.insert("broken.aex".into(), serde_json::json!({"mtime": "not-a-tuple"}));
-        let accepted = accept_cache_file(CacheFile { version: CACHE_VERSION, entries });
+        entries.insert(
+            "broken.aex".into(),
+            serde_json::json!({"mtime": "not-a-tuple"}),
+        );
+        let accepted = accept_cache_file(CacheFile {
+            version: CACHE_VERSION,
+            entries,
+        });
         assert_eq!(accepted.len(), 1);
         assert!(accepted.contains_key("good.aex"));
     }
@@ -3339,7 +3538,10 @@ mod tests {
         assert!(!unknown.is_known());
         assert_eq!(
             classify(Some(&entry), META, unknown),
-            LoadDecision { register: true, discover: false }
+            LoadDecision {
+                register: true,
+                discover: false
+            }
         );
     }
 
@@ -3381,7 +3583,10 @@ mod tests {
         assert!(merged.stale, "still queued for another attempt");
         assert_eq!(
             classify(Some(&merged), META, build(2)),
-            LoadDecision { register: true, discover: true }
+            LoadDecision {
+                register: true,
+                discover: true
+            }
         );
     }
 
@@ -3412,6 +3617,25 @@ mod tests {
         let (picked, complete) = newest_versioned(&root, "App ", &["Plug-ins"]);
         assert_eq!(picked.unwrap(), root.join("App 2025").join("Plug-ins"));
         assert!(complete);
+    }
+
+    #[test]
+    fn dependency_provenance_is_additive_and_round_trips() {
+        let closure = CachedClosure {
+            provenance: vec![CachedDependencyProvenance {
+                basename: "runtime.dll".into(),
+                import_derived: false,
+                string_derived: true,
+            }],
+            ..CachedClosure::default()
+        };
+        let encoded = serde_json::to_value(&closure).unwrap();
+        assert_eq!(encoded["provenance"][0]["basename"], "runtime.dll");
+        assert_eq!(encoded["provenance"][0]["string_derived"], true);
+        let decoded: CachedClosure = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.provenance.len(), 1);
+        assert!(!decoded.provenance[0].import_derived);
+        assert!(decoded.provenance[0].string_derived);
     }
 
     /// The cache embeds the broker's `InteractiveParameter`, whose fields are not
@@ -3449,7 +3673,10 @@ mod tests {
         // And the fields we persist still round-trip.
         let value = serde_json::to_value(parsed.unwrap()).unwrap();
         for key in frozen.as_object().unwrap().keys() {
-            assert!(value.get(key).is_some(), "field `{key}` disappeared from the schema");
+            assert!(
+                value.get(key).is_some(),
+                "field `{key}` disappeared from the schema"
+            );
         }
     }
 
@@ -3660,7 +3887,10 @@ mod tests {
         let key = other.to_string_lossy().into_owned();
         let mut cache = cache_of(&[&key]);
         prune_cache(&mut cache, &scan.seen, &[root], scan.complete);
-        assert!(cache.contains_key(&key), "the file is still there, so is its entry");
+        assert!(
+            cache.contains_key(&key),
+            "the file is still there, so is its entry"
+        );
     }
 
     /// An AEX that really is gone still goes, or the cache never shrinks.
@@ -3670,7 +3900,10 @@ mod tests {
         let key = root.join("gone.aex").to_string_lossy().into_owned();
         let mut cache = cache_of(&[&key]);
         prune_cache(&mut cache, &[], &[root], true);
-        assert!(cache.is_empty(), "the file does not exist, so the entry goes");
+        assert!(
+            cache.is_empty(),
+            "the file does not exist, so the entry goes"
+        );
     }
 
     /// The spelling the scan walks can change between launches (a junction added
@@ -3752,7 +3985,10 @@ mod tests {
     #[test]
     fn re_keying_keeps_the_original_spelling() {
         let mut cache = cache_of(&["stable.aex"]);
-        apply_rekey(&mut cache, vec![("stable.aex".into(), "via-junction.aex".into())]);
+        apply_rekey(
+            &mut cache,
+            vec![("stable.aex".into(), "via-junction.aex".into())],
+        );
         assert!(cache.contains_key("stable.aex"));
         assert!(cache.contains_key("via-junction.aex"));
     }
@@ -3791,7 +4027,11 @@ mod tests {
         junction(&root.join("link"), &real);
 
         let direct = real.join("foo.aex").to_string_lossy().into_owned();
-        let via_link = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+        let via_link = root
+            .join("link")
+            .join("foo.aex")
+            .to_string_lossy()
+            .into_owned();
 
         // Both spellings resolve to one file, so they collide in the index.
         // Whichever spelling holds the negative, the registering entry must win.
@@ -3820,7 +4060,11 @@ mod tests {
         junction(&root.join("link"), &real);
 
         let direct = real.join("foo.aex").to_string_lossy().into_owned();
-        let via_link = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+        let via_link = root
+            .join("link")
+            .join("foo.aex")
+            .to_string_lossy()
+            .into_owned();
 
         let mut winners = std::collections::HashSet::new();
         for _ in 0..64 {
@@ -3851,7 +4095,11 @@ mod tests {
         junction(&root.join("link"), &real);
 
         let direct = real.join("foo.aex").to_string_lossy().into_owned();
-        let via_link = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+        let via_link = root
+            .join("link")
+            .join("foo.aex")
+            .to_string_lossy()
+            .into_owned();
 
         for (stale_key, fresh_key) in [(&direct, &via_link), (&via_link, &direct)] {
             let mut cache = HashMap::new();
@@ -3881,7 +4129,11 @@ mod tests {
         junction(&root.join("link"), &real);
 
         let walked = real.join("foo.aex").to_string_lossy().into_owned();
-        let other = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+        let other = root
+            .join("link")
+            .join("foo.aex")
+            .to_string_lossy()
+            .into_owned();
 
         // The spelling being walked holds an old negative; the other spelling
         // holds the result a later pass discovered.
@@ -3920,10 +4172,17 @@ mod tests {
         std::fs::write(real.join("foo.aex"), b"x").unwrap();
         junction(&root.join("link"), &real);
         let walked = real.join("foo.aex");
-        let other = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+        let other = root
+            .join("link")
+            .join("foo.aex")
+            .to_string_lossy()
+            .into_owned();
 
         let mut cache = HashMap::new();
-        cache.insert(walked.to_string_lossy().into_owned(), failed(5, 64, build(1)));
+        cache.insert(
+            walked.to_string_lossy().into_owned(),
+            failed(5, 64, build(1)),
+        );
         cache.insert(other.clone(), discovered(5, 64, build(1)));
 
         let mut aliases = None;
@@ -3937,8 +4196,15 @@ mod tests {
             true,
             &mut aliases,
         );
-        assert!(entry.is_some_and(|entry| entry.ok), "adopted the usable entry");
-        assert_eq!(alias.as_deref(), Some(other.as_str()), "and reports the re-key");
+        assert!(
+            entry.is_some_and(|entry| entry.ok),
+            "adopted the usable entry"
+        );
+        assert_eq!(
+            alias.as_deref(),
+            Some(other.as_str()),
+            "and reports the re-key"
+        );
     }
 
     /// A spelling that already registers must not pay for the alias lookup.
@@ -4062,7 +4328,11 @@ mod tests {
                 true,
                 &mut aliases,
             );
-            assert_eq!(entry.map(|entry| entry.len), Some(64), "took the usable one");
+            assert_eq!(
+                entry.map(|entry| entry.len),
+                Some(64),
+                "took the usable one"
+            );
             assert_eq!(alias.as_deref(), Some(&*usable.to_string_lossy()));
         }
     }
@@ -4079,9 +4349,15 @@ mod tests {
         let walked = real.join("foo.aex");
 
         let mut cache = HashMap::new();
-        cache.insert(walked.to_string_lossy().into_owned(), failed(5, 64, build(1)));
         cache.insert(
-            root.join("link").join("foo.aex").to_string_lossy().into_owned(),
+            walked.to_string_lossy().into_owned(),
+            failed(5, 64, build(1)),
+        );
+        cache.insert(
+            root.join("link")
+                .join("foo.aex")
+                .to_string_lossy()
+                .into_owned(),
             failed(5, 64, build(1)),
         );
         let mut aliases = None;
@@ -4169,12 +4445,21 @@ mod tests {
         assert!(merged.stale, "and queued again");
         assert_eq!(
             classify(Some(&merged), replacement, build(1)),
-            LoadDecision { register: true, discover: true }
+            LoadDecision {
+                register: true,
+                discover: true
+            }
         );
         // A fixed point: re-checking again cannot move it, which is what "does
         // not converge" means here.
-        assert_eq!((merged.ok, merged.stale, &merged.sha), (stale.ok, stale.stale, &stale.sha));
-        assert_eq!((merged.mtime, merged.len, merged.build), (stale.mtime, stale.len, stale.build));
+        assert_eq!(
+            (merged.ok, merged.stale, &merged.sha),
+            (stale.ok, stale.stale, &stale.sha)
+        );
+        assert_eq!(
+            (merged.mtime, merged.len, merged.build),
+            (stale.mtime, stale.len, stale.build)
+        );
     }
 
     #[test]
@@ -4258,7 +4543,11 @@ mod tests {
         std::fs::write(real.join("foo.aex"), b"x").unwrap();
         junction(&root.join("link"), &real);
         let walked = real.join("foo.aex");
-        let other = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+        let other = root
+            .join("link")
+            .join("foo.aex")
+            .to_string_lossy()
+            .into_owned();
 
         let mut stale = discovered(5, 64, build(1));
         stale.stale = true;
@@ -4307,7 +4596,10 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(walked.to_string_lossy().into_owned(), stale);
         cache.insert(
-            root.join("link").join("foo.aex").to_string_lossy().into_owned(),
+            root.join("link")
+                .join("foo.aex")
+                .to_string_lossy()
+                .into_owned(),
             also_stale,
         );
 
@@ -4343,7 +4635,11 @@ mod tests {
         std::fs::write(real.join("foo.aex"), b"x").unwrap();
         junction(&root.join("link"), &real);
         let walked = real.join("foo.aex");
-        let other = root.join("link").join("foo.aex").to_string_lossy().into_owned();
+        let other = root
+            .join("link")
+            .join("foo.aex")
+            .to_string_lossy()
+            .into_owned();
 
         let mut cache = HashMap::new();
         // Same rank as the alias (ok, not stale, current build) but its meta does
@@ -4365,7 +4661,11 @@ mod tests {
             true,
             &mut aliases,
         );
-        assert_eq!(entry.map(|entry| entry.len), Some(64), "took the usable one");
+        assert_eq!(
+            entry.map(|entry| entry.len),
+            Some(64),
+            "took the usable one"
+        );
         assert_eq!(alias.as_deref(), Some(other.as_str()));
     }
 

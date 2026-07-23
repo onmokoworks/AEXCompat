@@ -41,7 +41,12 @@ def test_terminal_cleanup_order_is_explicit_and_idempotent():
     assert audit < trace < unload < stdout
     assert "if (terminal_audit_captured_)" in SOURCE
     assert "if (!trace_started_) return" in SOURCE
-    assert "if (!module_) return" in SOURCE
+    # The null-module path also owns the sealed-directory cookie introduced by
+    # the delay-load closure. Keep the guard tied to its cleanup semantics
+    # instead of requiring the pre-#60 one-line spelling.
+    assert "if (!module_) {" in SOURCE
+    assert "if (sealed_directory_cookie_)" in SOURCE
+    assert "RemoveDllDirectory(sealed_directory_cookie_);" in SOURCE
     assert "if (!stdout_redirected_) return" in SOURCE
 
 

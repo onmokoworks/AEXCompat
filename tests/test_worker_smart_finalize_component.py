@@ -23,5 +23,6 @@ def test_finalize_preserves_output_validation_and_error_priority():
     assert "result.render_error == 0) result.render_error = -5" in SOURCE
     assert "!result.output_pixels_valid" in SOURCE
     assert "result.render_error = -6" in SOURCE
-    assert "result.render_error = -4" in SOURCE
+    assert "external_output" not in SOURCE
+    assert "result.render_error = -4" not in SOURCE
     assert "result.guards_intact = r.guarded->sentinels_intact()" in SOURCE

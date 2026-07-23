@@ -40,5 +40,8 @@ def test_generic_mask_transport_reuses_bounded_cleanroom_context():
     assert "host_context: Option<&crate::render_request::HostContext>" in broker
     assert "encode_mask_context(context)?" in broker
     assert "image_mask_context" in worker
-    assert "hooks.parse_mask_context(argv[trailer_argc - 1])" in worker
+    # The one-shot peeled the mask trailer at `trailer_argc - 1`; #365 deleted
+    # that arm and the session reads it at the index its own peel chain
+    # recorded.
+    assert "hooks.parse_mask_context(argv[mode.image_argc])" in worker
     assert "hooks.parse_mask_context(argv[5])" in worker

@@ -8,8 +8,7 @@ use crate::runtime_module_policy::{
     authenticate_gpu_worker_report,
 };
 use crate::secure_image_dispatch::{
-    ApprovedImageArtifact, GpuRuntimeAuthorization, SecureImageDispatch, WorkerKind,
-    dispatch_secure_gpu_image, dispatch_secure_image,
+    ApprovedImageArtifact, SecureImageDispatch, WorkerKind, dispatch_secure_image,
 };
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
@@ -24,7 +23,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) const MAX_DIMENSION: u32 = 4096;
 pub(crate) const MAX_PIXELS: u64 = 16_777_216;
 pub(crate) const MAX_RGBA_TRANSPORT_BYTES: u64 = MAX_PIXELS * 4;
-pub(crate) const MAX_INTERNAL_IMAGE_BYTES: u64 = MAX_PIXELS * 16;
 const MAX_PARAMETERS: u32 = 1024;
 pub(crate) const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
 const MAX_STAGE_EVENTS: usize = 32;
@@ -424,11 +422,12 @@ fn is_owned_image_transport_name(name: &str) -> bool {
         return true;
     }
 
-    // `layer-<nonce>-<index>.rgba` is the one-shot layered transport; the
-    // resident session streams its own per-layer files as
-    // `layer-session-<nonce>-<index>.rgba` (#268), a distinct prefix so the two
-    // routes never collide on a nonce. Both are broker-owned and must be
-    // reclaimable by the stale sweep when a crash skips their normal deletion.
+    // `layer-session-<nonce>-<index>.rgba` is the resident session's per-layer
+    // transport (#268). `layer-<nonce>-<index>.rgba` was the deleted one-shot's
+    // (#365); the prefix stays claimable so a file leaked by a crash before that
+    // deletion is still reclaimed rather than left behind forever. Both are
+    // broker-owned and must be reachable by the stale sweep when a crash skips
+    // their normal deletion.
     [
         ("layer-", ".rgba"),
         ("layer-session-", ".rgba"),
@@ -516,7 +515,7 @@ fn cleanup_stale_image_transport(root: &Path, now: SystemTime) -> io::Result<()>
 
 /// Decodes an input image while enforcing the transport bounds. Public so the
 /// harness's resident-session adapter can decode its cached input through the
-/// same fail-closed limits the one-shot entries apply.
+/// same fail-closed limits every render entry applies.
 pub fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::DynamicImage> {
     let mut reader = image::ImageReader::open(path)
         .map_err(|error| invalid(format!("{role} image open failed: {error}")))?
@@ -570,6 +569,15 @@ pub(crate) fn isolated_worker_diagnostics(
         "process_memory_limit_bytes".into(),
         json!(isolated.process_memory_limit_bytes),
     );
+    // Absent when nothing appeared, which is the ordinary case; present the
+    // moment a plug-in tried to ask the user something (issue #351). Titles are
+    // already path-redacted where they are captured.
+    if !isolated.dismissed_windows.is_empty() {
+        object.insert(
+            "dismissed_windows".into(),
+            json!(isolated.dismissed_windows),
+        );
+    }
     diagnostics
 }
 
@@ -807,25 +815,33 @@ fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Va
 
 fn module_audit_summary(audit: &Value) -> Option<Value> {
     let union = audit.get("observed_union")?;
-    let policy = union
-        .get("policy")?
-        .as_array()?
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|name| {
-            !name.is_empty()
-                && name.len() <= 260
-                && name.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b' ')
+    let safe_names = |field: &str| -> Option<Vec<&str>> {
+        Some(
+            union
+                .get(field)?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|name| {
+                    !name.is_empty()
+                        && name.len() <= 260
+                        && name.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric()
+                                || matches!(byte, b'.' | b'_' | b'-' | b' ')
+                        })
                 })
-        })
-        .take(MAX_MISSING_SUITES)
-        .collect::<Vec<_>>();
+                .take(MAX_MISSING_SUITES)
+                .collect(),
+        )
+    };
+    let policy = safe_names("policy")?;
+    let unknown = safe_names("unknown")?;
     Some(json!({
         "status": audit.get("status").and_then(Value::as_str),
         "unknown_count": audit.get("unknown_count").and_then(Value::as_u64),
         "phase_count": audit.get("phase_count").and_then(Value::as_u64),
         "authorized_policy_modules": policy,
+        "unknown_modules": unknown,
     }))
 }
 
@@ -835,21 +851,6 @@ fn failed_module_audit_summary(stdout: &str) -> Option<Value> {
         return None;
     }
     module_audit_summary(report.get("module_audit")?)
-}
-
-fn diagnostics_contains_gpu_stage(diagnostics: &Value) -> bool {
-    diagnostics["failure_stage"]
-        .as_str()
-        .is_some_and(|stage| stage.starts_with("gpu_device_") || stage == "smart_render_gpu")
-        || diagnostics["stage_events"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|event| {
-                event["stage"].as_str().is_some_and(|stage| {
-                    stage.starts_with("gpu_device_") || stage == "smart_render_gpu"
-                })
-            })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -926,27 +927,6 @@ pub(crate) fn runtime_backend(backend: RenderGpuBackend) -> Option<RuntimeBacken
     }
 }
 
-fn is_auto_gpu_preflight_error(error: &io::Error) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    [
-        "gpu render requires",
-        "gpu infrastructure",
-        "gpu backend unavailable",
-        "gpu unavailable",
-        "host policy",
-        "runtime module",
-        "gpu dispatch",
-        "restricted token",
-        "sealed tree acl",
-        "trusted worker staging",
-        "restricted process launch",
-        "worker module audit validation",
-        "local worker binary",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-}
-
 impl RenderPixelFormat {
     pub(crate) fn report_name(self) -> &'static str {
         match self {
@@ -1014,7 +994,6 @@ pub(crate) fn native_rgba_to_preview(
 /// default off and only take effect for broker-dispatched image renders.
 const WORLD_DUMP_DIR_ENV: &str = "AEXCOMPAT_DUMP_WORLDS_DIR";
 const OUTPUT_CHECKSUM_DETAIL_ENV: &str = "AEXCOMPAT_CHECKSUM_DETAIL";
-const WORLD_DUMP_EXTENSIONS: [&str; 3] = [".rgba8", ".rgba16le", ".rgba32f-le"];
 
 pub(crate) struct WorldDumpDir {
     pub(crate) path: PathBuf,
@@ -1063,12 +1042,19 @@ pub(crate) fn resolve_managed_dump_dir(
             "world dump directory must not contain traversal components",
         ));
     }
+    // On Windows, `canonicalize()` returns an extended-length (`\\?\\`) path
+    // while callers commonly pass the repository as a plain absolute path.
+    // Normalize every lexical-boundary operand to the same representation so
+    // a wrapper that has already canonicalized the directory is not mistaken
+    // for an escape from the managed tree (#372).
+    let repository_root = strip_extended_prefix(&repository.canonicalize()?);
+    let requested = strip_extended_prefix(requested);
     let resolved = if requested.is_absolute() {
-        requested.to_path_buf()
+        requested
     } else {
-        repository.join(requested)
+        repository_root.join(requested)
     };
-    let target_root = repository.join("target");
+    let target_root = repository_root.join("target");
     // Lexical pre-check before creating anything, so a rejected request never
     // leaves a directory outside the broker-managed target tree behind.
     if !resolved.starts_with(&target_root) {
@@ -1077,8 +1063,8 @@ pub(crate) fn resolve_managed_dump_dir(
         ));
     }
     fs::create_dir_all(&resolved)?;
-    let canonical = resolved.canonicalize()?;
-    let canonical_target = target_root.canonicalize()?;
+    let canonical = strip_extended_prefix(&resolved.canonicalize()?);
+    let canonical_target = strip_extended_prefix(&target_root.canonicalize()?);
     if !canonical.starts_with(&canonical_target) {
         return Err(invalid(
             "world dump directory must stay under the repository target tree",
@@ -1102,26 +1088,6 @@ fn output_checksum_detail_requested() -> bool {
         std::env::var(OUTPUT_CHECKSUM_DETAIL_ENV),
         Ok(value) if value == "1" || value.eq_ignore_ascii_case("true")
     )
-}
-
-/// Delete only the snapshot files this feature owns (NNN-<stage>-WxH.<ext>)
-/// before a retry dispatch, so a fallback run cannot inherit stale dumps.
-fn clear_world_dump_files(directory: &Path) -> io::Result<()> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let owned = name.len() > 4
-            && name.as_bytes()[..3].iter().all(u8::is_ascii_digit)
-            && name.as_bytes()[3] == b'-'
-            && WORLD_DUMP_EXTENSIONS
-                .iter()
-                .any(|extension| name.ends_with(extension));
-        if owned && entry.file_type()?.is_file() {
-            fs::remove_file(entry.path())?;
-        }
-    }
-    Ok(())
 }
 
 /// AE 16-bpc white point: ARGB16 transport samples are 0..=32768, not 0..=65535.
@@ -1155,11 +1121,11 @@ pub enum RenderUiAction {
 }
 
 impl RenderUiAction {
-    /// Encodes the action in the custom-UI trailer grammar shared by the
-    /// one-shot argv path and the v:2 session `ui_action` field
-    /// (`click:v1|x|y|r|g|b|a` / `draw:v1`). The click color is validated here
-    /// (finite, in 0..=1) so both callers reject the same set before it reaches
-    /// a worker.
+    /// Encodes the action in the custom-UI grammar the v:2 session `ui_action`
+    /// field carries (`click:v1|x|y|r|g|b|a` / `draw:v1`); it came from the
+    /// deleted one-shot argv trailer unchanged. The click color is validated
+    /// here (finite, in 0..=1) so a bad value is rejected before it reaches a
+    /// worker.
     pub fn encode_ui_field(&self) -> io::Result<String> {
         match self {
             RenderUiAction::Click { point, color } => {
@@ -1184,49 +1150,6 @@ impl RenderUiAction {
             RenderUiAction::Draw => Ok("draw:v1".into()),
         }
     }
-}
-
-fn image_worker_command(
-    smart: bool,
-    pixel_format: RenderPixelFormat,
-    layered: bool,
-    backend: RenderGpuBackend,
-) -> io::Result<&'static str> {
-    let command = match (smart, pixel_format, layered, backend) {
-        (true, RenderPixelFormat::Argb32f, false, RenderGpuBackend::Cuda)
-        | (true, RenderPixelFormat::Argb32f, false, RenderGpuBackend::Auto) => "--smart-image32",
-        (true, RenderPixelFormat::Argb32f, false, RenderGpuBackend::OpenCl) => {
-            "--smart-image32-opencl"
-        }
-        (true, RenderPixelFormat::Argb32f, false, RenderGpuBackend::DirectX) => {
-            "--smart-image32-directx"
-        }
-        (true, RenderPixelFormat::Argb32f, false, RenderGpuBackend::Cpu) => "--smart-image32-cpu",
-        (true, RenderPixelFormat::Argb8, true, RenderGpuBackend::Auto) => "--smart-image-layer",
-        (true, RenderPixelFormat::Argb16, true, RenderGpuBackend::Auto) => "--smart-image16-layer",
-        (true, RenderPixelFormat::Argb32f, true, RenderGpuBackend::Auto) => "--smart-image32-layer",
-        (true, RenderPixelFormat::Argb32f, true, RenderGpuBackend::Cpu) => {
-            "--smart-image32-cpu-layer"
-        }
-        (true, RenderPixelFormat::Argb8, false, RenderGpuBackend::Auto) => "--smart-image",
-        (true, RenderPixelFormat::Argb16, false, RenderGpuBackend::Auto) => "--smart-image16",
-        (false, RenderPixelFormat::Argb8, true, RenderGpuBackend::Auto) => "--render-image-layer",
-        (false, RenderPixelFormat::Argb16, true, RenderGpuBackend::Auto) => {
-            "--render-image16-layer"
-        }
-        (false, RenderPixelFormat::Argb32f, true, RenderGpuBackend::Auto) => {
-            "--render-image32-layer"
-        }
-        (false, RenderPixelFormat::Argb8, false, RenderGpuBackend::Auto) => "--render-image",
-        (false, RenderPixelFormat::Argb16, false, RenderGpuBackend::Auto) => "--render-image16",
-        (false, RenderPixelFormat::Argb32f, false, RenderGpuBackend::Auto) => "--render-image32",
-        _ => {
-            return Err(invalid(
-                "explicit GPU backend requires non-layered SmartFX ARGB32f rendering",
-            ));
-        }
-    };
-    Ok(command)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1840,28 +1763,25 @@ pub fn render_experimental_image(
 
 enum AudioWrapperOutcome {
     /// The length-1 audio session rendered and closed clean; this is the public
-    /// report, satisfying the same contract the one-shot path asserts.
+    /// report, in the shape the deleted one-shot path asserted.
     Report(Value),
-    /// The session carried the render but the render itself failed the way the
-    /// one-shot path also fails it (a per-span compatibility error, or a
-    /// post-render output/write failure). The one-shot `--render-audio` transport
-    /// returns Err for the same input, so this is final, not a fallback.
+    /// The session carried the render but the render itself failed: a per-span
+    /// compatibility error, or a post-render output/write failure. This is the
+    /// render's verdict, not an infrastructure fault, so it is final.
     Failure(io::Error),
     /// The session infrastructure could not carry the render (open failure,
     /// worker crash or invalidation, malformed close). The string is the reason;
-    /// the automatic one-shot fallback is removed (#98 W4, #264), so the caller
-    /// turns this into an explicit fail-closed error rather than silently
-    /// rerunning the one-shot transport. The one-shot transport stays reachable
-    /// only via the AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER override.
+    /// there is no second transport (#98 W4, #264, #365), so the caller turns
+    /// this into an explicit fail-closed error.
     Fallback(String),
 }
 
-/// Renders a single audio buffer through a length-1 AudioRenderSession (§10),
-/// so the one-shot `--render-audio` argv transport is a fallback rather than
-/// the only path (issue #98 W4 / #239). The session's own validation (guards,
-/// checksum, generation, and the clean-close gate on the worker's audio
-/// report) enforces the same contract the one-shot report is checked against,
-/// so the synthesized report carries the asserted fields.
+/// Renders a single audio buffer through a length-1 AudioRenderSession (§10).
+/// This is the only audio transport since #365 deleted the one-shot
+/// `--render-audio` argv mode (issue #98 W4 / #239). The session's own
+/// validation (guards, checksum, generation, and the clean-close gate on the
+/// worker's audio report) enforces the contract the one-shot report used to be
+/// checked against, so the synthesized report carries the asserted fields.
 #[cfg(windows)]
 fn render_audio_via_length_one_session(
     repository: &Path,
@@ -1912,11 +1832,10 @@ fn render_audio_via_length_one_session(
             output_start,
             ..
         } => (samples, output_start),
-        // A per-span compatibility error: the one-shot `--render-audio` path
-        // returns Err for the same input (its worker exits non-zero and the
-        // report gate rejects a non-"render_completed" status), so this is a
-        // final compatibility failure, not a session-infrastructure fallback.
-        // Fail closed with the error the effect reported (#98 W4, #264).
+        // A per-span compatibility error: the effect could not render this
+        // input. That is a final compatibility failure, not a
+        // session-infrastructure fault, so fail closed with the error the
+        // effect reported (#98 W4, #264).
         AudioSpanStatus::SpanError { render_error } => {
             let _ = session.close();
             return AudioWrapperOutcome::Failure(invalid(format!(
@@ -1952,11 +1871,11 @@ fn render_audio_via_length_one_session(
         let _ = fs::remove_file(output_path);
         return AudioWrapperOutcome::Failure(error);
     }
-    // Preserve the one-shot audio report schema: start from the worker's
-    // aggregate audio report (which carries the audio_* telemetry the SDK audio
-    // contract consumes, at parity with emit_audio_render_report) and add or
-    // override the fields render_experimental_audio's one-shot path exposes, so
-    // a Windows caller on the default session path sees the same public shape.
+    // Keep the public audio report schema unchanged by #365: start from the
+    // worker's aggregate audio report (which carries the audio_* telemetry the
+    // SDK audio contract consumes, at parity with the deleted
+    // emit_audio_render_report) and add or override the fields the one-shot
+    // exposed, so a caller sees the same shape it always did.
     let Some(mut report) = close
         .get("final_report")
         .and_then(Value::as_object)
@@ -1966,11 +1885,10 @@ fn render_audio_via_length_one_session(
             "the audio session close carried no final report".into(),
         );
     };
-    // Override/add the fields the one-shot emit_audio_render_report exposes so
-    // the default session path returns the same public JSON shape as the
-    // `--render-audio` fallback. The wrapper only reaches here on a clean close
-    // (every span succeeded), so the selector errors are 0, the ranges valid,
-    // and the output was created.
+    // Override/add the fields the deleted one-shot emit_audio_render_report
+    // exposed, so the public JSON shape callers parse is unchanged by #365. The
+    // wrapper only reaches here on a clean close (every span succeeded), so the
+    // selector errors are 0, the ranges valid, and the output was created.
     for (key, value) in [
         ("stage", json!("audio_render")),
         ("status", json!("render_completed")),
@@ -2000,9 +1918,9 @@ fn render_audio_via_length_one_session(
     ] {
         report.insert(key.to_owned(), value);
     }
-    // Preserve the one-shot path's top-level `worker_diagnostics`
-    // (classification / stage events) rather than only nesting it under
-    // session_close, so a caller on the default session path keeps that field.
+    // Keep `worker_diagnostics` (classification / stage events) at the top
+    // level, where the deleted one-shot put it, rather than only nesting it
+    // under session_close, so a caller keeps that field.
     let worker_diagnostics = close
         .get("worker")
         .and_then(|worker| worker.get("diagnostics"))
@@ -2021,7 +1939,6 @@ pub fn render_experimental_audio(
     output_path: &Path,
     parameters: &[InteractiveParameter],
 ) -> io::Result<Value> {
-    const SAMPLE_RATE: u32 = 44_100;
     const MAX_SAMPLES: usize = 10_000_000;
     let plugin_bytes = fs::read(plugin_path)?;
     let actual = format!("{:X}", Sha256::digest(&plugin_bytes));
@@ -2047,111 +1964,28 @@ pub fn render_experimental_audio(
         return Err(invalid("audio input contains a non-finite sample"));
     }
 
-    // Route the render through a length-1 audio session by default (protocol
-    // §10); the one-shot `--render-audio` argv transport below is the fallback
-    // when the session infrastructure cannot carry it. The escape hatch
-    // (AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER=1) forces the one-shot path.
-    #[cfg(windows)]
-    if std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none() {
-        match render_audio_via_length_one_session(
-            repository,
-            plugin_path,
-            approved_sha256,
-            &input,
-            output_path,
-            parameters,
-        ) {
-            AudioWrapperOutcome::Report(report) => return Ok(report),
-            AudioWrapperOutcome::Failure(error) => return Err(error),
-            // Fail closed (#98 W4, #264): an audio-session infrastructure failure
-            // no longer silently falls back to the one-shot transport. Surface it
-            // as an explicit diagnostic. The one-shot transport stays reachable
-            // via the AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER override, which
-            // bypasses the session attempt entirely.
-            AudioWrapperOutcome::Fallback(reason) => {
-                return Err(invalid(format!(
-                    "the resident audio render session could not carry this render ({reason}); \
-                     the automatic one-shot fallback is disabled. Diagnose the session failure, \
-                     or set {DISABLE_SESSION_WRAPPER_ENV}=1 to force the one-shot transport for \
-                     this render."
-                )));
-            }
-        }
-    }
-
-    let transport = repository.join("target/audio-transport");
-    fs::create_dir_all(&transport)?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| invalid("system clock is before UNIX epoch"))?
-        .as_nanos();
-    let worker_input = transport.join(format!("input-{nonce}.f32"));
-    let worker_output = transport.join(format!("output-{nonce}.f32"));
-    fs::write(&worker_input, &input)?;
-    let _cleanup = Cleanup(vec![worker_input.clone(), worker_output.clone()]);
-    let args_before_plugin = vec!["--render-audio".into()];
-    let args_after_plugin = vec![
-        actual.to_ascii_lowercase(),
-        encode_interactive_payload(parameters)?,
-        worker_input.to_string_lossy().into_owned(),
-        worker_output.to_string_lossy().into_owned(),
-        (input.len() / 4).to_string(),
-        SAMPLE_RATE.to_string(),
-    ];
-    let started = Instant::now();
-    let isolated = dispatch_approved_image(
+    // The length-1 audio session (protocol §10) is the only audio transport
+    // since #365: the one-shot `--render-audio` argv mode and the escape hatch
+    // that reached it are gone, so a session failure is a failure rather than a
+    // routing choice.
+    match render_audio_via_length_one_session(
         repository,
-        WorkerKind::Render,
         plugin_path,
         approved_sha256,
-        &args_before_plugin,
-        &args_after_plugin,
-        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
-    )?;
-    let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
-    if isolated.classification.as_str() != "ok" {
-        return Err(invalid(format!(
-            "audio render worker failed safely: {diagnostics}"
-        )));
+        &input,
+        output_path,
+        parameters,
+    ) {
+        AudioWrapperOutcome::Report(report) => Ok(report),
+        AudioWrapperOutcome::Failure(error) => Err(error),
+        // Fail closed (#98 W4, #264): an audio-session infrastructure failure
+        // no longer silently falls back. There is no second transport to fall
+        // back to since #365, so an infrastructure failure is reported as one.
+        AudioWrapperOutcome::Fallback(reason) => Err(invalid(format!(
+            "the resident audio render session could not carry this render ({reason}). \
+             Diagnose the session failure; there is no alternate transport."
+        ))),
     }
-    let mut report: Value = serde_json::from_str(isolated.stdout.trim())
-        .map_err(|_| invalid("audio render worker report is invalid"))?;
-    let output_samples = report
-        .get("output_samples")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| invalid("audio report has no output sample count"))?
-        as usize;
-    let output = fs::read(&worker_output)?;
-    if report.get("status") != Some(&json!("render_completed"))
-        || report.get("sample_rate") != Some(&json!(SAMPLE_RATE))
-        || report.get("channels") != Some(&json!(1))
-        || report.get("sample_format") != Some(&json!("float32"))
-        || report.get("guard_bytes_intact") != Some(&json!(true))
-        || report.get("samples_finite") != Some(&json!(true))
-        || report.get("audio_lifetimes_balanced") != Some(&json!(true))
-        || report.get("invalid_audio_operations") != Some(&json!(0))
-        || output_samples > input.len() / 4
-        || output.len() != output_samples * 4
-    {
-        return Err(invalid("audio worker contract failed"));
-    }
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output_path)?;
-    if let Err(error) = destination
-        .write_all(&output)
-        .and_then(|_| destination.sync_all())
-    {
-        drop(destination);
-        let _ = fs::remove_file(output_path);
-        return Err(error);
-    }
-    report["input_sha256"] = json!(format!("{:x}", Sha256::digest(&input)));
-    report["output_sha256"] = json!(format!("{:x}", Sha256::digest(&output)));
-    report["output_transport"] = json!("mono_f32le_44100");
-    report["worker_diagnostics"] = diagnostics;
-    Ok(report)
 }
 
 pub fn render_experimental_image_at_time(
@@ -2409,6 +2243,30 @@ pub fn render_experimental_image_at_time_with_deep16_png(
     timing: RenderTiming,
     smart: bool,
 ) -> io::Result<Value> {
+    render_experimental_image_with_approved_dependencies_and_deep16_png(
+        repository,
+        plugin_path,
+        approved_sha256,
+        input_path,
+        output_path,
+        parameters,
+        timing,
+        smart,
+        Vec::new(),
+    )
+}
+
+pub fn render_experimental_image_with_approved_dependencies_and_deep16_png(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    smart: bool,
+    dependencies: Vec<ApprovedImageArtifact>,
+) -> io::Result<Value> {
     let bytes = fs::read(plugin_path)?;
     let actual = format!("{:X}", Sha256::digest(&bytes));
     if !actual.eq_ignore_ascii_case(approved_sha256) {
@@ -2433,7 +2291,7 @@ pub fn render_experimental_image_at_time_with_deep16_png(
         None,
         None,
         None,
-        Vec::new(),
+        dependencies,
         None,
         true,
     )
@@ -2504,12 +2362,13 @@ pub fn render_experimental_image_with_parameter_animation(
     // reconstruction, so the length-1 session gate in `render_with_artifact`
     // (`payload == encode_interactive_payload(interactive_parameters)`) always
     // failed and parameter animation was forced onto the one-shot argv path.
-    // Deriving the payload here lets the gate hold so animation rides the session
-    // transport, and keeps the one-shot fallback byte-identical: the animation
-    // sidecar overwrites every animated slot's value per frame, and an empty
-    // payload is version-agnostic to the worker, so the only observable change
-    // is that a non-animated parameter's declared value is now honored instead
-    // of dropped (matching every other interactive entrypoint).
+    // Deriving the payload here let the gate hold so animation rode the session;
+    // #365 then deleted both the gate and the one-shot, but deriving it is still
+    // what the worker needs. The animation sidecar overwrites every animated
+    // slot's value per frame, and an empty payload is version-agnostic to the
+    // worker, so the only observable effect of deriving it is that a
+    // non-animated parameter's declared value is honored instead of dropped
+    // (matching every other interactive entrypoint).
     render_with_artifact(
         repository,
         "experimental-parameter-animation",
@@ -2705,6 +2564,21 @@ pub fn probe_experimental_options_dialog(
     }
     let mut report: Value = serde_json::from_str(isolated.stdout.trim())
         .map_err(|_| invalid("options dialog worker report is invalid"))?;
+    // A dialog the broker closed did not complete; it was cancelled by the
+    // host, and reporting that as a pass would turn a compatibility gap into
+    // fixture-shaped silent success. The probe fails explicitly instead, naming
+    // what was closed (issue #351).
+    let closed_by_host: Vec<_> = isolated
+        .dismissed_windows
+        .iter()
+        .filter(|window| window.asked_to_close)
+        .collect();
+    if !closed_by_host.is_empty() {
+        return Err(invalid(format!(
+            "options dialog was closed by the host, so it did not complete: {}",
+            serde_json::to_string(&closed_by_host).unwrap_or_default()
+        )));
+    }
     if report.get("status") != Some(&json!("dialog_completed"))
         || report.get("dialog_advertised") != Some(&json!(true))
         || report.get("selector_dispatched") != Some(&json!(true))
@@ -2748,6 +2622,19 @@ pub fn probe_experimental_automatic_options_dialog(
     }
     let mut report: Value = serde_json::from_str(isolated.stdout.trim())
         .map_err(|_| invalid("automatic options dialog worker report is invalid"))?;
+    // Same reasoning as the manual probe: a dialog the host closed did not
+    // complete (issue #351).
+    let closed_by_host: Vec<_> = isolated
+        .dismissed_windows
+        .iter()
+        .filter(|window| window.asked_to_close)
+        .collect();
+    if !closed_by_host.is_empty() {
+        return Err(invalid(format!(
+            "automatic options dialog was closed by the host, so it did not complete: {}",
+            serde_json::to_string(&closed_by_host).unwrap_or_default()
+        )));
+    }
     if report.get("status") != Some(&json!("automatic_dialog_completed"))
         || report.get("dialog_capability_advertised") != Some(&json!(true))
         || report.get("automatic_dialog_requested") != Some(&json!(true))
@@ -4750,6 +4637,15 @@ fn render_with_artifact(
     if !timing.is_valid() {
         return Err(invalid("render timing is invalid"));
     }
+    // The worker's session request carries time_scale as a signed 32-bit value,
+    // so a larger launch scale could never round-trip. `RenderSession::open`
+    // rejects it too, but as a session-open failure; checking it here keeps it
+    // the plain caller error it is. This bound used to sit in the
+    // session-eligibility gate, where exceeding it silently chose the one-shot
+    // transport instead (#365).
+    if timing.time_scale > i32::MAX as u32 {
+        return Err(invalid("render time scale is out of range"));
+    }
     if deep_png_output && pixel_format != RenderPixelFormat::Argb16 {
         return Err(invalid(
             "16-bit deep PNG output requires the Argb16 render format",
@@ -4944,32 +4840,19 @@ fn render_with_artifact(
         timed_secondaries.push((layer.slot, layer.time, layer_width, layer_height, rgba));
     }
 
-    // Experimental rendering always receives the generic interactive payload.
-    // Fixture manifests are resolved by fixture-specific public entrypoints,
-    // never by this AEX-agnostic transport path.
-    let payload = payload_override.unwrap_or_else(|| "v2|".to_owned());
-
-    // Issue #98 stage W2: plain classic CPU renders route through a resident
-    // length-1 render session so the one-shot argv transport can eventually
-    // retire. Anything the session transport cannot carry yet keeps the
-    // one-shot dispatch below, as does any session-infrastructure failure
-    // (the one-shot re-run then reports through the original path). Gate
-    // failures inside the session path are final: they are the same
-    // fail-closed validation the one-shot path applies.
-    // The session transport carries mask, spatial, render-environment context
-    // (W1-3), alpha-as-coverage parameter slots (W1-4c, published once at
-    // launch), and aux channels (#211): every HostContext field is now
-    // session-representable.
+    // Issue #98 stage W2, completed by #365: every render routes through a
+    // resident length-1 render session, and the one-shot argv transport it was
+    // meant to retire is gone. The session carries mask, spatial,
+    // render-environment context (W1-3), alpha-as-coverage parameter slots
+    // (W1-4c, published once at launch), and aux channels (#211): every
+    // HostContext field is session-representable.
     //
-    // Aux channels ride the same broker-created manifest sidecar the one-shot
-    // path consumes (`--aux-manifest-v1 <manifest>`), so prepare it once here
-    // and share it with both transports rather than building it twice. The
-    // sidecars and manifest live under the broker-owned `target/image-transport`
-    // root; the worker only ever reads broker-written files there (the sample
-    // source paths are canonicalized, bounded, and copied by the broker inside
-    // prepare_aux_transport), so session-izing adds no new worker-side path
-    // re-resolution beyond the pre-existing one-shot transport. `root` and
-    // `nonce` are established here so the one-shot path below reuses them.
+    // Aux channels ride a broker-created manifest sidecar
+    // (`--aux-manifest-v1 <manifest>`) prepared here. The sidecars and manifest
+    // live under the broker-owned `target/image-transport` root; the worker only
+    // ever reads broker-written files there (the sample source paths are
+    // canonicalized, bounded, and copied by the broker inside
+    // prepare_aux_transport), so the worker re-resolves no caller-supplied path.
     let root = repository.join("target/image-transport");
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4982,111 +4865,41 @@ fn render_with_artifact(
     } else {
         // Only aux-carrying renders touch the transport root up front; a plain
         // session render still creates nothing here. create_dir_all and the
-        // stale sweep are idempotent with the one-shot path's own calls below.
+        // stale sweep are idempotent with the layer/audio calls below.
         fs::create_dir_all(&root)?;
         cleanup_stale_image_transport(&root, SystemTime::now())?;
         prepare_aux_transport(repository, aux_channels, &root, nonce)?
     };
     let alpha_as_coverage_params: &[u32] =
         host_context.map_or(&[], |context| context.alpha_as_coverage_params.as_slice());
+    // #365 (W4): the length-1 render session is the only image transport. The
+    // one-shot argv commands and the eligibility gate that chose between them
+    // are gone, so a shape the session cannot carry is an explicit error from
+    // `RenderSession::open` (a GPU backend with no authenticated runtime-module
+    // policy, a depth/backend pair with no session command) rather than a
+    // silent reroute onto a second implementation.
+    //
+    // Deleting the gate widened what the host accepts, because the session
+    // command table is a superset of the one-shot one: classic and smart
+    // Argb8/Argb16 now accept an explicit Cpu backend, and a layered Argb32f
+    // render carrying a policy now opens the real GPU session instead of
+    // falling to the one-shot's CPU render. The one shape it narrowed is an
+    // explicit GPU backend with no policy: the one-shot let the worker take the
+    // device unauthorized, which was the only route that could, and the session
+    // fails it closed.
+    //
     // Layer pixels travel as inherited per-layer file HANDLEs (#268), not
     // section slots, so the section is header + input + output only and its
-    // aggregate cap is no longer a function of layer count or size. A layered
-    // config the one-shot per-file path accepts now always fits the session, so
-    // the former session_section_fits carve-out is gone (#264): every eligible
-    // render below can be carried by the length-1 session.
-    // An audio sidecar rides the session's launch trailer the same way the static
-    // context trailers do (issue #339), so on its own it no longer excludes a
-    // render. It still excludes one when secondary layers are also present; see
-    // the classic arm below for why.
-    let session_eligible = payload
-        == encode_interactive_payload(interactive_parameters.unwrap_or_default())?
-        && std::env::var_os(DISABLE_SESSION_WRAPPER_ENV).is_none()
-        && timing.time_scale <= i32::MAX as u32
-        && if smart {
-            // Admit the smart configs the CPU session serves and that no policy
-            // is required for; the pixels match one-shot because both render on
-            // the smart worker's CPU path. The one-shot smart command table
-            // (image_worker_command) has non-layered arms for Argb8/Argb16 only
-            // under Auto, and for Argb32f under Auto/Cpu/OpenCl/DirectX.
-            // Admitted here:
-            //   - Argb8/Argb16 Auto: no GPU attempt either side, fully equivalent.
-            //   - Argb32f Cpu: one-shot --smart-image32-cpu, no GPU attempt.
-            //   - Argb32f Auto (policy-none): the session folds Auto to CPU
-            //     (--smart-session32-cpu-v1) and renders on CPU. One-shot fails
-            //     its policy-less GPU preflight *before touching any device* and
-            //     falls back to the same CPU render, so the pixels match, but it
-            //     records gpu_attempt/gpu_fallback_used. Per W4 (#264) the
-            //     session is the anchor and that futile preflight record is an
-            //     artifact being removed, so the session's no-GPU-attempt report
-            //     is canonical (issue #292).
-            //   - Argb32f Auto with a policy / explicit GPU backends (#290): the
-            //     session opens the GPU command with the same authenticated
-            //     runtime-module policy the one-shot GPU path uses, so both
-            //     dispatch to the real device and the pixels match. Only the
-            //     success path is equivalent: on a GPU failure the one-shot Auto
-            //     path retries on CPU and records gpu_attempt/gpu_fallback_used,
-            //     while the session fails closed (it cannot retry mid-flight).
-            //     Per W4 (#264) the session is the anchor, so its no-CPU-retry
-            //     GPU behavior is canonical.
-            //   - Renders carrying a static host context (#331): the smart session
-            //     command peels the mask/spatial/render trailers from the same
-            //     positional tail the classic session command does, and the shared
-            //     request parser reads them at the same indices, so both routes
-            //     hand the plug-in the same context.
-            // Excluded here:
-            //   - Argb8/Argb16 Cpu: the one-shot table has no CPU arm for these
-            //     depths (falls through to the error arm), so routing them to
-            //     the session would succeed while the forced one-shot fails.
-            //   - Argb32f Auto/explicit-GPU without a policy: no authenticated
-            //     policy means the GPU dispatch cannot be authorized, so these
-            //     stay off the GPU session arm (Auto-none folds to the CPU
-            //     session below; explicit-GPU-none is ineligible and the
-            //     one-shot path fails it closed).
-            //
-            // A policy is inert below ARGB32f on both routes (#337): the one-shot's
-            // gpu_initial_attempt requires float32, so it never reads the policy and
-            // renders through --smart-image/--smart-image16; the session's gpu_capable
-            // is likewise false, so it neither folds the backend nor attaches the
-            // authorization manifest. Carrying one therefore does not exclude a render.
-            // Static context trailers (host_context) ride the smart session's
-            // positional tail the same way they ride the classic one (issue #331),
-            // as do secondary layers (issue #294), so neither excludes a render.
-            if secondaries.is_empty() && timed_secondaries.is_empty() {
-                (gpu_backend == RenderGpuBackend::Cpu && pixel_format == RenderPixelFormat::Argb32f)
-                    || (gpu_backend == RenderGpuBackend::Auto
-                        && (gpu_runtime_policy.is_none()
-                            || pixel_format != RenderPixelFormat::Argb32f))
-                    || (pixel_format == RenderPixelFormat::Argb32f
-                        && runtime_backend(gpu_backend).is_some()
-                        && gpu_runtime_policy.is_some())
-            } else {
-                // Smart layered: admit Argb8/Argb16 under Auto only. The
-                // one-shot layered arms (--smart-image*-layer) are Auto-only
-                // and for these depths the worker's gpu_negotiation is false
-                // (it requires float32), so both routes render on CPU.
-                // Argb32f layered stays on one-shot: gpu_initial_attempt is
-                // false when layers are present, so the broker does not fold
-                // it to CPU, and a GPU-declaring float32 plug-in would
-                // negotiate GPU in the worker on the one-shot route, which a
-                // CPU-folded session cannot reproduce (issue #296 review).
-                // The depth bound already makes a policy inert here (#337), so it
-                // is not a separate condition.
-                gpu_backend == RenderGpuBackend::Auto && pixel_format != RenderPixelFormat::Argb32f
-            }
-        } else {
-            // Classic layered + audio stays off the session: the one-shot's
-            // --render-image-audio arm is pinned to exactly 16 argv slots
-            // (l2_cli_dispatch.cpp), so it cannot express secondary layers at
-            // all, and the shape currently fails the forced one-shot outright.
-            // Routing it to the session would render it, which is arguably
-            // better, but it would also silently break the A/B escape hatch this
-            // gate exists to preserve. Tracked separately (#341); the exclusion
-            // goes away with the one-shot itself.
-            gpu_backend == RenderGpuBackend::Auto
-                && (audio.is_none() || (secondaries.is_empty() && timed_secondaries.is_empty()))
-        };
-    if session_eligible {
+    // aggregate cap is no longer a function of layer count or size.
+    // An audio sidecar rides the session's launch trailer the same way the
+    // static context trailers do (issue #339), while secondary layers use
+    // inherited file handles. The two transports are orthogonal, and the
+    // combined native fixture proves that a classic session consumes both in
+    // one render (issue #341).
+    //
+    // The block scopes the audio sidecar's cleanup guard so it is dropped on
+    // every arm of the match below, including the error arms.
+    {
         // Only a layered session touches target/image-transport: RenderSession::
         // open writes per-layer sidecars there (#268), so a file-free session
         // (no secondary/timed layers) must not be forced to create or sweep the
@@ -5147,9 +4960,8 @@ fn render_with_artifact(
             None => None,
         };
         // The worker loads the span from a file, exactly as it does for the
-        // one-shot's --render-image-audio, so the session writes the same sidecar
-        // before opening and names it in the trailer (issue #339). The one-shot
-        // writes its copy further below, after this branch has returned.
+        // deleted one-shot's --render-image-audio, so the session writes the
+        // sidecar before opening and names it in the trailer (issue #339).
         // One binding, so "a sidecar was written" and "a trailer was emitted"
         // cannot come apart: there is no shape here that writes the file and
         // then renders as if the render carried no audio.
@@ -5199,6 +5011,7 @@ fn render_with_artifact(
             output_path,
             preserved_output: preserved_output.as_deref(),
             interactive_parameters,
+            payload_override: payload_override.as_deref(),
             parameter_animation,
             layers: session_layers,
             mask_trailer,
@@ -5225,642 +5038,27 @@ fn render_with_artifact(
             custom_ui_action: custom_ui_action.as_ref(),
             smart,
             gpu_backend,
-            // Copy (not move): GpuRuntimePolicyInput is Copy, so the one-shot
-            // fall-through below still sees the same policy if this render is
-            // ineligible for the session. The gate above only reaches this
-            // construction with a policy present for Argb32f + a GPU backend.
+            // `RenderSession::open` decides what to do with this: it folds Auto
+            // to CPU when the policy is absent, requires one for any real GPU
+            // attempt, and ignores it entirely below float32 or on classic.
             gpu_runtime_policy,
         });
         match session_outcome {
             SessionWrapperOutcome::Report(report) => return Ok(report),
             SessionWrapperOutcome::Failure(error) => return Err(error),
-            // Fail closed (#98 W4, #264): a resident-session infrastructure
-            // failure no longer silently falls back to the one-shot transport,
-            // which would let the session path rot undetected. Surface it as an
-            // explicit diagnostic. The one-shot transport stays available for
-            // renders the session cannot serve (the ineligible shapes handled
-            // below) and via the AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER
-            // override, which bypasses the session attempt entirely.
+            // Fail closed (#98 W4, #264, #365): there is no second transport to
+            // fall back to, so an infrastructure failure is reported as one.
             SessionWrapperOutcome::Fallback(reason) => {
                 return Err(invalid(format!(
-                    "the resident render session could not carry this render ({reason}); the \
-                     automatic one-shot fallback is disabled. Diagnose the session failure, or \
-                     set {DISABLE_SESSION_WRAPPER_ENV}=1 to force the one-shot transport for \
-                     this render. Any world-dump snapshots from the failed session are preserved \
-                     for diagnosis; clear the dump directory before re-running, since it must \
-                     start empty."
+                    "the resident render session could not carry this render ({reason}). \
+                     Diagnose the session failure; there is no alternate transport. Any \
+                     world-dump snapshots from the failed session are preserved for diagnosis; \
+                     clear the dump directory before re-running, since it must start empty."
                 )));
             }
         }
     }
-
-    // `root` and `nonce` were established above and shared with the aux-manifest
-    // sidecar. Ensure the directory exists for renders that had no aux channels
-    // to prepare; create_dir_all and the stale sweep are idempotent, so a
-    // fallback after an aux-carrying session attempt repeats them harmlessly
-    // (the just-written aux sidecars are fresh and survive the sweep).
-    fs::create_dir_all(&root)?;
-    cleanup_stale_image_transport(&root, SystemTime::now())?;
-    let input_raw = root.join(format!("input-{nonce}.rgba"));
-    let output_raw = root.join(format!("output-{nonce}.rgba"));
-    let audio_raw = audio
-        .as_ref()
-        .map(|_| root.join(format!("audio-{nonce}.f32")));
-    let layer_raws = (0..secondaries.len())
-        .map(|index| root.join(format!("layer-{nonce}-{index}.rgba")))
-        .collect::<Vec<_>>();
-    let timed_layer_raws = (0..timed_secondaries.len())
-        .map(|index| root.join(format!("layer-{nonce}-{}.rgba", secondaries.len() + index)))
-        .collect::<Vec<_>>();
-    let report_path = root.join(format!("report-{nonce}.json"));
-    let animation_path = parameter_animation
-        .filter(|animations| !animations.is_empty())
-        .map(|_| root.join(format!("parameter-animation-{nonce}.json")));
-    let mut cleanup_paths = vec![input_raw.clone(), output_raw.clone(), report_path.clone()];
-    cleanup_paths.extend(layer_raws.iter().cloned());
-    cleanup_paths.extend(timed_layer_raws.iter().cloned());
-    cleanup_paths.extend(audio_raw.iter().cloned());
-    cleanup_paths.extend(animation_path.iter().cloned());
-    let cleanup = Cleanup(cleanup_paths);
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&input_raw)?
-        .write_all(&rgba)?;
-    for (layer_raw, (_, _, _, layer_rgba)) in layer_raws.iter().zip(&secondaries) {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(layer_raw)?
-            .write_all(layer_rgba)?;
-    }
-    for (layer_raw, (_, _, _, _, layer_rgba)) in timed_layer_raws.iter().zip(&timed_secondaries) {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(layer_raw)?
-            .write_all(layer_rgba)?;
-    }
-    if let (Some(path), Some(bytes)) = (&audio_raw, &audio) {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?
-            .write_all(bytes)?;
-    }
-    if let (Some(path), Some(animations)) = (&animation_path, parameter_animation) {
-        let bytes = parameter_animation_sidecar_json(animations)?;
-        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-    }
-    // `aux_transport` was prepared once above and is shared with the session
-    // wrapper; the one-shot worker consumes the same `--aux-manifest-v1`
-    // manifest when the session path fell back or was ineligible.
-    let world_dump_dir = requested_world_dump_dir(repository)?;
-    let minidump_directory = requested_minidump_directory(repository)?;
-    let output_checksum_detail = output_checksum_detail_requested();
-
-    let worker_kind = if smart {
-        WorkerKind::Smart
-    } else {
-        WorkerKind::Render
-    };
-    let plugin = ApprovedImageArtifact {
-        path: plugin_path.to_path_buf(),
-        expected_sha256: decode_sha256_hex(plugin_sha256)?,
-        expected_size: fs::metadata(plugin_path)?.len(),
-    };
-    let command = if audio.is_some() {
-        "--render-image-audio"
-    } else {
-        image_worker_command(
-            smart,
-            pixel_format,
-            !secondaries.is_empty() || !timed_secondaries.is_empty(),
-            gpu_backend,
-        )?
-    };
-    let mut args_after_plugin = vec![
-        plugin_sha256.to_ascii_lowercase(),
-        payload,
-        input_raw.to_string_lossy().into_owned(),
-        output_raw.to_string_lossy().into_owned(),
-        width.to_string(),
-        height.to_string(),
-        timing.current_time.to_string(),
-        timing.time_step.to_string(),
-        timing.total_time.to_string(),
-        timing.time_scale.to_string(),
-    ];
-    for (layer_raw, (slot, layer_width, layer_height, _)) in layer_raws.iter().zip(&secondaries) {
-        args_after_plugin.extend([
-            slot.to_string(),
-            layer_raw.to_string_lossy().into_owned(),
-            layer_width.to_string(),
-            layer_height.to_string(),
-        ]);
-    }
-    for (layer_raw, (slot, time, layer_width, layer_height, _)) in
-        timed_layer_raws.iter().zip(&timed_secondaries)
-    {
-        args_after_plugin.extend([
-            format!("v1|{slot}|{}|{}", time.value, time.scale),
-            layer_raw.to_string_lossy().into_owned(),
-            layer_width.to_string(),
-            layer_height.to_string(),
-        ]);
-    }
-    if let (Some(path), Some(bytes)) = (&audio_raw, &audio) {
-        args_after_plugin.extend([
-            path.to_string_lossy().into_owned(),
-            (bytes.len() / 4).to_string(),
-            "44100".into(),
-        ]);
-    }
-    if let Some(context) = host_context {
-        args_after_plugin.push(crate::render_request::encode_mask_context(context)?);
-        if let Some(spatial) = crate::render_request::encode_spatial_context(context)? {
-            args_after_plugin.push(spatial);
-        }
-        if let Some(environment) = crate::render_request::encode_render_environment(context)? {
-            args_after_plugin.push(environment);
-        }
-    }
-    if let Some(action) = custom_ui_action {
-        args_after_plugin.push(action.encode_ui_field()?);
-    }
-    // Named transports must remain after positional UI/context trailers. The
-    // native workers peel these pairs from argv's tail before decoding the
-    // positional image contract.
-    if let Some(context) = host_context {
-        if !context.alpha_as_coverage_params.is_empty() {
-            let mut slots = context.alpha_as_coverage_params.clone();
-            slots.sort_unstable();
-            if slots.windows(2).any(|pair| pair[0] == pair[1])
-                || slots.iter().any(|slot| *slot > 1024)
-            {
-                return Err(invalid("alpha-as-coverage parameter slots are invalid"));
-            }
-            args_after_plugin.extend([
-                "--alpha-as-coverage-v1".into(),
-                slots
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ]);
-        }
-    }
-    if let Some(aux) = &aux_transport {
-        args_after_plugin.extend([
-            "--aux-manifest-v1".into(),
-            aux.manifest_path.to_string_lossy().into_owned(),
-        ]);
-    }
-    if let Some(path) = &animation_path {
-        args_after_plugin.extend([
-            "--parameter-animation-v1".into(),
-            path.to_string_lossy().into_owned(),
-        ]);
-    }
-    if let Some(dump) = &world_dump_dir {
-        args_after_plugin.extend([
-            "--dump-worlds-v1".into(),
-            dump.path.to_string_lossy().into_owned(),
-        ]);
-    }
-    // No minidump flag is passed to the worker: the broker creates the dump file
-    // and hands over an inherited pipe at the launch boundary (minidump_policy).
-    // `minidump_directory` here is only for the report.
-    if output_checksum_detail {
-        args_after_plugin.extend(["--output-checksum-detail-v1".into(), "1".into()]);
-    }
-    if let Some(settings) = &conformance_render_settings {
-        args_after_plugin.extend(["--conformance-render-settings-v1".into(), settings.clone()]);
-    }
-    let mut args_before_plugin = vec![command.into()];
-    let started = Instant::now();
-    let gpu_initial_attempt = smart
-        && pixel_format == RenderPixelFormat::Argb32f
-        && secondaries.is_empty()
-        && timed_secondaries.is_empty()
-        && audio.is_none()
-        && runtime_backend(gpu_backend).is_some();
-    let auto_gpu_cpu_fallback = gpu_backend == RenderGpuBackend::Auto
-        && smart
-        && pixel_format == RenderPixelFormat::Argb32f
-        && gpu_initial_attempt;
-    // A GPU render carries its authenticated policy's modules to the worker as an
-    // AEXRMA1 manifest (#300) so the GPU runtime DLLs classify as authorized
-    // `policy` in the required module audit instead of `unknown`. Added before the
-    // initial dispatch so it is sealed for it. The transport lives to the end of
-    // this render, past every dispatch that seals it.
-    let mut dependencies = dependencies;
-    // Snapshot the policy-free args/dependencies before the GPU authorization
-    // trailer is appended. An Auto GPU->CPU fallback dispatches with these instead
-    // of the GPU args: the worker treats a `--runtime-module-authorization-v1`
-    // trailer as authorize_runtime_modules before loading the plug-in, so carrying
-    // it into a CPU retry (which loads no GPU DLL) could fail on runtime-policy or
-    // manifest validation, e.g. if the policy expired during the GPU attempt
-    // (#301 review).
-    let cpu_fallback_args_after_plugin = args_after_plugin.clone();
-    let cpu_fallback_dependencies = dependencies.clone();
-    let mut gpu_fallback_used = false;
-    let mut gpu_fallback_reason: Option<String> = None;
-    let mut gpu_attempt: Option<Value> = None;
-    // Building the manifest is fallible (an expired policy, an unwritable
-    // transport). On an Auto render a runtime-module failure here must take the
-    // same policy-free CPU fallback as any other caught GPU preflight error
-    // instead of aborting the render, so it is captured rather than propagated;
-    // failures that are not preflight conditions still fail the render
-    // (#301 review).
-    let mut manifest_fallback_error: Option<io::Error> = None;
-    let _runtime_authorization = match (gpu_initial_attempt, gpu_runtime_policy) {
-        (true, Some(policy_input)) => {
-            let backend = runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
-            // Reuse the preflight's session identity so the manifest the worker
-            // parses matches the identity the report was authenticated against
-            // (#301 review).
-            match prepare_runtime_authorization_transport_with_identity(
-                repository,
-                policy_input.policy,
-                backend,
-                policy_input.session_identity,
-            ) {
-                Ok(transport) => {
-                    args_after_plugin.push("--runtime-module-authorization-v1".to_owned());
-                    args_after_plugin.push(transport.basename().to_owned());
-                    dependencies.push(transport.artifact());
-                    Some(transport)
-                }
-                Err(error) if auto_gpu_cpu_fallback && is_auto_gpu_preflight_error(&error) => {
-                    manifest_fallback_error = Some(error);
-                    None
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        _ => None,
-    };
-    // A captured manifest failure degrades this render to the policy-free CPU
-    // command before the initial dispatch is built, so the GPU attempt is skipped
-    // and the fallback is reported exactly like a caught GPU preflight error.
-    let gpu_initial_attempt = if let Some(error) = &manifest_fallback_error {
-        gpu_fallback_used = true;
-        gpu_fallback_reason = Some(error.to_string());
-        gpu_attempt = Some(json!({
-            "classification": "gpu_preflight_error",
-            "error": error.to_string(),
-        }));
-        args_before_plugin[0] =
-            image_worker_command(smart, pixel_format, false, RenderGpuBackend::Cpu)?.into();
-        false
-    } else {
-        gpu_initial_attempt
-    };
-    let initial_dispatch = SecureImageDispatch {
-        repository,
-        worker_kind,
-        plugin: plugin.clone(),
-        dependencies: if manifest_fallback_error.is_some() {
-            cpu_fallback_dependencies.clone()
-        } else {
-            dependencies.clone()
-        },
-        args_before_plugin: &args_before_plugin,
-        args_after_plugin: if manifest_fallback_error.is_some() {
-            &cpu_fallback_args_after_plugin
-        } else {
-            &args_after_plugin
-        },
-        timeout: Some(Duration::from_millis(timeout_ms)),
-    };
-    let mut isolated = if gpu_initial_attempt {
-        let gpu_result = (|| -> io::Result<_> {
-            let policy_input = gpu_runtime_policy.ok_or_else(|| {
-                invalid(
-                    "GPU render requires a session-bound authenticated runtime module policy report; use the runtime-policy render API or select CPU",
-                )
-            })?;
-            let backend = runtime_backend(gpu_backend).expect("GPU attempt has a runtime backend");
-            let report = authenticate_gpu_worker_report(
-                policy_input.module_report_json,
-                &policy_input.session_identity,
-                backend,
-                WorkerModuleValidation {
-                    policy: policy_input.policy,
-                    sealed: policy_input.sealed_modules,
-                    trusted: policy_input.trusted_modules,
-                    system32: policy_input.system32,
-                },
-            )?;
-            dispatch_secure_gpu_image(
-                initial_dispatch,
-                GpuRuntimeAuthorization {
-                    backend,
-                    session_identity: policy_input.session_identity,
-                    module_report: &report,
-                },
-            )
-        })();
-        match gpu_result {
-            Ok(result) => result,
-            Err(error) if auto_gpu_cpu_fallback && is_auto_gpu_preflight_error(&error) => {
-                gpu_fallback_used = true;
-                gpu_fallback_reason = Some(error.to_string());
-                gpu_attempt = Some(json!({
-                    "classification": "gpu_preflight_error",
-                    "error": error.to_string(),
-                }));
-                args_before_plugin[0] =
-                    image_worker_command(smart, pixel_format, false, RenderGpuBackend::Cpu)?.into();
-                // Dispatch the CPU retry with the policy-free args/dependencies so
-                // the worker does not authorize_runtime_modules for a CPU render
-                // that loads no GPU DLL (#301 review).
-                dispatch_secure_image(SecureImageDispatch {
-                    repository,
-                    worker_kind,
-                    plugin: plugin.clone(),
-                    dependencies: cpu_fallback_dependencies.clone(),
-                    args_before_plugin: &args_before_plugin,
-                    args_after_plugin: &cpu_fallback_args_after_plugin,
-                    timeout: Some(Duration::from_millis(timeout_ms)),
-                })?
-            }
-            Err(error) => return Err(error),
-        }
-    } else {
-        dispatch_secure_image(initial_dispatch)?
-    };
-    let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
-    let initial_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
-    if let Some(report) = &initial_report {
-        propagate_missing_suites(&mut diagnostics, report);
-        propagate_unsupported_suite_calls(&mut diagnostics, report);
-    }
-    if initial_report
-        .as_ref()
-        .is_some_and(|report| report.get("output_pixels_valid") == Some(&Value::Bool(false)))
-    {
-        diagnostics["failure_stage"] = json!("output_validation");
-    }
-    let gpu_trace_inferred =
-        initial_report.is_none() && diagnostics_contains_gpu_stage(&diagnostics);
-    let gpu_attempt_failed = gpu_backend == RenderGpuBackend::Auto
-        && smart
-        && pixel_format == RenderPixelFormat::Argb32f
-        && (gpu_trace_inferred
-            || initial_report.as_ref().is_some_and(|worker_report| {
-                worker_report.get("gpu_render_dispatched") == Some(&Value::Bool(true))
-                    && (isolated.classification.as_str() != "ok"
-                        || worker_report.get("smart_render_error") != Some(&json!(0))
-                        || worker_report.get("gpu_device_setup_error") != Some(&json!(0))
-                        || worker_report.get("gpu_device_setdown_error") != Some(&json!(0)))
-            }));
-    let worker_report = if gpu_attempt_failed {
-        gpu_fallback_reason = Some("GPU worker attempt failed; CPU retry used".into());
-        gpu_attempt = Some(json!({
-            "worker_classification": isolated.classification.as_str(),
-            "worker_diagnostics": diagnostics,
-            "report_available": initial_report.is_some(),
-            "gpu_trace_inferred": gpu_trace_inferred,
-            "smart_render_error": initial_report.as_ref().and_then(|report| report.get("smart_render_error")),
-            "smart_render_selector_error": initial_report.as_ref().and_then(|report| report.get("smart_render_selector_error")),
-            "output_pixels_valid": initial_report.as_ref().and_then(|report| report.get("output_pixels_valid")),
-            "suite_timeline": initial_report.as_ref().and_then(|report| report.get("suite_timeline")),
-            "gpu_device_setup_error": initial_report.as_ref().and_then(|report| report.get("gpu_device_setup_error")),
-            "gpu_device_setdown_error": initial_report.as_ref().and_then(|report| report.get("gpu_device_setdown_error")),
-            "gpu_device_setdown_exception_code": initial_report.as_ref().and_then(|report| report.get("gpu_device_setdown_exception_code")),
-            "gpu_render_possible": initial_report.as_ref().and_then(|report| report.get("gpu_render_possible")),
-            "gpu_render_dispatched": initial_report.as_ref().and_then(|report| report.get("gpu_render_dispatched")),
-        }));
-        match fs::remove_file(&output_raw) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        if let Some(dump) = &world_dump_dir {
-            clear_world_dump_files(&dump.path)?;
-        }
-        args_before_plugin[0] = image_worker_command(
-            smart,
-            pixel_format,
-            !secondaries.is_empty() || !timed_secondaries.is_empty(),
-            RenderGpuBackend::Cpu,
-        )?
-        .into();
-        let retry_started = Instant::now();
-        // Dispatch the CPU retry with the policy-free args/dependencies: a GPU
-        // worker that launched but reported a GPU failure must not carry its
-        // runtime-module authorization trailer into the CPU retry, which loads no
-        // GPU DLL and should not depend on the (possibly expired) policy manifest
-        // (#301 review).
-        isolated = dispatch_secure_image(SecureImageDispatch {
-            repository,
-            worker_kind,
-            plugin,
-            dependencies: cpu_fallback_dependencies.clone(),
-            args_before_plugin: &args_before_plugin,
-            args_after_plugin: &cpu_fallback_args_after_plugin,
-            timeout: Some(Duration::from_millis(timeout_ms)),
-        })?;
-        diagnostics = isolated_worker_diagnostics(&isolated, retry_started.elapsed().as_millis());
-        let retry_report = serde_json::from_str(isolated.stdout.trim()).map_err(|_| {
-            invalid(format!(
-                "CPU fallback worker report unavailable: {diagnostics}"
-            ))
-        })?;
-        propagate_missing_suites(&mut diagnostics, &retry_report);
-        propagate_unsupported_suite_calls(&mut diagnostics, &retry_report);
-        gpu_fallback_used = true;
-        retry_report
-    } else {
-        initial_report
-            .ok_or_else(|| invalid(format!("worker report unavailable: {diagnostics}")))?
-    };
-    let (output_origin_ok, parameter_count_ok, spatial_ok) = validate_interactive_worker_report(
-        &worker_report,
-        &diagnostics,
-        &InteractiveGateFacts {
-            smart,
-            pixel_format,
-            spatial,
-            expected_quality,
-            expected_field,
-            expected_shutter_angle,
-            expected_shutter_phase,
-            custom_ui_action: custom_ui_action.as_ref(),
-            audio_present: audio.is_some(),
-            interactive_parameters,
-            classification: isolated.classification.as_str(),
-            time_step: timing.time_step,
-            input_width: width,
-            input_height: height,
-        },
-    )?;
-    let rendered_width = worker_report
-        .get("width")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| invalid("worker output width is invalid"))?;
-    let rendered_height = worker_report
-        .get("height")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| invalid("worker output height is invalid"))?;
-    let rendered_rowbytes = worker_report
-        .get("rowbytes")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| invalid("worker output rowbytes is invalid"))?;
-    // A SmartFX run that legally answered an empty result_rect renders
-    // nothing: zero dimensions and a zero-byte raw output are that contract's
-    // fulfillment, and no PNG can represent them, so the pixel pipeline is
-    // skipped while the report still carries the empty-geometry fields.
-    let empty_smart_result =
-        smart && worker_report.get("empty_result_rect") == Some(&Value::Bool(true));
-    let mut deep_overrange_samples = None;
-    if empty_smart_result {
-        if rendered_width != 0 || rendered_height != 0 || rendered_rowbytes != 0 {
-            return Err(invalid(format!(
-                "empty SmartFX result reported nonzero output geometry: {rendered_width}x{rendered_height} rowbytes={rendered_rowbytes}"
-            )));
-        }
-        let actual_bytes = fs::metadata(&output_raw)
-            .map_err(|error| invalid(format!("validated worker output unavailable: {error}")))?
-            .len();
-        if actual_bytes != 0 {
-            return Err(invalid(format!(
-                "empty SmartFX result produced {actual_bytes} output bytes"
-            )));
-        }
-    } else {
-        crate::render_request::validate_image_buffer_layout(
-            u64::from(rendered_width),
-            u64::from(rendered_height),
-            rendered_rowbytes,
-            pixel_format.bytes_per_pixel(),
-            None,
-            u64::from(MAX_DIMENSION),
-            MAX_PIXELS,
-            MAX_INTERNAL_IMAGE_BYTES,
-        )?;
-        let expected_bytes_u64 = crate::render_request::validate_image_buffer_layout(
-            u64::from(rendered_width),
-            u64::from(rendered_height),
-            u64::from(rendered_width) * pixel_format.bytes_per_pixel(),
-            pixel_format.bytes_per_pixel(),
-            None,
-            u64::from(MAX_DIMENSION),
-            MAX_PIXELS,
-            MAX_INTERNAL_IMAGE_BYTES,
-        )?;
-        let expected_bytes = usize::try_from(expected_bytes_u64)
-            .map_err(|_| invalid("worker output size does not fit this broker"))?;
-        let actual_bytes = fs::metadata(&output_raw)
-            .map_err(|error| invalid(format!("validated worker output unavailable: {error}")))?
-            .len();
-        if actual_bytes != expected_bytes_u64 {
-            return Err(invalid(format!(
-                "validated worker output size mismatch: expected={expected_bytes_u64}, actual={actual_bytes}, diagnostics={diagnostics}"
-            )));
-        }
-        let rendered = fs::read(&output_raw).map_err(|error| {
-            invalid(format!(
-                "validated worker output unavailable: error={error}, diagnostics={diagnostics}, report={worker_report}"
-            ))
-        })?;
-        if rendered.len() != expected_bytes {
-            return Err(invalid(format!(
-                "validated worker output size mismatch: expected={expected_bytes}, actual={}, diagnostics={diagnostics}",
-                rendered.len()
-            )));
-        }
-        if let Some(path) = &preserved_output {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?
-                .write_all(&rendered)?;
-        }
-        if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        if deep_png_output {
-            let (samples, overrange_samples) = rgba16_transport_to_png16(&rendered)?;
-            deep_overrange_samples = Some(overrange_samples);
-            let image = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
-                rendered_width,
-                rendered_height,
-                samples,
-            )
-            .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
-            image
-                .save_with_format(output_path, ImageFormat::Png)
-                .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
-        } else {
-            let preview = native_rgba_to_preview(&rendered, pixel_format)?;
-            let image = image::RgbaImage::from_raw(rendered_width, rendered_height, preview)
-                .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
-            image
-                .save_with_format(output_path, ImageFormat::Png)
-                .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
-        }
-    }
-    // The empty branch never writes the preserved raw sidecar, so pointing
-    // the report at that path would name a file that does not exist.
-    let output_raw = if empty_smart_result {
-        None
-    } else {
-        preserved_output
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned())
-    };
-    let facts = InteractiveImageReportFacts {
-        plugin_id: plugin_id.to_owned(),
-        smart,
-        pixel_format,
-        rendered_width,
-        rendered_height,
-        input_width: width,
-        input_height: height,
-        output_png: output_path.to_path_buf(),
-        timing,
-        worker_classification: isolated.classification.as_str().to_owned(),
-        diagnostics,
-        gpu_fallback_used,
-        gpu_fallback_reason,
-        gpu_attempt,
-        secondary_layers: json!(
-            secondaries
-                .iter()
-                .map(|item| json!({"slot": item.0, "width": item.1, "height": item.2}))
-                .collect::<Vec<_>>()
-        ),
-        empty_smart_result,
-        output_raw,
-        deep_png_output,
-        deep_overrange_samples,
-        world_dump_display: world_dump_dir.as_ref().map(|dump| dump.display.clone()),
-        minidump_display: minidump_directory.clone(),
-        output_checksum_detail,
-        output_origin_ok,
-        parameter_count_ok,
-        spatial_ok,
-        audio_input_sha256: audio
-            .as_ref()
-            .map(|bytes| format!("{:x}", Sha256::digest(bytes))),
-    };
-    drop(cleanup);
-    Ok(build_interactive_image_report(&worker_report, facts))
 }
-
-/// Escape hatch for A/B verification against the one-shot argv transport;
-/// the equivalence test renders both ways and diffs the public reports.
-pub const DISABLE_SESSION_WRAPPER_ENV: &str = "AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER";
 
 /// Test-only fault injection (#264): when set, the length-1 classic wrapper
 /// reports a `Fallback` before opening the session, so a test can exercise the
@@ -5919,7 +5117,8 @@ pub static RENDER_SESSION_WRAPPER_RENDERS: std::sync::atomic::AtomicU64 =
 /// report it absent, or the reverse (issue #339).
 struct SessionAudioSource {
     /// `session-audio:v1|<samples>|<rate>|<path>`, the session's form of the
-    /// three bare argv slots the one-shot spends under `--render-image-audio`.
+    /// three bare argv slots the deleted one-shot spent under
+    /// `--render-image-audio`.
     trailer: String,
     input_sha256: String,
 }
@@ -5933,6 +5132,11 @@ struct SessionWrapperRequest<'a> {
     output_path: &'a Path,
     preserved_output: Option<&'a Path>,
     interactive_parameters: Option<&'a [InteractiveParameter]>,
+    /// Pre-encoded worker payload for the fixture-manifest route, whose
+    /// descriptor-profile encoding `interactive_parameters` cannot express
+    /// (see `SessionOpenRequest::payload_override`). `None` on every
+    /// interactive route.
+    payload_override: Option<&'a str>,
     parameter_animation: Option<&'a [ParameterAnimation]>,
     layers: Vec<crate::render_session::SessionLayer>,
     mask_trailer: Option<String>,
@@ -5989,12 +5193,9 @@ enum SessionWrapperOutcome {
     Failure(io::Error),
     /// The session infrastructure could not carry the render (open failure,
     /// worker crash or invalidation, malformed close summary). The string is the
-    /// reason. The automatic one-shot fallback is removed (#98 W4, #264): the
-    /// caller turns this into an explicit fail-closed error so a session
-    /// infrastructure failure surfaces instead of being masked by a silent
-    /// one-shot rerun. The one-shot transport stays reachable only for renders
-    /// the session cannot serve (ineligible shapes) or the explicit
-    /// `AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER` override.
+    /// reason. There is no second transport (#98 W4, #264, #365): the caller
+    /// turns this into an explicit fail-closed error so a session
+    /// infrastructure failure surfaces instead of being masked.
     Fallback(String),
 }
 
@@ -6027,6 +5228,7 @@ fn render_classic_via_length_one_session(
         plugin_path: request.plugin_path,
         plugin_sha256: request.plugin_sha256,
         parameters: request.interactive_parameters,
+        payload_override: request.payload_override,
         parameter_animation: request.parameter_animation,
         aux_manifest: request.aux_manifest,
         world_dump_dir: world_dump_dir.as_ref().map(|dump| dump.path.as_path()),
@@ -6113,7 +5315,23 @@ fn render_classic_via_length_one_session(
         .as_str()
         .unwrap_or("unknown")
         .to_owned();
-    let diagnostics = close["worker"]["diagnostics"].clone();
+    let mut diagnostics = close["worker"]["diagnostics"].clone();
+    // Lift the worker's structured suite records into the diagnostics, the way
+    // the deleted one-shot dispatch did after every launch. Without this a
+    // session render silently drops `missing_suites` /
+    // `unsupported_suite_calls`, which is exactly the "a compatibility gap must
+    // become a reproducible diagnostic" contract those fields exist for. The
+    // one-shot was the only caller before #365 deleted it, so the propagation
+    // had to move here rather than go with it.
+    propagate_missing_suites(&mut diagnostics, &final_report);
+    propagate_unsupported_suite_calls(&mut diagnostics, &final_report);
+    // Name the stage when the worker itself rejected its output pixels. The
+    // gate below turns that into an error carrying these diagnostics, so
+    // without this the failure reads as an unattributed validation failure.
+    // The deleted one-shot set the same annotation (#365).
+    if final_report.get("output_pixels_valid") == Some(&Value::Bool(false)) {
+        diagnostics["failure_stage"] = json!("output_validation");
+    }
     let gate = validate_interactive_worker_report(
         &final_report,
         &diagnostics,
@@ -6152,7 +5370,7 @@ fn render_classic_via_length_one_session(
             height,
             ..
         } => (pixels, width, height),
-        FrameStatus::FrameError { render_error } => {
+        FrameStatus::FrameError { render_error, .. } => {
             // The gate above rejects any final report carrying a render
             // error, so this arm is defensive only.
             return SessionWrapperOutcome::Failure(invalid(format!(
@@ -6333,6 +5551,7 @@ impl InteractiveRenderSession {
                 plugin_path: request.plugin_path,
                 plugin_sha256: request.plugin_sha256,
                 parameters: request.parameters,
+                payload_override: None,
                 parameter_animation: None,
                 aux_manifest: None,
                 world_dump_dir: None,
@@ -6489,7 +5708,10 @@ impl InteractiveRenderSession {
                     "passed": true,
                 }))
             }
-            FrameStatus::FrameError { render_error } => {
+            FrameStatus::FrameError {
+                render_error,
+                missing_dependency,
+            } => {
                 self.frames_errored += 1;
                 Ok(json!({
                     "schema_version": 1,
@@ -6501,6 +5723,7 @@ impl InteractiveRenderSession {
                     "worker_classification": "resident_session",
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
                     "render_error": render_error,
+                    "missing_dependency": missing_dependency,
                     "passed": false,
                 }))
             }
@@ -6924,6 +6147,26 @@ pub(crate) fn build_interactive_image_report(
         "custom_ui_draw_out_flags",
         "custom_ui_lifecycle_errors",
         "custom_ui_context_closed",
+        // Keep probe-specific lifecycle and selector telemetry visible on the
+        // session projection as it was on the deleted one-shot report.  The
+        // built-artifact probes use these fields as their byte/lifetime oracle.
+        "pre_render_error",
+        "result_rects_valid",
+        "last_seh_exception_code",
+        "receipt_lifetimes_balanced",
+        "receipts_created",
+        "receipts_checked_in",
+        "live_receipts",
+        "live_receipt_bytes",
+        "invalid_receipt_operations",
+        "async_layer_requests_balanced",
+        "async_layer_requests_created",
+        "async_layer_requests_completed",
+        "async_layer_requests_canceled",
+        "live_async_layer_requests",
+        "async_layer_reserved_bytes",
+        "malformed_checkout_request_count",
+        "empty_checkout_pixel_denial_count",
         "pf_path_lifetimes_balanced",
         "pf_path_checkout_calls",
         "pf_path_checkin_calls",
@@ -7851,6 +7094,17 @@ mod tests {
         assert!(accepted.path.is_dir());
         assert_eq!(accepted.display, "target/world-dumps");
 
+        // The length-one session wrapper resolves the environment value once
+        // before passing it to `RenderSession::open`, so the second resolver
+        // receives the canonical Windows path. Keep that production shape in
+        // the contract test (#372).
+        let canonical_request = repository.join("target/canonical-world-dumps");
+        fs::create_dir_all(&canonical_request).unwrap();
+        let canonical_request = canonical_request.canonicalize().unwrap();
+        let canonical_accepted =
+            resolve_managed_dump_dir(&repository, &canonical_request, true).unwrap();
+        assert_eq!(canonical_accepted.display, "target/canonical-world-dumps");
+
         // A non-empty directory is refused so stale snapshots cannot be
         // mistaken for the coming run's output.
         fs::write(
@@ -7873,35 +7127,6 @@ mod tests {
         assert!(resolve_world_dump_dir(&repository, &outside).is_err());
         assert!(!outside.exists() || fs::remove_dir_all(&outside).is_ok());
         fs::remove_dir_all(repository).unwrap();
-    }
-
-    #[test]
-    fn world_dump_cleanup_removes_only_owned_snapshot_files() {
-        let directory = std::env::temp_dir().join(format!(
-            "aexcompat-world-dump-clear-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        let owned = [
-            "000-classic-input-4x2.rgba8",
-            "001-smart-output-4x2.rgba16le",
-            "002-smart-layer-slot7-4x2.rgba32f-le",
-        ];
-        let foreign = ["notes.txt", "xyz-classic-input-4x2.rgba8", "003-.png"];
-        for name in owned.iter().chain(foreign.iter()) {
-            fs::write(directory.join(name), b"x").unwrap();
-        }
-        clear_world_dump_files(&directory).unwrap();
-        for name in owned {
-            assert!(!directory.join(name).exists(), "{name} should be removed");
-        }
-        for name in foreign {
-            assert!(directory.join(name).exists(), "{name} should survive");
-        }
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -7958,6 +7183,27 @@ mod tests {
             native_rgba_to_preview(&rgba32, RenderPixelFormat::Argb32f).unwrap(),
             vec![0, 128, 255, 0]
         );
+    }
+
+    #[test]
+    fn module_audit_summary_exposes_only_bounded_safe_unknown_basenames() {
+        let summary = module_audit_summary(&json!({
+            "status": "failed",
+            "unknown_count": 4,
+            "phase_count": 3,
+            "observed_union": {
+                "policy": ["approved.dll"],
+                "unknown": ["outside.dll", "C:\\private\\leak.dll", "bad:name.dll"]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            summary["authorized_policy_modules"],
+            json!(["approved.dll"])
+        );
+        assert_eq!(summary["unknown_modules"], json!(["outside.dll"]));
+        assert!(!summary.to_string().contains("private"));
     }
 
     #[test]
@@ -8100,20 +7346,6 @@ mod tests {
     }
 
     #[test]
-    fn gpu_trace_inference_requires_an_explicit_gpu_stage() {
-        let gpu = json!({
-            "failure_stage": "gpu_device_setdown",
-            "stage_events": [{"stage":"smart_render_gpu","state":"begin"}]
-        });
-        let cpu = json!({
-            "failure_stage": "smart_render_cpu",
-            "stage_events": [{"stage":"smart_render_cpu","state":"begin"}]
-        });
-        assert!(diagnostics_contains_gpu_stage(&gpu));
-        assert!(!diagnostics_contains_gpu_stage(&cpu));
-    }
-
-    #[test]
     fn minidump_marker_accepts_only_worker_owned_shapes() {
         // Legitimate worker lines normalize to a path-free marker.
         assert_eq!(
@@ -8162,6 +7394,7 @@ mod tests {
             peak_job_memory_bytes: Some(531_000_000),
             process_memory_limit_bytes: 536_870_912,
             memory_limit_reached: true,
+            dismissed_windows: Vec::new(),
         };
         let diagnostics = isolated_worker_diagnostics(&isolated, 1_234);
         assert_eq!(diagnostics["kill_reason"], "memory_limit");
@@ -8186,6 +7419,7 @@ mod tests {
             peak_job_memory_bytes: Some(1_000_000),
             process_memory_limit_bytes: 536_870_912,
             memory_limit_reached: false,
+            dismissed_windows: Vec::new(),
         };
         let diagnostics = isolated_worker_diagnostics(&alive, 5);
         assert_eq!(diagnostics["kill_reason"], Value::Null);
@@ -8211,102 +7445,5 @@ mod tests {
             Some(RuntimeBackend::Directx)
         );
         assert_eq!(runtime_backend(RenderGpuBackend::Cpu), None);
-    }
-
-    #[test]
-    fn auto_gpu_fallback_is_limited_to_host_preflight_failures() {
-        for message in [
-            "GPU render requires a session-bound authenticated runtime module policy report",
-            "GPU infrastructure is unavailable",
-            "GPU backend unavailable on this host",
-            "host policy rejected GPU dispatch",
-            "runtime module policy is expired",
-            "trusted worker staging failed",
-            "restricted process launch failed",
-        ] {
-            assert!(is_auto_gpu_preflight_error(&io::Error::other(message)));
-        }
-        for message in [
-            "isolated AEX image render failed validation: selector_error=17",
-            "worker crashed during SMART_RENDER",
-            "validated worker output size mismatch",
-        ] {
-            assert!(!is_auto_gpu_preflight_error(&io::Error::other(message)));
-        }
-    }
-
-    #[test]
-    fn image_worker_commands_are_depth_and_layer_explicit() {
-        assert_eq!(
-            image_worker_command(
-                false,
-                RenderPixelFormat::Argb16,
-                false,
-                RenderGpuBackend::Auto
-            )
-            .unwrap(),
-            "--render-image16"
-        );
-        assert_eq!(
-            image_worker_command(
-                true,
-                RenderPixelFormat::Argb32f,
-                true,
-                RenderGpuBackend::Auto
-            )
-            .unwrap(),
-            "--smart-image32-layer"
-        );
-        assert_eq!(
-            image_worker_command(
-                true,
-                RenderPixelFormat::Argb32f,
-                true,
-                RenderGpuBackend::Cpu
-            )
-            .unwrap(),
-            "--smart-image32-cpu-layer"
-        );
-        assert_ne!(
-            image_worker_command(
-                false,
-                RenderPixelFormat::Argb8,
-                false,
-                RenderGpuBackend::Auto
-            )
-            .unwrap(),
-            image_worker_command(
-                false,
-                RenderPixelFormat::Argb16,
-                false,
-                RenderGpuBackend::Auto
-            )
-            .unwrap()
-        );
-        for (backend, expected) in [
-            (RenderGpuBackend::Auto, "--smart-image32"),
-            (RenderGpuBackend::Cuda, "--smart-image32"),
-            (RenderGpuBackend::OpenCl, "--smart-image32-opencl"),
-            (RenderGpuBackend::DirectX, "--smart-image32-directx"),
-            (RenderGpuBackend::Cpu, "--smart-image32-cpu"),
-        ] {
-            assert_eq!(
-                image_worker_command(true, RenderPixelFormat::Argb32f, false, backend).unwrap(),
-                expected
-            );
-        }
-        assert!(
-            image_worker_command(
-                false,
-                RenderPixelFormat::Argb32f,
-                false,
-                RenderGpuBackend::Cuda
-            )
-            .is_err()
-        );
-        assert_eq!(
-            serde_json::to_string(&RenderGpuBackend::OpenCl).unwrap(),
-            "\"opencl\""
-        );
     }
 }

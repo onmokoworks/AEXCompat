@@ -24,5 +24,19 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Pipes",
   "Win32_System_ProcessStatus",
   "Win32_System_StationsAndDesktops",
-  "Win32_System_Threading"
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging"
+] }
+windows = { version = "0.58", features = [
+  "Win32_Devices_DeviceAndDriverInstallation",
+  "Win32_Foundation",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Registry",
+  "Win32_System_SystemInformation",
+  "Wdk_Graphics_Direct3D",
+  "Wdk_System_SystemServices"
 ] }

@@ -68,6 +68,12 @@ def test_gpu_cleanup_error_is_a_hard_failure_and_forwarded():
     assert "result.render_error == 0 && !result.output_pixels_valid" in source
     assert 'worker_report.get("gpu_device_setdown_error") == Some(&json!(0))' in broker
     assert 'diagnostics["failure_stage"] = json!("output_validation")' in broker
-    assert '"smart_render_selector_error": initial_report.as_ref()' in broker
-    assert '"output_pixels_valid": initial_report.as_ref()' in broker
     assert '"gpu_device_setdown_exception_code": worker_report.get(' in broker
+    # The two `initial_report.as_ref()` projections copied the failed GPU
+    # launch's fields into the `gpu_attempt` record before the CPU retry. #365
+    # deleted that retry with the one-shot transport, so those fields reach the
+    # public report through the ordinary flattening and the failure is an error
+    # rather than an attempt record.
+    assert "initial_report" not in broker
+    assert '"smart_render_selector_error",' in broker
+    assert '"output_pixels_valid",' in broker

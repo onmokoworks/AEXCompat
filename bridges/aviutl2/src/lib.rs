@@ -212,6 +212,7 @@ impl BridgeSession {
                     smart: config.smart,
                     gpu_backend: aexcompat_broker::image_render::RenderGpuBackend::Auto,
                     gpu_runtime_policy: None,
+                    payload_override: None,
                 }) {
                     Ok(session) => session,
                     Err(error) => {
@@ -251,13 +252,15 @@ impl BridgeSession {
                                 width: frame_width,
                                 height: frame_height,
                             }),
-                            FrameStatus::FrameError { render_error } => {
+                            FrameStatus::FrameError { render_error, .. } => {
                                 FrameReply::FrameLocal(render_error)
                             }
                         },
                         // An io error means the transport is broken; the session
                         // cannot be trusted for further frames.
-                        Err(error) => FrameReply::SessionLost(format!("render_frame failed: {error}")),
+                        Err(error) => {
+                            FrameReply::SessionLost(format!("render_frame failed: {error}"))
+                        }
                     };
                     // A host-protection invariant failure invalidates the whole
                     // session; the next frame must reopen, so report it lost even
@@ -1002,7 +1005,13 @@ fn config_item_for(parameter: &InteractiveParameter) -> Option<FilterConfigItem>
     match parameter.kind.as_str() {
         "float" => {
             let (min, max) = bounded_range(parameter)?;
-            Some(track(name, parameter.value, min, max, track_step(max - min)))
+            Some(track(
+                name,
+                parameter.value,
+                min,
+                max,
+                track_step(max - min),
+            ))
         }
         // "angle" is deferred to stage 2b: its value lives in `components[0]`
         // (not `value`), it usually reports no numeric bounds (so a slider needs

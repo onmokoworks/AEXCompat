@@ -1,16 +1,15 @@
-import hashlib
-import json
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from _render_session import run_session_render
 
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "target" / "minihost-build" / "aex_smart_worker.exe"
 PROBE = ROOT / "target" / "pf-smart-geometry-probe-build" / "Release" / "pf_smart_geometry_probe.aex"
 WIDTH, HEIGHT = 16, 12
-DEPTH_COMMANDS = ("--smart-image", "--smart-image16", "--smart-image32")
+DEPTH_FORMATS = ("argb8", "argb16", "argb32f")
 
 # The probe drives one geometry scenario per render time (current_time % 4),
 # so every scenario is reached through the generic time argument with no
@@ -63,30 +62,24 @@ MODES = {
 }
 
 
-def _run(tmp_path, command, mode):
+def _run(tmp_path, pixel_format, mode):
     assert WORKER.exists(), "build aex_smart_worker.exe before running this test"
     assert PROBE.exists(), (
         "build the probe first: tools/build-pf-smart-geometry-probe.ps1"
     )
-    probe_hash = hashlib.sha256(PROBE.read_bytes()).hexdigest()
-    input_path = tmp_path / f"input-{command.strip('-')}-{mode}.rgba"
+    input_path = tmp_path / f"input-{pixel_format}-{mode}.rgba"
     input_path.write_bytes(bytes(index % 251 for index in range(WIDTH * HEIGHT * 4)))
-    output_path = tmp_path / f"output-{command.strip('-')}-{mode}.bin"
-    completed = subprocess.run(
-        [str(WORKER), command, str(PROBE), probe_hash, "v2|", str(input_path),
-         str(output_path), str(WIDTH), str(HEIGHT), str(mode), "1", "4", "1"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=60,
+    output_path = tmp_path / f"output-{pixel_format}-{mode}.bin"
+    return run_session_render(
+        tmp_path, PROBE, input_path, output_path, width=WIDTH, height=HEIGHT,
+        pixel_format=pixel_format, smart=True, current_time=mode,
+        total_time=4, time_scale=1,
     )
-    assert completed.returncode == 0, completed.stderr
-    return json.loads(completed.stdout)
 
 
 @pytest.mark.parametrize("mode", sorted(MODES))
 def test_probe_modes_pin_the_geometry_contract(tmp_path, mode):
-    report = _run(tmp_path, "--smart-image", mode)
+    report = _run(tmp_path, "argb8", mode)
     assert report["status"] == "render_completed"
     # Mode 0 verifies the checkout intersection answers inside the probe's own
     # Smart Pre-Render; a zero pre_render_error means every check passed.
@@ -107,7 +100,7 @@ def test_geometry_contract_is_identical_across_depths(tmp_path, mode):
         "pre_render_error", "smart_render_error", "result_rects_valid",
         "input_checkout_result_rect",
     )
-    reports = [_run(tmp_path, command, mode) for command in DEPTH_COMMANDS]
+    reports = [_run(tmp_path, pixel_format, mode) for pixel_format in DEPTH_FORMATS]
     assert [report["pixel_format"] for report in reports] == [
         "argb8", "argb16", "argb32f"
     ]

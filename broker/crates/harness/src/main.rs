@@ -365,6 +365,52 @@ fn discover_adjacent_imports(aex_path: &Path) -> Result<AdjacentImportDiscovery,
     })
 }
 
+fn approved_adjacent_dependencies(
+    aex_path: &Path,
+    approved_sha256: &str,
+) -> Result<Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>, String> {
+    let aex_path = aex_path
+        .canonicalize()
+        .map_err(|error| format!("selected AEX could not be resolved: {error}"))?;
+    let discovery = discover_adjacent_imports(&aex_path)?;
+    let main = aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
+        path: aex_path.clone(),
+        expected_sha256: decode_sha256(approved_sha256)?,
+        expected_size: fs::metadata(aex_path)
+            .map_err(|error| format!("selected AEX metadata failed: {error}"))?
+            .len(),
+    };
+    let dependencies = discovery
+        .dependencies
+        .into_iter()
+        .map(|dependency| {
+            let basename = dependency
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+                .ok_or_else(|| "adjacent dependency basename is not Unicode".to_owned())?;
+            Ok(
+                aexcompat_broker::session_dependency_manifest::SessionDependencyDto {
+                    path: dependency.path,
+                    basename,
+                    sha256: dependency.sha256,
+                    size: dependency.size,
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    aexcompat_broker::session_dependency_manifest::validate(
+        aexcompat_broker::session_dependency_manifest::SessionDependencyManifestDto {
+            schema_version: 1,
+            dependencies,
+        },
+        &main,
+    )
+    .map(|manifest| manifest.into_approved_image_artifacts())
+    .map_err(|error| format!("adjacent dependency manifest rejected: {error}"))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DispatchIdentity {
     sha256: String,
@@ -3765,17 +3811,12 @@ impl HarnessApp {
         #[cfg(windows)]
         {
             let live_eligible = !smart
-            && host_context.is_none()
-            && custom_ui_action.is_none()
-            && audio_sidecar.is_none()
-            && gpu_backend == aexcompat_broker::image_render::RenderGpuBackend::Auto
-            && !use_registered_default
-            && !parameters.iter().any(|parameter| parameter.kind == "layer")
-            // The A/B escape hatch disables every resident-session route,
-            // this GUI adapter included, not just the broker's length-1
-            // wrapper.
-            && std::env::var_os(aexcompat_broker::image_render::DISABLE_SESSION_WRAPPER_ENV)
-                .is_none();
+                && host_context.is_none()
+                && custom_ui_action.is_none()
+                && audio_sidecar.is_none()
+                && gpu_backend == aexcompat_broker::image_render::RenderGpuBackend::Auto
+                && !use_registered_default
+                && !parameters.iter().any(|parameter| parameter.kind == "layer");
             if live_eligible {
                 let identity = DispatchIdentity {
                     sha256: hash.clone(),
@@ -5611,9 +5652,8 @@ fn main() -> eframe::Result {
         // GPU single-image render routed through the length-one session (#290):
         // parse the runtime-module policy JSON, run the GPU module-audit preflight
         // to assemble the authenticated policy input, then render an Argb32f smart
-        // frame on the requested GPU backend. Setting
-        // AEXCOMPAT_DISABLE_RENDER_SESSION_WRAPPER forces the one-shot GPU path for
-        // the A/B comparison; the default routes through the session.
+        // frame on the requested GPU backend. The session is the only transport
+        // (#365).
         use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat, RenderTiming};
         let plugin = Path::new(&args[2]);
         let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
@@ -5730,6 +5770,63 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    if args.len() == 10 && args[1] == "--render-experimental-session" {
+        // Built-artifact probes use this explicit session-only adapter.  The
+        // worker no longer accepts the deleted one-shot image argv (#365), so
+        // native probe coverage must enter through the same length-one session
+        // wrapper as production experimental renders.
+        use aexcompat_broker::image_render::{RenderPixelFormat, RenderTiming};
+        let pixel_format = match args[5].to_string_lossy().as_ref() {
+            "argb8" => RenderPixelFormat::Argb8,
+            "argb16" => RenderPixelFormat::Argb16,
+            "argb32f" => RenderPixelFormat::Argb32f,
+            _ => {
+                eprintln!("pixel format must be argb8, argb16, or argb32f");
+                std::process::exit(1);
+            }
+        };
+        let smart = match args[6].to_string_lossy().as_ref() {
+            "classic" => false,
+            "smart" => true,
+            _ => {
+                eprintln!("render kind must be classic or smart");
+                std::process::exit(1);
+            }
+        };
+        let current_time = args[7].to_string_lossy().parse::<i32>().unwrap_or(-1);
+        let total_time = args[8].to_string_lossy().parse::<i32>().unwrap_or(0);
+        let time_scale = args[9].to_string_lossy().parse::<u32>().unwrap_or(0);
+        let timing = RenderTiming {
+            current_time,
+            time_step: 1,
+            total_time,
+            time_scale,
+        };
+        let plugin = Path::new(&args[2]);
+        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let parameters =
+            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
+                .unwrap_or_default();
+        let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format(
+            &repository,
+            plugin,
+            &hash,
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+            &parameters,
+            timing,
+            smart,
+            pixel_format,
+        );
+        match report {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 5
         && matches!(
             args[1].to_string_lossy().as_ref(),
@@ -5758,22 +5855,41 @@ fn main() -> eframe::Result {
         };
         let plugin = Path::new(&args[2]);
         let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let (parameters, inspection) =
-            match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+        let approved_dependencies = match approved_adjacent_dependencies(plugin, &hash) {
+            Ok(dependencies) => dependencies,
+            Err(error) if auto_path => {
+                eprintln!("automatic dependency approval failed: {error}");
+                std::process::exit(1);
+            }
+            Err(_) => Vec::new(),
+        };
+        let use_approved_dependencies = auto_path || !approved_dependencies.is_empty();
+        let (parameters, inspection) = if use_approved_dependencies {
+            match aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics(
                 &repository,
                 plugin,
                 &hash,
+                approved_dependencies.clone(),
             ) {
                 Ok(inspected) => inspected,
-                Err(error) if auto_path => {
+                Err(error) => {
                     eprintln!(
                         "automatic render-path selection needs a successful parameter \
                          inspection: {error}"
                     );
                     std::process::exit(1);
                 }
+            }
+        } else {
+            match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+                &repository,
+                plugin,
+                &hash,
+            ) {
+                Ok(inspected) => inspected,
                 Err(_) => Default::default(),
-            };
+            }
+        };
         let smart_advertised = inspection["smart_render_advertised"]
             .as_bool()
             .unwrap_or(false);
@@ -5783,18 +5899,65 @@ fn main() -> eframe::Result {
             command.contains("smart")
         };
         let report = if deep16_png {
-            aexcompat_broker::image_render::render_experimental_image_at_time_with_deep16_png(
-                &repository,
-                plugin,
-                &hash,
-                Path::new(&args[3]),
-                Path::new(&args[4]),
-                &parameters,
-                aexcompat_broker::image_render::RenderTiming::default(),
-                smart,
-            )
+            if use_approved_dependencies {
+                aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_deep16_png(
+                    &repository,
+                    plugin,
+                    &hash,
+                    Path::new(&args[3]),
+                    Path::new(&args[4]),
+                    &parameters,
+                    aexcompat_broker::image_render::RenderTiming::default(),
+                    smart,
+                    approved_dependencies,
+                )
+            } else {
+                aexcompat_broker::image_render::render_experimental_image_at_time_with_deep16_png(
+                    &repository,
+                    plugin,
+                    &hash,
+                    Path::new(&args[3]),
+                    Path::new(&args[4]),
+                    &parameters,
+                    aexcompat_broker::image_render::RenderTiming::default(),
+                    smart,
+                )
+            }
         } else if command.ends_with("-32-cpu") {
-            aexcompat_broker::image_render::render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
+            if use_approved_dependencies {
+                aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
+                    &repository,
+                    plugin,
+                    &hash,
+                    Path::new(&args[3]),
+                    Path::new(&args[4]),
+                    &parameters,
+                    aexcompat_broker::image_render::RenderTiming::default(),
+                    smart,
+                    pixel_format,
+                    None,
+                    None,
+                    aexcompat_broker::image_render::RenderGpuBackend::Cpu,
+                    approved_dependencies,
+                )
+            } else {
+                aexcompat_broker::image_render::render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
+                    &repository,
+                    plugin,
+                    &hash,
+                    Path::new(&args[3]),
+                    Path::new(&args[4]),
+                    &parameters,
+                    aexcompat_broker::image_render::RenderTiming::default(),
+                    smart,
+                    pixel_format,
+                    None,
+                    None,
+                    aexcompat_broker::image_render::RenderGpuBackend::Cpu,
+                )
+            }
+        } else if use_approved_dependencies {
+            aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
                 &repository,
                 plugin,
                 &hash,
@@ -5806,7 +5969,8 @@ fn main() -> eframe::Result {
                 pixel_format,
                 None,
                 None,
-                aexcompat_broker::image_render::RenderGpuBackend::Cpu,
+                aexcompat_broker::image_render::RenderGpuBackend::Auto,
+                approved_dependencies,
             )
         } else {
             aexcompat_broker::image_render::render_experimental_image_at_time_with_format(

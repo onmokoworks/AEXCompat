@@ -647,19 +647,21 @@ def test_owner_comment_same_second_as_approval_blocks() -> None:
         "owner_comments_unresolved", payload, ME, json.dumps({"onmokoworks": ts}))
 
 
-def test_both_review_thread_connections_are_paginated() -> None:
-    # A single GraphQL cursor cannot advance both nested connections. The
-    # scripts must enumerate threads, then issue a separately paginated query
-    # for every thread's comments (finding on d62ad17).
+def test_both_review_thread_connections_are_batched_and_fail_closed() -> None:
+    # The top-level reviewThreads connection is paginated by gh --paginate while
+    # each thread's first 100 comments travel in the same query. A nested page
+    # overflow is represented by truncated and remains fail-closed.
     root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
     for name in ("codex-review-monitor.sh", "codex-merge-guard.sh"):
         script = (root / name).read_text(encoding="utf-8")
-        assert "nodes{id isResolved}" in script
-        assert "node(id:$id)" in script
-        assert "comments(first:100,after:$endCursor)" in script
+        assert "nodes{id isResolved comments(first:100)" in script
+        assert "pageInfo{hasNextPage}" in script
+        assert "truncated:" in script
+        assert "node(id:$id)" not in script
+        assert "comments(first:100,after:$endCursor)" not in script
         assert "replyTo{databaseId}" in script
         assert "in_reply_to_id:(.replyTo.databaseId // null)" in script
-        assert script.count("gh api graphql --paginate") >= 2
+        assert script.count("gh api graphql --paginate") == 1
 
 
 def test_merge_guard_refetches_every_owner_surface_immediately_before_merge() -> None:

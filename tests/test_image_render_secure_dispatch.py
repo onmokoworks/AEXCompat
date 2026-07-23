@@ -3,12 +3,28 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
+SESSION = SOURCE.parent / "render_session.rs"
 
 
 def render_function() -> str:
     source = SOURCE.read_text(encoding="utf-8")
     start = source.index("fn render_with_artifact(")
     return source[start:source.index("\n#[cfg(test)]", start + 1)]
+
+
+def session_open() -> str:
+    """`RenderSession::open`, which is where the render launch is now built.
+
+    #365 deleted the one-shot argv transport, so the plug-in identity, the GPU
+    policy binding, and the launch argv that `render_with_artifact` used to
+    assemble all live here. The slice ends at the next `pub fn` so it covers the
+    whole of `open` and nothing after it.
+    """
+    session = SESSION.read_text(encoding="utf-8")
+    start = session.index(
+        "    pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {"
+    )
+    return session[start:session.index("\n    pub fn ", start + 1)]
 
 
 def test_render_workers_admit_the_local_build_through_dispatch_only():
@@ -27,9 +43,10 @@ def test_render_workers_admit_the_local_build_through_dispatch_only():
         assert not (SOURCE.parent / name).exists()
 
     # Admission happens exactly once per launch, inside dispatch_secure_image
-    # and its render-session variant, and the staged copy must still match the
-    # admitted bytes before launch.
-    assert dispatch.count("admit_local_worker(") == 3  # definition + one-shot + session
+    # (the diagnostic request routes) and its render-session variant (every
+    # image and audio render since #365), and the staged copy must still match
+    # the admitted bytes before launch.
+    assert dispatch.count("admit_local_worker(") == 3  # definition + request + session
     assert "pub fn dispatch_secure_image_session(" in dispatch
     assert "local worker binary is missing or unreadable" in dispatch
     assert "local worker binary is empty" in dispatch
@@ -38,70 +55,97 @@ def test_render_workers_admit_the_local_build_through_dispatch_only():
 
 def test_plugin_identity_is_strictly_decoded_and_size_bound():
     source = SOURCE.read_text(encoding="utf-8")
-    body = render_function()
+    session = SESSION.read_text(encoding="utf-8")
     assert "value.len() != 64" in source
     assert "byte.is_ascii_hexdigit()" in source
-    assert "expected_sha256: decode_sha256_hex(plugin_sha256)?" in body
-    assert "expected_size: fs::metadata(plugin_path)?.len()" in body
+    # Both session launches (image and audio) pin the plug-in by decoded digest
+    # and on-disk size. This used to be asserted on render_with_artifact's
+    # one-shot dispatch, which #365 deleted.
+    assert session.count("expected_sha256: decode_sha256_hex(request.plugin_sha256)?") == 2
+    assert session.count("expected_size: fs::metadata(request.plugin_path)?.len()") == 2
 
 
-def test_gpu_initial_dispatch_is_policy_bound_and_cpu_retry_remains_policy_free():
-    body = render_function()
-    assert "dispatch_secure_gpu_image(" in body
-    assert "authenticate_gpu_worker_report(" in body
-    assert "dispatch_secure_image(initial_dispatch)?" in body
-    # Auto SmartFX may use one secure CPU dispatch for a GPU preflight
-    # fallback and another for a worker-reported GPU failure retry.
-    assert body.count("dispatch_secure_image(SecureImageDispatch") == 2
-    assert "args_before_plugin[0] = image_worker_command(" in body
-    assert "RenderGpuBackend::Cpu," in body
-    assert "run_isolated" not in body
-    assert "args_before_plugin: &args_before_plugin" in body
-    # The GPU initial dispatch is the only one that binds the policy args; a
-    # captured manifest failure degrades it to the policy-free snapshots before
-    # the dispatch is built, so the GPU trailer never reaches a CPU command.
-    assert body.count("&args_after_plugin") == 1
-    assert "args_after_plugin: if manifest_fallback_error.is_some() {" in body
-    # Both Auto CPU retries (the caught preflight-error fallback and the
-    # worker-reported GPU failure retry) dispatch the policy-free snapshots, so
-    # neither carries the runtime-module authorization trailer or its manifest
-    # dependency into a CPU render that loads no GPU DLL.
-    assert body.count("args_after_plugin: &cpu_fallback_args_after_plugin") == 2
-    assert body.count("dependencies: cpu_fallback_dependencies.clone()") == 2
-    # The snapshots must be taken before the trailer is appended, or they would
-    # capture the GPU authorization they exist to exclude.
-    trailer = 'args_after_plugin.push("--runtime-module-authorization-v1".to_owned());'
-    assert body.count(trailer) == 1
-    assert (
-        body.index("let cpu_fallback_args_after_plugin = args_after_plugin.clone();")
-        < body.index(trailer)
-    )
-    assert (
-        body.index("let cpu_fallback_dependencies = dependencies.clone();")
-        < body.index(trailer)
-    )
-    assert "let mut args_before_plugin = vec![command.into()]" in body
-    assert "let mut args_after_plugin = vec![\n        plugin_sha256.to_ascii_lowercase()" in body
+def test_the_session_is_the_only_image_transport():
+    """#365 (W4): no eligibility gate, no argv render commands, no fallback.
 
-
-def test_gpu_policy_is_required_only_for_an_actual_gpu_initial_attempt():
+    A second transport is what made a gate necessary; without one, a shape the
+    session cannot carry has to become an explicit error from
+    `RenderSession::open` instead of being silently rerouted.
+    """
     source = SOURCE.read_text(encoding="utf-8")
     body = render_function()
+    dispatch = (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text(encoding="utf-8")
+
+    assert "session_eligible" not in source, "the eligibility gate must be gone"
+    assert "fn image_worker_command(" not in source
+    assert "dispatch_secure_gpu_image(" not in source
+    # render_with_artifact ends at the session outcome; nothing dispatches a
+    # one-shot worker after it.
+    assert "render_classic_via_length_one_session(&SessionWrapperRequest {" in body
+    assert "dispatch_secure_image(" not in body
+    assert "SecureImageDispatch {" not in body
+    assert "run_isolated" not in body
+    # Fail closed: an infrastructure failure is reported, not retried elsewhere.
+    assert "there is no alternate transport" in body
+
+    # The worker no longer admits any one-shot render command word.
+    for command in (
+        '"--render-image"', '"--render-image16"', '"--render-image32"',
+        '"--render-image-layer"', '"--render-image16-layer"', '"--render-image32-layer"',
+        '"--render-image-audio"', '"--render-audio"',
+        '"--smart-image"', '"--smart-image16"', '"--smart-image32"',
+        '"--smart-image32-cpu"', '"--smart-image32-opencl"', '"--smart-image32-directx"',
+        '"--smart-image-layer"', '"--smart-image16-layer"',
+        '"--smart-image32-layer"', '"--smart-image32-cpu-layer"',
+    ):
+        # `equals(command, L"--render-image")` is the admission form; a bare
+        # mention inside a comment is fine, so match the L-prefixed literal.
+        assert f'L{command}' not in dispatch, f"{command} is still admitted"
+    # The session command words must survive that sweep (the loop above would
+    # also match them by prefix if it were written loosely).
+    assert 'L"--render-session-v1"' in dispatch
+    assert 'L"--render-audio-session-v1"' in dispatch
+    assert 'L"--smart-session32-cpu-v1"' in dispatch
+
+
+def test_a_gpu_session_requires_a_policy_and_never_retries_on_cpu():
+    """The session binds the GPU dispatch to an authenticated policy at open.
+
+    The deleted one-shot ran a GPU preflight and, on Auto, retried on CPU while
+    recording gpu_attempt/gpu_fallback_used. A session cannot retry mid-flight,
+    so that collapses to open time: Auto without a policy IS a CPU session, Auto
+    with a policy is a GPU session with no retry, and an explicit GPU backend
+    without a policy fails closed before any transport work.
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    body = session_open()
+
     assert "pub struct GpuRuntimePolicyInput<'a>" in source
     assert (
         "render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy"
         in source
     )
-    assert "let gpu_initial_attempt = smart" in body
-    assert "pixel_format == RenderPixelFormat::Argb32f" in body
-    assert "secondaries.is_empty()" in body
-    assert "timed_secondaries.is_empty()" in body
-    assert "audio.is_none()" in body
-    assert "runtime_backend(gpu_backend).is_some()" in body
-    assert "GPU render requires a session-bound authenticated runtime module policy report" in body
-    fallback = body[body.index("let worker_report = if gpu_attempt_failed") :]
-    assert "dispatch_secure_gpu_image(" not in fallback
-    assert "authenticate_gpu_worker_report(" not in fallback
+    # gpu_capable is a depth/smart property; the Auto fold and the fail-closed
+    # check both hang off it.
+    assert (
+        "let gpu_capable = request.smart && request.pixel_format == RenderPixelFormat::Argb32f"
+        in body
+    )
+    assert "&& request.gpu_backend == RenderGpuBackend::Auto" in body
+    assert "&& request.gpu_runtime_policy.is_none()" in body
+    assert "RenderGpuBackend::Cpu" in body
+    assert "let gpu_attempt = gpu_capable && runtime_backend(effective_backend).is_some();" in body
+    assert "if gpu_attempt && request.gpu_runtime_policy.is_none() {" in body
+    assert (
+        "GPU render requires a session-bound authenticated runtime module policy report"
+        in body
+    )
+    # The authorization manifest is attached only when GPU is actually attempted,
+    # which is what keeps a policy inert below float32 and on classic.
+    assert "let _runtime_authorization = if gpu_attempt {" in body
+    # No CPU retry exists to carry the GPU trailer into.
+    assert "gpu_fallback_used" not in body
+    assert "cpu_fallback_args_after_plugin" not in body
 
 
 def test_gpu_backend_mapping_is_explicit_and_auto_preflights_as_cuda():
@@ -118,13 +162,6 @@ def test_gpu_backend_mapping_is_explicit_and_auto_preflights_as_cuda():
 
 def test_gpu_policy_render_routes_through_the_session_and_a_preflight_producer():
     source = SOURCE.read_text(encoding="utf-8")
-    body = render_function()
-    gate = body[body.index("let session_eligible ="):body.index("if session_eligible")]
-    # A GPU single-image render (Argb32f + a GPU backend) with an authenticated
-    # runtime-module policy is session-eligible (#290); policy-less GPU stays out.
-    assert "runtime_backend(gpu_backend).is_some()" in gate
-    assert "gpu_runtime_policy.is_some()" in gate
-    assert "gpu_runtime_policy.is_none()" in gate
     # The wrapper carries the policy into the session instead of hard-coding None.
     assert "gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>," in source
     assert "gpu_runtime_policy: request.gpu_runtime_policy," in source
@@ -139,10 +176,12 @@ def test_all_other_image_routes_use_secure_dispatch_without_isolated_fallback():
     source = SOURCE.read_text(encoding="utf-8")
     assert "windows_process::run_isolated" not in source
     assert "run_isolated(" not in source
-    assert source.count("dispatch_approved_image(") == 33
+    # 32, not 33: the one-shot `--render-audio` dispatch went with #365. The rest
+    # are the diagnostic request routes, none of which renders an image.
+    assert source.count("dispatch_approved_image(") == 32
     assert source.count("WorkerKind::L2,") == 24
-    assert source.count("WorkerKind::Render,") == 7
-    # Two smart render routes plus the GPU module-audit preflight (#290), which
+    assert source.count("WorkerKind::Render,") == 6
+    # Two smart request routes plus the GPU module-audit preflight (#290), which
     # dispatches the smart worker to emit the classified module report the GPU
     # policy producer authenticates.
     assert source.count("WorkerKind::Smart,") == 3
@@ -157,8 +196,6 @@ def test_shared_dispatch_preserves_cli_order_and_empty_dependency_approval():
     assert "expected_size: fs::metadata(plugin_path)?.len()" in helper
     assert "dependencies: vec![]" in helper
     assert helper.index("args_before_plugin,") < helper.index("args_after_plugin,")
-    assert 'let args_before_plugin = vec!["--render-audio".into()]' in source
-    assert "let args_after_plugin = vec![\n        actual.to_ascii_lowercase()," in source
 
 
 def test_gpu_render_manifests_carry_the_preflight_session_identity():
@@ -166,20 +203,19 @@ def test_gpu_render_manifests_carry_the_preflight_session_identity():
     against. Minting a fresh identity per render lets a prepared report authorize
     a manifest from another session, defeating the anti-replay binding."""
     source = SOURCE.read_text(encoding="utf-8")
-    session = (SOURCE.parent / "render_session.rs").read_text(encoding="utf-8")
+    session = SESSION.read_text(encoding="utf-8")
 
     assert (
         "pub(crate) fn prepare_runtime_authorization_transport_with_identity(" in source
     )
     assert "runtime module session identity must be nonzero" in source
 
-    # Both render paths encode the manifest with the authenticated identity, and
-    # neither reaches for the identity-minting constructor.
-    render = render_function()
-    for body in (render, session):
-        assert "prepare_runtime_authorization_transport_with_identity(" in body
-        assert "policy_input.session_identity," in body
-        assert "prepare_runtime_authorization_transport(" not in body
+    # The session is the only render path since #365, and it encodes the
+    # manifest with the authenticated identity rather than minting one.
+    assert "prepare_runtime_authorization_transport_with_identity(" in session
+    assert "policy_input.session_identity," in session
+    assert "prepare_runtime_authorization_transport(" not in session
+    assert "prepare_runtime_authorization_transport_with_identity(" not in render_function()
 
     # The minting constructor stays reserved for the preflight (which originates
     # the session identity) and the params-inspect path (which ignores it).
@@ -203,29 +239,25 @@ def test_gpu_preflight_seals_the_same_dependencies_as_the_render():
 
 
 def test_smart_sessions_carry_static_context_trailers():
-    """A host context must not force a render onto the one-shot transport (#331).
+    """A host context must reach the plug-in on a smart session (#331).
 
     The broker builds the mask/spatial/render trailers from `host_context` and pushes
     them onto the session's positional tail; the worker's smart session command has to
     peel them in the same order the classic session command does, or the ten-slot
     session contract does not resolve and the command is rejected outright.
+
+    Before #365 this also had to assert that a host context did not force the
+    render onto the one-shot transport. There is no such transport now, so what
+    remains is the peel order itself.
     """
-    source = SOURCE.read_text(encoding="utf-8")
-    session = (SOURCE.parent / "render_session.rs").read_text(encoding="utf-8")
+    session = SESSION.read_text(encoding="utf-8")
     dispatch = (
         ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
     ).read_text(encoding="utf-8")
 
-    # The gate no longer excludes a static host context.
-    gate = render_function()[
-        render_function().index("let session_eligible ="): render_function().index(
-            "if session_eligible"
-        )
-    ]
-    assert "host_context.is_none()" not in gate
-    # The session open no longer refuses smart requests that carry the trailers.
+    # The session open does not refuse smart requests that carry the trailers.
     assert "smart sessions do not carry static context trailers yet" not in session
-    # The broker still pushes all three, in the one-shot order.
+    # The broker pushes all three, in the original positional order.
     push = session[session.index("if let Some(mask) = &request.mask_trailer"):]
     assert push.index("request.mask_trailer") < push.index("request.spatial_trailer")
     assert push.index("request.spatial_trailer") < push.index(
@@ -234,12 +266,11 @@ def test_smart_sessions_carry_static_context_trailers():
 
     # Both session commands peel the three trailers ahead of the layer trailer, so
     # the ten-slot core lands at the same place on either route. `>= 11` is the
-    # session arity guard (10 slots + the trailer under test) and distinguishes
-    # these from the one-shot peels, which share the expressions but guard on
-    # `>= 14`. Asserted per branch and in order: counting file-wide would pass a
-    # smart branch that peeled mask before render, which shifts where the core
-    # lands, or one that re-based image_argc on effective_argc ahead of the
-    # (shared) layer line -- both re-break #331 while keeping every count at 2.
+    # session arity guard (10 slots + the trailer under test). Asserted per branch
+    # and in order: counting file-wide would pass a smart branch that peeled mask
+    # before render, which shifts where the core lands, or one that re-based
+    # image_argc on effective_argc ahead of the (shared) layer line -- both
+    # re-break #331 while keeping every count at 2.
     peels = [
         "mode.image_render_environment = ",
         "mode.image_spatial_context = ",
@@ -270,63 +301,22 @@ def test_smart_sessions_carry_static_context_trailers():
 
 
 def test_a_policy_below_float32_or_on_classic_does_not_exclude_a_render():
-    """An inert runtime module policy must not exclude an eligible session.
+    """An inert runtime module policy must not make `open` reject a render.
 
-    The one-shot's gpu_initial_attempt requires float32, so it never reads the policy
-    for Argb8/Argb16 and renders through --smart-image/--smart-image16. The session's
-    gpu_capable is false for the same reason, so it neither folds the backend nor
-    attaches the authorization manifest. Classic Auto sessions likewise never attempt
-    GPU, so carrying a policy must not make RenderSession::open reject a shape that
-    both routes handle identically (#337, #340).
+    `gpu_capable` is false for Argb8/Argb16 and for classic at every depth, so
+    those shapes neither fold the backend nor attach the authorization manifest
+    (#337, #340). Carrying a policy is therefore a no-op for them, and `open`
+    must not turn it into a rejection. This used to be asserted against the
+    session-eligibility gate as well; #365 deleted the gate, so `open` is the
+    only place the claim can be broken now.
     """
-
-    def flat(text):
-        # rustfmt decides where these conditions wrap, so compare on collapsed
-        # whitespace rather than pinning a particular line break.
-        return " ".join(text.split())
-
-    body = render_function()
-    gate = flat(body[body.index("let session_eligible ="): body.index("if session_eligible")])
-
-    # Non-layered: Auto is admitted when there is no policy OR the depth makes one
-    # inert. The float32 GPU arm still requires an authenticated policy.
-    assert (
-        "(gpu_backend == RenderGpuBackend::Auto && (gpu_runtime_policy.is_none() "
-        "|| pixel_format != RenderPixelFormat::Argb32f))" in gate
-    )
-    assert (
-        "(pixel_format == RenderPixelFormat::Argb32f && runtime_backend(gpu_backend).is_some() "
-        "&& gpu_runtime_policy.is_some())" in gate
-    )
-    # Layered: the depth bound alone carries it; the redundant policy clause is gone.
-    # The smart arm ends where the classic arm begins; the classic arm's own first
-    # comment is the delimiter (issue #339 added an audio/layer exclusion there, so
-    # it is no longer a bare `gpu_backend == RenderGpuBackend::Auto`).
-    layered_start = gate.index("Smart layered: admit Argb8/Argb16 under Auto only")
-    layered = gate[layered_start : gate.index("Classic layered + audio stays off the session")]
-    assert (
-        "gpu_backend == RenderGpuBackend::Auto && pixel_format != RenderPixelFormat::Argb32f"
-        in layered
-    )
-    assert "gpu_runtime_policy.is_none()" not in layered
-
-    # Classic (issue #339): audio rides the session, but not together with
-    # secondary layers -- the one-shot's --render-image-audio arm is pinned to a
-    # fixed argv arity and cannot express layers, so routing that shape to the
-    # session would break the A/B escape hatch (#341).
-    classic_start = gate.index("Classic layered + audio stays off the session")
-    classic = gate[classic_start:]
-    assert (
-        "gpu_backend == RenderGpuBackend::Auto && (audio.is_none() "
-        "|| (secondaries.is_empty() && timed_secondaries.is_empty()))" in classic
-    )
-
-    # Classic Auto is already admitted by the image-render gate. RenderSession::open
-    # must accept the same policy-carrying request and only attach the manifest when
-    # it actually attempts GPU -- both are what make the policy inert.
-    session = (SOURCE.parent / "render_session.rs").read_text(encoding="utf-8")
+    session = SESSION.read_text(encoding="utf-8")
     assert "if !request.smart && request.gpu_runtime_policy.is_some()" not in session
     assert (
         "let gpu_capable = request.smart && request.pixel_format == RenderPixelFormat::Argb32f"
         in session
     )
+    # Nothing else may reject on the mere presence of a policy.
+    body = session_open()
+    assert "request.gpu_runtime_policy.is_some()" not in body, (
+        "open must gate on gpu_attempt, not on a policy being present")

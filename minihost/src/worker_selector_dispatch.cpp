@@ -1,6 +1,7 @@
 #include "worker_selector_dispatch.hpp"
 
 #include <windows.h>
+#include <delayimp.h>
 
 #include "worker_minidump_runtime.hpp"
 #include "worker_suite_registry.hpp"
@@ -13,10 +14,49 @@ AuditPassed g_audit_passed{};
 SelectorDispatchTrace g_selector_trace{};
 SelectorDispatchTelemetry g_telemetry;
 
+constexpr uint32_t kDelayLoadModuleNotFound = 0xC06D007Eu;
+constexpr std::size_t kMaxDependencyName = 260;
+
+bool capture_delay_load_basename(EXCEPTION_POINTERS* information,
+                                 char* output,
+                                 std::size_t capacity) noexcept {
+  if (!information || !information->ExceptionRecord || !output || capacity < 2)
+    return false;
+  const EXCEPTION_RECORD* record = information->ExceptionRecord;
+  if (record->ExceptionCode != kDelayLoadModuleNotFound ||
+      record->NumberParameters < 1 || record->ExceptionInformation[0] == 0)
+    return false;
+  __try {
+    const auto* delay = reinterpret_cast<const DelayLoadInfo*>(
+        record->ExceptionInformation[0]);
+    const char* name = delay->szDll;
+    if (!name) return false;
+    std::size_t length = 0;
+    for (; length + 1 < capacity && length < kMaxDependencyName; ++length) {
+      const unsigned char byte = static_cast<unsigned char>(name[length]);
+      if (byte == 0) break;
+      if (!(isalnum(byte) || byte == '.' || byte == '_' || byte == '-'))
+        return false;
+      output[length] = static_cast<char>(byte);
+    }
+    if (length == 0 || length >= kMaxDependencyName || name[length] != '\0')
+      return false;
+    if (length < 4 || _stricmp(output + length - 4, ".dll") != 0)
+      return false;
+    output[length] = '\0';
+    return true;
+  } __except(EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
 int capture_seh_exception(EXCEPTION_POINTERS* information) {
   minidump::classify_seh_exception(
       information, {g_telemetry.seh_code, g_telemetry.seh_address,
                     g_telemetry.seh_module});
+  char dependency[kMaxDependencyName + 1]{};
+  if (capture_delay_load_basename(information, dependency, sizeof(dependency)))
+    g_telemetry.missing_dependency = dependency;
   return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -83,6 +123,7 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
                          uint32_t* out_exception_code) {
   if (!out_exception_code) return kAuditFailure;
   *out_exception_code = 0;
+  g_telemetry.missing_dependency.clear();
   const char* previous_suite_selector =
       set_suite_timeline_selector(effect_selector_name(command));
   int32_t result = 0;

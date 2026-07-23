@@ -31,16 +31,11 @@ enum class WorkerKind { Render, Smart };
 
 struct WorkerMode {
   int external_pixel_bytes{4};
-  int transport_argc{};
-  int image_click_argc{};
   int image_environment_argc{};
   int image_trailer_argc{};
   int image_argc{};
   bool request_mode{};
   bool command_accepted{};
-  bool audio_mode{};
-  bool image_audio_mode{};
-  bool image_mode{};
   bool render_session_mode{};
   // Resident audio render session (`--render-audio-session-v1`, protocol §10).
   bool audio_session_mode{};
@@ -50,15 +45,12 @@ struct WorkerMode {
   bool session_layers{};
   // Session audio-source trailer (`session-audio:v1|<samples>|<rate>|<path>`)
   // present; when set, it is the positional argument at index
-  // `session_audio_argc`. The one-shot spends three bare slots on the same three
-  // values under its own command word (`--render-image-audio`); a session cannot,
-  // because its tail is shared with the other optional trailers, so the values
-  // ride one marked argument peeled like the rest (issue #339).
+  // `session_audio_argc`. The deleted one-shot `--render-image-audio` spent
+  // three bare slots on the same three values; a session cannot, because its
+  // tail is shared with the other optional trailers, so the values ride one
+  // marked argument peeled like the rest (issue #339).
   bool session_audio{};
   int session_audio_argc{};
-  bool layered_image_mode{};
-  bool image_click_context{};
-  bool image_draw_context{};
   bool image_render_environment{};
   bool image_spatial_context{};
   bool image_mask_context{};

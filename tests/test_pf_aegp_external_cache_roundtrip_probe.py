@@ -3,6 +3,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from _render_session import run_session_render
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-aegp-external-cache-roundtrip-probe" / "pf_aegp_external_cache_roundtrip_probe.cpp"
 SCRIPT = ROOT / "tools" / "build-pf-aegp-external-cache-roundtrip-probe.ps1"
@@ -49,15 +51,7 @@ def test_real_probe_roundtrips_external_cache_pixels_through_a_receipt(tmp_path)
     assert PROBE.is_file()
     assert INPUT.is_file()
     output = tmp_path / "external-cache-roundtrip-output.rgba"
-    completed = subprocess.run(
-        [str(WORKER), "--render-image", str(PROBE),
-         hashlib.sha256(PROBE.read_bytes()).hexdigest(), "v5|",
-         str(INPUT), str(output), "37", "23", "0", "1", "1", "1"],
-        cwd=ROOT, text=True, encoding="utf-8", errors="replace",
-        capture_output=True, timeout=30,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    report = json.loads(completed.stdout)
+    report = run_session_render(tmp_path, PROBE, INPUT, output, width=37, height=23)
     assert report["status"] == "render_completed"
     assert report["render_error"] == 0
     assert report["suite_leases_balanced"] is True
