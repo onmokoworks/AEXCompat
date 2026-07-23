@@ -39,8 +39,12 @@ pub fn validate_required_worker_audit(stdout: &str, stdout_truncated: bool) -> i
     if stdout_truncated {
         return Err(invalid("secure worker report was truncated"));
     }
-    let report: Value = serde_json::from_str(stdout.trim())
-        .map_err(|_| invalid("secure worker report is not valid JSON"))?;
+    let report: Value = serde_json::from_str(stdout.trim()).map_err(|_| {
+        invalid_classified(
+            "module_audit_report_invalid_json",
+            "secure worker report is not valid JSON",
+        )
+    })?;
     let audit: AuditReport = serde_json::from_value(
         report
             .get("module_audit")
@@ -158,6 +162,18 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+fn invalid_classified(classification: &str, reason: &str) -> io::Error {
+    let diagnostics = serde_json::json!({
+        "classification": classification,
+        "failure_stage": "module_audit_validation",
+        "reason": reason,
+    });
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("secure worker module audit failed: diagnostics={diagnostics}"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +222,29 @@ mod tests {
         report["module_audit"]["observed_union"]["unknown_count"] = json!(0);
         report["module_audit"]["phase_count"] = json!(0);
         assert!(validate_required_worker_audit(&report.to_string(), false).is_err());
+    }
+
+    #[test]
+    fn classifies_invalid_json_without_exposing_worker_output() {
+        let error = validate_required_worker_audit("not-json", false)
+            .expect_err("malformed worker output must fail closed");
+        let error_text = error.to_string();
+        let diagnostics = error_text
+            .split_once("diagnostics=")
+            .map(|(_, value)| value)
+            .expect("classified diagnostic marker");
+        let diagnostics: Value =
+            serde_json::from_str(diagnostics).expect("diagnostics remain valid JSON");
+        assert_eq!(
+            diagnostics["classification"],
+            "module_audit_report_invalid_json"
+        );
+        assert_eq!(diagnostics["failure_stage"], "module_audit_validation");
+        assert_eq!(
+            diagnostics["reason"],
+            "secure worker report is not valid JSON"
+        );
+        assert!(!error_text.contains("not-json"));
     }
 
     #[test]
