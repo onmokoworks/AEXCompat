@@ -190,6 +190,8 @@ bool verify_matrix_case(bool smart_case) {
   g_hooks.get_dimensions(&saved_width, &saved_height);
   const auto saved_transforms = scene_runtime_state().layer_transforms;
   const auto saved_parent_indices = scene_runtime_state().layer_parent_indices;
+  const auto saved_camera_zoom = scene_runtime_state().layer_camera_zoom;
+  const auto saved_camera_zoom_keyframes = scene_runtime_state().layer_camera_zoom_keyframes;
   const auto saved_spatial = aexcompat::render::render_context_state();
   pf_state_runtime::reset_effect_lifetime(true);
   g_hooks.set_dimensions(smart_case ? 1920 : 640, smart_case ? 1080 : 480);
@@ -257,6 +259,50 @@ bool verify_matrix_case(bool smart_case) {
       near(matrix.mat[1][3], -200.0) && near(matrix.mat[2][3], 0.0) &&
       distance == expected_width && width == expected_width && height == expected_height;
 
+  scene_runtime_state().layer_camera_zoom[2] = 1400.0;
+  matrix = {};
+  distance = -1.0;
+  width = -1;
+  height = -1;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
+      &width, &height) == 0 && near(matrix.mat[0][3], -100.0) &&
+      near(matrix.mat[1][3], -200.0) && distance == 1400.0 &&
+      width == expected_width && height == expected_height;
+
+  auto& zoom_keyframes = scene_runtime_state().layer_camera_zoom_keyframes[2];
+  zoom_keyframes = {};
+  zoom_keyframes[0].valid = true;
+  zoom_keyframes[0].time = {0, 30};
+  zoom_keyframes[0].zoom = 1000.0;
+  zoom_keyframes[1].valid = true;
+  zoom_keyframes[1].time = {60, 30};
+  zoom_keyframes[1].zoom = 2000.0;
+  const suite_abi::AegpTime zoom_midpoint{30, 30};
+  matrix = {};
+  distance = -1.0;
+  width = -1;
+  height = -1;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &zoom_midpoint, &matrix,
+      &distance, &width, &height) == 0 && near(matrix.mat[0][3], -100.0) &&
+      near(matrix.mat[1][3], -200.0) && distance == 1500.0 &&
+      width == expected_width && height == expected_height;
+  const suite_abi::AegpTime zoom_after{90, 30};
+  matrix = {};
+  distance = -1.0;
+  width = -1;
+  height = -1;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &zoom_after, &matrix,
+      &distance, &width, &height) == 0 && distance == 2000.0 &&
+      width == expected_width && height == expected_height;
+  zoom_keyframes[1].zoom = 0.0;
+  matrix = sentinel;
+  distance = -2.0;
+  width = -2;
+  height = -2;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &zoom_after, &matrix,
+      &distance, &width, &height) != 0 && std::memcmp(&matrix, &sentinel,
+      sizeof(matrix)) == 0 && distance == -2.0 && width == -2 && height == -2;
+
   scene_runtime_state().layer_transforms[2].scale[0] = 0.0;
   matrix = sentinel;
   distance = -2.0;
@@ -268,6 +314,8 @@ bool verify_matrix_case(bool smart_case) {
   g_hooks.set_camera_index(-1);
   scene_runtime_state().layer_transforms = saved_transforms;
   scene_runtime_state().layer_parent_indices = saved_parent_indices;
+  scene_runtime_state().layer_camera_zoom = saved_camera_zoom;
+  scene_runtime_state().layer_camera_zoom_keyframes = saved_camera_zoom_keyframes;
   matrix = sentinel; distance = -2.0; width = -2; height = -2;
   suite_abi::AegpTime invalid{time.value, 0};
   ok = ok && g_hooks.get_camera_matrix(nullptr, &time, &matrix, &distance,

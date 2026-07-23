@@ -169,13 +169,24 @@ int32_t __cdecl get_effect_camera_matrix(void* effect, const AegpTime* comp_time
   for (std::size_t index = 0; index < 4; ++index) result.mat[index][index] = 1.0;
   void* camera_layer = nullptr;
   if (get_effect_camera(effect, comp_time, &camera_layer) != 0) return 4;
+  double resolved_distance = static_cast<double>(width);
   if (camera_layer) {
     AegpMatrix4 world{};
     if (aegp_get_layer_to_world_xform(camera_layer, comp_time, &world) != 0 ||
         !invert_affine_matrix(world, result)) return 4;
+    constexpr int32_t kLayerStreamZoom = 11;
+    constexpr int16_t kCompTimeMode = 1;
+    constexpr int32_t kStreamTypeOneD = 5;
+    AegpLegacyStreamVal zoom_value{};
+    int32_t zoom_type = 0;
+    if (aegp_get_layer_stream_value_v2(camera_layer, kLayerStreamZoom, kCompTimeMode,
+            comp_time, 0, &zoom_value, &zoom_type) != 0 ||
+        zoom_type != kStreamTypeOneD || !std::isfinite(zoom_value.one_d) ||
+        zoom_value.one_d <= 0.0) return 4;
+    resolved_distance = zoom_value.one_d;
   }
   *camera_matrix = result;
-  *distance_to_image_plane = static_cast<double>(width);
+  *distance_to_image_plane = resolved_distance;
   *image_plane_width = static_cast<int16_t>(width);
   *image_plane_height = static_cast<int16_t>(height);
   return 0;

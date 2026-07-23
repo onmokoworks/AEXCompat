@@ -65,8 +65,16 @@ def test_camera_matrix_is_atomic_bounded_and_deterministic():
     assert "if (!valid_camera_spatial_context()) return 4;" in source
     assert "width > INT16_MAX || height > INT16_MAX" in source
     assert "result.mat[index][index] = 1.0" in source
-    assert "*distance_to_image_plane = static_cast<double>(width);" in source
+    assert "double resolved_distance = static_cast<double>(width);" in source
     assert "std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0" in source
+
+
+def test_camera_matrix_distance_uses_active_camera_zoom_snapshot():
+    source = scene_source()
+    assert "double resolved_distance = static_cast<double>(width);" in source
+    assert "aegp_get_layer_stream_value_v2(camera_layer" in source
+    assert "resolved_distance = zoom_value.one_d;" in source
+    assert "*distance_to_image_plane = resolved_distance;" in source
 
 
 def test_active_camera_matrix_uses_scene_world_transform_and_fail_closed():
