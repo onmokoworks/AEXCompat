@@ -83,7 +83,7 @@ Result run(State& state, EffectEntry entry, const AbiHooks& abi,
   result.advertised_out_flags = read<uint32_t>(state.output, 96);
   result.advertised_out_flags2 = read<uint32_t>(state.output, 400);
   if (request.render_worker)
-    hooks.configure_audio_admission(request.audio_mode,
+    hooks.configure_audio_admission(request.audio_invocation,
                                     (result.advertised_out_flags & (1u << 20)) != 0);
   result.image_render_supported = (result.advertised_out_flags & (1u << 31)) == 0;
   result.nop_render_advertised = (result.advertised_out_flags & (1u << 18)) != 0;

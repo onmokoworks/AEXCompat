@@ -8,9 +8,10 @@
 //! install folder (an After Effects effect importing `dvacore.dll` from the AE
 //! `Support Files\` folder) therefore fails the worker's module load with exit
 //! code 11: the isolated root has no such neighbour, so the Windows image loader
-//! cannot resolve its imports. This module walks the plug-in's PE import tables,
-//! resolves each imported name against caller-supplied search roots, and returns
-//! the closure as dependencies the sealed tree can carry.
+//! cannot resolve its imports. This module walks the plug-in's PE import tables
+//! and conservative runtime DLL literals, resolves each name against
+//! caller-supplied search roots, and returns the closure as dependencies the
+//! sealed tree can carry.
 //!
 //! What this module does *not* do:
 //!
@@ -18,9 +19,11 @@
 //!   through the same `session_dependency_manifest` authentication a hand-written
 //!   dependency does, and is then copied, re-hashed, and pinned by
 //!   `SealedLoadTree`.
-//! - It resolves only what the PE import tables name. A module the plug-in loads
-//!   later by absolute path at runtime, rather than through its import tables,
-//!   is invisible here and stays an unknown module in the worker's module audit.
+//! - Runtime discovery is deliberately narrower than arbitrary Windows loader
+//!   emulation: only NUL-terminated ASCII or UTF-16LE `*.dll` basenames that are
+//!   already present as direct children of approved roots are candidates.
+//!   Constructed names and absolute paths remain invisible and fail closed in
+//!   the worker's module audit.
 //! - A name only reaches the closure if a search root provides it. Roots are
 //!   consulted in order, matching `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` before
 //!   `LOAD_LIBRARY_SEARCH_SYSTEM32`, so an app-local runtime a plug-in ships
@@ -41,7 +44,7 @@ use crate::session_dependency_manifest::{
 use object::LittleEndian;
 use object::read::pe::{ImageNtHeaders, PeFile32, PeFile64};
 use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -66,9 +69,16 @@ const MAX_IMPORT_NAMES_PER_IMAGE: usize = 4_096;
 /// rather than anything the file size bounds.
 const MAX_IMPORT_NAME_BYTES: usize = 260;
 
-/// Imported names one closure may decide about, across every image in it. Bounds
-/// what the walk retains (`seen`, the unresolved set) for a plug-in whose graph
-/// is wide rather than deep.
+/// Runtime DLL literals retained per image. Only safe names that actually exist
+/// in an approved root enter the closure, but bounding the extracted set first
+/// keeps a hostile image from turning the root existence checks into unbounded
+/// work.
+const MAX_RUNTIME_DLL_LITERALS_PER_IMAGE: usize = 4_096;
+
+/// Dependency names one closure may decide about, across every image in it.
+/// Bounds what the walk retains (`seen`, the unresolved set) for a plug-in whose
+/// graph is wide rather than deep. Runtime literals count only after an approved
+/// root is confirmed to provide them.
 const MAX_CLOSURE_IMPORT_NAMES: usize = 16_384;
 
 #[derive(Clone, Debug)]
@@ -110,6 +120,7 @@ impl<'a> DependencyClosureRequest<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedDependencyClosure {
     dependencies: Vec<ApprovedImageArtifact>,
+    provenance: Vec<DependencyProvenance>,
     unresolved: Vec<String>,
     rejected_names: usize,
     total_bytes: u64,
@@ -123,6 +134,14 @@ impl ResolvedDependencyClosure {
 
     pub fn into_dependencies(self) -> Vec<ApprovedImageArtifact> {
         self.dependencies
+    }
+
+    /// Why each sealed dependency entered the closure, in dependency order.
+    /// Module audit still classifies all of them as authenticated plug-in-tree
+    /// modules; this record explains whether the resolver learned the basename
+    /// from PE metadata, a runtime string literal, or both.
+    pub fn provenance(&self) -> &[DependencyProvenance] {
+        &self.provenance
     }
 
     /// Imported names none of the search roots provided, lowercased and sorted.
@@ -153,6 +172,13 @@ impl ResolvedDependencyClosure {
     pub fn is_empty(&self) -> bool {
         self.dependencies.is_empty()
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DependencyProvenance {
+    pub basename: String,
+    pub import_derived: bool,
+    pub string_derived: bool,
 }
 
 /// Walks `request.plugin`'s import closure and returns the modules that resolve
@@ -229,6 +255,7 @@ pub fn resolve_dependency_closure(
     )?;
     Ok(ResolvedDependencyClosure {
         dependencies: validated.into_approved_image_artifacts(),
+        provenance: walk.provenance,
         unresolved: walk.unresolved,
         rejected_names: walk.rejected_names,
         total_bytes: walk.total_bytes,
@@ -242,6 +269,7 @@ pub struct DependencyClosureSurvey {
     /// could not seal them (over its own ceiling, say) can still record their
     /// identities and notice when they change.
     pub modules: Vec<PathBuf>,
+    pub provenance: Vec<DependencyProvenance>,
     pub total_bytes: u64,
     pub unresolved: Vec<String>,
     pub rejected_names: usize,
@@ -274,6 +302,7 @@ pub fn survey_dependency_closure(
     )?;
     Ok(DependencyClosureSurvey {
         modules: walk.resolved.into_iter().map(|image| image.path).collect(),
+        provenance: walk.provenance,
         total_bytes: walk.total_bytes,
         unresolved: walk.unresolved,
         rejected_names: walk.rejected_names,
@@ -296,12 +325,30 @@ struct ImportClosureWalk {
     /// `None` only when a measuring walk could not read it.
     plugin: Option<WalkedImage>,
     resolved: Vec<WalkedImage>,
+    provenance: Vec<DependencyProvenance>,
     unresolved: Vec<String>,
     rejected_names: usize,
     unreadable_images: usize,
     total_bytes: u64,
     over_module_limit: bool,
     over_byte_limit: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CandidateOrigins {
+    import_derived: bool,
+    string_derived: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CandidateOrigin {
+    Import,
+    StringLiteral,
+}
+
+struct ImageDependencyNames {
+    imports: Vec<String>,
+    runtime_literals: Vec<String>,
 }
 
 /// Whether a walk hashes the bytes it parses.
@@ -351,6 +398,7 @@ fn walk_import_closure(
     let mut walk = ImportClosureWalk {
         plugin: None,
         resolved: Vec::new(),
+        provenance: Vec::new(),
         unresolved: Vec::new(),
         rejected_names: 0,
         unreadable_images: 0,
@@ -363,10 +411,14 @@ fn walk_import_closure(
     // let a hostile table (4096 descriptors naming the same string) multiply into
     // orders of magnitude more memory than the file it came from.
     let mut queue: VecDeque<String> = VecDeque::new();
+    let mut origins: HashMap<String, CandidateOrigins> = HashMap::new();
     let enqueue = |queue: &mut VecDeque<String>,
                    seen: &mut HashSet<String>,
+                   origins: &mut HashMap<String, CandidateOrigins>,
                    walk: &mut ImportClosureWalk,
-                   names: Vec<String>|
+                   roots: &[PathBuf],
+                   names: Vec<String>,
+                   origin: CandidateOrigin|
      -> io::Result<()> {
         for name in names {
             // Names are ASCII-validated before anything else, so a name that
@@ -375,10 +427,27 @@ fn walk_import_closure(
             // (U+212A KELVIN SIGN onto `k`, say) claim its key and then be
             // rejected, dropping the real import from the closure in silence.
             if !windows_safe_basename(&name) {
-                walk.rejected_names += 1;
+                if matches!(origin, CandidateOrigin::Import) {
+                    walk.rejected_names += 1;
+                }
                 continue;
             }
-            if !seen.insert(fold(&name)) {
+            // A runtime literal is only a candidate when the approved roots
+            // already provide it. Missing strings are not unresolved imports:
+            // arbitrary diagnostics text in an image must not invalidate a
+            // cache when a same-named file appears later.
+            if matches!(origin, CandidateOrigin::StringLiteral)
+                && matches!(resolve_name(&name, roots)?, NameResolution::NotInRoots)
+            {
+                continue;
+            }
+            let key = fold(&name);
+            let provenance = origins.entry(key.clone()).or_default();
+            match origin {
+                CandidateOrigin::Import => provenance.import_derived = true,
+                CandidateOrigin::StringLiteral => provenance.string_derived = true,
+            }
+            if !seen.insert(key) {
                 continue;
             }
             if seen.len() > MAX_CLOSURE_IMPORT_NAMES {
@@ -391,10 +460,27 @@ fn walk_import_closure(
 
     // The plug-in is read the same way its dependencies are, so the identity the
     // caller seals is the identity of the bytes these imports came from.
-    match read_image_imports(plugin, identity) {
+    match read_image_dependencies(plugin, identity) {
         Ok((image, names)) => {
             walk.plugin = Some(image);
-            enqueue(&mut queue, &mut seen, &mut walk, names)?;
+            enqueue(
+                &mut queue,
+                &mut seen,
+                &mut origins,
+                &mut walk,
+                &roots,
+                names.imports,
+                CandidateOrigin::Import,
+            )?;
+            enqueue(
+                &mut queue,
+                &mut seen,
+                &mut origins,
+                &mut walk,
+                &roots,
+                names.runtime_literals,
+                CandidateOrigin::StringLiteral,
+            )?;
         }
         Err(error) if unreadable == UnreadableImage::KeepGoing => {
             walk.unreadable_images += 1;
@@ -420,11 +506,28 @@ fn walk_import_closure(
                 if walk.over_module_limit || walk.over_byte_limit {
                     break;
                 }
-                match read_image_imports(&path, identity) {
-                    Ok((image, imports)) => {
+                match read_image_dependencies(&path, identity) {
+                    Ok((image, names)) => {
                         walk.total_bytes = walk.total_bytes.saturating_add(image.size);
                         walk.resolved.push(image);
-                        enqueue(&mut queue, &mut seen, &mut walk, imports)?;
+                        enqueue(
+                            &mut queue,
+                            &mut seen,
+                            &mut origins,
+                            &mut walk,
+                            &roots,
+                            names.imports,
+                            CandidateOrigin::Import,
+                        )?;
+                        enqueue(
+                            &mut queue,
+                            &mut seen,
+                            &mut origins,
+                            &mut walk,
+                            &roots,
+                            names.runtime_literals,
+                            CandidateOrigin::StringLiteral,
+                        )?;
                     }
                     Err(error) if unreadable == UnreadableImage::KeepGoing => {
                         walk.unreadable_images += 1;
@@ -441,8 +544,28 @@ fn walk_import_closure(
             }
         }
     }
-    walk.unresolved = unresolved.into_iter().collect();
+    walk.unresolved = unresolved
+        .into_iter()
+        .filter(|name| {
+            origins
+                .get(name)
+                .is_some_and(|source| source.import_derived)
+        })
+        .collect();
     walk.unresolved.sort();
+    walk.provenance = walk
+        .resolved
+        .iter()
+        .map(|image| {
+            let basename = basename_of(&image.path)?;
+            let source = origins.get(&fold(&basename)).copied().unwrap_or_default();
+            Ok(DependencyProvenance {
+                basename,
+                import_derived: source.import_derived,
+                string_derived: source.string_derived,
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
     Ok(walk)
 }
 
@@ -533,12 +656,12 @@ fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
 
 /// Reads `image` once and returns both what it imports and the identity of the
 /// bytes those imports were read from.
-fn read_image_imports(
+fn read_image_dependencies(
     image: &Path,
     identity: ImageIdentity,
-) -> io::Result<(WalkedImage, Vec<String>)> {
+) -> io::Result<(WalkedImage, ImageDependencyNames)> {
     let bytes = read_bounded(image)?;
-    let names = imported_names_from_bytes(&bytes)?;
+    let names = dependency_names_from_bytes(&bytes)?;
     Ok((
         WalkedImage {
             path: image.to_path_buf(),
@@ -552,22 +675,94 @@ fn read_image_imports(
     ))
 }
 
-/// Every DLL name in `image`'s import and delay-load import tables.
-///
-/// Delay-loaded names are included because the worker's isolated root is the
-/// only place the loader will look for them too, so leaving them out would just
-/// move the same failure from load time to first call (issue #60 covers the
-/// delay-load execution semantics; this only affects what gets sealed).
-fn imported_names_from_bytes(bytes: &[u8]) -> io::Result<Vec<String>> {
-    match PeFile64::parse(bytes) {
-        Ok(pe) => import_names_from(&pe),
-        // Not a PE32+ image: a 32-bit AEX still resolves the same way, and any
-        // other content simply contributes no imports.
+fn dependency_names_from_bytes(bytes: &[u8]) -> io::Result<ImageDependencyNames> {
+    let imports = match PeFile64::parse(bytes) {
+        Ok(pe) => import_names_from(&pe)?,
         Err(_) => match PeFile32::parse(bytes) {
-            Ok(pe) => import_names_from(&pe),
-            Err(_) => Ok(Vec::new()),
+            Ok(pe) => import_names_from(&pe)?,
+            Err(_) => {
+                return Ok(ImageDependencyNames {
+                    imports: Vec::new(),
+                    runtime_literals: Vec::new(),
+                });
+            }
         },
+    };
+    let imported: HashSet<String> = imports.iter().map(|name| fold(name)).collect();
+    let runtime_literals = runtime_dll_literal_names(bytes, &imported)?;
+    Ok(ImageDependencyNames {
+        imports,
+        runtime_literals,
+    })
+}
+
+/// Conservative runtime loader candidates found in image data.
+///
+/// Import-table names are byte strings too, so they are removed before the
+/// result is returned; otherwise every ordinary import would misleadingly be
+/// reported as both import- and string-derived. Existence under an approved root
+/// is checked by the walk before any returned name enters its queue.
+fn runtime_dll_literal_names(bytes: &[u8], imported: &HashSet<String>) -> io::Result<Vec<String>> {
+    let mut found = HashSet::new();
+    let mut names = Vec::new();
+    let mut consider = |raw: &[u8]| -> io::Result<()> {
+        if raw.is_empty() || raw.len() > MAX_IMPORT_NAME_BYTES {
+            return Ok(());
+        }
+        let Ok(name) = std::str::from_utf8(raw) else {
+            return Ok(());
+        };
+        if name.len() < 5
+            || !name[name.len() - 4..].eq_ignore_ascii_case(".dll")
+            || !windows_safe_basename(name)
+            || imported.contains(&fold(name))
+            || !found.insert(fold(name))
+        {
+            return Ok(());
+        }
+        if names.len() == MAX_RUNTIME_DLL_LITERALS_PER_IMAGE {
+            return Err(invalid("runtime DLL literal name limit exceeded"));
+        }
+        names.push(name.to_owned());
+        Ok(())
+    };
+
+    // ASCII C strings. A non-printable byte starts a new possible run; a NUL
+    // terminates it. Requiring the terminator avoids treating code bytes ending
+    // in `.dll` as a declaration.
+    let mut start = 0usize;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte == 0 {
+            consider(&bytes[start..index])?;
+            start = index + 1;
+        } else if !(0x20..=0x7e).contains(&byte) {
+            start = index + 1;
+        }
     }
+
+    // Windows wide strings are UTF-16LE. Check both byte parities because an
+    // image section's file offset need not make a literal naturally aligned in
+    // this byte slice. Only printable ASCII code units are accepted: dependency
+    // basenames in the sealed manifest are ASCII by policy.
+    for parity in 0..=1usize {
+        let mut run = Vec::new();
+        let mut offset = parity;
+        while offset + 1 < bytes.len() {
+            let unit = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+            if unit == 0 {
+                consider(&run)?;
+                run.clear();
+            } else if (0x20..=0x7e).contains(&unit) {
+                if run.len() <= MAX_IMPORT_NAME_BYTES {
+                    run.push(unit as u8);
+                }
+            } else {
+                run.clear();
+            }
+            offset += 2;
+        }
+    }
+    Ok(names)
 }
 
 fn import_names_from<Nt: ImageNtHeaders>(
@@ -734,6 +929,26 @@ mod tests {
         path
     }
 
+    fn append_ascii_literal(path: &Path, name: &str, terminated: bool) {
+        let mut bytes = fs::read(path).unwrap();
+        bytes.push(0);
+        bytes.extend_from_slice(name.as_bytes());
+        if terminated {
+            bytes.push(0);
+        }
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn append_utf16_literal(path: &Path, name: &str) {
+        let mut bytes = fs::read(path).unwrap();
+        bytes.extend_from_slice(&[0, 0]);
+        for unit in name.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[0, 0]);
+        fs::write(path, bytes).unwrap();
+    }
+
     #[test]
     fn resolves_the_recursive_closure_and_leaves_system_names_out() {
         let install = temp_dir("install");
@@ -752,11 +967,87 @@ mod tests {
             .collect();
         sealed.sort();
         assert_eq!(sealed, vec!["dvacore.dll", "dvaui.dll"]);
+        assert!(
+            closure
+                .provenance()
+                .iter()
+                .all(|source| { source.import_derived && !source.string_derived })
+        );
         // No root provides kernel32, so it is not sealed — the worker's own load
         // flags reach System32. It is still reported, because a root that starts
         // providing that name would change what the closure seals.
         assert_eq!(closure.unresolved(), ["kernel32.dll"]);
         assert!(closure.total_bytes() > 0);
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn seals_ascii_and_utf16_runtime_literals_recursively() {
+        let install = temp_dir("runtime-literals");
+        let plugin = write_pe(&install, "effect.aex", &["dispatcher.dll"]);
+        append_ascii_literal(&plugin, "ascii-backend.dll", true);
+        let dispatcher = write_pe(&install, "dispatcher.dll", &[]);
+        append_utf16_literal(&dispatcher, "wide-backend.dll");
+        write_pe(&install, "ascii-backend.dll", &[]);
+        write_pe(&install, "wide-backend.dll", &[]);
+        let roots = vec![install.clone()];
+
+        let closure =
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap();
+        let provenance: HashMap<_, _> = closure
+            .provenance()
+            .iter()
+            .map(|source| (source.basename.as_str(), source))
+            .collect();
+        assert_eq!(closure.dependencies().len(), 3);
+        assert!(provenance["dispatcher.dll"].import_derived);
+        assert!(!provenance["dispatcher.dll"].string_derived);
+        assert!(provenance["ascii-backend.dll"].string_derived);
+        assert!(!provenance["ascii-backend.dll"].import_derived);
+        assert!(provenance["wide-backend.dll"].string_derived);
+        assert!(!provenance["wide-backend.dll"].import_derived);
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn runtime_literal_candidates_are_existing_safe_nul_terminated_dlls_only() {
+        let install = temp_dir("runtime-literal-boundary");
+        let plugin = write_pe(&install, "effect.aex", &[]);
+        append_ascii_literal(&plugin, "missing.dll", true);
+        append_ascii_literal(&plugin, "..\\escape.dll", true);
+        append_ascii_literal(&plugin, "nested/path.dll", true);
+        append_ascii_literal(&plugin, "unterminated.dll", false);
+        write_pe(&install, "unterminated.dll", &[]);
+        let roots = vec![install.clone()];
+
+        let closure =
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap();
+        assert!(closure.is_empty());
+        assert!(closure.provenance().is_empty());
+        assert!(closure.unresolved().is_empty());
+        assert_eq!(closure.rejected_names(), 0);
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn duplicate_import_and_runtime_literal_keep_both_origins_once() {
+        let install = temp_dir("runtime-literal-dedup");
+        let plugin = write_pe(&install, "effect.aex", &["dispatcher.dll"]);
+        append_ascii_literal(&plugin, "common.dll", true);
+        write_pe(&install, "dispatcher.dll", &["common.dll"]);
+        write_pe(&install, "common.dll", &[]);
+        let roots = vec![install.clone()];
+
+        let closure =
+            resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots)).unwrap();
+        assert_eq!(closure.dependencies().len(), 2);
+        let source = closure
+            .provenance()
+            .iter()
+            .find(|source| source.basename.eq_ignore_ascii_case("common.dll"))
+            .unwrap();
+        assert!(source.import_derived);
+        assert!(source.string_derived);
         fs::remove_dir_all(install).unwrap();
     }
 

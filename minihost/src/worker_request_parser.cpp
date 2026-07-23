@@ -14,16 +14,6 @@ bool same_time(const LayerInput& left, const LayerInput& right) {
           static_cast<int64_t>(right.time) * left.time_scale;
 }
 
-bool load_rgba(const wchar_t* path, int32_t width, int32_t height,
-               std::vector<unsigned char>& output) {
-  if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return false;
-  const auto bytes = static_cast<std::size_t>(width) * height * 4;
-  std::ifstream file(path, std::ios::binary | std::ios::ate);
-  if (!file || static_cast<std::size_t>(file.tellg()) != bytes) return false;
-  output.resize(bytes); file.seekg(0);
-  return static_cast<bool>(file.read(reinterpret_cast<char*>(output.data()), bytes));
-}
-
 bool load_audio(const wchar_t* path, int32_t samples, int32_t rate,
                 std::vector<float>& output) {
   if (samples <= 0 || samples > 10'000'000 || rate != 44100) return false;
@@ -56,20 +46,6 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
     return result;
   }
   try {
-    if (mode.audio_mode) {
-      result.invocation.audio_samples = std::stoi(argv[7]);
-      result.invocation.audio_rate = std::stoi(argv[8]);
-      if (!load_audio(argv[5], result.invocation.audio_samples,
-                      result.invocation.audio_rate, result.invocation.audio)) throw 1;
-      result.invocation.audio_output = argv[6];
-      if (std::filesystem::exists(result.invocation.audio_output)) throw 1;
-    }
-    if (mode.image_audio_mode) {
-      result.invocation.audio_samples = std::stoi(argv[14]);
-      result.invocation.audio_rate = std::stoi(argv[15]);
-      if (!load_audio(argv[13], result.invocation.audio_samples,
-                      result.invocation.audio_rate, result.invocation.audio)) throw 1;
-    }
     if (mode.audio_session_mode) {
       // [command, plugin, sha256, payload, max_samples, channels, time_scale]
       // (protocol §10.2). v1 audio is mono; channels stays for the extension.
@@ -109,6 +85,27 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
           !hooks.parse_spatial_context(argv[mode.image_trailer_argc]))) throw 1;
       if (mode.image_render_environment && (!hooks.parse_render_environment ||
           !hooks.parse_render_environment(argv[mode.image_environment_argc]))) throw 1;
+      // Audio source for the session (`session-audio:v1|<samples>|<rate>|<path>`,
+      // issue #339). The one-shot spends argv[13..15] on the same three values
+      // under --render-image-audio; a session packs them into one marked trailer
+      // because its tail is shared. The path is last so a separator inside it
+      // cannot shift the numeric fields. Same load_audio validation as the
+      // one-shot, so a malformed span fails the launch rather than the frame.
+      if (mode.session_audio) {
+        const std::wstring trailer(argv[mode.session_audio_argc]);
+        const std::wstring body = trailer.substr(std::wcslen(L"session-audio:v1|"));
+        const std::size_t rate_at = body.find(L'|');
+        if (rate_at == std::wstring::npos) throw 1;
+        const std::size_t path_at = body.find(L'|', rate_at + 1);
+        if (path_at == std::wstring::npos) throw 1;
+        result.invocation.audio_samples = std::stoi(body.substr(0, rate_at));
+        result.invocation.audio_rate =
+            std::stoi(body.substr(rate_at + 1, path_at - rate_at - 1));
+        if (!load_audio(body.substr(path_at + 1).c_str(),
+                        result.invocation.audio_samples,
+                        result.invocation.audio_rate,
+                        result.invocation.audio)) throw 1;
+      }
       // Secondary layer metadata:
       // `session-layers:v2|slot,w,h,handle;slot,w,h,time,scale,handle;...`.
       // The pixels travel as inherited per-layer file HANDLEs (#268); the slot,
@@ -148,12 +145,11 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
               layer.rgba_handle == 0 ||
               std::any_of(invocation.layers.begin(), invocation.layers.end(),
                   [&](const auto& existing) {
-                    // Same dedup as the one-shot layered_image_mode path: a
-                    // slot rejects only a second static entry or a timed entry
-                    // at a rational time already present. A static plus timed
-                    // entries at one slot is the valid representation of a
-                    // layer parameter sampled at current_time and other times,
-                    // so the session must admit exactly what one-shot does.
+                    // A slot rejects only a second static entry or a timed
+                    // entry at a rational time already present. A static plus
+                    // timed entries at one slot is the valid representation of
+                    // a layer parameter sampled at current_time and at other
+                    // times, so both must be admitted.
                     if (existing.slot != layer.slot) return false;
                     if (!existing.timed || !layer.timed) return !existing.timed && !layer.timed;
                     return same_time(existing, layer);
@@ -164,49 +160,6 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
           offset = separator + 1;
         }
         if (invocation.layers.empty() || invocation.layers.size() > 64) throw 1;
-      }
-    }
-    if (mode.image_mode) {
-      auto& invocation = result.invocation;
-      invocation.width = std::stoi(argv[7]); invocation.height = std::stoi(argv[8]);
-      if (!load_rgba(argv[5], invocation.width, invocation.height, invocation.rgba)) throw 1;
-      invocation.output = argv[6];
-      if (std::filesystem::exists(invocation.output)) throw 1;
-      invocation.current_time = std::stoi(argv[9]); invocation.time_step = std::stoi(argv[10]);
-      invocation.total_time = std::stoi(argv[11]); invocation.time_scale = std::stoul(argv[12]);
-      if (invocation.current_time < 0 || invocation.time_step <= 0 ||
-          invocation.total_time < invocation.current_time || invocation.time_scale == 0) throw 1;
-      if (mode.layered_image_mode) for (int argument = 13; argument < mode.image_argc; argument += 4) {
-        LayerInput layer;
-        if (!hooks.parse_layer_key || !hooks.parse_layer_key(argv[argument], layer)) throw 1;
-        layer.width = std::stoi(argv[argument + 2]); layer.height = std::stoi(argv[argument + 3]);
-        if (layer.slot <= 0 || layer.slot > 1024 || layer.width <= 0 || layer.height <= 0 ||
-            layer.width > 4096 || layer.height > 4096 ||
-            std::any_of(invocation.layers.begin(), invocation.layers.end(), [&](const auto& existing) {
-              if (existing.slot != layer.slot) return false;
-              if (!existing.timed || !layer.timed) return !existing.timed && !layer.timed;
-              return same_time(existing, layer);
-            }) || !load_rgba(argv[argument + 1], layer.width, layer.height, layer.rgba)) throw 1;
-        invocation.layers.push_back(std::move(layer));
-      }
-      const int click_argc = mode.image_click_argc;
-      const int environment_argc = mode.image_environment_argc;
-      const int trailer_argc = mode.image_trailer_argc;
-      if (mode.image_mask_context && (!hooks.parse_mask_context ||
-          !hooks.parse_mask_context(argv[trailer_argc - 1]))) throw 1;
-      if (mode.image_spatial_context && (!hooks.parse_spatial_context ||
-          !hooks.parse_spatial_context(argv[environment_argc - 1]))) throw 1;
-      if (mode.image_render_environment && (!hooks.parse_render_environment ||
-          !hooks.parse_render_environment(argv[click_argc - 1]))) throw 1;
-      if (mode.image_click_context) {
-        auto& color = invocation.picker_color;
-        if (swscanf_s(argv[auxiliary.effective_argc - 1] + 9, L"%d|%d|%f|%f|%f|%f",
-              &invocation.click_x, &invocation.click_y, &color[0], &color[1], &color[2], &color[3]) != 6 ||
-            invocation.click_x < 0 || invocation.click_x > 8192 ||
-            invocation.click_y < 0 || invocation.click_y > 8192 ||
-            std::any_of(color.begin(), color.end(), [](float value) {
-              return !std::isfinite(value) || value < 0 || value > 1;
-            })) throw 1;
       }
     }
     if (kind == Kind::Smart && mode.mask_model_enabled) {

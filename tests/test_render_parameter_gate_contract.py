@@ -406,6 +406,7 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
             "sealed_manifest_sha256": "c" * 64,
             "module_audit_required": True,
             "module_audit": None,
+            "dismissed_windows": [],
         }
         run = {key: None for key in smart_schema["$defs"]["run"]["required"]}
         run["classification"] = "timeout_killed"
@@ -435,6 +436,70 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         invalid = json.loads(json.dumps(report))
         invalid["secure_launch_1"]["unexpected"] = True
         self.assertTrue(list(Draft202012Validator(smart_schema).iter_errors(invalid)))
+
+    def test_one_shot_projection_carries_the_windows_the_broker_closed(self):
+        """A one-shot launch's report must show what the host closed (#351).
+
+        The parameterized path hand-projects its `secure_launch_N` object, so
+        the observation reaching `SecureLaunchResult` and the session
+        diagnostics does not reach here by itself. A dispatch where the broker
+        answered a plug-in's dialog and one where it did not are otherwise
+        indistinguishable in the report.
+        """
+        source = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"dismissed_windows":isolated.dismissed_windows', source)
+
+        for schema_name in (
+            "parameterized_classic_render_report.schema.json",
+            "parameterized_smartfx_render_report.schema.json",
+            "smartfx_suite_fault_report.schema.json",
+            "smartfx_mask_scene_report.schema.json",
+        ):
+            schema = json.loads(
+                (ROOT / "contracts/aex" / schema_name).read_text(encoding="utf-8")
+            )
+            secure_launch = schema["$defs"]["secure_launch"]
+            self.assertIn("dismissed_windows", secure_launch["properties"], schema_name)
+            # Required, so a report that simply drops the field fails the
+            # contract instead of reading as "no window appeared".
+            self.assertIn("dismissed_windows", secure_launch["required"], schema_name)
+            window = schema["$defs"]["dismissed_windows"]["items"]
+            self.assertFalse(window["additionalProperties"], schema_name)
+            # `asked_to_close` apart from `closed`: a dialog that ignored the
+            # broker is not a dialog the broker closed.
+            for field in ("title", "class", "closed", "asked_to_close"):
+                self.assertIn(field, window["properties"], schema_name)
+            # Bounded, like every other capture that reaches a report.
+            self.assertEqual(schema["$defs"]["dismissed_windows"]["maxItems"], 32)
+            self.assertEqual(window["properties"]["title"]["maxLength"], 256)
+
+        smart_schema = json.loads(
+            (
+                ROOT / "contracts/aex/parameterized_smartfx_render_report.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        window = {
+            "title": "Error at loading of ippCV library",
+            "class": "#32770",
+            "closed": True,
+            "asked_to_close": True,
+        }
+        Draft202012Validator(
+            smart_schema["$defs"]["dismissed_windows"]
+        ).validate([window])
+        for broken in (
+            {**window, "unexpected": True},
+            {key: value for key, value in window.items() if key != "asked_to_close"},
+        ):
+            self.assertTrue(
+                list(
+                    Draft202012Validator(
+                        smart_schema["$defs"]["dismissed_windows"]
+                    ).iter_errors([broken])
+                )
+            )
 
 
 if __name__ == "__main__":

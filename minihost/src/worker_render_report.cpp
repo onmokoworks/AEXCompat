@@ -522,6 +522,7 @@ void append_seh_diagnostics(ReportSnapshot& report, const SehDiagnosticsSnapshot
       << ",\"last_seh_exception_address\":" << value.address
       << ",\"last_seh_exception_module\":\"" << value.escaped_module << '"'
       << ",\"last_seh_selector\":\"" << value.escaped_selector << '"'
+      << ",\"missing_dependency\":\"" << value.escaped_missing_dependency << '"'
       << ",\"last_seh_error\":" << value.error;
 }
 
@@ -637,6 +638,7 @@ SehDiagnosticsSnapshot capture_seh_diagnostics() {
   auto& telemetry = worker_runtime::selector_dispatch_telemetry();
   return {telemetry.seh_code, telemetry.seh_address,
           l2_detail::escape(telemetry.seh_module), l2_detail::escape(telemetry.selector),
+          l2_detail::escape(telemetry.missing_dependency),
           telemetry.error};
 }
 

@@ -2146,15 +2146,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
         runtime_hooks, runtime_request, runtime_context);
     if (admission_error != 0) return admission_error;
     const auto release_admitted = [&] {
-      if (runtime_context.module) {
-        FreeLibrary(runtime_context.module);
-        runtime_context.module = nullptr;
-      }
-      if (runtime_context.stdout_redirected &&
-          runtime_context.restore_native_stdout) {
-        runtime_context.restore_native_stdout();
-        runtime_context.stdout_redirected = false;
-      }
+      wr::release_runtime_context(runtime_context);
     };
     // Load the plug-in and run the DLL-load module audit across the GPU lifecycle,
     // exactly like a sealed render worker: the broker's secure dispatch requires a
@@ -2200,11 +2192,6 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     return parse_parameter_payload(text, *static_cast<RequestedAssignments*>(context));
   };
   const aexcompat::worker_runtime::invocation::ApplyHooks invocation_hooks{
-      +[](int32_t x, int32_t y, const std::array<float, 4>& color) {
-        g_render_click_x = x; g_render_click_y = y;
-        g_app_picker_color = color; g_render_click_enabled = true;
-      },
-      +[] { g_render_draw_enabled = true; },
       +[](bool enabled) { aexcompat::mask_runtime::set_model_enabled(enabled); },
       +[](bool count_error, bool count_crash) {
         aexcompat::mask_runtime::set_fault(count_error
@@ -2433,11 +2420,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
        invocation.external_pixel_bytes,
        is_render_worker(), is_rendering_worker(),
-       // The audio session is an audio invocation too: without this the
-       // admission "requested audio" flag stays false and host_audio::Runtime
-       // rejects unadvertised audio checkouts on the session path, breaking
-       // audio-only plug-ins that render fine under --render-audio (Codex #252).
-       invocation.audio_mode || invocation.audio_session_mode, g_skip_about},
+       // The audio session is an audio invocation: without this the admission
+       // "requested audio" flag stays false and host_audio::Runtime rejects
+       // unadvertised audio checkouts on the session path (Codex #252). It used
+       // to be OR'd with the one-shot --render-audio mode, which #365 deleted.
+       invocation.audio_session_mode, g_skip_about},
       {&invoke_entry_seh, &reset_effect_lifetime,
        +[](bool active) { g_global_setup_active = active; },
        +[](bool requested, bool advertised) {
@@ -2623,17 +2610,6 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     if (session_outcome.invariant_failure)
       return session.finish(aexcompat::worker_audio_session::kExitInvariantFailure);
     return session.finish(session_outcome.clean ? 0 : 20);
-  }
-  if (is_render_worker() && invocation.audio_mode) {
-    const AudioModeRequest audio_request{
-        entry, &input, &output, global_error, params_error,
-        invocation.external_audio_samples, &invocation.external_audio,
-        &invocation.external_audio_output, &invocation.requested_parameters};
-    const auto audio_outcome = run_audio_mode(audio_request);
-    if (!session.prepare_protocol_report()) return session.finish(14);
-    restore_native_stdout();
-    emit_audio_render_report(audio_request, audio_outcome);
-    return session.finish(audio_outcome.passed && audio_outcome.output_created ? 0 : 20);
   }
   std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
   bool lifecycle_data_null = false;

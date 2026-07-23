@@ -49,21 +49,6 @@ pub struct GpuRuntimeAuthorization<'a> {
     pub module_report: &'a AuthenticatedGpuModuleReport,
 }
 
-/// GPU-only dispatch boundary. CPU callers continue to use
-/// `dispatch_secure_image` and do not require a runtime module policy.
-pub fn dispatch_secure_gpu_image(
-    input: SecureImageDispatch<'_>,
-    authorization: GpuRuntimeAuthorization<'_>,
-) -> io::Result<SecureLaunchResult> {
-    if authorization.backend == RuntimeBackend::Cpu {
-        return Err(invalid("GPU dispatch cannot use the CPU backend"));
-    }
-    authorization
-        .module_report
-        .authorize_dispatch(&authorization.session_identity, authorization.backend)?;
-    dispatch_secure_image(input)
-}
-
 /// GPU-only session dispatch boundary, mirroring `dispatch_secure_gpu_image`
 /// for resident sessions: the authenticated runtime module report authorizes
 /// the backend before the session worker launches. CPU session callers
@@ -83,6 +68,21 @@ pub fn dispatch_secure_gpu_image_session(
     dispatch_secure_image_session(input, session)
 }
 
+#[cfg(windows)]
+pub(crate) fn dispatch_secure_gpu_image_session_on_current_desktop(
+    input: SecureImageDispatch<'_>,
+    authorization: GpuRuntimeAuthorization<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+) -> io::Result<crate::secure_launch::SecureSessionProcess> {
+    if authorization.backend == RuntimeBackend::Cpu {
+        return Err(invalid("GPU dispatch cannot use the CPU backend"));
+    }
+    authorization
+        .module_report
+        .authorize_dispatch(&authorization.session_identity, authorization.backend)?;
+    dispatch_secure_image_session_on_current_desktop(input, session)
+}
+
 /// Session variant of `dispatch_secure_image`: the same admission pipeline
 /// (sealed plugin tree, dependency authentication, local worker admission),
 /// but the worker keeps running with the inherited session transport.
@@ -92,6 +92,31 @@ pub fn dispatch_secure_gpu_image_session(
 pub fn dispatch_secure_image_session(
     input: SecureImageDispatch<'_>,
     session: &crate::windows_process::SessionChildHandles,
+) -> io::Result<crate::secure_launch::SecureSessionProcess> {
+    dispatch_secure_image_session_with_policy(
+        input,
+        session,
+        crate::windows_process::WorkerDesktopPolicy::Dedicated,
+    )
+}
+
+#[cfg(windows)]
+pub(crate) fn dispatch_secure_image_session_on_current_desktop(
+    input: SecureImageDispatch<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+) -> io::Result<crate::secure_launch::SecureSessionProcess> {
+    dispatch_secure_image_session_with_policy(
+        input,
+        session,
+        crate::windows_process::WorkerDesktopPolicy::Current,
+    )
+}
+
+#[cfg(windows)]
+fn dispatch_secure_image_session_with_policy(
+    input: SecureImageDispatch<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+    desktop_policy: crate::windows_process::WorkerDesktopPolicy,
 ) -> io::Result<crate::secure_launch::SecureSessionProcess> {
     crate::trace_policy::validate_broker_trace_directory(input.repository)?;
     let worker_program = input
@@ -116,7 +141,14 @@ pub fn dispatch_secure_image_session(
         repository: input.repository,
         require_module_audit: true,
     };
-    crate::secure_launch::secure_launch_session(tree, request, session)
+    match desktop_policy {
+        crate::windows_process::WorkerDesktopPolicy::Dedicated => {
+            crate::secure_launch::secure_launch_session(tree, request, session)
+        }
+        crate::windows_process::WorkerDesktopPolicy::Current => {
+            crate::secure_launch::secure_launch_session_on_current_desktop(tree, request, session)
+        }
+    }
 }
 
 pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<SecureLaunchResult> {
@@ -299,8 +331,20 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Both guards run before the session transport is touched, so a
+    /// handle-free `SessionChildHandles` reaches neither. #365 deleted the
+    /// one-shot `dispatch_secure_gpu_image` this used to drive; the session
+    /// boundary carries the identical checks, so the coverage moved rather
+    /// than going away with the transport.
+    #[cfg(windows)]
     #[test]
-    fn gpu_dispatch_rejects_cpu_backend_and_session_mismatch_before_launch() {
+    fn gpu_session_dispatch_rejects_cpu_backend_and_session_mismatch_before_launch() {
+        let handles = crate::windows_process::SessionChildHandles {
+            request_read: std::ptr::null_mut(),
+            response_write: std::ptr::null_mut(),
+            section: std::ptr::null_mut(),
+            layers: Vec::new(),
+        };
         let report = AuthenticatedGpuModuleReport::test_only(
             [0x11; 32],
             RuntimeBackend::Cuda,
@@ -320,26 +364,30 @@ mod tests {
             timeout: Duration::from_secs(1),
         };
 
-        let cpu = dispatch_secure_gpu_image(
+        let Err(cpu) = dispatch_secure_gpu_image_session(
             make_input(),
             GpuRuntimeAuthorization {
                 backend: RuntimeBackend::Cpu,
                 session_identity: [0x11; 32],
                 module_report: &report,
             },
-        )
-        .unwrap_err();
+            &handles,
+        ) else {
+            panic!("a CPU backend must not reach the GPU session dispatch");
+        };
         assert_eq!(cpu.to_string(), "GPU dispatch cannot use the CPU backend");
 
-        let wrong_session = dispatch_secure_gpu_image(
+        let Err(wrong_session) = dispatch_secure_gpu_image_session(
             make_input(),
             GpuRuntimeAuthorization {
                 backend: RuntimeBackend::Cuda,
                 session_identity: [0x22; 32],
                 module_report: &report,
             },
-        )
-        .unwrap_err();
+            &handles,
+        ) else {
+            panic!("a foreign session identity must not reach the GPU session dispatch");
+        };
         assert_eq!(
             wrong_session.to_string(),
             "runtime module report session identity mismatch"

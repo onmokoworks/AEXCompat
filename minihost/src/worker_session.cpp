@@ -12,6 +12,7 @@ WorkerSession::WorkerSession(RuntimeContext& context, TraceWriter* trace_writer,
                              TraceWriter** active_trace_writer) noexcept
     : plugin_path_(std::move(context.plugin_path)),
       module_(context.module),
+      sealed_directory_cookie_(context.sealed_directory_cookie),
       restore_native_stdout_(context.restore_native_stdout),
       stdout_redirected_(context.stdout_redirected),
       trace_writer_(trace_writer),
@@ -77,12 +78,22 @@ void WorkerSession::stop_trace() noexcept {
 }
 
 void WorkerSession::unload_module() noexcept {
-  if (!module_) return;
+  if (!module_) {
+    if (sealed_directory_cookie_) {
+      RemoveDllDirectory(sealed_directory_cookie_);
+      sealed_directory_cookie_ = nullptr;
+    }
+    return;
+  }
   // Defensive coverage for future unload paths that do not capture an audit.
   // Never unload code while its owner reports that callbacks may still run.
   if (!quiesce_once()) return;
   FreeLibrary(module_);
   module_ = nullptr;
+  if (sealed_directory_cookie_) {
+    RemoveDllDirectory(sealed_directory_cookie_);
+    sealed_directory_cookie_ = nullptr;
+  }
 }
 
 void WorkerSession::restore_stdout() noexcept {

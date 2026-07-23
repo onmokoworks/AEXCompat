@@ -1,6 +1,7 @@
 import json
 import shutil
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,46 @@ ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "AE_REFERENCE_CAPTURE_AUTOMATION_RESULT_2026-07-15.json"
 RUNNER = ROOT / "tools" / "capture-ae-reference.ps1"
 SCRIPT = ROOT / "tools" / "ae-reference-capture.jsx"
+
+
+def _wait_for_staged_input(marker: bytes, process, timeout: float = 60.0) -> None:
+    """Block until the runner has staged its private copy of the input.
+
+    The staging copy is the runner's LAST preflight step -- it happens after the
+    OutputPng and result-path existence checks -- so its appearance is the only
+    reliable signal that writing those files will not race the preflight. A
+    fixed sleep is not: on a loaded hosted runner the runner can still be in its
+    preflight after several seconds, and the test's write then makes it fail
+    with "OutputPng already exists" instead of exercising the path under test
+    (issue #175).
+
+    `marker` must be unique to this run: a staging copy leaked by an earlier run
+    would otherwise satisfy the wait immediately.
+    """
+    import subprocess
+    import tempfile
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for candidate in Path(tempfile.gettempdir()).glob("aexcompat-ae-input-*.png"):
+            try:
+                if candidate.read_bytes() == marker:
+                    return
+            except OSError:
+                pass
+        if process.poll() is not None:
+            stdout, stderr = process.communicate(timeout=5)
+            raise AssertionError(f"capture runner exited before staging input: {stderr}")
+        time.sleep(0.05)
+    # The runner is still alive by definition here, so communicate() would raise
+    # TimeoutExpired and hide the real reason. Kill it first, then report.
+    process.kill()
+    try:
+        _, stderr = process.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        stderr = "<runner did not exit after kill>"
+    raise AssertionError(f"capture runner did not stage input within {timeout}s: {stderr}")
 
 
 def test_reference_capture_is_fail_closed_while_user_ae_session_is_running():
@@ -31,9 +72,22 @@ def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
     # Kills are scoped to the launched process tree by PID; a name-based
     # kill could hit an unrelated AE session started after the gate, and a
     # launch that already exited is never killed (its PID may be reused).
-    assert "taskkill.exe /PID $process.Id /T /F" in runner
+    assert "taskkill.exe /PID $ProcessId /T /F" in runner
     assert "if (-not $process.HasExited) {" in runner
     assert "Stop-Process" not in runner
+    # Every kill goes through the helper, and the helper drops
+    # $ErrorActionPreference for the call. Under 'Stop', taskkill's stderr for an
+    # already-gone PID becomes a *terminating* error even with 2>$null, and in a
+    # finally block that error replaces the real exception the cleanup is running
+    # for (issue #175). Pinning the helper keeps a best-effort kill best-effort.
+    runner_code = "\n".join(
+        line for line in runner.splitlines() if not line.lstrip().startswith("#"))
+    assert runner_code.count("taskkill.exe") == 1, (
+        "every kill must go through Stop-CaptureProcessTree")
+    helper_start = runner.index("function Stop-CaptureProcessTree")
+    helper_body = runner[helper_start:runner.index("taskkill.exe", helper_start)]
+    assert "$ErrorActionPreference = 'Continue'" in helper_body
+    assert runner.count("Stop-CaptureProcessTree -ProcessId $process.Id") == 3
     assert "Installed AEX hash does not match tested AEX" in runner
     assert "Process.Modules" in runner
     assert "loaded_aex_identity" in runner
@@ -116,11 +170,10 @@ def test_reference_capture_result_records_prelaunch_input_identities(tmp_path):
     # real AE would have rendered - not the replaced file.
     import hashlib
     import subprocess
-    import time
 
     aex = tmp_path / "fixture.aex"
     aex.write_bytes(b"fixture-bytes")
-    original_input = b"original-input-bytes"
+    original_input = f"original-input-bytes-{uuid.uuid4().hex}".encode("ascii")
     input_image = tmp_path / "input.png"
     input_image.write_bytes(original_input)
     mock_ae = tmp_path / "mock-afterfx.exe"
@@ -136,7 +189,7 @@ def test_reference_capture_result_records_prelaunch_input_identities(tmp_path):
          "-TimeoutSeconds", "60"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
     try:
-        time.sleep(5)  # let the runner hash the inputs and enter its poll loop
+        _wait_for_staged_input(original_input, process)
         input_image.write_bytes(b"replaced-while-ae-was-running")
         output.write_bytes(b"png-placeholder")
         result_path.write_text(
@@ -167,7 +220,8 @@ def test_reference_capture_shutdown_never_touches_unrelated_ae_named_processes(t
     aex = tmp_path / "fixture.aex"
     aex.write_bytes(b"fixture-bytes")
     input_image = tmp_path / "input.png"
-    input_image.write_bytes(b"input-bytes")
+    shutdown_marker = f"input-bytes-{uuid.uuid4().hex}".encode("ascii")
+    input_image.write_bytes(shutdown_marker)
     mock_ae = tmp_path / "mock-afterfx.exe"
     shutil.copyfile(Path("C:/Windows/System32/where.exe"), mock_ae)
     decoy_exe = tmp_path / "AfterFX.com"
@@ -184,7 +238,7 @@ def test_reference_capture_shutdown_never_touches_unrelated_ae_named_processes(t
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
     decoy = None
     try:
-        time.sleep(5)  # the runner has passed its gate and is polling
+        _wait_for_staged_input(shutdown_marker, process)
         decoy = subprocess.Popen(
             [str(decoy_exe), "-n", "60", "127.0.0.1"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -207,8 +261,6 @@ def test_reference_capture_shutdown_never_touches_unrelated_ae_named_processes(t
     reason="mock capture run requires Windows PowerShell and a Windows executable")
 def test_reference_capture_fails_closed_without_loaded_module_identity(tmp_path):
     import subprocess
-    import tempfile
-    import time
 
     aex = tmp_path / "fixture.aex"
     aex.write_bytes(b"fixture-bytes")
@@ -217,7 +269,13 @@ def test_reference_capture_fails_closed_without_loaded_module_identity(tmp_path)
     shutil.copyfile(Path("C:/Windows/System32/where.exe"), mock_ae)
     output = tmp_path / "capture.png"
     result_path = tmp_path / "capture.result.json"
-    input_marker = b"identity-gate-input"
+    # Unique per run. The staged copy the runner makes lives in %TEMP% and is
+    # left behind whenever this test kills the runner, so a fixed marker made
+    # the synchronization below match a *previous* run's leftover and return
+    # immediately -- the test then wrote OutputPng before the runner had reached
+    # its own preflight, and the runner failed with "OutputPng already exists"
+    # instead of the identity gate this test is about (issue #175).
+    input_marker = f"identity-gate-input-{uuid.uuid4().hex}".encode("ascii")
     input_image.write_bytes(input_marker)
 
     process = subprocess.Popen(
@@ -228,31 +286,7 @@ def test_reference_capture_fails_closed_without_loaded_module_identity(tmp_path)
          "-RequireLoadedAexIdentity", "-TimeoutSeconds", "60"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
     try:
-        # The staging copy is created after all preflight checks, including the
-        # result-path existence check, so it is a real synchronization marker
-        # rather than a fixed delay that races under full-suite load.
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            staged = False
-            for candidate in Path(tempfile.gettempdir()).glob(
-                    "aexcompat-ae-input-*.png"):
-                try:
-                    if candidate.read_bytes() == input_marker:
-                        staged = True
-                        break
-                except OSError:
-                    pass
-            if staged:
-                break
-            if process.poll() is not None:
-                stdout, stderr = process.communicate(timeout=5)
-                raise AssertionError(
-                    f"capture runner exited before staging input: {stderr}")
-            time.sleep(0.05)
-        else:
-            stdout, stderr = process.communicate(timeout=5)
-            raise AssertionError(
-                f"capture runner did not stage input: {stderr}")
+        _wait_for_staged_input(input_marker, process)
         output.write_bytes(b"png-placeholder")
         result_path.write_text(
             '{"schema_version": 1, "status": "captured"}', encoding="utf-8")
@@ -296,3 +330,25 @@ def test_locked_file_identity_distinguishes_equal_bytes_at_different_paths(tmp_p
     assert identities[0]["sha256"] == identities[1]["sha256"]
     assert identities[0]["canonical_path_sha256"] != identities[1]["canonical_path_sha256"]
     assert identities[0]["file_id"] != identities[1]["file_id"]
+
+
+def test_capture_tests_synchronize_on_the_staging_marker_not_a_fixed_sleep():
+    """No test here may write OutputPng after a fixed sleep.
+
+    The runner's preflight refuses a pre-existing OutputPng. A fixed sleep is
+    not a barrier against it: on a loaded runner the preflight can still be in
+    progress, and the write then makes the runner fail with "OutputPng already
+    exists" instead of exercising the path under test. Observed on the hosted
+    runner (issue #175); every such wait must go through
+    _wait_for_staged_input, whose marker is the runner's own last preflight
+    step.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    # Split so this assertion does not match itself.
+    forbidden = "time.sleep" + "(5)"
+    assert forbidden not in source
+    # Each test that writes the output/result files must have waited first.
+    waits = source.count("_wait_for_staged_input(")
+    assert waits >= 4, (
+        "expected the helper plus one barrier per test that writes OutputPng, "
+        f"found {waits}")

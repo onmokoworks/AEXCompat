@@ -78,7 +78,9 @@ def test_directx_implementation_build_and_readme_markers_are_present():
     for marker in (
         "directx::begin_context",
         "directx::end_context",
-        'equals(command, L"--smart-image32-directx")',
+        # #365: the one-shot --smart-image32-directx was replaced by the
+        # session command word, which selects the same backend.
+        'equals(command, L"--smart-session32-directx-v1")',
         '\\"directx_device_count\\":',
         '\\"directx_device_index\\":',
         '\\"gpu_allocations_created\\":',

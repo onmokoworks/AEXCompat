@@ -5,13 +5,13 @@
     "authenticated_artifacts":  {
                                     "minihost_source":  {
                                                             "path":  "minihost/src/l2_main.cpp",
-                                                            "size_bytes":  139615,
-                                                            "sha256":  "4ccae13e08ee5e00083136887ac36c48141c8e14d4315e282d468c6f56a42ac9"
+                                                            "size_bytes":  154909,
+                                                            "sha256":  "295cd60a80ae1f6e0421098362b52a0840b6ec5767642d21f97b30ad9943d229"
                                                         },
                                     "worker":  {
                                                    "path":  "target/minihost-build/aex_render_worker.exe",
-                                                   "size_bytes":  1218048,
-                                                   "sha256":  "47daaf75e1bde6f09cfde040415da1e29f357b0d3b2fdbccc2b454f484a1b594"
+                                                   "size_bytes":  1229312,
+                                                   "sha256":  "33ba80b615bf94d3c184b449630c07a8d749b1f30468e82c6d0cb09621917620"
                                                },
                                     "probe":  {
                                                   "path":  "target/pf-composite-rect-probe-build/Release/pf_composite_rect_probe.aex",

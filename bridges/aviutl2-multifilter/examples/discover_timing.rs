@@ -69,12 +69,18 @@ fn main() {
             Err(error) if ms >= 4500 => {
                 fail_slow += 1;
                 let detail = format!("{error}");
-                println!("{ms:>6} ms  TIMEOUT/slow  {name}\n    {}", &detail[..detail.len().min(600)]);
+                println!(
+                    "{ms:>6} ms  TIMEOUT/slow  {name}\n    {}",
+                    &detail[..detail.len().min(600)]
+                );
             }
             Err(error) => {
                 fail_fast += 1;
                 let detail = format!("{error}");
-                println!("{ms:>6} ms  FAIL  {name}\n    {}", &detail[..detail.len().min(600)]);
+                println!(
+                    "{ms:>6} ms  FAIL  {name}\n    {}",
+                    &detail[..detail.len().min(600)]
+                );
             }
         }
     }

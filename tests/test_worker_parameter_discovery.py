@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from _render_session import run_session_render
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
 PROBE = (ROOT / "target" / "pf-param-utils-animation-probe-build" / "Release"
@@ -30,16 +32,8 @@ def test_parameter_declaring_aex_passes_the_count_contract(tmp_path):
     input_path = tmp_path / "input.rgba"
     output_path = tmp_path / "output.rgba"
     input_path.write_bytes(bytes([255, 0, 0, 0]) * (7 * 5))
-    completed = subprocess.run(
-        [str(WORKER), "--render-image", str(PROBE),
-         hashlib.sha256(PROBE.read_bytes()).hexdigest(), "v5|",
-         str(input_path), str(output_path), "7", "5", "12", "1", "24", "1"],
-        cwd=ROOT, text=True, encoding="utf-8", errors="replace",
-        capture_output=True, timeout=60, check=False)
-    # Before the fix the worker exited 3 right after params_setup_end, so the
-    # exit code alone is the regression signal; the parsed report pins the
-    # render actually happening on top of the restored contract.
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    report = json.loads(completed.stdout)
+    report = run_session_render(
+        tmp_path, PROBE, input_path, output_path, width=7, height=5,
+    )
     assert report["render_error"] == 0
     assert output_path.is_file() and output_path.stat().st_size == 7 * 5 * 4

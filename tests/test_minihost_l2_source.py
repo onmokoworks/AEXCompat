@@ -286,9 +286,15 @@ class MinihostL2SourceTests(unittest.TestCase):
 
         self.assertIn("src/worker_request_parser.cpp", cmake)
         self.assertEqual(worker.count("request_parser::parse("), 2)
+        # load_rgba went with the one-shot argv transport (#365): session
+        # primary pixels arrive in the shared section and layer pixels through
+        # inherited file handles, so the parser no longer reads a raw file for
+        # them. load_audio survives because the session's `session-audio:v1|`
+        # trailer still names a broker-written sidecar.
         for marker in ("strip_auxiliary_options", "classify_worker_mode",
-                       "load_rgba", "load_audio", "same_time"):
+                       "load_audio", "same_time"):
             self.assertIn(marker, parser)
+        self.assertNotIn("load_rgba", parser)
         self.assertNotIn("std::ifstream layer_file", worker)
         self.assertNotIn("std::ifstream file(argv[5]", worker)
 
@@ -810,11 +816,16 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_secondary_layer_transport_is_multi_slot_bound(self):
         text = l2_family_source() + (ROOT / "minihost" / "src" /
                                      "worker_smart_runtime.cpp").read_text(encoding="utf-8")
-        for marker in ('L"--render-image-layer"', 'L"--smart-image-layer"',
+        # #365 deleted the one-shot layered commands (--render-image-layer /
+        # --smart-image-layer) and their 4-argv-slots-per-layer tail. Layers now
+        # ride the `session-layers:v2|` trailer with per-layer inherited file
+        # handles (#268); the slot bound, the dedup rule, and the rational-time
+        # match are the same contract in the new encoding.
+        for marker in ('L"session-layers:v2|"', "mode.session_layers",
                        "g_checkout_layer_definitions", "runtime.hosted_layers",
                        "existing.slot != layer.slot", "g_params[layer.slot - 1].type != 0",
-                       "(mode.image_argc - 13) / 4 <= 64",
-                       'L"v1|%d|%d|%u%n"', "same_rational_time",
+                       "invocation.layers.size() > 64",
+                       'L"%d,%d,%d,%d,%u,%llu%n"', "same_rational_time",
                        "copy_timed_layer", "timed_slot"):
             self.assertIn(marker, text)
 
@@ -853,9 +864,14 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_interactive_image_time_context_is_validated_and_forwarded(self):
         text = l2_family_source()
+        # The launch bound moved with #365: the deleted one-shot argv parse
+        # checked `total_time < current_time` because both arrived together, and
+        # a session launch carries only total_time (current_time is per frame),
+        # so the ordering is enforced per frame instead.
         for marker in ("external_current_time", "external_time_step",
                        "external_total_time", "external_time_scale",
-                       "invocation.total_time < invocation.current_time",
+                       "invocation.total_time < 0",
+                       "current_time < 0 || current_time > total_time",
                        "write<int32_t>(input, 224, external_current_time)"):
             self.assertIn(marker, text)
 
@@ -991,10 +1007,13 @@ class MinihostL2SourceTests(unittest.TestCase):
             encoding="utf-8"
         )
         for marker in (
-            'L"--render-image16"',
-            'L"--render-image32"',
-            'L"--smart-image16"',
-            'L"--smart-image32"',
+            # The depth still travels in the command word; #365 replaced the
+            # one-shot family (--render-image16/32, --smart-image16/32) with the
+            # session commands, which encode the same three depths.
+            'L"--render-session16-v1"',
+            'L"--render-session32-v1"',
+            'L"--smart-session16-v1"',
+            'L"--smart-session32-v1"',
             "pixel_bytes != 4 && pixel_bytes != 8 && pixel_bytes != 16",
             "aexcompat::render::prepare_world_layout",
         ):
@@ -1364,10 +1383,14 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_custom_ui_click_can_mutate_the_same_state_used_for_classic_and_smart_render(self):
         text = l2_family_source()
+        # The click arrives as the session's per-frame v:2 `ui_action` field
+        # since #365 deleted the one-shot argv trailer it used to ride
+        # (L"click:v1|" and the smart_image_click_* argv indices). The grammar
+        # is unchanged, so the decoder still matches on the same literal.
         for marker in (
-            'L"click:v1|"',
-            "smart_image_click_context",
-            "smart_image_click_argc",
+            '"click:v1|"',
+            "bool parse_session_ui_action(",
+            "void apply_session_ui_action(",
             "g_render_click_enabled",
             "dispatch_render_click(entry, input, command_output, definitions)",
             "struct SmartRenderUiContextScope",
@@ -1381,7 +1404,9 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_custom_ui_draw_can_share_the_classic_or_smart_render_lifecycle(self):
         text = l2_family_source()
         for marker in (
-            'L"draw:v1"',
+            # Same #365 move as the click above: the draw trailer is now the
+            # session's `ui_action` value, decoded from the same literal.
+            'text == "draw:v1"',
             "g_render_draw_enabled",
             "hooks.dispatch_render_draw",
             "custom_ui_draw_dispatched",

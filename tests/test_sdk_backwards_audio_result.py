@@ -60,8 +60,11 @@ def test_audio_abi_is_instrumented_and_runtime_boundaries_are_explicit():
         "utils.ansi_sin",
     ):
         assert marker in probe
+    # #365 deleted the one-shot --render-audio command; the resident audio
+    # session command is the only audio entry now, and it carries the same
+    # guarded span machinery below.
     for marker in (
-        'mode.audio_mode = effective_argc == 9 && equals(command, L"--render-audio")',
+        'equals(command, L"--render-audio-session-v1")',
         "kAudioGuardSamples",
         "checkout_layer_audio",
         "audio_lifetimes_balanced",
@@ -69,14 +72,19 @@ def test_audio_abi_is_instrumented_and_runtime_boundaries_are_explicit():
         "kUtilsAnsiSin",
     ):
         assert marker in worker
+    # The broker's audio bounds and its fail-closed output write survive the
+    # transport change; `target/audio-transport` and the worker_input/
+    # worker_output raw sidecars were the one-shot's file transport, and the
+    # session carries the samples in its shared section instead (#365).
     for marker in (
         "MAX_SAMPLES: usize = 10_000_000",
-        'repository.join("target/audio-transport")',
-        "worker_input.clone(), worker_output.clone()",
+        "audio input must contain 1..10000000 float32 samples",
+        "audio input contains a non-finite sample",
         ".create_new(true)",
-        "audio worker contract failed",
+        "render_audio_via_length_one_session(",
     ):
         assert marker in broker
+    assert 'repository.join("target/audio-transport")' not in broker
     assert 'args[1] == "--render-experimental-audio-request"' in harness
 
 

@@ -78,6 +78,8 @@ def test_report_exposes_schema_snapshots_counts_and_basenames_not_paths():
     assert '"unknown_count\\\":"' in serializer
     assert "audit_basename(module_path)" in SOURCE
     assert '"winsxs\\\":"' in serializer
+    assert '"unknown\\\":"' in serializer
+    assert "audit_basename(std::filesystem::path(key))" in serializer
     assert "module_path.wstring()" not in serializer
     assert "plugin_root.wstring()" not in serializer
     assert "executable.wstring()" not in serializer

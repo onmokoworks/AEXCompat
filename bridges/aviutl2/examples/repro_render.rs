@@ -15,8 +15,9 @@ use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRe
 use sha2::{Digest, Sha256};
 
 fn main() {
-    let plugin =
-        PathBuf::from(std::env::var_os("AEXCOMPAT_AVIUTL2_PLUGIN").expect("AEXCOMPAT_AVIUTL2_PLUGIN"));
+    let plugin = PathBuf::from(
+        std::env::var_os("AEXCOMPAT_AVIUTL2_PLUGIN").expect("AEXCOMPAT_AVIUTL2_PLUGIN"),
+    );
     let repository = PathBuf::from(
         std::env::var_os("AEXCOMPAT_AVIUTL2_REPOSITORY").expect("AEXCOMPAT_AVIUTL2_REPOSITORY"),
     );
@@ -90,6 +91,8 @@ fn main() {
         mask_trailer: None,
         spatial_trailer: None,
         render_environment_trailer: None,
+        // Video repro only; no audio source (issue #339).
+        audio_trailer: None,
         alpha_as_coverage_params: &[],
         conformance_render_settings: None,
         layers: &[],
@@ -104,6 +107,7 @@ fn main() {
         smart,
         gpu_backend: RenderGpuBackend::Auto,
         gpu_runtime_policy: None,
+        payload_override: None,
     }) {
         Ok(session) => session,
         Err(error) => {
@@ -129,7 +133,7 @@ fn main() {
                         pixels.get(0..4).unwrap_or(&pixels)
                     );
                 }
-                FrameStatus::FrameError { render_error } => {
+                FrameStatus::FrameError { render_error, .. } => {
                     eprintln!("  frame {frame} FRAME ERROR render_error={render_error}")
                 }
             },

@@ -28,8 +28,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <new>
 #include <string>
 #include <vector>
@@ -48,7 +46,6 @@ using aexcompat::pf_ae_channel::activate_external_aux;
 using aexcompat::pf_ae_channel::deactivate_external_aux;
 using aexcompat::pf_ae_channel::clear_native_aux_provider;
 using aexcompat::pf_ae_channel::publish_alpha_coverage_provider;
-using aexcompat::render_pixel_transport::argb_to_rgba_native;
 using aexcompat::render_pixel_transport::rgba8_to_argb;
 using aexcompat::worker_runtime::guarded_effect_call;
 using aexcompat::worker_runtime::invoke_entry_seh;
@@ -85,8 +82,6 @@ bool same_rational_time(int32_t left, uint32_t left_scale,
                         int32_t right, uint32_t right_scale);
 void dump_world_snapshot(const std::string& stage, const unsigned char* packed_argb,
                          int32_t width, int32_t height, int32_t pixel_bytes);
-void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
-                                   int32_t height, int32_t pixel_bytes);
 std::string sha256_bytes(const unsigned char* data, std::size_t size);
 void* aegp_comp_item_handle();
 void reset_smart_host_telemetry();
@@ -363,7 +358,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
                     std::string& input_hash, std::string& output_hash,
                     bool& guards_intact, const RequestedAssignments* requested = nullptr,
                     const std::vector<unsigned char>* external_rgba = nullptr,
-                    const std::filesystem::path* external_output = nullptr,
                     int32_t external_width = 0, int32_t external_height = 0,
                     const std::vector<ExternalLayerInput>* external_layers = nullptr,
                     int32_t external_current_time = 0, int32_t external_time_step = 1,
@@ -554,7 +548,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       destination, rowbytes, width, height, pixel_bytes, error,
       external_current_time, external_time_step, external_time_scale,
       read<int32_t>(input, kInQuality), dispatch_pixel_format, &output_hash,
-      &guards_intact, captured_argb, external_output, guarded.sentinels_intact()};
+      &guards_intact, captured_argb, guarded.sentinels_intact()};
   error = aexcompat::worker_runtime::classic_execution::finalize(final_context, {
       +[](const unsigned char* data, int32_t rowbytes, int32_t width, int32_t height,
           int32_t bytes, std::vector<unsigned char>& output) {
@@ -571,9 +565,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         dump_world_snapshot("classic-output",
             static_cast<const unsigned char*>(pixels), width, height, bytes);
       },
-      +[](unsigned char* destination, const unsigned char* source, int32_t bytes) {
-        argb_to_rgba_native(destination, source, bytes);
-      }, &record_output_checksum_detail,
       +[](const char* format) { smart_state().pixel_format = format; }});
   // The render dispatch hook (ClassicRenderDispatchOwner, RenderHooks) already
   // closes the UI context when it is active, so only close here if it is still
@@ -605,7 +596,6 @@ struct ClassicRenderRequest {
   bool& guards_intact;
   const RequestedAssignments* requested;
   const std::vector<unsigned char>* external_rgba;
-  const std::filesystem::path* external_output;
   int32_t external_width;
   int32_t external_height;
   const std::vector<ExternalLayerInput>* external_layers;
@@ -629,7 +619,7 @@ int classic_render_guarded_effect_main(void* opaque) {
   auto& request = *static_cast<ClassicRenderRequest*>(opaque);
   return classic_render_runtime(request.entry, request.input, request.output, request.case_id,
       request.width, request.height, request.rowbytes, request.input_hash, request.output_hash,
-      request.guards_intact, request.requested, request.external_rgba, request.external_output,
+      request.guards_intact, request.requested, request.external_rgba,
       request.external_width, request.external_height, request.external_layers,
       request.external_current_time, request.external_time_step, request.external_total_time,
       request.external_time_scale, request.external_pixel_bytes, request.manage_sequence,
@@ -648,7 +638,6 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     int32_t& rowbytes, std::string& input_hash, std::string& output_hash,
                     bool& guards_intact, const RequestedAssignments* requested = nullptr,
                     const std::vector<unsigned char>* external_rgba = nullptr,
-                    const std::filesystem::path* external_output = nullptr,
                     int32_t external_width = 0, int32_t external_height = 0,
                     const std::vector<ExternalLayerInput>* external_layers = nullptr,
                     int32_t external_current_time = 0, int32_t external_time_step = 1,
@@ -657,7 +646,7 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     std::vector<unsigned char>* captured_argb = nullptr,
                     bool* output_validation_failed = nullptr) {
   ClassicRenderRequest request{entry, input, output, case_id, width, height, rowbytes,
-      input_hash, output_hash, guards_intact, requested, external_rgba, external_output,
+      input_hash, output_hash, guards_intact, requested, external_rgba,
       external_width, external_height, external_layers, external_current_time,
       external_time_step, external_total_time, external_time_scale, external_pixel_bytes,
       manage_sequence, captured_argb, output_validation_failed};
@@ -676,7 +665,6 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
                               const std::string& case_id,
                               const RequestedAssignments* requested = nullptr,
                               const std::vector<unsigned char>* external_rgba = nullptr,
-                              const std::filesystem::path* external_output = nullptr,
                               int32_t external_width = 0, int32_t external_height = 0,
                               const std::vector<ExternalLayerInput>* external_layers = nullptr,
                               int32_t external_current_time = 0, int32_t external_time_step = 1,
@@ -840,16 +828,6 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
     dump_world_snapshot("smart-output", logical_output.data(), width, height, pixel_bytes);
     if (session && session->captured_argb) *session->captured_argb = logical_output;
-    if (external_output && result.render_error == 0) {
-      std::vector<unsigned char> rgba(static_cast<std::size_t>(width) * height * pixel_bytes);
-      for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel)
-        argb_to_rgba_native(rgba.data() + pixel * pixel_bytes,
-                      logical_output.data() + pixel * pixel_bytes, pixel_bytes);
-      record_output_checksum_detail(rgba.data(), width, height, pixel_bytes);
-      std::ofstream file(*external_output, std::ios::binary | std::ios::out);
-      if (!file || !file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size()))
-        result.render_error = -4;
-    }
     result.guards_intact = guarded.sentinels_intact();
     if (g_render_ui_context_active &&
         !close_render_ui_context(entry, input, command_output, definitions) &&
@@ -860,14 +838,14 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   if (!aexcompat::worker_runtime::smart_render_runtime::execute(
           {entry, &input, &command_output, &plan, &parameter_state, &input_world,
            &output_world, &dispatch_worlds, &source, &guarded, &destination,
-           &lifecycle, external_output, dispatch_pixel_format, width, height,
+           &lifecycle, dispatch_pixel_format, width, height,
            rowbytes, pixel_bytes, session},
           {&dispatch_render_draw,
            {&guarded_effect_call, &capture_module_audit,
             reinterpret_cast<void*>(&guid_mix_in_ptr),
             &automatic_checkin_pre_render_params},
            {&close_render_ui_context, end_lifecycle, &dump_world_snapshot,
-            &record_output_checksum_detail, &sha256_bytes,
+            &sha256_bytes,
             +[] { return g_render_ui_context_active; }}}, result))
     return result;
   return result;
@@ -882,7 +860,6 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               const std::string& case_id,
                               const RequestedAssignments* requested = nullptr,
                               const std::vector<unsigned char>* external_rgba = nullptr,
-                              const std::filesystem::path* external_output = nullptr,
                               int32_t external_width = 0, int32_t external_height = 0,
                               const std::vector<ExternalLayerInput>* external_layers = nullptr,
                               int32_t external_current_time = 0, int32_t external_time_step = 1,
@@ -892,7 +869,7 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               aexcompat::worker_runtime::smart_execution::SessionFrame* session =
                                   nullptr) {
   return aexcompat::worker_runtime::smart_execution::render_once(
-      entry, input, output, case_id, requested, external_rgba, external_output,
+      entry, input, output, case_id, requested, external_rgba,
       external_width, external_height, external_layers, external_current_time,
       external_time_step, external_total_time, external_time_scale,
       external_pixel_bytes, session);

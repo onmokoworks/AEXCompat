@@ -13,8 +13,8 @@ def test_native_worker_output_reorders_channels_without_quantizing_depth():
     assert "void argb_to_rgba_native" in PIXEL_TRANSPORT
     assert "output[0] = pixel[1]" in PIXEL_TRANSPORT
     assert "height * pixel_bytes" in SOURCE
-    # Three external-output transport blocks, the world snapshot dump helper,
-    # and the render session output slot reuse the same depth-preserving
-    # reorder.
+    # Only the shared checksum-detail telemetry and the render-session output
+    # slot perform this depth-preserving reorder. The removed one-shot
+    # external-output writers must not reappear in the worker source.
     deep_output_blocks = SOURCE.count("argb_to_rgba_native(")
-    assert deep_output_blocks == 5
+    assert deep_output_blocks == 2

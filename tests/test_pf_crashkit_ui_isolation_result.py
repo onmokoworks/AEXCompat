@@ -53,8 +53,14 @@ def test_selector_failure_is_checked_before_output_read():
     failure_check = renderer.index(
         "= validate_interactive_worker_report("
     )
-    output_read = renderer.index("let rendered = fs::read(&output_raw)")
-    assert failure_check < output_read
+    # The one-shot read its output back from a raw sidecar
+    # (`fs::read(&output_raw)`), which #365 deleted. The session's frame pixels
+    # arrive in the shared section, so the "no output byte before the gate"
+    # ordering is now about destructuring FrameStatus::Rendered and writing the
+    # PNG, both of which must still follow the gate.
+    output_use = renderer.index("let (pixels, rendered_width, rendered_height) = match outcome.status")
+    assert failure_check < output_use
+    assert output_use < renderer.index("file.write_all(&pixels)")
 
 
 def test_custom_ui_crash_and_hang_are_parameterized_and_isolated():

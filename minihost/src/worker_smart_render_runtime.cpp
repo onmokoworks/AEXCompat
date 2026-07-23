@@ -45,7 +45,7 @@ bool execute(const Request& request, const Hooks& hooks,
   return smart_finalize::finalize(
       {request.entry, request.input, request.output, request.parameters,
        request.output_world, request.lifecycle, request.source, request.guarded,
-       *request.destination, request.external_output, request.width,
+       *request.destination, request.width,
        request.height, request.rowbytes, request.pixel_bytes,
        &dispatch_state.pre_output, request.session},
       hooks.finalize, result);

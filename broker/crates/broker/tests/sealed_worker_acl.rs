@@ -1,3 +1,5 @@
+mod common;
+
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
@@ -53,6 +55,11 @@ mod windows_e2e {
 
     #[test]
     fn worker_restricted_operations_can_only_read_the_sealed_directory() {
+        if crate::common::skip_without_restricted_token_launch(
+            "worker_restricted_operations_can_only_read_the_sealed_directory",
+        ) {
+            return;
+        }
         let fixture = build_fixture();
         let root = TempTree(std::env::temp_dir().join(format!(
             "aexcompat-sealed-worker-e2e-{}-{:032x}",

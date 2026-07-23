@@ -3,6 +3,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from _render_session import run_session_render
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments/pf-transfer-mask-probe/pf_transfer_mask_probe.cpp"
@@ -27,19 +29,7 @@ def test_probe_builds_with_exact_mask_abi_and_flags():
 
 def test_real_mask_probe_crosses_the_aex_boundary(tmp_path):
     output = tmp_path / "transfer-mask-output.rgba"
-    completed = subprocess.run(
-        [str(WORKER), "--render-image", str(PROBE),
-         hashlib.sha256(PROBE.read_bytes()).hexdigest(), "v5|", str(INPUT), str(output),
-         "37", "23", "0", "1", "1", "1"],
-        cwd=ROOT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        capture_output=True,
-        timeout=30,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    report = json.loads(completed.stdout)
+    report = run_session_render(tmp_path, PROBE, INPUT, output, width=37, height=23)
     assert report["status"] == "render_completed" and report["render_error"] == 0
     assert report["suite_leases_balanced"] is True
     assert output.read_bytes() == bytes(37 * 23 * 4)

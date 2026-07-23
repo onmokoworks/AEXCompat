@@ -72,8 +72,10 @@ def test_opencl_boundary_and_fixture_build_markers_are_present():
     ):
         assert marker in backend
 
+    # #365: the one-shot --smart-image32-opencl was replaced by the session
+    # command word, which selects the same backend.
     for marker in (
-        'equals(command, L"--smart-image32-opencl")',
+        'equals(command, L"--smart-session32-opencl-v1")',
     ):
         assert marker in source
     assert "opencl_upload_bytes += input_size" in transport

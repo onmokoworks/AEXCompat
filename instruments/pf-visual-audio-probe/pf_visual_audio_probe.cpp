@@ -1,11 +1,42 @@
 #include "AEConfig.h"
 #include "entry.h"
 #include "AE_Effect.h"
+#include "AE_EffectCB.h"
+#include "AE_Macros.h"
+#include "Param_Utils.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
+namespace {
+
+#if AEXCOMPAT_AUDIO_LAYER_PROBE
+PF_Err setup_params(PF_InData* in_data, PF_OutData* out_data) {
+  PF_ParamDef def{};
+  PF_ADD_LAYER("Layer", PF_LayerDefault_MYSELF, 1);
+  out_data->num_params = 2;
+  return PF_Err_NONE;
+}
+
+PF_Pixel sample_layer(const PF_LayerDef* layer, A_long x, A_long y) {
+  const A_long cx = std::min(x, layer->width - 1);
+  const A_long cy = std::min(y, layer->height - 1);
+  const PF_Pixel* row = reinterpret_cast<const PF_Pixel*>(
+      reinterpret_cast<const char*>(layer->data) + cy * layer->rowbytes);
+  return row[cx];
+}
+
+A_u_char audio_channel(float value) {
+  const float bounded = std::clamp(value, 0.0f, 1.0f);
+  return static_cast<A_u_char>(std::lround(bounded * 255.0f));
+}
+#endif
+
+}  // namespace
+
 extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
-                                        PF_OutData* out_data, PF_ParamDef*[],
+                                        PF_OutData* out_data, PF_ParamDef* params[],
                                         PF_LayerDef* output, void*) {
   switch (cmd) {
     case PF_Cmd_GLOBAL_SETUP:
@@ -16,9 +47,17 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
 #endif
       return PF_Err_NONE;
     case PF_Cmd_PARAMS_SETUP:
+#if AEXCOMPAT_AUDIO_LAYER_PROBE
+      return setup_params(in_data, out_data);
+#else
       out_data->num_params = 1;
       return PF_Err_NONE;
+#endif
     case PF_Cmd_RENDER: {
+#if AEXCOMPAT_AUDIO_LAYER_PROBE
+      float audio_window_start = 0.0f;
+      float audio_window_end = 0.0f;
+#endif
 #if AEXCOMPAT_AUDIO_DOUBLE_CHECKIN_PROBE
       PF_LayerAudio checked_in = nullptr;
       PF_Err lifetime_error = PF_CHECKOUT_LAYER_AUDIO(in_data, 0, 0, 4, 44100,
@@ -179,10 +218,20 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       A_long sample_count = 0;
       PF_Err data_error = PF_GET_AUDIO_DATA(
           in_data, audio, &samples, &sample_count, nullptr, nullptr, nullptr, nullptr);
+#if AEXCOMPAT_AUDIO_LAYER_PROBE
+      const bool valid = data_error == PF_Err_NONE && samples && sample_count == 7 &&
+          std::isfinite(reinterpret_cast<float*>(samples)[0]) &&
+          std::isfinite(reinterpret_cast<float*>(samples)[5]);
+      if (valid) {
+        audio_window_start = reinterpret_cast<float*>(samples)[0];
+        audio_window_end = reinterpret_cast<float*>(samples)[5];
+      }
+#else
       const bool valid = data_error == PF_Err_NONE && samples && sample_count == 7 &&
           reinterpret_cast<float*>(samples)[0] == 0.25f &&
           reinterpret_cast<float*>(samples)[5] == 0.5625f &&
           reinterpret_cast<float*>(samples)[6] == 0.0f;
+#endif
       const PF_Err checkin_error = PF_CHECKIN_LAYER_AUDIO(in_data, audio);
       if (!valid || checkin_error != PF_Err_NONE) return PF_Err_INTERNAL_STRUCT_DAMAGED;
 #else
@@ -194,9 +243,29 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
 #endif
       if (!output || !output->data || output->rowbytes < output->width * 4)
         return PF_Err_BAD_CALLBACK_PARAM;
+#if AEXCOMPAT_AUDIO_LAYER_PROBE
+      if (!params || !params[1] || !params[1]->u.ld.data ||
+          params[1]->u.ld.width <= 0 || params[1]->u.ld.height <= 0)
+        return PF_Err_BAD_CALLBACK_PARAM;
+      const PF_LayerDef* layer = &params[1]->u.ld;
+      const A_u_char audio_start = audio_channel(audio_window_start);
+      const A_u_char audio_end = audio_channel(audio_window_end);
+      for (A_long y = 0; y < output->height; ++y) {
+        PF_Pixel* dst = reinterpret_cast<PF_Pixel*>(
+            reinterpret_cast<char*>(output->data) + y * output->rowbytes);
+        for (A_long x = 0; x < output->width; ++x) {
+          const PF_Pixel source = sample_layer(layer, x, y);
+          dst[x].alpha = 255;
+          dst[x].red = source.red;
+          dst[x].green = static_cast<A_u_char>(source.green ^ audio_start);
+          dst[x].blue = static_cast<A_u_char>(source.blue ^ audio_end);
+        }
+      }
+#else
       for (A_long y = 0; y < output->height; ++y)
         std::memset(reinterpret_cast<A_u_char*>(output->data) + y * output->rowbytes,
                     0x29, static_cast<std::size_t>(output->width) * 4);
+#endif
       return PF_Err_NONE;
     }
     default:

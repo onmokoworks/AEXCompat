@@ -58,10 +58,10 @@ def validate_json_input(path: Path, root: Path, label: str) -> Path:
     return resolve_under_root(path, root, must_exist=True)
 
 
-def validate_wiztree_csv(path: Path) -> Path:
+def validate_wiztree_csv(path: Path, *, export_root: Path = WIZTREE_EXPORT_ROOT) -> Path:
     if path.suffix.lower() != ".csv":
         raise ValueError("WizTree snapshot must have .csv extension")
-    return resolve_under_root(path, WIZTREE_EXPORT_ROOT, must_exist=True)
+    return resolve_under_root(path, export_root, must_exist=True)
 
 
 def validate_output_path(path: Path) -> Path:

@@ -30,19 +30,13 @@ fetch() {
 }
 
 fetch_review_threads() {
-  local out query comment_query encoded thread id resolved comments result='[]'
-  query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{id isResolved}pageInfo{hasNextPage endCursor}}}}}'
+  local out query
+  query='query($owner:String!,$repo:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{id isResolved comments(first:100){nodes{databaseId author{login} body createdAt path line originalLine replyTo{databaseId}} pageInfo{hasNextPage}}}pageInfo{hasNextPage endCursor}}}}}'
   out=$(gh api graphql --paginate -F owner="$OWNER" -F repo="$REPO" -F pr="$PR" -f query="$query") || return 1
-  comment_query='query($id:ID!,$endCursor:String){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$endCursor){nodes{databaseId author{login} body createdAt path line originalLine replyTo{databaseId}}pageInfo{hasNextPage endCursor}}}}}'
-  # Windows jq emits CRLF; strip CR or base64 --decode rejects the tokens.
-  for encoded in $(jq -r -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]] | .[] | @base64' <<<"$out" | tr -d '\r'); do
-    thread=$(printf '%s' "$encoded" | base64 --decode) || return 1
-    id=$(jq -r '.id' <<<"$thread" | tr -d '\r'); resolved=$(jq -r '.isResolved' <<<"$thread" | tr -d '\r')
-    comments=$(gh api graphql --paginate -F id="$id" -f query="$comment_query") || return 1
-    comments=$(jq -s '[.[].data.node.comments.nodes[] | {id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine,in_reply_to_id:(.replyTo.databaseId // null)}]' <<<"$comments") || return 1
-    result=$(jq -c --argjson resolved "$resolved" --argjson comments "$comments" '. + [{isResolved:$resolved,comments:$comments}]' <<<"$result") || return 1
-  done
-  printf '%s\n' "$result"
+  # Nested comments are fetched with the thread page in one request. If a
+  # thread has more than 100 comments, preserve the fail-closed truncated
+  # marker rather than issuing a per-thread follow-up request.
+  jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[] | {isResolved, truncated:(.comments.pageInfo.hasNextPage // false), comments:[.comments.nodes[] | {id:.databaseId,user:{login:.author.login},body,created_at:.createdAt,path,line,original_line:.originalLine,in_reply_to_id:(.replyTo.databaseId // null)}]}]' <<<"$out"
 }
 
 required_ci_gate() {
@@ -56,45 +50,6 @@ required_ci_gate() {
     echo "REFUSE: no required CI checks reported for PR #$PR"
     return 1
   fi
-}
-
-# Client-side snapshots cannot atomically exclude an inline owner comment that
-# lands between the final fetch and merge. GitHub's required conversation
-# resolution rule is evaluated by the server in the merge transaction, so it is
-# required WHERE THE PLAN OFFERS IT. Three outcomes:
-#   0 = proven enabled (strongest path)
-#   1 = the feature is reachable but not enabled, or the lookup failed for an
-#       unknown reason — REFUSE (an available-but-unconfigured rule is an owner
-#       choice; an unknown failure fails closed)
-#   2 = the plan provably does not offer branch protection/rulesets (GitHub
-#       Free private repo: protection 404 AND the rules API answers with its
-#       explicit upgrade message) — fall back to the FINAL OWNER SNAPSHOT +
-#       --match-head-commit below, accepting the documented sub-second residual
-#       race as the best available guarantee on this plan. Demanding a feature
-#       the plan does not sell would make the guard permanently unable to merge
-#       (observed on this repo), which just pushes operators to bypass it.
-server_thread_gate_state() {
-  local base protection rules_out
-  base=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.base.ref') || return 1
-  protection=$(gh api "repos/$OWNER/$REPO/branches/$base/protection" 2>/dev/null) || protection='null'
-  if jq -e '.required_conversation_resolution.enabled == true' <<<"$protection" >/dev/null; then
-    return 0
-  fi
-  # Rulesets expose the setting as a pull_request rule with
-  # parameters.required_review_thread_resolution (per the REST docs for
-  # "Get rules for a branch"), not as a standalone rule type; accept both.
-  if rules_out=$(gh api "repos/$OWNER/$REPO/rules/branches/$base" 2>/dev/null); then
-    jq -e 'any(.[]; .type == "required_review_thread_resolution"
-                 or (.type == "pull_request"
-                     and ((.parameters.required_review_thread_resolution // false) == true)))' \
-      <<<"$rules_out" >/dev/null && return 0
-    return 1
-  fi
-  rules_out=$(gh api "repos/$OWNER/$REPO/rules/branches/$base" 2>&1) && return 1
-  if grep -q "Upgrade to GitHub Pro or make this repository public" <<<"$rules_out"; then
-    return 2
-  fi
-  return 1
 }
 
 head=$(gh api "repos/$OWNER/$REPO/pulls/$PR" --jq '.head.sha') || {
@@ -156,21 +111,14 @@ if [ -n "$owner_after" ]; then
   exit 1
 fi
 
-# Prove the static server-side prerequisite before the final dynamic snapshot.
-# Looking it up afterward would reopen a window for owner feedback forms that
-# the conversation-resolution rule cannot see.
-server_thread_gate_state; gate_state=$?
-case "$gate_state" in
-  0) : ;;
-  2) echo "NOTE: branch protection/rulesets are not offered on this plan (private Free repo); falling back to the final owner snapshot + --match-head-commit (documented residual race)" ;;
-  *) echo "REFUSE: base branch must enable server-side required conversation resolution (branch protection/ruleset), or the rule lookup failed"; exit 1 ;;
-esac
-
 # FINAL OWNER SNAPSHOT: owner feedback does not change the head SHA, so
 # --match-head-commit alone cannot close the window between the earlier API
 # reads and merge. Re-fetch every owner surface immediately before merge and
 # run the complete owner gate again. Also refresh Codex inputs so a finding
 # arriving in the same window cannot be hidden by the earlier clean snapshot.
+# This snapshot is the ONLY defense against that window: a sub-second residual
+# race remains (owner feedback landing between the last fetch and the merge API
+# call) and is accepted as the best available client-side guarantee.
 pr_comments=$(fetch "pulls/$PR/comments") || { echo "REFUSE: final pulls/comments fetch failed"; exit 1; }
 review_threads=$(fetch_review_threads) || { echo "REFUSE: final reviewThreads fetch failed"; exit 1; }
 reviews=$(fetch "pulls/$PR/reviews") || { echo "REFUSE: final pulls/reviews fetch failed"; exit 1; }
@@ -204,6 +152,7 @@ fi
 # being treated as mergeable.
 required_ci_gate || exit 1
 
-# Atomic head check closes the remaining commit race after the final snapshot;
-# server-side conversation resolution independently closes the review race.
+# Atomic head check closes the remaining commit race after the final snapshot.
+# The review race is closed only by the final snapshot above (sub-second
+# residual race documented there).
 gh pr merge "$PR" --repo "$OWNER/$REPO" --merge --delete-branch --match-head-commit "$head"

@@ -25,7 +25,7 @@ use crate::secure_image_dispatch::{
     dispatch_secure_gpu_image_session, dispatch_secure_image_session,
 };
 use crate::secure_launch::{SecureLaunchResult, SecureSessionProcess};
-use crate::windows_process::SessionChildHandles;
+use crate::windows_process::{SessionChildHandles, WorkerDesktopPolicy};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -85,6 +85,15 @@ fn is_fatal_session_error(render_error: i64) -> bool {
     matches!(render_error, -47 | -45..=-41)
 }
 
+fn valid_dependency_basename(name: &str) -> bool {
+    name.len() >= 5
+        && name.len() <= 260
+        && name.to_ascii_lowercase().ends_with(".dll")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 /// Resize-output bounds mirroring the worker's `validate_output_extent`
 /// (render_subsystem.cpp): each dimension <= 4096 and <= 16,777,216 pixels
 /// total. The broker re-caps a resize_needed request so a misbehaving worker
@@ -128,7 +137,7 @@ fn depth_code(pixel_format: RenderPixelFormat) -> u32 {
 
 /// Maps the session flavor to the worker command word (protocol §3, v1.1).
 /// SmartFX ARGB32f carries the GPU backend in the command word, mirroring the
-/// one-shot `--smart-image32[-cpu|-opencl|-directx]` family; every other
+/// deleted one-shot `--smart-image32[-cpu|-opencl|-directx]` family; every other
 /// depth is CPU-only, and classic sessions reject explicit GPU backends.
 fn session_command(
     pixel_format: RenderPixelFormat,
@@ -446,6 +455,14 @@ pub struct SessionOpenRequest<'a> {
     pub plugin_path: &'a Path,
     pub plugin_sha256: &'a str,
     pub parameters: Option<&'a [InteractiveParameter]>,
+    /// A pre-encoded worker payload used verbatim instead of encoding
+    /// `parameters`. The fixture-manifest route (`render_image`) builds its
+    /// payload from a descriptor profile via `encode_worker_payload`, which the
+    /// `InteractiveParameter` list cannot represent; before #365 that route was
+    /// the reason a one-shot argv transport had to exist at all. Both encoders
+    /// emit the same `v2|`/`v3|` grammar the worker decodes, so the session
+    /// carries either one in the same argv slot. `None` encodes `parameters`.
+    pub payload_override: Option<&'a str>,
     /// Parameter animation timeline evaluated by the worker at each frame's
     /// current_time (issue #132). Bindings are validated against `parameters`
     /// before launch, exactly like the one-shot entry.
@@ -470,6 +487,14 @@ pub struct SessionOpenRequest<'a> {
     /// Static render-environment trailer (`render:v1|`), already encoded by
     /// `encode_render_environment`.
     pub render_environment_trailer: Option<String>,
+    /// Static audio-source trailer (`session-audio:v1|<samples>|<rate>|<path>`),
+    /// carrying the same span the one-shot passes as three bare argv slots under
+    /// deleted `--render-image-audio` (issue #339). The plug-in sees one source for the
+    /// whole session, so it rides the launch argv rather than the frame message.
+    /// Rides at the tail of the *positional* section, behind the other optional
+    /// trailers, so the worker peels it first of those. The auxiliary option
+    /// pairs are appended after it and are stripped before any of this.
+    pub audio_trailer: Option<String>,
     /// Alpha-as-coverage parameter slots (`--alpha-as-coverage-v1`), issue #98
     /// W1-4c. The worker publishes the alpha-coverage provider once at launch
     /// (a global the classic render runtime reads on every frame), matching the
@@ -548,7 +573,10 @@ pub enum FrameStatus {
     },
     /// A frame-local compatibility diagnostic (selector error, time scale
     /// mismatch). The session stays usable; continuing is the caller's call.
-    FrameError { render_error: i64 },
+    FrameError {
+        render_error: i64,
+        missing_dependency: Option<String>,
+    },
     // An expand-output effect that overruns the launch slot no longer surfaces to
     // the caller: `render_frame` grows the shared section in place and waits for
     // the worker's follow-up ok (protocol §3, issue #262), so it always resolves
@@ -599,6 +627,8 @@ struct FrameDone {
     #[serde(default)]
     output: Option<FrameDoneOutput>,
     render_error: i64,
+    #[serde(default)]
+    missing_dependency: Option<String>,
     #[serde(default)]
     generation: Option<u32>,
     /// Present only on a "resize_needed" status (#262): the dimensions the
@@ -698,6 +728,22 @@ impl RenderSession {
     /// slot in place mid-session (protocol §3, issue #262), so there is no
     /// launch-time output-capacity parameter.
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated)
+    }
+
+    /// Opens a session for an explicitly interactive GUI harness. This is
+    /// intentionally opt-in; normal discovery/render sessions use a private
+    /// desktop so plugin UI cannot interrupt the user's desktop.
+    pub(crate) fn open_on_current_desktop(
+        request: SessionOpenRequest<'_>,
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current)
+    }
+
+    fn open_with_desktop_policy(
+        request: SessionOpenRequest<'_>,
+        desktop_policy: WorkerDesktopPolicy,
+    ) -> io::Result<RenderSession> {
         if request.time_step <= 0
             // A zero-duration render (total_time == 0) is valid: the shared
             // RenderTiming::is_valid admits it at current_time == 0, and the
@@ -825,7 +871,18 @@ impl RenderSession {
             ));
         }
         let command = session_command(request.pixel_format, request.smart, effective_backend)?;
-        let payload = encode_interactive_payload(request.parameters.unwrap_or_default())?;
+        // A pre-encoded payload is bounded here the way `encode_interactive_payload`
+        // bounds the one it builds, so no caller can widen the launch argv past
+        // the limit the worker's parser is written against.
+        let payload = match request.payload_override {
+            Some(payload) => {
+                if payload.len() > 16384 {
+                    return Err(invalid("interactive parameter payload is too large"));
+                }
+                payload.to_owned()
+            }
+            None => encode_interactive_payload(request.parameters.unwrap_or_default())?,
+        };
         // The sidecar mirrors the one-shot transport: validated bindings,
         // JSON under <repository>/target/image-transport (the only directory
         // the worker's strict sidecar loader accepts), removed when the
@@ -891,8 +948,13 @@ impl RenderSession {
         // Layers are static and no longer occupy the section (#268): stream each
         // layer's RGBA8 to its own file under target/image-transport and hand the
         // worker an inherited, path-authenticated read HANDLE. The worker reads it
-        // once at open into a private vector and never re-opens a path for
-        // transport (issue #18 TOCTOU lesson). Because the pixels leave the
+        // once at open into a private vector and never re-opens a path for *pixel*
+        // transport (issue #18 TOCTOU lesson). Broker-written sidecars whose
+        // contents are not pixels still travel by path (`--aux-manifest-v1`,
+        // `--parameter-animation-v1`, and the audio source of #339); those are
+        // read during argv parsing, before the plug-in module is loaded, so no
+        // plug-in code is running in that process to swap the leaf. Because the
+        // pixels leave the
         // bounded section, layer count/size no longer feed the aggregate section
         // cap, so the one-shot per-file layered path has no capability the session
         // lacks. `layer_files` keeps the broker's inheritable read handles alive
@@ -986,6 +1048,12 @@ impl RenderSession {
         }
         if let Some(render_environment) = &request.render_environment_trailer {
             args_after_plugin.push(render_environment.clone());
+        }
+        // The audio trailer sits after the context trailers so the worker peels it
+        // first and the context/layer chain keeps the positions it already had
+        // (issue #339). Auxiliary option pairs are stripped before any of this.
+        if let Some(audio) = &request.audio_trailer {
+            args_after_plugin.push(audio.clone());
         }
         // Auxiliary option pairs ride argv's tail; the worker peels them
         // before the positional session contract (strip_auxiliary_options)
@@ -1127,17 +1195,40 @@ impl RenderSession {
                     system32: policy_input.system32,
                 },
             )?;
-            dispatch_secure_gpu_image_session(
-                dispatch,
-                GpuRuntimeAuthorization {
-                    backend,
-                    session_identity: policy_input.session_identity,
-                    module_report: &report,
-                },
-                &child_handles,
-            )?
+            match desktop_policy {
+                WorkerDesktopPolicy::Dedicated => dispatch_secure_gpu_image_session(
+                    dispatch,
+                    GpuRuntimeAuthorization {
+                        backend,
+                        session_identity: policy_input.session_identity,
+                        module_report: &report,
+                    },
+                    &child_handles,
+                )?,
+                WorkerDesktopPolicy::Current => {
+                    crate::secure_image_dispatch::dispatch_secure_gpu_image_session_on_current_desktop(
+                        dispatch,
+                        GpuRuntimeAuthorization {
+                            backend,
+                            session_identity: policy_input.session_identity,
+                            module_report: &report,
+                        },
+                        &child_handles,
+                    )?
+                }
+            }
         } else {
-            dispatch_secure_image_session(dispatch, &child_handles)?
+            match desktop_policy {
+                WorkerDesktopPolicy::Dedicated => {
+                    dispatch_secure_image_session(dispatch, &child_handles)?
+                }
+                WorkerDesktopPolicy::Current => {
+                    crate::secure_image_dispatch::dispatch_secure_image_session_on_current_desktop(
+                        dispatch,
+                        &child_handles,
+                    )?
+                }
+            }
         };
         // The worker inherited its copies; dropping the broker's child-side
         // ends turns a worker exit into pipe EOF instead of a hang.
@@ -1493,6 +1584,18 @@ impl RenderSession {
             // response; deny_unknown_fields treats them as known for every status,
             // so reject them here on ok/error to keep the frame_done schema strict.
             let carries_resize_fields = done.width.is_some() || done.height.is_some();
+            if done
+                .missing_dependency
+                .as_deref()
+                .is_some_and(|name| !valid_dependency_basename(name))
+            {
+                return Err(self.invalidate(
+                    "malformed_dependency_diagnostic",
+                    format!("frame {frame_index} carried an unsafe dependency name"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
             match done.status.as_str() {
                 "error" => {
                     if done.output.is_some()
@@ -1539,11 +1642,16 @@ impl RenderSession {
                         // that exit instead of racing it with a job termination:
                         // collection terminates the job anyway if the worker does
                         // not leave within the timeout.
+                        let dependency = done
+                            .missing_dependency
+                            .as_deref()
+                            .map(|name| format!(", missing dependency {name}"))
+                            .unwrap_or_default();
                         return Err(self.invalidate(
                             "worker_invariant_failure",
                             format!(
-                                "frame {frame_index} reported the fatal session error {}",
-                                done.render_error
+                                "frame {frame_index} reported the fatal session error {}{}",
+                                done.render_error, dependency
                             ),
                             false,
                             CLOSE_COLLECT_TIMEOUT,
@@ -1557,6 +1665,7 @@ impl RenderSession {
                         frame_index,
                         status: FrameStatus::FrameError {
                             render_error: done.render_error,
+                            missing_dependency: done.missing_dependency,
                         },
                     });
                 }
@@ -1569,7 +1678,7 @@ impl RenderSession {
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     };
-                    if carries_resize_fields {
+                    if carries_resize_fields || done.missing_dependency.is_some() {
                         return Err(self.invalidate(
                             "malformed_ok_response",
                             format!("frame {frame_index} ok response carried resize fields"),
@@ -2171,16 +2280,41 @@ impl RenderSession {
 
 /// A clean session close requires the final report to agree, not just the
 /// exit code: the hoisted sequence must have set up and torn down without
-/// error, guards must be intact, and every ownership ledger must balance.
+/// error, guards must be intact, and every hard ownership ledger must balance.
+/// The worker contract explicitly classifies a known suite lease residue as a
+/// warning, so that one warning is accepted only when its diagnostics prove it
+/// is an explicit, non-faulting live lease rather than a malformed report.
 /// Missing keys fail closed. The classic and smart workers report session
 /// mechanics under different keys (the classic report reuses its
 /// persistent-sequence fields; the smart report carries dedicated session_*
 /// fields, protocol v1.1).
+fn suite_lease_state_clean(report: &Value) -> bool {
+    if report.get("suite_leases_balanced") == Some(&Value::Bool(true)) {
+        return true;
+    }
+    let acquires = report.get("suite_acquires").and_then(Value::as_u64);
+    let releases = report.get("suite_releases").and_then(Value::as_u64);
+    report.get("suite_leases_balanced") == Some(&Value::Bool(false))
+        && report.get("suite_lease_warning") == Some(&Value::Bool(true))
+        && report.get("suite_fault_observed") == Some(&Value::Bool(false))
+        && acquires
+            .zip(releases)
+            .is_some_and(|(acquires, releases)| acquires > releases)
+        && report
+            .get("live_suite_lease_count")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0)
+        && report
+            .get("live_suite_leases")
+            .and_then(Value::as_str)
+            .is_some_and(|leases| !leases.is_empty())
+}
+
 fn final_report_clean(report: &Value, smart: bool) -> bool {
     let shared = report.get("status") == Some(&json!("render_completed"))
         && report.get("global_setdown_error") == Some(&json!(0))
         && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
-        && report.get("suite_leases_balanced") == Some(&Value::Bool(true))
+        && suite_lease_state_clean(report)
         && report.get("handle_lifetimes_balanced") == Some(&Value::Bool(true))
         && report.get("world_lifetimes_balanced") == Some(&Value::Bool(true))
         && report.get("param_checkouts_balanced") == Some(&Value::Bool(true));
@@ -2311,6 +2445,7 @@ pub fn run_video_batch(
         plugin_path: &plugin_path,
         plugin_sha256: &plugin_sha256,
         parameters: (!request.parameters.is_empty()).then_some(request.parameters.as_slice()),
+        payload_override: None,
         parameter_animation: (!request.parameter_animation.is_empty())
             .then_some(request.parameter_animation.as_slice()),
         aux_manifest: request.aux_manifest.as_deref().map(Path::new),
@@ -2319,6 +2454,7 @@ pub fn run_video_batch(
         mask_trailer: None,
         spatial_trailer: None,
         render_environment_trailer: None,
+        audio_trailer: None,
         alpha_as_coverage_params: &request.alpha_as_coverage_params,
         // The video-batch entry does not apply conformance render settings.
         conformance_render_settings: None,
@@ -2426,10 +2562,14 @@ pub fn run_video_batch(
                         "output_png": output_png.file_name().and_then(|name| name.to_str()),
                     }))
                 }
-                FrameStatus::FrameError { render_error } => Ok(json!({
+                FrameStatus::FrameError {
+                    render_error,
+                    missing_dependency,
+                } => Ok(json!({
                     "frame_index": frame_index,
                     "status": "error",
                     "render_error": render_error,
+                    "missing_dependency": missing_dependency,
                 })),
             }
         })();
@@ -3244,6 +3384,16 @@ mod tests {
         assert!(error_shape.output.is_none());
         assert!(error_shape.generation.is_none());
         assert_eq!(error_shape.render_error, -40);
+        assert!(error_shape.missing_dependency.is_none());
+        let dependency_error: FrameDone = serde_json::from_str(
+            r#"{"v":1,"type":"frame_done","frame_index":4,"status":"error",
+                "render_error":-47,"missing_dependency":"fixture_delay.dll"}"#,
+        )
+        .unwrap();
+        assert!(valid_dependency_basename(
+            dependency_error.missing_dependency.as_deref().unwrap()
+        ));
+        assert!(!valid_dependency_basename("..\\escape.dll"));
     }
 
     #[test]
@@ -3343,6 +3493,49 @@ mod tests {
     }
 
     #[test]
+    fn final_report_clean_accepts_only_explicit_nonfaulting_suite_lease_warning() {
+        let mut warned = serde_json::json!({
+            "status": "render_completed",
+            "global_setdown_error": 0,
+            "guard_bytes_intact": true,
+            "suite_leases_balanced": false,
+            "suite_lease_warning": true,
+            "suite_fault_observed": false,
+            "suite_acquires": 123,
+            "suite_releases": 24,
+            "live_suite_lease_count": 1,
+            "live_suite_leases": "PF World Suite@2=99",
+            "handle_lifetimes_balanced": true,
+            "world_lifetimes_balanced": true,
+            "param_checkouts_balanced": true,
+            "session_mode": true,
+            "session_render_error": 0,
+            "session_sequence_setup_error": 0,
+            "session_sequence_setdown_error": 0,
+        });
+        assert!(final_report_clean(&warned, true));
+
+        for (key, value) in [
+            ("suite_lease_warning", serde_json::json!(false)),
+            ("suite_fault_observed", serde_json::json!(true)),
+            ("suite_acquires", serde_json::json!(24)),
+            ("live_suite_lease_count", serde_json::json!(0)),
+            ("live_suite_leases", serde_json::json!("")),
+        ] {
+            warned[key] = value;
+            assert!(!final_report_clean(&warned, true), "{key} must fail closed");
+            warned[key] = match key {
+                "suite_lease_warning" => serde_json::json!(true),
+                "suite_fault_observed" => serde_json::json!(false),
+                "suite_acquires" => serde_json::json!(123),
+                "live_suite_lease_count" => serde_json::json!(1),
+                "live_suite_leases" => serde_json::json!("PF World Suite@2=99"),
+                _ => unreachable!(),
+            };
+        }
+    }
+
+    #[test]
     fn open_rejects_timing_the_worker_could_never_render() {
         // Timing is validated before any file or transport work, so fake
         // paths never get touched when the timing is invalid.
@@ -3360,6 +3553,7 @@ mod tests {
                 plugin_path: Path::new("missing-plugin.aex"),
                 plugin_sha256: &"0".repeat(64),
                 parameters: None,
+                payload_override: None,
                 parameter_animation: None,
                 aux_manifest: None,
                 world_dump_dir: None,
@@ -3367,6 +3561,7 @@ mod tests {
                 mask_trailer: None,
                 spatial_trailer: None,
                 render_environment_trailer: None,
+                audio_trailer: None,
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
                 layers: &[],

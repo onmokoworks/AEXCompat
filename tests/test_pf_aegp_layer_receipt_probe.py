@@ -4,6 +4,8 @@ import struct
 import subprocess
 from pathlib import Path
 
+from _render_session import run_session_render
+
 import pytest
 
 
@@ -84,30 +86,20 @@ def _expected_output(source, width, depth):
 
 
 @pytest.mark.parametrize(
-    ("command", "depth"),
-    (("--render-image", 8), ("--render-image16", 16), ("--render-image32", 32)),
+    ("pixel_format", "depth"),
+    (("argb8", 8), ("argb16", 16), ("argb32f", 32)),
 )
 def test_real_probe_checks_out_typed_upstream_pixels_during_ordinary_render(
-        tmp_path, command, depth):
+        tmp_path, pixel_format, depth):
     assert WORKER.is_file()
     assert PROBE.is_file()
     assert INPUT.is_file()
     output = tmp_path / f"layer-receipt-output-{depth}.rgba"
     probe_hash = hashlib.sha256(PROBE.read_bytes()).hexdigest()
-    completed = subprocess.run(
-        [
-            str(WORKER), command, str(PROBE), probe_hash, "v5|",
-            str(INPUT), str(output), "37", "23", "0", "1", "1", "1",
-        ],
-        cwd=ROOT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        capture_output=True,
-        timeout=30,
+    report = run_session_render(
+        tmp_path, PROBE, INPUT, output, width=37, height=23,
+        pixel_format=pixel_format,
     )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    report = json.loads(completed.stdout)
     assert report["status"] == "render_completed"
     assert report["render_error"] == 0
     assert report["receipt_lifetimes_balanced"] is True

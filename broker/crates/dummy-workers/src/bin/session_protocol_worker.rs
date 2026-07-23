@@ -16,6 +16,8 @@
 //! - `mutate_header`: rewrites a broker-owned static header field.
 //! - `bad_checksum`: reports a checksum that does not match the slot bytes.
 //! - `error_frame_0`: answers frame 0 with a frame-local error response.
+//! - `modal_frame`: reports its desktop, opens a MessageBox, and waits for the
+//!   broker watchdog (issue #351).
 
 #[cfg(windows)]
 mod worker {
@@ -24,6 +26,10 @@ mod worker {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows_sys::Win32::System::Memory::{FILE_MAP_ALL_ACCESS, MapViewOfFile};
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        GetThreadDesktop, GetUserObjectInformationW, UOI_NAME,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
     const HEADER_BYTES: usize = 4096;
     const SLOT_ALIGNMENT: usize = 4096;
@@ -49,6 +55,69 @@ mod worker {
     fn env_handle(name: &str) -> Option<HANDLE> {
         let value = std::env::var(name).ok()?.parse::<usize>().ok()?;
         (value != 0).then_some(value as HANDLE)
+    }
+
+    fn current_desktop_name() -> Option<String> {
+        let desktop = unsafe { GetThreadDesktop(GetCurrentThreadId()) };
+        if desktop.is_null() {
+            return None;
+        }
+        let mut required = 0u32;
+        unsafe {
+            GetUserObjectInformationW(desktop, UOI_NAME, null_mut(), 0, &mut required);
+        }
+        if required < 2 {
+            return None;
+        }
+        let mut buffer = vec![0u16; (required as usize).div_ceil(2)];
+        if unsafe {
+            GetUserObjectInformationW(
+                desktop,
+                UOI_NAME,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * 2) as u32,
+                &mut required,
+            )
+        } == 0
+        {
+            return None;
+        }
+        let end = buffer.iter().position(|value| *value == 0).unwrap_or(0);
+        String::from_utf16(&buffer[..end]).ok()
+    }
+
+    fn report_desktop_for_test() {
+        let Some(path) = std::env::var_os("AEXCOMPAT_TEST_SESSION_DESKTOP_REPORT") else {
+            return;
+        };
+        let Some(name) = current_desktop_name() else {
+            return;
+        };
+        let _ = std::fs::write(path, name);
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBoxW(
+            hwnd: *mut std::ffi::c_void,
+            text: *const u16,
+            title: *const u16,
+            kind: u32,
+        ) -> i32;
+    }
+
+    fn show_modal_dialog_and_wait() -> ! {
+        let text: Vec<u16> = "AEXCompat modal session fixture"
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        let title: Vec<u16> = "noninteractive worker".encode_utf16().chain([0]).collect();
+        unsafe {
+            MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), 0);
+        }
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
     }
 
     fn read_exact(handle: HANDLE, destination: &mut [u8]) -> bool {
@@ -142,7 +211,7 @@ mod worker {
         }
     }
 
-    fn final_report(frames: u32, smart: bool) -> String {
+    fn final_report(frames: u32, smart: bool, launch_payload: &str) -> String {
         // The broker validates a module audit on a clean exit exactly like the
         // one-shot path; this fixture reports its own honest minimal audit.
         // The session-mechanics keys follow the worker flavor: the classic
@@ -166,6 +235,12 @@ mod worker {
         let mut report = serde_json::json!({
             "status": "render_completed",
             "global_setdown_error": 0,
+            // Echo the launch payload argv slot verbatim so a test can prove
+            // what reached the worker. The real worker parses it instead
+            // (`hooks.parse_parameters(argv[4], ...)`); this fixture only has
+            // to show which bytes arrived, which is the whole claim behind
+            // SessionOpenRequest::payload_override (#365).
+            "launch_payload": launch_payload,
             "session_frames": frames,
             "guard_bytes_intact": true,
             "suite_leases_balanced": true,
@@ -468,6 +543,10 @@ mod worker {
                 "hang_frame" => loop {
                     std::thread::sleep(std::time::Duration::from_secs(3600));
                 },
+                "modal_frame" => {
+                    report_desktop_for_test();
+                    show_modal_dialog_and_wait();
+                }
                 "crash_frame" => std::process::exit(0xC000_0005_u32 as i32),
                 "crash_frame_minidump" => {
                     // Same access-violation death as `crash_frame`, but first
@@ -638,11 +717,11 @@ mod worker {
             if behavior == "exit_after_frame_0" && frame_index == 0 {
                 // A unilateral exit with a clean-looking report and exit code
                 // 0, violating only the close-handshake contract.
-                println!("{}", final_report(frames, smart));
+                println!("{}", final_report(frames, smart, &args[4]));
                 return 0;
             }
         }
-        println!("{}", final_report(frames, smart));
+        println!("{}", final_report(frames, smart, &args[4]));
         0
     }
 }

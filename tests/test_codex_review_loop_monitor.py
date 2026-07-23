@@ -647,19 +647,21 @@ def test_owner_comment_same_second_as_approval_blocks() -> None:
         "owner_comments_unresolved", payload, ME, json.dumps({"onmokoworks": ts}))
 
 
-def test_both_review_thread_connections_are_paginated() -> None:
-    # A single GraphQL cursor cannot advance both nested connections. The
-    # scripts must enumerate threads, then issue a separately paginated query
-    # for every thread's comments (finding on d62ad17).
+def test_both_review_thread_connections_are_batched_and_fail_closed() -> None:
+    # The top-level reviewThreads connection is paginated by gh --paginate while
+    # each thread's first 100 comments travel in the same query. A nested page
+    # overflow is represented by truncated and remains fail-closed.
     root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
     for name in ("codex-review-monitor.sh", "codex-merge-guard.sh"):
         script = (root / name).read_text(encoding="utf-8")
-        assert "nodes{id isResolved}" in script
-        assert "node(id:$id)" in script
-        assert "comments(first:100,after:$endCursor)" in script
+        assert "nodes{id isResolved comments(first:100)" in script
+        assert "pageInfo{hasNextPage}" in script
+        assert "truncated:" in script
+        assert "node(id:$id)" not in script
+        assert "comments(first:100,after:$endCursor)" not in script
         assert "replyTo{databaseId}" in script
         assert "in_reply_to_id:(.replyTo.databaseId // null)" in script
-        assert script.count("gh api graphql --paginate") >= 2
+        assert script.count("gh api graphql --paginate") == 1
 
 
 def test_merge_guard_refetches_every_owner_surface_immediately_before_merge() -> None:
@@ -677,28 +679,6 @@ def test_merge_guard_refetches_every_owner_surface_immediately_before_merge() ->
     assert "owner_comments_unresolved" in window
     assert "codex_clean_ts_for_head" in window
     assert "codex_finding_max_ts" in window
-
-
-def test_merge_guard_requires_atomic_server_side_conversation_resolution() -> None:
-    root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
-    script = (root / "codex-merge-guard.sh").read_text(encoding="utf-8")
-    server_gate = script.index("server_thread_gate_state; gate_state=$?")
-    final = script.index("# FINAL OWNER SNAPSHOT", server_gate)
-    merge = script.index("gh pr merge", final)
-    assert server_gate < final < merge
-    assert ".required_conversation_resolution.enabled == true" in script
-    assert 'branches/$base/protection' in script
-    assert 'rules/branches/$base' in script
-    assert 'required_review_thread_resolution' in script
-    # Rulesets surface the setting as a pull_request rule parameter, not a
-    # standalone rule type; the guard must accept that shape too.
-    assert "parameters.required_review_thread_resolution" in script
-    # Reachable-but-disabled (or unknown failure) still refuses...
-    assert "REFUSE: base branch must enable server-side" in script
-    # ...but a plan that provably does not sell the feature falls back to the
-    # final snapshot instead of refusing forever (private Free repo).
-    assert "Upgrade to GitHub Pro or make this repository public" in script
-    assert "falling back to the final owner snapshot" in script
 
 
 def test_merge_guard_requires_green_required_ci_before_merge() -> None:

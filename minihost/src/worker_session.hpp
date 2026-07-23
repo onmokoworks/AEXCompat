@@ -65,6 +65,7 @@ class WorkerSession final {
 
   std::filesystem::path plugin_path_;
   HMODULE module_{};
+  DLL_DIRECTORY_COOKIE sealed_directory_cookie_{};
   RuntimeStdoutRestore restore_native_stdout_{};
   bool stdout_redirected_{};
   bool terminal_audit_captured_{};

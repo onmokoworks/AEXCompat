@@ -39,10 +39,14 @@ and bounded image input/output are now the main implementation path.
 - Implementation gap: there is no single shipped tier today. The sealed/restricted
   launch with no normal-token fallback is wired for two paths: the L2 launch
   transaction (schema-v2 approval receipts) and interactive image dispatch
-  (`image_render.rs` via `dispatch_secure_image`, which uses per-session
-  `ApprovedImageArtifact` from `selection.sha256` enforcing a pre-selection hash
-  match, not a schema-v2 receipt, and already admits the locally built worker at
-  dispatch time per `docs/EVIDENCE_POLICY_2026-07-18.md` §3). The `l1` route
+  (`image_render.rs`, which uses per-session `ApprovedImageArtifact` from
+  `selection.sha256` enforcing a pre-selection hash match, not a schema-v2
+  receipt, and already admits the locally built worker at dispatch time per
+  `docs/EVIDENCE_POLICY_2026-07-18.md` §3). Since #365 deleted the one-shot argv
+  render transport, an image or audio render reaches that boundary only through
+  `RenderSession`/`AudioRenderSession` (`dispatch_secure_image_session`);
+  `dispatch_secure_image` still serves the non-rendering diagnostic request
+  routes (`dispatch_approved_image`). The `l1` route
   (`l1.rs`) still dispatches a plug-in through normal-token `run_isolated`; the
   `render_request.rs` routes (`render-parameter-request`, `smart-suite-fault`,
   `smart-mask-scene`) moved onto the sealed load tree in #312, so `l1` is the
