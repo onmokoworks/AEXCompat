@@ -32,6 +32,10 @@ def _repo_root() -> Path:
 
 
 def _wrapper_path() -> Path:
+    # Prefer the bundled worker for addon-only or zip installations.
+    packaged = Path(__file__).with_name("session_wrapper.py")
+    if packaged.is_file():
+        return packaged
     return _repo_root() / "tools" / "blender_aexcompat_session.py"
 
 
@@ -61,7 +65,7 @@ def _run_session(request: dict[str, Any], timeout_ms: int = 5000) -> dict[str, A
             input=json.dumps(request, sort_keys=True) + "\n",
             text=True,
             capture_output=True,
-            cwd=str(_repo_root()),
+            cwd=str(wrapper.parent),
             timeout=max(1, timeout_ms) / 1000.0,
             check=False,
         )

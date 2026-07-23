@@ -27,6 +27,7 @@ def load_module(name: str, path: Path):
 SESSION = load_module("blender_aexcompat_session", ROOT / "tools" / "blender_aexcompat_session.py")
 SCHEMA = json.loads((ROOT / "contracts" / "blender" / "aexcompat_blender_session.schema.json").read_text(encoding="utf-8"))
 ADDON_SOURCE = (ROOT / "blender_addon" / "aexcompat_blender" / "__init__.py").read_text(encoding="utf-8")
+PACKAGE_WRAPPER = ROOT / "blender_addon" / "aexcompat_blender" / "session_wrapper.py"
 
 
 def request(mode: str = "identity_no_aex") -> dict:
@@ -107,11 +108,43 @@ def test_jsonl_subprocess_roundtrip():
     assert result["status"] == "identity_only"
 
 
+def test_packaged_wrapper_roundtrip_supports_addon_only_install():
+    completed = subprocess.run(
+        [sys.executable, str(PACKAGE_WRAPPER)],
+        input=json.dumps(request()) + "\n",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    result = json.loads(completed.stdout)
+    jsonschema.validate(result, SCHEMA)
+    assert result["status"] == "identity_only"
+
+
 def test_addon_source_contract_stays_fail_closed_and_out_of_process():
     assert "class AEXCompatCompositorNode(bpy.types.CompositorNode)" in ADDON_SOURCE
     assert "CompositorNodeOFX" in ADDON_SOURCE
     assert "subprocess.run" in ADDON_SOURCE
     assert '"identity_no_aex"' in ADDON_SOURCE
     assert '"fixture_invert_no_aex"' in ADDON_SOURCE
+    assert 'Path(__file__).with_name("session_wrapper.py")' in ADDON_SOURCE
     assert '"host_success": response.get("host_success")' not in ADDON_SOURCE
     assert "response.get(\"status\") not in {\"identity_only\", \"fixture_transform\"}" in ADDON_SOURCE
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["../outside.aex", "..\\outside.aex", "C:\\outside.aex", "\\\\server\\share\\outside.aex", "/tmp/outside.aex"],
+)
+def test_plugin_path_rejects_root_and_traversal(value):
+    payload = request()
+    payload["plugin"] = {"source_relative_path": value}
+    with pytest.raises(ValueError):
+        SESSION.build_response(payload)
+
+
+def test_plugin_path_is_normalized_to_relative_posix_form():
+    payload = request()
+    payload["plugin"] = {"source_relative_path": "effects\\safe.aex"}
+    result = SESSION.build_response(payload)
+    assert result["plugin_identity"]["source_relative_path"] == "effects/safe.aex"
