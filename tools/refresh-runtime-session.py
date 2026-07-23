@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import json
 import shutil
 import sys
@@ -48,6 +49,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--total-time", type=int, required=True)
     parser.add_argument("--time-scale", type=int, required=True)
     parser.add_argument("--smart", action="store_true")
+    parser.add_argument("--parameter-slot", type=int)
+    parser.add_argument("--parameter-value", type=float)
     return parser.parse_args()
 
 
@@ -74,6 +77,12 @@ def main() -> int:
         raise RuntimeError(f"input is missing: {input_path}")
     if args.width <= 0 or args.height <= 0:
         raise RuntimeError("width and height must be positive")
+    if (args.parameter_slot is None) != (args.parameter_value is None):
+        raise RuntimeError("--parameter-slot and --parameter-value must be provided together")
+    if args.parameter_slot is not None and args.parameter_slot <= 0:
+        raise RuntimeError("--parameter-slot must be positive")
+    if args.parameter_value is not None and not math.isfinite(args.parameter_value):
+        raise RuntimeError("--parameter-value must be finite")
 
     expected_input_size = args.width * args.height * 4
     if input_path.suffix.lower() == ".png":
@@ -101,9 +110,14 @@ def main() -> int:
                 session_input
             )
         session_output = temporary_root / "output.png"
+        session_command = (
+            "--render-experimental-session-param"
+            if args.parameter_slot is not None
+            else "--render-experimental-session"
+        )
         command = [
             str(HARNESS),
-            "--render-experimental-session",
+            session_command,
             str(plugin),
             str(session_input),
             str(session_output),
@@ -113,6 +127,8 @@ def main() -> int:
             str(args.total_time),
             str(args.time_scale),
         ]
+        if args.parameter_slot is not None:
+            command.extend([str(args.parameter_slot), format(args.parameter_value, ".17g")])
         import subprocess
 
         completed = subprocess.run(
@@ -162,10 +178,15 @@ def main() -> int:
         output_path.write_bytes(output_bytes)
 
     report["refresh_adapter"] = {
-        "command": "render-experimental-session",
+        "command": session_command.lstrip("-"),
         "pixel_format": args.pixel_format,
         "plugin_sha256": actual_plugin_sha,
         "output_size_bytes": len(output_bytes),
+        "parameter_override": (
+            None
+            if args.parameter_slot is None
+            else {"slot": args.parameter_slot, "value": args.parameter_value}
+        ),
     }
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0

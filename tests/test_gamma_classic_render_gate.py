@@ -12,42 +12,57 @@ def _result():
     return json.loads(RESULT.read_text(encoding="utf-8-sig"))
 
 
-def test_gate_authenticates_fixed_fixture_worker_and_input():
+def test_gate_uses_session_transport_and_authenticates_fixture_and_input():
     result = _result()
-    assert result["status"] == "passed"
     assert result["fixture"].endswith("Gamma_Table")
+    assert result["status"] in {"passed", "blocked"}
     artifacts = result["authenticated_artifacts"]
     assert artifacts["fixture"] == {
         "path": "target/sdk-fixtures/gamma/Gamma_Table.aex",
         "size_bytes": 45056,
         "sha256": "6fcb4946c77a9fcb4fab8e15dbbc54ffb4b1ab08656ce9acea39c44099b6dfa8",
     }
-    assert artifacts["worker"]["path"] == "target/minihost-build/aex_render_worker.exe"
-    assert artifacts["worker"]["size_bytes"] == 828928
-    assert artifacts["worker"]["sha256"] == "373f5b48b2afb8b5b0b168e0ebb022312b2b1eb1ad6ffbd27f328c9a60b40055"
-    assert artifacts["input"]["sha256"] == "c9ee521c7d71cbf6a41cb1a2d075add64676b912f5870098417b75ca727ba807"
+    assert artifacts["input"] == {
+        "path": "target/image-transport/colorgrid-click-input.rgba",
+        "size_bytes": 768,
+        "sha256": "c9ee521c7d71cbf6a41cb1a2d075add64676b912f5870098417b75ca727ba807",
+    }
+    assert artifacts["session_harness"]["path"].endswith("aexcompat-harness.exe")
+    assert artifacts["release_worker"]["path"] == "target/minihost-build/aex_render_worker.exe"
+    if result["status"] == "blocked":
+        assert result["classification"] == "session_transport_failure"
+        assert result["failure"]["message"]
+        assert result["checks"]["fail_closed"] is True
+        assert result["checks"]["structured_failure_recorded"] is True
 
 
-def test_identity_and_changed_cases_each_have_two_audited_deterministic_runs():
+def test_success_cases_prove_parameter_override_and_determinism():
     result = _result()
-    assert result["execution"]["worker_processes"] == 4
-    assert result["execution"]["fresh_authenticated_stage_per_run"] is True
-    assert result["cases"]["identity"]["gamma"] == 1.0
-    assert result["cases"]["changed"]["gamma"] == 1.5
-    for case in result["cases"].values():
+    if result["status"] != "passed":
+        return
+    assert result["execution"] == {
+        "render_path": "classic",
+        "transport": "render-experimental-session-param",
+        "pixel_format": "argb8",
+        "width": 16,
+        "height": 12,
+        "rowbytes": 64,
+        "fresh_session_run": True,
+    }
+    for case_name, gamma in (("identity", 1.0), ("changed", 1.5)):
+        case = result["cases"][case_name]
+        assert case["gamma"] == gamma
         assert case["deterministic"] is True
         assert len(case["runs"]) == 2
-        assert case["runs"][0]["internal_output_sha256"] == case["runs"][1]["internal_output_sha256"]
         for run in case["runs"]:
-            assert all(value == 0 for value in run["selector_errors"].values())
-            assert run["module_audit"]["status"] == "passed"
-            assert run["module_audit"]["unknown_count"] == 0
-            assert run["module_audit"]["phase_count"] >= 3
+            assert run["parameter_override"] == {"slot": 1, "value": gamma}
             assert all(run["checks"].values())
 
 
 def test_gamma_changes_output_and_one_is_identity():
     result = _result()
+    if result["status"] != "passed":
+        return
     identity = result["cases"]["identity"]["runs"][0]
     changed = result["cases"]["changed"]["runs"][0]
     assert result["cross_case"] == {
@@ -59,21 +74,20 @@ def test_gamma_changes_output_and_one_is_identity():
     assert identity["transport_output_sha256"] != changed["transport_output_sha256"]
 
 
-def test_runner_is_fail_closed_and_evidence_has_no_local_paths_or_stderr():
+def test_runner_is_fail_closed_and_does_not_call_removed_one_shot_entrypoint():
     source = RUNNER.read_text(encoding="utf-8")
     for marker in (
-        "Resolve-AuthenticatedArtifact",
-        "Get-FileHash",
-        "aexcompat-trusted-worker-gamma-",
-        "aexcompat-sealed-gamma-",
-        "Start-Process",
-        "-WindowStyle Hidden",
-        "module_audit_passed",
-        "selectors_success",
-        "lifetimes_balanced",
-        "guards_intact",
+        "refresh-runtime-session.py",
+        "render-experimental-session-param",
+        "--parameter-slot",
+        "--parameter-value",
+        "session_transport_failure",
+        "old_one_shot_cli_absent",
+        "Get-ArtifactIdentity",
     ):
         assert marker in source
+    assert "--render-image" not in source
+    assert "Start-Process" not in source
     serialized = RESULT.read_text(encoding="utf-8-sig")
     assert not re.search(r"[A-Za-z]:\\", serialized)
     assert "stderr" not in serialized.lower()

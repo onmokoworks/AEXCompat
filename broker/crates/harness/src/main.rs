@@ -5770,7 +5770,11 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    if args.len() == 10 && args[1] == "--render-experimental-session" {
+    let session_command = args.get(1).and_then(|value| value.to_str());
+    let session_with_parameter = session_command == Some("--render-experimental-session-param");
+    if (args.len() == 10 && session_command == Some("--render-experimental-session"))
+        || (args.len() == 12 && session_with_parameter)
+    {
         // Built-artifact probes use this explicit session-only adapter.  The
         // worker no longer accepts the deleted one-shot image argv (#365), so
         // native probe coverage must enter through the same length-one session
@@ -5804,9 +5808,50 @@ fn main() -> eframe::Result {
         };
         let plugin = Path::new(&args[2]);
         let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let parameters =
+        let mut parameters = if session_with_parameter {
+            match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+                &repository,
+                plugin,
+                &hash,
+            ) {
+                Ok((parameters, _diagnostics)) => parameters,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+                .unwrap_or_default()
+        };
+        if session_with_parameter {
+            let slot = match args[10].to_string_lossy().parse::<u32>() {
+                Ok(slot) if slot > 0 => slot,
+                _ => {
+                    eprintln!("parameter slot must be a positive integer");
+                    std::process::exit(1);
+                }
+            };
+            let value = match args[11].to_string_lossy().parse::<f64>() {
+                Ok(value) if value.is_finite() => value,
+                _ => {
+                    eprintln!("parameter value must be finite");
+                    std::process::exit(1);
+                }
+            };
+            let Some(parameter) = parameters.iter_mut().find(|item| item.slot == slot) else {
+                eprintln!("parameter slot {slot} was not discovered");
+                std::process::exit(1);
+            };
+            if value < parameter.minimum || value > parameter.maximum {
+                eprintln!(
+                    "parameter value {value} is outside slot {slot} range {}..{}",
+                    parameter.minimum, parameter.maximum
+                );
+                std::process::exit(1);
+            }
+            parameter.value = value;
+        }
         let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format(
             &repository,
             plugin,

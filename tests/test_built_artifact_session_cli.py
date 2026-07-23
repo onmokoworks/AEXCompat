@@ -7,7 +7,9 @@ HARNESS_SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
 
 def test_built_artifact_probes_have_a_supported_session_only_entrypoint():
     source = HARNESS_SOURCE.read_text(encoding="utf-8")
-    assert 'args[1] == "--render-experimental-session"' in source
+    assert 'session_command == Some("--render-experimental-session")' in source
+    assert 'session_command == Some("--render-experimental-session-param")' in source
+    assert "parameter.value = value" in source
     assert "render_experimental_image_at_time_with_format" in source
     assert "the deleted one-shot image argv" in source
 
