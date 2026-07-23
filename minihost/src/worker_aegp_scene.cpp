@@ -44,6 +44,107 @@ bool layer_active_at_time(std::size_t index, const AegpTime& time) {
   const long double duration_seconds = static_cast<long double>(duration.value) / duration.scale;
   return seconds >= in_seconds && seconds < in_seconds + duration_seconds;
 }
+
+void set_identity(AegpMatrix4& matrix) {
+  matrix = {};
+  for (std::size_t index = 0; index < 4; ++index) matrix.mat[index][index] = 1.0;
+}
+
+AegpMatrix4 multiply(const AegpMatrix4& left, const AegpMatrix4& right) {
+  AegpMatrix4 result{};
+  for (std::size_t row = 0; row < 4; ++row) {
+    for (std::size_t column = 0; column < 4; ++column) {
+      for (std::size_t index = 0; index < 4; ++index)
+        result.mat[row][column] += left.mat[row][index] * right.mat[index][column];
+    }
+  }
+  return result;
+}
+
+bool finite_bounded(double value, double limit) {
+  return std::isfinite(value) && std::abs(value) <= limit;
+}
+
+bool build_layer_transform(const AegpLayerTransform& authored, AegpMatrix4& output) {
+  constexpr double kLinearLimit = 1000000.0;
+  constexpr double kRotationLimit = 360000.0;
+  for (std::size_t index = 0; index < 3; ++index) {
+    if (!finite_bounded(authored.anchor[index], kLinearLimit) ||
+        !finite_bounded(authored.position[index], kLinearLimit) ||
+        !finite_bounded(authored.scale[index], kLinearLimit) ||
+        !finite_bounded(authored.rotation_degrees[index], kRotationLimit) ||
+        authored.scale[index] == 0.0) return false;
+  }
+
+  std::array<double, 3> position = authored.position;
+  std::array<double, 3> rotation = authored.rotation_degrees;
+  if (!authored.is_3d) {
+    position[2] = 0.0;
+    rotation[0] = 0.0;
+    rotation[1] = 0.0;
+  }
+  constexpr double kPi = 3.141592653589793238462643383279502884;
+  const std::array<double, 3> radians{{
+      rotation[0] * kPi / 180.0,
+      rotation[1] * kPi / 180.0,
+      rotation[2] * kPi / 180.0}};
+  for (double value : radians)
+    if (!std::isfinite(value)) return false;
+
+  AegpMatrix4 translation{};
+  set_identity(translation);
+  translation.mat[0][3] = position[0];
+  translation.mat[1][3] = position[1];
+  translation.mat[2][3] = position[2];
+
+  AegpMatrix4 scale{};
+  set_identity(scale);
+  scale.mat[0][0] = authored.scale[0] / 100.0;
+  scale.mat[1][1] = authored.scale[1] / 100.0;
+  scale.mat[2][2] = authored.scale[2] / 100.0;
+
+  AegpMatrix4 rotate_x{};
+  AegpMatrix4 rotate_y{};
+  AegpMatrix4 rotate_z{};
+  set_identity(rotate_x);
+  set_identity(rotate_y);
+  set_identity(rotate_z);
+  const double sin_x = std::sin(radians[0]);
+  const double cos_x = std::cos(radians[0]);
+  const double sin_y = std::sin(radians[1]);
+  const double cos_y = std::cos(radians[1]);
+  const double sin_z = std::sin(radians[2]);
+  const double cos_z = std::cos(radians[2]);
+  rotate_x.mat[1][1] = cos_x;
+  rotate_x.mat[1][2] = -sin_x;
+  rotate_x.mat[2][1] = sin_x;
+  rotate_x.mat[2][2] = cos_x;
+  rotate_y.mat[0][0] = cos_y;
+  rotate_y.mat[0][2] = sin_y;
+  rotate_y.mat[2][0] = -sin_y;
+  rotate_y.mat[2][2] = cos_y;
+  rotate_z.mat[0][0] = cos_z;
+  rotate_z.mat[0][1] = -sin_z;
+  rotate_z.mat[1][0] = sin_z;
+  rotate_z.mat[1][1] = cos_z;
+
+  AegpMatrix4 negative_anchor{};
+  set_identity(negative_anchor);
+  negative_anchor.mat[0][3] = -authored.anchor[0];
+  negative_anchor.mat[1][3] = -authored.anchor[1];
+  negative_anchor.mat[2][3] = -authored.anchor[2];
+
+  // Row-major matrices multiply column vectors: T(position) * Rz * Ry * Rx
+  // * S(scale / 100) * T(-anchor), matching the authored AE transform order.
+  const AegpMatrix4 result = multiply(
+      multiply(multiply(multiply(translation, rotate_z), rotate_y), rotate_x),
+      multiply(scale, negative_anchor));
+  for (std::size_t row = 0; row < 4; ++row)
+    for (std::size_t column = 0; column < 4; ++column)
+      if (!std::isfinite(result.mat[row][column])) return false;
+  output = result;
+  return true;
+}
 }  // namespace
 
 bool configure_scene_context(const SceneContext& context) noexcept {
@@ -230,6 +331,7 @@ AegpLegacyItemSuite6 g_aegp_legacy_item_suite6{};
 
 std::array<AegpTime, 3>& g_aegp_layer_in_points = state().layer_in_points;
 std::array<AegpTime, 3>& g_aegp_layer_durations = state().layer_durations;
+std::array<AegpLayerTransform, 3>& g_aegp_layer_transforms = state().layer_transforms;
 
 int32_t __cdecl aegp_get_item_current_time(void* item, AegpTime* time) {
   if (item != &g_aegp_comp_item || !time) return 4;
@@ -305,10 +407,11 @@ int32_t aegp_layer_index(void* layer) {
 }
 int32_t __cdecl aegp_get_layer_to_world_xform(
     void* layer, const AegpTime* comp_time, AegpMatrix4* transform) {
-  if (aegp_layer_index(layer) < 0 || !comp_time || !transform ||
-      !valid_comp_time(*comp_time)) return 4;
+  const int32_t index = aegp_layer_index(layer);
+  if (index < 0 || !comp_time || !transform || !valid_comp_time(*comp_time)) return 4;
   AegpMatrix4 result{};
-  for (std::size_t index = 0; index < 4; ++index) result.mat[index][index] = 1.0;
+  if (!build_layer_transform(g_aegp_layer_transforms[static_cast<std::size_t>(index)],
+                             result)) return 4;
   *transform = result;
   return 0;
 }
