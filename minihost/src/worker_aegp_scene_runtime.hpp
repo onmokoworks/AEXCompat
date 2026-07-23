@@ -97,6 +97,12 @@ struct AegpLayerTransform {
   bool is_3d{};
 };
 
+struct AegpLayerTransformKeyframe {
+  aexcompat::suite_abi::AegpTime time{};
+  AegpLayerTransform transform{};
+  bool valid{};
+};
+
 // All synthetic-scene identity and lease state has one owning translation
 // unit. Callbacks obtain it through this accessor; no SDK-shaped handle is
 // ever reconstituted from a second scene copy.
@@ -165,6 +171,7 @@ struct SceneRuntimeState {
   std::array<aexcompat::suite_abi::AegpTime, 3> layer_durations{{
       {300, 30}, {300, 30}, {300, 30}}};
   std::array<AegpLayerTransform, 3> layer_transforms{};
+  std::array<std::array<AegpLayerTransformKeyframe, 2>, 3> layer_transform_keyframes{};
   std::array<int32_t, 3> layer_parent_indices{{-1, -1, -1}};
   int32_t active_camera_layer_index{-1};
   AegpSelectionCollection selection{};

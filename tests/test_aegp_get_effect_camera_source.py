@@ -114,6 +114,21 @@ def test_parent_layer_transform_chain_is_bounded_and_fail_closed():
     assert "parent_index >= 0" not in source
 
 
+def test_animated_layer_transform_snapshot_is_rational_and_fail_closed():
+    source = (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
+        encoding="utf-8")
+    runtime = (ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp").read_text(
+        encoding="utf-8")
+    assert "struct AegpLayerTransformKeyframe" in runtime
+    assert "layer_transform_keyframes" in runtime
+    assert "resolve_layer_transform" in source
+    assert "first_time < second_time" in source
+    assert "current_time <= first_time" in source
+    assert "current_time >= second_time" in source
+    assert "blend(output.position" in source
+    assert "!keyframes[0].valid || !keyframes[1].valid" in source
+
+
 def test_native_self_test_covers_all_three_release_workers():
     for worker_name in ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe"):
         worker = BUILD / worker_name

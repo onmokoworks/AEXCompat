@@ -65,6 +65,51 @@ bool finite_bounded(double value, double limit) {
   return std::isfinite(value) && std::abs(value) <= limit;
 }
 
+bool resolve_layer_transform(std::size_t index, const AegpTime& comp_time,
+    AegpLayerTransform& output) {
+  if (index >= g_aegp_layer_transforms.size() || !valid_comp_time(comp_time)) return false;
+  const auto& keyframes = state().layer_transform_keyframes[index];
+  if (!keyframes[0].valid && !keyframes[1].valid) {
+    output = g_aegp_layer_transforms[index];
+    return true;
+  }
+  if (!keyframes[0].valid || !keyframes[1].valid ||
+      !valid_comp_time(keyframes[0].time) || !valid_comp_time(keyframes[1].time) ||
+      keyframes[0].transform.is_3d != keyframes[1].transform.is_3d) return false;
+  const long double first_time = static_cast<long double>(keyframes[0].time.value) /
+      static_cast<long double>(keyframes[0].time.scale);
+  const long double second_time = static_cast<long double>(keyframes[1].time.value) /
+      static_cast<long double>(keyframes[1].time.scale);
+  const long double current_time = static_cast<long double>(comp_time.value) /
+      static_cast<long double>(comp_time.scale);
+  if (!std::isfinite(first_time) || !std::isfinite(second_time) ||
+      !std::isfinite(current_time) || !(first_time < second_time)) return false;
+  if (current_time <= first_time) {
+    output = keyframes[0].transform;
+    return true;
+  }
+  if (current_time >= second_time) {
+    output = keyframes[1].transform;
+    return true;
+  }
+  const long double alpha = (current_time - first_time) / (second_time - first_time);
+  if (!std::isfinite(alpha) || alpha < 0.0L || alpha > 1.0L) return false;
+  output = keyframes[0].transform;
+  const auto blend = [alpha](std::array<double, 3>& destination,
+      const std::array<double, 3>& first, const std::array<double, 3>& second) {
+    for (std::size_t component = 0; component < 3; ++component) {
+      destination[component] = first[component] +
+          static_cast<double>(alpha) * (second[component] - first[component]);
+    }
+  };
+  blend(output.anchor, keyframes[0].transform.anchor, keyframes[1].transform.anchor);
+  blend(output.position, keyframes[0].transform.position, keyframes[1].transform.position);
+  blend(output.scale, keyframes[0].transform.scale, keyframes[1].transform.scale);
+  blend(output.rotation_degrees, keyframes[0].transform.rotation_degrees,
+      keyframes[1].transform.rotation_degrees);
+  return true;
+}
+
 bool build_layer_transform(const AegpLayerTransform& authored, AegpMatrix4& output) {
   constexpr double kLinearLimit = 1000000.0;
   constexpr double kRotationLimit = 360000.0;
@@ -146,7 +191,8 @@ bool build_layer_transform(const AegpLayerTransform& authored, AegpMatrix4& outp
   return true;
 }
 
-bool build_layer_world_transform(std::size_t index, AegpMatrix4& output) {
+bool build_layer_world_transform(std::size_t index, const AegpTime& comp_time,
+    AegpMatrix4& output) {
   constexpr std::size_t kMaxParentDepth = 8;
   if (index >= g_aegp_layer_transforms.size()) return false;
   std::array<bool, 3> visited{};
@@ -156,8 +202,10 @@ bool build_layer_world_transform(std::size_t index, AegpMatrix4& output) {
   for (std::size_t depth = 0; depth < kMaxParentDepth; ++depth) {
     if (current >= g_aegp_layer_transforms.size() || visited[current]) return false;
     visited[current] = true;
+    AegpLayerTransform authored{};
+    if (!resolve_layer_transform(current, comp_time, authored)) return false;
     AegpMatrix4 local{};
-    if (!build_layer_transform(g_aegp_layer_transforms[current], local)) return false;
+    if (!build_layer_transform(authored, local)) return false;
     world = multiply(local, world);
     const int32_t parent = g_aegp_layer_parent_indices[current];
     if (parent == -1) {
@@ -436,7 +484,7 @@ int32_t __cdecl aegp_get_layer_to_world_xform(
   const int32_t index = aegp_layer_index(layer);
   if (index < 0 || !comp_time || !transform || !valid_comp_time(*comp_time)) return 4;
   AegpMatrix4 result{};
-  if (!build_layer_world_transform(static_cast<std::size_t>(index), result)) return 4;
+  if (!build_layer_world_transform(static_cast<std::size_t>(index), *comp_time, result)) return 4;
   *transform = result;
   return 0;
 }

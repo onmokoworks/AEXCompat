@@ -610,6 +610,7 @@ bool verify_aegp_resizer_3d_chain() {
   const auto saved_durations = g_aegp_layer_durations;
   const auto saved_transforms = g_aegp_layer_transforms;
   const auto saved_parent_indices = g_aegp_layer_parent_indices;
+  const auto saved_keyframes = scene_runtime_state().layer_transform_keyframes;
   g_aegp_active_camera_layer_index = 2;
   g_aegp_layer_in_points[2] = {0, 30};
   g_aegp_layer_durations[2] = {300, 30};
@@ -701,6 +702,30 @@ bool verify_aegp_resizer_3d_chain() {
       std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
   g_aegp_layer_parent_indices = saved_parent_indices;
   g_aegp_layer_transforms[1] = saved_transforms[1];
+
+  auto& keyframes = scene_runtime_state().layer_transform_keyframes[2];
+  keyframes = {};
+  keyframes[0].valid = true;
+  keyframes[0].time = {0, 30};
+  keyframes[0].transform.position = {{10.0, 20.0, 0.0}};
+  keyframes[0].transform.scale = {{100.0, 100.0, 100.0}};
+  keyframes[0].transform.is_3d = true;
+  keyframes[1].valid = true;
+  keyframes[1].time = {60, 30};
+  keyframes[1].transform.position = {{70.0, 80.0, 30.0}};
+  keyframes[1].transform.scale = {{100.0, 100.0, 100.0}};
+  keyframes[1].transform.is_3d = true;
+  g_aegp_layer_parent_indices[2] = -1;
+  const AegpTime midpoint{30, 30};
+  matrix = {};
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &midpoint, &matrix) == 0 &&
+      near(matrix.mat[0][3], 40.0) && near(matrix.mat[1][3], 50.0) &&
+      near(matrix.mat[2][3], 15.0);
+  keyframes[1].time = {0, 30};
+  matrix = matrix_sentinel;
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &midpoint, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  scene_runtime_state().layer_transform_keyframes = saved_keyframes;
   AegpLegacyStreamVal zoom{-1.0};
   int32_t type = -1;
   ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
@@ -741,6 +766,7 @@ bool verify_aegp_resizer_3d_chain() {
   g_aegp_layer_durations = saved_durations;
   g_aegp_layer_transforms = saved_transforms;
   g_aegp_layer_parent_indices = saved_parent_indices;
+  scene_runtime_state().layer_transform_keyframes = saved_keyframes;
   return ok && suite_leases_balanced();
 }
 
