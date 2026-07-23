@@ -1,9 +1,9 @@
-﻿{
-    "schema_version":  1,
+{
+    "schema_version":  2,
     "gate":  "real_aex_render_gate",
-    "classification":  "host_regression_exact",
+    "classification":  "session_transport_failure",
     "oracle":  false,
-    "status":  "passed",
+    "status":  "blocked",
     "fixture":  "Adobe After Effects SDK ColorGrid",
     "case":  {
                  "render_path":  "classic",
@@ -32,48 +32,62 @@
                                                   },
                                     "release_worker":  {
                                                            "path":  "target/minihost-build/aex_render_worker.exe",
-                                                           "size_bytes":  828416,
-                                                           "sha256":  "3777c8b853433d2c59530b5afc39c95b0420dcf417f8ca89953d862c3bdf978c"
-                                                       }
+                                                           "size_bytes":  1221632,
+                                                           "sha256":  "8a60c79afc1b0eb77c2b6498783066a756c5d53cd6c0c460ae078301ab869e22"
+                                                       },
+                                    "session_harness":  {
+                                                            "path":  "broker/target/release/aexcompat-harness.exe",
+                                                            "size_bytes":  11547136,
+                                                            "sha256":  "2eb204d033ebaa3eec456bc1b4ec5df8b2a8aa00516ea22f654d5a3e33ee15f1"
+                                                        }
                                 },
     "invocation":  {
-                       "executable":  "target/minihost-build/aex_render_worker.exe",
-                       "cli":  "--render-image \u003caex\u003e \u003caex_sha256\u003e v5| \u003cinput\u003e \u003coutput\u003e 16 12 0 1 1 1",
-                       "exit_code":  0
+                       "executable":  "broker/target/release/aexcompat-harness.exe",
+                       "adapter":  "tools/refresh-runtime-session.py",
+                       "transport":  "render-experimental-session",
+                       "command":  "python tools/refresh-runtime-session.py --plugin \u003caex\u003e --plugin-sha256 \u003caex_sha256\u003e --input \u003cinput\u003e --output \u003coutput\u003e --width 16 --height 12 --pixel-format argb8 --current-time 0 --total-time 1 --time-scale 1",
+                       "exit_code":  1
                    },
     "output":  {
-                   "size_bytes":  768,
-                   "sha256":  "91d436a039c7f5ef56c4418e97dcb48dd4a69b8b9d984f224a06f97fe3ff8578",
-                   "expected_sha256":  "91d436a039c7f5ef56c4418e97dcb48dd4a69b8b9d984f224a06f97fe3ff8578"
+                   "path":  "target/image-transport/aex-render-gate-output.rgba",
+                   "size_bytes":  null,
+                   "sha256":  null,
+                   "expected_sha256":  "91d436a039c7f5ef56c4418e97dcb48dd4a69b8b9d984f224a06f97fe3ff8578",
+                   "differing_bytes":  null
                },
-    "worker":  {
-                   "schema_version":  1,
-                   "stage":  "classic_render",
-                   "status":  "render_completed",
-                   "internal_output_sha256":  "4f3c8d8405d0917ab85ccda3af3c8fd2c66f6daaf12383e07cc0c7846f6407d7",
-                   "guard_bytes_intact":  true,
-                   "suite_acquires":  8,
-                   "suite_releases":  8,
-                   "live_suite_lease_count":  0,
-                   "suite_leases_balanced":  true,
-                   "handle_lifetimes_balanced":  true,
-                   "world_lifetimes_balanced":  true,
-                   "last_seh_exception_code":  0
-               },
+    "session":  {
+                    "stage":  null,
+                    "status":  null,
+                    "passed":  null,
+                    "width":  null,
+                    "height":  null,
+                    "row_bytes":  null,
+                    "pixel_format":  null,
+                    "frame_time_ms":  null,
+                    "input_sha256":  null,
+                    "internal_output_sha256":  null,
+                    "guard_bytes_intact":  null,
+                    "suite_leases_balanced":  null,
+                    "handle_lifetimes_balanced":  null,
+                    "world_lifetimes_balanced":  null
+                },
     "checks":  {
-                   "worker_exit_zero":  true,
-                   "worker_status_completed":  true,
-                   "dimensions_exact":  true,
-                   "output_size_exact":  true,
-                   "output_hash_exact":  true,
-                   "guards_intact":  true,
-                   "suite_leases_balanced":  true,
-                   "handle_lifetimes_balanced":  true,
-                   "world_lifetimes_balanced":  true,
-                   "selector_success":  true
+                   "session_gate_attempted":  true,
+                   "session_exit_zero":  false,
+                   "session_report_passed":  false,
+                   "output_verified":  false,
+                   "old_one_shot_cli_absent":  true,
+                   "fail_closed":  true,
+                   "structured_failure_recorded":  true
                },
+    "failure":  {
+                    "stage":  "session",
+                    "message":  "refresh-runtime-session: session harness failed with exit code 1: the resident render session could not carry this render (session open failed: restricted token does not contain the generated worker SID). Diagnose the session failure; there is no alternate transport. Any world-dump snapshots from the failed session are preserved for diagnosis; clear the dump directory before re-running, since it must start empty.",
+                    "external_blocker":  true,
+                    "restart_condition":  "Provide a runner/token that can create the generated worker SID, then rerun this gate."
+                },
     "scope":  {
-                  "proves":  "The authenticated AEXCompat release worker reproduces this exact host output for the fixed default/frame0 vector.",
-                  "does_not_prove":  "Pixel equivalence with Adobe After Effects; this is not an AE oracle."
+                  "proves":  "The current session-only gate was attempted and any inability to run was recorded without claiming a render success.",
+                  "does_not_prove":  "Pixel equivalence with Adobe After Effects; this is not an AE oracle. A blocked status is not a successful render."
               }
 }
