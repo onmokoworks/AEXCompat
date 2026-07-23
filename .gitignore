@@ -5,6 +5,7 @@ build/
 dist/
 out/
 /bin/
+bridges/ymm4-plugin/bin/
 obj/
 __pycache__/
 *.pyc

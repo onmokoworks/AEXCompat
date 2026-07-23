@@ -1,0 +1,17 @@
+[package]
+name = "aexcompat-ymm4-native"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "C ABI YMM4 adapter for an AEXCompat resident RenderSession"
+
+# Standalone crate, intentionally outside the broker workspace. The YMM4 C#
+# plug-in loads the cdylib and keeps the untrusted AEX in the broker worker.
+[lib]
+name = "aexcompat_ymm4_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aexcompat-broker = { path = "../../broker/crates/broker" }
+sha2 = "0.10"
