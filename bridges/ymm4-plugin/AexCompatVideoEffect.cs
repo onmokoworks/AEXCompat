@@ -248,7 +248,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
             timeStep: 1,
             totalTime: duration,
             timeScale: checked((uint)fps),
-            smart: 0);
+            smart: 1);
         if (session == 0)
         {
             throw new InvalidOperationException(ReadNativeError());
