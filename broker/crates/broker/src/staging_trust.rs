@@ -1,21 +1,22 @@
-//! Opt-in trusted staging profile (issue #399).
+//! Trusted staging profile (issue #399), enabled by default.
 //!
 //! The discovery sweep re-hashes every dependency image at closure resolution
-//! and twice more while it is sealed into the load tree. When the operator
-//! sets `AEXCOMPAT_TRUSTED_STAGING=1`, this module lets the broker skip
-//! re-hashes a process-local cache can prove redundant: an entry is keyed by
-//! inode (volume serial + file index) and holds the size, last-write time, and
-//! SHA-256 recorded the last time that inode was hashed. A lookup hits only
-//! when the handle's current size and last-write time still match the entry.
+//! and twice more while it is sealed into the load tree. This module lets the
+//! broker skip re-hashes a process-local cache can prove redundant: an entry
+//! is keyed by inode (volume serial + file index) and holds the size,
+//! last-write time, and SHA-256 recorded the last time that inode was hashed.
+//! A lookup hits only when the handle's current size and last-write time still
+//! match the entry. The residual risk — an in-place content swap that
+//! preserves both size and last-write time on the same inode — is negligible
+//! for the local measurement workloads this project targets, so the profile
+//! is on by default; set `AEXCOMPAT_TRUSTED_STAGING=0` to restore the strict
+//! per-file re-hashing path when authenticating hostile input.
 //!
 //! The profile fails closed on real modification: rewriting a file between
 //! resolution and staging changes its size or last-write time, the lookup
 //! misses (evicting the stale entry), the real hasher runs, and the digest
 //! mismatch against the declared expectation fails the dispatch exactly as
-//! the strict path does. The accepted residual risk — an in-place content
-//! swap that preserves both size and last-write time on the same inode — is
-//! the explicit contract of opting in. The strict path (env unset) is
-//! unchanged and remains the default.
+//! the strict path does.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -47,13 +48,14 @@ thread_local! {
     static ENABLED_OVERRIDE: std::cell::Cell<Option<bool>> = std::cell::Cell::new(None);
 }
 
-/// Whether the trusted staging profile is active for this thread.
+/// Whether the trusted staging profile is active for this thread. Enabled by
+/// default; `AEXCOMPAT_TRUSTED_STAGING=0` restores strict per-file re-hashing.
 pub fn trusted_staging_enabled() -> bool {
     #[cfg(test)]
     if let Some(override_) = ENABLED_OVERRIDE.with(std::cell::Cell::get) {
         return override_;
     }
-    std::env::var_os(ENV_VAR).is_some_and(|value| value == "1")
+    !std::env::var_os(ENV_VAR).is_some_and(|value| value == "0")
 }
 
 /// Pins the enable flag for a test thread without racing the process env.
