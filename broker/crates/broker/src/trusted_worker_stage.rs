@@ -3,9 +3,13 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 const ROOT_PREFIX: &str = "aexcompat-trusted-worker-";
 const WORKER_BASENAME: &str = "trusted-worker.exe";
+const CLEANUP_RETRY_COUNT: usize = 20;
+const CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Owns an authenticated, read/execute-only copy of a trusted worker executable.
 /// Keep this value alive until the worker process has exited.
@@ -101,8 +105,21 @@ impl Drop for TrustedWorkerStage {
             .is_some_and(|v| v.starts_with(ROOT_PREFIX));
         let safe_parent = self.root.parent() == Some(self.temp_parent.as_path());
         if safe_name && safe_parent && reject_reparse_path(&self.root).is_ok() {
-            let _ = fs::remove_file(&self.worker);
-            let _ = fs::remove_dir(&self.root);
+            // Windows can signal the process before the image section has
+            // released the staged executable. Retry only this owned file/root
+            // pair for a short bounded interval; never broaden cleanup to a
+            // recursive delete or an unvalidated path.
+            for attempt in 0..CLEANUP_RETRY_COUNT {
+                let _ = fs::remove_file(&self.worker);
+                match fs::remove_dir(&self.root) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                    Err(_) if attempt + 1 < CLEANUP_RETRY_COUNT => {
+                        thread::sleep(CLEANUP_RETRY_DELAY);
+                    }
+                    Err(_) => break,
+                }
+            }
         }
     }
 }
