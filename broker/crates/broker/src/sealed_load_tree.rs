@@ -23,6 +23,17 @@ pub enum AdditionalChildProtection {
     RequiresRestrictedWorkerAcl,
 }
 
+/// How the entries of a sealed load tree were staged into the root.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StagingStats {
+    /// Entries staged by hard-linking the source into the sealed root.
+    pub hard_linked: u64,
+    /// Entries staged by copying after the hard link failed.
+    pub copied: u64,
+    /// Whether the stale-root sweep before staging completed without error.
+    pub stale_cleanup_ok: bool,
+}
+
 #[derive(Debug)]
 pub struct SealedLoadTree {
     root: PathBuf,
@@ -34,25 +45,50 @@ pub struct SealedLoadTree {
 
 impl SealedLoadTree {
     pub fn create(main: LoadEntry, dependencies: Vec<LoadEntry>) -> io::Result<Self> {
-        let temp_parent = fs::canonicalize(std::env::temp_dir())?;
-        reject_reparse(&temp_parent)?;
-        Self::create_at(&temp_parent, main, dependencies)
+        Self::create_with_stats(main, dependencies).map(|(tree, _)| tree)
     }
 
+    /// Like [`Self::create`], but also reports how each entry was staged.
+    pub fn create_with_stats(
+        main: LoadEntry,
+        dependencies: Vec<LoadEntry>,
+    ) -> io::Result<(Self, StagingStats)> {
+        let temp_parent = fs::canonicalize(std::env::temp_dir())?;
+        reject_reparse(&temp_parent)?;
+        Self::create_at_with_stats(&temp_parent, main, dependencies)
+    }
+
+    #[cfg(test)]
     fn create_at(
         temp_parent: &Path,
         main: LoadEntry,
         dependencies: Vec<LoadEntry>,
     ) -> io::Result<Self> {
+        Self::create_at_with_stats(temp_parent, main, dependencies).map(|(tree, _)| tree)
+    }
+
+    fn create_at_with_stats(
+        temp_parent: &Path,
+        main: LoadEntry,
+        dependencies: Vec<LoadEntry>,
+    ) -> io::Result<(Self, StagingStats)> {
         let temp_parent = fs::canonicalize(temp_parent)?;
         reject_reparse(&temp_parent)?;
-        let _ = cleanup_stale_roots(&temp_parent, SystemTime::now(), STALE_ROOT_AGE);
+        let mut stats = StagingStats {
+            stale_cleanup_ok: cleanup_stale_roots(&temp_parent, SystemTime::now(), STALE_ROOT_AGE)
+                .is_ok(),
+            ..StagingStats::default()
+        };
         let root = create_random_root(&temp_parent)?;
         let result = Self::populate(root.clone(), temp_parent.clone(), main, dependencies);
         if result.is_err() {
             let _ = remove_owned_root(&root, &temp_parent);
         }
-        result
+        result.map(|(tree, populate_stats)| {
+            stats.hard_linked = populate_stats.hard_linked;
+            stats.copied = populate_stats.copied;
+            (tree, stats)
+        })
     }
 
     fn populate(
@@ -60,7 +96,7 @@ impl SealedLoadTree {
         temp_parent: PathBuf,
         main: LoadEntry,
         mut dependencies: Vec<LoadEntry>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, StagingStats)> {
         dependencies.sort_by_key(|entry| entry.relative_basename.to_lowercase());
         let mut entries = Vec::with_capacity(dependencies.len() + 1);
         entries.push((0u8, main));
@@ -77,6 +113,7 @@ impl SealedLoadTree {
 
         let mut handles = Vec::with_capacity(entries.len());
         let mut manifest_filenames = Vec::with_capacity(entries.len());
+        let mut stats = StagingStats::default();
         let mut manifest = Sha256::new();
         manifest.update(MANIFEST_DOMAIN);
         manifest.update((entries.len() as u64).to_le_bytes());
@@ -117,7 +154,10 @@ impl SealedLoadTree {
                 return Err(invalid("destination must be a direct child"));
             }
             let staged_by_hard_link = fs::hard_link(&entry.source, &destination).is_ok();
-            if !staged_by_hard_link {
+            if staged_by_hard_link {
+                stats.hard_linked += 1;
+            } else {
+                stats.copied += 1;
                 let mut output = create_destination(&destination)?;
                 io::copy(&mut source, &mut output)?;
                 output.flush()?;
@@ -157,13 +197,16 @@ impl SealedLoadTree {
             handles.push(retained);
         }
 
-        Ok(Self {
-            root,
-            temp_parent,
-            manifest_digest: manifest.finalize().into(),
-            manifest_filenames,
-            handles: Some(handles),
-        })
+        Ok((
+            Self {
+                root,
+                temp_parent,
+                manifest_digest: manifest.finalize().into(),
+                manifest_filenames,
+                handles: Some(handles),
+            },
+            stats,
+        ))
     }
 
     pub fn root(&self) -> &Path {
@@ -556,6 +599,18 @@ mod tests {
         drop(tree);
         assert!(source_path.is_file());
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn create_with_stats_reports_staging_counts() {
+        let source = source_dir();
+        let main = fixture(&source, "main.plugin", b"main");
+        let dependency = fixture(&source, "helper.dll", b"dependency");
+        let (tree, stats) = SealedLoadTree::create_with_stats(main, vec![dependency]).unwrap();
+        assert_eq!(stats.hard_linked + stats.copied, 2);
+        assert!(stats.stale_cleanup_ok);
+        drop(tree);
+        fs::remove_dir_all(source).unwrap();
     }
 
     #[test]
