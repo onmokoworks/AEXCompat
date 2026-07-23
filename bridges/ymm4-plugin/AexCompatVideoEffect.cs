@@ -281,15 +281,24 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
             new BitmapProperties1(format, 96, 96, BitmapOptions.CpuRead | BitmapOptions.CannotDraw));
 
         var previousTarget = deviceContext.Target;
+        var previousTransform = deviceContext.Transform;
         try
         {
             deviceContext.Target = target;
+            deviceContext.Transform = new Matrix3x2(
+                1,
+                0,
+                0,
+                1,
+                size.Width / 2f,
+                size.Height / 2f);
             deviceContext.BeginDraw();
             deviceContext.DrawImage(input!, InterpolationMode.NearestNeighbor, CompositeMode.SourceOver);
             deviceContext.EndDraw();
         }
         finally
         {
+            deviceContext.Transform = previousTransform;
             deviceContext.Target = previousTarget;
         }
         readable.CopyFromBitmap(target);
