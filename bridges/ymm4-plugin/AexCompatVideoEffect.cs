@@ -47,6 +47,23 @@ public sealed class AexCompatVideoEffect : VideoEffectBase
         }
     }
 
+    [Display(GroupName = "AEXCompat", Name = "AEXCompatリポジトリ", Description = "aex_render_worker.exeを含むAEXCompatリポジトリのパス")]
+    [YukkuriMovieMaker.Controls.TextEditor]
+    public string RepositoryPath
+    {
+        get => repositoryPath;
+        set
+        {
+            if (string.Equals(repositoryPath, value, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+            repositoryPath = value ?? string.Empty;
+            OnPropertyChanged(nameof(RepositoryPath));
+            SetParameters(AexParameterSet.Discover(repositoryPath, pluginPath));
+        }
+    }
+
     [Display(GroupName = "AEXCompat", Name = "AEXパラメータ", Description = "検出された対応パラメータ")]
     [AexParameterEditor]
     public AexParameterSet Parameters
@@ -54,8 +71,6 @@ public sealed class AexCompatVideoEffect : VideoEffectBase
         get => parameters;
         set => SetParameters(value ?? new AexParameterSet());
     }
-
-    public string RepositoryPath => repositoryPath;
 
     protected override IEnumerable<IAnimatable> GetAnimatables() => [Parameters];
 

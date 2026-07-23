@@ -30,7 +30,10 @@ parameters as native YMM4 controls:
 - colors: ARGB hexadecimal field (`#AARRGGBB`)
 
 The selected AEX path can also be edited in the effect's `AEXファイル` field.
-Changing it refreshes the parameter panel. The first GUI slice intentionally
+The AEXCompat repository path can be entered in `AEXCompatリポジトリ`, so
+YMM4 does not have to be launched from a shell that inherited the repository
+environment variable. Changing either path refreshes the parameter panel. The
+first GUI slice intentionally
 leaves unsupported point/layer/path/custom parameters at their discovered
 defaults and does not yet provide YMM4 keyframe animation for AEX parameters.
 

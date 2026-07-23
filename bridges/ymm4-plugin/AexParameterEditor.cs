@@ -202,7 +202,9 @@ internal sealed class AexParameterEditorControl : UserControl, IPropertyEditorCo
 
     private void EffectOnPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(AexCompatVideoEffect.Parameters) or nameof(AexCompatVideoEffect.PluginPath))
+        if (e.PropertyName is nameof(AexCompatVideoEffect.Parameters)
+            or nameof(AexCompatVideoEffect.PluginPath)
+            or nameof(AexCompatVideoEffect.RepositoryPath))
         {
             Rebuild();
         }
