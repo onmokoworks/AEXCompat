@@ -5632,6 +5632,85 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    if args.len() == 9 && args[1] == "--render-experimental-session-animation" {
+        use aexcompat_broker::image_render::{ParameterAnimation, RenderTiming};
+        let plugin = Path::new(&args[2]);
+        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let current_time = args[5].to_string_lossy().parse::<i32>().unwrap_or(-1);
+        let total_time = args[6].to_string_lossy().parse::<i32>().unwrap_or(0);
+        let time_scale = args[7].to_string_lossy().parse::<u32>().unwrap_or(0);
+        let timing = RenderTiming {
+            current_time,
+            time_step: 1,
+            total_time,
+            time_scale,
+        };
+        let sidecar = match fs::read(&args[8])
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .map_err(|error| error.to_string())
+            }) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("parameter animation sidecar is invalid: {error}");
+                std::process::exit(1);
+            }
+        };
+        let Some(object) = sidecar.as_object() else {
+            eprintln!("parameter animation sidecar must be a JSON object");
+            std::process::exit(1);
+        };
+        if object.len() != 2
+            || !object.contains_key("schema_version")
+            || !object.contains_key("parameters")
+            || object
+                .get("schema_version")
+                .and_then(|value| value.as_u64())
+                != Some(1)
+        {
+            eprintln!("parameter animation sidecar requires schema_version=1 and parameters");
+            std::process::exit(1);
+        }
+        let animations: Vec<ParameterAnimation> =
+            match serde_json::from_value(object.get("parameters").cloned().unwrap_or_default()) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("parameter animation sidecar parameters are invalid: {error}");
+                    std::process::exit(1);
+                }
+            };
+        let parameters = match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+            &repository,
+            plugin,
+            &hash,
+        ) {
+            Ok((parameters, _diagnostics)) => parameters,
+            Err(error) => {
+                eprintln!("parameter animation inspection failed: {error}");
+                std::process::exit(1);
+            }
+        };
+        let report =
+            aexcompat_broker::image_render::render_experimental_image_with_parameter_animation(
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                &animations,
+                timing,
+            );
+        match report {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 4 && args[1] == "--render-image" {
         let report = aexcompat_broker::image_render::render_image(
             &repository,
