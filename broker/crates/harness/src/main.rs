@@ -20,6 +20,8 @@ const MAX_DIAGNOSTIC_SUMMARY_BYTES: usize = 1024;
 const MAX_AGGREGATE_SHAS: usize = 4096;
 const MAX_AGGREGATE_FILES: usize = 65_536;
 const MAX_AGGREGATE_BYTES: u64 = 64 * 1024 * 1024;
+const CLI_CONTRACT_SCHEMA: &str = "aexcompat.harness-cli-contract";
+const CLI_CONTRACT_VERSION: u64 = 1;
 
 const SCATTERMAP_HASH: &str = "223FF5EC542DD74374C727F16AA6C068073D1C2D7A5CABF20512CB289F0716EB";
 const MASKOFFSET_HASH: &str = "B7C41F4F906FCE74B26BD2F06520F6BFDF75DCD1A2682DBB85D50D1DE833877B";
@@ -5676,9 +5678,119 @@ fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
         })
 }
 
+fn cli_contract() -> serde_json::Value {
+    serde_json::json!({
+        "schema": CLI_CONTRACT_SCHEMA,
+        "version": CLI_CONTRACT_VERSION,
+        "program": "aexcompat-harness",
+        "transport": {
+            "success_stdout": "json",
+            "failure_stderr": true,
+            "failure_exit_code": "nonzero",
+            "unknown_or_malformed_arguments": "launch_gui"
+        },
+        "commands": [
+            {
+                "name": "--compare-images",
+                "argv": ["--compare-images", "<reference-image>", "<output-image>"],
+                "result": "pixel-comparison-json",
+                "exit_code": "0=exact,2=non-exact"
+            },
+            {
+                "name": "--inspect-experimental",
+                "argv": ["--inspect-experimental", "<aex>"],
+                "result": "parameter-inspection-json"
+            },
+            {
+                "name": "--inspect-experimental-with-deps",
+                "argv": ["--inspect-experimental-with-deps", "<aex>", "<dependency-root>..."],
+                "result": "parameter-inspection-and-dependency-closure-json"
+            },
+            {
+                "name": "--inspect-experimental-dependencies",
+                "argv": ["--inspect-experimental-dependencies", "<aex>", "all|missing"],
+                "result": "dependency-diagnostic-json"
+            },
+            {
+                "name": "--render-experimental-request",
+                "argv": ["--render-experimental-request|--render-experimental-smart-request|--render-experimental-request-16|--render-experimental-smart-request-16|--render-experimental-request-32|--render-experimental-smart-request-32-cpu", "<aex>", "<input-image>", "<output-image>", "<debug-request.json>"],
+                "result": "render-report-json"
+            },
+            {
+                "name": "--render-experimental-session",
+                "argv": ["--render-experimental-session|--render-experimental-session-param", "<aex>", "<input-image>", "<output-image>", "argb8|argb16|argb32f", "classic|smart", "<current-time>", "<total-time>", "<time-scale>", "<slot>", "<value>"],
+                "result": "session-render-report-json",
+                "aliases": ["--render-experimental-session", "--render-experimental-session-param"],
+                "note": "The final slot/value pair is required only for --render-experimental-session-param."
+            },
+            {
+                "name": "--render-experimental",
+                "argv": ["--render-experimental|--render-experimental-auto|--render-experimental-16|--render-experimental-16-deep|--render-experimental-32|--render-experimental-smart|--render-experimental-smart-16|--render-experimental-smart-16-deep|--render-experimental-smart-32|--render-experimental-smart-32-cpu", "<aex>", "<input-image>", "<output-image>"],
+                "result": "render-report-json"
+            },
+            {
+                "name": "experimental-probes",
+                "aliases": [
+                    "--probe-experimental-options-dialog",
+                    "--probe-experimental-automatic-options-dialog",
+                    "--probe-experimental-nop-render",
+                    "--probe-experimental-smart-nop-render",
+                    "--probe-experimental-input-buffer-write",
+                    "--probe-experimental-smart-input-buffer-write",
+                    "--probe-experimental-expand-buffer",
+                    "--probe-experimental-shrink-buffer",
+                    "--probe-experimental-persistent-sequence",
+                    "--probe-experimental-flattened-sequence",
+                    "--probe-experimental-copied-flattened-sequence"
+                ],
+                "argv": ["<probe-command>", "<aex>"],
+                "result": "probe-report-json",
+                "note": "Every listed probe uses the same one-AEX argument shape."
+            },
+            {
+                "name": "experimental-aegp",
+                "aliases": [
+                    "--initialize-experimental-aegp",
+                    "--dispatch-experimental-aegp-update-menu",
+                    "--dispatch-experimental-aegp-idle",
+                    "--dispatch-experimental-aegp-command-roundtrip",
+                    "--dispatch-experimental-aegp-active-idle-roundtrip",
+                    "--dispatch-experimental-aegp-comp-idle-roundtrip",
+                    "--dispatch-experimental-aegp-keyframe-roundtrip",
+                    "--dispatch-experimental-aegp-seek-roundtrip",
+                    "--dispatch-experimental-aegp-trim-roundtrip",
+                    "--dispatch-experimental-aegp-switch-roundtrip"
+                ],
+                "argv": ["<aegp-command>", "<aex>"],
+                "result": "aegp-report-json"
+            }
+        ],
+        "safety": {
+            "native_aex_execution": true,
+            "not_a_security_sandbox": true,
+            "paths_are_caller_supplied": true,
+            "use_conformance_bundle_for_hashed_reproducible_artifacts": true
+        }
+    })
+}
+
+fn print_cli_help() {
+    println!(
+        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI."
+    );
+}
+
 fn main() -> eframe::Result {
     aexcompat_broker::observability::init();
     let args: Vec<_> = std::env::args_os().collect();
+    if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
+        print_cli_help();
+        return Ok(());
+    }
+    if args.len() == 2 && args[1] == "--print-cli-contract" {
+        println!("{}", serde_json::to_string_pretty(&cli_contract()).unwrap());
+        return Ok(());
+    }
     let repository = repository_root(&args);
     if args.len() == 4 && args[1] == "--compare-images" {
         match compare_images(Path::new(&args[2]), Path::new(&args[3])) {

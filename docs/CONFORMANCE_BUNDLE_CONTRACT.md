@@ -47,3 +47,20 @@ Current native execution supports disabled color management, no working space, l
 disabled, and the `AEXCompat CPU`/`software` renderer aliases. Generated bundle paths
 (`manifest.json`, `report.json`, and the `diagnostics`, `outputs`, `raw`, `requests`, and
 `target` namespaces) are reserved and cannot be used by pinned artifacts.
+
+## Agent-facing harness contract
+
+The native harness exposes its existing CLI surface without requiring an agent to parse
+`main.rs` or guess whether a command falls through to the GUI:
+
+```powershell
+.\aexcompat-harness.exe --print-cli-contract | ConvertFrom-Json
+.\aexcompat-harness.exe --help
+```
+
+`--print-cli-contract` writes the versioned `aexcompat.harness-cli-contract` JSON document to
+stdout. It lists the inspection, dependency, render, probe, and AEGP routes, their positional
+argument shapes, JSON result channel, failure channel, and the explicit GUI fallback for unknown
+or malformed arguments. This is command metadata only; it does not load an AEX. Native AEX
+execution remains isolated worker execution and is not a security sandbox. For hash-pinned,
+redacted evidence, use the conformance bundle runner above.
