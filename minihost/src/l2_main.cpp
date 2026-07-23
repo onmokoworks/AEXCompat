@@ -51,6 +51,7 @@
 #include "gpu_memory_world_transport.hpp"
 #include "host_audio_runtime.hpp"
 #include "l2_cli_dispatch.h"
+#include "aex_string_table.hpp"
 #include "l2_mode_execution.hpp"
 #include "parameter_animation_transport.hpp"
 #include "worker_parameter_runtime.hpp"
@@ -968,11 +969,50 @@ int32_t __cdecl host_extended_free(void** ptr) {
   if (ptr) std::free(*ptr);
   return 0;
 }
-// TODO(#382-follow-up): resolve the real string from the plug-in's string
-// resources ($$$/... localization keys). This placeholder unblocks selector
-// dispatch but every parameter name reads "AEXCompat" for now.
-const char* __cdecl host_extended_lookup(void*, int32_t, void*, void*) {
-  return "AEXCompat";
+
+constexpr std::uintmax_t kMaxAexStringTableFileBytes = 256u * 1024u * 1024u;
+thread_local const aexcompat::aex_strings::StringTable*
+    g_active_aex_string_table = nullptr;
+
+bool load_aex_string_table(
+    HMODULE module, aexcompat::aex_strings::StringTable& table) {
+  table = {};
+  wchar_t module_path[32768]{};
+  const DWORD length = GetModuleFileNameW(
+      module, module_path, static_cast<DWORD>(std::size(module_path)));
+  if (length == 0 || length >= std::size(module_path)) {
+    table.status = aexcompat::aex_strings::ParseStatus::Invalid;
+    return false;
+  }
+  std::ifstream input(std::filesystem::path(module_path), std::ios::binary);
+  if (!input) {
+    table.status = aexcompat::aex_strings::ParseStatus::Invalid;
+    return false;
+  }
+  input.seekg(0, std::ios::end);
+  const std::streamoff end = input.tellg();
+  if (end <= 0 || static_cast<std::uintmax_t>(end) >
+                       kMaxAexStringTableFileBytes) {
+    table.status = aexcompat::aex_strings::ParseStatus::Invalid;
+    return false;
+  }
+  input.seekg(0, std::ios::beg);
+  std::vector<unsigned char> bytes(static_cast<std::size_t>(end));
+  input.read(reinterpret_cast<char*>(bytes.data()),
+             static_cast<std::streamsize>(bytes.size()));
+  if (!input) {
+    table.status = aexcompat::aex_strings::ParseStatus::Invalid;
+    return false;
+  }
+  table = aexcompat::aex_strings::parse_readonly_pe_strings(
+      bytes.data(), bytes.size());
+  return table.status != aexcompat::aex_strings::ParseStatus::Invalid;
+}
+
+const char* __cdecl host_extended_lookup(void*, int32_t id, void*, void*) {
+  return g_active_aex_string_table
+             ? g_active_aex_string_table->lookup(id)
+             : nullptr;
 }
 
 void append_pipl_u32(std::vector<unsigned char>& bytes, uint32_t value) {
@@ -2392,6 +2432,16 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     return session.finish(12);
   }
 
+  aexcompat::aex_strings::StringTable aex_string_table;
+  load_aex_string_table(module, aex_string_table);
+  const char* string_table_status =
+      aex_string_table.status == aexcompat::aex_strings::ParseStatus::Valid
+          ? "valid"
+          : aex_string_table.status == aexcompat::aex_strings::ParseStatus::NoEntries
+              ? "none"
+              : "invalid";
+  std::cerr << "string_table_status:" << string_table_status << "\n" << std::flush;
+  g_active_aex_string_table = &aex_string_table;
   aexcompat::worker_runtime::effect_bootstrap::State effect_state{};
   auto& input = effect_state.input;
   auto& output = effect_state.output;
@@ -2457,6 +2507,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
          observe_arbitrary_defaults(callback, state.input, state.output);
        },
        +[]() { return static_cast<int32_t>(g_params.size()); }});
+  g_active_aex_string_table = nullptr;
   const int32_t global_error = bootstrap.global_error;
   const int32_t about_error = bootstrap.about_error;
   const int32_t params_error = bootstrap.params_error;
