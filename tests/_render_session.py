@@ -17,6 +17,37 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS = ROOT / "broker" / "target" / "release" / "aexcompat-harness.exe"
 
 
+def assert_artifact_fresh(artifact: Path, *runtime_inputs: Path):
+    """Reject an existing probe that predates a current runtime input.
+
+    Built-artifact tests are opt-in and intentionally do not build native
+    inputs themselves.  Existence alone is not enough, though: a probe built
+    before the worker or session harness changed can fail in a way that looks
+    like a runtime regression.  The build scripts run after these inputs in
+    CI, so a stale artifact is safely treated as a local rebuild requirement.
+    """
+
+    artifact = Path(artifact)
+    if not artifact.is_file():
+        raise AssertionError(f"built artifact is missing: {artifact}")
+    artifact_mtime = artifact.stat().st_mtime_ns
+    newer_inputs = []
+    for runtime_input in runtime_inputs:
+        runtime_input = Path(runtime_input)
+        if not runtime_input.is_file():
+            raise AssertionError(f"freshness input is missing: {runtime_input}")
+        input_mtime = runtime_input.stat().st_mtime_ns
+        if input_mtime > artifact_mtime:
+            newer_inputs.append(f"{runtime_input} (mtime_ns={input_mtime})")
+    if newer_inputs:
+        raise AssertionError(
+            f"stale built artifact: {artifact} (mtime_ns={artifact_mtime}) "
+            "is older than current runtime input(s): "
+            + ", ".join(newer_inputs)
+            + "; rebuild the artifact from this checkout"
+        )
+
+
 def run_session_render(
     tmp_path: Path,
     plugin: Path,

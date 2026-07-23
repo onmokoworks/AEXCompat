@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from _render_session import run_session_render
+from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-aegp-render-suite5-probe" / "pf_aegp_render_suite5_probe.cpp"
@@ -42,6 +42,7 @@ def test_real_probe_exercises_render_suite5_metadata_and_lifecycle(tmp_path):
     assert WORKER.is_file()
     assert PROBE.is_file()
     assert INPUT.is_file()
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
     output = tmp_path / "render-suite5-output.rgba"
     try:
         report = run_session_render(
