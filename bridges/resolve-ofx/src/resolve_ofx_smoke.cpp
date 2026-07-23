@@ -25,11 +25,18 @@ struct Value {
   void *pointer_value = nullptr;
 };
 
+struct FakeImageObject;
+
 struct FakePropertySet {
   std::unordered_map<std::string, Value> values;
+  void *owner = nullptr;
 };
 
-struct FakeImageObject;
+struct FakeParam {
+  FakePropertySet properties;
+  double value = 0.5;
+  double last_time = -1.0;
+};
 
 struct FakeClip {
   FakeImageObject *owner = nullptr;
@@ -40,6 +47,7 @@ struct FakeClip {
 struct FakeImageObject {
   FakePropertySet properties;
   FakePropertySet params;
+  FakeParam strength;
   std::vector<std::unique_ptr<FakePropertySet>> children;
   FakeClip source_clip;
   FakeClip output_clip;
@@ -153,8 +161,9 @@ static OfxStatus image_get_properties(OfxImageEffectHandle h,
 static OfxStatus image_get_params(OfxImageEffectHandle h,
                                   OfxParamSetHandle *out) {
   if (!h || !out) return kOfxStatErrBadHandle;
-  *out = reinterpret_cast<OfxParamSetHandle>(
-      &reinterpret_cast<FakeImageObject *>(h)->params);
+  auto *image = reinterpret_cast<FakeImageObject *>(h);
+  image->params.owner = image;
+  *out = reinterpret_cast<OfxParamSetHandle>(&image->params);
   return kOfxStatOK;
 }
 
@@ -219,6 +228,38 @@ static OfxStatus parameter_define(OfxParamSetHandle h, const char *,
   return kOfxStatOK;
 }
 
+static OfxStatus parameter_get_handle(OfxParamSetHandle h, const char *name,
+                                      OfxParamHandle *param,
+                                      OfxPropertySetHandle *properties) {
+  if (!h || !name || !param || std::strcmp(name, "strength") != 0) {
+    return kOfxStatErrBadHandle;
+  }
+  auto *set = reinterpret_cast<FakePropertySet *>(h);
+  auto *image = static_cast<FakeImageObject *>(set->owner);
+  if (!image) return kOfxStatErrBadHandle;
+  image->strength.properties.owner = image;
+  *param = reinterpret_cast<OfxParamHandle>(&image->strength);
+  if (properties) {
+    *properties = reinterpret_cast<OfxPropertySetHandle>(
+        &image->strength.properties);
+  }
+  return kOfxStatOK;
+}
+
+static OfxStatus parameter_get_value_at_time(OfxParamHandle handle,
+                                             OfxTime time, ...) {
+  if (!handle || !std::isfinite(time)) return kOfxStatErrBadHandle;
+  auto *param = reinterpret_cast<FakeParam *>(handle);
+  va_list args;
+  va_start(args, time);
+  auto *value = va_arg(args, double *);
+  va_end(args);
+  if (!value) return kOfxStatErrBadHandle;
+  param->last_time = time;
+  *value = param->value;
+  return kOfxStatOK;
+}
+
 static OfxPropertySuiteV1 g_properties = {prop_set_pointer,
                                           prop_set_string,
                                           prop_set_double,
@@ -236,7 +277,7 @@ static OfxImageEffectSuiteV1 g_image_effect = {image_get_properties,
                                                 image_clip_get_property_set,
                                                 image_clip_get_image,
                                                 image_clip_release_image};
-static OfxParameterSuiteV1 g_parameters = {parameter_define};
+static OfxParameterSuiteV1 g_parameters = {parameter_define, parameter_get_handle, nullptr, nullptr, nullptr, parameter_get_value_at_time};
 
 static const void *fetch_suite(OfxPropertySetHandle, const char *name, int) {
   if (std::strcmp(name, kOfxPropertySuite) == 0) return &g_properties;
@@ -273,6 +314,7 @@ static void set_image_property(FakePropertySet &properties, const char *name,
 }
 
 static void initialize_fixture(FakeImageObject &instance) {
+  instance.strength.value = 0.25;
   instance.source_clip.owner = &instance;
   instance.source_clip.source = true;
   instance.output_clip.owner = &instance;
@@ -317,8 +359,8 @@ static bool rendered_fixture_ok(const FakeImageObject &instance,
         continue;
       }
       for (int channel = 0; channel < 3; ++channel) {
-        const auto expected =
-            static_cast<unsigned char>((source[source_offset + channel] + 1) / 2);
+        const auto expected = static_cast<unsigned char>(
+            source[source_offset + channel] * 0.75 + 0.5);
         if (output[output_offset + channel] != expected) return false;
         ++changed;
       }
@@ -329,7 +371,7 @@ static bool rendered_fixture_ok(const FakeImageObject &instance,
     }
   }
   if (changed_bytes) *changed_bytes = changed;
-  return instance.last_source_time == 7.0 && instance.last_output_time == 7.0;
+  return instance.last_source_time == 7.0 && instance.last_output_time == 7.0 && instance.strength.last_time == 7.0;
 }
 
 static std::string sha256(const std::vector<unsigned char> &bytes) {
@@ -470,7 +512,7 @@ int main(int argc, char **argv) {
             << ",\"rgba8_contract\":true,\"stride_checked\":"
             << (render_verified ? "true" : "false")
             << ",\"alpha_preserved\":" << (render_verified ? "true" : "false")
-            << ",\"frame_time\":7.0,\"input_sha256\":\"" << input_sha256
+            << ",\"frame_time\":7.0,\"parameter\":{\"name\":\"strength\",\"time\":7.0,\"value\":0.25},\"input_sha256\":\"" << input_sha256
             << "\",\"output_sha256\":\"" << output_sha256
             << "\",\"pixel_diff\":" << changed_bytes
             << ",\"lifecycle_ok\":"

@@ -25,8 +25,8 @@
   },
   "identity": {
     "plugin_identifier": "com.aexcompat.resolve.ofx",
-    "source_sha256": "305CCE47B4E8028B550A74C49F701CAC160840E5F16C3C0CB8C83F011BADBFC9",
-    "binary_sha256": "74485252CB2CE131788E55FC9E8EF5C509627FD298D8A8D0729BA8FF32AABC00",
+    "source_sha256": "047BA904757D17F4130E3768C93BB5ADF1E18E906D55AE3CEA90DFB6C77A61FC",
+    "binary_sha256": "B0A8D2806559A5912F384C409E5A05E8C6AF0A180811A98F0F5BB84CBCB3A092",
     "worker_identity": "not_claimed_until_shared_RenderSession_gate",
     "input_sha256": null,
     "output_sha256": null,
@@ -43,8 +43,13 @@
     "source_rowbytes": 20,
     "output_rowbytes": 24,
     "frame_time": 7.0,
+    "parameter": {
+      "name": "strength",
+      "time": 7.0,
+      "value": 0.25
+    },
     "input_sha256": "BAB34C631AD014956B753F38982CF9E10868FA5817C890754A7DFE2B72337FA6",
-    "output_sha256": "933A4189AE74D7CAFE01C96F38EF8DBCF3045EC6D19AA5BBA0B4CC18099C8F65",
+    "output_sha256": "62D50D3EFA7A752FA5D300C98EAD1D4559E9F188B5E92EF5D66F69449693816C",
     "pixel_diff": 12,
     "alpha_preserved": true,
     "padding_preserved": true

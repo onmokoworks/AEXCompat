@@ -31,6 +31,7 @@ def test_resolve_ofx_contract_is_machine_checkable_and_fail_closed():
     )
     assert contract["control_render"]["source_rowbytes"] == 20
     assert contract["control_render"]["output_rowbytes"] == 24
+    assert contract["control_render"]["parameter"] == {"name": "strength", "time": 7.0, "value": 0.25}
     assert contract["control_render"]["pixel_diff"] == 12
     assert contract["aex_render_gate"]["state"] == "blocked"
     assert contract["aex_render_gate"]["success_status"] == "not_claimed"
@@ -60,6 +61,8 @@ def test_resolve_ofx_source_contains_real_exports_and_no_identity_success():
     assert "clipGetImage" in source
     assert "kOfxImagePropRowBytes" in source
     assert "kOfxStatErrUnsupported" in source
+    assert "paramGetValueAtTime" in source
+    assert "strength" in source
     assert "return kOfxStatErrUnsupported;" in source
     assert "OpenFX" in header
     assert "BSD-3-Clause" in header

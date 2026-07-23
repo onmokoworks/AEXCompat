@@ -149,6 +149,13 @@ typedef struct OfxImageEffectSuiteV1 {
 typedef struct OfxParameterSuiteV1 {
   OfxStatus (*paramDefine)(OfxParamSetHandle, const char *, const char *,
                            OfxPropertySetHandle *);
+  OfxStatus (*paramGetHandle)(OfxParamSetHandle, const char *, OfxParamHandle *,
+                              OfxPropertySetHandle *);
+  OfxStatus (*paramSetGetPropertySet)(OfxParamSetHandle,
+                                      OfxPropertySetHandle *);
+  OfxStatus (*paramGetPropertySet)(OfxParamHandle, OfxPropertySetHandle *);
+  OfxStatus (*paramGetValue)(OfxParamHandle, ...);
+  OfxStatus (*paramGetValueAtTime)(OfxParamHandle, OfxTime, ...);
 } OfxParameterSuiteV1;
 
 AEXCOMPAT_OFX_EXPORT int OfxGetNumberOfPlugins(void);

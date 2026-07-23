@@ -1,5 +1,6 @@
 #include "resolve_ofx_abi.h"
 
+#include <cmath>
 #include <new>
 #include <string>
 
@@ -14,6 +15,7 @@ struct InstanceState {
   unsigned int lifecycle_cookie = 0xA3E0388u;
   OfxImageClipHandle source_clip = nullptr;
   OfxImageClipHandle output_clip = nullptr;
+  OfxParamHandle strength_param = nullptr;
 };
 
 OfxPropertySetHandle property_set(OfxImageEffectHandle handle) {
@@ -102,9 +104,9 @@ OfxStatus describe_in_context(OfxImageEffectHandle descriptor,
     return kOfxStatErrMissingHostFeature;
   }
 
-  // This bounded control effect uses the descriptor's default strength until
-  // the parameter-value suite is added. It is intentionally separate from the
-  // AEX RenderSession gate below.
+  // This bounded control effect exposes a standard double parameter. The
+  // instance reads it with paramGetValueAtTime during render and keeps that
+  // path separate from the AEX RenderSession gate below.
   if (g_parameters && g_image_effect->getParamSet && g_parameters->paramDefine) {
     OfxParamSetHandle param_set = nullptr;
     OfxPropertySetHandle param_properties = nullptr;
@@ -135,6 +137,16 @@ OfxStatus create_instance(OfxImageEffectHandle instance) {
       g_image_effect->clipGetHandle(instance, kOfxImageEffectOutputClipName,
                                     &state->output_clip, &output_properties) !=
           kOfxStatOK) {
+    set_pointer(property_set(instance), kOfxPropInstanceData, nullptr);
+    delete state;
+    return kOfxStatErrMissingHostFeature;
+  }
+  OfxParamSetHandle param_set = nullptr;
+  if (!g_parameters || !g_parameters->paramGetHandle ||
+      !g_image_effect->getParamSet ||
+      g_image_effect->getParamSet(instance, &param_set) != kOfxStatOK ||
+      g_parameters->paramGetHandle(param_set, "strength", &state->strength_param,
+                                   nullptr) != kOfxStatOK) {
     set_pointer(property_set(instance), kOfxPropInstanceData, nullptr);
     delete state;
     return kOfxStatErrMissingHostFeature;
@@ -173,6 +185,16 @@ OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle in_args) {
     return kOfxStatErrMissingHostFeature;
   }
   auto *state = static_cast<InstanceState *>(raw_state);
+  double strength = 0.0;
+  if (!g_parameters || !g_parameters->paramGetValueAtTime ||
+      !state->strength_param ||
+      g_parameters->paramGetValueAtTime(state->strength_param, frame_time,
+                                         &strength) != kOfxStatOK) {
+    return kOfxStatErrMissingHostFeature;
+  }
+  if (!std::isfinite(strength) || strength < 0.0 || strength > 1.0) {
+    return kOfxStatErrValue;
+  }
 
   OfxRectI render_window{};
   for (int index = 0; index < 4; ++index) {
@@ -257,8 +279,8 @@ OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle in_args) {
   }
 
   // Bounded, deterministic control effect: darken premultiplied RGB by the
-  // descriptor default (0.5), preserve alpha, and honor host rowbytes. This
-  // is an actual OFX pixel render, but it is not an AEX render claim.
+  // time-evaluated strength parameter, preserve alpha, and honor host rowbytes.
+  // This is an actual OFX pixel render, but it is not an AEX render claim.
   for (int y = y1; y < y2; ++y) {
     auto *source_row = static_cast<unsigned char *>(source_data) +
                        static_cast<long long>(y - source_bounds.y1) * source_row_bytes;
@@ -267,12 +289,13 @@ OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle in_args) {
     for (int x = x1; x < x2; ++x) {
       const auto source_offset = static_cast<size_t>(x - source_bounds.x1) * 4;
       const auto output_offset = static_cast<size_t>(x - output_bounds.x1) * 4;
-      output_row[output_offset + 0] =
-          static_cast<unsigned char>((source_row[source_offset + 0] + 1) / 2);
-      output_row[output_offset + 1] =
-          static_cast<unsigned char>((source_row[source_offset + 1] + 1) / 2);
-      output_row[output_offset + 2] =
-          static_cast<unsigned char>((source_row[source_offset + 2] + 1) / 2);
+      const auto attenuation = 1.0 - strength;
+      output_row[output_offset + 0] = static_cast<unsigned char>(
+          source_row[source_offset + 0] * attenuation + 0.5);
+      output_row[output_offset + 1] = static_cast<unsigned char>(
+          source_row[source_offset + 1] * attenuation + 0.5);
+      output_row[output_offset + 2] = static_cast<unsigned char>(
+          source_row[source_offset + 2] * attenuation + 0.5);
       output_row[output_offset + 3] = source_row[source_offset + 3];
     }
   }
