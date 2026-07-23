@@ -11,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <vector>
 
 namespace aexcompat::aegp_staged_item_runtime {
@@ -20,6 +21,28 @@ using render_options::ItemValue;
 using render_receipts::ReceiptDraft;
 using suite_abi::AegpRect;
 using suite_abi::AegpTime;
+
+struct NormalizedRational {
+  int64_t numerator{};
+  uint64_t denominator{};
+  bool valid{};
+
+  friend bool operator==(const NormalizedRational& left,
+                         const NormalizedRational& right) {
+    return left.valid == right.valid && (!left.valid ||
+        (left.numerator == right.numerator && left.denominator == right.denominator));
+  }
+};
+
+NormalizedRational normalize_rational(AegpTime time) noexcept {
+  if (time.scale == 0) return {};
+  const int64_t numerator = time.value;
+  const uint64_t denominator = time.scale;
+  const uint64_t magnitude = numerator < 0
+      ? static_cast<uint64_t>(-numerator) : static_cast<uint64_t>(numerator);
+  const uint64_t divisor = std::gcd(magnitude, denominator);
+  return {numerator / static_cast<int64_t>(divisor), denominator / divisor, true};
+}
 
 struct StagedItemWorld {
   void* item{};
@@ -32,6 +55,27 @@ struct StagedItemWorld {
   int32_t height{};
   int32_t rowbytes{};
   uint32_t project_generation{};
+  struct StageIdentity {
+    void* item{};
+    NormalizedRational time{};
+    NormalizedRational time_step{};
+    int8_t quality{};
+    uint8_t guide_layers{};
+    int32_t pixel_format{};
+    int32_t width{};
+    int32_t height{};
+    int32_t rowbytes{};
+    uint32_t project_generation{};
+
+    friend bool operator==(const StageIdentity& left, const StageIdentity& right) {
+      return left.item == right.item && left.time == right.time &&
+          left.time_step == right.time_step && left.quality == right.quality &&
+          left.guide_layers == right.guide_layers &&
+          left.pixel_format == right.pixel_format && left.width == right.width &&
+          left.height == right.height && left.rowbytes == right.rowbytes &&
+          left.project_generation == right.project_generation;
+    }
+  } identity{};
   uint64_t stage_generation{};
   std::shared_ptr<const std::vector<std::byte>> backing;
 };
@@ -52,6 +96,9 @@ std::atomic<uint32_t> g_published{};
 std::atomic<uint32_t> g_cache_hits{};
 std::atomic<uint32_t> g_cache_misses{};
 std::atomic<uint32_t> g_cycles_rejected{};
+std::atomic<uint32_t> g_generation_invalidations{};
+std::atomic<uint32_t> g_evictions{};
+uint32_t g_cache_generation{};
 
 int32_t pixel_bytes_for(int32_t pixel_format) {
   if (pixel_format == world_registry::kPixelFormatArgb32) return 4;
@@ -62,8 +109,28 @@ int32_t pixel_bytes_for(int32_t pixel_format) {
 
 bool same_rational(const AegpTime& left, const AegpTime& right) {
   return left.scale != 0 && right.scale != 0 &&
-      static_cast<int64_t>(left.value) * right.scale ==
-      static_cast<int64_t>(right.value) * left.scale;
+      normalize_rational(left) == normalize_rational(right);
+}
+
+StagedItemWorld::StageIdentity make_stage_identity(
+    void* item, AegpTime time, AegpTime time_step, int8_t quality,
+    uint8_t guide_layers, int32_t pixel_format, int32_t width, int32_t height,
+    int32_t rowbytes, uint32_t project_generation) noexcept {
+  return {item, normalize_rational(time), normalize_rational(time_step), quality,
+          guide_layers, pixel_format, width, height, rowbytes, project_generation};
+}
+
+void invalidate_generation_locked() {
+  if (!g_worlds.empty() || g_cache_generation != 0) ++g_generation_invalidations;
+  g_worlds.clear();
+  g_cache_generation = 0;
+}
+
+void ensure_generation(uint32_t generation) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (g_cache_generation != 0 && g_cache_generation != generation)
+    invalidate_generation_locked();
+  g_cache_generation = generation;
 }
 
 bool stack_contains(const ItemRenderStackKey& key) {
@@ -89,13 +156,22 @@ bool snapshot_world(const ItemValue& options, StagedItemWorld& stage) {
        (options.world_type == 3 ? world_registry::kPixelFormatArgb128 : 0));
   if (!g_hooks.project_generation) return false;
   const uint32_t generation = g_hooks.project_generation();
+  if (generation == 0) return false;
+  ensure_generation(generation);
   std::lock_guard<std::mutex> lock(g_mutex);
   const auto found = std::find_if(g_worlds.rbegin(), g_worlds.rend(), [&](const auto& value) {
     return value.item == options.item && same_rational(value.time, options.time) &&
         same_rational(value.time_step, options.time_step) &&
         value.quality == options.render_quality &&
         value.guide_layers == options.render_guide_layers &&
-        value.pixel_format == pixel_format && value.project_generation == generation;
+        value.pixel_format == pixel_format && value.project_generation == generation &&
+        value.identity.item == options.item &&
+        value.identity.time == normalize_rational(options.time) &&
+        value.identity.time_step == normalize_rational(options.time_step) &&
+        value.identity.quality == options.render_quality &&
+        value.identity.guide_layers == options.render_guide_layers &&
+        value.identity.pixel_format == pixel_format &&
+        value.identity.project_generation == generation;
   });
   if (found == g_worlds.rend() || !found->backing) {
     ++g_cache_misses;
@@ -202,7 +278,7 @@ void configure(Hooks hooks) noexcept { g_hooks = hooks; }
 
 void clear() noexcept {
   std::lock_guard<std::mutex> lock(g_mutex);
-  g_worlds.clear();
+  invalidate_generation_locked();
 }
 
 bool publish_world(void* item, AegpTime time, AegpTime time_step, int8_t quality,
@@ -225,17 +301,23 @@ bool publish_world(void* item, AegpTime time, AegpTime time_step, int8_t quality
           static_cast<std::size_t>(tight_rowbytes));
   } catch (...) { return false; }
   const uint32_t project_generation = g_hooks.project_generation();
+  if (project_generation == 0) return false;
+  ensure_generation(project_generation);
   const uint64_t stage_generation = g_stage_generation.fetch_add(1);
-  if (project_generation == 0 || stage_generation == 0) return false;
+  if (stage_generation == 0) return false;
+  const auto identity = make_stage_identity(item, time, time_step, quality, guide_layers,
+      pixel_format, width, height, static_cast<int32_t>(tight_rowbytes), project_generation);
+  if (!identity.time.valid || !identity.time_step.valid) return false;
   StagedItemWorld stage{item, time, time_step, quality, guide_layers, pixel_format, width, height,
-      static_cast<int32_t>(tight_rowbytes), project_generation, stage_generation, std::move(backing)};
+      static_cast<int32_t>(tight_rowbytes), project_generation, identity, stage_generation,
+      std::move(backing)};
   std::lock_guard<std::mutex> lock(g_mutex);
   auto same_key = [&](const auto& value) {
     return value.item == item && same_rational(value.time, time) &&
         same_rational(value.time_step, time_step) && value.quality == quality &&
         value.guide_layers == guide_layers && value.pixel_format == pixel_format &&
         value.width == width && value.height == height && value.rowbytes == tight_rowbytes &&
-        value.project_generation == project_generation;
+        value.project_generation == project_generation && value.identity == identity;
   };
   const auto existing = std::find_if(g_worlds.begin(), g_worlds.end(), same_key);
   if (existing != g_worlds.end()) *existing = std::move(stage);
@@ -243,6 +325,7 @@ bool publish_world(void* item, AegpTime time, AegpTime time_step, int8_t quality
     const auto oldest = std::min_element(g_worlds.begin(), g_worlds.end(),
         [](const auto& left, const auto& right) { return left.stage_generation < right.stage_generation; });
     *oldest = std::move(stage);
+    ++g_evictions;
   } else {
     try { g_worlds.push_back(std::move(stage)); } catch (...) { return false; }
   }
@@ -285,7 +368,7 @@ bool verify_recursion_guard(void* item, AegpTime time, void* options, Checkout c
 
 Diagnostics diagnostics() noexcept {
   return {g_published.load(), g_cache_hits.load(), g_cache_misses.load(),
-          g_cycles_rejected.load()};
+          g_cycles_rejected.load(), g_generation_invalidations.load(), g_evictions.load()};
 }
 
 }  // namespace aexcompat::aegp_staged_item_runtime

@@ -318,6 +318,12 @@ bool verify_aegp_item_staged_worlds() {
         render_checkout_frame_reject(options, nullptr, nullptr, out_receipt) == 0 &&
         *out_receipt && get_receipt_world(*out_receipt, out_world) == 0 && *out_world;
   };
+  void* rational_receipt = nullptr;
+  void** rational_world = nullptr;
+  if (render_options_set_time(options, {10, 48}) != 0 ||
+      !checkout(1, 1, 1, {}, 0, 0, 0, &rational_receipt, &rational_world) ||
+      checkin_frame(rational_receipt) != 0 || render_options_set_time(options, time) != 0)
+    return false;
   for (int32_t depth = 1; depth <= 3; ++depth) {
     void* receipt = nullptr;
     void** world = nullptr;
@@ -394,7 +400,16 @@ bool verify_aegp_item_staged_worlds() {
       checkin_frame(first) == 0 || aegp_world_get_type(first_world, &pinned_type) == 0)
     return false;
 
+  const auto evictions_before = aexcompat::aegp_staged_item_runtime::diagnostics().evictions;
   auto pixels8 = fixture(4);
+  for (std::uintptr_t index = 0; index < 40; ++index) {
+    if (!aexcompat::aegp_staged_item_runtime::publish_world(
+            reinterpret_cast<void*>(0x2000u + index * 16u), time, step, 1, 0,
+            kPixelFormatArgb32, width, height, width * 4, pixels8.data())) return false;
+  }
+  if (aexcompat::aegp_staged_item_runtime::diagnostics().evictions <= evictions_before)
+    return false;
+  clear_staged_item_worlds_for_test();
   if (!aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(), time, step, 1, 0,
           kPixelFormatArgb32, width, height, width * 4, pixels8.data())) return false;
   void* rejected = reinterpret_cast<void*>(1);
@@ -412,8 +427,12 @@ bool verify_aegp_item_staged_worlds() {
       render_checkout_frame_reject(options, nullptr, nullptr, &rejected) == 0 || rejected ||
       render_options_set_time(options, time) != 0) return false;
 
+  const auto invalidations_before =
+      aexcompat::aegp_staged_item_runtime::diagnostics().generation_invalidations;
   if (!verify_item_render_cycle_contract(options)) return false;
-  return render_options_lifetimes_balanced() && async_receipt_lifetimes_balanced();
+  const auto diagnostics = aexcompat::aegp_staged_item_runtime::diagnostics();
+  return diagnostics.generation_invalidations > invalidations_before &&
+      render_options_lifetimes_balanced() && async_receipt_lifetimes_balanced();
 }
 
 int32_t acquire_suite(const char*, int32_t, const void**);

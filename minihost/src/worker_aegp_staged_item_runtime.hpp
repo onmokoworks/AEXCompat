@@ -22,6 +22,8 @@ struct Diagnostics {
   uint32_t cache_hits{};
   uint32_t cache_misses{};
   uint32_t cycles_rejected{};
+  uint32_t generation_invalidations{};
+  uint32_t evictions{};
 };
 
 void configure(Hooks hooks) noexcept;

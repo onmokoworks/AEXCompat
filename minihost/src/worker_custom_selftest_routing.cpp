@@ -192,6 +192,8 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << ",\"cache_hits\":" << staged.cache_hits
         << ",\"cache_misses\":" << staged.cache_misses
         << ",\"cycles_rejected\":" << staged.cycles_rejected
+        << ",\"generation_invalidations\":" << staged.generation_invalidations
+        << ",\"evictions\":" << staged.evictions
         << "}\n";
     return {true, passed ? 0 : 1, out.str()};
   }
