@@ -6163,6 +6163,8 @@ pub(crate) fn build_interactive_image_report(
         "async_layer_requests_created",
         "async_layer_requests_completed",
         "async_layer_requests_canceled",
+        "async_layer_callback_failures",
+        "async_layer_callback_exceptions",
         "live_async_layer_requests",
         "async_layer_reserved_bytes",
         "malformed_checkout_request_count",

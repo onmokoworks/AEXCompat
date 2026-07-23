@@ -16,6 +16,7 @@ def test_built_artifact_probes_have_a_supported_session_only_entrypoint():
     assert "the deleted one-shot image argv" in source
 
     migrated = (
+        "test_pf_aegp_async_cancel_probe.py",
         "test_pf_aegp_async_layer_receipt_probe.py",
         "test_pf_aegp_external_cache_roundtrip_probe.py",
         "test_pf_aegp_fast_blur_probe.py",
