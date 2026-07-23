@@ -135,7 +135,7 @@ pub fn run(
             require_module_audit: true,
         };
         let start = Instant::now();
-        let result = secure_launch(tree, request, Duration::from_millis(timeout_ms))?;
+        let result = secure_launch(tree, request, Some(Duration::from_millis(timeout_ms)))?;
         let elapsed = start.elapsed().as_millis().min(30_000) as u64;
         let worker_report: Value =
             serde_json::from_str(result.stdout.trim()).unwrap_or_else(|_| {

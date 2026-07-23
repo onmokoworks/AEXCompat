@@ -90,7 +90,11 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
         repository,
         require_module_audit: true,
     };
-    let result = secure_launch(tree, request, Duration::from_millis(approved.timeout_ms))?;
+    let result = secure_launch(
+        tree,
+        request,
+        Some(Duration::from_millis(approved.timeout_ms)),
+    )?;
     let worker_report: Value = serde_json::from_str(result.stdout.trim()).unwrap_or_else(|_| {
         json!({
             "status": "worker_report_unavailable",

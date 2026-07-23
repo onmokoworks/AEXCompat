@@ -742,7 +742,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
                 repository,
                 require_module_audit: true,
             },
-            Duration::from_millis(timeout_ms),
+            Some(Duration::from_millis(timeout_ms)),
         )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
@@ -984,7 +984,7 @@ pub fn execute_smart(
                 repository,
                 require_module_audit: true,
             },
-            Duration::from_millis(timeout_ms),
+            Some(Duration::from_millis(timeout_ms)),
         )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
@@ -1385,7 +1385,7 @@ pub fn execute_smart_suite_fault(
                 repository,
                 require_module_audit: true,
             },
-            Duration::from_millis(timeout_ms),
+            Some(Duration::from_millis(timeout_ms)),
         )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
@@ -1711,7 +1711,7 @@ pub fn execute_smart_mask_scene(
                 repository,
                 require_module_audit: true,
             },
-            Duration::from_millis(timeout_ms),
+            Some(Duration::from_millis(timeout_ms)),
         )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));

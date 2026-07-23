@@ -1167,7 +1167,7 @@ impl RenderSession {
             dependencies,
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
-            timeout: request.frame_deadline,
+            timeout: Some(request.frame_deadline),
         };
         let child_handles = SessionChildHandles {
             request_read: request_read.raw(),
@@ -1316,7 +1316,7 @@ impl RenderSession {
         let Some(process) = self.process.take() else {
             return;
         };
-        self.collected = Some(match process.finish(wait) {
+        self.collected = Some(match process.finish(Some(wait)) {
             Ok(result) => CollectedExit {
                 result: Some(result),
                 error: None,
@@ -2817,7 +2817,7 @@ impl AudioRenderSession {
             dependencies: request.dependencies,
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
-            timeout: request.frame_deadline,
+            timeout: Some(request.frame_deadline),
         };
         let child_handles = SessionChildHandles {
             request_read: request_read.raw(),
@@ -2895,7 +2895,7 @@ impl AudioRenderSession {
         let Some(process) = self.process.take() else {
             return;
         };
-        self.collected = Some(match process.finish(wait) {
+        self.collected = Some(match process.finish(Some(wait)) {
             Ok(result) => CollectedExit {
                 result: Some(result),
                 error: None,

@@ -124,7 +124,7 @@ mod windows_probe {
             repository: &repository.0,
             require_module_audit: false,
         };
-        match secure_launch(tree, request, Duration::from_secs(60)) {
+        match secure_launch(tree, request, Some(Duration::from_secs(60))) {
             Ok(result) if result.exit_code == STATUS_DLL_INIT_FAILED => {
                 // println!, not eprintln!: libtest's --show-output is what makes
                 // these lines survive into the CI log, and stdout is the stream

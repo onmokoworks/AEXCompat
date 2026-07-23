@@ -88,7 +88,7 @@ fn dispatch_approved_image(
     approved_sha256: &str,
     args_before_plugin: &[String],
     args_after_plugin: &[String],
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> io::Result<crate::secure_launch::SecureLaunchResult> {
     dispatch_secure_image(SecureImageDispatch {
         repository,
@@ -114,7 +114,7 @@ fn dispatch_approved_image_with_dependencies(
     dependencies: Vec<ApprovedImageArtifact>,
     args_before_plugin: &[String],
     args_after_plugin: &[String],
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> io::Result<crate::secure_launch::SecureLaunchResult> {
     dispatch_secure_image(SecureImageDispatch {
         repository,
@@ -317,7 +317,7 @@ pub fn prepare_gpu_runtime_policy(
         preflight_dependencies,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(30_000),
+        Some(Duration::from_millis(30_000)),
     )?;
     // The synchronous dispatch has returned, so the worker has consumed the
     // manifest; drop the transport to remove the temp file.
@@ -2505,7 +2505,7 @@ pub fn inspect_experimental_external_dependencies(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -2554,7 +2554,7 @@ pub fn probe_experimental_options_dialog(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -2612,7 +2612,7 @@ pub fn probe_experimental_automatic_options_dialog(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -2673,7 +2673,7 @@ pub fn probe_experimental_nop_render(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -2723,7 +2723,7 @@ pub fn probe_experimental_smart_nop_render(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -2777,7 +2777,7 @@ pub fn probe_experimental_input_buffer_write(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -2827,7 +2827,7 @@ pub fn probe_experimental_smart_input_buffer_write(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -2888,7 +2888,7 @@ fn probe_experimental_frame_resize(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -2979,7 +2979,7 @@ pub fn probe_experimental_persistent_sequence(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -3030,7 +3030,7 @@ pub fn probe_experimental_flattened_sequence(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -3082,7 +3082,7 @@ pub fn probe_experimental_copied_flattened_sequence(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+        Some(Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS)),
     )?;
     let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     if isolated.classification.as_str() != "ok" {
@@ -3177,26 +3177,6 @@ pub fn inspect_experimental_with_runtime_policy(
     )
 }
 
-/// The watchdog an inspection launch gets.
-///
-/// A dependency-free inspection is a small AEX and 5 s is generous. Sealed
-/// dependencies change the shape of the work: the worker has to map every one of
-/// them before the first selector runs, and an Adobe runtime closure can be
-/// a gigabyte, so a fixed 5 s reports "timed out" for a plug-in that was only
-/// still loading. Scale with the bytes actually handed to the worker — the rate
-/// comes from cold-cache measurements over the AE 2025 corpus, where a ~1 GB
-/// closure needed just over 20 s to map — and keep a hard ceiling so the timeout
-/// stays a crash-containment bound rather than an open-ended wait.
-fn inspection_deadline(dependencies: &[ApprovedImageArtifact]) -> Duration {
-    const BASE: Duration = Duration::from_millis(5_000);
-    const PER_BYTE_MILLIS_DIVISOR: u64 = 32 * 1_024; // 1 s per 32 MiB
-    const CEILING: Duration = Duration::from_secs(120);
-    let bytes = dependencies.iter().fold(0u64, |total, dependency| {
-        total.saturating_add(dependency.expected_size)
-    });
-    (BASE + Duration::from_millis(bytes / PER_BYTE_MILLIS_DIVISOR)).min(CEILING)
-}
-
 fn inspect_experimental_with_diagnostics_and_runtime_policy(
     repository: &Path,
     plugin_path: &Path,
@@ -3223,8 +3203,13 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     if let Some(authorization) = &authorization {
         dependencies.push(authorization.artifact.clone());
     }
+    // Parameter inspection runs with no deadline (issue #354). A watchdog here
+    // contains nothing the job object does not already contain, and it decides
+    // discovery results by wall-clock: a plug-in still mapping its sealed
+    // closure was reported as "timed out", and that verdict was then cached.
+    // Containment stays — the job object kills the tree when the launch handle
+    // drops, and the sealed root is still torn down.
     let isolated = if !dependencies.is_empty() {
-        let deadline = inspection_deadline(&dependencies);
         dispatch_approved_image_with_dependencies(
             repository,
             WorkerKind::L2,
@@ -3233,7 +3218,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             dependencies,
             &args_before_plugin,
             &args_after_plugin,
-            deadline,
+            None,
         )?
     } else {
         dispatch_approved_image(
@@ -3243,7 +3228,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
             approved_sha256,
             &args_before_plugin,
             &args_after_plugin,
-            Duration::from_millis(5_000),
+            None,
         )?
     };
     let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
@@ -3498,7 +3483,7 @@ pub fn probe_experimental_custom_ui_cursor(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid("custom UI cursor worker failed safely"));
@@ -3538,7 +3523,7 @@ pub fn probe_experimental_custom_ui_draw(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid("custom UI draw worker failed safely"));
@@ -3595,7 +3580,7 @@ pub fn probe_experimental_custom_ui_lifecycle(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid("custom UI lifecycle worker failed safely"));
@@ -3638,7 +3623,7 @@ pub fn probe_experimental_custom_ui_idle(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid("custom UI idle worker failed safely"));
@@ -3688,7 +3673,7 @@ pub fn probe_experimental_custom_ui_keydown(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid("custom UI keydown worker failed safely"));
@@ -3733,7 +3718,7 @@ pub fn probe_experimental_custom_ui_mouse_exited(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid("custom UI mouse-exited worker failed safely"));
@@ -3793,7 +3778,7 @@ pub fn probe_experimental_custom_ui_click(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid("custom UI click worker failed safely"));
@@ -3849,7 +3834,7 @@ pub fn probe_experimental_custom_ui_drag(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(8_000),
+        Some(Duration::from_millis(8_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid("custom UI drag worker failed safely"));
@@ -3900,7 +3885,7 @@ pub fn trigger_experimental_button(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
@@ -3937,7 +3922,7 @@ pub fn initialize_experimental_aegp(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
@@ -3974,7 +3959,7 @@ pub fn dispatch_experimental_aegp_update_menu(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
@@ -4012,7 +3997,7 @@ pub fn dispatch_experimental_aegp_idle(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
@@ -4055,7 +4040,7 @@ pub fn dispatch_experimental_aegp_command_roundtrip(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
@@ -4094,7 +4079,7 @@ pub fn dispatch_experimental_aegp_active_idle_roundtrip(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
@@ -4135,7 +4120,7 @@ pub fn dispatch_experimental_aegp_comp_idle_roundtrip(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(5_000),
+        Some(Duration::from_millis(5_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
@@ -4323,7 +4308,7 @@ pub fn dispatch_experimental_aegp_keyframe_roundtrip(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(8_000),
+        Some(Duration::from_millis(8_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
@@ -4390,7 +4375,7 @@ pub fn dispatch_experimental_aegp_seek_roundtrip(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(8_000),
+        Some(Duration::from_millis(8_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
@@ -4450,7 +4435,7 @@ pub fn dispatch_experimental_aegp_trim_roundtrip(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(8_000),
+        Some(Duration::from_millis(8_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
@@ -4502,7 +4487,7 @@ pub fn dispatch_experimental_aegp_switch_roundtrip(
         approved_sha256,
         &args_before_plugin,
         &args_after_plugin,
-        Duration::from_millis(8_000),
+        Some(Duration::from_millis(8_000)),
     )?;
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
@@ -6339,31 +6324,6 @@ mod tests {
         assert!(
             validate_interactive_worker_report(&unadvertised, &json!({}), &facts(false)).is_ok(),
             "the same report is fine when the render carried no audio"
-        );
-    }
-
-    #[test]
-    fn inspection_deadline_scales_with_sealed_bytes_and_stays_bounded() {
-        let sealed = |size: u64| ApprovedImageArtifact {
-            path: PathBuf::from("dependency.dll"),
-            expected_sha256: [0; 32],
-            expected_size: size,
-        };
-        assert_eq!(inspection_deadline(&[]), Duration::from_millis(5_000));
-        // 32 MiB buys about one extra second (1 ms per 32 KiB).
-        assert_eq!(
-            inspection_deadline(&[sealed(32 * 1_024 * 1_024)]),
-            Duration::from_millis(6_024)
-        );
-        // The Adobe runtime closures observed for AE effects (~1 GB) stay inside
-        // the ceiling, and nothing can exceed it.
-        assert_eq!(
-            inspection_deadline(&[sealed(1_024 * 1_024 * 1_024)]),
-            Duration::from_millis(37_768)
-        );
-        assert_eq!(
-            inspection_deadline(&[sealed(u64::MAX / 2), sealed(u64::MAX / 2)]),
-            Duration::from_secs(120)
         );
     }
 

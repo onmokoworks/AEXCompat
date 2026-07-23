@@ -45,7 +45,7 @@ fn a_modal_dialog_is_closed_so_the_worker_reaches_its_result() {
     let result = run_isolated(
         Path::new(env!("CARGO_BIN_EXE_dummy_messagebox")),
         &[title.clone()],
-        Duration::from_secs(30),
+        Some(Duration::from_secs(30)),
     )
     .expect("launch the dialog worker");
 
@@ -97,7 +97,7 @@ fn a_dialog_seen_to_go_away_while_the_worker_runs_is_reported_closed() {
     let result = run_isolated(
         Path::new(env!("CARGO_BIN_EXE_dummy_messagebox")),
         &[title.clone(), "dialog-then-live".into()],
-        Duration::from_secs(30),
+        Some(Duration::from_secs(30)),
     )
     .expect("launch the dialog worker");
 
@@ -130,7 +130,7 @@ fn a_window_that_is_not_a_dialog_is_recorded_and_left_alone() {
     let result = run_isolated(
         Path::new(env!("CARGO_BIN_EXE_dummy_messagebox")),
         &[title.clone(), "window".into()],
-        Duration::from_secs(30),
+        Some(Duration::from_secs(30)),
     )
     .expect("launch the window worker");
 
@@ -206,7 +206,7 @@ fn the_dialog_never_appears_where_the_user_is_working() {
     let result = run_isolated(
         Path::new(env!("CARGO_BIN_EXE_dummy_messagebox")),
         &[title.clone()],
-        Duration::from_secs(30),
+        Some(Duration::from_secs(30)),
     )
     .expect("launch the dialog worker");
     stop.store(true, std::sync::atomic::Ordering::Relaxed);

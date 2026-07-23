@@ -27,6 +27,7 @@ use windows_sys::Win32::System::StationsAndDesktops::{
     CloseDesktop, CreateDesktopW, GetProcessWindowStation, GetThreadDesktop,
     GetUserObjectInformationW, HDESK, UOI_NAME,
 };
+use windows_sys::Win32::System::Threading::INFINITE;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateEventW,
     CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList,
@@ -248,7 +249,7 @@ pub struct ProcessResult {
     pub dismissed_windows: Vec<crate::worker_dialog::DismissedWindow>,
 }
 
-pub fn run_sentinel_check(program: &Path, timeout: Duration) -> io::Result<ProcessResult> {
+pub fn run_sentinel_check(program: &Path, timeout: Option<Duration>) -> io::Result<ProcessResult> {
     let mut security = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: null_mut(),
@@ -518,7 +519,7 @@ fn terminate_job_and_wait(job: HANDLE, process: HANDLE, wait_ms: u32) -> io::Res
 pub fn run_isolated(
     program: &Path,
     args: &[String],
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> io::Result<ProcessResult> {
     run_isolated_impl(
         program,
@@ -534,7 +535,7 @@ pub fn run_isolated(
 pub fn run_isolated_with_restricted_token(
     program: &Path,
     args: &[String],
-    timeout: Duration,
+    timeout: Option<Duration>,
     token: &RestrictedWorkerToken,
     current_directory: &Path,
     repository: &Path,
@@ -553,7 +554,7 @@ pub fn run_isolated_with_restricted_token(
 fn run_isolated_impl(
     program: &Path,
     args: &[String],
-    timeout: Duration,
+    timeout: Option<Duration>,
     token: Option<(HANDLE, &Path)>,
     worker_sid: Option<&RestrictedWorkerSid>,
     desktop_policy: WorkerDesktopPolicy,
@@ -644,7 +645,16 @@ impl LaunchedIsolatedProcess {
     /// Waits up to `timeout` for the worker to exit (terminating the job on
     /// deadline, exactly like the one-shot path), then collects output and
     /// job accounting into a `ProcessResult`.
-    pub fn wait_and_collect(self, timeout: Duration) -> io::Result<ProcessResult> {
+    /// Waits for the worker to exit, killing its job if `timeout` elapses first.
+    ///
+    /// `None` waits indefinitely. That is not the absence of containment: the
+    /// job object still kills the tree when this handle drops, and the caller
+    /// still owns the process. It is the absence of a *deadline*, for callers
+    /// where a slow answer is a better answer than a wrong one — discovery
+    /// reports "timed out" for a plug-in that was only still loading, and that
+    /// verdict gets cached (issue #354). A worker that blocks on a modal dialog
+    /// is released by the dialog sweep below, not by a deadline (issue #359).
+    pub fn wait_and_collect(self, timeout: Option<Duration>) -> io::Result<ProcessResult> {
         // Pattern bindings drop in reverse order, so `dialog_sweep` comes last
         // here to be dropped first: an early return below must stop the sweep
         // before the handles it reads are closed.
@@ -657,12 +667,14 @@ impl LaunchedIsolatedProcess {
             minidump_file,
             dialog_sweep,
         } = self;
-        let wait = unsafe {
-            WaitForSingleObject(
-                process_handle.raw(),
-                timeout.as_millis().min(u32::MAX as u128) as u32,
-            )
+        // `INFINITE` is `u32::MAX`, so a `None` deadline and a clamped very long
+        // one land on the same wait; naming it keeps that an intent rather than
+        // an arithmetic coincidence.
+        let wait_ms = match timeout {
+            Some(timeout) => timeout.as_millis().min(u32::MAX as u128) as u32,
+            None => INFINITE,
         };
+        let wait = unsafe { WaitForSingleObject(process_handle.raw(), wait_ms) };
         let timed_out = wait == WAIT_TIMEOUT;
         if timed_out {
             terminate_job_and_wait(job.raw(), process_handle.raw(), TERMINATION_GRACE_MS)?;

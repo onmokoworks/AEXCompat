@@ -31,7 +31,7 @@ fn timeout_kill_reports_timeout_reason_and_memory_peaks() {
     let result = run_isolated(
         Path::new(env!("CARGO_BIN_EXE_dummy_sleep")),
         &["30000".into()],
-        Duration::from_millis(200),
+        Some(Duration::from_millis(200)),
     )
     .expect("run sleeping worker");
     assert_eq!(result.classification.as_str(), "timeout_killed");
@@ -39,6 +39,27 @@ fn timeout_kill_reports_timeout_reason_and_memory_peaks() {
     assert!(!result.memory_limit_reached);
     let peak = result.peak_process_memory_bytes.expect("peak recorded");
     assert!(peak > 0 && peak < result.process_memory_limit_bytes);
+}
+
+#[cfg(windows)]
+#[test]
+fn no_deadline_waits_for_a_worker_the_watchdog_would_have_killed() {
+    // The same worker and the same wall-clock, with and without a deadline
+    // (issue #354): discovery passes `None` because a plug-in that is merely
+    // slow to map its sealed closure must not be recorded as a timeout.
+    use aexcompat_broker::windows_process::run_isolated;
+    use std::path::Path;
+    use std::time::Duration;
+
+    let worker = Path::new(env!("CARGO_BIN_EXE_dummy_sleep"));
+    let killed = run_isolated(worker, &["400".into()], Some(Duration::from_millis(50)))
+        .expect("run sleeping worker under a deadline");
+    assert_eq!(killed.classification.as_str(), "timeout_killed");
+    assert_eq!(killed.kill_reason, Some("timeout"));
+
+    let waited = run_isolated(worker, &["400".into()], None).expect("run sleeping worker");
+    assert_eq!(waited.classification.as_str(), "ok");
+    assert_eq!(waited.kill_reason, None);
 }
 
 #[cfg(windows)]
@@ -51,7 +72,7 @@ fn memory_cap_death_reports_memory_limit_reason() {
     let result = run_isolated(
         Path::new(env!("CARGO_BIN_EXE_dummy_oom")),
         &[],
-        Duration::from_secs(60),
+        Some(Duration::from_secs(60)),
     )
     .expect("run oom worker");
     assert_eq!(result.classification.as_str(), "nonzero_exit");
@@ -73,7 +94,7 @@ fn descendant_oom_does_not_implicate_the_worker() {
     let result = run_isolated(
         Path::new(env!("CARGO_BIN_EXE_dummy_oom_descendant")),
         &[env!("CARGO_BIN_EXE_dummy_oom").to_string()],
-        Duration::from_secs(60),
+        Some(Duration::from_secs(60)),
     )
     .expect("run descendant-oom worker");
     assert_eq!(result.classification.as_str(), "nonzero_exit");
@@ -100,7 +121,7 @@ fn clean_exit_reports_no_kill_reason() {
     let result = run_isolated(
         Path::new(env!("CARGO_BIN_EXE_dummy_exit0")),
         &[],
-        Duration::from_secs(10),
+        Some(Duration::from_secs(10)),
     )
     .expect("run exiting worker");
     assert_eq!(result.classification.as_str(), "ok");
@@ -121,7 +142,7 @@ fn pipe_holding_descendant_does_not_block_capture() {
     let result = run_isolated(
         Path::new(env!("CARGO_BIN_EXE_dummy_descendant")),
         &[],
-        Duration::from_secs(10),
+        Some(Duration::from_secs(10)),
     )
     .expect("run descendant worker");
     assert_eq!(result.classification.as_str(), "ok");
@@ -141,7 +162,7 @@ fn production_stdout_capture_preserves_large_bounded_worker_reports() {
     let result = run_isolated(
         Path::new(env!("CARGO_BIN_EXE_dummy_large_stdout")),
         &[report_bytes.to_string()],
-        Duration::from_secs(30),
+        Some(Duration::from_secs(30)),
     )
     .expect("run large-report worker");
     assert_eq!(result.classification.as_str(), "ok");

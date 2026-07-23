@@ -149,7 +149,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
             entry.plugin_path.to_string_lossy().into_owned(),
             entry.sha256.to_ascii_lowercase(),
         ],
-        Duration::from_millis(entry.timeout_ms),
+        Some(Duration::from_millis(entry.timeout_ms)),
     )?;
     let parsed_report = serde_json::from_str::<Value>(result.stdout.trim());
     let worker_report = parsed_report.as_ref().ok();
