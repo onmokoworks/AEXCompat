@@ -19,6 +19,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cwchar>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -647,7 +648,10 @@ constexpr int32_t kPluginDataRejected = 4;  // A_Err_PARAMETER
 constexpr int32_t kPluginDataException = 512;
 constexpr int32_t kPluginDataReservedInfo = 8;
 constexpr int32_t kPluginDataApiMajor = 13;
-constexpr int32_t kPluginDataApiMinor = 28;
+// Bundled AE 2025 effects register api 13.29 (observed across the whole
+// bundled corpus via the #326 probe): Adobe ships them built against a newer
+// internal SDK than the public 25.2 headers (13.28).
+constexpr int32_t kPluginDataApiMinor = 29;
 
 template <std::size_t Capacity>
 struct BoundedPluginDataText {
@@ -741,9 +745,12 @@ int32_t record_plugin_data_registration(
     const unsigned char* entrypoint, int32_t kind, int32_t api_major,
     int32_t api_minor, int32_t reserved_info,
     const unsigned char* support_url) noexcept {
-  if (!context || context->callback_count != 0) {
-    if (context) context->invalid = true;
-    return kPluginDataRejected;
+  if (!context) return kPluginDataRejected;
+  // Multi-effect bundles legitimately register more than once (issue #326):
+  // keep the first registration and accept the rest.
+  if (context->callback_count != 0) {
+    ++context->callback_count;
+    return 0;
   }
   ++context->callback_count;
   const auto name_copy = copy_bounded_plugin_data_text<kPluginDataNameBytes>(name);
@@ -763,8 +770,10 @@ int32_t record_plugin_data_registration(
       !valid_plugin_data_export_name(entry_copy) || !support_valid ||
       !plugin_data_effect_kind(kind) || api_major <= 0 ||
       api_major > kPluginDataApiMajor || api_minor < 0 ||
-      (api_major == kPluginDataApiMajor && api_minor > kPluginDataApiMinor) ||
-      reserved_info != kPluginDataReservedInfo) {
+      (api_major == kPluginDataApiMajor && api_minor > kPluginDataApiMinor)) {
+    // reserved_info is deliberately not validated: in the wild it is a
+    // plugin-defined opaque value (0/1/8/9 observed across the bundled
+    // corpus), not the SDK sample's AE_RESERVED_INFO constant (#326).
     context->invalid = true;
     return kPluginDataRejected;
   }
@@ -863,7 +872,7 @@ PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
       ? invoke_plugin_data_entry2_seh(entry2, &context)
       : invoke_plugin_data_entry1_seh(entry1, &context);
   if (result != 0 || context.exception_code != 0 || context.invalid ||
-      context.callback_count != 1 || !context.registration.valid)
+      context.callback_count == 0 || !context.registration.valid)
     return {PiplPluginKind::Unknown, {}};
   return {PiplPluginKind::Effect,
           std::string(context.registration.entrypoint.data(),
@@ -911,6 +920,8 @@ bool verify_plugin_data_entrypoint() {
                   v1.registration.entrypoint_length) != "EffectMain")
     return false;
   PluginDataContext duplicate;
+  // Duplicate registrations are accepted and ignored: both calls must succeed
+  // and the first registration must win (issue #326).
   if (plugin_data_callback1(
           &duplicate, reinterpret_cast<const unsigned char*>("Name"),
           reinterpret_cast<const unsigned char*>("Match"),
@@ -919,12 +930,15 @@ bool verify_plugin_data_entrypoint() {
           static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
           kPluginDataApiMinor, kPluginDataReservedInfo) != 0 ||
       plugin_data_callback1(
-          &duplicate, reinterpret_cast<const unsigned char*>("Name"),
-          reinterpret_cast<const unsigned char*>("Match"),
-          reinterpret_cast<const unsigned char*>("Category"),
-          reinterpret_cast<const unsigned char*>("EffectMain"),
+          &duplicate, reinterpret_cast<const unsigned char*>("Name2"),
+          reinterpret_cast<const unsigned char*>("Match2"),
+          reinterpret_cast<const unsigned char*>("Category2"),
+          reinterpret_cast<const unsigned char*>("EffectMain2"),
           static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
-          kPluginDataApiMinor, kPluginDataReservedInfo) == 0)
+          kPluginDataApiMinor, kPluginDataReservedInfo) != 0 ||
+      duplicate.callback_count != 2 ||
+      std::string(duplicate.registration.name.data(),
+                  duplicate.registration.name_length) != "Name")
     return false;
   PluginDataContext invalid_pointer;
   return plugin_data_callback1(
@@ -934,6 +948,31 @@ bool verify_plugin_data_entrypoint() {
       reinterpret_cast<const unsigned char*>("EffectMain"),
       static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
       kPluginDataApiMinor, kPluginDataReservedInfo) != 0;
+}
+
+// Extended inter slots beyond the public SDK's PF_InteractCallbacks (issue
+// #382). The real AE host's callback table is larger than the public headers
+// show; bundled effects call in_data+0x60 first thing in GLOBAL_SETUP
+// (allocating 0xFA0 bytes) and release it through in_data+0x70, while
+// PARAMS_SETUP resolves parameter-name strings through in_data+0x68.
+int32_t __cdecl host_extended_alloc(void** out, std::size_t size) {
+  if (!out || size == 0 || size > (size_t{1} << 24)) return 4;
+  void* buffer = std::calloc(1, size);
+  if (!buffer) return 4;
+  *out = buffer;
+  return 0;
+}
+int32_t __cdecl host_extended_free(void** ptr) {
+  // The plug-in passes the address of its buffer pointer (lea rcx,[local]),
+  // not the buffer itself.
+  if (ptr) std::free(*ptr);
+  return 0;
+}
+// TODO(#382-follow-up): resolve the real string from the plug-in's string
+// resources ($$$/... localization keys). This placeholder unblocks selector
+// dispatch but every parameter name reads "AEXCompat" for now.
+const char* __cdecl host_extended_lookup(void*, int32_t, void*, void*) {
+  return "AEXCompat";
 }
 
 void append_pipl_u32(std::vector<unsigned char>& bytes, uint32_t value) {
@@ -2362,7 +2401,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         reinterpret_cast<void*>(&add_param), reinterpret_cast<void*>(&abort_render),
         reinterpret_cast<void*>(&report_progress), reinterpret_cast<void*>(&register_custom_ui),
         reinterpret_cast<void*>(&checkout_layer_audio), reinterpret_cast<void*>(&checkin_layer_audio),
-        reinterpret_cast<void*>(&get_audio_data)},
+        reinterpret_cast<void*>(&get_audio_data),
+        // Extended inter slots 0x60 / 0x68 / 0x70 (issue #382).
+        reinterpret_cast<void*>(&host_extended_alloc),
+        reinterpret_cast<void*>(&host_extended_lookup),
+        reinterpret_cast<void*>(&host_extended_free)},
        {reinterpret_cast<void*>(&begin_sampling8), reinterpret_cast<void*>(&subpixel_sample8),
         reinterpret_cast<void*>(&area_sample8), reinterpret_cast<void*>(&end_sampling8),
         reinterpret_cast<void*>(&blend_world), reinterpret_cast<void*>(&convolve_world),
