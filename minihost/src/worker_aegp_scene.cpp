@@ -110,6 +110,51 @@ bool resolve_layer_transform(std::size_t index, const AegpTime& comp_time,
   return true;
 }
 
+bool resolve_layer_camera_zoom(std::size_t index, const AegpTime& comp_time,
+    double fallback, double& output) {
+  constexpr double kZoomLimit = 1000000000.0;
+  if (index >= state().layer_camera_zoom.size() || !valid_comp_time(comp_time) ||
+      !finite_bounded(fallback, kZoomLimit) || fallback <= 0.0) return false;
+  const auto& keyframes = state().layer_camera_zoom_keyframes[index];
+  const auto valid_zoom = [=](double value) {
+    return finite_bounded(value, kZoomLimit) && value > 0.0;
+  };
+  if (!keyframes[0].valid && !keyframes[1].valid) {
+    const double authored = state().layer_camera_zoom[index];
+    if (authored == 0.0) {
+      output = fallback;
+      return true;
+    }
+    if (!valid_zoom(authored)) return false;
+    output = authored;
+    return true;
+  }
+  if (!keyframes[0].valid || !keyframes[1].valid ||
+      !valid_comp_time(keyframes[0].time) || !valid_comp_time(keyframes[1].time) ||
+      !valid_zoom(keyframes[0].zoom) || !valid_zoom(keyframes[1].zoom)) return false;
+  const long double first_time = static_cast<long double>(keyframes[0].time.value) /
+      static_cast<long double>(keyframes[0].time.scale);
+  const long double second_time = static_cast<long double>(keyframes[1].time.value) /
+      static_cast<long double>(keyframes[1].time.scale);
+  const long double current_time = static_cast<long double>(comp_time.value) /
+      static_cast<long double>(comp_time.scale);
+  if (!std::isfinite(first_time) || !std::isfinite(second_time) ||
+      !std::isfinite(current_time) || !(first_time < second_time)) return false;
+  if (current_time <= first_time) {
+    output = keyframes[0].zoom;
+    return true;
+  }
+  if (current_time >= second_time) {
+    output = keyframes[1].zoom;
+    return true;
+  }
+  const long double alpha = (current_time - first_time) / (second_time - first_time);
+  if (!std::isfinite(alpha) || alpha < 0.0L || alpha > 1.0L) return false;
+  output = keyframes[0].zoom +
+      static_cast<double>(alpha) * (keyframes[1].zoom - keyframes[0].zoom);
+  return valid_zoom(output);
+}
+
 bool build_layer_transform(const AegpLayerTransform& authored, AegpMatrix4& output) {
   constexpr double kLinearLimit = 1000000.0;
   constexpr double kRotationLimit = 360000.0;
@@ -521,7 +566,10 @@ int32_t __cdecl aegp_get_layer_stream_value_v2(void* layer, int32_t which_stream
   const int32_t width = g_full_resolution_width > 0
       ? g_full_resolution_width : g_smart_width;
   if (width <= 0 || width > INT16_MAX) return 4;
-  value->one_d = static_cast<double>(width);
+  double zoom = 0.0;
+  if (!resolve_layer_camera_zoom(static_cast<std::size_t>(index), *time,
+          static_cast<double>(width), zoom)) return 4;
+  value->one_d = zoom;
   if (stream_type) *stream_type = kStreamTypeOneD;
   return 0;
 }
