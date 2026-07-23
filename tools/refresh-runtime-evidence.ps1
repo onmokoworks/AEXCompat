@@ -76,7 +76,7 @@ function Ensure-SessionHarness {
     if (-not $cargoCommand) { throw 'Cargo was not found; cannot build the session harness.' }
     Invoke-Checked $cargoCommand @(
         'build', '--manifest-path', 'broker/Cargo.toml', '-p', 'aexcompat-harness', '--locked', '--release'
-    )
+    ) | Out-Host
     if (-not (Test-Path -LiteralPath $sessionHarness -PathType Leaf)) {
         throw "Session harness build did not create: $sessionHarness"
     }
@@ -194,13 +194,27 @@ function Invoke-RecordedCommand([string]$Command) {
     if ($tokens.Count -lt 1) { throw 'Recorded command is empty.' }
     if ($tokens.Count -gt 1 -and $tokens[1] -match 'refresh-runtime-session\.py') {
         Ensure-SessionHarness
-        $adapterArgs = @($tokens[2..($tokens.Count - 1)])
+        $adapterArgs = @($tokens[1..($tokens.Count - 1)])
+        $pluginIndex = -1
+        $shaIndex = -1
+        for ($index = 0; $index -lt $adapterArgs.Count; $index++) {
+            if ($adapterArgs[$index] -eq '--plugin') { $pluginIndex = $index }
+            if ($adapterArgs[$index] -eq '--plugin-sha256') { $shaIndex = $index }
+        }
+        if ($pluginIndex -lt 0 -or $shaIndex -lt 0 -or $pluginIndex + 1 -ge $adapterArgs.Count -or $shaIndex + 1 -ge $adapterArgs.Count) {
+            throw "Canonical session command is missing plugin identity arguments: $Command"
+        }
+        $plugin = [string]$adapterArgs[$pluginIndex + 1]
+        if (-not (Test-Path -LiteralPath $plugin -PathType Leaf)) { throw "Canonical plugin is missing: $plugin" }
+        $currentPluginSha = (Get-FileHash -LiteralPath $plugin -Algorithm SHA256).Hash.ToLowerInvariant()
+        $recordedPluginSha = [string]$adapterArgs[$shaIndex + 1]
+        $adapterArgs[$shaIndex + 1] = $currentPluginSha
         Invoke-Checked $pythonCommand $adapterArgs @{
             TEMP = (Join-Path $root 'target/tmp')
             TMP = (Join-Path $root 'target/tmp')
             PYTHONUTF8 = '1'
-        }
-        return $Command
+        } | Out-Host
+        return $Command.Replace($recordedPluginSha, $currentPluginSha)
     }
     $exe = $tokens[0]
     $recordedArgs = @($tokens[1..($tokens.Count - 1)])
@@ -215,7 +229,7 @@ function Invoke-RecordedCommand([string]$Command) {
     Invoke-Checked $exe $recordedArgs @{
         TEMP = (Join-Path $root 'target/tmp')
         TMP = (Join-Path $root 'target/tmp')
-    }
+    } | Out-Host
     return $Command
 }
 
