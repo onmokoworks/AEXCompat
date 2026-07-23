@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/onmokoworks/AEXCompat/contracts/openfx/render_session_bridge.schema.json",
+  "title": "AEXCompat host-neutral OpenFX RenderSession bridge packet",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "publication_status",
+    "contract_kind",
+    "contract_state",
+    "transport",
+    "session_open",
+    "frame_exchange",
+    "close"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "publication_status": {"const": "local-only"},
+    "contract_kind": {"const": "aexcompat_openfx_render_session_bridge"},
+    "contract_state": {"enum": ["ready", "rejected"]},
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pixel_format", "channel_order", "alpha_mode", "rowbytes_unit", "payload_encoding"],
+      "properties": {
+        "pixel_format": {"const": "rgba8"},
+        "channel_order": {"const": "rgba"},
+        "alpha_mode": {"enum": ["straight", "premultiplied"]},
+        "rowbytes_unit": {"const": "bytes"},
+        "payload_encoding": {"const": "base64_row_major"}
+      }
+    },
+    "session_open": {"$ref": "#/$defs/session_open"},
+    "frame_exchange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request", "response"],
+      "properties": {
+        "request": {"$ref": "#/$defs/frame_request"},
+        "response": {
+          "oneOf": [
+            {"$ref": "#/$defs/rendered_response"},
+            {"$ref": "#/$defs/failed_response"}
+          ]
+        }
+      }
+    },
+    "close": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "frames_ok", "frames_errored"],
+      "properties": {
+        "status": {"enum": ["closed", "invalidated"]},
+        "frames_ok": {"type": "integer", "minimum": 0},
+        "frames_errored": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+    "relative_path": {"type": "string", "minLength": 1, "maxLength": 260},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plugin_sha256", "worker_sha256"],
+      "properties": {
+        "plugin_sha256": {"$ref": "#/$defs/sha256"},
+        "worker_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "rowbytes"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "height": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "rowbytes": {"type": "integer", "minimum": 4, "maximum": 65536}
+      }
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_time", "time_step", "total_time", "time_scale"],
+      "properties": {
+        "current_time": {"type": "integer"},
+        "time_step": {"type": "integer", "minimum": 1},
+        "total_time": {"type": "integer", "minimum": 1},
+        "time_scale": {"type": "integer", "minimum": 1}
+      }
+    },
+    "session_open": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plugin", "worker", "geometry", "time"],
+      "properties": {
+        "plugin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["relative_path", "sha256"],
+          "properties": {
+            "relative_path": {"$ref": "#/$defs/relative_path"},
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "worker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "sha256"],
+          "properties": {
+            "kind": {"const": "render"},
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "geometry": {"$ref": "#/$defs/geometry"},
+        "time": {"$ref": "#/$defs/time"}
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height",
+        "rowbytes",
+        "pixel_format",
+        "channel_order",
+        "alpha_mode",
+        "sha256",
+        "data_base64"
+      ],
+      "properties": {
+        "width": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "height": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "rowbytes": {"type": "integer", "minimum": 4, "maximum": 65536},
+        "pixel_format": {"const": "rgba8"},
+        "channel_order": {"const": "rgba"},
+        "alpha_mode": {"enum": ["straight", "premultiplied"]},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "data_base64": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9+/]*={0,2}$"}
+      }
+    },
+    "frame_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame_index", "current_time", "input"],
+      "properties": {
+        "frame_index": {"type": "integer", "minimum": 0},
+        "current_time": {"type": "integer"},
+        "input": {"$ref": "#/$defs/frame"}
+      }
+    },
+    "rendered_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "output", "identity"],
+      "properties": {
+        "status": {"const": "rendered"},
+        "output": {"$ref": "#/$defs/frame"},
+        "identity": {"$ref": "#/$defs/identity"}
+      }
+    },
+    "failed_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "classification"],
+      "properties": {
+        "status": {"enum": ["unsupported", "timeout", "worker_crash", "identity_mismatch", "protocol_error"]},
+        "classification": {"type": "string", "minLength": 1, "maxLength": 120},
+        "detail": {"type": "string", "maxLength": 1000}
+      }
+    }
+  }
+}
