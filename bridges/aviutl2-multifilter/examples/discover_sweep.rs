@@ -19,7 +19,7 @@
 //!   --survey-only  only measure each closure's size; launch no workers
 //!   --json <path>  write the per-plug-in records as JSON
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics;
@@ -115,6 +115,65 @@ fn collect_aex(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Returns a shareable, scan-root-relative identity without leaking the local
+/// installation path. `collect_aex` only returns paths below `scan`; a failure
+/// here means that invariant was broken and the report must fail closed rather
+/// than fall back to an ambiguous basename or an absolute path.
+fn normalized_relative_path(scan: &Path, plugin: &Path) -> String {
+    let relative = plugin
+        .strip_prefix(scan)
+        .expect("discovered plug-in must be below the scan root");
+    let components: Vec<String> = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(value) => value.to_string_lossy().into_owned(),
+            _ => panic!("discovered plug-in has an unsafe relative path"),
+        })
+        .collect();
+    assert!(
+        !components.is_empty(),
+        "discovered plug-in must have a relative path"
+    );
+    components.join("/")
+}
+
+fn plugin_record(
+    scan: &Path,
+    plugin: &Path,
+    bucket: &str,
+    elapsed_ms: u128,
+    size_bytes: Option<u64>,
+    sha256: Option<&str>,
+    extra: Value,
+) -> Value {
+    let identity_status = if sha256.is_some() {
+        "hashed"
+    } else {
+        "unreadable_file"
+    };
+    let mut row = json!({
+        // Keep the historical basename for human-readable reports and
+        // consumers that only displayed it. The relative path is the stable
+        // identity when a scan contains duplicate basenames.
+        "plugin": plugin
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<unknown>".into()),
+        "plugin_relative_path": normalized_relative_path(scan, plugin),
+        "plugin_size_bytes": size_bytes,
+        "plugin_sha256": sha256,
+        "plugin_identity_status": identity_status,
+        "bucket": bucket,
+        "elapsed_ms": elapsed_ms,
+    });
+    if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            row.insert(key.clone(), value.clone());
+        }
+    }
+    row
+}
+
 /// The diagnostics JSON the broker embeds in its error text.
 fn diagnostics_of(error: &str) -> Option<Value> {
     let start = error.find('{')?;
@@ -186,28 +245,37 @@ fn main() {
     let mut buckets: std::collections::BTreeMap<String, usize> = Default::default();
     for (index, plugin) in plugins.iter().enumerate() {
         let started = Instant::now();
+        // Hash and size the source before dispatch so every outcome, including
+        // worker/module failures, can be mapped back to the exact file. An
+        // unreadable file keeps explicit null identity fields instead of
+        // silently dropping its provenance.
+        let file_bytes = std::fs::read(plugin).ok();
+        let plugin_size_bytes = file_bytes.as_ref().map(|bytes| bytes.len() as u64);
+        let plugin_sha256 = file_bytes
+            .as_ref()
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
         // Every plug-in gets exactly one record and one bucket, including the
         // ones that fail before dispatch: a sweep that silently drops them
         // reports a total that disagrees with its own buckets.
         let record = |bucket: &str, extra: Value| {
-            let mut row = json!({
-                "plugin": plugin.file_name().unwrap().to_string_lossy(),
-                "bucket": bucket,
-                "elapsed_ms": started.elapsed().as_millis(),
-            });
-            if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
-                for (key, value) in extra {
-                    row.insert(key.clone(), value.clone());
-                }
-            }
-            row
+            plugin_record(
+                &options.scan,
+                plugin,
+                bucket,
+                started.elapsed().as_millis(),
+                plugin_size_bytes,
+                plugin_sha256.as_deref(),
+                extra,
+            )
         };
-        let Ok(bytes) = std::fs::read(plugin) else {
+        if file_bytes.is_none() {
             records.push(record("unreadable_file", json!({})));
             *buckets.entry("unreadable_file".into()).or_default() += 1;
             continue;
-        };
-        let sha = format!("{:x}", Sha256::digest(&bytes));
+        }
+        let sha = plugin_sha256
+            .as_deref()
+            .expect("readable plug-in must have a SHA-256 identity");
 
         // `--no-deps` seals nothing at all, including helper DLLs sitting next to
         // the plug-in: the point of the baseline is the pre-#304 dispatch, which
@@ -353,5 +421,59 @@ fn main() {
             "buckets": buckets,
         });
         std::fs::write(path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_path_disambiguates_duplicate_basenames_without_absolute_paths() {
+        let scan = Path::new(r"C:\scan");
+        let first = scan.join("one").join("Same.aex");
+        let second = scan.join("two").join("Same.aex");
+
+        let first_record = plugin_record(scan, &first, "unreadable_file", 0, None, None, json!({}));
+        let second_record =
+            plugin_record(scan, &second, "unreadable_file", 0, None, None, json!({}));
+
+        assert_eq!(first_record["plugin"], "Same.aex");
+        assert_eq!(second_record["plugin"], "Same.aex");
+        assert_eq!(first_record["plugin_relative_path"], "one/Same.aex");
+        assert_eq!(second_record["plugin_relative_path"], "two/Same.aex");
+        assert_ne!(
+            first_record["plugin_relative_path"],
+            second_record["plugin_relative_path"]
+        );
+        assert!(
+            first_record["plugin_relative_path"]
+                .as_str()
+                .is_some_and(|path| !path.contains(':') && !path.contains(".."))
+        );
+        assert!(first_record["plugin_sha256"].is_null());
+        assert!(first_record["plugin_size_bytes"].is_null());
+        assert_eq!(first_record["plugin_identity_status"], "unreadable_file");
+    }
+
+    #[test]
+    fn readable_identity_is_recorded_with_size_and_sha() {
+        let scan = Path::new(r"C:\scan");
+        let plugin = scan.join("Same.aex");
+        let record = plugin_record(
+            scan,
+            &plugin,
+            "loaded",
+            4,
+            Some(3),
+            Some("abc123"),
+            json!({"parameters": 2}),
+        );
+
+        assert_eq!(record["plugin_relative_path"], "Same.aex");
+        assert_eq!(record["plugin_size_bytes"], 3);
+        assert_eq!(record["plugin_sha256"], "abc123");
+        assert_eq!(record["plugin_identity_status"], "hashed");
+        assert_eq!(record["parameters"], 2);
     }
 }
