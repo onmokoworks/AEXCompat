@@ -3,7 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from _render_session import run_session_render
+from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-aegp-layer-options-probe" / "pf_aegp_layer_options_probe.cpp"
@@ -49,6 +49,7 @@ def test_probe_checks_duplicate_independence_and_rejects_stale_handles():
 def test_real_probe_validates_layer_options_suite_during_render(tmp_path):
     assert WORKER.is_file()
     assert PROBE.is_file()
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
     assert INPUT.is_file()
     output = tmp_path / "layer-options-output.rgba"
     report = run_session_render(tmp_path, PROBE, INPUT, output, width=37, height=23)

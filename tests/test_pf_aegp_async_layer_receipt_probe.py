@@ -3,7 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from _render_session import run_session_render
+from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +28,7 @@ def test_probe_has_bounded_validated_async_slot2_path():
 def test_real_probe_uses_async_owned_receipt_during_ordinary_render(tmp_path):
     assert WORKER.is_file()
     assert PROBE.is_file()
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
     assert INPUT.is_file()
     output = tmp_path / "async-layer-receipt-output.rgba"
     report = run_session_render(tmp_path, PROBE, INPUT, output, width=37, height=23)

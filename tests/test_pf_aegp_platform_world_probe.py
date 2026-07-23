@@ -3,7 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from _render_session import run_session_render
+from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-aegp-platform-world-probe" / "pf_aegp_platform_world_probe.cpp"
@@ -44,6 +44,7 @@ def test_probe_covers_platform_world_lifecycle_and_safe_invalid_paths():
 def test_real_probe_adopts_platform_world_and_rejects_stale_handles(tmp_path):
     assert WORKER.is_file()
     assert PROBE.is_file()
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
     assert INPUT.is_file()
     output = tmp_path / "platform-world-output.rgba"
     report = run_session_render(tmp_path, PROBE, INPUT, output, width=37, height=23)

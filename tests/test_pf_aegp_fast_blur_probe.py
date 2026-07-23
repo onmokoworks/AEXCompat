@@ -3,7 +3,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from _render_session import run_session_render
+from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +44,9 @@ def test_probe_covers_impulses_blur_and_invalid_owned_world_lifecycle():
 
 
 def test_real_probe_blurs_owned_world_and_copies_nonzero_pixels(tmp_path):
+    assert WORKER.is_file()
+    assert PROBE.is_file()
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
     output = tmp_path / "fast-blur-output.rgba"
     report = run_session_render(tmp_path, PROBE, INPUT, output, width=37, height=23)
     assert report["status"] == "render_completed"

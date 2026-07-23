@@ -1,8 +1,29 @@
 import os
+from pathlib import Path
 
 import pytest
 
 from _render_session import assert_artifact_fresh
+
+
+SESSION_PROBE_TESTS = (
+    "test_pf_aegp_async_layer_receipt_probe.py",
+    "test_pf_aegp_external_cache_roundtrip_probe.py",
+    "test_pf_aegp_fast_blur_probe.py",
+    "test_pf_aegp_layer_options_probe.py",
+    "test_pf_aegp_layer_receipt_probe.py",
+    "test_pf_aegp_owned_world_probe.py",
+    "test_pf_aegp_platform_world_probe.py",
+    "test_pf_aegp_render_options4_tail_probe.py",
+    "test_worker_parameter_discovery.py",
+)
+
+
+@pytest.mark.parametrize("filename", SESSION_PROBE_TESTS)
+def test_session_probe_callers_guard_artifact_provenance(filename):
+    source = Path(__file__).with_name(filename).read_text(encoding="utf-8")
+    assert "assert_artifact_fresh" in source
+    assert "PROBE, SOURCE, WORKER, HARNESS" in source
 
 
 def test_stale_artifact_is_rejected_with_rebuild_diagnostic(tmp_path):

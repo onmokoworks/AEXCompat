@@ -4,7 +4,7 @@ import struct
 import subprocess
 from pathlib import Path
 
-from _render_session import run_session_render
+from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 import pytest
 
@@ -93,6 +93,7 @@ def test_real_probe_checks_out_typed_upstream_pixels_during_ordinary_render(
         tmp_path, pixel_format, depth):
     assert WORKER.is_file()
     assert PROBE.is_file()
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
     assert INPUT.is_file()
     output = tmp_path / f"layer-receipt-output-{depth}.rgba"
     probe_hash = hashlib.sha256(PROBE.read_bytes()).hexdigest()
