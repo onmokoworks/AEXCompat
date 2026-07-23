@@ -16,10 +16,19 @@
 //!                  scan folder's AE `Support Files` ancestor when present)
 //!   --no-deps      seal nothing, i.e. the pre-#304 behaviour
 //!   --limit <n>    stop after n plug-ins
+//!   --jobs <n>     dispatch up to n workers concurrently (issue #404; default
+//!                  8 — measured at 353 plug-ins: 982s sequential -> 282s).
+//!                  Workers are process-isolated (private desktop / Job Object /
+//!                  per-dispatch sealed root), so concurrency only changes wall
+//!                  time, not the safety model. `--jobs 1` restores the
+//!                  historical sequential behaviour; prefer it when the TEMP
+//!                  volume is nearly full, since concurrent staging needs a few
+//!                  GB of transient headroom per worker.
 //!   --survey-only  only measure each closure's size; launch no workers
 //!   --json <path>  write the per-plug-in records as JSON
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics;
@@ -37,6 +46,7 @@ struct Options {
     seal: bool,
     survey_only: bool,
     limit: usize,
+    jobs: usize,
     json: Option<PathBuf>,
 }
 
@@ -47,6 +57,7 @@ fn parse_options() -> Options {
     let mut seal = true;
     let mut survey_only = false;
     let mut limit = usize::MAX;
+    let mut jobs = 8usize;
     let mut json = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -61,12 +72,19 @@ fn parse_options() -> Options {
                     .and_then(|value| value.parse().ok())
                     .expect("--limit needs a number")
             }
+            "--jobs" => {
+                jobs = args
+                    .next()
+                    .and_then(|value| value.parse().ok())
+                    .filter(|jobs: &usize| *jobs >= 1)
+                    .expect("--jobs needs a number >= 1")
+            }
             "--json" => json = Some(PathBuf::from(args.next().expect("--json needs a path"))),
             other => scan = Some(PathBuf::from(other)),
         }
     }
     let scan = scan.expect(
-        "usage: discover_sweep <scan-dir> [--deps <dir>] [--no-deps] [--limit n] [--json path]",
+        "usage: discover_sweep <scan-dir> [--deps <dir>] [--no-deps] [--limit n] [--jobs n] [--json path]",
     );
     if dependency_dirs.is_empty() {
         dependency_dirs.extend(default_dependency_dirs(&scan));
@@ -77,6 +95,7 @@ fn parse_options() -> Options {
         seal,
         survey_only,
         limit,
+        jobs,
         json,
     }
 }
@@ -224,6 +243,193 @@ fn provenance_json(sources: &[DependencyProvenance]) -> Value {
     )
 }
 
+/// One plug-in's sweep result: exactly one record and one bucket, plus the
+/// progress line the sequential path printed as it went. Under `--jobs` the
+/// outcomes are collected per plug-in index and emitted in scan order, so the
+/// JSON records and the bucket summary match a sequential run.
+struct SweepOutcome {
+    record: Value,
+    bucket: String,
+    log: String,
+}
+
+fn sweep_plugin(
+    options: &Options,
+    repository: &Path,
+    index: usize,
+    total: usize,
+    plugin: &Path,
+) -> SweepOutcome {
+    let started = Instant::now();
+    // Hash and size the source before dispatch so every outcome, including
+    // worker/module failures, can be mapped back to the exact file. An
+    // unreadable file keeps explicit null identity fields instead of
+    // silently dropping its provenance.
+    let file_bytes = std::fs::read(plugin).ok();
+    let plugin_size_bytes = file_bytes.as_ref().map(|bytes| bytes.len() as u64);
+    let plugin_sha256 = file_bytes
+        .as_ref()
+        .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+    // Every plug-in gets exactly one record and one bucket, including the
+    // ones that fail before dispatch: a sweep that silently drops them
+    // reports a total that disagrees with its own buckets.
+    let record = |bucket: &str, extra: Value| {
+        plugin_record(
+            &options.scan,
+            plugin,
+            bucket,
+            started.elapsed().as_millis(),
+            plugin_size_bytes,
+            plugin_sha256.as_deref(),
+            extra,
+        )
+    };
+    let name = plugin.file_name().unwrap().to_string_lossy();
+    if file_bytes.is_none() {
+        return SweepOutcome {
+            record: record("unreadable_file", json!({})),
+            bucket: "unreadable_file".into(),
+            log: format!("[{}/{}] {name} -> unreadable_file", index + 1, total),
+        };
+    }
+    let sha = plugin_sha256
+        .as_deref()
+        .expect("readable plug-in must have a SHA-256 identity");
+
+    // `--no-deps` seals nothing at all, including helper DLLs sitting next to
+    // the plug-in: the point of the baseline is the pre-#304 dispatch, which
+    // passed an empty dependency list, so keeping the plug-in's own folder as
+    // a root would under-count the load failures it is meant to measure.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if options.seal {
+        // Canonicalized because the resolver requires absolute roots, and a
+        // scan folder may be given relative on the command line.
+        roots.extend(
+            plugin
+                .parent()
+                .and_then(|parent| std::fs::canonicalize(parent).ok()),
+        );
+        for dir in &options.dependency_dirs {
+            if let Ok(dir) = std::fs::canonicalize(dir)
+                && !roots.contains(&dir)
+            {
+                roots.push(dir);
+            }
+        }
+    }
+    if options.survey_only {
+        return match survey_dependency_closure(plugin, &roots) {
+            Ok(survey) => SweepOutcome {
+                record: record(
+                    "surveyed",
+                    json!({
+                        "closure_modules": survey.modules.len(),
+                        "closure_bytes": survey.total_bytes,
+                        "unresolved": survey.unresolved.len(),
+                        "unreadable_images": survey.unreadable_images,
+                        "dependency_provenance": provenance_json(&survey.provenance),
+                    }),
+                ),
+                bucket: "surveyed".into(),
+                log: format!(
+                    "[{}/{}] {name} -> {} modules, {} bytes",
+                    index + 1,
+                    total,
+                    survey.modules.len(),
+                    survey.total_bytes
+                ),
+            },
+            Err(error) => {
+                let bucket = format!("survey_error: {error}");
+                SweepOutcome {
+                    record: record(&bucket, json!({})),
+                    log: format!("[{}/{}] {name} -> {bucket}", index + 1, total),
+                    bucket,
+                }
+            }
+        };
+    }
+    // The baseline must not depend on the resolver at all: it reproduces the
+    // pre-#304 dispatch, which passed an empty dependency list without ever
+    // reading the plug-in's import table. Running the resolver here would let
+    // a parse failure bucket a plug-in as `closure_error` in a run whose whole
+    // point is what the worker does with no dependencies.
+    let closure = options
+        .seal
+        .then(|| resolve_dependency_closure(DependencyClosureRequest::new(plugin, &roots)));
+    // `unresolved` is `null` rather than 0 in the baseline: nothing was
+    // resolved there, so reporting a count would read as "nothing was
+    // missing" when the honest answer is "not measured".
+    let (dependencies, sealed_bytes, unresolved, dependency_provenance): (
+        Vec<ApprovedImageArtifact>,
+        u64,
+        Value,
+        Value,
+    ) = match &closure {
+        Some(Ok(closure)) => (
+            closure.dependencies().to_vec(),
+            closure.total_bytes(),
+            json!(closure.unresolved().len()),
+            provenance_json(closure.provenance()),
+        ),
+        Some(Err(_)) => (Vec::new(), 0, json!(null), json!(null)),
+        None => (Vec::new(), 0, json!(null), json!(null)),
+    };
+    let bucket = match &closure {
+        Some(Err(error)) => format!("closure_error: {error}"),
+        Some(Ok(_)) | None => {
+            match inspect_experimental_with_approved_dependencies_and_diagnostics(
+                repository,
+                plugin,
+                sha,
+                dependencies.clone(),
+            ) {
+                Ok((parameters, _)) => {
+                    return SweepOutcome {
+                        record: record(
+                            "loaded",
+                            json!({
+                                "parameters": parameters.len(),
+                                "sealed": dependencies.len(),
+                                "sealed_bytes": sealed_bytes,
+                                "unresolved": unresolved,
+                                "dependency_provenance": dependency_provenance,
+                            }),
+                        ),
+                        bucket: "loaded".into(),
+                        log: format!(
+                            "[{}/{}] {name} -> loaded ({} params, {} deps)",
+                            index + 1,
+                            total,
+                            parameters.len(),
+                            dependencies.len()
+                        ),
+                    };
+                }
+                Err(error) => bucket_of(&error.to_string()),
+            }
+        }
+    };
+    SweepOutcome {
+        record: record(
+            &bucket,
+            json!({
+                "sealed": dependencies.len(),
+                "sealed_bytes": sealed_bytes,
+                "unresolved": unresolved,
+                "dependency_provenance": dependency_provenance,
+            }),
+        ),
+        log: format!(
+            "[{}/{}] {name} -> {bucket} ({} deps)",
+            index + 1,
+            total,
+            dependencies.len()
+        ),
+        bucket,
+    }
+}
+
 fn main() {
     let options = parse_options();
     let repository = PathBuf::from(
@@ -234,180 +440,63 @@ fn main() {
     collect_aex(&options.scan, 0, &mut plugins);
     plugins.sort();
     plugins.truncate(options.limit);
+    let total = plugins.len();
     eprintln!(
-        "sweeping {} plug-ins (seal dependencies: {}, search dirs: {})",
-        plugins.len(),
+        "sweeping {} plug-ins (seal dependencies: {}, search dirs: {}, jobs: {})",
+        total,
         options.seal,
-        options.dependency_dirs.len()
+        options.dependency_dirs.len(),
+        options.jobs
     );
+
+    let mut outcomes: Vec<Option<SweepOutcome>> = (0..total).map(|_| None).collect();
+    if options.jobs <= 1 {
+        for (index, plugin) in plugins.iter().enumerate() {
+            let outcome = sweep_plugin(&options, &repository, index, total, plugin);
+            eprintln!("{}", outcome.log);
+            outcomes[index] = Some(outcome);
+        }
+    } else {
+        // The workers are already process-isolated (private desktop, Job
+        // Object, per-dispatch randomly-named sealed root, per-process audit),
+        // so running several dispatches concurrently changes only wall time,
+        // not the safety model. A thread pool indexes into the shared plug-in
+        // list; each outcome lands back in its own slot, keeping the report
+        // in scan order.
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..options.jobs.min(total.max(1)))
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut local = Vec::new();
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            if index >= total {
+                                break;
+                            }
+                            let outcome =
+                                sweep_plugin(&options, &repository, index, total, &plugins[index]);
+                            eprintln!("{}", outcome.log);
+                            local.push((index, outcome));
+                        }
+                        local
+                    })
+                })
+                .collect();
+            for handle in handles {
+                for (index, outcome) in handle.join().expect("sweep worker thread panicked") {
+                    outcomes[index] = Some(outcome);
+                }
+            }
+        });
+    }
 
     let mut records = Vec::new();
     let mut buckets: std::collections::BTreeMap<String, usize> = Default::default();
-    for (index, plugin) in plugins.iter().enumerate() {
-        let started = Instant::now();
-        // Hash and size the source before dispatch so every outcome, including
-        // worker/module failures, can be mapped back to the exact file. An
-        // unreadable file keeps explicit null identity fields instead of
-        // silently dropping its provenance.
-        let file_bytes = std::fs::read(plugin).ok();
-        let plugin_size_bytes = file_bytes.as_ref().map(|bytes| bytes.len() as u64);
-        let plugin_sha256 = file_bytes
-            .as_ref()
-            .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
-        // Every plug-in gets exactly one record and one bucket, including the
-        // ones that fail before dispatch: a sweep that silently drops them
-        // reports a total that disagrees with its own buckets.
-        let record = |bucket: &str, extra: Value| {
-            plugin_record(
-                &options.scan,
-                plugin,
-                bucket,
-                started.elapsed().as_millis(),
-                plugin_size_bytes,
-                plugin_sha256.as_deref(),
-                extra,
-            )
-        };
-        if file_bytes.is_none() {
-            records.push(record("unreadable_file", json!({})));
-            *buckets.entry("unreadable_file".into()).or_default() += 1;
-            continue;
-        }
-        let sha = plugin_sha256
-            .as_deref()
-            .expect("readable plug-in must have a SHA-256 identity");
-
-        // `--no-deps` seals nothing at all, including helper DLLs sitting next to
-        // the plug-in: the point of the baseline is the pre-#304 dispatch, which
-        // passed an empty dependency list, so keeping the plug-in's own folder as
-        // a root would under-count the load failures it is meant to measure.
-        let mut roots: Vec<PathBuf> = Vec::new();
-        if options.seal {
-            // Canonicalized because the resolver requires absolute roots, and a
-            // scan folder may be given relative on the command line.
-            roots.extend(
-                plugin
-                    .parent()
-                    .and_then(|parent| std::fs::canonicalize(parent).ok()),
-            );
-            for dir in &options.dependency_dirs {
-                if let Ok(dir) = std::fs::canonicalize(dir)
-                    && !roots.contains(&dir)
-                {
-                    roots.push(dir);
-                }
-            }
-        }
-        if options.survey_only {
-            match survey_dependency_closure(plugin, &roots) {
-                Ok(survey) => {
-                    records.push(record(
-                        "surveyed",
-                        json!({
-                            "closure_modules": survey.modules.len(),
-                            "closure_bytes": survey.total_bytes,
-                            "unresolved": survey.unresolved.len(),
-                            "unreadable_images": survey.unreadable_images,
-                            "dependency_provenance": provenance_json(&survey.provenance),
-                        }),
-                    ));
-                    *buckets.entry("surveyed".into()).or_default() += 1;
-                    eprintln!(
-                        "[{}/{}] {} -> {} modules, {} bytes",
-                        index + 1,
-                        plugins.len(),
-                        plugin.file_name().unwrap().to_string_lossy(),
-                        survey.modules.len(),
-                        survey.total_bytes
-                    );
-                }
-                Err(error) => {
-                    let bucket = format!("survey_error: {error}");
-                    records.push(record(&bucket, json!({})));
-                    *buckets.entry(bucket).or_default() += 1;
-                }
-            }
-            continue;
-        }
-        // The baseline must not depend on the resolver at all: it reproduces the
-        // pre-#304 dispatch, which passed an empty dependency list without ever
-        // reading the plug-in's import table. Running the resolver here would let
-        // a parse failure bucket a plug-in as `closure_error` in a run whose whole
-        // point is what the worker does with no dependencies.
-        let closure = options
-            .seal
-            .then(|| resolve_dependency_closure(DependencyClosureRequest::new(plugin, &roots)));
-        // `unresolved` is `null` rather than 0 in the baseline: nothing was
-        // resolved there, so reporting a count would read as "nothing was
-        // missing" when the honest answer is "not measured".
-        let (dependencies, sealed_bytes, unresolved, dependency_provenance): (
-            Vec<ApprovedImageArtifact>,
-            u64,
-            Value,
-            Value,
-        ) = match &closure {
-            Some(Ok(closure)) => (
-                closure.dependencies().to_vec(),
-                closure.total_bytes(),
-                json!(closure.unresolved().len()),
-                provenance_json(closure.provenance()),
-            ),
-            Some(Err(_)) => (Vec::new(), 0, json!(null), json!(null)),
-            None => (Vec::new(), 0, json!(null), json!(null)),
-        };
-        let bucket = match &closure {
-            Some(Err(error)) => format!("closure_error: {error}"),
-            Some(Ok(_)) | None => {
-                match inspect_experimental_with_approved_dependencies_and_diagnostics(
-                    &repository,
-                    plugin,
-                    &sha,
-                    dependencies.clone(),
-                ) {
-                    Ok((parameters, _)) => {
-                        records.push(record(
-                            "loaded",
-                            json!({
-                                "parameters": parameters.len(),
-                                "sealed": dependencies.len(),
-                                "sealed_bytes": sealed_bytes,
-                                "unresolved": unresolved,
-                                "dependency_provenance": dependency_provenance,
-                            }),
-                        ));
-                        *buckets.entry("loaded".into()).or_default() += 1;
-                        eprintln!(
-                            "[{}/{}] {} -> loaded ({} params, {} deps)",
-                            index + 1,
-                            plugins.len(),
-                            plugin.file_name().unwrap().to_string_lossy(),
-                            parameters.len(),
-                            dependencies.len()
-                        );
-                        continue;
-                    }
-                    Err(error) => bucket_of(&error.to_string()),
-                }
-            }
-        };
-        records.push(record(
-            &bucket,
-            json!({
-                "sealed": dependencies.len(),
-                "sealed_bytes": sealed_bytes,
-                "unresolved": unresolved,
-                "dependency_provenance": dependency_provenance,
-            }),
-        ));
-        *buckets.entry(bucket.clone()).or_default() += 1;
-        eprintln!(
-            "[{}/{}] {} -> {} ({} deps)",
-            index + 1,
-            plugins.len(),
-            plugin.file_name().unwrap().to_string_lossy(),
-            bucket,
-            dependencies.len()
-        );
+    for outcome in outcomes {
+        let outcome = outcome.expect("every plug-in must produce exactly one outcome");
+        *buckets.entry(outcome.bucket).or_default() += 1;
+        records.push(outcome.record);
     }
 
     println!("\n=== summary ({} plug-ins) ===", records.len());
