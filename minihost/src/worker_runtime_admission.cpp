@@ -2,6 +2,7 @@
 
 #include "runtime_module_audit.hpp"
 
+#include <cstring>
 #include <iostream>
 
 namespace aexcompat::worker_runtime {
@@ -15,6 +16,65 @@ void remove_directory_cookie(DLL_DIRECTORY_COOKIE& cookie) noexcept {
   if (!cookie) return;
   RemoveDllDirectory(cookie);
   cookie = nullptr;
+}
+
+bool pipl_resource_is_aegp(const unsigned char* bytes,
+                           std::size_t size) noexcept {
+  constexpr std::size_t kMaxPiplBytes = 1024 * 1024;
+  if (!bytes || size < 20 || size > kMaxPiplBytes) return false;
+  // The PiPL kind property is a MIB8/dnik property whose four-byte value is
+  // xgEA. This is deliberately only a discriminator: the full PiPL parser
+  // remains the authoritative effect-entrypoint validator after admission.
+  for (std::size_t offset = 0; offset + 20 <= size; ++offset) {
+    if (std::memcmp(bytes + offset, "MIB8", 4) != 0 ||
+        std::memcmp(bytes + offset + 4, "dnik", 4) != 0 ||
+        bytes[offset + 12] != 4 || bytes[offset + 13] != 0 ||
+        bytes[offset + 14] != 0 || bytes[offset + 15] != 0 ||
+        std::memcmp(bytes + offset + 16, "xgEA", 4) != 0)
+      continue;
+    return true;
+  }
+  return false;
+}
+
+struct AegpPreflightScan {
+  HMODULE module{};
+  bool found{};
+  std::size_t names_seen{};
+};
+
+BOOL CALLBACK scan_pipl_resource_name(HMODULE module, LPCWSTR, LPWSTR name,
+                                      LONG_PTR context) {
+  auto* scan = reinterpret_cast<AegpPreflightScan*>(context);
+  if (!scan || scan->names_seen++ >= 64) return FALSE;
+  const HRSRC resource = FindResourceW(module, name, L"PiPL");
+  if (!resource) return TRUE;
+  const DWORD size = SizeofResource(module, resource);
+  const HGLOBAL loaded = LoadResource(module, resource);
+  const auto* bytes = loaded
+      ? static_cast<const unsigned char*>(LockResource(loaded)) : nullptr;
+  if (pipl_resource_is_aegp(bytes, size)) {
+    scan->found = true;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+bool is_aegp_candidate_without_execution(
+    const std::filesystem::path& plugin_path) noexcept {
+  // Map the image without resolving imports or calling DllMain. The PiPL
+  // discriminator lets the PF-only worker reject an AEGP before third-party
+  // dependency initialization can reach process teardown. The normal
+  // LoadLibraryExW below remains the only executable admission path.
+  const HMODULE preflight_module = LoadLibraryExW(
+      plugin_path.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+  if (!preflight_module) return false;
+  AegpPreflightScan scan{preflight_module};
+  EnumResourceNamesW(preflight_module, L"PiPL", &scan_pipl_resource_name,
+                     reinterpret_cast<LONG_PTR>(&scan));
+  const bool aegp_candidate = scan.found;
+  FreeLibrary(preflight_module);
+  return aegp_candidate;
 }
 
 }  // namespace
@@ -40,6 +100,15 @@ int admit_runtime(const RuntimeHostHooks& hooks,
   if (request.authorize_runtime_modules &&
       !parse_runtime_module_authorization(plugin_path,
                                           request.authorization_manifest)) return 15;
+
+  // This worker only supports PF effects. Reject an AEGP candidate from an
+  // image-only preflight so its DllMain and delay-loaded dependencies never
+  // execute in a PF inspection process. In particular, this keeps an AEGP's
+  // third-party teardown outside the PF worker's shutdown contract (#377).
+  if (is_aegp_candidate_without_execution(plugin_path)) {
+    std::cerr << "plugin_kind:aegp_candidate\n" << std::flush;
+    return 12;
+  }
 
   if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 |
                                 LOAD_LIBRARY_SEARCH_USER_DIRS)) return 11;

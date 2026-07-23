@@ -33,14 +33,31 @@ def test_gpu_preflight_uses_common_admission_for_plugin_load():
 def test_admission_preserves_ordered_fail_closed_identity_and_audit_gates():
     hash_gate = SOURCE.index("hooks.hash_file(request.plugin_argument")
     manifest_gate = SOURCE.index("parse_runtime_module_authorization(plugin_path,")
+    preflight = SOURCE.index("is_aegp_candidate_without_execution(plugin_path)")
     load = SOURCE.index("LoadLibraryExW(plugin_path.c_str()")
     audit = SOURCE.index("audit.post_load = capture_module_audit()")
     stdout = SOURCE.index("hooks.redirect_native_stdout()")
-    assert hash_gate < manifest_gate < load < audit < stdout
+    assert hash_gate < manifest_gate < preflight < load < audit < stdout
     assert "return 10" in SOURCE
     assert "return 15" in SOURCE
     assert "return 14" in SOURCE
     assert "return 13" in SOURCE
+
+
+def test_pf_admission_rejects_aegp_before_executable_load():
+    preflight = SOURCE[SOURCE.index("bool pipl_resource_is_aegp"):
+                      SOURCE.index("int admit_runtime")]
+    assert "DONT_RESOLVE_DLL_REFERENCES" in preflight
+    assert "pipl_resource_is_aegp" in preflight
+    assert 'EnumResourceNamesW(preflight_module, L"PiPL"' in preflight
+    assert '"MIB8", 4' in preflight
+    assert '"dnik", 4' in preflight
+    assert '"xgEA", 4' in preflight
+    assert "FreeLibrary(preflight_module)" in preflight
+    admission = SOURCE[SOURCE.index("if (is_aegp_candidate_without_execution"):
+                        SOURCE.index("if (!SetDefaultDllDirectories")]
+    assert 'plugin_kind:aegp_candidate\\n' in admission
+    assert "return 12" in admission
 
 
 def test_admission_keeps_runtime_path_data_out_of_serialized_diagnostics():
