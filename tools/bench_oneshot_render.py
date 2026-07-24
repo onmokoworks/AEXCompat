@@ -1,16 +1,20 @@
-"""issue #98 段階0 項目4: 現行 one-shot worker 経路のフレームあたり固定コスト計測。
+"""Benchmark the current session-harness render transport.
 
-worker を直接起動する (broker の sealed staging は含まない)。broker が加える
-hash コストは sha256 計測で近似する。結果は JSON で stdout に出す。
+The former one-shot worker render verbs were removed in #365. This benchmark
+keeps its historical filename for evidence continuity, but enters through
+``aexcompat-harness.exe --render-experimental-session`` and emits JSON to
+stdout.
 
 Usage:
     uv run python tools/bench_oneshot_render.py <repository_root> <work_dir>
+    uv run python tools/bench_oneshot_render.py <repository_root> <work_dir> <harness_exe>
 
-<work_dir> は入出力 raw の一時置き場 (任意の空きディレクトリ)。事前に
-`aex_render_worker.exe` と `pf_sampling_probe.aex` のビルドが必要。
-計測値は機材・AV スキャン状態に依存するため、frozen evidence ではなく
-調査ノート (docs/RENDER_SESSION_INVESTIGATION_2026-07-19.md) の参考値。
+The work directory is a temporary input/output directory. Before running, build
+the release session harness and ``pf_sampling_probe.aex``.
 """
+
+from __future__ import annotations
+
 import hashlib
 import json
 import statistics
@@ -19,64 +23,116 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(sys.argv[1]).resolve()
-OUT_DIR = Path(sys.argv[2]).resolve()
-WORKER = ROOT / "target/minihost-build/aex_render_worker.exe"
-AEX = ROOT / "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex"
+from PIL import Image
 
 N = 12
 
 
-def run_worker(args, timeout=60):
+def run_harness(harness: Path, root: Path, args: list[str], timeout: int = 60):
     start = time.perf_counter()
     completed = subprocess.run(
-        [str(WORKER), *args], cwd=ROOT, text=True, capture_output=True,
+        [str(harness), *args],
+        cwd=root,
+        text=True,
+        capture_output=True,
         timeout=timeout,
     )
     return time.perf_counter() - start, completed
 
 
-def bench_render(width, height, label):
-    aex_sha = hashlib.sha256(AEX.read_bytes()).hexdigest()
-    input_path = OUT_DIR / f"input-{label}.rgba"
+def session_failure(label: str, completed: subprocess.CompletedProcess[str]) -> dict:
+    return {
+        "label": label,
+        "status": "error",
+        "error": completed.returncode,
+        "stderr": completed.stderr[-500:],
+    }
+
+
+def bench_render(
+    root: Path,
+    out_dir: Path,
+    harness: Path,
+    aex: Path,
+    width: int,
+    height: int,
+    label: str,
+) -> dict:
+    aex_sha = hashlib.sha256(aex.read_bytes()).hexdigest()
+    input_path = out_dir / f"input-{label}.png"
     write_start = time.perf_counter()
-    input_path.write_bytes(bytes(width * height * 4))
+    Image.new("RGBA", (width, height), (0, 0, 0, 0)).save(input_path)
     input_write_s = time.perf_counter() - write_start
     samples = []
     for index in range(N):
-        output_path = OUT_DIR / f"output-{label}-{index}.rgba"
+        output_path = out_dir / f"output-{label}-{index}.png"
         if output_path.exists():
             output_path.unlink()
-        elapsed, completed = run_worker([
-            "--render-image", str(AEX), aex_sha, "v5|",
-            str(input_path), str(output_path),
-            str(width), str(height), "0", "1", "1", "1",
-        ])
+        elapsed, completed = run_harness(
+            harness,
+            root,
+            [
+                "--render-experimental-session",
+                str(aex),
+                str(input_path),
+                str(output_path),
+                "argb8",
+                "classic",
+                "0",
+                "1",
+                "1",
+            ],
+        )
         if completed.returncode != 0:
-            return {"label": label, "error": completed.returncode,
-                    "stderr": completed.stderr[-500:]}
+            return session_failure(label, completed)
+        try:
+            report = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            return {
+                "label": label,
+                "status": "error",
+                "error": "session harness returned invalid JSON",
+                "stdout": completed.stdout[-500:],
+            }
+        if report.get("passed") is not True or not output_path.is_file():
+            return {
+                "label": label,
+                "status": "error",
+                "error": "session harness did not report a successful PNG render",
+                "report": report,
+            }
         samples.append(elapsed)
         output_path.unlink()
     return {
+        "status": "ok",
+        "transport": "session-harness",
         "label": label,
         "width": width,
         "height": height,
         "n": N,
-        "input_write_ms": round(input_write_s * 1e3, 2),
+        "input_png_write_ms": round(input_write_s * 1e3, 2),
         "min_ms": round(min(samples) * 1e3, 1),
         "median_ms": round(statistics.median(samples) * 1e3, 1),
         "max_ms": round(max(samples) * 1e3, 1),
     }
 
 
-def bench_spawn_floor():
+def bench_spawn_floor(root: Path, harness: Path) -> dict:
     samples = []
     for _ in range(N):
-        elapsed, completed = run_worker(["--render-image"], timeout=15)
-        assert completed.returncode == 2, completed.returncode
+        elapsed, completed = run_harness(
+            harness,
+            root,
+            ["--print-cli-contract"],
+            timeout=15,
+        )
+        if completed.returncode != 0:
+            return session_failure("session_harness_contract_floor", completed)
         samples.append(elapsed)
     return {
-        "label": "spawn_floor_exit2",
+        "label": "session_harness_contract_floor",
+        "status": "ok",
+        "transport": "session-harness",
         "n": N,
         "min_ms": round(min(samples) * 1e3, 1),
         "median_ms": round(statistics.median(samples) * 1e3, 1),
@@ -84,21 +140,19 @@ def bench_spawn_floor():
     }
 
 
-def stream_hash(path):
-    # admit_local_worker (secure_image_dispatch.rs) と同じく、毎回ディスクから
-    # open して 1MiB チャンクで stream しながら hash する。read_bytes 後の
-    # CPU-only 計測ではディスクキャッシュ/AV スキャンのコストが抜けるため
-    # (Codex PR #101 P2 指摘)、本番 admission と同じ経路を測る。
+def stream_hash(path: Path) -> str:
+    """Hash one file through the same chunked admission shape used at runtime."""
+
     hasher = hashlib.sha256()
-    with open(path, "rb") as handle:
+    with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
 
 
-def bench_hash():
+def bench_hash(harness: Path, aex: Path) -> dict:
     result = {}
-    for name, path in (("worker_exe", WORKER), ("probe_aex", AEX)):
+    for name, path in (("harness_exe", harness), ("probe_aex", aex)):
         size = path.stat().st_size
         samples = []
         for _ in range(N):
@@ -107,8 +161,7 @@ def bench_hash():
             samples.append(time.perf_counter() - start)
         result[name] = {
             "size_bytes": size,
-            "note": "open+stream+hash per iteration (mirrors admit_local_worker); "
-                    "includes disk/AV overhead, warm cache",
+            "note": "open+stream+hash per iteration (mirrors session admission); includes disk/AV overhead, warm cache",
             "n": N,
             "min_ms": round(min(samples) * 1e3, 3),
             "median_ms": round(statistics.median(samples) * 1e3, 3),
@@ -117,16 +170,50 @@ def bench_hash():
     return result
 
 
-def main():
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+def main() -> int:
+    if len(sys.argv) not in (3, 4):
+        print(__doc__, file=sys.stderr)
+        return 2
+    root = Path(sys.argv[1]).resolve()
+    out_dir = Path(sys.argv[2]).resolve()
+    harness = (
+        Path(sys.argv[3]).resolve()
+        if len(sys.argv) == 4
+        else root / "broker/target/release/aexcompat-harness.exe"
+    )
+    aex = root / "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex"
+    missing = [str(path) for path in (harness, aex) if not path.is_file()]
+    if missing:
+        print(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "blocker": {
+                        "blocker_id": "benchmark_artifact_missing",
+                        "missing": missing,
+                        "restart_condition": "build the release session harness and pf_sampling_probe.aex",
+                    },
+                },
+                indent=2,
+            )
+        )
+        return 3
+    out_dir.mkdir(parents=True, exist_ok=True)
     report = {
-        "spawn_floor": bench_spawn_floor(),
-        "hash": bench_hash(),
-        "tiny_37x23": bench_render(37, 23, "tiny"),
-        "fhd_1920x1080": bench_render(1920, 1080, "fhd"),
+        "transport": "session-harness",
+        "spawn_floor": bench_spawn_floor(root, harness),
+        "hash": bench_hash(harness, aex),
+        "tiny_37x23": bench_render(root, out_dir, harness, aex, 37, 23, "tiny"),
+        "fhd_1920x1080": bench_render(root, out_dir, harness, aex, 1920, 1080, "fhd"),
     }
     print(json.dumps(report, indent=2))
+    render_results = [
+        value
+        for key, value in report.items()
+        if key not in {"transport", "hash"}
+    ]
+    return 0 if all(value.get("status") == "ok" for value in render_results) else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

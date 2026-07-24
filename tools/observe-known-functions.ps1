@@ -5,8 +5,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Out,
     [Parameter(Mandatory = $true)][string]$ModulePath,
     [Parameter(Mandatory = $true)][string]$PluginLabel,
-    [Parameter(Mandatory = $true)][string[]]$RenderArgs,
-    [string]$Worker = "target/minihost-build/aex_render_worker.exe",
+    [Parameter(Mandatory = $true)][string[]]$SessionArgs,
+    [string]$Harness = "broker/target/release/aexcompat-harness.exe",
     [int]$TimeoutSeconds = 30
 )
 
@@ -15,16 +15,16 @@ param(
 # native_observation and must never be promoted into an AE-equivalence corpus.
 # See docs/KNOWN_FUNCTION_OBSERVATION_2026-07-19.md.
 #
-# It spawns the worker's own receipt-free --render-image CLI under Frida (Frida
-# owns the PID), so no broker core path is touched. The render runs the worker,
-# not After Effects, so AfterFX/aerender are not required and not contended.
+# It spawns the supported session harness command under Frida (Frida owns the
+# PID). Deleted one-shot worker render verbs are rejected as a structured blocker;
+# this launcher never treats them as a successful observation path.
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
-$workerAbsolute = Join-Path $root ($Worker -replace '/', '\')
-if (-not (Test-Path -LiteralPath $workerAbsolute -PathType Leaf)) {
-    throw "Worker build is missing: $Worker. Build it first (see docs/COMPATIBILITY_STATUS) before observation."
+$harnessAbsolute = Join-Path $root ($Harness -replace '/', '\')
+if (-not (Test-Path -LiteralPath $harnessAbsolute -PathType Leaf)) {
+    throw "Session harness is missing: $Harness. Build it first (see docs/COMPATIBILITY_STATUS) before observation."
 }
 
 # Frida is an observation-only dependency, intentionally absent from the
@@ -42,10 +42,10 @@ $arguments = @(
     "--out", $Out,
     "--module-path", $ModulePath,
     "--plugin-label", $PluginLabel,
-    "--worker", $Worker,
+    "--harness", $Harness,
     "--timeout-seconds", $TimeoutSeconds,
     "--"
-) + $RenderArgs
+) + $SessionArgs
 
 Push-Location $root
 try {
