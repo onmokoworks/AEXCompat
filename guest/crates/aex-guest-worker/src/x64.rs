@@ -1,4 +1,5 @@
 use aex_abi::x86_64_windows as abi;
+use std::collections::HashMap;
 use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::{RegisterX86, Unicorn};
@@ -17,10 +18,26 @@ const HOST_POISON: u64 = STUB_BASE + 0x80010;
 const HOST_ANSI_STRCPY: u64 = STUB_BASE + 0x80020;
 const HOST_COPY: u64 = STUB_BASE + 0x80030;
 const HOST_NOOP: u64 = STUB_BASE + 0x80040;
+const HOST_PRE_CHECKOUT_LAYER: u64 = STUB_BASE + 0x80050;
+const HOST_CHECKOUT_LAYER_PIXELS: u64 = STUB_BASE + 0x80060;
+const HOST_CHECKIN_LAYER_PIXELS: u64 = STUB_BASE + 0x80070;
+const HOST_CHECKOUT_OUTPUT: u64 = STUB_BASE + 0x80080;
+const HOST_ACQUIRE_SUITE: u64 = STUB_BASE + 0x80090;
+const HOST_CHECKOUT_PARAM: u64 = STUB_BASE + 0x800a0;
+const HOST_CHECKIN_PARAM: u64 = STUB_BASE + 0x800b0;
+const HOST_NEW_HANDLE: u64 = STUB_BASE + 0x800c0;
+const HOST_LOCK_HANDLE: u64 = STUB_BASE + 0x800d0;
+const HOST_UNLOCK_HANDLE: u64 = STUB_BASE + 0x800e0;
+const HOST_DISPOSE_HANDLE: u64 = STUB_BASE + 0x800f0;
+const HOST_HANDLE_SIZE: u64 = STUB_BASE + 0x80100;
+const HOST_RESIZE_HANDLE: u64 = STUB_BASE + 0x80110;
+const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const DATA_BASE: u64 = 0x0000_0000_4000_0000;
-const DATA_SIZE: u64 = 0x10_0000;
-const MAX_INSTRUCTIONS: usize = 20_000_000;
-const TIMEOUT_MICROSECONDS: u64 = 5_000_000;
+const DATA_SIZE: u64 = 0x1000_0000;
+const HANDLE_DATA_BASE: u64 = DATA_BASE + 0x400_0000;
+const HANDLE_DATA_END: u64 = DATA_BASE + DATA_SIZE;
+const MAX_INSTRUCTIONS: usize = 4_000_000_000;
+const TIMEOUT_MICROSECONDS: u64 = 600_000_000;
 
 #[derive(Debug, Error)]
 pub enum GuestError {
@@ -39,6 +56,8 @@ pub enum GuestError {
     DataCapacity,
     #[error("guest callback failed: {0}")]
     Callback(String),
+    #[error("DLL process attach returned FALSE")]
+    DllProcessAttach,
 }
 
 fn uc<T>(
@@ -64,6 +83,26 @@ struct GuestState {
     params: Vec<GuestParam>,
     callback_error: Option<String>,
     last_pc: u64,
+    smart_input_world: u64,
+    smart_output_world: u64,
+    smart_width: u32,
+    smart_height: u32,
+    suite_requests: Vec<String>,
+    pre_checkout_calls: u32,
+    checkout_pixels_calls: u32,
+    checkout_output_calls: u32,
+    parameter_definitions: Vec<u64>,
+    next_handle_data: u64,
+    handles: HashMap<u64, GuestHandle>,
+    math_calls: Vec<String>,
+    handle_allocations: Vec<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct GuestHandle {
+    data: u64,
+    size: u64,
+    locks: u32,
 }
 
 pub struct GuestEngine<'a> {
@@ -77,6 +116,7 @@ impl GuestEngine<'static> {
             "create x86_64 engine",
             Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()),
         )?;
+        unicorn.get_data_mut().next_handle_data = HANDLE_DATA_BASE;
         let image_size =
             u64::try_from(image.mapped_bytes().len()).map_err(|_| GuestError::ImageAlignment)?;
         if image.image_base() % PAGE_SIZE != 0 || image_size % PAGE_SIZE != 0 {
@@ -140,13 +180,28 @@ impl GuestEngine<'static> {
                     "write import stub",
                     unicorn.mem_write(stub, &[0x31, 0xc0, 0xc3]),
                 )?;
-                if symbol.name == "strncpy" {
-                    uc(
-                        "install strncpy import",
-                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                            emulate_strncpy(unicorn);
-                        }),
-                    )?;
+                match symbol.name.as_str() {
+                    "strncpy" => {
+                        uc(
+                            "install strncpy import",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_strncpy(unicorn);
+                            }),
+                        )?;
+                    }
+                    "memset" => {
+                        uc(
+                            "install memset import",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_memset(unicorn);
+                            }),
+                        )?;
+                    }
+                    "expf" => install_float_import(&mut unicorn, stub, "expf", f32::exp)?,
+                    "floorf" => install_float_import(&mut unicorn, stub, "floorf", f32::floor)?,
+                    "powf" => install_float_binary_import(&mut unicorn, stub, "powf", f32::powf)?,
+                    "pow" => install_double_binary_import(&mut unicorn, stub, "pow", f64::powf)?,
+                    _ => {}
                 }
                 let iat_rva = u64::try_from(symbol.iat_rva).map_err(|_| GuestError::IatRange)?;
                 let iat = image
@@ -181,6 +236,23 @@ impl GuestEngine<'static> {
             "write no-op callback",
             unicorn.mem_write(HOST_NOOP, &[0x31, 0xc0, 0xc3]),
         )?;
+        for (operation, address) in [
+            ("write pre-checkout callback", HOST_PRE_CHECKOUT_LAYER),
+            ("write checkout-pixels callback", HOST_CHECKOUT_LAYER_PIXELS),
+            ("write checkin-pixels callback", HOST_CHECKIN_LAYER_PIXELS),
+            ("write checkout-output callback", HOST_CHECKOUT_OUTPUT),
+            ("write acquire-suite callback", HOST_ACQUIRE_SUITE),
+            ("write checkout-param callback", HOST_CHECKOUT_PARAM),
+            ("write checkin-param callback", HOST_CHECKIN_PARAM),
+            ("write new-handle callback", HOST_NEW_HANDLE),
+            ("write lock-handle callback", HOST_LOCK_HANDLE),
+            ("write unlock-handle callback", HOST_UNLOCK_HANDLE),
+            ("write dispose-handle callback", HOST_DISPOSE_HANDLE),
+            ("write handle-size callback", HOST_HANDLE_SIZE),
+            ("write resize-handle callback", HOST_RESIZE_HANDLE),
+        ] {
+            uc(operation, unicorn.mem_write(address, &[0xc3]))?;
+        }
         uc(
             "install add_param callback",
             unicorn.add_code_hook(HOST_ADD_PARAM, HOST_ADD_PARAM, |unicorn, _, _| {
@@ -199,10 +271,125 @@ impl GuestEngine<'static> {
                 emulate_copy(unicorn);
             }),
         )?;
-        Ok(Self {
+        uc(
+            "install pre-checkout callback",
+            unicorn.add_code_hook(
+                HOST_PRE_CHECKOUT_LAYER,
+                HOST_PRE_CHECKOUT_LAYER,
+                emulate_pre_checkout_layer,
+            ),
+        )?;
+        uc(
+            "install checkout-pixels callback",
+            unicorn.add_code_hook(
+                HOST_CHECKOUT_LAYER_PIXELS,
+                HOST_CHECKOUT_LAYER_PIXELS,
+                emulate_checkout_layer_pixels,
+            ),
+        )?;
+        uc(
+            "install checkin-pixels callback",
+            unicorn.add_code_hook(
+                HOST_CHECKIN_LAYER_PIXELS,
+                HOST_CHECKIN_LAYER_PIXELS,
+                |unicorn, _, _| {
+                    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+                },
+            ),
+        )?;
+        uc(
+            "install checkout-output callback",
+            unicorn.add_code_hook(
+                HOST_CHECKOUT_OUTPUT,
+                HOST_CHECKOUT_OUTPUT,
+                emulate_checkout_output,
+            ),
+        )?;
+        uc(
+            "install acquire-suite callback",
+            unicorn.add_code_hook(
+                HOST_ACQUIRE_SUITE,
+                HOST_ACQUIRE_SUITE,
+                emulate_acquire_suite,
+            ),
+        )?;
+        uc(
+            "install checkout-param callback",
+            unicorn.add_code_hook(
+                HOST_CHECKOUT_PARAM,
+                HOST_CHECKOUT_PARAM,
+                emulate_checkout_param,
+            ),
+        )?;
+        uc(
+            "install checkin-param callback",
+            unicorn.add_code_hook(HOST_CHECKIN_PARAM, HOST_CHECKIN_PARAM, |unicorn, _, _| {
+                let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            }),
+        )?;
+        for (operation, address, callback) in [
+            (
+                "install new-handle callback",
+                HOST_NEW_HANDLE,
+                emulate_new_handle as fn(&mut Unicorn<'_, GuestState>, u64, u32),
+            ),
+            (
+                "install lock-handle callback",
+                HOST_LOCK_HANDLE,
+                emulate_lock_handle,
+            ),
+            (
+                "install unlock-handle callback",
+                HOST_UNLOCK_HANDLE,
+                emulate_unlock_handle,
+            ),
+            (
+                "install dispose-handle callback",
+                HOST_DISPOSE_HANDLE,
+                emulate_dispose_handle,
+            ),
+            (
+                "install handle-size callback",
+                HOST_HANDLE_SIZE,
+                emulate_handle_size,
+            ),
+            (
+                "install resize-handle callback",
+                HOST_RESIZE_HANDLE,
+                emulate_resize_handle,
+            ),
+        ] {
+            uc(operation, unicorn.add_code_hook(address, address, callback))?;
+        }
+        let mut handle_suite = [0u8; 48];
+        for (offset, address) in [
+            HOST_NEW_HANDLE,
+            HOST_LOCK_HANDLE,
+            HOST_UNLOCK_HANDLE,
+            HOST_DISPOSE_HANDLE,
+            HOST_HANDLE_SIZE,
+            HOST_RESIZE_HANDLE,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            handle_suite[offset * 8..offset * 8 + 8].copy_from_slice(&address.to_le_bytes());
+        }
+        uc(
+            "write PF Handle Suite",
+            unicorn.mem_write(HOST_HANDLE_SUITE, &handle_suite),
+        )?;
+        let mut engine = Self {
             unicorn,
             next_data: DATA_BASE,
-        })
+        };
+        if let Some(entry) = image.dll_entry_address() {
+            let attached = engine.call_win64(entry, [image.image_base(), 1, 0, 0, 0, 0])?;
+            if attached == 0 {
+                return Err(GuestError::DllProcessAttach);
+            }
+        }
+        Ok(engine)
     }
 
     pub fn call_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
@@ -243,10 +430,30 @@ impl GuestEngine<'static> {
             let rip = self.unicorn.reg_read(RegisterX86::RIP).unwrap_or(0);
             let last_pc = self.unicorn.get_data().last_pc;
             let rbx = self.unicorn.reg_read(RegisterX86::RBX).unwrap_or(0);
+            let rcx = self.unicorn.reg_read(RegisterX86::RCX).unwrap_or(0);
+            let rdx = self.unicorn.reg_read(RegisterX86::RDX).unwrap_or(0);
+            let rbp = self.unicorn.reg_read(RegisterX86::RBP).unwrap_or(0);
+            let r8 = self.unicorn.reg_read(RegisterX86::R8).unwrap_or(0);
+            let suites = self.unicorn.get_data().suite_requests.join(", ");
+            let math_calls = self.unicorn.get_data().math_calls.join(", ");
+            let handle_allocations = &self.unicorn.get_data().handle_allocations;
             return Err(GuestError::Unicorn {
                 operation: "execute guest function",
                 detail: format!(
-                    "{error} at RIP={rip:#x}, last guest PC={last_pc:#x}, RBX={rbx:#x}"
+                    "{error} at RIP={rip:#x}, last guest PC={last_pc:#x}, RBX={rbx:#x}, RBP={rbp:#x}, RCX={rcx:#x}, RDX={rdx:#x}, R8={r8:#x}, suite requests=[{suites}], handle allocations={handle_allocations:?}, math calls=[{math_calls}]"
+                ),
+            });
+        }
+        let rip = uc(
+            "read instruction pointer",
+            self.unicorn.reg_read(RegisterX86::RIP),
+        )?;
+        if rip != RETURN_ADDRESS {
+            let last_pc = self.unicorn.get_data().last_pc;
+            return Err(GuestError::Unicorn {
+                operation: "execute guest function",
+                detail: format!(
+                    "execution stopped before the guest returned (RIP={rip:#x}, last guest PC={last_pc:#x})"
                 ),
             });
         }
@@ -305,6 +512,93 @@ impl GuestEngine<'static> {
         HOST_NOOP
     }
 
+    pub fn acquire_suite_callback_address(&self) -> u64 {
+        HOST_ACQUIRE_SUITE
+    }
+
+    pub fn checkout_param_callback_address(&self) -> u64 {
+        HOST_CHECKOUT_PARAM
+    }
+
+    pub fn checkin_param_callback_address(&self) -> u64 {
+        HOST_CHECKIN_PARAM
+    }
+
+    pub fn configure_parameter_definitions(&mut self, definitions: Vec<u64>) {
+        self.unicorn.get_data_mut().parameter_definitions = definitions;
+    }
+
+    pub fn suite_requests(&self) -> &[String] {
+        &self.unicorn.get_data().suite_requests
+    }
+
+    pub fn smart_callback_counts(&self) -> (u32, u32, u32) {
+        let state = self.unicorn.get_data();
+        (
+            state.pre_checkout_calls,
+            state.checkout_pixels_calls,
+            state.checkout_output_calls,
+        )
+    }
+
+    pub fn handle_allocations(&self) -> &[u64] {
+        &self.unicorn.get_data().handle_allocations
+    }
+
+    pub fn pre_checkout_layer_callback_address(&self) -> u64 {
+        HOST_PRE_CHECKOUT_LAYER
+    }
+
+    pub fn checkout_layer_pixels_callback_address(&self) -> u64 {
+        HOST_CHECKOUT_LAYER_PIXELS
+    }
+
+    pub fn checkin_layer_pixels_callback_address(&self) -> u64 {
+        HOST_CHECKIN_LAYER_PIXELS
+    }
+
+    pub fn checkout_output_callback_address(&self) -> u64 {
+        HOST_CHECKOUT_OUTPUT
+    }
+
+    pub fn new_handle_callback_address(&self) -> u64 {
+        HOST_NEW_HANDLE
+    }
+
+    pub fn lock_handle_callback_address(&self) -> u64 {
+        HOST_LOCK_HANDLE
+    }
+
+    pub fn unlock_handle_callback_address(&self) -> u64 {
+        HOST_UNLOCK_HANDLE
+    }
+
+    pub fn dispose_handle_callback_address(&self) -> u64 {
+        HOST_DISPOSE_HANDLE
+    }
+
+    pub fn handle_size_callback_address(&self) -> u64 {
+        HOST_HANDLE_SIZE
+    }
+
+    pub fn resize_handle_callback_address(&self) -> u64 {
+        HOST_RESIZE_HANDLE
+    }
+
+    pub fn configure_smart_render(
+        &mut self,
+        input_world: u64,
+        output_world: u64,
+        width: u32,
+        height: u32,
+    ) {
+        let state = self.unicorn.get_data_mut();
+        state.smart_input_world = input_world;
+        state.smart_output_world = output_world;
+        state.smart_width = width;
+        state.smart_height = height;
+    }
+
     pub fn parameters(&self) -> &[GuestParam] {
         &self.unicorn.get_data().params
     }
@@ -345,6 +639,118 @@ fn capture_add_param(unicorn: &mut Unicorn<'_, GuestState>) {
         Ok(param) => {
             unicorn.get_data_mut().params.push(param);
             let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().callback_error = Some(error);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn install_float_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+    name: &'static str,
+    operation: fn(f32) -> f32,
+) -> Result<(), GuestError> {
+    uc(
+        "install unary float import",
+        unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+            if let Ok(bits) = unicorn.reg_read(RegisterX86::XMM0) {
+                let value = f32::from_bits(bits as u32);
+                let output = operation(value);
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn
+                        .get_data_mut()
+                        .math_calls
+                        .push(format!("{name}({value})={output}"));
+                }
+                let _ = unicorn.reg_write(RegisterX86::XMM0, output.to_bits() as u64);
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
+fn install_float_binary_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+    name: &'static str,
+    operation: fn(f32, f32) -> f32,
+) -> Result<(), GuestError> {
+    uc(
+        "install binary float import",
+        unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+            if let (Ok(left), Ok(right)) = (
+                unicorn.reg_read(RegisterX86::XMM0),
+                unicorn.reg_read(RegisterX86::XMM1),
+            ) {
+                let value = operation(f32::from_bits(left as u32), f32::from_bits(right as u32));
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn.get_data_mut().math_calls.push(format!(
+                        "{name}({},{})={value}",
+                        f32::from_bits(left as u32),
+                        f32::from_bits(right as u32)
+                    ));
+                }
+                let _ = unicorn.reg_write(RegisterX86::XMM0, value.to_bits() as u64);
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
+fn install_double_binary_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+    name: &'static str,
+    operation: fn(f64, f64) -> f64,
+) -> Result<(), GuestError> {
+    uc(
+        "install binary double import",
+        unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+            if let (Ok(left), Ok(right)) = (
+                unicorn.reg_read(RegisterX86::XMM0),
+                unicorn.reg_read(RegisterX86::XMM1),
+            ) {
+                let value = operation(f64::from_bits(left), f64::from_bits(right));
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn.get_data_mut().math_calls.push(format!(
+                        "{name}({},{})={value}",
+                        f64::from_bits(left),
+                        f64::from_bits(right)
+                    ));
+                }
+                let _ = unicorn.reg_write(RegisterX86::XMM0, value.to_bits());
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
+fn emulate_memset(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| {
+        let destination = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("memset destination: {error}"))?;
+        let value = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("memset value: {error}"))? as u8;
+        let length = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("memset length: {error}"))?;
+        if length > DATA_SIZE {
+            return Err(format!("memset length exceeds guest data bound: {length}"));
+        }
+        let bytes = vec![value; length as usize];
+        unicorn
+            .mem_write(destination, &bytes)
+            .map_err(|error| format!("memset write: {error}"))?;
+        Ok(destination)
+    })();
+    match result {
+        Ok(destination) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, destination);
         }
         Err(error) => {
             unicorn.get_data_mut().callback_error = Some(error);
@@ -488,6 +894,319 @@ fn emulate_copy(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         Err(error) => {
             unicorn.get_data_mut().callback_error = Some(error);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    unicorn.get_data_mut().pre_checkout_calls += 1;
+    let result = (|| {
+        let index = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("pre-checkout index: {error}"))? as i32;
+        let checkout_id = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("pre-checkout id: {error}"))? as i32;
+        if index != 0 || checkout_id != 0 {
+            return Err(format!(
+                "unsupported smart checkout index={index} id={checkout_id}"
+            ));
+        }
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("pre-checkout stack: {error}"))?;
+        let mut result_pointer = [0u8; 8];
+        unicorn
+            .mem_read(rsp + 0x40, &mut result_pointer)
+            .map_err(|error| format!("pre-checkout result pointer: {error}"))?;
+        let result_pointer = u64::from_le_bytes(result_pointer);
+        if result_pointer == 0 {
+            return Err("pre-checkout result is null".to_string());
+        }
+        let state = unicorn.get_data();
+        let width = state.smart_width as i32;
+        let height = state.smart_height as i32;
+        let mut bytes = [0u8; 76];
+        for (offset, value) in [
+            (0, 0),
+            (4, 0),
+            (8, width),
+            (12, height),
+            (16, 0),
+            (20, 0),
+            (24, width),
+            (28, height),
+            (32, 1),
+            (36, 1),
+            (44, width),
+            (48, height),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        unicorn
+            .mem_write(result_pointer, &bytes)
+            .map_err(|error| format!("pre-checkout result write: {error}"))?;
+        Ok(())
+    })();
+    finish_callback(unicorn, result);
+}
+
+fn emulate_checkout_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    unicorn.get_data_mut().checkout_pixels_calls += 1;
+    let result = (|| {
+        let checkout_id = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("checkout-pixels id: {error}"))?
+            as i32;
+        let output = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("checkout-pixels output: {error}"))?;
+        let input_world = unicorn.get_data().smart_input_world;
+        if checkout_id != 0 || output == 0 || input_world == 0 {
+            return Err(format!(
+                "invalid checkout-pixels id={checkout_id} output={output:#x}"
+            ));
+        }
+        unicorn
+            .mem_write(output, &input_world.to_le_bytes())
+            .map_err(|error| format!("checkout-pixels world write: {error}"))?;
+        Ok(())
+    })();
+    finish_callback(unicorn, result);
+}
+
+fn emulate_checkout_output(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    unicorn.get_data_mut().checkout_output_calls += 1;
+    let result = (|| {
+        let output = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("checkout-output pointer: {error}"))?;
+        let output_world = unicorn.get_data().smart_output_world;
+        if output == 0 || output_world == 0 {
+            return Err(format!("invalid checkout-output pointer={output:#x}"));
+        }
+        unicorn
+            .mem_write(output, &output_world.to_le_bytes())
+            .map_err(|error| format!("checkout-output world write: {error}"))?;
+        Ok(())
+    })();
+    finish_callback(unicorn, result);
+}
+
+fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let name_pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let version = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let mut bytes = Vec::new();
+    if name_pointer != 0 {
+        for offset in 0..256u64 {
+            let mut byte = [0u8; 1];
+            if unicorn.mem_read(name_pointer + offset, &mut byte).is_err() || byte[0] == 0 {
+                break;
+            }
+            bytes.push(byte[0]);
+        }
+    }
+    let name = String::from_utf8_lossy(&bytes);
+    unicorn
+        .get_data_mut()
+        .suite_requests
+        .push(format!("{name} v{version}"));
+    let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    if name == "PF Handle Suite" && version == 2 && output != 0 {
+        if unicorn
+            .mem_write(output, &HOST_HANDLE_SUITE.to_le_bytes())
+            .is_ok()
+        {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            return;
+        }
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+}
+
+fn emulate_checkout_param(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let index = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("checkout-param index: {error}"))?
+            as usize;
+        let source = index
+            .checked_sub(1)
+            .and_then(|offset| unicorn.get_data().parameter_definitions.get(offset))
+            .copied()
+            .ok_or_else(|| format!("checkout-param index is outside definitions: {index}"))?;
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("checkout-param stack: {error}"))?;
+        let mut destination = [0u8; 8];
+        unicorn
+            .mem_read(rsp + 0x30, &mut destination)
+            .map_err(|error| format!("checkout-param destination pointer: {error}"))?;
+        let destination = u64::from_le_bytes(destination);
+        if destination == 0 {
+            return Err("checkout-param destination is null".to_string());
+        }
+        let mut definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        unicorn
+            .mem_read(source, &mut definition)
+            .map_err(|error| format!("checkout-param definition read: {error}"))?;
+        unicorn
+            .mem_write(destination, &definition)
+            .map_err(|error| format!("checkout-param definition write: {error}"))?;
+        Ok(())
+    })();
+    finish_callback(unicorn, result);
+}
+
+fn emulate_new_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let size = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX);
+    unicorn.get_data_mut().handle_allocations.push(size);
+    let allocation = (|| {
+        if size > 128 * 1024 * 1024 {
+            return Err(format!("handle allocation exceeds 128 MiB: {size}"));
+        }
+        let state = unicorn.get_data_mut();
+        let handle = (state.next_handle_data + 7) & !7;
+        let data = (handle + 8 + 15) & !15;
+        let end = data
+            .checked_add(size.max(1))
+            .ok_or_else(|| "handle allocation overflow".to_string())?;
+        if end > HANDLE_DATA_END {
+            return Err("handle arena exhausted".to_string());
+        }
+        state.next_handle_data = end;
+        state.handles.insert(
+            handle,
+            GuestHandle {
+                data,
+                size,
+                locks: 0,
+            },
+        );
+        Ok((handle, data))
+    })();
+    match allocation {
+        Ok((handle, data)) => {
+            let _ = unicorn.mem_write(handle, &data.to_le_bytes());
+            if size != 0 {
+                let _ = unicorn.mem_write(data, &vec![0u8; size as usize]);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, handle);
+        }
+        Err(_) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+    }
+}
+
+fn emulate_lock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let data = unicorn
+        .get_data_mut()
+        .handles
+        .get_mut(&handle)
+        .map(|record| {
+            record.locks = record.locks.saturating_add(1);
+            record.data
+        });
+    let _ = unicorn.reg_write(RegisterX86::RAX, data.unwrap_or_default());
+}
+
+fn emulate_unlock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    if let Some(record) = unicorn.get_data_mut().handles.get_mut(&handle) {
+        record.locks = record.locks.saturating_sub(1);
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+}
+
+fn emulate_dispose_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    unicorn.get_data_mut().handles.remove(&handle);
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+}
+
+fn emulate_handle_size(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let size = unicorn
+        .get_data()
+        .handles
+        .get(&handle)
+        .map(|record| record.size)
+        .unwrap_or_default();
+    let _ = unicorn.reg_write(RegisterX86::RAX, size);
+}
+
+fn emulate_resize_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let size = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("resize-handle size: {error}"))?;
+        let handle_pointer = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("resize-handle pointer: {error}"))?;
+        if size > 128 * 1024 * 1024 || handle_pointer == 0 {
+            return Err("invalid resize-handle request".to_string());
+        }
+        let mut handle_bytes = [0u8; 8];
+        unicorn
+            .mem_read(handle_pointer, &mut handle_bytes)
+            .map_err(|error| format!("resize-handle read: {error}"))?;
+        let handle = u64::from_le_bytes(handle_bytes);
+        let old = unicorn
+            .get_data()
+            .handles
+            .get(&handle)
+            .cloned()
+            .ok_or_else(|| "resize-handle unknown handle".to_string())?;
+        if old.locks != 0 {
+            return Err("resize-handle locked handle".to_string());
+        }
+        let data = {
+            let state = unicorn.get_data_mut();
+            let data = (state.next_handle_data + 15) & !15;
+            let end = data
+                .checked_add(size.max(1))
+                .ok_or_else(|| "resize-handle overflow".to_string())?;
+            if end > HANDLE_DATA_END {
+                return Err("handle arena exhausted".to_string());
+            }
+            state.next_handle_data = end;
+            data
+        };
+        let mut bytes = vec![0u8; size as usize];
+        let copied = old.size.min(size) as usize;
+        if copied != 0 {
+            unicorn
+                .mem_read(old.data, &mut bytes[..copied])
+                .map_err(|error| format!("resize-handle old data: {error}"))?;
+        }
+        if size != 0 {
+            unicorn
+                .mem_write(data, &bytes)
+                .map_err(|error| format!("resize-handle new data: {error}"))?;
+        }
+        unicorn
+            .mem_write(handle, &data.to_le_bytes())
+            .map_err(|error| format!("resize-handle record: {error}"))?;
+        if let Some(record) = unicorn.get_data_mut().handles.get_mut(&handle) {
+            record.data = data;
+            record.size = size;
+        }
+        Ok(())
+    })();
+    let _ = unicorn.reg_write(RegisterX86::RAX, if result.is_ok() { 0 } else { 4 });
+}
+
+fn finish_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<(), String>) {
+    match result {
+        Ok(()) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().callback_error = Some(error);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
             let _ = unicorn.emu_stop();
         }
     }

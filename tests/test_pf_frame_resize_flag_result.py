@@ -45,7 +45,7 @@ class PfFrameResizeFlagResultTest(unittest.TestCase):
 
     def test_broker_and_harness_expose_isolated_resize_probes(self):
         broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
-        harness = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text(encoding="utf-8")
+        harness = (ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs").read_text(encoding="utf-8")
         for direction in ("expand", "shrink"):
             self.assertIn(f"probe_experimental_{direction}_buffer", broker)
             self.assertIn(f"--probe-experimental-{direction}-buffer", harness)

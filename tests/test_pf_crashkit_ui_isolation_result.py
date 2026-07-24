@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "analysis" / "PF_CRASHKIT_UI_ISOLATION_RESULT_2026-07-15.json"
 RUNNER = ROOT / "broker" / "crates" / "broker" / "src" / "windows_process.rs"
 IMAGE_RENDER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def test_all_crashkit_modes_have_distinct_bounded_outcomes():

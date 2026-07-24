@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_OUTPUT_RELATION_RESULT_2026-07-15.json"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def test_real_effect_matrix_distinguishes_changed_and_passthrough_outputs():

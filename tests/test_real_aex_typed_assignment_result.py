@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_TYPED_ASSIGNMENT_RESULT_2026-07-15.json"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
 

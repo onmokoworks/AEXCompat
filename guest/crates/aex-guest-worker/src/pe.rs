@@ -60,6 +60,7 @@ pub struct PeReport {
     pub image_size: usize,
     pub entry_export: String,
     pub entry_rva: usize,
+    pub dll_entry_rva: usize,
     pub section_count: usize,
     pub imports: Vec<ImportLibrary>,
     pub has_tls: bool,
@@ -73,6 +74,7 @@ pub struct PeImage {
     image_base: u64,
     entry_export: String,
     entry_rva: usize,
+    dll_entry_rva: usize,
     section_count: usize,
     imports: Vec<ImportLibrary>,
     has_tls: bool,
@@ -105,6 +107,7 @@ impl PeImage {
             .as_ref()
             .ok_or(PeError::UnsupportedImage)?;
         let image_size = optional.windows_fields.size_of_image as usize;
+        let dll_entry_rva = optional.standard_fields.address_of_entry_point as usize;
         let header_size = optional.windows_fields.size_of_headers as usize;
         if image_size == 0 || image_size > MAX_IMAGE_SIZE {
             return Err(PeError::ImageSize(image_size));
@@ -172,6 +175,7 @@ impl PeImage {
             image_base: pe.image_base,
             entry_export,
             entry_rva,
+            dll_entry_rva,
             section_count: pe.sections.len(),
             imports,
             has_tls: pe.tls_data.is_some(),
@@ -192,6 +196,10 @@ impl PeImage {
         self.image_base + self.entry_rva as u64
     }
 
+    pub fn dll_entry_address(&self) -> Option<u64> {
+        (self.dll_entry_rva != 0).then_some(self.image_base + self.dll_entry_rva as u64)
+    }
+
     pub fn imports(&self) -> &[ImportLibrary] {
         &self.imports
     }
@@ -206,6 +214,7 @@ impl PeImage {
             image_size: self.bytes.len(),
             entry_export: self.entry_export.clone(),
             entry_rva: self.entry_rva,
+            dll_entry_rva: self.dll_entry_rva,
             section_count: self.section_count,
             imports: self.imports.clone(),
             has_tls: self.has_tls,

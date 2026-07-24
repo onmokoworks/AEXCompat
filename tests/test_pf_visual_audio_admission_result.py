@@ -52,7 +52,7 @@ def test_worker_checks_admission_before_source_availability():
     assert "PF_CHECKOUT_LAYER_AUDIO" in fixture
     assert "PF_GET_AUDIO_DATA" in fixture
     broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
-    harness = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text(encoding="utf-8")
+    harness = (ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs").read_text(encoding="utf-8")
     assert "render_experimental_image_with_audio_sidecar" in broker
     assert "audio sidecar contains a non-finite sample" in broker
     assert "--render-experimental-image-audio-sidecar" in harness
