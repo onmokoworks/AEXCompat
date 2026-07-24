@@ -6037,13 +6037,7 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             }
         };
-        let (parameters, _inspection) =
-            aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
-                &repository,
-                plugin,
-                &hash,
-            )
-            .unwrap_or_default();
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         // The preflight seals the same approved dependency artifacts the render
         // dispatches with, so a plug-in that imports one loads in both.
         let render_dependencies: Vec<
