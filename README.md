@@ -214,7 +214,8 @@ The goal is practical, faithful compatibility with general Effect AEX plug-ins, 
 - Multiple Layer inputs, timing/FPS, downsampling, pixel aspect, and sequence state
 - Mono float32 audio and visual-audio sidecars
 - Six-case 8/16/32 bpc compatibility matrix
-- Pixel comparison against After Effects reference output
+- Optional oracle comparison against After Effects (pixel diffs are supporting evidence)
+- Headless/agent-facing CLI contract output and manifest-driven conformance bundles
 - Custom UI, PF Suite, and selector-lifecycle probes
 - Restricted workers, timeouts, Job Objects, ACLs, sealed load trees, and pixel guards
 - Separate reporting for crashes, hangs, selector errors, and host validation errors
@@ -230,7 +231,7 @@ The goal is practical, faithful compatibility with general Effect AEX plug-ins, 
 | image input | PNG, JPEG, BMP, TIFF, WebP |
 | image output | PNG |
 
-macOS, Apple Silicon, and Windows ARM64 are not currently supported. After Effects itself is not required for ordinary harness runs, but it is required to capture AE oracles and establish pixel equivalence.
+macOS, Apple Silicon, and Windows ARM64 are not currently supported. After Effects itself is not required for ordinary harness runs. AE oracles can be captured when deeper compatibility investigation needs them; pixel comparison is supporting evidence, not a mandatory gate for every feature.
 
 ### Quick Start
 
@@ -255,6 +256,17 @@ cd broker
 cargo build -p aexcompat-harness --release
 .\target\release\aexcompat-harness.exe
 ```
+
+#### Headless / agent-facing CLI
+
+Inspect the current CLI input shapes and exit codes from the generated contract instead of inferring them from source:
+
+```powershell
+.\target\release\aexcompat-harness.exe --print-cli-contract | ConvertFrom-Json
+.\target\release\aexcompat-harness.exe --help
+```
+
+Prefix a command with `--headless` when automation must never fall through to the GUI. For manifest-driven input, worker, and report validation, see the [Conformance Bundle Contract](docs/CONFORMANCE_BUNDLE_CONTRACT.md).
 
 ### Tests
 
@@ -297,7 +309,7 @@ Desktop Harness / CLI
 
 - Universal compatibility with arbitrary AEX binaries is not yet claimed.
 - Missing suites and effect-specific host assumptions may stop loading or rendering.
-- “Worker completed,” “image produced,” and “pixel-equivalent to AE” are separate maturity levels.
+- “Worker completed,” “image produced,” “failure classified,” and “compared with an AE oracle” are separate maturity levels. Pixel equivalence is an optional comparison used when it helps diagnose a specific behavior.
 - Custom UI, GPU backends, pixel depths, multiple inputs, and sequence semantics vary by plug-in.
 - AEGP work is limited to helper routes useful for Effect debugging.
 - Isolation reduces the impact of accidental crashes and many forms of misbehavior; it is not a complete security sandbox.
@@ -308,7 +320,7 @@ For reproducing After Effects-dependent oracle captures on another Windows machi
 
 ### Development Method
 
-Compatibility work follows a repeatable sequence: reproduce behavior with a real AEX, SDK sample, or self-authored probe; implement a minimal general host capability; add focused boundary tests; compare with an AE oracle where possible; and document both verified and unverified behavior in the same change.
+Compatibility work follows a repeatable sequence: reproduce behavior with a real AEX, SDK sample, or self-authored probe; implement a minimal general host capability; add focused boundary tests; compare with an AE oracle where useful; add pixel diffs only when they help isolate the behavior; and document both verified and unverified behavior in the same change.
 
 ### References
 
