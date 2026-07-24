@@ -302,9 +302,18 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         # secure_launch injects the sealed plug-in between the before/after argv
         # slices, so no route may serialize a plug-in path into its own args.
         self.assertNotIn("plugin_path.to_string_lossy()", route)
-        self.assertEqual(
-            route.count("plugin_basename: &plugin_basename"), self.launch_sites(route)
+        # #405 widened SecureLaunchRequest::plugin_basename to Option<&str> so the
+        # cluster discovery session can launch with no positional plug-in at all.
+        # Every render_request route still carries one, so each launch site must
+        # name the basename explicitly — as the pre-#405 `&plugin_basename` or the
+        # Option-wrapped `Some(&plugin_basename)` — and `plugin_basename: None`
+        # must never appear here (it belongs to the discovery session only).
+        launches = self.launch_sites(route)
+        named = route.count("plugin_basename: &plugin_basename") + route.count(
+            "plugin_basename: Some(&plugin_basename)"
         )
+        self.assertEqual(named, launches)
+        self.assertNotIn("plugin_basename: None", route)
 
     def test_each_launch_is_pinned_to_the_receipt_worker(self):
         route = self.route_source()
