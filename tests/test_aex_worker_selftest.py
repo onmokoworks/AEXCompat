@@ -1,9 +1,11 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +42,101 @@ def make_design_packet() -> Path:
 
 
 class AexWorkerSelftestTests(unittest.TestCase):
+    def test_main_removes_owned_ppm_when_report_publish_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            worker_root = root / "worker"
+            worker_root.mkdir()
+            output_ppm = worker_root / "owned.ppm"
+            report_path = worker_root / "report.json"
+            report_path.write_text("existing report", encoding="utf-8")
+
+            def fake_run_selftest(**kwargs):
+                self.assertEqual(kwargs["output_ppm"], output_ppm)
+                output_ppm.write_bytes(b"created by this run")
+                return {"output_ppm": str(output_ppm)}
+
+            with (
+                mock.patch.object(aex_worker_selftest, "WORKER_SELFTEST_ROOT", worker_root),
+                mock.patch.object(aex_worker_selftest, "run_selftest", side_effect=fake_run_selftest),
+                mock.patch.object(
+                    aex_worker_selftest.sys,
+                    "argv",
+                    [
+                        "aex_worker_selftest.py", "--worker", str(LAB_ROOT / "tools" / "aex_no_load_worker.py"),
+                        "--output-ppm", str(output_ppm), "--out", str(report_path),
+                    ],
+                ),
+            ):
+                with self.assertRaises(FileExistsError):
+                    aex_worker_selftest.main()
+
+            self.assertFalse(output_ppm.exists())
+            self.assertEqual(report_path.read_text(encoding="utf-8"), "existing report")
+
+    def test_main_never_removes_unowned_reported_ppm(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            worker_root = root / "worker"
+            worker_root.mkdir()
+            requested_output = worker_root / "requested.ppm"
+            unowned_output = worker_root / "unowned.ppm"
+            unowned_output.write_bytes(b"pre-existing artifact")
+            report_path = worker_root / "report.json"
+
+            with (
+                mock.patch.object(aex_worker_selftest, "WORKER_SELFTEST_ROOT", worker_root),
+                mock.patch.object(
+                    aex_worker_selftest,
+                    "run_selftest",
+                    return_value={"output_ppm": str(unowned_output)},
+                ),
+                mock.patch.object(
+                    aex_worker_selftest.sys,
+                    "argv",
+                    [
+                        "aex_worker_selftest.py", "--worker", str(LAB_ROOT / "tools" / "aex_no_load_worker.py"),
+                        "--output-ppm", str(requested_output), "--out", str(report_path),
+                    ],
+                ),
+            ):
+                with self.assertRaisesRegex(AssertionError, "does not match"):
+                    aex_worker_selftest.main()
+
+            self.assertTrue(unowned_output.exists())
+            self.assertFalse(requested_output.exists())
+            self.assertFalse(report_path.exists())
+
+    def test_main_keeps_owned_ppm_and_report_after_successful_publish(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            worker_root = root / "worker"
+            worker_root.mkdir()
+            output_ppm = worker_root / "owned.ppm"
+            report_path = worker_root / "report.json"
+
+            def fake_run_selftest(**kwargs):
+                self.assertEqual(kwargs["output_ppm"], output_ppm)
+                output_ppm.write_bytes(b"created by this run")
+                return {"output_ppm": str(output_ppm)}
+
+            with (
+                mock.patch.object(aex_worker_selftest, "WORKER_SELFTEST_ROOT", worker_root),
+                mock.patch.object(aex_worker_selftest, "run_selftest", side_effect=fake_run_selftest),
+                mock.patch.object(
+                    aex_worker_selftest.sys,
+                    "argv",
+                    [
+                        "aex_worker_selftest.py", "--worker", str(LAB_ROOT / "tools" / "aex_no_load_worker.py"),
+                        "--output-ppm", str(output_ppm), "--out", str(report_path),
+                    ],
+                ),
+            ):
+                self.assertEqual(aex_worker_selftest.main(), 0)
+
+            self.assertTrue(output_ppm.exists())
+            self.assertEqual(json.loads(report_path.read_text(encoding="utf-8"))["output_ppm"], str(output_ppm))
+
     def test_run_selftest_spawns_worker_and_reports_no_load(self):
         output_ppm = LAB_ROOT / "target" / "worker-selftest" / f"{time.time_ns()}-identity.ppm"
         report = aex_worker_selftest.run_selftest(

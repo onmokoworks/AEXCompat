@@ -328,13 +328,22 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    output_ppm = validate_output_ppm(Path(args.output_ppm))
     report = run_selftest(
         worker_path=Path(args.worker),
         input_ppm=Path(args.input_ppm) if args.input_ppm else None,
-        output_ppm=Path(args.output_ppm),
+        output_ppm=output_ppm,
         design_packet_path=Path(args.design_packet) if args.design_packet else None,
     )
-    written = write_json_create_new(Path(args.out), report)
+    reported_output_ppm = Path(str(report.get("output_ppm", ""))).resolve(strict=False)
+    if reported_output_ppm != output_ppm:
+        raise AssertionError("selftest report output path does not match requested output")
+
+    try:
+        written = write_json_create_new(Path(args.out), report)
+    except OSError:
+        output_ppm.unlink(missing_ok=True)
+        raise
     print(written)
     return 0
 
