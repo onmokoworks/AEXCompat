@@ -20,6 +20,16 @@ struct ModuleAuditSnapshot {
   std::vector<std::wstring> unknown_keys;
 };
 
+// One cluster-session swap epoch (docs/CLOSURE_SESSION_PROTOCOL_2026-07-23.md
+// §5): pre_unload is the loaded-module set immediately before plugins[N] is
+// freed, post_load the set right after plugins[N+1] finishes loading. The
+// final plug-in's pre_unload stays the report's terminal `pre_unload`.
+struct ModuleAuditEpoch {
+  uint32_t plugin_index{};
+  ModuleAuditSnapshot pre_unload;
+  ModuleAuditSnapshot post_load;
+};
+
 struct ModuleAuditReport {
   bool required{};
   ModuleAuditSnapshot post_load;
@@ -27,6 +37,7 @@ struct ModuleAuditReport {
   ModuleAuditSnapshot observed_union;
   uint32_t phase_count{};
   std::filesystem::path plugin_path;
+  std::vector<ModuleAuditEpoch> epochs;
 };
 
 void configure_runtime_module_hash(FileSha256 hash) noexcept;
@@ -39,6 +50,22 @@ ModuleAuditSnapshot capture_module_audit();
 void capture_module_audit_phase();
 bool module_audit_passed();
 std::string module_audit_json();
+
+// Cluster-session audit mode (design §5): replaces the fixed
+// kMaxAuditedModules enumeration/accumulation bound with the launch-time
+// authenticated `module_bound` (capped at 4096) and narrows the `plugin`
+// classification to the manifest's declared basename set. A loaded module
+// under the sealed root whose basename is not declared counts as unknown
+// (fail-closed). `declared_plugin_basenames` must be lowercased.
+void configure_module_audit_cluster(std::size_t module_bound,
+                                    std::vector<std::string> declared_plugin_basenames);
+
+// Appends one swap epoch to the report. The snapshots are the values the
+// caller captured via capture_module_audit() (which already accumulated them
+// into observed_union).
+void record_module_audit_epoch(uint32_t plugin_index,
+                               ModuleAuditSnapshot pre_unload,
+                               ModuleAuditSnapshot post_load);
 
 // The GPU-framework backend id (1=cuda, 2=opencl, 3=directx, 4=opengl) carried
 // by the AEXRMA1 manifest that the last successful

@@ -34,6 +34,7 @@ AuxiliaryOptionResult strip_auxiliary_options(
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
   bool saw_dump_worlds = false, saw_checksum_detail = false;
   bool saw_render_settings = false, saw_authorization = false;
+  bool saw_cluster_manifest = false;
   while (effective_argc >= 3) {
     const wchar_t* flag = argv[effective_argc - 2];
     const wchar_t* value = argv[effective_argc - 1];
@@ -61,6 +62,10 @@ AuxiliaryOptionResult strip_auxiliary_options(
                hooks.set_runtime_module_authorization && !saw_authorization) {
       accepted = hooks.set_runtime_module_authorization(hooks.context, value);
       saw_authorization = accepted;
+    } else if (equals(flag, L"--cluster-manifest-v1") &&
+               hooks.load_cluster_manifest && !saw_cluster_manifest) {
+      accepted = hooks.load_cluster_manifest(hooks.context, value);
+      saw_cluster_manifest = accepted;
     } else {
       break;
     }
@@ -75,6 +80,15 @@ WorkerMode classify_worker_mode(
   WorkerMode mode{};
   if (argc < 0 || !argv || effective_argc < 0) return mode;
   const wchar_t* command = argc > 1 ? argv[1] : L"";
+
+  // Discovery session (closure-session design §2.2): the
+  // `--cluster-manifest-v1 <path>` tail was already stripped as an auxiliary
+  // option, leaving exactly [command].
+  if (equals(command, L"--discovery-session-v1")) {
+    mode.discovery_session_mode = effective_argc == 2;
+    mode.command_accepted = mode.discovery_session_mode;
+    return mode;
+  }
 
   if (kind == WorkerKind::Render) {
     const bool session16 = equals(command, L"--render-session16-v1");

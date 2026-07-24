@@ -22,6 +22,7 @@ namespace {
 void apply_common(const request_parser::WorkerInvocation& source,
                   InvocationState& target) {
   const auto& mode = source.mode;
+  target.discovery_session_mode = mode.discovery_session_mode;
   target.external_pixel_bytes = mode.external_pixel_bytes;
   target.external_layers = source.layers;
   target.external_width = source.width;
@@ -35,6 +36,15 @@ void apply_common(const request_parser::WorkerInvocation& source,
 
 int parse_l2_modes(int argc, wchar_t** argv, InvocationState& target,
                    const L2ModeHooks& hooks) {
+  // Discovery session (closure-session design §2.2/§4.2): the cluster
+  // manifest is the only launch input; plug-ins load per inspect_plugin.
+  target.discovery_session_mode = argc == 4 &&
+      std::wstring(argv[1]) == L"--discovery-session-v1" &&
+      std::wstring(argv[2]) == L"--cluster-manifest-v1";
+  if (target.discovery_session_mode) {
+    target.cluster_manifest_path = argv[3];
+    return 0;
+  }
   target.user_changed_mode = (argc == 5 || argc == 6) &&
       std::wstring(argv[1]) == L"--user-changed";
   target.aegp_update_menu_mode = argc == 4 &&
@@ -250,7 +260,8 @@ RenderSessionOutcome run_render_session(
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
-    const std::vector<ExternalLayerInput>* external_layers);
+    const std::vector<ExternalLayerInput>* external_layers,
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr);
 SmartRenderSessionOutcome run_smart_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
@@ -300,6 +311,7 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
   bool& persistent_sequence = result.persistent_sequence;
   bool& session_protocol_violation = result.session_protocol_violation;
   bool& session_invariant_failure = result.session_invariant_failure;
+  bool& session_swap_failure = result.session_swap_failure;
   bool& flattened_sequence = result.flattened_sequence;
   bool& copied_flattened_sequence = result.copied_flattened_sequence;
   int32_t& persistent_sequence_setup_error = result.persistent_sequence_setup_error;
@@ -478,7 +490,8 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
         invocation.external_height, invocation.external_time_step,
         invocation.external_total_time,
         invocation.external_time_scale, invocation.external_pixel_bytes,
-        invocation.external_layers.empty() ? nullptr : &invocation.external_layers);
+        invocation.external_layers.empty() ? nullptr : &invocation.external_layers,
+        request.cluster_swap);
     persistent_sequence_setup_error = session_outcome.setup_error;
     persistent_sequence_setdown_error = session_outcome.setdown_error;
     render_width = session_outcome.width;
@@ -489,6 +502,7 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
     guards_intact = session_outcome.guards_intact;
     session_protocol_violation = session_outcome.protocol_violation;
     session_invariant_failure = session_outcome.invariant_failure;
+    session_swap_failure = session_outcome.swap_failure;
     render_error = session_outcome.render_error;
   } else if (params_error == 0 && image_render_supported && depth_supported) {
     render_error = render_once(entry, input, output, case_id, render_width, render_height,

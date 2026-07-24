@@ -148,4 +148,54 @@ int WorkerSession::finish(int exit_code) noexcept {
   return exit_code;
 }
 
+bool WorkerSession::swap_release_module(uint32_t outgoing_index) noexcept {
+  if (!module_ || swap_pending_ || terminal_audit_captured_) return false;
+  // Never unload code while its owner reports callbacks may still run; a
+  // quiescence failure already marks the terminal lifecycle failed.
+  if (!quiesce_once()) return false;
+  ModuleAuditReport& audit = module_audit_report();
+  ModuleAuditSnapshot pre_unload;
+  if (audit.required) {
+    pre_unload = capture_module_audit();
+    if (pre_unload.status != "passed" || !module_audit_passed()) return false;
+  }
+  // Only the plug-in image is freed: the AddDllDirectory cookie and the
+  // pinned closure dependencies are session-lifetime state (design §3), so
+  // the swapped-in plug-in resolves the same dependency instances.
+  if (!FreeLibrary(module_)) return false;
+  module_ = nullptr;
+  swap_pending_ = true;
+  swap_outgoing_index_ = outgoing_index;
+  swap_pre_unload_ = std::move(pre_unload);
+  // Re-arm the barrier so the next swap (or the terminal path) quiesces the
+  // newly adopted plug-in rather than replaying this latch.
+  pre_unload_hook_invoked_ = false;
+  pre_unload_hook_passed_ = true;
+  return true;
+}
+
+bool WorkerSession::swap_adopt_module(HMODULE module,
+                                      const std::filesystem::path& plugin_path,
+                                      uint32_t incoming_index) noexcept {
+  (void)incoming_index;  // the epoch records the outgoing index by design
+  if (!swap_pending_ || !module) return false;
+  ModuleAuditReport& audit = module_audit_report();
+  audit.plugin_path = plugin_path;
+  if (audit.required) {
+    // Capture and judge before taking ownership: a rejected plug-in is freed
+    // here and never enters the session's ownership state.
+    ModuleAuditSnapshot post_load = capture_module_audit();
+    record_module_audit_epoch(swap_outgoing_index_, std::move(swap_pre_unload_),
+                              post_load);
+    if (post_load.status != "passed" || !module_audit_passed()) {
+      FreeLibrary(module);
+      return false;
+    }
+  }
+  swap_pending_ = false;
+  module_ = module;
+  plugin_path_ = plugin_path;
+  return true;
+}
+
 }  // namespace aexcompat::worker_runtime

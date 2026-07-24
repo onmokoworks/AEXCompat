@@ -1,0 +1,286 @@
+#include "worker_cluster_manifest.hpp"
+
+#include "runtime_module_audit.hpp"
+#include "strict_json.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <fstream>
+#include <set>
+#include <system_error>
+
+namespace aexcompat::worker_runtime::cluster {
+namespace {
+
+using aexcompat::strict_json::JsonValue;
+using aexcompat::strict_json::StrictJsonParser;
+using aexcompat::strict_json::json_exact_keys;
+using aexcompat::strict_json::json_member;
+using aexcompat::strict_json::json_string;
+using aexcompat::strict_json::json_u64;
+
+std::wstring lowercase(std::wstring value) {
+  std::transform(value.begin(), value.end(), value.begin(), towlower);
+  return value;
+}
+
+std::string lowercase_ascii(std::string value) {
+  for (char& ch : value)
+    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+  return value;
+}
+
+// Windows-safe basename rules, mirroring the broker
+// `session_dependency_manifest::validate_windows_basename` exactly: a single
+// normal path component with no separators, drive letters, control
+// characters, trailing dots/spaces, or reserved device names.
+bool windows_safe_basename(const std::string& name) {
+  if (name.empty() || name == "." || name == "..") return false;
+  for (const unsigned char ch : name)
+    if (ch < 0x20 || ch == 0x7f || ch == '/' || ch == '\\' || ch == ':')
+      return false;
+  if (name.back() == '.' || name.back() == ' ') return false;
+  std::string stem = name.substr(0, name.find('.'));
+  while (!stem.empty() && (stem.back() == '.' || stem.back() == ' '))
+    stem.pop_back();
+  stem = lowercase_ascii(stem);
+  if (stem == "con" || stem == "prn" || stem == "aux" || stem == "nul")
+    return false;
+  if (stem.size() == 4 &&
+      (stem.rfind("com", 0) == 0 || stem.rfind("lpt", 0) == 0) &&
+      stem[3] >= '1' && stem[3] <= '9')
+    return false;
+  return true;
+}
+
+bool valid_sha256(const std::string& value) {
+  if (value.size() != 64) return false;
+  for (const unsigned char ch : value) {
+    const bool digit = ch >= '0' && ch <= '9';
+    const bool lower = ch >= 'a' && ch <= 'f';
+    const bool upper = ch >= 'A' && ch <= 'F';
+    if (!digit && !lower && !upper) return false;
+  }
+  return true;
+}
+
+bool canonical_of(const std::filesystem::path& path,
+                  std::filesystem::path& result) {
+  std::error_code error;
+  const std::filesystem::path canonical = std::filesystem::canonical(path, error);
+  if (error || !canonical.is_absolute()) return false;
+  result = canonical;
+  return true;
+}
+
+bool same_path(const std::filesystem::path& left,
+               const std::filesystem::path& right) {
+  return lowercase(left.wstring()) == lowercase(right.wstring());
+}
+
+// Verifies that `path` resolves to a regular file directly inside
+// `sealed_root` (never through a parent escape) and authenticates its size
+// and SHA-256 before the bytes are allowed to execute.
+bool authenticate_file(const std::filesystem::path& path,
+                       const std::filesystem::path& sealed_root,
+                       const std::string& declared_sha256, uint64_t declared_size,
+                       FileSha256 hash_file) {
+  std::filesystem::path canonical;
+  if (!canonical_of(path, canonical) || !same_path(canonical.parent_path(), sealed_root))
+    return false;
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(canonical, error) || error) return false;
+  const uint64_t size = std::filesystem::file_size(canonical, error);
+  if (error || size != declared_size) return false;
+  std::string digest;
+  return hash_file && hash_file(canonical, digest) &&
+      hash_equals(digest, declared_sha256);
+}
+
+}  // namespace
+
+bool hash_equals(const std::string& actual, const std::string& declared) {
+  return valid_sha256(actual) && valid_sha256(declared) &&
+      lowercase_ascii(actual) == lowercase_ascii(declared);
+}
+
+std::filesystem::path normalize_verbatim(const std::filesystem::path& path) {
+  const std::wstring text = path.wstring();
+  if (text.rfind(L"\\\\?\\UNC\\", 0) == 0)
+    return std::filesystem::path(L"\\\\" + text.substr(8));
+  if (text.rfind(L"\\\\?\\", 0) == 0)
+    return std::filesystem::path(text.substr(4));
+  return path;
+}
+
+bool load_manifest(const std::filesystem::path& path, Manifest& result) {
+  if (path.empty() || !path.is_absolute()) return false;
+  // The broker hands over the verbatim (\\?\-prefixed) canonical form of the
+  // staged path; normalize before canonicalizing (see normalize_verbatim).
+  const std::filesystem::path argument = normalize_verbatim(path);
+  std::filesystem::path canonical;
+  if (!canonical_of(argument, canonical)) return false;
+  // Same absolute+canonical identity rule as load_aux_manifest: the broker
+  // hands over the exact path it wrote, with no symlink indirection.
+  std::error_code error;
+  const std::filesystem::path absolute = std::filesystem::absolute(argument, error);
+  if (error || absolute.lexically_normal() != canonical) return false;
+  const uint64_t size = std::filesystem::file_size(canonical, error);
+  if (error || size == 0 || size > kMaxManifestBytes) return false;
+  std::ifstream input(canonical, std::ios::binary);
+  if (!input) return false;
+  std::string text((std::istreambuf_iterator<char>(input)), {});
+  JsonValue root;
+  if (input.bad() || !StrictJsonParser(std::move(text)).parse(root) ||
+      !std::holds_alternative<JsonValue::Object>(root.value))
+    return false;
+  const auto& object = std::get<JsonValue::Object>(root.value);
+  std::string schema;
+  uint64_t module_bound = 0;
+  if (!json_exact_keys(object, {"schema", "plugins", "dependencies", "module_bound"}) ||
+      !json_string(object, "schema", schema) || schema != "cluster-manifest-v1" ||
+      !json_u64(object, "module_bound", module_bound) || module_bound == 0 ||
+      module_bound > kMaxModuleBound)
+    return false;
+  const auto* plugins_value = json_member(object, "plugins");
+  const auto* dependencies_value = json_member(object, "dependencies");
+  if (!plugins_value || !std::holds_alternative<JsonValue::Array>(plugins_value->value) ||
+      !dependencies_value ||
+      !std::holds_alternative<JsonValue::Array>(dependencies_value->value))
+    return false;
+  const auto& plugins = std::get<JsonValue::Array>(plugins_value->value);
+  const auto& dependencies = std::get<JsonValue::Array>(dependencies_value->value);
+  if (plugins.empty() || plugins.size() > kMaxPlugins ||
+      dependencies.size() > kMaxModuleBound)
+    return false;
+
+  Manifest parsed;
+  parsed.module_bound = static_cast<uint32_t>(module_bound);
+  std::set<std::string> basenames;
+  for (const auto& plugin_value : plugins) {
+    if (!std::holds_alternative<JsonValue::Object>(plugin_value.value)) return false;
+    const auto& plugin_object = std::get<JsonValue::Object>(plugin_value.value);
+    PluginEntry entry;
+    const bool with_payload = json_exact_keys(plugin_object, {"basename", "sha256", "payload"});
+    if (!with_payload &&
+        !json_exact_keys(plugin_object, {"basename", "sha256"}))
+      return false;
+    if (!json_string(plugin_object, "basename", entry.basename) ||
+        !windows_safe_basename(entry.basename) ||
+        !json_string(plugin_object, "sha256", entry.sha256) ||
+        !valid_sha256(entry.sha256) ||
+        !basenames.insert(lowercase_ascii(entry.basename)).second)
+      return false;
+    if (with_payload) {
+      if (!json_string(plugin_object, "payload", entry.payload) ||
+          entry.payload.size() > kMaxPayloadBytes)
+        return false;
+      for (const unsigned char ch : entry.payload)
+        if (ch < 0x20 || ch > 0x7e) return false;
+      entry.has_payload = true;
+    }
+    parsed.plugins.push_back(std::move(entry));
+  }
+  for (const auto& dependency_value : dependencies) {
+    if (!std::holds_alternative<JsonValue::Object>(dependency_value.value))
+      return false;
+    const auto& dependency_object = std::get<JsonValue::Object>(dependency_value.value);
+    DependencyEntry entry;
+    if (!json_exact_keys(dependency_object, {"basename", "sha256", "size"}) ||
+        !json_string(dependency_object, "basename", entry.basename) ||
+        !windows_safe_basename(entry.basename) ||
+        !json_string(dependency_object, "sha256", entry.sha256) ||
+        !valid_sha256(entry.sha256) ||
+        !json_u64(dependency_object, "size", entry.size) || entry.size == 0 ||
+        !basenames.insert(lowercase_ascii(entry.basename)).second)
+      return false;
+    parsed.dependencies.push_back(std::move(entry));
+  }
+
+  // The manifest lives directly inside the sealed root so every entry path is
+  // `sealed_root / basename`; the root must carry the sealed-staging prefix
+  // the module audit and admission already require.
+  parsed.manifest_path = canonical;
+  parsed.sealed_root = canonical.parent_path();
+  if (parsed.sealed_root.empty() ||
+      !has_prefixed_basename(parsed.sealed_root, L"aexcompat-sealed-"))
+    return false;
+  result = std::move(parsed);
+  return true;
+}
+
+bool matches_launch_plugin(const Manifest& manifest,
+                           const std::filesystem::path& plugin_path,
+                           const std::string& plugin_sha256) {
+  if (manifest.plugins.empty()) return false;
+  const PluginEntry& first = manifest.plugins.front();
+  const std::wstring basename = lowercase(plugin_path.filename().wstring());
+  std::wstring declared;
+  for (const unsigned char ch : first.basename) declared.push_back(ch);
+  return basename == lowercase(declared) &&
+      hash_equals(plugin_sha256, first.sha256);
+}
+
+std::filesystem::path plugin_path(const Manifest& manifest, std::size_t index) {
+  if (index >= manifest.plugins.size()) return {};
+  return manifest.sealed_root / std::filesystem::u8path(manifest.plugins[index].basename);
+}
+
+std::vector<std::string> declared_basenames(const Manifest& manifest) {
+  std::vector<std::string> declared;
+  declared.reserve(manifest.plugins.size() + manifest.dependencies.size());
+  for (const auto& plugin : manifest.plugins)
+    declared.push_back(lowercase_ascii(plugin.basename));
+  for (const auto& dependency : manifest.dependencies)
+    declared.push_back(lowercase_ascii(dependency.basename));
+  return declared;
+}
+
+ClosurePins::~ClosurePins() { release(); }
+
+bool ClosurePins::pin(const Manifest& manifest, FileSha256 hash_file) {
+  if (!pins_.empty()) return false;
+  for (const auto& dependency : manifest.dependencies) {
+    const std::filesystem::path path =
+        manifest.sealed_root / std::filesystem::u8path(dependency.basename);
+    std::filesystem::path canonical;
+    // Authenticate the file before its bytes may execute (fail-closed double
+    // of the broker staging check), then load with the admission flags.
+    if (!canonical_of(path, canonical) ||
+        !authenticate_file(canonical, manifest.sealed_root, dependency.sha256,
+                           dependency.size, hash_file)) {
+      release();
+      return false;
+    }
+    HMODULE module = LoadLibraryExW(canonical.c_str(), nullptr,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!module) {
+      release();
+      return false;
+    }
+    // The loaded module must be the authenticated file directly under the
+    // sealed root (design §3): a loader redirect to any other directory fails
+    // the pin.
+    std::array<wchar_t, 32768> loaded_buffer{};
+    const DWORD loaded_length = GetModuleFileNameW(
+        module, loaded_buffer.data(), static_cast<DWORD>(loaded_buffer.size()));
+    std::filesystem::path loaded_path;
+    if (loaded_length == 0 || loaded_length >= loaded_buffer.size() ||
+        !canonical_of(loaded_buffer.data(), loaded_path) ||
+        !same_path(loaded_path, canonical)) {
+      FreeLibrary(module);
+      release();
+      return false;
+    }
+    pins_.push_back(module);
+  }
+  return true;
+}
+
+void ClosurePins::release() noexcept {
+  for (auto it = pins_.rbegin(); it != pins_.rend(); ++it) FreeLibrary(*it);
+  pins_.clear();
+}
+
+}  // namespace aexcompat::worker_runtime::cluster

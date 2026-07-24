@@ -73,6 +73,11 @@ std::string serialize_l2_report(const L2ReportContext& c) {
     if (p.type == 0) o << ",\"layer_default\":" << p.layer_default;
     o << '}';
   }
-  return o.str() + "],\"selectors_executed\":true,\"render_performed\":false,\"module_audit\":" + c.module_audit_json + "}\n";
+  std::string out = o.str() + "],\"selectors_executed\":true,\"render_performed\":false";
+  // The discovery session embeds this report in its inspect_done message with
+  // the module audit carried by the session's own epoch/final report instead
+  // (closure-session design §4.2); an empty module_audit_json omits the key.
+  if (!c.module_audit_json.empty()) out += ",\"module_audit\":" + c.module_audit_json;
+  return out + "}\n";
 }
 }  // namespace aexcompat::worker_report

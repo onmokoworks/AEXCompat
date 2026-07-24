@@ -1,5 +1,6 @@
 #pragma once
 
+#include "runtime_module_audit.hpp"
 #include "worker_runtime_admission.hpp"
 
 #include <filesystem>
@@ -37,6 +38,20 @@ class WorkerSession final {
   // Registers the session's single pre-unload barrier. Registration is only
   // accepted before terminal audit/quiescence begins.
   bool set_pre_unload_hook(PreUnloadHook hook, void* context) noexcept;
+
+  // Cluster-session plug-in swap (docs/CLOSURE_SESSION_PROTOCOL_2026-07-23.md
+  // §4.1): releases only the plug-in image while the AddDllDirectory cookie
+  // and the pinned closure dependencies stay loaded. swap_release_module runs
+  // the quiescence barrier, captures the epoch's pre_unload snapshot, and
+  // frees the plug-in HMODULE; swap_adopt_module captures post_load, records
+  // the epoch {outgoing_index, pre_unload, post_load}, and takes ownership of
+  // the next plug-in only on success (a rejected module is freed inside the
+  // session and never adopted). A false return is a swap failure
+  // (quiescence, audit, or FreeLibrary): the session cannot safely continue
+  // and the caller must terminate with the dedicated swap-failure exit code.
+  bool swap_release_module(uint32_t outgoing_index) noexcept;
+  bool swap_adopt_module(HMODULE module, const std::filesystem::path& plugin_path,
+                         uint32_t incoming_index) noexcept;
 
   // Captures the terminal loaded-module set before protocol output and restores
   // stdout. On audit rejection it emits the canonical fail-closed report.
@@ -76,6 +91,12 @@ class WorkerSession final {
   bool pre_unload_hook_invoked_{};
   bool pre_unload_hook_passed_{true};
   bool audit_failure_reported_{};
+  // Cluster swap state: set between swap_release_module and
+  // swap_adopt_module; the pending epoch holds the outgoing plug-in's
+  // pre_unload snapshot until the incoming plug-in's post_load completes it.
+  bool swap_pending_{};
+  uint32_t swap_outgoing_index_{};
+  ModuleAuditSnapshot swap_pre_unload_{};
   TraceWriter* trace_writer_{};
   TraceWriter** active_trace_writer_{};
   bool trace_started_{};
