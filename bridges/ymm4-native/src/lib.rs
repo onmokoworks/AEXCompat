@@ -139,16 +139,18 @@ fn open_session(
     total_time: i32,
     time_scale: u32,
     smart: bool,
+    parameters: Vec<InteractiveParameter>,
+    open_tx: Sender<Result<(), String>>,
     rx: Receiver<RenderRequest>,
 ) -> Result<(), String> {
-    let mut session = RenderSession::open(SessionOpenRequest {
+    let baseline = (!parameters.is_empty()).then_some(parameters.as_slice());
+    let mut session = match RenderSession::open(SessionOpenRequest {
         repository: &repository,
         plugin_path: &plugin,
         plugin_sha256: &plugin_sha256,
-        // YMM4 sends the complete current parameter payload with every frame.
-        // Avoid rediscovering parameters on Open, which can block before the
-        // managed processor has rendered once when an AEX is unresponsive.
-        parameters: None,
+        // Seed the resident worker with the discovered defaults. YMM4 then
+        // sends the current complete parameter payload with every frame.
+        parameters: baseline,
         parameter_animation: None,
         aux_manifest: None,
         world_dump_dir: None,
@@ -172,8 +174,18 @@ fn open_session(
         gpu_backend: RenderGpuBackend::Auto,
         gpu_runtime_policy: None,
         payload_override: None,
-    })
-    .map_err(|error| format!("RenderSession::open failed: {error}"))?;
+    }) {
+        Ok(session) => session,
+        Err(error) => {
+            let message = format!("RenderSession::open failed: {error}");
+            let _ = open_tx.send(Err(message.clone()));
+            return Err(message);
+        }
+    };
+    if open_tx.send(Ok(())).is_err() {
+        let _ = session.close();
+        return Ok(());
+    }
 
     for request in rx {
         let reply = match session.render_frame_with_parameters(
@@ -255,12 +267,14 @@ pub unsafe extern "C" fn aexcompat_ymm4_open(
             return Err("invalid YMM4 session geometry or timing".to_string());
         }
         let plugin_sha256 = plugin_sha256(&plugin)?;
+        let parameters =
+            discover_parameters(&repository, &plugin, &plugin_sha256).unwrap_or_default();
         let (tx, rx) = channel::<RenderRequest>();
         let (open_tx, open_rx) = channel::<Result<(), String>>();
         let join = thread::Builder::new()
             .name("aex-ymm4-session".to_string())
             .spawn(move || {
-                let result = open_session(
+                let _ = open_session(
                     repository,
                     plugin,
                     plugin_sha256,
@@ -270,13 +284,10 @@ pub unsafe extern "C" fn aexcompat_ymm4_open(
                     total_time,
                     time_scale,
                     smart != 0,
+                    parameters,
+                    open_tx,
                     rx,
                 );
-                if let Err(error) = &result {
-                    let _ = open_tx.send(Err(error.clone()));
-                } else {
-                    let _ = open_tx.send(Ok(()));
-                }
             })
             .map_err(|error| format!("spawn session thread failed: {error}"))?;
         match open_rx.recv_timeout(Duration::from_millis(OPEN_HANDSHAKE_TIMEOUT_MS)) {

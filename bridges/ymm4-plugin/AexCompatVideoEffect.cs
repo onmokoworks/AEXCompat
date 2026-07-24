@@ -3,6 +3,7 @@ using System.Text;
 using System.ComponentModel;
 using System.IO;
 using System.Reflection;
+using System.Numerics;
 using System.ComponentModel.DataAnnotations;
 using Vortice.DCommon;
 using Vortice.Direct2D1;
@@ -99,6 +100,8 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
 {
     private readonly ID2D1DeviceContext6 deviceContext;
     private readonly AexCompatVideoEffect effect;
+    private readonly ID2D1Effect outputTransform;
+    private readonly ID2D1Image transformedOutput;
     private readonly object gate = new();
     private ID2D1Image? input;
     private ID2D1Bitmap1? output;
@@ -116,9 +119,11 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
     {
         deviceContext = devices.DeviceContext;
         this.effect = effect;
+        outputTransform = new ID2D1Effect(deviceContext.CreateEffect(EffectGuids.AffineTransform2D));
+        transformedOutput = outputTransform.Output;
     }
 
-    public ID2D1Image Output => output ?? input!;
+    public ID2D1Image Output => output is null ? input! : transformedOutput;
 
     public void SetInput(ID2D1Image? input)
     {
@@ -215,8 +220,11 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
         lock (gate)
         {
             input = null;
+            outputTransform.SetInput(0, null, true);
             CloseSession();
             ReplaceOutput(null);
+            transformedOutput.Dispose();
+            outputTransform.Dispose();
         }
     }
 
@@ -248,7 +256,7 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
             timeStep: 1,
             totalTime: duration,
             timeScale: checked((uint)fps),
-            smart: 0);
+            smart: 1);
         if (session == 0)
         {
             throw new InvalidOperationException(ReadNativeError());
@@ -273,15 +281,24 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
             new BitmapProperties1(format, 96, 96, BitmapOptions.CpuRead | BitmapOptions.CannotDraw));
 
         var previousTarget = deviceContext.Target;
+        var previousTransform = deviceContext.Transform;
         try
         {
             deviceContext.Target = target;
+            deviceContext.Transform = new Matrix3x2(
+                1,
+                0,
+                0,
+                1,
+                size.Width / 2f,
+                size.Height / 2f);
             deviceContext.BeginDraw();
             deviceContext.DrawImage(input!, InterpolationMode.NearestNeighbor, CompositeMode.SourceOver);
             deviceContext.EndDraw();
         }
         finally
         {
+            deviceContext.Transform = previousTransform;
             deviceContext.Target = previousTarget;
         }
         readable.CopyFromBitmap(target);
@@ -340,11 +357,16 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
                 var previous = output;
                 output = next;
                 previous?.Dispose();
+                outputTransform.SetInput(0, output, true);
             }
             else
             {
                 output.CopyFromMemory(handle.AddrOfPinnedObject(), size.Width * 4);
             }
+
+            outputTransform.SetValue(
+                (int)AffineTransform2DProperties.TransformMatrix,
+                new Matrix3x2(1, 0, 0, 1, -size.Width / 2f, -size.Height / 2f));
         }
         finally
         {
@@ -370,6 +392,10 @@ internal sealed class AexCompatVideoEffectProcessor : IVideoEffectProcessor
 
     private void ReplaceOutput(ID2D1Bitmap1? next)
     {
+        if (next is null)
+        {
+            outputTransform.SetInput(0, null, true);
+        }
         output?.Dispose();
         output = next;
     }
