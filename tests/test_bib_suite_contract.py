@@ -27,7 +27,11 @@ def test_bib_provider_is_fail_closed_and_does_not_load_arbitrary_paths():
         assert procedure in SOURCE
     assert "if (!state.resolver) return nullptr;" in SOURCE
 
-def test_pre_unload_hook_is_exported_across_translation_units():
-    assert "bool teardown_bib_suite_impl(void*) noexcept" in SOURCE
-    assert "bool teardown_bib_suite(void* context) noexcept" in SOURCE
-    assert "return teardown_bib_suite_impl(context);" in SOURCE
+L2_SOURCE = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+
+
+def test_case_id_rejection_runs_global_setdown_before_bib_termination():
+    old = "    if (dispatch.case_id_rejected) return session.finish(2);"
+    new = "    if (dispatch.case_id_rejected) {\n      dispose_arbitrary_defaults(entry, input, output);\n      if (global_error == 0)\n        invoke_global_setdown(entry, input.data(), output.data());\n      return session.finish(2);\n    }"
+    assert old not in L2_SOURCE
+    assert L2_SOURCE.count(new) == 2

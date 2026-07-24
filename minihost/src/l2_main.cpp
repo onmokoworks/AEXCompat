@@ -2745,7 +2745,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     const auto dispatch = aexcompat::worker_runtime::invocation::run_classic_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,
          image_render_supported, depth_supported, smart_render_supported});
-    if (dispatch.case_id_rejected) return session.finish(2);
+    if (dispatch.case_id_rejected) {
+      dispose_arbitrary_defaults(entry, input, output);
+      if (global_error == 0)
+        invoke_global_setdown(entry, input.data(), output.data());
+      return session.finish(2);
+    }
     case_id = dispatch.case_id;
     input_hash = dispatch.input_hash;
     output_hash = dispatch.output_hash;
@@ -2778,7 +2783,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     const auto dispatch = aexcompat::worker_runtime::invocation::run_smart_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,
          image_render_supported, depth_supported, smart_render_supported});
-    if (dispatch.case_id_rejected) return session.finish(2);
+    if (dispatch.case_id_rejected) {
+      dispose_arbitrary_defaults(entry, input, output);
+      if (global_error == 0)
+        invoke_global_setdown(entry, input.data(), output.data());
+      return session.finish(2);
+    }
     case_id = dispatch.case_id;
     smart = dispatch.smart;
     lifetime_fault_observed = dispatch.lifetime_fault_observed;
