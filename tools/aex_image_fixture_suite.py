@@ -114,6 +114,11 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
     primary = policy.get("primary_policy_candidate")
     if not isinstance(primary, dict):
         errors.append("source primary_policy_candidate must be an object")
+    else:
+        for field in ("relative_path", "candidate_policy_state", "native_load_approval"):
+            value = primary.get(field)
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"source primary_policy_candidate.{field} must be a non-empty string")
     for flag in SAFETY_FLAGS:
         if policy.get(flag) is not False:
             errors.append(f"source {flag} must be false")

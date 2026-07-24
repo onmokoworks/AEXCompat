@@ -70,6 +70,23 @@ class AexImageFixtureSuiteTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             aex_image_fixture_suite.build_suite(policy, Path("policy.json"), suite_id=f"{time.time_ns()}-bad")
 
+    def test_missing_primary_candidate_identity_is_rejected(self):
+        for field, value in (
+            ("relative_path", None),
+            ("candidate_policy_state", ""),
+            ("native_load_approval", 0),
+        ):
+            policy = make_policy()
+            policy["primary_policy_candidate"].pop(field, None)
+            if value is not None:
+                policy["primary_policy_candidate"][field] = value
+            with self.assertRaises(ValueError):
+                aex_image_fixture_suite.build_suite(
+                    policy,
+                    Path("policy.json"),
+                    suite_id=f"{time.time_ns()}-missing-{field}",
+                )
+
     def test_paths_are_confined_and_outputs_are_create_new(self):
         policy_root = LAB_ROOT / "target" / "sandbox-policy"
         policy_root.mkdir(parents=True, exist_ok=True)
