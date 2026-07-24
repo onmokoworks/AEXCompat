@@ -258,6 +258,7 @@ pub fn secure_launch_session(
     )
 }
 
+#[cfg(windows)]
 pub(crate) fn secure_launch_session_on_current_desktop(
     tree: SealedLoadTree,
     request: SecureLaunchRequest<'_>,
@@ -271,6 +272,7 @@ pub(crate) fn secure_launch_session_on_current_desktop(
     )
 }
 
+#[cfg(windows)]
 fn secure_launch_session_with_desktop_policy(
     tree: SealedLoadTree,
     request: SecureLaunchRequest<'_>,
