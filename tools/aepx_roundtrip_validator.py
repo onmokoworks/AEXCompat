@@ -394,7 +394,7 @@ def main() -> int:
     )
     written = write_json_create_new(Path(args.out), report)
     print(written)
-    return 0
+    return 0 if report["validator_ready"] else 1
 
 
 if __name__ == "__main__":

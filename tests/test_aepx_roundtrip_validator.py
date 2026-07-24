@@ -4,6 +4,8 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -111,6 +113,27 @@ def make_edit_plan(probe_path: Path) -> dict:
 
 
 class AepxRoundtripValidatorTests(unittest.TestCase):
+    def test_cli_exit_follows_validator_ready(self):
+        args = SimpleNamespace(aepx_probe="probe.json", aepx_edit_plan="plan.json", out="out.json")
+        failure = {"validator_ready": False}
+        with mock.patch.object(aepx_roundtrip_validator, "parse_args", return_value=args), mock.patch.object(
+            aepx_roundtrip_validator, "load_aepx_probe", return_value=({}, Path("probe.json"))
+        ), mock.patch.object(
+            aepx_roundtrip_validator, "load_aepx_edit_plan", return_value=({}, Path("plan.json"))
+        ), mock.patch.object(
+            aepx_roundtrip_validator, "build_roundtrip_validator", return_value=failure
+        ), mock.patch.object(aepx_roundtrip_validator, "write_json_create_new", return_value=Path("out.json")):
+            self.assertEqual(aepx_roundtrip_validator.main(), 1)
+
+        with mock.patch.object(aepx_roundtrip_validator, "parse_args", return_value=args), mock.patch.object(
+            aepx_roundtrip_validator, "load_aepx_probe", return_value=({}, Path("probe.json"))
+        ), mock.patch.object(
+            aepx_roundtrip_validator, "load_aepx_edit_plan", return_value=({}, Path("plan.json"))
+        ), mock.patch.object(
+            aepx_roundtrip_validator, "build_roundtrip_validator", return_value={"validator_ready": True}
+        ), mock.patch.object(aepx_roundtrip_validator, "write_json_create_new", return_value=Path("out.json")):
+            self.assertEqual(aepx_roundtrip_validator.main(), 0)
+
     def test_roundtrip_validates_structure_without_writing_or_exporting_payloads(self):
         source = write_synthetic_aepx()
         probe = make_probe(source)
