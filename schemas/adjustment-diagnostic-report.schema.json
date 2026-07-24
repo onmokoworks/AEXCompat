@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/schemas/adjustment-diagnostic-report.schema.json",
+  "title": "AEXCompat direct/adjustment diagnostic report",
+  "schema_name": "AEXCompat Adjustment Layer diagnostic report schema",
+  "schema_version": 1,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "diagnostic_id", "status", "execution_evidence", "identity", "scenes", "pairs"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "diagnostic_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "status": {"enum": ["completed", "completed_with_failures", "blocked_external", "failed"]},
+    "execution_evidence": {"enum": ["native_aex", "adapter", "none"]},
+    "blocked_reason": {"type": ["string", "null"], "maxLength": 512},
+    "identity": {"type": "object", "additionalProperties": false, "required": ["aex", "dependencies", "runner"], "properties": {
+      "aex": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"},
+      "dependencies": {"type": "array", "maxItems": 64, "items": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"}},
+      "runner": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"}
+    }},
+    "scenes": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/scene"}},
+    "pairs": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/pair"}}
+  },
+  "$defs": {
+    "rect": {"type": "object", "additionalProperties": false, "required": ["left", "top", "right", "bottom"], "properties": {"left": {"type": "integer"}, "top": {"type": "integer"}, "right": {"type": "integer"}, "bottom": {"type": "integer"}}},
+    "artifact": {"$ref": "conformance-manifest.schema.json#/$defs/artifact"},
+    "layer": {"type": "object", "additionalProperties": false, "required": ["layer_id", "kind", "order", "flags", "coverage", "extent", "roi"], "properties": {
+      "layer_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"},
+      "kind": {"enum": ["source", "effect", "adjustment"]},
+      "order": {"type": "integer", "minimum": 0, "maximum": 65535},
+      "flags": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"}},
+      "coverage": {"enum": ["full_frame", "partial", "transparent"]},
+      "extent": {"$ref": "#/$defs/rect"},
+      "roi": {"$ref": "#/$defs/rect"}
+    }},
+    "scene": {"type": "object", "additionalProperties": false, "required": ["scene_id", "kind", "alpha_policy", "layers", "composite_input"], "properties": {
+      "scene_id": {"enum": ["opaque_full_frame", "alpha_extent_roi"]},
+      "kind": {"enum": ["opaque_full_frame", "alpha_extent_roi"]},
+      "alpha_policy": {"enum": ["straight", "premultiplied", "opaque"]},
+      "layers": {"type": "array", "minItems": 2, "maxItems": 8, "items": {"$ref": "#/$defs/layer"}},
+      "composite_input": {"$ref": "#/$defs/artifact"}
+    }},
+    "outcome": {"type": "object", "additionalProperties": false, "required": ["status", "manifest_path", "report_path", "results", "diagnostics"], "properties": {
+      "status": {"enum": ["completed", "failed", "blocked_external"]},
+      "manifest_path": {"$ref": "#/$defs/path"},
+      "report_path": {"$ref": "#/$defs/path"},
+      "diagnostics": {"type": "object", "additionalProperties": true}, "results": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "object", "additionalProperties": false, "required": ["depth", "classification", "selector", "input_world", "world", "raw_input", "raw_output", "output_sha256", "suite_timeline"], "properties": {
+        "depth": {"enum": ["argb8", "argb16", "argb32f"]},
+        "classification": {"type": "string", "minLength": 1, "maxLength": 64},
+        "selector": {"type": "object", "additionalProperties": true},
+        "input_world": {"type": ["object", "null"]}, "world": {"type": ["object", "null"]},
+        "raw_input": {"type": ["object", "null"]}, "raw_output": {"type": ["object", "null"]},
+        "output_sha256": {"type": ["string", "null"]},
+        "suite_timeline": {"type": ["array", "null"]}
+      }}}
+    }},
+    "diff": {"type": "object", "additionalProperties": false, "required": ["depths"], "properties": {"depths": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "object", "additionalProperties": false, "required": ["depth", "comparable", "mismatched_pixels", "alpha_mismatched_pixels", "premultiplication_mismatch"], "properties": {
+      "depth": {"enum": ["argb8", "argb16", "argb32f"]}, "comparable": {"type": "boolean"}, "mismatched_pixels": {"type": "integer", "minimum": 0}, "alpha_mismatched_pixels": {"type": "integer", "minimum": 0}, "premultiplication_mismatch": {"type": "boolean"}
+    }}}}},
+    "path": {"type": "string", "minLength": 1, "pattern": "^(?![/\\\\])(?!.*\\\\)[A-Za-z0-9._ -]+(?:/[A-Za-z0-9._ -]+)*$"},
+    "pair": {"type": "object", "additionalProperties": false, "required": ["pair_id", "scene_id", "application_modes", "common_identity", "layer_stacks", "composite_input", "direct", "adjustment", "classification", "cause_candidates", "diff"], "properties": {
+      "pair_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+      "scene_id": {"enum": ["opaque_full_frame", "alpha_extent_roi"]},
+      "application_modes": {"const": ["direct", "adjustment"]},
+      "common_identity": {"type": "object", "additionalProperties": false, "required": ["aex", "parameters", "time", "resolution", "depths", "renderer", "alpha_policy", "premultiplication", "downsample"], "properties": {
+        "aex": {"$ref": "#/$defs/artifact"}, "parameters": {"type": "array"}, "time": {"type": "object"}, "resolution": {"type": "object"}, "depths": {"type": "array"}, "renderer": {"type": "string"}, "alpha_policy": {"type": "string"}, "premultiplication": {"type": "string"}, "downsample": {"type": "object"}
+      }},
+      "layer_stacks": {"type": "object", "additionalProperties": false, "required": ["direct", "adjustment"], "properties": {"direct": {"type": "array", "items": {"$ref": "#/$defs/layer"}}, "adjustment": {"type": "array", "items": {"$ref": "#/$defs/layer"}}}}, "composite_input": {"type": "object", "additionalProperties": false, "required": ["source_ids", "png", "recomputed_sha256", "raw_inputs"], "properties": {"source_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}, "png": {"$ref": "#/$defs/artifact"}, "recomputed_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "raw_inputs": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "object", "additionalProperties": false, "required": ["depth", "expected", "adjustment", "identity_match"], "properties": {"depth": {"enum": ["argb8", "argb16", "argb32f"]}, "expected": {"$ref": "#/$defs/artifact"}, "adjustment": {"type": ["object", "null"]}, "identity_match": {"type": "boolean"}}}}}}, "direct": {"$ref": "#/$defs/outcome"}, "adjustment": {"$ref": "#/$defs/outcome"},
+      "classification": {"enum": ["equivalent", "pixel_diverged", "direct_ok_adjustment_failed", "direct_failed_adjustment_ok", "both_failed", "blocked_external", "identity_mismatch"]},
+      "cause_candidates": {"type": "array", "uniqueItems": true, "items": {"enum": ["layer_flag_or_admission", "composite_input", "effect_stack_order", "extent_roi", "alpha_premultiplication", "resolution_downsample", "selector_suite", "session_transport", "identity_mismatch", "external_unavailable"]}},
+      "diff": {"$ref": "#/$defs/diff"}
+    }}
+  }
+}
