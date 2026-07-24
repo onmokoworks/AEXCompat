@@ -14,11 +14,15 @@ def test_harness_exposes_machine_readable_agent_cli_contract():
     assert '"success_stdout": "json"' in source
     assert '"failure_stderr": true' in source
     assert '"unknown_or_malformed_arguments": "launch_gui"' in source
+    assert 'args[1] == "--render-scattermap-fixture"' in source
+    assert 'args[1] == "--render-image"' not in source
+    assert "render_scattermap_fixture" in source
 
     # Keep the contract tied to the existing, behavior-bearing routes rather
     # than allowing the machine-readable surface to drift into a second CLI.
     for command in (
         "--inspect-experimental",
+        "--render-scattermap-fixture",
         "--inspect-experimental-with-deps",
         "--inspect-experimental-dependencies",
         "--render-experimental-request",
