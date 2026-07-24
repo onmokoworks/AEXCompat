@@ -48,6 +48,12 @@ disabled, and the `AEXCompat CPU`/`software` renderer aliases. Generated bundle 
 (`manifest.json`, `report.json`, and the `diagnostics`, `outputs`, `raw`, `requests`, and
 `target` namespaces) are reserved and cannot be used by pinned artifacts.
 
+The runner returns exit code `0` only when every requested depth is `ok` or the legal SmartFX
+`empty_result`. A report containing another classification is still written for diagnosis, but
+the default exit code is `3` and `diagnostics/run.json` records `completed_with_failures`. Batch
+collectors that intentionally aggregate failed cells must pass `--allow-failures`; that keeps exit
+code `0` while retaining the `completed_with_failures` state.
+
 ## Agent-facing harness contract
 
 The native harness exposes its existing CLI surface without requiring an agent to parse

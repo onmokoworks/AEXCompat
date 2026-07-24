@@ -79,11 +79,20 @@ def fixture(tmp_path: Path):
     return path, adapter
 
 
-def invoke(manifest: Path, output: Path, adapter: Path):
-    return subprocess.run(
-        [sys.executable, str(RUNNER), "--manifest", str(manifest), "--out", str(output), "--adapter-command", str(adapter)],
-        cwd=ROOT, capture_output=True, text=True,
-    )
+def invoke(manifest: Path, output: Path, adapter: Path, *, allow_failures: bool = False):
+    command = [
+        sys.executable,
+        str(RUNNER),
+        "--manifest",
+        str(manifest),
+        "--out",
+        str(output),
+        "--adapter-command",
+        str(adapter),
+    ]
+    if allow_failures:
+        command.append("--allow-failures")
+    return subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
 
 
 def report_validator():
@@ -646,13 +655,48 @@ def test_failure_leaves_bounded_diagnostic_bundle(tmp_path):
     adapter.write_text("import sys; print('x'*100000, file=sys.stderr); raise SystemExit(3)\n", encoding="utf-8")
     output = tmp_path / "bundle"
     completed = invoke(manifest, output, adapter)
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 3, completed.stderr
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["classification"] for item in report["results"]} == {"nonzero_exit"}
     detail = json.loads((output / "diagnostics" / "run.json").read_text(encoding="utf-8"))
+    assert detail["status"] == "completed_with_failures"
+    assert detail["failure_classifications"] == ["nonzero_exit"]
     assert detail["depths"]["argb8"]["stderr"]["truncated"] is True
     assert len(detail["depths"]["argb8"]["stderr"]["text"].encode()) <= 65536
     assert report["results"][0]["suite_timeline"] is None
+
+
+def test_failure_bundle_can_be_explicitly_allowed_for_aggregation(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    adapter.write_text("raise SystemExit(3)\n", encoding="utf-8")
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter, allow_failures=True)
+    assert completed.returncode == 0, completed.stderr
+    state = json.loads((output / "diagnostics" / "run.json").read_text(encoding="utf-8"))
+    assert state["status"] == "completed_with_failures"
+    assert state["failure_classifications"] == ["nonzero_exit"]
+
+
+def test_legal_empty_result_remains_a_success(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    adapter.write_text(
+        "import argparse, json\n"
+        "p=argparse.ArgumentParser()\n"
+        "[p.add_argument(x) for x in ('--depth','--render-path','--runner','--plugin','--input','--output','--request','--world-dump-dir')]\n"
+        "a=p.parse_args()\n"
+        "bpp={'argb8':4,'argb16':8,'argb32f':16}[a.depth]\n"
+        "w={'width':2,'height':2,'row_bytes':2*bpp,'pixel_format':a.depth,'premultiplication':'straight','extent_hint':{'left':0,'top':0,'right':0,'bottom':0}}\n"
+        "print(json.dumps({'depth':a.depth,'classification':'empty_result','selector':{'render_path':a.render_path,'completed':True,'error_code':0},'input_world':w,'world':None,'output_sha256':'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855','suite_timeline':[],'parameter_metadata':[],'oracle':{'state':'not_captured','identity_match':False,'exact':False}}))\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter)
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert {item["classification"] for item in report["results"]} == {"empty_result"}
+    state = json.loads((output / "diagnostics" / "run.json").read_text(encoding="utf-8"))
+    assert state["status"] == "completed"
+    assert state["failure_classifications"] == []
 
 
 def test_structured_failure_uses_meaningful_pre_render_error_over_sentinel(tmp_path):
@@ -662,7 +706,7 @@ def test_structured_failure_uses_meaningful_pre_render_error_over_sentinel(tmp_p
         encoding="utf-8",
     )
     output = tmp_path / "bundle"
-    assert invoke(manifest, output, adapter).returncode == 0
+    assert invoke(manifest, output, adapter, allow_failures=True).returncode == 0
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["classification"] for item in report["results"]} == {"selector_error"}
     assert {item["selector"]["error_code"] for item in report["results"]} == {25}
@@ -675,7 +719,7 @@ def test_structured_inspection_failure_preserves_bounded_plugin_kind(tmp_path):
         encoding="utf-8",
     )
     output = tmp_path / "bundle"
-    assert invoke(manifest, output, adapter).returncode == 0
+    assert invoke(manifest, output, adapter, allow_failures=True).returncode == 0
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["plugin_kind"] for item in report["results"]} == {"unknown_no_effect_entrypoint"}
 
@@ -793,7 +837,7 @@ def test_stderr_truncation_observes_exact_64k_boundary(tmp_path, size, truncated
         encoding="utf-8",
     )
     output = tmp_path / "bundle"
-    assert invoke(manifest, output, adapter).returncode == 0
+    assert invoke(manifest, output, adapter, allow_failures=True).returncode == 0
     detail = json.loads((output / "diagnostics" / "run.json").read_text(encoding="utf-8"))
     stderr = detail["depths"]["argb8"]["stderr"]
     assert stderr["bytes_kept"] == min(size, 65536)
@@ -820,7 +864,7 @@ def test_synthesized_raw_input_applies_declared_alpha_mode(tmp_path, mode, sampl
     adapter.write_text("raise SystemExit(3)\n", encoding="utf-8")
 
     output = tmp_path / "bundle"
-    assert invoke(manifest_path, output, adapter).returncode == 0
+    assert invoke(manifest_path, output, adapter, allow_failures=True).returncode == 0
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     result = report["results"][0]
     if depth == "argb8":
@@ -843,7 +887,7 @@ def test_structured_nonzero_failure_preserves_protocol_and_missing_suites(tmp_pa
         encoding="utf-8",
     )
     output = tmp_path / "bundle"
-    completed = invoke(manifest, output, adapter)
+    completed = invoke(manifest, output, adapter, allow_failures=True)
     assert completed.returncode == 0, completed.stderr
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["classification"] for item in report["results"]} == {"missing_suite"}
@@ -880,7 +924,7 @@ def test_adapter_cannot_claim_success_for_wrong_output_identity(tmp_path):
     source = adapter.read_text(encoding="utf-8")
     adapter.write_text(source.replace("hashlib.sha256(data).hexdigest()", "'0'*64"), encoding="utf-8")
     output = tmp_path / "bundle"
-    completed = invoke(manifest, output, adapter)
+    completed = invoke(manifest, output, adapter, allow_failures=True)
     assert completed.returncode == 0, completed.stderr
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["classification"] for item in report["results"]} == {"invalid_output"}
@@ -953,7 +997,7 @@ def test_failed_render_retains_captured_oracle_identity(tmp_path):
     adapter.write_text("raise SystemExit(3)\n", encoding="utf-8")
     output = tmp_path / "bundle"
     completed = invoke(manifest_path, output, adapter)
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 3, completed.stderr
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     report_validator().validate(report)
     assert report["results"][0]["oracle"] == {
@@ -976,7 +1020,9 @@ def test_not_requested_oracle_state_is_retained_for_every_render_outcome(
         adapter.write_text("raise SystemExit(3)\n", encoding="utf-8")
 
     output = tmp_path / "bundle"
-    completed = invoke(manifest_path, output, adapter)
+    completed = invoke(
+        manifest_path, output, adapter, allow_failures=not adapter_succeeds
+    )
 
     assert completed.returncode == 0, completed.stderr
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
