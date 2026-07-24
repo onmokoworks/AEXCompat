@@ -40,16 +40,28 @@ struct AuditSnapshot {
     unknown: Vec<String>,
 }
 
+// Parses the worker's final report as the FIRST JSON value on stdout,
+// tolerating non-JSON teardown output the closure may print after the report
+// when its modules unload at process exit (issue #474: e.g. an Adobe
+// allocator's exit-time stats lines). A broken or truncated report still
+// fails closed.
+pub(crate) fn parse_report_prefix(stdout: &str) -> io::Result<Value> {
+    let trimmed = stdout.trim();
+    let mut stream = serde_json::Deserializer::from_str(trimmed).into_iter::<Value>();
+    match stream.next() {
+        Some(Ok(value)) => Ok(value),
+        _ => Err(invalid_classified(
+            "module_audit_report_invalid_json",
+            "secure worker report is not valid JSON",
+        )),
+    }
+}
+
 pub fn validate_required_worker_audit(stdout: &str, stdout_truncated: bool) -> io::Result<()> {
     if stdout_truncated {
         return Err(invalid("secure worker report was truncated"));
     }
-    let report: Value = serde_json::from_str(stdout.trim()).map_err(|_| {
-        invalid_classified(
-            "module_audit_report_invalid_json",
-            "secure worker report is not valid JSON",
-        )
-    })?;
+    let report = parse_report_prefix(stdout)?;
     let audit: AuditReport = serde_json::from_value(
         report
             .get("module_audit")
@@ -265,12 +277,7 @@ pub fn validate_cluster_worker_audit(
     if stdout_truncated {
         return Err(invalid("secure worker report was truncated"));
     }
-    let report: Value = serde_json::from_str(stdout.trim()).map_err(|_| {
-        invalid_classified(
-            "module_audit_report_invalid_json",
-            "secure worker report is not valid JSON",
-        )
-    })?;
+    let report = parse_report_prefix(stdout)?;
     let audit: ClusterAuditReport = serde_json::from_value(
         report
             .get("module_audit")

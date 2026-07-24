@@ -86,6 +86,16 @@ void WorkerSession::stop_trace() noexcept {
 }
 
 void WorkerSession::unload_module() noexcept {
+  if (deferred_module_release_) {
+    // Deferred release (issue #474): nothing is freed mid-process. The
+    // current and retired plug-in images and the sealed-directory cookie all
+    // unload in one loader-ordered pass at process exit.
+    if (module_) retired_modules_.push_back(module_);
+    module_ = nullptr;
+    retired_modules_.clear();
+    sealed_directory_cookie_ = nullptr;
+    return;
+  }
   if (!module_) {
     if (sealed_directory_cookie_) {
       RemoveDllDirectory(sealed_directory_cookie_);
@@ -169,10 +179,12 @@ bool WorkerSession::swap_release_module(uint32_t outgoing_index) noexcept {
     pre_unload = capture_module_audit();
     if (pre_unload.status != "passed" || !module_audit_passed()) return false;
   }
-  // Only the plug-in image is freed: the AddDllDirectory cookie and the
-  // pinned closure dependencies are session-lifetime state (design §3), so
-  // the swapped-in plug-in resolves the same dependency instances.
-  if (!FreeLibrary(module_)) return false;
+  // Deferred release (issue #474): the outgoing plug-in image is retired,
+  // not freed — its logical teardown already happened (GLOBAL_SETDOWN), and
+  // the image stays mapped until the loader-ordered unload at process exit.
+  // Freeing it here would let closure atexit handlers later dereference the
+  // unmapped image.
+  retired_modules_.push_back(module_);
   module_ = nullptr;
   swap_pending_ = true;
   swap_outgoing_index_ = outgoing_index;
@@ -188,13 +200,14 @@ bool WorkerSession::swap_adopt_module(HMODULE module,
   ModuleAuditReport& audit = module_audit_report();
   audit.plugin_path = plugin_path;
   if (audit.required) {
-    // Capture and judge before taking ownership: a rejected plug-in is freed
-    // here and never enters the session's ownership state.
+    // Capture and judge before taking ownership: a rejected plug-in is
+    // deferred to process exit like every other image (issue #474) and never
+    // enters the session's ownership state.
     ModuleAuditSnapshot post_load = capture_module_audit();
     record_module_audit_epoch(swap_outgoing_index_, std::move(swap_pre_unload_),
                               post_load);
     if (post_load.status != "passed" || !module_audit_passed()) {
-      FreeLibrary(module);
+      retired_modules_.push_back(module);
       return false;
     }
   }
