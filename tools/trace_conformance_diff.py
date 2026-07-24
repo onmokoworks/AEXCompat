@@ -128,7 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         destination = output_path(args.out)
         report = compare(load_trace(args.reference), load_trace(args.candidate), load_rules(args.rules))
-        destination.write_text(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+        with destination.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"trace_conformance_diff: {type(exc).__name__}", file=sys.stderr)
         return 2

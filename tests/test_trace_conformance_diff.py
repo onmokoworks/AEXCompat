@@ -1,7 +1,11 @@
+import contextlib
 import copy
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tools import trace_conformance_diff
 from tools.trace_normalizer import normalize, read_jsonl
@@ -59,6 +63,55 @@ class TraceConformanceDiffTests(unittest.TestCase):
             path.write_text(RULES.read_text(encoding="utf-8"), encoding="utf-8")
             with self.assertRaises(ValueError):
                 trace_conformance_diff.load_rules(path)
+
+    def test_cli_writes_new_conformant_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.json"
+            candidate = root / "candidate.json"
+            rules = root / "rules.json"
+            destination = root / "out" / "report.json"
+            payload = {"schema_version": 1, "report_kind": "normalized_host_trace", "events": self.events}
+            for path in (reference, candidate):
+                path.write_text(json.dumps(payload), encoding="utf-8")
+            rules.write_text(RULES.read_text(encoding="utf-8"), encoding="utf-8")
+            with (
+                mock.patch.object(trace_conformance_diff, "RULES_ROOT", root),
+                mock.patch.object(trace_conformance_diff, "OUTPUT_ROOT", root / "out"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                code = trace_conformance_diff.main(["--reference", str(reference), "--candidate", str(candidate), "--rules", str(rules), "--out", str(destination)])
+            self.assertEqual(0, code)
+            self.assertEqual("conformant", json.loads(destination.read_text(encoding="utf-8"))["conformance_state"])
+
+    def test_cli_preserves_competing_report_after_preflight(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.json"
+            candidate = root / "candidate.json"
+            rules = root / "rules.json"
+            destination = root / "out" / "report.json"
+            payload = {"schema_version": 1, "report_kind": "normalized_host_trace", "events": self.events}
+            for path in (reference, candidate):
+                path.write_text(json.dumps(payload), encoding="utf-8")
+            rules.write_text(RULES.read_text(encoding="utf-8"), encoding="utf-8")
+            original_compare = trace_conformance_diff.compare
+
+            def create_competing_report(*args):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text("sentinel", encoding="utf-8")
+                return original_compare(*args)
+
+            with (
+                mock.patch.object(trace_conformance_diff, "RULES_ROOT", root),
+                mock.patch.object(trace_conformance_diff, "OUTPUT_ROOT", root / "out"),
+                mock.patch.object(trace_conformance_diff, "compare", side_effect=create_competing_report),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                code = trace_conformance_diff.main(["--reference", str(reference), "--candidate", str(candidate), "--rules", str(rules), "--out", str(destination)])
+            self.assertEqual(2, code)
+            self.assertEqual("sentinel", destination.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
