@@ -48,6 +48,7 @@ use aexcompat_broker::render_session::{
     DiscoverySession, DiscoverySessionOpenRequest, InspectOutcome,
 };
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
+use aexcompat_broker::worker_module_audit::MAX_AUDITED_MODULES as ONESHOT_AUDIT_MODULE_LIMIT;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -57,10 +58,9 @@ const MAX_CLUSTER_MODULE_BOUND: usize = 4096;
 const CLUSTER_MODULE_HEADROOM: usize = 256;
 const CLUSTER_INSPECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
 /// One-member cluster routing (issue #362, mirror of the bridge lib): a
-/// singleton with `deps + SYSTEM_TAIL_ESTIMATE` over the one-shot
-/// 128-module audit cap goes through a one-member DiscoverySession instead
-/// of failing the one-shot audit.
-const ONESHOT_AUDIT_MODULE_LIMIT: usize = 128;
+/// singleton with `deps + SYSTEM_TAIL_ESTIMATE` over the bounded one-shot
+/// audit cap goes through a one-member DiscoverySession instead of failing
+/// the one-shot audit.
 const SYSTEM_TAIL_ESTIMATE: usize = 66;
 
 struct Options {
@@ -577,7 +577,10 @@ fn main() {
     for (bucket, count) in &buckets {
         println!("{count:5}  {bucket}");
     }
-    println!("total sweep time: {} ms", sweep_started.elapsed().as_millis());
+    println!(
+        "total sweep time: {} ms",
+        sweep_started.elapsed().as_millis()
+    );
     if let Some(path) = options.json {
         let report = json!({
             "sealed_dependencies": options.seal,
@@ -708,12 +711,15 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
     }
 
     // Phase 2: group by identity; clusters of 2+ go through one
-    // DiscoverySession, singletons whose closure would exceed the one-shot
-    // 128-module audit cap go through a one-member session (issue #362),
+    // DiscoverySession, singletons whose closure would exceed the bounded
+    // one-shot audit cap go through a one-member session (issue #362),
     // everything else through the one-shot inspect.
     let mut groups: std::collections::BTreeMap<&str, Vec<usize>> = Default::default();
     for (index, member) in prepared.iter().enumerate() {
-        groups.entry(member.identity.as_str()).or_default().push(index);
+        groups
+            .entry(member.identity.as_str())
+            .or_default()
+            .push(index);
     }
     let mut cluster_reports = Vec::new();
     let mut singleton_indices = Vec::new();
@@ -783,7 +789,8 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
 
     for indices in &cluster_indices {
         let cluster_started = Instant::now();
-        let members: Vec<&ClusterPrepared> = indices.iter().map(|index| &prepared[*index]).collect();
+        let members: Vec<&ClusterPrepared> =
+            indices.iter().map(|index| &prepared[*index]).collect();
         let identity = members[0].identity.clone();
         let declared = members.len() + members[0].dependencies.len();
         let infeasible = declared + CLUSTER_MODULE_HEADROOM > MAX_CLUSTER_MODULE_BOUND;
@@ -802,11 +809,9 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
                         let bytes = member.sha.as_bytes();
                         let mut digest = [0u8; 32];
                         for (index, pair) in bytes.chunks_exact(2).enumerate() {
-                            digest[index] = u8::from_str_radix(
-                                std::str::from_utf8(pair).expect("hex"),
-                                16,
-                            )
-                            .expect("hex");
+                            digest[index] =
+                                u8::from_str_radix(std::str::from_utf8(pair).expect("hex"), 16)
+                                    .expect("hex");
                         }
                         digest
                     },
@@ -913,8 +918,7 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
             fallback_note = json!(reason.clone());
         }
         for member in members.iter().skip(inspected) {
-            let (bucket, record) =
-                one_shot(member, Instant::now(), fallback_note.clone());
+            let (bucket, record) = one_shot(member, Instant::now(), fallback_note.clone());
             records.push(record);
             *buckets.entry(bucket).or_default() += 1;
         }
@@ -925,7 +929,11 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
             members.len(),
             open_ms,
             total_ms,
-            if invalidation.is_some() { " (fell back)" } else { "" },
+            if invalidation.is_some() {
+                " (fell back)"
+            } else {
+                ""
+            },
         );
         cluster_reports.push(json!({
             "identity": identity,
@@ -943,7 +951,11 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
         *buckets.entry(bucket).or_default() += 1;
     }
 
-    println!("\n=== summary ({} plug-ins, {} clusters) ===", records.len(), cluster_reports.len());
+    println!(
+        "\n=== summary ({} plug-ins, {} clusters) ===",
+        records.len(),
+        cluster_reports.len()
+    );
     for (bucket, count) in &buckets {
         println!("{count:5}  {bucket}");
     }
@@ -956,7 +968,10 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
             report["total_ms"],
         );
     }
-    println!("total sweep time: {} ms", sweep_started.elapsed().as_millis());
+    println!(
+        "total sweep time: {} ms",
+        sweep_started.elapsed().as_millis()
+    );
     if let Some(path) = &options.json {
         let report = json!({
             "sealed_dependencies": options.seal,

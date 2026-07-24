@@ -6,7 +6,7 @@ across the three components:
 - broker: the cluster-manifest bounds and validation, the sealed-root
   staging of the manifest, the swap/discovery session API, and the
   declared-set module audit validated at close — while the one-shot audit
-  keeps its fixed 128-module cap.
+  keeps its fixed native-aligned 512-module cap.
 - minihost worker: strict manifest parsing, closure pins with the
   sealed-root LoadLibrary flags, the dedicated swap-failure exit code, the
   discovery session launch mode, and swap epochs in the module audit.
@@ -133,8 +133,8 @@ def test_cluster_audit_is_validated_at_close_against_the_declared_set():
 
 def test_one_shot_audit_keeps_the_fixed_cap():
     """The declared-set model applies to cluster sessions only; the one-shot
-    validator and its 128-module cap are out of scope (#394) and unchanged."""
-    assert "const MAX_AUDITED_MODULES: usize = 128;" in AUDIT
+    validator keeps the bounded native producer capacity after #478."""
+    assert "pub const MAX_AUDITED_MODULES: usize = 512;" in AUDIT
     assert "pub fn validate_required_worker_audit" in AUDIT
 
 
@@ -151,14 +151,15 @@ def test_broker_validates_driverstore_in_both_audit_models():
     assert AUDIT.count("+ snapshot.driverstore.len()") == 2
     # Union subset on the one-shot path (terminal snapshots) and the cluster
     # path (terminal and epoch snapshots alike).
-    assert AUDIT.count(
-        "require_subset(&audit.post_load.driverstore, &audit.observed_union.driverstore)?;"
+    compact = "".join(AUDIT.split())
+    assert compact.count(
+        "require_subset(&audit.post_load.driverstore,&audit.observed_union.driverstore,"
     ) == 1
-    assert AUDIT.count(
-        "require_subset(&audit.pre_unload.driverstore, &audit.observed_union.driverstore)?;"
+    assert compact.count(
+        "require_subset(&audit.pre_unload.driverstore,&audit.observed_union.driverstore,"
     ) == 1
-    assert AUDIT.count(
-        "require_subset(&snapshot.driverstore, &audit.observed_union.driverstore)?;"
+    assert compact.count(
+        "require_subset(&snapshot.driverstore,&audit.observed_union.driverstore)?;"
     ) == 1
     # The limit-exceeded diagnostics disclose the category like the others.
     assert '"driverstore": snapshot.driverstore.len(),' in AUDIT
