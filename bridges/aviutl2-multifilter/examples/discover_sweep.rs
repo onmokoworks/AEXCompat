@@ -56,6 +56,12 @@ const MAX_CLUSTER_PLUGINS: usize = 256;
 const MAX_CLUSTER_MODULE_BOUND: usize = 4096;
 const CLUSTER_MODULE_HEADROOM: usize = 256;
 const CLUSTER_INSPECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+/// One-member cluster routing (issue #362, mirror of the bridge lib): a
+/// singleton with `deps + SYSTEM_TAIL_ESTIMATE` over the one-shot
+/// 128-module audit cap goes through a one-member DiscoverySession instead
+/// of failing the one-shot audit.
+const ONESHOT_AUDIT_MODULE_LIMIT: usize = 128;
+const SYSTEM_TAIL_ESTIMATE: usize = 66;
 
 struct Options {
     scan: PathBuf,
@@ -702,7 +708,9 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
     }
 
     // Phase 2: group by identity; clusters of 2+ go through one
-    // DiscoverySession, everything else through the one-shot inspect.
+    // DiscoverySession, singletons whose closure would exceed the one-shot
+    // 128-module audit cap go through a one-member session (issue #362),
+    // everything else through the one-shot inspect.
     let mut groups: std::collections::BTreeMap<&str, Vec<usize>> = Default::default();
     for (index, member) in prepared.iter().enumerate() {
         groups.entry(member.identity.as_str()).or_default().push(index);
@@ -712,6 +720,11 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
     let mut cluster_indices = Vec::new();
     for indices in groups.values() {
         if indices.len() >= 2 && indices.len() <= MAX_CLUSTER_PLUGINS {
+            cluster_indices.push(indices.clone());
+        } else if indices.len() == 1
+            && prepared[indices[0]].dependencies.len() + SYSTEM_TAIL_ESTIMATE
+                > ONESHOT_AUDIT_MODULE_LIMIT
+        {
             cluster_indices.push(indices.clone());
         } else {
             singleton_indices.extend(indices.iter().copied());

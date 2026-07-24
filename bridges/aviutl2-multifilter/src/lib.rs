@@ -89,6 +89,18 @@ static SESSION_SERIAL: AtomicU64 = AtomicU64::new(0);
 const MAX_CLUSTER_PLUGINS: usize = 256;
 const MAX_CLUSTER_MODULE_BOUND: usize = 4096;
 const CLUSTER_MODULE_HEADROOM: usize = 256;
+/// The one-shot module-audit cap (the broker's `MAX_AUDITED_MODULES`): total
+/// modules across every category in one snapshot. A singleton whose closure
+/// cannot fit it is exactly the case the cluster session's declared-set
+/// audit exists for (issue #362), so discovery routes it to a one-member
+/// cluster session instead of the one-shot inspect.
+const ONESHOT_AUDIT_MODULE_LIMIT: usize = 128;
+/// Estimated non-declared modules in a one-shot audit snapshot (the worker
+/// image plus the System32/WinSxS tail), measured ~65 for built-in AE
+/// effects. A singleton with `deps + SYSTEM_TAIL_ESTIMATE` over the one-shot
+/// cap would fail the audit there, so it goes to a one-member cluster
+/// session whose module bound is declared instead (issue #362).
+const SYSTEM_TAIL_ESTIMATE: usize = 66;
 /// Per-inspect watchdog deadline for a cluster discovery session (design §7).
 /// The one-shot inspect carries no deadline (#354: mapping a large closure
 /// must not be decided by wall-clock), so this stays generous — its job is to
@@ -2529,17 +2541,28 @@ enum DiscoveryTask {
     Cluster(Vec<usize>),
 }
 
+/// What the planner needs to know about one prepared plug-in: its closure
+/// identity (when the closure resolved) and how many dependency modules that
+/// closure carries.
+struct PlannedMember {
+    identity: Option<String>,
+    dependency_count: usize,
+}
+
 /// Groups the prepared plug-ins into tasks by closure identity. Identities
-/// with 2..=MAX_CLUSTER_PLUGINS members form one cluster task; everything
-/// else — singletons, failed resolutions (no identity), oversized clusters —
-/// stays on the per-plugin path (fail-closed, design §6). Deterministic:
-/// clusters in first-seen identity order, then the remaining singles in scan
-/// order.
-fn plan_tasks(identities: &[Option<String>]) -> Vec<DiscoveryTask> {
+/// with 2..=MAX_CLUSTER_PLUGINS members form one cluster task; singletons
+/// whose closure would exceed the one-shot module-audit cap form a
+/// one-member cluster task (issue #362: the cluster session's declared-set
+/// audit replaces the fixed 128-module cap with the launch-authenticated
+/// module bound); everything else — small singletons, failed resolutions (no
+/// identity), oversized clusters — stays on the per-plugin path
+/// (fail-closed, design §6). Deterministic: clusters in first-seen identity
+/// order, then the remaining singles in scan order.
+fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
     let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut first_seen: Vec<&str> = Vec::new();
-    for (index, identity) in identities.iter().enumerate() {
-        let Some(identity) = identity else {
+    for (index, member) in members.iter().enumerate() {
+        let Some(identity) = &member.identity else {
             continue;
         };
         groups
@@ -2559,8 +2582,19 @@ fn plan_tasks(identities: &[Option<String>]) -> Vec<DiscoveryTask> {
             tasks.push(DiscoveryTask::Cluster(members.clone()));
         }
     }
-    for index in 0..identities.len() {
-        if !clustered.contains(&index) {
+    for (index, member) in members.iter().enumerate() {
+        if clustered.contains(&index) {
+            continue;
+        }
+        // A singleton whose closure would trip the one-shot audit cap takes a
+        // one-member cluster session (issue #362): same launch trust, but the
+        // audit is validated against the declared module bound instead of the
+        // fixed 128-module one-shot cap.
+        if member.identity.is_some()
+            && member.dependency_count + SYSTEM_TAIL_ESTIMATE > ONESHOT_AUDIT_MODULE_LIMIT
+        {
+            tasks.push(DiscoveryTask::Cluster(vec![index]));
+        } else {
             tasks.push(DiscoveryTask::Single(index));
         }
     }
@@ -2608,11 +2642,13 @@ fn fallback_members(
 
 /// Discovers one same-closure cluster through a single DiscoverySession
 /// (issue #405, design §4.2): the closure is sealed and mapped once, and
-/// each member is inspected by index. Every failure is fail-closed — an
-/// infeasible cluster, a failed open, or an invalidation mid-sweep falls the
-/// not-yet-processed members back to the per-plugin path with a structured
-/// `cluster_fallback` note, and a close-time audit rejection redoes every
-/// session-inspected member per-plugin.
+/// each member is inspected by index. A cluster of one is the issue #362
+/// case — a singleton whose closure would exceed the one-shot module-audit
+/// cap, inspected under the declared-set audit instead. Every failure is
+/// fail-closed — an infeasible cluster, a failed open, or an invalidation
+/// mid-sweep falls the not-yet-processed members back to the per-plugin path
+/// with a structured `cluster_fallback` note, and a close-time audit
+/// rejection redoes every session-inspected member per-plugin.
 fn discover_cluster(
     repository: &Path,
     dependency: &DependencyConfig,
@@ -2840,11 +2876,25 @@ fn discover_all(
         }
     });
     let slots = slots.into_inner().unwrap_or_else(|poison| poison.into_inner());
-    let identities: Vec<Option<String>> = slots
+    let planned: Vec<PlannedMember> = slots
         .iter()
-        .map(|slot| slot.as_ref().and_then(|(_, prepared)| prepared.identity.clone()))
+        .map(|slot| {
+            slot.as_ref().map_or(
+                PlannedMember {
+                    identity: None,
+                    dependency_count: 0,
+                },
+                |(_, prepared)| PlannedMember {
+                    identity: prepared.identity.clone(),
+                    dependency_count: prepared
+                        .closure
+                        .as_ref()
+                        .map_or(0, |closure| closure.dependencies().len()),
+                },
+            )
+        })
         .collect();
-    let tasks = plan_tasks(&identities);
+    let tasks = plan_tasks(&planned);
 
     // Phase 2: process tasks with the same worker budget. A cluster is one
     // unit of work: its members are inspected sequentially inside one
@@ -2894,9 +2944,13 @@ fn discover_all(
                             if members.is_empty() {
                                 continue;
                             }
-                            // A shutdown gap can leave a cluster with a single
-                            // prepared member; it takes the per-plugin path.
-                            if members.len() == 1 {
+                            // A shutdown gap can deplete a multi-member
+                            // cluster to a single prepared member; it takes
+                            // the per-plugin path. A task planned as a
+                            // one-member cluster (issue #362) has
+                            // `indices.len() == 1` by construction and goes
+                            // to the session below.
+                            if members.len() == 1 && indices.len() > 1 {
                                 let (plugin, prepared) = members.pop().expect("one member");
                                 let entry = std::panic::catch_unwind(
                                     std::panic::AssertUnwindSafe(|| {
@@ -5868,17 +5922,23 @@ mod tests {
         assert_ne!(closure_identity_of(&first), closure_identity_of(&missing));
     }
 
+    fn planned(identity: Option<&str>, dependency_count: usize) -> PlannedMember {
+        PlannedMember {
+            identity: identity.map(str::to_owned),
+            dependency_count,
+        }
+    }
+
     #[test]
     fn plan_tasks_clusters_only_shareable_identities() {
-        let identity = |tag: &str| Some(tag.to_owned());
-        let identities = vec![
-            identity("cluster"),
-            identity("cluster"),
-            identity("single"),
-            None,
-            identity("cluster"),
+        let members = vec![
+            planned(Some("cluster"), 2),
+            planned(Some("cluster"), 2),
+            planned(Some("single"), 2),
+            planned(None, 0),
+            planned(Some("cluster"), 2),
         ];
-        let tasks = plan_tasks(&identities);
+        let tasks = plan_tasks(&members);
         // One cluster over members 0/1/4 (first-seen), then singles in scan
         // order for the singleton identity and the failed resolution.
         assert_eq!(tasks.len(), 3);
@@ -5896,12 +5956,47 @@ mod tests {
 
     #[test]
     fn plan_tasks_keeps_oversized_clusters_on_the_per_plugin_path() {
-        let identities: Vec<Option<String>> = (0..=MAX_CLUSTER_PLUGINS)
-            .map(|_| Some("huge".to_owned()))
+        let members: Vec<PlannedMember> = (0..=MAX_CLUSTER_PLUGINS)
+            .map(|_| planned(Some("huge"), 2))
             .collect();
-        let tasks = plan_tasks(&identities);
+        let tasks = plan_tasks(&members);
         assert!(tasks.iter().all(|task| matches!(task, DiscoveryTask::Single(_))));
         assert_eq!(tasks.len(), MAX_CLUSTER_PLUGINS + 1);
+    }
+
+    #[test]
+    fn plan_tasks_routes_oversized_singleton_closures_to_a_one_member_cluster() {
+        // The threshold: deps + the measured system tail past the one-shot
+        // 128-module audit cap. 62 deps still fits (62 + 66 = 128, not over);
+        // 63 does not (issue #362).
+        let members = vec![
+            planned(Some("small"), 62),
+            planned(Some("large"), 63),
+            planned(Some("larger"), 300),
+            planned(None, 300),
+            planned(Some("tiny"), 0),
+        ];
+        let tasks = plan_tasks(&members);
+        let cluster_of = |index: usize| match &tasks[index] {
+            DiscoveryTask::Cluster(members) => members.clone(),
+            _ => panic!("task {index} must be a cluster"),
+        };
+        match &tasks[0] {
+            DiscoveryTask::Single(index) => assert_eq!(*index, 0),
+            _ => panic!("62 deps stays on the one-shot path"),
+        }
+        assert_eq!(cluster_of(1), vec![1]);
+        assert_eq!(cluster_of(2), vec![2]);
+        // A failed closure resolution never clusters, however large the walk
+        // was: there is no authenticated identity to seal a session around.
+        match &tasks[3] {
+            DiscoveryTask::Single(index) => assert_eq!(*index, 3),
+            _ => panic!("an unresolved closure stays on the one-shot path"),
+        }
+        match &tasks[4] {
+            DiscoveryTask::Single(index) => assert_eq!(*index, 4),
+            _ => panic!("a zero-dependency singleton stays on the one-shot path"),
+        }
     }
 
     #[test]
