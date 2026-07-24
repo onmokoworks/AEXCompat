@@ -268,6 +268,9 @@ int main() {
   field<decltype(PF_InteractCallbacks::checkout_layer_audio)>("inter.checkout_layer_audio", offsetof(PF_InteractCallbacks, checkout_layer_audio), first);
   field<decltype(PF_InteractCallbacks::checkin_layer_audio)>("inter.checkin_layer_audio", offsetof(PF_InteractCallbacks, checkin_layer_audio), first);
   field<decltype(PF_InteractCallbacks::get_audio_data)>("inter.get_audio_data", offsetof(PF_InteractCallbacks, get_audio_data), first);
+  field<decltype(PF_InteractCallbacks::reserved[0])>("inter.reserved_0", offsetof(PF_InteractCallbacks, reserved), first);
+  field<decltype(PF_InteractCallbacks::reserved[0])>("inter.reserved_1", offsetof(PF_InteractCallbacks, reserved) + sizeof(void*), first);
+  field<decltype(PF_InteractCallbacks::reserved[0])>("inter.reserved_2", offsetof(PF_InteractCallbacks, reserved) + 2 * sizeof(void*), first);
   field<decltype(PF_UtilCallbacks::begin_sampling)>("utils.begin_sampling", offsetof(PF_UtilCallbacks, begin_sampling), first);
   field<decltype(PF_UtilCallbacks::subpixel_sample)>("utils.subpixel_sample", offsetof(PF_UtilCallbacks, subpixel_sample), first);
   field<decltype(PF_UtilCallbacks::area_sample)>("utils.area_sample", offsetof(PF_UtilCallbacks, area_sample), first);
@@ -290,6 +293,7 @@ int main() {
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, sprintf), first);
   field<decltype(PF_ANSICallbacks::strcpy)>("utils.ansi_strcpy",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, strcpy), first);
+  field<decltype(PF_UtilCallbacks::colorCB)>("utils.color_callbacks", offsetof(PF_UtilCallbacks, colorCB), first);
   field<decltype(PF_UtilCallbacks::blend)>("utils.blend", offsetof(PF_UtilCallbacks, blend), first);
   field<decltype(PF_UtilCallbacks::convolve)>("utils.convolve", offsetof(PF_UtilCallbacks, convolve), first);
   field<decltype(PF_UtilCallbacks::copy)>("utils.copy", offsetof(PF_UtilCallbacks, copy), first);

@@ -41,6 +41,15 @@ def test_cpp_and_rust_share_observed_constants():
     ):
         assert f"{name} = {value}" in cpp
         assert f"{name}: usize = {value}" in rust
+    input_offsets = "0, 8, 16, 24, 32, 40, 48, 56, 64, 96, 104, 112"
+    utility_offsets = (
+        "0, 8, 16, 32, 48, 56, 64, 72, 96, 104, 488, 496, 88, 112, "
+        "120, 152, 224, 248, 296, 304, 328, 336, 432, 528, 536, 160, "
+        "168, 176, 184, 440, 464"
+    )
+    for output in (cpp, rust):
+        assert input_offsets in output
+        assert utility_offsets in output
 
 
 def test_duplicate_keys_are_rejected(tmp_path):
@@ -90,6 +99,12 @@ def test_missing_required_field_is_rejected(tmp_path):
                 {"in.bad": {"offset": -1, "size": 8}}
             ),
             "non-negative",
+        ),
+        (
+            lambda data: data["fields"]["utils.subpixel_sample"].update(
+                offset=data["fields"]["utils.begin_sampling"]["offset"]
+            ),
+            "UTILITY_CALLBACK_OFFSETS contains duplicate offsets",
         ),
     ],
 )
