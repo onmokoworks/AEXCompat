@@ -5,10 +5,11 @@
 ## 0. 作業開始時の必須確認
 
 1. この `AGENTS.md` を読む。
-2. `git status --short --branch` と `git worktree list` を確認する。
+2. `docs/AGENT_ORCHESTRATION.md` を全文読む。
+3. `git status --short --branch` と `git worktree list` を確認する。
 3. 主worktree (`git worktree list` の先頭に出る、自分がこの作業のために作成したのではない既存worktree) の既存変更は、閲覧以外の操作をしない。特定のbranch名で固定せず、その時点の `git worktree list` で判定する。revert、reset、checkout、clean、上書きを禁止する。
-4. 設定済みのremote (通常は `origin`) から最新を fetch し、GitHub の Issue/PR の現在状態を確認する。remoteが無い、または名前が異なる環境では fetch は best-effort とし (`git remote` で実際の名前を確認する)、GitHub側の現在状態の確認を優先する。過去の会話や古いcommitを正本にしない。
-5. 同時に複数のIssue、PR、worktree、エージェントを進めない。ユーザーが明示的に並列作業を依頼した場合だけ例外とする。
+5. 設定済みのremote (通常は `origin`) から最新を fetch し、GitHub の Issue/PR の現在状態を確認する。remoteが無い、または名前が異なる環境では fetch は best-effort とし (`git remote` で実際の名前を確認する)、GitHub側の現在状態の確認を優先する。過去の会話や古いcommitを正本にしない。
+6. 同時に複数のIssue、PR、worktree、エージェントを進めない。ユーザーが明示的に並列作業を依頼した場合だけ例外とする。
 
 ## 1. Issue-first / claim-first
 
