@@ -50,7 +50,8 @@ def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__); p.add_argument("--reference",required=True,type=Path); p.add_argument("--candidate",required=True,type=Path); p.add_argument("--tolerance",type=int,default=0); p.add_argument("--out",required=True,type=Path); a=p.parse_args(argv)
     try:
         out=output_path(a.out); report=compare_images(read_ppm(safe_ppm(a.reference)),read_ppm(safe_ppm(a.candidate)),a.tolerance)
-        out.write_text(json.dumps(report,indent=2,sort_keys=True)+"\n",encoding="utf-8")
+        with out.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (OSError,ValueError) as exc: print(f"aex_compat_oracle: {type(exc).__name__}",file=sys.stderr); return 2
     print(json.dumps(report,indent=2)); return 0 if report["match_state"] != "nonmatching" else 1
 if __name__ == "__main__": raise SystemExit(main())

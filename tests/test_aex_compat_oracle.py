@@ -1,5 +1,11 @@
+import contextlib
+import io
+import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+from tools import aex_compat_oracle
 from tools.aex_compat_oracle import compare_images, safe_ppm
 from tools.ppm_fixture_tool import PpmImage
 
@@ -24,4 +30,47 @@ class CompatOracleTests(unittest.TestCase):
         self.assertNotIn("pixels",r); self.assertFalse(r["render_performed"]); self.assertFalse(r["pixel_values_serialized"])
     def test_non_ppm_input_is_rejected(self):
         with self.assertRaises(ValueError): safe_ppm(Path("fixture.aex"))
+
+    def test_cli_writes_new_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.ppm"
+            candidate = root / "candidate.ppm"
+            destination = root / "out" / "report.json"
+            for path in (reference, candidate):
+                path.write_bytes(b"P6\n1 1\n255\n\x01\x02\x03")
+            with (
+                mock.patch.object(aex_compat_oracle, "TARGET_ROOT", root),
+                mock.patch.object(aex_compat_oracle, "OUTPUT_ROOT", root / "out"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                code = aex_compat_oracle.main(["--reference", str(reference), "--candidate", str(candidate), "--out", str(destination)])
+            self.assertEqual(0, code)
+            self.assertEqual("compat_oracle", json.loads(destination.read_text(encoding="utf-8"))["report_kind"])
+
+    def test_cli_preserves_competing_report_after_preflight(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.ppm"
+            candidate = root / "candidate.ppm"
+            destination = root / "out" / "report.json"
+            for path in (reference, candidate):
+                path.write_bytes(b"P6\n1 1\n255\n\x01\x02\x03")
+            original_compare = aex_compat_oracle.compare_images
+
+            def create_competing_report(*args):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text("sentinel", encoding="utf-8")
+                return original_compare(*args)
+
+            with (
+                mock.patch.object(aex_compat_oracle, "TARGET_ROOT", root),
+                mock.patch.object(aex_compat_oracle, "OUTPUT_ROOT", root / "out"),
+                mock.patch.object(aex_compat_oracle, "compare_images", side_effect=create_competing_report),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                code = aex_compat_oracle.main(["--reference", str(reference), "--candidate", str(candidate), "--out", str(destination)])
+            self.assertEqual(2, code)
+            self.assertEqual("sentinel", destination.read_text(encoding="utf-8"))
 if __name__ == "__main__": unittest.main()
