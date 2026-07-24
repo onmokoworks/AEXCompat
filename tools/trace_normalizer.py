@@ -76,7 +76,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         destination = output_path(args.out)
         payload = normalize(read_jsonl(args.input))
-        destination.write_text(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+        with destination.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"trace_normalizer: {type(exc).__name__}", file=sys.stderr)
         return 2
