@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Drive a receipt-free worker render under Frida and record a native_observation trace.
+"""Drive a session-harness render under Frida and record a native_observation trace.
 
 PID-resolution decision (see docs/KNOWN_FUNCTION_OBSERVATION_2026-07-19.md for the
-full trade-off write-up): this launcher *spawns* ``aex_render_worker.exe`` through
-its own documented render CLI (``--render-image`` and friends) with Frida, injects
+full trade-off write-up): this launcher *spawns* the supported
+``aexcompat-harness.exe --render-experimental-session`` command with Frida, injects
 the resolved read plan while the process is suspended, then resumes. Frida owns the
 PID, so hooks are in place before any render code runs and every invocation is
 captured. This does not go through the broker's evidence-tier restricted token or
 sealed load tree, but it still enforces the crash-containment floor: the spawned
-worker is assigned to a Windows Job Object with kill-on-close and a process-memory
+harness is assigned to a Windows Job Object with kill-on-close and a process-memory
 cap, so the whole process tree (including any descendant the plug-in spawns) is
-terminated on exit/timeout. The worker also performs its own plug-in hash and
-admission checks. The rejected alternatives (process-name enumeration; a broker-core
-PID handoff with a resume gate) are documented in the same file.
+terminated on exit/timeout. The session harness performs the plug-in admission and
+hash checks. Deleted one-shot worker verbs are rejected before Frida is imported and
+reported as structured blockers.
 
 The message-to-event pipeline and spawn-argv assembly here are importable and unit
 tested without Frida; only :func:`run_observation` imports ``frida`` (lazily), so the
@@ -38,7 +38,7 @@ except ModuleNotFoundError:  # invoked as a script from tools/
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_WORKER = "target/minihost-build/aex_render_worker.exe"
+DEFAULT_HARNESS = "broker/target/release/aexcompat-harness.exe"
 # Observation traces may only be written under this root, canonicalised, with no
 # reparse point on the path - so a -Out race cannot redirect the write elsewhere.
 OUTPUT_ROOT = REPO_ROOT / "target" / "known-function-observation"
@@ -49,6 +49,20 @@ WORKER_MEMORY_CAP = 2 * 1024 * 1024 * 1024
 
 class ObservationError(RuntimeError):
     pass
+
+
+class ObservationBlocker(ObservationError):
+    """A reproducible prerequisite or transport blocker, never a success result."""
+
+    def __init__(self, *, blocker_id: str, command: str, replacement: str, reason: str):
+        self.blocker = {
+            "status": "blocked",
+            "blocker_id": blocker_id,
+            "requested_command": command,
+            "replacement": replacement,
+            "reason": reason,
+        }
+        super().__init__(json.dumps(self.blocker, ensure_ascii=False, sort_keys=True))
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -137,17 +151,42 @@ def write_session_jsonl(session: dict[str, Any], out_path: Path) -> Path:
     return _atomic_write_jsonl(session, safe_output_path(out_path))
 
 
-def build_worker_argv(worker_program: str, render_args: list[str]) -> list[str]:
-    """Assemble the spawn argv for the worker's standalone render CLI.
+def build_harness_argv(harness_program: str, session_args: list[str]) -> list[str]:
+    """Assemble and validate the current session-harness command.
 
-    ``render_args`` is the worker command line as an existing render gate would
-    pass it, e.g. ``["--render-image", aex, aex_sha256, "v5|", input, output,
-    "16", "12", "0", "1", "1", "1"]`` (see tools/run-aex-render-gate.ps1).
+    ``session_args`` excludes the executable and must contain either the
+    ``--render-experimental-session`` command or its parameterized variant. The
+    old ``aex_render_worker.exe --render-image*`` transport was removed in #365;
+    accepting it here would make an observation look runnable while spawning a
+    command that cannot exist anymore.
     """
 
-    if not render_args or not render_args[0].startswith("--render"):
-        raise ObservationError("render_args must start with a --render* worker verb")
-    return [worker_program, *render_args]
+    if not session_args:
+        raise ObservationError("session_args must start with a session-harness command")
+    command = session_args[0]
+    valid_commands = {
+        "--render-experimental-session",
+        "--render-experimental-session-param",
+    }
+    if command not in valid_commands:
+        if command.startswith("--render"):
+            raise ObservationBlocker(
+                blocker_id="deleted_one_shot_worker_argv",
+                command=command,
+                replacement="--render-experimental-session <aex> <input-image> <output-image> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>",
+                reason="one-shot worker render verbs were removed in #365; Frida observation must spawn the session harness",
+            )
+        raise ObservationError(
+            "session_args must start with --render-experimental-session or "
+            "--render-experimental-session-param"
+        )
+    expected_count = 11 if command.endswith("-param") else 9
+    if len(session_args) != expected_count:
+        raise ObservationError(
+            f"{command} expects {expected_count - 1} arguments after the command; "
+            f"received {len(session_args) - 1}"
+        )
+    return [harness_program, *session_args]
 
 
 class MessageCollector:
@@ -236,16 +275,16 @@ def run_observation(
     spec_path: Path,
     offset_map_path: Path,
     module_path: str,
-    render_args: list[str],
+    session_args: list[str],
     out_path: Path,
-    worker_program: str = DEFAULT_WORKER,
+    harness_program: str = DEFAULT_HARNESS,
     plugin_label: str,
     host_version_label: str = "native-observation frida",
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Spawn the worker under Frida, inject the plan, and write the trace.
+    """Spawn the session harness under Frida, inject the plan, and write the trace.
 
-    ``module_path`` is the expected canonical path of the plug-in the worker
+    ``module_path`` is the expected canonical path of the plug-in the harness
     loads; the JS binds hook installation to that exact module (not just its
     basename). Imports ``frida`` lazily so the module stays importable (and unit
     testable) without the observation runtime.
@@ -259,6 +298,7 @@ def run_observation(
     expected_hook_count = len(plan["hooks"])
     module_path = str(Path(module_path).resolve())
     destination = safe_output_path(out_path)
+    argv = build_harness_argv(harness_program, session_args)
     script_source = (Path(__file__).parent / "frida" / "known_function_probe.js").read_text(encoding="utf-8")
 
     try:
@@ -295,7 +335,6 @@ def run_observation(
             ready.set()
 
     device = frida.get_local_device()
-    argv = build_worker_argv(worker_program, render_args)
     pid = device.spawn(argv)
     completed = False
     try:  # pragma: no cover - requires frida runtime + worker
@@ -531,27 +570,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--spec", required=True, type=Path)
     parser.add_argument("--offset-map", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path, help="trace destination (must resolve under target/known-function-observation)")
-    parser.add_argument("--module-path", required=True, help="canonical path of the plug-in module the worker loads; hooks bind to this exact module")
+    parser.add_argument("--module-path", required=True, help="canonical path of the plug-in module the harness loads; hooks bind to this exact module")
     parser.add_argument("--plugin-label", required=True, help="redacted filename stem for the trace")
-    parser.add_argument("--worker", default=DEFAULT_WORKER)
+    parser.add_argument("--harness", default=DEFAULT_HARNESS)
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
-    parser.add_argument("render_args", nargs=argparse.REMAINDER, help="-- <worker render verb and args>")
+    parser.add_argument("session_args", nargs=argparse.REMAINDER, help="-- <session-harness command and args>")
     args = parser.parse_args(argv)
 
-    render_args = args.render_args
-    if render_args and render_args[0] == "--":
-        render_args = render_args[1:]
+    session_args = args.session_args
+    if session_args and session_args[0] == "--":
+        session_args = session_args[1:]
     try:
         result = run_observation(
             spec_path=args.spec,
             offset_map_path=args.offset_map,
             module_path=args.module_path,
-            render_args=render_args,
+            session_args=session_args,
             out_path=args.out,
-            worker_program=args.worker,
+            harness_program=args.harness,
             plugin_label=args.plugin_label,
             timeout_seconds=args.timeout_seconds,
         )
+    except ObservationBlocker as exc:
+        print(json.dumps({"observed": False, "blocker": exc.blocker}, ensure_ascii=False, sort_keys=True))
+        print(f"observe_known_functions: blocked: {exc}", file=sys.stderr)
+        return 4
     except (OSError, ValueError, ObservationError) as exc:
         print(f"observe_known_functions: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

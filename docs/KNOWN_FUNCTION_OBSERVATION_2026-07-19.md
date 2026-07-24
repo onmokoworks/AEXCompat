@@ -198,7 +198,7 @@ Runtime safety, layered on the resolver's static validation:
   and the field is omitted - it is never thrown out of the Frida callback (which
   could destabilise the worker) and never fabricated.
 
-Because the launcher spawns the worker **suspended**, the plug-in DLL is not
+Because the launcher spawns the session harness **suspended**, the plug-in DLL is not
 mapped yet - it is `LoadLibrary`'d later, during the render. So the script cannot
 attach the hooks before resume. Instead it arms a loader watch (`LoadLibrary*`
 `onLeave`) synchronously and attaches the moment the identity-matched module
@@ -211,17 +211,18 @@ after load, so attaching in the loader's `onLeave` never misses them.
 
 `tools/observe-known-functions.ps1` → `tools/observe_known_functions.py`.
 
-**Decision: spawn the worker's own receipt-free render CLI under Frida.** The
-worker (`aex_render_worker.exe`) already exposes a standalone render contract
-(`--render-image <aex> <aex_sha256> v5| <input> <output> 16 12 0 1 1 1` and the
-`16`/`32`/`-layer`/`--render-request` variants - see
-`tools/run-aex-render-gate.ps1`). Frida spawns that argv suspended, the launcher
-injects the read plan, **waits for the `ready` acknowledgement** (loader watch
-armed / hooks attached) before resuming, then resumes. Frida owns the PID, so the
-loader watch is armed before any code runs and every plug-in invocation is
-captured deterministically.
+**Decision: spawn the supported session harness under Frida.** The harness
+(`aexcompat-harness.exe`) exposes the current session contract
+(`--render-experimental-session <aex> <input-image> <output-image> <pixel-format>
+<classic|smart> <current-time> <total-time> <time-scale>` and the parameterized
+variant). Frida spawns that argv suspended, the launcher injects the read plan,
+**waits for the `ready` acknowledgement** (loader watch armed / hooks attached)
+before resuming, then resumes. Frida owns the PID, so the loader watch is armed
+before any code runs and every plug-in invocation is captured deterministically.
+The deleted one-shot worker verbs are rejected as a structured blocker rather
+than being passed to a nonexistent worker CLI.
 
-Completeness gating: a trace is finalised **complete** only if the worker exited
+Completeness gating: a trace is finalised **complete** only if the harness exited
 *and* the expected hooks actually attached (`installed_hook_count` equals the
 plan's hook count). If the module never loads (wrong `module_path`, or a loader
 path we do not watch) the hooks never install and the empty trace is finalised
@@ -229,7 +230,7 @@ path we do not watch) the hooks never install and the empty trace is finalised
 being reported as a successful empty observation. The same incomplete finalisation
 applies on timeout.
 
-Isolation: the spawned worker is assigned to a **Windows Job Object** with
+Isolation: the spawned harness is assigned to a **Windows Job Object** with
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and a process-memory cap
 (`_JobIsolation`). Closing the job handle at the end terminates the whole process
 tree, including any descendant the plug-in spawns - the `device.kill(pid)` alone
@@ -246,11 +247,11 @@ or symlink cannot redirect the write elsewhere.
 
 Trade-offs versus the alternatives the issue listed:
 
-- **(chosen) Frida spawn of the worker render CLI.** Highest completeness
+- **(chosen) Frida spawn of the session harness.** Highest completeness
   (pre-execution hooking), and it touches **no broker core path**. It runs under a
   Job Object (kill-on-close + memory cap) so descendants are contained, but not
   under the broker's restricted token / sealed load tree. That is acceptable
-  because (a) this is an explicitly non-evidence RE path, (b) the worker still runs
+  because (a) this is an explicitly non-evidence RE path, (b) the harness still runs
   its own plug-in hash and admission checks internally, and (c) the Job Object plus
   the launcher's bounded wait keep the crash-containment floor. Not a
   confidentiality sandbox - same caveat as the default tier.
@@ -269,23 +270,24 @@ Trade-offs versus the alternatives the issue listed:
   observation is ever required (and it would require re-running the broker
   integration tests after any worker rebuild).
 
-### Running it (gated: needs a worker build, a real `.aex`, an offset map, Frida)
+### Running it (gated: needs a session-harness build, a real `.aex`, an offset map, Frida)
 
 ```powershell
-# 1. Build the worker and generate an offset map (see above).
+# 1. Build the release session harness and generate an offset map (see above).
 # 2. Reverse the target .aex (e.g. in Ghidra) to get the module-relative RVAs,
 #    and write a hook set JSON per the schema.
-# 3. Run the observation. RenderArgs is the worker render verb + args.
+# 3. Run the observation. SessionArgs is the session-harness command + args.
 tools/observe-known-functions.ps1 `
   -Spec my-hook-set.json `
   -OffsetMap my-offset-map.json `
   -Out target/known-function-observation/gamma.jsonl `
   -ModulePath C:\path\to\Gamma.aex `
   -PluginLabel gamma-classic `
-  -RenderArgs @('--render-image','<aex>','<aex_sha256>','v5|','<input>','<output>','16','12','0','1','1','1')
+  -Harness broker/target/release/aexcompat-harness.exe `
+  -SessionArgs @('--render-experimental-session','<aex>','<input.png>','<output.png>','argb8','classic','0','1','1')
 ```
 
-`-ModulePath` is the canonical path of the plug-in the worker loads; hooks bind
+`-ModulePath` is the canonical path of the plug-in the harness loads; hooks bind
 to that exact module. `-Out` must resolve under `target/known-function-observation/`.
 
 Frida is an **observation-only** dependency. It is intentionally not in the
@@ -294,7 +296,7 @@ and `cargo test` (the canonical, machine-portable verification) never require
 it. The launcher imports `frida`
 lazily and fails with a clear message if it is absent.
 
-The worker render does not use After Effects, so `AfterFX` / `aerender` /
+The session harness render does not use After Effects, so `AfterFX` / `aerender` /
 `aerendercore` are neither required nor contended by this path.
 
 ## Files

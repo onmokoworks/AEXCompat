@@ -5,7 +5,8 @@ from tools.observe_known_functions import (
     OUTPUT_ROOT,
     MessageCollector,
     ObservationError,
-    build_worker_argv,
+    ObservationBlocker,
+    build_harness_argv,
     safe_output_path,
     write_session_jsonl,
 )
@@ -15,23 +16,40 @@ from tools.trace_contract_validator import validate_session
 OBS = Path(__file__).resolve().parents[1] / "contracts" / "observation"
 
 
-class BuildWorkerArgvTests(unittest.TestCase):
-    def test_prepends_worker_to_render_verb(self):
-        argv = build_worker_argv(
-            "target/minihost-build/aex_render_worker.exe",
-            ["--render-image", "plugin.aex", "deadbeef", "v5|", "in.rgba", "out.rgba", "16", "12", "0", "1", "1", "1"],
+class BuildHarnessArgvTests(unittest.TestCase):
+    def test_prepends_harness_to_session_command(self):
+        argv = build_harness_argv(
+            "broker/target/release/aexcompat-harness.exe",
+            [
+                "--render-experimental-session",
+                "plugin.aex",
+                "in.png",
+                "out.png",
+                "argb8",
+                "classic",
+                "0",
+                "1",
+                "1",
+            ],
         )
-        self.assertEqual("target/minihost-build/aex_render_worker.exe", argv[0])
-        self.assertEqual("--render-image", argv[1])
-        self.assertEqual("out.rgba", argv[6])
+        self.assertEqual("broker/target/release/aexcompat-harness.exe", argv[0])
+        self.assertEqual("--render-experimental-session", argv[1])
+        self.assertEqual("out.png", argv[4])
 
-    def test_rejects_non_render_verb(self):
-        with self.assertRaises(ObservationError):
-            build_worker_argv("worker.exe", ["--self-test-pf-color-suite"])
+    def test_rejects_deleted_one_shot_render_verb_as_structured_blocker(self):
+        with self.assertRaises(ObservationBlocker) as context:
+            build_harness_argv("harness.exe", ["--render-image", "plugin.aex"])
+        self.assertEqual("deleted_one_shot_worker_argv", context.exception.blocker["blocker_id"])
+        self.assertEqual("blocked", context.exception.blocker["status"])
+        self.assertIn("--render-experimental-session", context.exception.blocker["replacement"])
 
-    def test_rejects_empty_render_args(self):
+    def test_rejects_non_session_verb(self):
         with self.assertRaises(ObservationError):
-            build_worker_argv("worker.exe", [])
+            build_harness_argv("harness.exe", ["--self-test-pf-color-suite"])
+
+    def test_rejects_empty_session_args(self):
+        with self.assertRaises(ObservationError):
+            build_harness_argv("harness.exe", [])
 
 
 class MessageCollectorTests(unittest.TestCase):
@@ -269,7 +287,17 @@ class OutputPreflightTests(unittest.TestCase):
                 spec_path=OBS / "examples" / "example_hook_set.json",
                 offset_map_path=OBS / "examples" / "example_offset_map.json",
                 module_path="C:/plugins/Gamma.aex",
-                render_args=["--render-image", "a", "b", "v5|", "i", "o", "16", "12", "0", "1", "1", "1"],
+                session_args=[
+                    "--render-experimental-session",
+                    "a",
+                    "i.png",
+                    "o.png",
+                    "argb8",
+                    "classic",
+                    "0",
+                    "1",
+                    "1",
+                ],
                 out_path=Path("../../etc/passwd"),  # escapes the allowed root
                 plugin_label="gamma-classic",
             )
