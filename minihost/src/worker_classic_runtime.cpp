@@ -1,6 +1,7 @@
 #include "worker_classic_runtime.hpp"
 
 #include "render_subsystem.h"
+#include "worker_extended_diag.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -251,6 +252,9 @@ int32_t __cdecl duck_quack(uint16_t times) {
 }
 
 int32_t __cdecl abort_render(void* effect_ref) {
+  if (extended_diag_enabled())
+    std::cerr << "extended_diag:abort_render ref=" << effect_ref << "\n"
+              << std::flush;
   if (!effect_ref) return 4;
   ++g_abort_calls;
   return 0;

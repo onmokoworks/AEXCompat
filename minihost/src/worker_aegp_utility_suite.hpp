@@ -33,9 +33,34 @@ struct UtilitySuite3 {
 static_assert(sizeof(UtilitySuite3) == 25 * sizeof(void*));
 static_assert(offsetof(UtilitySuite3, register_with_aegp) == 7 * sizeof(void*));
 static_assert(offsetof(UtilitySuite3, get_main_hwnd) == 8 * sizeof(void*));
+struct UtilitySuite1 {
+  // AEGP_UtilitySuite1 (acquisition version 3, frozen in AE 5.0) publishes 9
+  // slots with RegisterWithAEGP at slot 7 and GetMainHWND at slot 8 (issue
+  // #362: the Liquify family acquires exactly version 3).
+  void* unsupported[7]{};
+  decltype(&register_with_aegp) register_with_aegp;
+  decltype(&get_main_hwnd) get_main_hwnd;
+};
+static_assert(sizeof(UtilitySuite1) == 9 * sizeof(void*));
+static_assert(offsetof(UtilitySuite1, register_with_aegp) == 7 * sizeof(void*));
+static_assert(offsetof(UtilitySuite1, get_main_hwnd) == 8 * sizeof(void*));
+struct UtilitySuite5 {
+  // AEGP_UtilitySuite5 (acquisition version 11, frozen in AE 8.0) publishes
+  // 31 slots with RegisterWithAEGP at slot 8 and GetMainHWND at slot 9
+  // (issue #362: Cryptomatte acquires exactly version 11).
+  void* unsupported[8]{};
+  decltype(&register_with_aegp) register_with_aegp;
+  decltype(&get_main_hwnd) get_main_hwnd;
+  void* unsupported_tail[21]{};
+};
+static_assert(sizeof(UtilitySuite5) == 31 * sizeof(void*));
+static_assert(offsetof(UtilitySuite5, register_with_aegp) == 8 * sizeof(void*));
+static_assert(offsetof(UtilitySuite5, get_main_hwnd) == 9 * sizeof(void*));
 
 extern UtilitySuite g_utility_suite;
 extern UtilitySuite3 g_utility_suite3;
+extern UtilitySuite1 g_utility_suite1;
+extern UtilitySuite5 g_utility_suite5;
 
 bool verify_suite_entry_guards_and_utility13();
 

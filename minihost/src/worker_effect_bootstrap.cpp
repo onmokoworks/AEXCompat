@@ -10,14 +10,17 @@ constexpr std::array<std::size_t, 12> kInputCallbackOffsets{
     0, 8, 16, 24, 32, 40, 48, 56, 64,
     // Extended inter slots bundled effects call (issue #382).
     96, 104, 112};
-constexpr std::array<std::size_t, 31> kUtilityCallbackOffsets{
+constexpr std::array<std::size_t, 32> kUtilityCallbackOffsets{
     0, 8, 16, 32, 48, 56, 64, 72, 96, 104, 488, 496,
     88, 112, 120, 152, 224, 248, 296, 304, 328, 336, 432, 528, 536,
     // Handle callbacks (issue #220). Offsets are PF_UtilCallbacks member
     // offsets verified against the SDK header by abi-layout-probe static_asserts:
     // host_new_handle=160, host_lock_handle=168, host_unlock_handle=176,
     // host_dispose_handle=184, host_get_handle_size=440, host_resize_handle=464.
-    160, 168, 176, 184, 440, 464};
+    160, 168, 176, 184, 440, 464,
+    // Legacy application-specific callback `app` (issue #362: PIN-era
+    // effects such as Drop_Shadow call it from GLOBAL_SETUP).
+    200};
 constexpr std::size_t kUtilityColorCallbacksOffset = 368;
 constexpr std::size_t kUtilityPlatformDataOffset = 432;
 static_assert(kUtilityColorCallbacksOffset + 64 == kUtilityPlatformDataOffset);

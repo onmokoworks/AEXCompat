@@ -1,5 +1,7 @@
 #include "worker_parameter_execution.hpp"
 
+#include "worker_extended_diag.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -811,6 +813,10 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
   std::memcpy(bytes.data(), definition, bytes.size());
   const char* name = reinterpret_cast<const char*>(bytes.data() + kParamName);
   const auto length = strnlen_s(name, kParamNameSize);
+  if (extended_diag_enabled())
+    std::cerr << "extended_diag:add_param index=" << index
+              << " type=" << read<int32_t>(bytes, kParamType) << " name=\""
+              << std::string(name, length) << "\"\n" << std::flush;
   const int32_t host_index = index < 0 ? static_cast<int32_t>(g_params.size() + 1) : index;
   if (host_index <= 0 || host_index > static_cast<int32_t>(kMaxParams) ||
       std::any_of(g_params.begin(), g_params.end(),
