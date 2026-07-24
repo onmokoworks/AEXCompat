@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <string>
 
+#include "generated/aex_abi_contract.hpp"
+
 namespace aexcompat::worker_runtime::effect_bootstrap {
 
 using EffectEntry = int32_t(__cdecl*)(int32_t, void*, void*, void**, void*, void*);
@@ -12,10 +14,10 @@ using InvokeEntry = int32_t(*)(EffectEntry, int32_t, void*, void*, void**, void*
                                void*, uint32_t*);
 
 struct State {
-  alignas(8) std::array<std::byte, 408> input{};
-  alignas(8) std::array<std::byte, 408> output{};
-  alignas(8) std::array<std::byte, 552> utils{};
-  std::array<std::byte, 408> about_output{};
+  alignas(8) std::array<std::byte, abi::x86_64_windows::PF_IN_DATA_SIZE> input{};
+  alignas(8) std::array<std::byte, abi::x86_64_windows::PF_OUT_DATA_SIZE> output{};
+  alignas(8) std::array<std::byte, abi::x86_64_windows::PF_UTIL_CALLBACKS_SIZE> utils{};
+  std::array<std::byte, abi::x86_64_windows::PF_OUT_DATA_SIZE> about_output{};
 };
 
 struct AbiHooks {
