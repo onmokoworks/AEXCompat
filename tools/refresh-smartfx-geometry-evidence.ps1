@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$TestedAex,
-    [string]$Worker = 'target\minihost-build\aex_smart_worker.exe',
+    [string]$Harness = 'broker\target\release\aexcompat-harness.exe',
     [string]$Probe = 'target\pf-smart-geometry-probe-build\Release\pf_smart_geometry_probe.aex',
     [string]$OutJson = 'analysis\SMARTFX_GEOMETRY_CONTRACT_RESULT_2026-07-19.json'
 )
@@ -31,14 +31,18 @@ function Identity([string]$Path) {
     }
 }
 
-$workerPath = (Resolve-Path -LiteralPath $Worker).Path
+$harnessPath = (Resolve-Path -LiteralPath $Harness).Path
+$sessionHarnessPath = (Resolve-Path -LiteralPath 'broker\target\release\aexcompat-harness.exe').Path
+if (-not $harnessPath.Equals($sessionHarnessPath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Harness must match the session adapter's release harness: $sessionHarnessPath"
+}
 $probePath = (Resolve-Path -LiteralPath $Probe).Path
 $aexPath = (Resolve-Path -LiteralPath $TestedAex).Path
 # Evidence must never carry machine-absolute paths. The tested AEX is
 # caller-supplied and may live anywhere; require a copy under the repo (for
 # example target\<name>.aex) so its recorded identity stays repo-relative.
 $repoPrefix = (Get-Item -LiteralPath $root).FullName + [IO.Path]::DirectorySeparatorChar
-foreach ($artifact in @($workerPath, $probePath, $aexPath)) {
+foreach ($artifact in @($harnessPath, $probePath, $aexPath)) {
     if (-not $artifact.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw "artifact lies outside the repository and would freeze an absolute path: $artifact (copy it under the repo, e.g. target\, first)"
     }
@@ -66,44 +70,59 @@ $geometryFields = @(
     'result_rects_valid', 'pixel_format'
 )
 
-function RunSmart([string]$Command, [string]$Plugin, [string]$PluginHash,
+function RunSmart([string]$PixelFormat, [string]$Plugin, [string]$PluginHash,
                   [string]$InputPath, [string]$OutputPath,
                   [int]$Width, [int]$Height, [int]$Time) {
-    # The worker narrates stages on stderr; under ErrorActionPreference Stop a
-    # redirected native stderr line becomes a terminating NativeCommandError
-    # in Windows PowerShell, so the preference is relaxed for the invocation.
+    # The adapter owns the current harness/session transport and converts the
+    # raw RGBA evidence format to the PNG/sidecar format required by the
+    # resident session. Deleted one-shot SmartFX worker commands must not be
+    # reintroduced here.
     $saved = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $json = & $workerPath $Command $Plugin $PluginHash 'v2|' $InputPath $OutputPath `
-        $Width $Height $Time 1 4 1 2>$null
+    $json = & python (Join-Path $root 'tools\refresh-runtime-session.py') `
+        --plugin $Plugin `
+        --plugin-sha256 $PluginHash `
+        --input $InputPath `
+        --output $OutputPath `
+        --width $Width `
+        --height $Height `
+        --pixel-format $PixelFormat `
+        --current-time $Time `
+        --total-time 4 `
+        --time-scale 1 `
+        --smart 2>$null
     $ErrorActionPreference = $saved
     if ($LASTEXITCODE -ne 0 -or -not $json) {
-        throw "worker run failed: $Command time=$Time exit=$LASTEXITCODE"
+        throw "session adapter run failed: pixel_format=$PixelFormat time=$Time exit=$LASTEXITCODE"
     }
     $report = $json | ConvertFrom-Json
-    $entry = [ordered]@{ command = $Command; render_time = $Time }
+    $entry = [ordered]@{
+        command = "--render-experimental-session:$PixelFormat"
+        render_time = $Time
+        pixel_format = $PixelFormat
+    }
     foreach ($field in $geometryFields) { $entry[$field] = $report.$field }
     $entry
 }
 
-$depthCommands = @('--smart-image', '--smart-image16', '--smart-image32')
+$depthFormats = @('argb8', 'argb16', 'argb32f')
 
 $probeInput = Join-Path $scratch 'probe-input.rgba'
 WriteInput $probeInput 16 12 1
 $probeRuns = @()
-foreach ($command in $depthCommands) {
+foreach ($pixelFormat in $depthFormats) {
     foreach ($mode in 0, 1, 2, 3) {
-        $output = Join-Path $scratch "probe-$($command.Substring(2))-$mode.bin"
-        $probeRuns += RunSmart $command $probePath $probeHash $probeInput $output 16 12 $mode
+        $output = Join-Path $scratch "probe-$pixelFormat-$mode.bin"
+        $probeRuns += RunSmart $pixelFormat $probePath $probeHash $probeInput $output 16 12 $mode
     }
 }
 
 $aexInput = Join-Path $scratch 'real-aex-input.rgba'
 WriteInput $aexInput 64 48 7
 $realRuns = @()
-foreach ($command in $depthCommands) {
-    $output = Join-Path $scratch "real-aex-$($command.Substring(2)).bin"
-    $realRuns += RunSmart $command $aexPath $aexHash $aexInput $output 64 48 0
+foreach ($pixelFormat in $depthFormats) {
+    $output = Join-Path $scratch "real-aex-$pixelFormat.bin"
+    $realRuns += RunSmart $pixelFormat $aexPath $aexHash $aexInput $output 64 48 0
 }
 
 function GeometryKey($Run) {
@@ -156,7 +175,7 @@ $document = [ordered]@{
     generated_by = 'tools/refresh-smartfx-geometry-evidence.ps1'
     artifacts = [ordered]@{
         source = Identity (Join-Path $root 'minihost\src\l2_main.cpp')
-        worker = Identity $workerPath
+        harness = Identity $harnessPath
         probe = Identity $probePath
         probe_source = Identity (Join-Path $root 'instruments\pf-smart-geometry-probe\pf_smart_geometry_probe.cpp')
         tested_aex = Identity $aexPath

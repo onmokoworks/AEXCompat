@@ -5,10 +5,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "analysis" / "SMARTFX_GEOMETRY_CONTRACT_RESULT_2026-07-19.json"
+REFRESH = ROOT / "tools" / "refresh-smartfx-geometry-evidence.ps1"
 
 
 def _sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_refresh_script_uses_the_supported_session_adapter():
+    source = REFRESH.read_text(encoding="utf-8")
+    assert "refresh-runtime-session.py" in source
+    assert "aex_smart_worker.exe" not in source
+    assert "--smart-image" not in source
+    assert "--render-experimental-session:" in source
+    assert "--pixel-format" in source
+    assert "--current-time" in source
 
 
 def test_geometry_evidence_is_authenticated_and_refresh_scripted():
@@ -27,7 +38,11 @@ def test_probe_runs_cover_every_mode_at_every_depth_with_identical_geometry():
     seen = {(run["command"], run["render_time"]) for run in runs}
     assert seen == {
         (command, mode)
-        for command in ("--smart-image", "--smart-image16", "--smart-image32")
+        for command in (
+            "--render-experimental-session:argb8",
+            "--render-experimental-session:argb16",
+            "--render-experimental-session:argb32f",
+        )
         for mode in (0, 1, 2, 3)
     }
     geometry_fields = (
@@ -63,7 +78,9 @@ def test_real_aex_runs_are_depth_consistent_without_fixture_branches():
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
     runs = evidence["real_aex_runs"]
     assert [run["command"] for run in runs] == [
-        "--smart-image", "--smart-image16", "--smart-image32"
+        "--render-experimental-session:argb8",
+        "--render-experimental-session:argb16",
+        "--render-experimental-session:argb32f",
     ]
     for run in runs:
         assert run["pre_render_error"] == 0
