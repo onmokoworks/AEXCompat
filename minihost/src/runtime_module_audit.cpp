@@ -177,6 +177,22 @@ bool is_winsxs_module(const std::filesystem::path& module_path,
       !contains_reparse_component(module_path);
 }
 
+// The OS DriverStore is the modern home of user-mode driver DLLs (the GPU
+// vendors' OpenGL/compute ICDs): like WinSxS it is an OS-managed component
+// store under the system directory that only the driver installer may
+// write, so a module packaged directly inside a FileRepository package
+// directory classifies like a WinSxS assembly instead of failing the audit
+// closed (issue #362). An empty root (a machine without the store) admits
+// nothing.
+bool is_driverstore_module(const std::filesystem::path& module_path,
+                           const std::filesystem::path& driverstore_root) {
+  if (driverstore_root.empty()) return false;
+  const std::filesystem::path package = module_path.parent_path();
+  return !module_path.filename().empty() && !package.filename().empty() &&
+      same_path(package.parent_path(), driverstore_root) &&
+      !contains_reparse_component(module_path);
+}
+
 std::string audit_basename(const std::filesystem::path& path) {
   const std::wstring name = path.filename().wstring();
   std::string result;
@@ -233,7 +249,8 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
   std::array<wchar_t, 32768> windows_buffer{};
   const UINT windows_length = GetWindowsDirectoryW(
       windows_buffer.data(), static_cast<UINT>(windows_buffer.size()));
-  std::filesystem::path executable, plugin_root, system32, windows_root, winsxs_root;
+  std::filesystem::path executable, plugin_root, system32, windows_root, winsxs_root,
+      driverstore_root;
   if (executable_length == 0 || executable_length >= executable_buffer.size() ||
       system_length == 0 || system_length >= system_buffer.size() ||
       windows_length == 0 || windows_length >= windows_buffer.size() ||
@@ -249,6 +266,14 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
     snapshot.unknown_count = 1;
     return snapshot;
   }
+  // The DriverStore is optional (always present on a normal Windows install,
+  // but its absence must not fail an audit that never loads a driver): an
+  // empty root classifies nothing, matching the pre-#362 behavior there.
+  const std::filesystem::path driverstore_candidate =
+      system32 / L"DriverStore" / L"FileRepository";
+  if (!canonical_path(driverstore_candidate, driverstore_root) ||
+      contains_reparse_component(driverstore_root))
+    driverstore_root.clear();
 
   const std::size_t count = needed / sizeof(HMODULE);
   for (std::size_t index = 0; index < count; ++index) {
@@ -279,6 +304,8 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
     else if (is_winsxs_module(module_path, winsxs_root) &&
              !contains_reparse_component(module_buffer.data()))
       snapshot.winsxs.push_back(basename);
+    else if (is_driverstore_module(module_path, driverstore_root))
+      snapshot.driverstore.push_back(basename);
     else if (authorized_runtime_module(module_path)) snapshot.policy.push_back(basename);
     else {
       ++snapshot.unknown_count;
@@ -312,6 +339,7 @@ void accumulate_module_audit(const ModuleAuditSnapshot& snapshot) {
   append_unique(g_module_audit.observed_union.plugin, snapshot.plugin);
   append_unique(g_module_audit.observed_union.system32, snapshot.system32);
   append_unique(g_module_audit.observed_union.winsxs, snapshot.winsxs);
+  append_unique(g_module_audit.observed_union.driverstore, snapshot.driverstore);
   append_unique(g_module_audit.observed_union.policy, snapshot.policy);
   for (const auto& key : snapshot.unknown_keys) {
     auto& keys = g_module_audit.observed_union.unknown_keys;
@@ -364,6 +392,7 @@ std::string module_audit_snapshot_json(const ModuleAuditSnapshot& snapshot) {
          << ",\"plugin\":" << names(snapshot.plugin)
          << ",\"system32\":" << names(snapshot.system32)
          << ",\"winsxs\":" << names(snapshot.winsxs)
+         << ",\"driverstore\":" << names(snapshot.driverstore)
          << ",\"policy\":" << names(snapshot.policy)
          << ",\"unknown\":" << names(unknown) << '}';
   return output.str();

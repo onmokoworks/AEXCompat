@@ -138,6 +138,33 @@ def test_one_shot_audit_keeps_the_fixed_cap():
     assert "pub fn validate_required_worker_audit" in AUDIT
 
 
+def test_broker_validates_driverstore_in_both_audit_models():
+    """The OS DriverStore category (issue #362) rides every validator rule
+    the other location categories ride: module-count, cross-category
+    duplicate rejection, and the observed-union subset, on both the one-shot
+    and the cluster path. `#[serde(default)]` keeps reports from pre-#362
+    workers (which have no such field) valid."""
+    assert "driverstore: Vec<String>" in AUDIT
+    assert "absent in reports from pre-#362 workers" in AUDIT
+    # Duplicate-rejection chains and module counts in both validators.
+    assert AUDIT.count(".chain(&snapshot.driverstore)") == 2
+    assert AUDIT.count("+ snapshot.driverstore.len()") == 2
+    # Union subset on the one-shot path (terminal snapshots) and the cluster
+    # path (terminal and epoch snapshots alike).
+    assert AUDIT.count(
+        "require_subset(&audit.post_load.driverstore, &audit.observed_union.driverstore)?;"
+    ) == 1
+    assert AUDIT.count(
+        "require_subset(&audit.pre_unload.driverstore, &audit.observed_union.driverstore)?;"
+    ) == 1
+    assert AUDIT.count(
+        "require_subset(&snapshot.driverstore, &audit.observed_union.driverstore)?;"
+    ) == 1
+    # The limit-exceeded diagnostics disclose the category like the others.
+    assert '"driverstore": snapshot.driverstore.len(),' in AUDIT
+    assert '"driverstore": samples(&snapshot.driverstore),' in AUDIT
+
+
 # --- minihost worker -------------------------------------------------------
 
 
