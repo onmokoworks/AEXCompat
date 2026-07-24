@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 0.2 seconds
-Output:
 #include "worker_host_suite_catalog.hpp"
 #include "worker_host_suite_router.hpp"
 #include "worker_suite_registry.hpp"
@@ -415,4 +412,3 @@ int32_t __cdecl release_suite(const char* name, int32_t version) {
 }
 
 }  // namespace aexcompat::l2_detail
-

@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 0.3 seconds
-Output:
 #!/usr/bin/env python3
 """Execute Issue #9 by producing and validating one Issue #4 bundle per cell.
 
@@ -249,4 +246,3 @@ def main():
      if private_publish is not None: shutil.rmtree(private_publish,ignore_errors=True)
 
 if __name__=="__main__": raise SystemExit(main())
-

@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 0.3 seconds
-Output:
 # Conformance bundle contract / 互換性bundle契約
 
 日本語を正とします。English follows each section.
@@ -77,4 +74,3 @@ redacted evidence, use the conformance bundle runner above.
 For LLM, CI, and other headless callers, prefix a command with `--headless`. In that mode,
 unknown or malformed arguments never launch the GUI; they write a bounded structured diagnostic
 to stderr and exit with code 64. The default no-argument/GUI behavior remains unchanged.
-

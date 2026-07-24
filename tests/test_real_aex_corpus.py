@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 0.3 seconds
-Output:
 import importlib.util, json
 from pathlib import Path
 import pytest
@@ -128,4 +125,3 @@ def test_synthetic_main_publishes_schema_valid_redacted_gap_and_private_mapping(
     assert "ntsc-rs" not in encoded and "private-name" not in encoded and "case-000001" not in encoded and "0.5" not in encoded
     assert json.loads((private/"gap-map.json").read_text(encoding="utf-8"))["mapping"][0]["case_ids"]==["case-000001"]
     assert corpus.hashlib.sha256(next((public/"evidence").glob("*.json")).read_bytes()).hexdigest()==gaps["records"][0]["evidence"]["sha256"]
-

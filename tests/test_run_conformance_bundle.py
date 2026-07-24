@@ -1,7 +1,3 @@
-Exit code: 0
-Wall time: 0.3 seconds
-Total output lines: 1114
-Output:
 import hashlib
 import importlib.util
 import io
@@ -504,7 +500,193 @@ def test_manifest_rejects_native_render_settings_the_harness_cannot_apply(
     failure = json.loads(
         (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text(encoding="utf-8")
     )
-    assert failu…2161 tokens truncated…ld':None,'output_sha256':'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855','suite_timeline':[],'parameter_metadata':[],'oracle':{'state':'not_captured','identity_match':False,'exact':False}}))\n",
+    assert failure["stage"] == "validate_manifest"
+
+
+@pytest.mark.parametrize("renderer", ["AEXCompat CPU", "software"])
+def test_manifest_accepts_each_native_renderer_alias(tmp_path, renderer):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["execution"]["renderer"] = renderer
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    completed = invoke(manifest, tmp_path / "bundle", adapter)
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        "manifest.json",
+        "report.json",
+        "Report.JSON",
+        "Report.JSON/payload.bin",
+        "manifest.json/child.bin",
+        "diagnostics/input.bin",
+        "outputs/input.bin",
+        "raw/input.bin",
+        "requests/input.bin",
+        "target/input.bin",
+    ],
+)
+def test_rejects_artifacts_that_collide_with_generated_bundle_paths(tmp_path, reserved):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    # Destination validation must reject reserved output namespaces before the
+    # source artifact is resolved or copied.  Some cases intentionally describe
+    # a child of the existing manifest.json file and therefore cannot be
+    # materialized in the fixture filesystem.
+    document["plugin"]["aex"] = {
+        "path": reserved,
+        "sha256": "0" * 64,
+        "size_bytes": 1,
+    }
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter)
+    assert completed.returncode != 0
+    assert not (output / "report.json").exists()
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text(encoding="utf-8"))
+    assert failure["stage"] == "validate_manifest"
+    assert "collides with generated bundle content" in failure["error"]["text"]
+
+
+@pytest.mark.parametrize("role", ["aex", "dependency", "input", "runner", "oracle"])
+def test_reserved_path_check_applies_to_every_artifact_role(tmp_path, role):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    artifact = {"path": "report.json", "sha256": "0" * 64, "size_bytes": 1}
+    if role == "aex":
+        document["plugin"]["aex"] = artifact
+    elif role == "dependency":
+        document["plugin"]["dependencies"] = [artifact]
+    elif role == "input":
+        document["input"] = artifact
+    elif role == "runner":
+        document["runner"] = artifact
+    else:
+        document["requested_depths"] = ["argb8"]
+        document["oracle"] = {
+            "state": "captured",
+            "identity_match": True,
+            "artifacts": {"argb8": artifact},
+        }
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    completed = invoke(manifest, tmp_path / "bundle", adapter)
+    assert completed.returncode != 0
+    failure = json.loads(
+        (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text(encoding="utf-8")
+    )
+    assert "collides with generated bundle content" in failure["error"]["text"]
+
+
+def test_parameter_metadata_must_match_across_depths(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    source = adapter.read_text(encoding="utf-8")
+    adapter.write_text(
+        source.replace("'initial_value':25", "'initial_value':25 if a.depth=='argb8' else 26"),
+        encoding="utf-8",
+    )
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter)
+    assert completed.returncode != 0
+    assert not (output / "report.json").exists()
+    failure = json.loads((output / "diagnostics" / "failure.json").read_text(encoding="utf-8"))
+    assert "parameter metadata differs" in failure["error"]["text"]
+
+
+@pytest.mark.parametrize("second_path", ["ARTIFACTS/EFFECT.AEX", "artifacts/effect.aex/child"])
+def test_rejects_case_and_file_parent_artifact_aliases(tmp_path, second_path):
+    manifest, adapter = fixture(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["plugin"]["dependencies"] = [
+        {"path": second_path, "sha256": "0" * 64, "size_bytes": 1}
+    ]
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    completed = invoke(manifest, tmp_path / "bundle", adapter)
+    assert completed.returncode != 0
+    failure = json.loads(
+        (tmp_path / "bundle" / "diagnostics" / "failure.json").read_text(encoding="utf-8")
+    )
+    assert failure["stage"] == "validate_manifest"
+    assert "artifact" in failure["error"]["text"]
+
+
+def test_refuses_existing_bundle_and_identity_mismatch(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    output = tmp_path / "bundle"
+    output.mkdir()
+    assert invoke(manifest, output, adapter).returncode != 0
+    output.rmdir()
+    (manifest.parent / "inputs" / "input.png").write_bytes(b"changed")
+    assert invoke(manifest, output, adapter).returncode != 0
+    assert output.exists()
+    assert (output / "diagnostics" / "failure.json").is_file()
+    assert not (output / "report.json").exists()
+
+
+def test_semantic_report_is_reproducible(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    first, second = tmp_path / "first", tmp_path / "second"
+    assert invoke(manifest, first, adapter).returncode == 0
+    assert invoke(manifest, second, adapter).returncode == 0
+    assert json.loads((first / "report.json").read_text(encoding="utf-8")) == json.loads((second / "report.json").read_text(encoding="utf-8"))
+
+
+def test_bundle_artifact_identities_match_every_file(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    output = tmp_path / "bundle"
+    assert invoke(manifest, output, adapter).returncode == 0
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    artifacts = [
+        report["identities"]["aex"],
+        report["identities"]["input"],
+        report["identities"]["runner"],
+    ]
+    for result in report["results"]:
+        artifacts.extend([result["raw_input"], result["raw_output"]])
+    for artifact in artifacts:
+        path = output / artifact["path"]
+        assert path.stat().st_size == artifact["size_bytes"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"]
+
+
+def test_failure_leaves_bounded_diagnostic_bundle(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    adapter.write_text("import sys; print('x'*100000, file=sys.stderr); raise SystemExit(3)\n", encoding="utf-8")
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter)
+    assert completed.returncode == 3, completed.stderr
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert {item["classification"] for item in report["results"]} == {"nonzero_exit"}
+    detail = json.loads((output / "diagnostics" / "run.json").read_text(encoding="utf-8"))
+    assert detail["status"] == "completed_with_failures"
+    assert detail["failure_classifications"] == ["nonzero_exit"]
+    assert detail["depths"]["argb8"]["stderr"]["truncated"] is True
+    assert len(detail["depths"]["argb8"]["stderr"]["text"].encode()) <= 65536
+    assert report["results"][0]["suite_timeline"] is None
+
+
+def test_failure_bundle_can_be_explicitly_allowed_for_aggregation(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    adapter.write_text("raise SystemExit(3)\n", encoding="utf-8")
+    output = tmp_path / "bundle"
+    completed = invoke(manifest, output, adapter, allow_failures=True)
+    assert completed.returncode == 0, completed.stderr
+    state = json.loads((output / "diagnostics" / "run.json").read_text(encoding="utf-8"))
+    assert state["status"] == "completed_with_failures"
+    assert state["failure_classifications"] == ["nonzero_exit"]
+
+
+def test_legal_empty_result_remains_a_success(tmp_path):
+    manifest, adapter = fixture(tmp_path)
+    adapter.write_text(
+        "import argparse, json\n"
+        "p=argparse.ArgumentParser()\n"
+        "[p.add_argument(x) for x in ('--depth','--render-path','--runner','--plugin','--input','--output','--request','--world-dump-dir')]\n"
+        "a=p.parse_args()\n"
+        "bpp={'argb8':4,'argb16':8,'argb32f':16}[a.depth]\n"
+        "w={'width':2,'height':2,'row_bytes':2*bpp,'pixel_format':a.depth,'premultiplication':'straight','extent_hint':{'left':0,'top':0,'right':0,'bottom':0}}\n"
+        "print(json.dumps({'depth':a.depth,'classification':'empty_result','selector':{'render_path':a.render_path,'completed':True,'error_code':0},'input_world':w,'world':None,'output_sha256':'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855','suite_timeline':[],'parameter_metadata':[],'oracle':{'state':'not_captured','identity_match':False,'exact':False}}))\n",
         encoding="utf-8",
     )
     output = tmp_path / "bundle"
@@ -929,4 +1111,3 @@ def test_native_render_settings_uses_checked_ascii_narrowing():
     assert "narrow_ascii_checked(fields[5], renderer)" in source
     assert "std::string(fields[1].begin(), fields[1].end())" not in source
     assert "std::string(fields[5].begin(), fields[5].end())" not in source
-

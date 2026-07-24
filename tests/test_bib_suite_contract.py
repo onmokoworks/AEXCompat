@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 0.2 seconds
-Output:
 from pathlib import Path
 
 
@@ -29,4 +26,3 @@ def test_bib_provider_is_fail_closed_and_does_not_load_arbitrary_paths():
     ):
         assert procedure in SOURCE
     assert "if (!state.resolver) return nullptr;" in SOURCE
-
