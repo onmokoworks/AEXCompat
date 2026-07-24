@@ -23,6 +23,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -143,6 +144,7 @@
 #include "worker_pf_state_runtime.hpp"
 #include "worker_report.hpp"
 #include "worker_render_session.hpp"
+#include "worker_cluster_manifest.hpp"
 #include "worker_request_parser.hpp"
 #include "strict_json.hpp"
 #include "worker_invocation_orchestration.hpp"
@@ -168,6 +170,7 @@ using namespace aexcompat::color_settings;
 int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** suite);
 int32_t __cdecl release_suite(const char* name, int32_t version);
 bool teardown_bib_suite(void*) noexcept;
+uint32_t bib_termination_attempt_count() noexcept;
 
 // Retained worker-entry identity state (issue #126 Phase D). The worker-kind
 // selector is set once by the entry shims before worker_main runs and is part
@@ -646,7 +649,7 @@ constexpr std::size_t kPluginDataNameBytes = 256;
 constexpr std::size_t kPluginDataCategoryBytes = 256;
 constexpr std::size_t kPluginDataEntryBytes = 128;
 constexpr std::size_t kPluginDataSupportUrlBytes = 1024;
-constexpr int32_t kPluginDataRejected = 4;  // A_Err_PARAMETER
+constexpr int32_t kPluginDataRejected = 3;  // A_Err_PARAMETER
 constexpr int32_t kPluginDataException = 512;
 constexpr int32_t kPluginDataReservedInfo = 8;
 constexpr int32_t kPluginDataApiMajor = 13;
@@ -661,14 +664,14 @@ struct BoundedPluginDataText {
   std::size_t length{};
   bool readable{};
   bool terminated{};
-  bool printable{};
+  bool safe_bytes{};
 };
 
 template <std::size_t Capacity>
 BoundedPluginDataText<Capacity> copy_bounded_plugin_data_text(
     const unsigned char* source) noexcept {
   BoundedPluginDataText<Capacity> copy;
-  copy.printable = true;
+  copy.safe_bytes = true;
   if (!source) return copy;
   __try {
     for (; copy.length < Capacity; ++copy.length) {
@@ -677,7 +680,10 @@ BoundedPluginDataText<Capacity> copy_bounded_plugin_data_text(
         copy.terminated = true;
         break;
       }
-      if (value < 0x20 || value > 0x7e) copy.printable = false;
+      // Metadata is an opaque byte string in the PluginData ABI.  Preserve
+      // bounded/NUL-terminated copying and reject C0 controls and DEL, but do
+      // not reject valid non-ASCII localized names, categories, or URLs.
+      if (value < 0x20 || value == 0x7f) copy.safe_bytes = false;
       copy.text[copy.length] = static_cast<char>(value);
     }
     copy.readable = true;
@@ -715,7 +721,7 @@ struct PluginDataContext {
 };
 
 bool valid_plugin_data_export_name(const BoundedPluginDataText<kPluginDataEntryBytes>& text) {
-  if (!text.readable || !text.terminated || !text.printable || text.length == 0 ||
+  if (!text.readable || !text.terminated || !text.safe_bytes || text.length == 0 ||
       text.length > 127) return false;
   if (!(text.text[0] == '_' || (text.text[0] >= 'A' && text.text[0] <= 'Z') ||
         (text.text[0] >= 'a' && text.text[0] <= 'z')))
@@ -737,7 +743,7 @@ bool plugin_data_effect_kind(int32_t kind) {
 template <std::size_t Capacity>
 bool valid_plugin_data_text(const BoundedPluginDataText<Capacity>& text,
                             bool required) {
-  return text.readable && text.terminated && text.printable &&
+  return text.readable && text.terminated && text.safe_bytes &&
       (!required || text.length != 0);
 }
 
@@ -839,7 +845,7 @@ int32_t invoke_plugin_data_entry2_seh(PluginDataEntry2 entry,
   if (!entry || !context) return kPluginDataRejected;
   int32_t result = kPluginDataRejected;
   __try {
-    result = entry(context, &plugin_data_callback2, nullptr,
+    result = entry(context, &plugin_data_callback2, &g_basic_suite,
                    "AEXCompat", "2025");
   } __except(plugin_data_exception_filter(GetExceptionInformation(),
                                            &context->exception_code)) {
@@ -853,7 +859,7 @@ int32_t invoke_plugin_data_entry1_seh(PluginDataEntry1 entry,
   if (!entry || !context) return kPluginDataRejected;
   int32_t result = kPluginDataRejected;
   __try {
-    result = entry(context, &plugin_data_callback1, nullptr,
+    result = entry(context, &plugin_data_callback1, &g_basic_suite,
                    "AEXCompat", "2025");
   } __except(plugin_data_exception_filter(GetExceptionInformation(),
                                            &context->exception_code)) {
@@ -862,12 +868,8 @@ int32_t invoke_plugin_data_entry1_seh(PluginDataEntry1 entry,
   return result;
 }
 
-PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
-  if (!module) return {PiplPluginKind::Unknown, {}};
-  const auto entry2 = reinterpret_cast<PluginDataEntry2>(
-      GetProcAddress(module, "PluginDataEntryFunction2"));
-  const auto entry1 = reinterpret_cast<PluginDataEntry1>(
-      GetProcAddress(module, "PluginDataEntryFunction"));
+PiplEntrypoint resolve_plugin_data_entrypoints(PluginDataEntry2 entry2,
+                                               PluginDataEntry1 entry1) {
   if (!entry2 && !entry1) return {PiplPluginKind::Unknown, {}};
   PluginDataContext context;
   const int32_t result = entry2
@@ -881,10 +883,21 @@ PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
                       context.registration.entrypoint_length)};
 }
 
+PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
+  if (!module) return {PiplPluginKind::Unknown, {}};
+  const auto entry2 = reinterpret_cast<PluginDataEntry2>(
+      GetProcAddress(module, "PluginDataEntryFunction2"));
+  const auto entry1 = reinterpret_cast<PluginDataEntry1>(
+      GetProcAddress(module, "PluginDataEntryFunction"));
+  return resolve_plugin_data_entrypoints(entry2, entry1);
+}
+
 int32_t __cdecl synthetic_plugin_data_entry2(
-    PluginDataOpaque* in_ptr, PluginDataCallback2 callback, void*, const char*,
-    const char*) {
-  if (!callback) return kPluginDataRejected;
+    PluginDataOpaque* in_ptr, PluginDataCallback2 callback, void* basic_suite,
+    const char* host, const char* version) {
+  if (!callback || !basic_suite || !host || !version ||
+      std::strcmp(host, "AEXCompat") != 0 || std::strcmp(version, "2025") != 0)
+    return kPluginDataRejected;
   return callback(in_ptr,
       reinterpret_cast<const unsigned char*>("Synthetic Effect"),
       reinterpret_cast<const unsigned char*>("AEXCompat Synthetic"),
@@ -896,9 +909,11 @@ int32_t __cdecl synthetic_plugin_data_entry2(
 }
 
 int32_t __cdecl synthetic_plugin_data_entry1(
-    PluginDataOpaque* in_ptr, PluginDataCallback1 callback, void*, const char*,
-    const char*) {
-  if (!callback) return kPluginDataRejected;
+    PluginDataOpaque* in_ptr, PluginDataCallback1 callback, void* basic_suite,
+    const char* host, const char* version) {
+  if (!callback || !basic_suite || !host || !version ||
+      std::strcmp(host, "AEXCompat") != 0 || std::strcmp(version, "2025") != 0)
+    return kPluginDataRejected;
   return callback(in_ptr,
       reinterpret_cast<const unsigned char*>("Synthetic v1 Effect"),
       reinterpret_cast<const unsigned char*>("AEXCompat Synthetic v1"),
@@ -909,17 +924,13 @@ int32_t __cdecl synthetic_plugin_data_entry1(
 }
 
 bool verify_plugin_data_entrypoint() {
-  PluginDataContext v2;
-  if (invoke_plugin_data_entry2_seh(&synthetic_plugin_data_entry2, &v2) != 0 ||
-      !v2.registration.valid || v2.registration.support_url_length == 0 ||
-      std::string(v2.registration.entrypoint.data(),
-                  v2.registration.entrypoint_length) != "entryPointFunc")
+  const auto v2 = resolve_plugin_data_entrypoints(&synthetic_plugin_data_entry2,
+                                                  &synthetic_plugin_data_entry1);
+  if (v2.kind != PiplPluginKind::Effect || v2.symbol != "entryPointFunc")
     return false;
-  PluginDataContext v1;
-  if (invoke_plugin_data_entry1_seh(&synthetic_plugin_data_entry1, &v1) != 0 ||
-      !v1.registration.valid || v1.registration.support_url_present ||
-      std::string(v1.registration.entrypoint.data(),
-                  v1.registration.entrypoint_length) != "EffectMain")
+  const auto v1 = resolve_plugin_data_entrypoints(nullptr,
+                                                  &synthetic_plugin_data_entry1);
+  if (v1.kind != PiplPluginKind::Effect || v1.symbol != "EffectMain")
     return false;
   PluginDataContext duplicate;
   // Duplicate registrations are accepted and ignored: both calls must succeed
@@ -941,6 +952,19 @@ bool verify_plugin_data_entrypoint() {
       duplicate.callback_count != 2 ||
       std::string(duplicate.registration.name.data(),
                   duplicate.registration.name_length) != "Name")
+    return false;
+  PluginDataContext localized;
+  const unsigned char localized_name[] = {0xe3, 0x83, 0x86, 0x00};
+  const unsigned char localized_match[] = {0xe3, 0x82, 0xb9, 0x00};
+  const unsigned char localized_category[] = {0xe3, 0x83, 0x88, 0x00};
+  const unsigned char localized_url[] = {0x68, 0x74, 0x74, 0x70, 0x73,
+                                          0x3a, 0x2f, 0x2f, 0xe3, 0x00};
+  if (plugin_data_callback2(
+          &localized, localized_name, localized_match, localized_category,
+          reinterpret_cast<const unsigned char*>("EffectMain"),
+          static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+          kPluginDataApiMinor, kPluginDataReservedInfo, localized_url) != 0 ||
+      !localized.registration.valid || !localized.registration.support_url_present)
     return false;
   PluginDataContext invalid_pointer;
   return plugin_data_callback1(
@@ -1895,11 +1919,15 @@ const bool g_parameter_execution_configured = configure_hooks({
 using SmartResult = aexcompat::worker_runtime::smart_execution::Result;
 
 
-void report(const char* status, int32_t global_error, int32_t params_error,
-            int32_t setdown_error, const std::array<std::byte, kOutSize>& output,
-            const std::string& about_message, const std::array<int32_t, 5>& lifecycle_errors,
-            bool lifecycle_data_null) {
-  restore_native_stdout();
+// Builds the one-shot L2 report JSON. `include_module_audit` is false only
+// for the discovery session's inspect_done payload, whose report mirrors the
+// one-shot params-only JSON minus module_audit (closure-session design §4.2);
+// the session's own final report carries the audit with the swap epochs.
+std::string build_l2_report_json(
+    const char* status, int32_t global_error, int32_t params_error,
+    int32_t setdown_error, const std::array<std::byte, kOutSize>& output,
+    const std::string& about_message, const std::array<int32_t, 5>& lifecycle_errors,
+    bool lifecycle_data_null, bool include_module_audit) {
   aexcompat::worker_report::L2ReportContext c;
   c.status = status ? status : ""; c.global_error = global_error; c.params_error = params_error;
   c.setdown_error = setdown_error; c.reported_num_params = read<int32_t>(output, kOutNumParams);
@@ -1924,13 +1952,24 @@ void report(const char* status, int32_t global_error, int32_t params_error,
   c.last_seh_exception_code = g_last_seh_exception_code;
   c.lifecycle_errors = lifecycle_errors; c.lifecycle_data_null = lifecycle_data_null;
   c.unsupported_suite_calls_json = unsupported_suite_calls_report_json();
-  c.module_audit_json = module_audit_json();
+  if (include_module_audit) c.module_audit_json = module_audit_json();
   c.parameters.reserve(g_params.size());
   for (const auto& p : g_params) {
     const auto* name = reinterpret_cast<const char*>(p.raw.data() + kParamName);
     c.parameters.push_back({p.index, p.disk_id, p.type, read<uint32_t>(p.raw, kParamUiFlags), read<int16_t>(p.raw, 8), read<int16_t>(p.raw, 10), read<uint32_t>(p.raw, kParamFlags), std::string(name, strnlen_s(name, kParamNameSize)), p.has_numeric, p.valid_min, p.valid_max, p.slider_min, p.slider_max, p.default_value, p.has_current, p.current_value, p.has_color, p.default_color, p.current_color, p.component_count, p.default_components, p.current_components, p.precision, p.choices, p.label, p.arbitrary_summary, p.layer_default});
   }
-  std::cout << aexcompat::worker_report::serialize_l2_report(c);
+  return aexcompat::worker_report::serialize_l2_report(c);
+}
+
+void report(const char* status, int32_t global_error, int32_t params_error,
+            int32_t setdown_error, const std::array<std::byte, kOutSize>& output,
+            const std::string& about_message, const std::array<int32_t, 5>& lifecycle_errors,
+            bool lifecycle_data_null) {
+  restore_native_stdout();
+  std::cout << build_l2_report_json(status, global_error, params_error,
+                                    setdown_error, output, about_message,
+                                    lifecycle_errors, lifecycle_data_null,
+                                    /*include_module_audit=*/true);
 }
 
 // The early-mode bridge (EarlyModeBridge and its l2mode hook adapters)
@@ -2009,6 +2048,19 @@ std::wstring g_gpu_runtime_authorization_basename;
 bool capture_l2_runtime_module_authorization(void*, const wchar_t* value) {
   if (!value || !*value) return false;
   g_gpu_runtime_authorization_basename = value;
+  return true;
+}
+
+// Captures the cluster-session manifest path carried by a
+// `--cluster-manifest-v1` auxiliary option (issue #405): render sessions use
+// it for plug-in swap, the discovery session as its only launch input. Stored
+// in a global because the auxiliary-option hook runs during request parsing,
+// before runtime admission; the manifest itself is loaded and validated after
+// admission established the sealed root.
+std::wstring g_cluster_manifest_path;
+bool capture_l2_cluster_manifest(void*, const wchar_t* value) {
+  if (!value || !*value) return false;
+  g_cluster_manifest_path = value;
   return true;
 }
 
@@ -2155,6 +2207,555 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
 int configure_worker_entry_bootstrap();
 std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv);
 
+// Effect-bootstrap wiring shared by the launch bootstrap, the cluster-session
+// swap re-bootstrap, and the discovery session's per-plug-in inspect (issue
+// #405). Extracted so every path installs the identical ABI tables and
+// runtime hooks; only the Request (worker kind, depth, audio, skip_about)
+// differs per call site.
+aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks() {
+  return {{reinterpret_cast<void*>(&checkout_param), reinterpret_cast<void*>(&checkin_param),
+    reinterpret_cast<void*>(&add_param), reinterpret_cast<void*>(&abort_render),
+    reinterpret_cast<void*>(&report_progress), reinterpret_cast<void*>(&register_custom_ui),
+    reinterpret_cast<void*>(&checkout_layer_audio), reinterpret_cast<void*>(&checkin_layer_audio),
+    reinterpret_cast<void*>(&get_audio_data),
+    // Extended inter slots 0x60 / 0x68 / 0x70 (issue #382).
+    reinterpret_cast<void*>(&host_extended_alloc),
+    reinterpret_cast<void*>(&host_extended_lookup),
+    reinterpret_cast<void*>(&host_extended_free)},
+   {reinterpret_cast<void*>(&begin_sampling8), reinterpret_cast<void*>(&subpixel_sample8),
+    reinterpret_cast<void*>(&area_sample8), reinterpret_cast<void*>(&end_sampling8),
+    reinterpret_cast<void*>(&blend_world), reinterpret_cast<void*>(&convolve_world),
+    reinterpret_cast<void*>(&copy_world8), reinterpret_cast<void*>(&fill_world8),
+    reinterpret_cast<void*>(&premultiply_world8), reinterpret_cast<void*>(&premultiply_color8),
+    reinterpret_cast<void*>(&fill_world16), reinterpret_cast<void*>(&premultiply_color16),
+    reinterpret_cast<void*>(&iterate_world8), reinterpret_cast<void*>(&legacy_new_world),
+    reinterpret_cast<void*>(&dispose_world), reinterpret_cast<void*>(&transform_world),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_ceil),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_pow),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sin),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy),
+    reinterpret_cast<void*>(&get_platform_data), reinterpret_cast<void*>(&get_pixel_data8),
+    reinterpret_cast<void*>(&get_pixel_data16),
+    // Handle callbacks in in_data->utils (issue #220): a conformant AE host
+    // provides host_new_handle/lock/unlock/dispose/get_handle_size/resize
+    // through the utility block, not only through the PF Handle Suite. The
+    // index order here must match the tail of kUtilityCallbackOffsets
+    // (160/168/176/184/440/464) in worker_effect_bootstrap.cpp.
+    reinterpret_cast<void*>(&new_handle), reinterpret_cast<void*>(&lock_handle),
+    reinterpret_cast<void*>(&unlock_handle), reinterpret_cast<void*>(&dispose_handle),
+    reinterpret_cast<void*>(&handle_size), reinterpret_cast<void*>(&resize_handle)},
+   &g_color_suite8, sizeof(g_color_suite8),
+   &g_basic_suite, &g_effect};
+}
+
+aexcompat::worker_runtime::effect_bootstrap::RuntimeHooks make_bootstrap_runtime_hooks() {
+  return {&invoke_entry_seh, &reset_effect_lifetime,
+   +[](bool active) { g_global_setup_active = active; },
+   +[](bool requested, bool advertised) {
+     aexcompat::host_audio::runtime().configure_admission(requested, advertised);
+   },
+   +[](EffectEntry callback,
+       aexcompat::worker_runtime::effect_bootstrap::State& state) {
+     observe_arbitrary_defaults(callback, state.input, state.output);
+   },
+   +[]() { return static_cast<int32_t>(g_params.size()); }};
+}
+
+// Per-plug-in host state reset for cluster sessions (issue #405): a swapped
+// or re-inspected plug-in must observe the same host state a fresh one-shot
+// process would present, and its inspect report must not carry the previous
+// plug-in's records or telemetry. Session-lifetime balances (handles,
+// suites, worlds) intentionally stay cumulative: they are process-wide
+// leak checks, not per-plug-in reports.
+void reset_cluster_effect_state() {
+  g_params.clear();
+  g_parameter_runtime.arbitrary = aexcompat::worker_runtime::parameters::ArbitraryTelemetry{};
+  g_parameter_runtime.ui = aexcompat::worker_runtime::parameters::UiState{};
+  g_parameter_runtime.checkout.definitions.clear();
+  {
+    std::lock_guard<std::mutex> lock(g_parameter_runtime.checkout.mutex);
+    g_parameter_runtime.checkout.live.clear();
+  }
+  g_custom_ui_telemetry = aexcompat::worker_runtime::ui_event_execution::CustomUiTelemetry{};
+  aexcompat::pf_state_runtime::reset_pf_state_statistics();
+}
+
+// Cluster-session plug-in string table (#405 on the #396 contract): the
+// launch path keeps its own local table; swapped/inspected plug-ins keep
+// theirs in the session scope so the thread-local active pointer never
+// dangles past the loader's frame.
+void activate_plugin_string_table(HMODULE module,
+                                  aexcompat::aex_strings::StringTable& table) {
+  load_aex_string_table(module, table);
+  const char* status =
+      table.status == aexcompat::aex_strings::ParseStatus::Valid
+          ? "valid"
+          : table.status == aexcompat::aex_strings::ParseStatus::NoEntries
+              ? "none"
+              : "invalid";
+  std::cerr << "string_table_status:" << status << "\n" << std::flush;
+  g_active_aex_string_table = &table;
+}
+
+// Render-session cluster swap (closure-session design §4.1): the session
+// frame loop owns SEQUENCE teardown and the swap_done response; this hook
+// owns everything from GLOBAL_SETDOWN to GLOBAL_SETUP/PARAMS_SETUP and the
+// payload swap. A hard failure means the worker exits with the dedicated
+// swap-failure exit code without answering.
+struct ClusterSwapContext {
+  aexcompat::worker_runtime::WorkerSession* session{};
+  EffectEntry* entry{};
+  aexcompat::worker_runtime::effect_bootstrap::State* effect_state{};
+  aexcompat::worker_runtime::invocation::InvocationState* invocation{};
+  const aexcompat::worker_runtime::cluster::Manifest* manifest{};
+  std::function<aexcompat::worker_runtime::effect_bootstrap::Result(EffectEntry)>
+      run_bootstrap;
+  int32_t current_plugin_index{0};
+  int32_t current_global_error{-1};
+  // String table of the currently loaded plug-in (#396): swapped in place so
+  // the thread-local active pointer tracks the session's current plug-in.
+  aexcompat::aex_strings::StringTable aex_string_table;
+};
+
+aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
+    void* opaque, int32_t plugin_index) {
+  namespace cluster = aexcompat::worker_runtime::cluster;
+  auto& context = *static_cast<ClusterSwapContext*>(opaque);
+  aexcompat::worker_render_session::SwapPluginResult result;
+  if (plugin_index < 0 ||
+      plugin_index >= static_cast<int32_t>(context.manifest->plugins.size())) {
+    result.hard_failure = true;
+    return result;
+  }
+  const cluster::PluginEntry& plugin =
+      context.manifest->plugins[static_cast<std::size_t>(plugin_index)];
+  auto& input = context.effect_state->input;
+  auto& output = context.effect_state->output;
+  // GLOBAL_SETDOWN (design §4.1 step 1); dispose the arbitrary defaults first,
+  // mirroring the teardown order of the close paths.
+  if (*context.entry) dispose_arbitrary_defaults(*context.entry, input, output);
+  if (context.current_global_error == 0 &&
+      invoke_global_setdown(*context.entry, input.data(), output.data()) != 0) {
+    result.hard_failure = true;
+    return result;
+  }
+  // Steps 2-4: per-swap quiescence (the session-global BIB teardown hook is
+  // NOT consumed here; it runs once at the terminal teardown), epoch
+  // pre_unload, FreeLibrary of the plug-in only (the cookie and pinned
+  // closure dependencies stay loaded).
+  if (!context.session->swap_release_module(
+          static_cast<uint32_t>(context.current_plugin_index))) {
+    result.hard_failure = true;
+    return result;
+  }
+  // Step 5: authenticate plugins[N] against the manifest, then load with the
+  // admission flags. A broker that staged the wrong bytes fails closed here.
+  const std::filesystem::path path = cluster::plugin_path(*context.manifest,
+      static_cast<std::size_t>(plugin_index));
+  std::string actual_sha256;
+  if (!sha256(path, actual_sha256) ||
+      !cluster::hash_equals(actual_sha256, plugin.sha256)) {
+    result.hard_failure = true;
+    return result;
+  }
+  HMODULE module = LoadLibraryExW(path.c_str(), nullptr,
+      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (!module) {
+    result.hard_failure = true;
+    return result;
+  }
+  if (!context.session->swap_adopt_module(module, path,
+                                          static_cast<uint32_t>(plugin_index))) {
+    // The session rejected (and freed) the loaded module; no cleanup here.
+    result.hard_failure = true;
+    return result;
+  }
+  g_plugin_file_path = path.wstring();
+  context.current_plugin_index = plugin_index;
+  // Entrypoint resolution follows the launch rules (PiPL, then PluginData on a
+  // missing PiPL only). An unresolvable entrypoint is plug-in-local: the
+  // session stays alive and later frames get the continuation-impossible
+  // response while the broker owns the continue/stop decision.
+  PiplEntrypoint pipl_entrypoint = discover_pipl_entrypoint(module);
+  if (pipl_entrypoint.kind == PiplPluginKind::Missing)
+    pipl_entrypoint = discover_plugin_data_entrypoint(module);
+  EffectEntry new_entry = nullptr;
+  if (pipl_entrypoint.kind == PiplPluginKind::Effect)
+    new_entry = reinterpret_cast<EffectEntry>(
+        GetProcAddress(module, pipl_entrypoint.symbol.c_str()));
+  *context.entry = new_entry;
+  if (!new_entry) {
+    context.current_global_error = -1;
+    result.global_setup_error = -1;
+    return result;
+  }
+  // The swapped-in plug-in's string table drives its PARAMS_SETUP lookups
+  // (issue #396), replacing the launch plug-in's table.
+  activate_plugin_string_table(module, context.aex_string_table);
+  // GLOBAL_SETUP / PARAMS_SETUP through the launch bootstrap on fresh
+  // buffers and fresh host records (ABOUT stays whatever the launch did).
+  reset_cluster_effect_state();
+  *context.effect_state = aexcompat::worker_runtime::effect_bootstrap::State{};
+  const auto bootstrap = context.run_bootstrap(new_entry);
+  result.entry = new_entry;
+  result.global_setup_error = bootstrap.global_error;
+  result.params_setup_error = bootstrap.params_error;
+  context.current_global_error = bootstrap.global_error;
+  // Step 6: the manifest payload (plugins[1..]) replaces the launch
+  // assignments, riding the same argv encoding (design §2.2/§4.1).
+  context.invocation->requested_parameters.clear();
+  if (plugin.has_payload) {
+    std::wstring widened;
+    widened.reserve(plugin.payload.size());
+    for (const unsigned char byte : plugin.payload)
+      widened.push_back(static_cast<wchar_t>(byte));
+    if (!parse_parameter_payload(widened.c_str(),
+                                 context.invocation->requested_parameters) ||
+        !validate_requested_assignments(context.invocation->requested_parameters)) {
+      if (result.params_setup_error == 0) result.params_setup_error = -1;
+    }
+  }
+  return result;
+}
+
+// Discovery session (closure-session design §4.2, issue #405): the worker
+// starts with no plug-in loaded, pins the shared closure once, and answers
+// inspect_plugin messages with the same params-only inspect the one-shot
+// `--l2-params-only` path runs (ABOUT omitted, GLOBAL_SETUP → PARAMS_SETUP).
+// The report mirrors the one-shot L2 JSON minus module_audit; the audit with
+// its swap epochs rides the session's final stdout report.
+int run_discovery_session(const std::wstring& manifest_argument,
+                          const aexcompat::worker_runtime::RuntimeHostHooks& runtime_hooks) {
+  namespace cluster = aexcompat::worker_runtime::cluster;
+  namespace wr = aexcompat::worker_runtime;
+  namespace wrs = aexcompat::worker_render_session;
+  using aexcompat::strict_json::JsonValue;
+  using aexcompat::strict_json::StrictJsonParser;
+  using aexcompat::strict_json::json_exact_keys;
+  using aexcompat::strict_json::json_i32;
+  using aexcompat::strict_json::json_string;
+  // Exit codes on this path: 2 usage, 3 manifest/config rejection, 11 DLL
+  // policy/pin failure, 13 stdout redirect failure, 14 terminal audit
+  // failure, 23 protocol violation, 25 swap/BIB-teardown failure (closure
+  // design §7).
+  if (manifest_argument.empty()) return 2;
+  cluster::Manifest manifest;
+  if (!cluster::load_manifest(manifest_argument, manifest)) return 3;
+  wrs::SessionPipes pipes;
+  if (!pipes.open_from_environment()) return 23;
+  pipes.set_max_write_bytes(wrs::kMaxInspectReportBytes);
+  if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 |
+                                LOAD_LIBRARY_SEARCH_USER_DIRS))
+    return 11;
+  DLL_DIRECTORY_COOKIE sealed_cookie =
+      AddDllDirectory(manifest.sealed_root.c_str());
+  if (!sealed_cookie) return 11;
+  cluster::ClosurePins pins;
+  if (!pins.pin(manifest, runtime_hooks.hash_file)) {
+    RemoveDllDirectory(sealed_cookie);
+    return 11;
+  }
+  wr::configure_module_audit_cluster(manifest.module_bound,
+                                     cluster::declared_basenames(manifest));
+  wr::ModuleAuditReport& audit = wr::module_audit_report();
+  audit.required = true;
+  audit.plugin_path = cluster::plugin_path(manifest, 0);
+  if (!runtime_hooks.redirect_native_stdout()) {
+    pins.release();
+    RemoveDllDirectory(sealed_cookie);
+    return 13;
+  }
+
+  aexcompat::worker_runtime::effect_bootstrap::State effect_state;
+  aexcompat::aex_strings::StringTable aex_string_table;
+  HMODULE current_module = nullptr;
+  EffectEntry current_entry = nullptr;
+  int32_t current_index = -1;
+  int32_t current_global_error = -1;
+  // GLOBAL_SETUP/GLOBAL_SETDOWN pairing state: the inspect column below ends
+  // every successful setup with its setdown (the one-shot params-only column
+  // the report must match), so a later swap, re-inspect, or teardown must not
+  // set the plug-in down a second time — a duplicate GLOBAL_SETDOWN is a host
+  // protocol violation plug-ins legitimately fail (real-env exit 25).
+  bool current_setdown_pending = false;
+  int32_t expected_request_index = 0;
+  bool protocol_violation = false;
+  bool swap_failure = false;
+  bool bib_teardown_failed = false;
+
+  // Terminal teardown shared by every exit path after the session loop. The
+  // ownership order is explicit (owner review P1-1): GLOBAL_SETDOWN →
+  // plug-in/module audit → BIB owned-only Terminate (session-global, runs
+  // exactly once here — never per swap — and never for a borrowed, missing,
+  // or init-failed BIB) → FreeLibrary. Pin release (reverse), cookie removal,
+  // stdout restore, final report follow.
+  const auto finish_session = [&](int exit_code) -> int {
+    if (current_module) {
+      if (current_entry) {
+        dispose_arbitrary_defaults(current_entry, effect_state.input,
+                                   effect_state.output);
+        if (current_setdown_pending) {
+          invoke_global_setdown(current_entry, effect_state.input.data(),
+                                effect_state.output.data());
+          current_setdown_pending = false;
+        }
+      }
+      audit.pre_unload = wr::capture_module_audit();
+      if (!teardown_bib_suite(nullptr)) bib_teardown_failed = true;
+      FreeLibrary(current_module);
+      current_module = nullptr;
+    } else {
+      // No plug-in survived to teardown, but an owned BIB may still be live
+      // from an earlier plug-in; terminate it before the pins release.
+      if (!teardown_bib_suite(nullptr)) bib_teardown_failed = true;
+    }
+    pins.release();
+    RemoveDllDirectory(sealed_cookie);
+    runtime_hooks.restore_native_stdout();
+    const bool audit_ok = !audit.required ||
+        (audit.pre_unload.status == "passed" && wr::module_audit_passed());
+    std::cout << "{\"schema_version\":1,\"stage\":\"discovery_session\",\"status\":\""
+              << (exit_code == 0 && !bib_teardown_failed
+                      ? "discovery_session_completed" : "discovery_session_failed")
+              << "\",\"bib_terminations\":" << bib_termination_attempt_count()
+              << ",\"module_audit\":" << wr::module_audit_json() << "}\n";
+    if (!audit_ok && exit_code == 0) return 14;
+    if (bib_teardown_failed && exit_code == 0) return 25;
+    return exit_code;
+  };
+
+  const auto run_inspect = [&](EffectEntry entry) -> wr::effect_bootstrap::Result {
+    reset_cluster_effect_state();
+    effect_state = wr::effect_bootstrap::State{};
+    return wr::effect_bootstrap::run(
+        effect_state, entry, make_bootstrap_abi_hooks(),
+        {g_render_quality, g_render_field, g_shutter_angle, g_shutter_phase,
+         {g_pre_effect_source_origin_x, g_pre_effect_source_origin_y},
+         {static_cast<int32_t>(g_downsample_x.numerator),
+          static_cast<int32_t>(g_downsample_x.denominator)},
+         {static_cast<int32_t>(g_downsample_y.numerator),
+          static_cast<int32_t>(g_downsample_y.denominator)},
+         {static_cast<int32_t>(g_pixel_aspect_ratio.numerator),
+          static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
+         4,      // external_pixel_bytes: params inspect is depth-neutral
+         false,  // render_worker
+         false,  // rendering_worker
+         false,  // audio_invocation
+         true},  // skip_about (design §4.2: ABOUT omitted)
+        make_bootstrap_runtime_hooks());
+  };
+
+  for (;;) {
+    std::string message;
+    const auto read_result = pipes.read_message(message);
+    if (read_result == wrs::SessionPipes::ReadResult::Eof) break;
+    if (read_result != wrs::SessionPipes::ReadResult::Message) {
+      protocol_violation = true;
+      break;
+    }
+    JsonValue root;
+    if (!StrictJsonParser(std::move(message)).parse(root) ||
+        !std::holds_alternative<JsonValue::Object>(root.value)) {
+      protocol_violation = true;
+      break;
+    }
+    const auto& object = std::get<JsonValue::Object>(root.value);
+    std::string type;
+    int32_t version{};
+    if (!json_string(object, "type", type) || !json_i32(object, "v", version) ||
+        version != 1) {
+      protocol_violation = true;
+      break;
+    }
+    if (type == "close") {
+      if (!json_exact_keys(object, {"v", "type"})) protocol_violation = true;
+      break;
+    }
+    int32_t plugin_index{};
+    int32_t request_index{};
+    if (type != "inspect_plugin" ||
+        !json_exact_keys(object, {"v", "type", "plugin_index", "request_index"}) ||
+        !json_i32(object, "plugin_index", plugin_index) ||
+        !json_i32(object, "request_index", request_index) ||
+        plugin_index < 0 ||
+        plugin_index >= static_cast<int32_t>(manifest.plugins.size()) ||
+        request_index != expected_request_index) {
+      protocol_violation = true;
+      break;
+    }
+    ++expected_request_index;
+
+    std::string report_json;
+    std::string error_kind;
+    // Authenticates plugins[N] against the manifest and loads it with the
+    // admission flags; null on failure (the caller fails the session closed).
+    const auto load_manifest_plugin = [&](int32_t index) -> HMODULE {
+      const std::filesystem::path path =
+          cluster::plugin_path(manifest, static_cast<std::size_t>(index));
+      std::string actual_sha256;
+      if (!runtime_hooks.hash_file(path, actual_sha256) ||
+          !cluster::hash_equals(
+              actual_sha256,
+              manifest.plugins[static_cast<std::size_t>(index)].sha256))
+        return nullptr;
+      return LoadLibraryExW(path.c_str(), nullptr,
+          LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    };
+    // The inspect column, identical to the one-shot `--l2-params-only` path
+    // (ABOUT omitted, GLOBAL_SETUP → PARAMS_SETUP, dispose defaults,
+    // GLOBAL_SETDOWN, then the L2 JSON minus module_audit).
+    const auto inspect_column = [&] {
+      const auto bootstrap = run_inspect(current_entry);
+      current_global_error = bootstrap.global_error;
+      current_setdown_pending = current_global_error == 0;
+      const bool defaults_disposed = dispose_arbitrary_defaults(
+          current_entry, effect_state.input, effect_state.output);
+      const int32_t setdown_error = current_setdown_pending
+          ? invoke_global_setdown(current_entry, effect_state.input.data(),
+                                  effect_state.output.data())
+          : -1;
+      current_setdown_pending = false;
+      const bool ok = current_global_error == 0 &&
+          bootstrap.params_error == 0 &&
+          bootstrap.parameter_count_contract_valid && defaults_disposed &&
+          setdown_error == 0;
+      report_json = build_l2_report_json(
+          ok ? "parameters_inspected" : "selector_error",
+          current_global_error, bootstrap.params_error, setdown_error,
+          effect_state.output, bootstrap.about_message, {-1, -1, -1, -1, -1},
+          true, /*include_module_audit=*/false);
+      if (!ok) error_kind = "selector_error";
+    };
+    if (plugin_index != current_index) {
+      // Swap to plugins[N] (design §4.2): the same column as the render
+      // swap (GLOBAL_SETDOWN → quiesce → unload → load → GLOBAL_SETUP).
+      // BIB teardown is session-global and deliberately NOT run here; it
+      // runs once in finish_session above.
+      wr::ModuleAuditSnapshot pre_unload;
+      int32_t outgoing_index = -1;
+      if (current_module) {
+        if (current_entry) {
+          dispose_arbitrary_defaults(current_entry, effect_state.input,
+                                     effect_state.output);
+          // GLOBAL_SETDOWN pairs the setup the inspect column opened, but the
+          // column already ran its own setdown for a successful setup; only
+          // an unpaired setup is set down here.
+          if (current_setdown_pending &&
+              invoke_global_setdown(current_entry, effect_state.input.data(),
+                                    effect_state.output.data()) != 0) {
+            std::cerr << "stage:cluster_swap step=global_setdown error="
+                      << GetLastError() << "\n" << std::flush;
+            swap_failure = true;
+            break;
+          }
+          current_setdown_pending = false;
+        }
+        // Per-swap quiescence barrier: no swap hook is registered on this
+        // path, so the barrier is the terminal-audit owner's trivial pass.
+        pre_unload = wr::capture_module_audit();
+        if (pre_unload.status != "passed" || !wr::module_audit_passed()) {
+          std::cerr << "stage:cluster_swap step=pre_unload_audit status="
+                    << pre_unload.status << " unknown=" << pre_unload.unknown_count
+                    << "\n" << std::flush;
+          swap_failure = true;
+          break;
+        }
+        if (!FreeLibrary(current_module)) {
+          std::cerr << "stage:cluster_swap step=free_library error="
+                    << GetLastError() << "\n" << std::flush;
+          swap_failure = true;
+          break;
+        }
+        outgoing_index = current_index;
+        current_module = nullptr;
+        current_entry = nullptr;
+        current_index = -1;
+      }
+      HMODULE module = load_manifest_plugin(plugin_index);
+      if (!module) {
+        std::cerr << "stage:cluster_swap step=load_plugin index=" << plugin_index
+                  << " error=" << GetLastError() << "\n" << std::flush;
+        swap_failure = true;
+        break;
+      }
+      wr::ModuleAuditSnapshot post_load = wr::capture_module_audit();
+      if (outgoing_index >= 0)
+        wr::record_module_audit_epoch(static_cast<uint32_t>(outgoing_index),
+                                      std::move(pre_unload), post_load);
+      else
+        // First inspect: the launch never loaded a plug-in, so this load is
+        // the session's post_load (design §5 epoch model).
+        audit.post_load = post_load;
+      if (post_load.status != "passed" || !wr::module_audit_passed()) {
+        std::cerr << "stage:cluster_swap step=post_load_audit status="
+                  << post_load.status << " unknown=" << post_load.unknown_count
+                  << "\n" << std::flush;
+        swap_failure = true;
+        break;
+      }
+      current_module = module;
+      current_index = plugin_index;
+      g_plugin_file_path =
+          cluster::plugin_path(manifest, static_cast<std::size_t>(plugin_index))
+              .wstring();
+      // Entrypoint resolution follows the launch rules; a failure is
+      // plug-in-local (design §4.2) and the session continues.
+      PiplEntrypoint pipl_entrypoint = discover_pipl_entrypoint(current_module);
+      if (pipl_entrypoint.kind == PiplPluginKind::Missing)
+        pipl_entrypoint = discover_plugin_data_entrypoint(current_module);
+      if (pipl_entrypoint.kind == PiplPluginKind::Effect)
+        current_entry = reinterpret_cast<EffectEntry>(
+            GetProcAddress(current_module, pipl_entrypoint.symbol.c_str()));
+      else
+        current_entry = nullptr;
+      if (current_entry) {
+        activate_plugin_string_table(current_module, aex_string_table);
+        inspect_column();
+      } else {
+        current_global_error = -1;
+        error_kind = "entrypoint_unresolved";
+      }
+    } else if (!current_entry) {
+      // Re-inspect of a plug-in whose entrypoint never resolved.
+      error_kind = "entrypoint_unresolved";
+    } else {
+      // Re-inspect of the current plug-in: set down only an unpaired setup
+      // (the previous inspect column already set a successful one down),
+      // then the same inspect column again, matching a fresh one-shot process.
+      if (current_setdown_pending) {
+        invoke_global_setdown(current_entry, effect_state.input.data(),
+                              effect_state.output.data());
+        current_setdown_pending = false;
+      }
+      inspect_column();
+    }
+
+    // Embed the report as a JSON value: the one-shot report ends with a
+    // newline, which must not travel inside the message.
+    while (!report_json.empty() &&
+           (report_json.back() == '\n' || report_json.back() == '\r'))
+      report_json.pop_back();
+    std::string reply = "{\"v\":1,\"type\":\"inspect_done\",\"plugin_index\":" +
+        std::to_string(plugin_index) + ",\"request_index\":" +
+        std::to_string(request_index) + ",\"status\":\"" +
+        (error_kind.empty() ? "ok" : "error") + "\"";
+    if (!error_kind.empty()) reply += ",\"error_kind\":\"" + error_kind + "\"";
+    if (!report_json.empty()) reply += ",\"report\":" + report_json;
+    reply += "}";
+    if (!pipes.write_message(reply)) {
+      protocol_violation = true;
+      break;
+    }
+  }
+
+  if (protocol_violation) return finish_session(23);
+  if (swap_failure) return finish_session(25);
+  return finish_session(0);
+}
+
+
 int worker_main_impl(int argc, wchar_t **argv) {
   if (const int bootstrap_error = configure_worker_entry_bootstrap())
     return bootstrap_error;
@@ -2268,7 +2869,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
         load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
         parse_l2_conformance_render_settings,
-        capture_l2_runtime_module_authorization},
+        capture_l2_runtime_module_authorization, capture_l2_cluster_manifest},
        &parse_layer_transport_key, &parse_mask_context_payload,
        &parse_spatial_context_payload, &parse_render_environment_payload,
        &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -2281,7 +2882,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
           load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
           parse_l2_conformance_render_settings,
-        capture_l2_runtime_module_authorization},
+        capture_l2_runtime_module_authorization, capture_l2_cluster_manifest},
          &parse_layer_transport_key, &parse_mask_context_payload,
          &parse_spatial_context_payload, &parse_render_environment_payload,
          &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -2309,6 +2910,13 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     g_user_changed_param_requested = invocation.user_changed_param_requested;
     g_user_changed_parameters = std::move(invocation.user_changed_parameters);
   }
+  if (!g_cluster_manifest_path.empty())
+    invocation.cluster_manifest_path = g_cluster_manifest_path;
+  // Discovery session (closure-session design §4.2): no plug-in is admitted
+  // at launch; the cluster manifest and the control pipes drive everything,
+  // so the normal admission/dispatch below is skipped entirely.
+  if (invocation.discovery_session_mode)
+    return run_discovery_session(invocation.cluster_manifest_path, runtime_hooks);
   // Every rendered effect instance belongs to a layer, even when that layer has no masks.
   if (is_rendering_worker()) aexcompat::mask_runtime::set_model_enabled(true);
   RuntimeAdmissionRequest runtime_request;
@@ -2447,68 +3055,29 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   aexcompat::worker_runtime::effect_bootstrap::State effect_state{};
   auto& input = effect_state.input;
   auto& output = effect_state.output;
-  const auto bootstrap = aexcompat::worker_runtime::effect_bootstrap::run(
-      effect_state, entry,
-      {{reinterpret_cast<void*>(&checkout_param), reinterpret_cast<void*>(&checkin_param),
-        reinterpret_cast<void*>(&add_param), reinterpret_cast<void*>(&abort_render),
-        reinterpret_cast<void*>(&report_progress), reinterpret_cast<void*>(&register_custom_ui),
-        reinterpret_cast<void*>(&checkout_layer_audio), reinterpret_cast<void*>(&checkin_layer_audio),
-        reinterpret_cast<void*>(&get_audio_data),
-        // Extended inter slots 0x60 / 0x68 / 0x70 (issue #382).
-        reinterpret_cast<void*>(&host_extended_alloc),
-        reinterpret_cast<void*>(&host_extended_lookup),
-        reinterpret_cast<void*>(&host_extended_free)},
-       {reinterpret_cast<void*>(&begin_sampling8), reinterpret_cast<void*>(&subpixel_sample8),
-        reinterpret_cast<void*>(&area_sample8), reinterpret_cast<void*>(&end_sampling8),
-        reinterpret_cast<void*>(&blend_world), reinterpret_cast<void*>(&convolve_world),
-        reinterpret_cast<void*>(&copy_world8), reinterpret_cast<void*>(&fill_world8),
-        reinterpret_cast<void*>(&premultiply_world8), reinterpret_cast<void*>(&premultiply_color8),
-        reinterpret_cast<void*>(&fill_world16), reinterpret_cast<void*>(&premultiply_color16),
-        reinterpret_cast<void*>(&iterate_world8), reinterpret_cast<void*>(&legacy_new_world),
-        reinterpret_cast<void*>(&dispose_world), reinterpret_cast<void*>(&transform_world),
-        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_ceil),
-        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs),
-        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_pow),
-        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sin),
-        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf),
-        reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy),
-        reinterpret_cast<void*>(&get_platform_data), reinterpret_cast<void*>(&get_pixel_data8),
-        reinterpret_cast<void*>(&get_pixel_data16),
-        // Handle callbacks in in_data->utils (issue #220): a conformant AE host
-        // provides host_new_handle/lock/unlock/dispose/get_handle_size/resize
-        // through the utility block, not only through the PF Handle Suite. The
-        // index order here must match the tail of kUtilityCallbackOffsets
-        // (160/168/176/184/440/464) in worker_effect_bootstrap.cpp.
-        reinterpret_cast<void*>(&new_handle), reinterpret_cast<void*>(&lock_handle),
-        reinterpret_cast<void*>(&unlock_handle), reinterpret_cast<void*>(&dispose_handle),
-        reinterpret_cast<void*>(&handle_size), reinterpret_cast<void*>(&resize_handle)},
-       &g_color_suite8, sizeof(g_color_suite8),
-       &g_basic_suite, &g_effect},
-      {g_render_quality, g_render_field, g_shutter_angle, g_shutter_phase,
-       {g_pre_effect_source_origin_x, g_pre_effect_source_origin_y},
-       {static_cast<int32_t>(g_downsample_x.numerator),
-        static_cast<int32_t>(g_downsample_x.denominator)},
-       {static_cast<int32_t>(g_downsample_y.numerator),
-        static_cast<int32_t>(g_downsample_y.denominator)},
-       {static_cast<int32_t>(g_pixel_aspect_ratio.numerator),
-        static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
-       invocation.external_pixel_bytes,
-       is_render_worker(), is_rendering_worker(),
-       // The audio session is an audio invocation: without this the admission
-       // "requested audio" flag stays false and host_audio::Runtime rejects
-       // unadvertised audio checkouts on the session path (Codex #252). It used
-       // to be OR'd with the one-shot --render-audio mode, which #365 deleted.
-       invocation.audio_session_mode, g_skip_about},
-      {&invoke_entry_seh, &reset_effect_lifetime,
-       +[](bool active) { g_global_setup_active = active; },
-       +[](bool requested, bool advertised) {
-         aexcompat::host_audio::runtime().configure_admission(requested, advertised);
-       },
-       +[](EffectEntry callback,
-           aexcompat::worker_runtime::effect_bootstrap::State& state) {
-         observe_arbitrary_defaults(callback, state.input, state.output);
-       },
-       +[]() { return static_cast<int32_t>(g_params.size()); }});
+  // The bootstrap wiring is shared with the cluster-session swap and the
+  // discovery session (issue #405); only the Request differs per call site.
+  const auto run_bootstrap = [&](EffectEntry bootstrap_entry) {
+    return aexcompat::worker_runtime::effect_bootstrap::run(
+        effect_state, bootstrap_entry, make_bootstrap_abi_hooks(),
+        {g_render_quality, g_render_field, g_shutter_angle, g_shutter_phase,
+         {g_pre_effect_source_origin_x, g_pre_effect_source_origin_y},
+         {static_cast<int32_t>(g_downsample_x.numerator),
+          static_cast<int32_t>(g_downsample_x.denominator)},
+         {static_cast<int32_t>(g_downsample_y.numerator),
+          static_cast<int32_t>(g_downsample_y.denominator)},
+         {static_cast<int32_t>(g_pixel_aspect_ratio.numerator),
+          static_cast<int32_t>(g_pixel_aspect_ratio.denominator)},
+         invocation.external_pixel_bytes,
+         is_render_worker(), is_rendering_worker(),
+         // The audio session is an audio invocation: without this the admission
+         // "requested audio" flag stays false and host_audio::Runtime rejects
+         // unadvertised audio checkouts on the session path (Codex #252). It used
+         // to be OR'd with the one-shot --render-audio mode, which #365 deleted.
+         invocation.audio_session_mode, g_skip_about},
+        make_bootstrap_runtime_hooks());
+  };
+  const auto bootstrap = run_bootstrap(entry);
   g_active_aex_string_table = nullptr;
   const int32_t global_error = bootstrap.global_error;
   const int32_t about_error = bootstrap.about_error;
@@ -2567,6 +3136,55 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // invoke_entry_seh(entry, kAbout)
   // invoke_entry_seh(entry, kParamsSetup)
   // invoke_entry_seh(entry, kGlobalSetdown)
+
+  // Cluster session wiring (closure-session design §2.2/§3, issue #405): a
+  // render session launched with `--cluster-manifest-v1` validates the
+  // manifest against the admitted launch plug-in (plugins[0]), pins the
+  // shared closure for the session lifetime, switches the module audit to
+  // the declared module_bound + basename set, and arms the swap hook the
+  // frame loop consults on swap_plugin messages. Every rejection is a
+  // fail-closed launch error before the session can start.
+  namespace cluster = aexcompat::worker_runtime::cluster;
+  cluster::Manifest cluster_manifest;
+  cluster::ClosurePins cluster_pins;
+  ClusterSwapContext cluster_swap_context;
+  aexcompat::worker_render_session::SwapPluginHook cluster_swap_hook;
+  if (is_render_worker() && invocation.render_session_mode &&
+      !invocation.cluster_manifest_path.empty()) {
+    std::error_code cluster_canonical_error;
+    const std::filesystem::path launch_plugin_root = std::filesystem::canonical(
+        session.plugin_path().parent_path(), cluster_canonical_error);
+    if (!cluster::load_manifest(invocation.cluster_manifest_path, cluster_manifest))
+      return session.finish(3);
+    std::string argv_sha256;
+    for (const wchar_t* character = argv[3]; *character; ++character) {
+      if (*character > 0x7f) return session.finish(3);
+      argv_sha256.push_back(static_cast<char>(*character));
+    }
+    if (cluster_canonical_error ||
+        cluster_manifest.sealed_root != launch_plugin_root ||
+        !cluster::matches_launch_plugin(cluster_manifest, session.plugin_path(),
+                                        argv_sha256))
+      return session.finish(3);
+    aexcompat::worker_runtime::configure_module_audit_cluster(
+        cluster_manifest.module_bound,
+        cluster::declared_basenames(cluster_manifest));
+    if (!cluster_pins.pin(cluster_manifest, runtime_hooks.hash_file))
+      return session.finish(11);
+    cluster_swap_context.session = &session;
+    cluster_swap_context.entry = &entry;
+    cluster_swap_context.effect_state = &effect_state;
+    cluster_swap_context.invocation = &invocation;
+    cluster_swap_context.manifest = &cluster_manifest;
+    cluster_swap_context.run_bootstrap = run_bootstrap;
+    cluster_swap_context.current_plugin_index = 0;
+    cluster_swap_context.current_global_error = global_error;
+    cluster_swap_hook.context = &cluster_swap_context;
+    cluster_swap_hook.invoke = &cluster_swap_invoke;
+    cluster_swap_hook.plugin_count =
+        static_cast<int32_t>(cluster_manifest.plugins.size());
+  }
+  const bool cluster_session_active = cluster_swap_context.session != nullptr;
   if (!is_rendering_worker() &&
       (invocation.adjust_cursor_mode || invocation.draw_event_mode || invocation.click_event_mode || invocation.drag_event_mode ||
        invocation.ui_lifecycle_mode || invocation.ui_idle_mode || invocation.ui_keydown_mode || invocation.ui_mouse_exited_mode)) {
@@ -2710,6 +3328,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   bool persistent_sequence = false;
   bool session_protocol_violation = false;
   bool session_invariant_failure = false;
+  bool session_swap_failure = false;
   bool flattened_sequence = false;
   bool copied_flattened_sequence = false;
   int32_t persistent_sequence_setup_error = -1;
@@ -2744,7 +3363,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   if (is_render_worker()) {
     const auto dispatch = aexcompat::worker_runtime::invocation::run_classic_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,
-         image_render_supported, depth_supported, smart_render_supported});
+         image_render_supported, depth_supported, smart_render_supported,
+         cluster_session_active ? &cluster_swap_hook : nullptr});
     if (dispatch.case_id_rejected) {
       dispose_arbitrary_defaults(entry, input, output);
       if (global_error == 0)
@@ -2765,6 +3385,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     persistent_sequence = dispatch.persistent_sequence;
     session_protocol_violation = dispatch.session_protocol_violation;
     session_invariant_failure = dispatch.session_invariant_failure;
+    session_swap_failure = dispatch.session_swap_failure;
     flattened_sequence = dispatch.flattened_sequence;
     copied_flattened_sequence = dispatch.copied_flattened_sequence;
     persistent_sequence_setup_error = dispatch.persistent_sequence_setup_error;
@@ -2800,9 +3421,15 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     smart_session_render_error = dispatch.session_render_error;
   }
   if (is_render_worker()) drain_async_layer_requests();
-  const bool arbitrary_defaults_disposed = dispose_arbitrary_defaults(entry, input, output);
+  // After cluster swaps, `entry` is the CURRENT plug-in's entry (or null when
+  // its entrypoint never resolved) and its GLOBAL_SETUP status lives in the
+  // swap context; the launch plug-in's global_error no longer describes it.
+  const int32_t effective_global_error =
+      cluster_session_active ? cluster_swap_context.current_global_error : global_error;
+  const bool arbitrary_defaults_disposed =
+      !entry || dispose_arbitrary_defaults(entry, input, output);
   std::cerr << "stage:global_setdown_begin\n" << std::flush;
-  const int32_t setdown_error = global_error == 0
+  const int32_t setdown_error = effective_global_error == 0 && entry
       ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
   // Smart-worker fault-injection probes as a handler table (issue #171):
   // each requested mode runs its verifier in the same order as before.
@@ -2838,7 +3465,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     for (const auto& probe : smart_fault_probes)
       if (probe.requested) *probe.observed = probe.verify();
   std::cerr << "stage:global_setdown_end error=" << setdown_error << "\n" << std::flush;
-  if (!session.prepare_protocol_report()) return session.finish(14);
+  // A swap failure still gets the completion report below; only its exit code
+  // is dedicated (25), so a terminal-audit rejection must not pre-empt it
+  // with the generic module-audit code here.
+  if (!session.prepare_protocol_report() && !session_swap_failure)
+    return session.finish(14);
   if (is_render_worker()) {
   restore_native_stdout();
   ClassicCompletionInputs classic_inputs;
@@ -2962,8 +3593,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   }
   if (is_render_worker()) {
     // Session fail-closed self-termination paths keep dedicated exit codes so
-    // the broker can distinguish protocol violations (23) and host-protection
-    // invariant failures (24) from ordinary render failures (21).
+    // the broker can distinguish protocol violations (23), host-protection
+    // invariant failures (24), and cluster swap failures (25, closure-session
+    // design §7: quiescence/setdown/unload/audit; a contamination-suspect
+    // abort, not a crash) from ordinary render failures (21).
+    if (session_swap_failure) return session.finish_integrated_report(25);
     if (session_protocol_violation) return session.finish(23);
     if (session_invariant_failure) return session.finish(24);
     return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&

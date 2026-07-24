@@ -25,6 +25,9 @@ struct Statistics {
   uint32_t are_states_identical_calls{};
 };
 Statistics pf_state_statistics();
+// Cluster sessions (issue #405) reset the per-effect counters between
+// plug-ins so each swap/inspect report matches a fresh one-shot process.
+void reset_pf_state_statistics();
 void on_global_setdown();
 
 int32_t __cdecl get_current_param_state(void*, int32_t, const PfTime*,

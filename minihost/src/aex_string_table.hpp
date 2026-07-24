@@ -1,4 +1,4 @@
-≠rá^—f•ñÿ¶{MÏy 'v√Æ∂õ≠#pragma once
+#pragma once
 
 #include <cstddef>
 #include <cstdint>

@@ -113,6 +113,7 @@ struct BibSuiteState {
   bool attempted{};
   bool owned{};
   bool termination_attempted{};
+  uint32_t termination_attempts{};
 };
 
 BibSuiteState& bib_suite_state() {
@@ -173,6 +174,7 @@ bool teardown_bib_suite_impl(void*) noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   if (!state.owned || state.termination_attempted) return true;
   state.termination_attempted = true;
+  ++state.termination_attempts;
   if (!state.terminate) return false;
   const uint32_t token = state.terminate();
   state.owned = false;
@@ -184,6 +186,15 @@ bool teardown_bib_suite_impl(void*) noexcept {
 
 bool teardown_bib_suite(void* context) noexcept {
   return teardown_bib_suite_impl(context);
+}
+
+// Number of owned-BIB termination attempts so far (0 or 1 by construction:
+// the latch above makes the teardown single-shot). Read by the cluster
+// session's final receipt (owner review P1-1, issue #405).
+uint32_t bib_termination_attempt_count() noexcept {
+  auto& state = bib_suite_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.termination_attempts;
 }
 
 bool mask_suite_provider_available(void*) { return aexcompat::mask_runtime::model_enabled(); }

@@ -11,6 +11,7 @@
 #include <set>
 #include <sstream>
 #include <type_traits>
+#include <utility>
 
 namespace aexcompat::worker_runtime {
 namespace {
@@ -19,6 +20,16 @@ namespace {
 #pragma comment(lib, "bcrypt.lib")
 
 constexpr std::size_t kMaxAuditedModules = 512;
+// Cluster sessions (issue #405) replace the fixed bound with the manifest's
+// launch-time authenticated module_bound (design §5) and narrow the `plugin`
+// classification to the manifest's declared basenames. Zero/empty means the
+// legacy fixed-bound behavior.
+std::size_t g_cluster_module_bound = 0;
+std::set<std::string> g_declared_plugin_basenames;
+
+std::size_t audit_module_bound() {
+  return g_cluster_module_bound != 0 ? g_cluster_module_bound : kMaxAuditedModules;
+}
 
 struct AuthorizedRuntimeModule {
   std::filesystem::path path;
@@ -102,6 +113,13 @@ std::string path_token(const std::filesystem::path& canonical_stripped) {
 std::wstring lowercase(std::wstring value) {
   std::transform(value.begin(), value.end(), value.begin(), towlower);
   return value;
+}
+
+std::string lowercase(const std::string& value) {
+  std::string result = value;
+  for (char& ch : result)
+    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+  return result;
 }
 
 bool canonical_path(const std::filesystem::path& path,
@@ -196,11 +214,12 @@ bool authorized_runtime_module(const std::filesystem::path& module_path) {
 ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_path) {
   ModuleAuditSnapshot snapshot;
   snapshot.status = "failed";
-  std::array<HMODULE, kMaxAuditedModules> modules{};
+  const std::size_t module_bound = audit_module_bound();
+  std::vector<HMODULE> modules(module_bound);
   DWORD needed = 0;
   if (!EnumProcessModulesEx(GetCurrentProcess(), modules.data(),
-          static_cast<DWORD>(sizeof(modules)), &needed, LIST_MODULES_ALL) ||
-      needed == 0 || needed > sizeof(modules) || needed % sizeof(HMODULE) != 0) {
+          static_cast<DWORD>(modules.size() * sizeof(HMODULE)), &needed, LIST_MODULES_ALL) ||
+      needed == 0 || needed > modules.size() * sizeof(HMODULE) || needed % sizeof(HMODULE) != 0) {
     snapshot.unknown_count = 1;
     return snapshot;
   }
@@ -244,7 +263,18 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
     }
     const std::string basename = audit_basename(module_path);
     if (same_path(module_path, executable)) snapshot.worker.push_back(basename);
-    else if (same_path(module_path.parent_path(), plugin_root)) snapshot.plugin.push_back(basename);
+    else if (same_path(module_path.parent_path(), plugin_root)) {
+      // Cluster sessions narrow the plugin class to the manifest's declared
+      // basename set (design §5): anything else under the sealed root is an
+      // unknown module and fails the audit closed.
+      if (!g_declared_plugin_basenames.empty() &&
+          g_declared_plugin_basenames.count(lowercase(basename)) == 0) {
+        ++snapshot.unknown_count;
+        snapshot.unknown_keys.push_back(lowercase(module_path.wstring()));
+      } else {
+        snapshot.plugin.push_back(basename);
+      }
+    }
     else if (same_path(module_path.parent_path(), system32)) snapshot.system32.push_back(basename);
     else if (is_winsxs_module(module_path, winsxs_root) &&
              !contains_reparse_component(module_buffer.data()))
@@ -262,11 +292,15 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
 void accumulate_module_audit(const ModuleAuditSnapshot& snapshot) {
   if (!g_module_audit.required) return;
   ++g_module_audit.phase_count;
-  auto append_unique = [](std::vector<std::string>& target,
+  // Cluster sessions may only WIDEN the historical fixed cap to the manifest's
+  // declared module_bound (design §5); it never shrinks, so the fixed-cap
+  // contract below is unchanged on every non-cluster path.
+  const std::size_t module_bound = audit_module_bound();
+  auto append_unique = [&module_bound](std::vector<std::string>& target,
                           const std::vector<std::string>& source) {
     for (const auto& value : source) {
       if (std::find(target.begin(), target.end(), value) != target.end()) continue;
-      if (target.size() >= kMaxAuditedModules) {
+      if (target.size() >= kMaxAuditedModules && target.size() >= module_bound) {
         g_module_audit.observed_union.unknown_count =
             (std::max)(1u, g_module_audit.observed_union.unknown_count);
         continue;
@@ -282,7 +316,7 @@ void accumulate_module_audit(const ModuleAuditSnapshot& snapshot) {
   for (const auto& key : snapshot.unknown_keys) {
     auto& keys = g_module_audit.observed_union.unknown_keys;
     if (std::find(keys.begin(), keys.end(), key) != keys.end()) continue;
-    if (keys.size() >= kMaxAuditedModules) {
+    if (keys.size() >= kMaxAuditedModules && keys.size() >= module_bound) {
       g_module_audit.observed_union.unknown_count =
           (std::max)(1u, g_module_audit.observed_union.unknown_count);
       continue;
@@ -339,6 +373,22 @@ std::string module_audit_snapshot_json(const ModuleAuditSnapshot& snapshot) {
 
 void configure_runtime_module_hash(FileSha256 hash) noexcept {
   g_file_sha256 = hash;
+}
+
+void configure_module_audit_cluster(std::size_t module_bound,
+                                    std::vector<std::string> declared_plugin_basenames) {
+  g_cluster_module_bound = module_bound;
+  g_declared_plugin_basenames.clear();
+  for (const std::string& basename : declared_plugin_basenames)
+    g_declared_plugin_basenames.insert(lowercase(basename));
+}
+
+void record_module_audit_epoch(uint32_t plugin_index,
+                               ModuleAuditSnapshot pre_unload,
+                               ModuleAuditSnapshot post_load) {
+  if (!g_module_audit.required) return;
+  g_module_audit.epochs.push_back(
+      {plugin_index, std::move(pre_unload), std::move(post_load)});
 }
 
 bool parse_runtime_module_authorization(const std::filesystem::path& plugin_path,
@@ -467,8 +517,23 @@ std::string module_audit_json() {
                  : "not_required")
          << "\",\"post_load\":" << module_audit_snapshot_json(g_module_audit.post_load)
          << ",\"pre_unload\":" << module_audit_snapshot_json(g_module_audit.pre_unload)
-         << ",\"observed_union\":" << module_audit_snapshot_json(g_module_audit.observed_union)
-         << ",\"phase_count\":" << g_module_audit.phase_count
+         << ",\"observed_union\":" << module_audit_snapshot_json(g_module_audit.observed_union);
+  // Cluster sessions append one epoch per swap (design §5). The key stays
+  // absent on every non-cluster path so the one-shot validator's exact-key
+  // contract is untouched.
+  if (!g_module_audit.epochs.empty()) {
+    output << ",\"epochs\":[";
+    for (std::size_t index = 0; index < g_module_audit.epochs.size(); ++index) {
+      if (index) output << ',';
+      const ModuleAuditEpoch& epoch = g_module_audit.epochs[index];
+      output << "{\"plugin_index\":" << epoch.plugin_index
+             << ",\"pre_unload\":" << module_audit_snapshot_json(epoch.pre_unload)
+             << ",\"post_load\":" << module_audit_snapshot_json(epoch.post_load)
+             << '}';
+    }
+    output << ']';
+  }
+  output << ",\"phase_count\":" << g_module_audit.phase_count
          << ",\"unknown_count\":" << g_module_audit.observed_union.unknown_count
          << '}';
   return output.str();

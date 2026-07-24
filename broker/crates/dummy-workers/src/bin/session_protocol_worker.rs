@@ -18,9 +18,32 @@
 //! - `error_frame_0`: answers frame 0 with a frame-local error response.
 //! - `modal_frame`: reports its desktop, opens a MessageBox, and waits for the
 //!   broker watchdog (issue #351).
+//!
+//! Cluster session support (issue #405,
+//! docs/CLOSURE_SESSION_PROTOCOL_2026-07-23.md): when the launch argv carries
+//! `--cluster-manifest-v1 <path>`, the fixture validates the transport the
+//! way the real loader does (staged directly inside the sealed root, 4 MiB
+//! bound, v1 schema), cross-checks the positional plugin against
+//! `plugins[0]`, answers `swap_plugin` with `swap_done`, and records swap
+//! epochs for the final report's cluster module audit. It also serves
+//! `--discovery-session-v1 --cluster-manifest-v1 <path>`, answering
+//! `inspect_plugin` with `inspect_done`. Additional misbehaviors:
+//!
+//! - `crash_on_swap`: dies with an access-violation exit code on the first
+//!   `swap_plugin` (worker-death three-way wait target).
+//! - `swap_done_wrong_index`: answers the swap with a mismatched
+//!   `plugin_index` (broker-side protocol-violation target).
+//! - `swap_global_setup_error`: answers the swap with
+//!   `status:"error","global_setup_error":25` (plugin-local error path).
+//! - `audit_undeclared_module`: adds an undeclared module to the final
+//!   report's observed union (declared-set audit rejection target).
+//! - `crash_on_inspect`: dies on the first `inspect_plugin`.
+//! - `inspect_error_plugin_1`: answers `inspect_plugin` for plugin 1 with a
+//!   structured parameter-local error.
 
 #[cfg(windows)]
 mod worker {
+    use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
@@ -211,9 +234,156 @@ mod worker {
         }
     }
 
-    fn final_report(frames: u32, smart: bool, launch_payload: &str) -> String {
+    /// The fixture's view of a `cluster-manifest-v1` document (issue #405):
+    /// the ordered plugin basenames/hashes a swap or inspect may select, and
+    /// the pinned dependency basenames the audit report lists.
+    struct ClusterManifest {
+        plugins: Vec<(String, String)>,
+        dependencies: Vec<String>,
+    }
+
+    /// Loads and validates the manifest transport the way the real worker's
+    /// loader does (design §2.3): an absolute existing file staged directly
+    /// inside the sealed load root (the `aexcompat-sealed-` directory the
+    /// broker staged every cluster image into), bounded to 4 MiB, with the
+    /// v1 schema and well-formed entries.
+    fn load_cluster_manifest(path: &str) -> Option<ClusterManifest> {
+        let path = std::path::Path::new(path);
+        if !path.is_absolute() || !path.is_file() {
+            return None;
+        }
+        let sealed_root = path.parent().and_then(|parent| parent.canonicalize().ok())?;
+        let inside_sealed_root = sealed_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("aexcompat-sealed-"));
+        if !inside_sealed_root {
+            return None;
+        }
+        let bytes = std::fs::read(path).ok()?;
+        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
+            return None;
+        }
+        let document: Value = serde_json::from_slice(&bytes).ok()?;
+        if document.get("schema").and_then(Value::as_str) != Some("cluster-manifest-v1") {
+            return None;
+        }
+        let mut plugins = Vec::new();
+        for plugin in document.get("plugins")?.as_array()? {
+            let basename = plugin.get("basename")?.as_str()?.to_owned();
+            let sha256 = plugin.get("sha256")?.as_str()?.to_owned();
+            plugins.push((basename, sha256));
+        }
+        if plugins.is_empty() {
+            return None;
+        }
+        let mut dependencies = Vec::new();
+        for dependency in document.get("dependencies")?.as_array()? {
+            dependencies.push(dependency.get("basename")?.as_str()?.to_owned());
+        }
+        Some(ClusterManifest {
+            plugins,
+            dependencies,
+        })
+    }
+
+    /// One audit snapshot for the cluster report: the worker image plus the
+    /// plugin-class modules loaded from the sealed root — the given plugin
+    /// and the pinned closure.
+    fn cluster_audit_snapshot(manifest: &ClusterManifest, plugin_index: usize) -> Value {
+        let mut plugin = vec![manifest.plugins[plugin_index].0.clone()];
+        plugin.extend(manifest.dependencies.iter().cloned());
+        json!({
+            "status": "passed",
+            "unknown_count": 0,
+            "worker": ["session_protocol_worker.exe"],
+            "plugin": plugin,
+            "system32": ["kernel32.dll"]
+        })
+    }
+
+    /// The cluster session's module audit (design §5): terminal snapshots of
+    /// the last loaded plugin, per-swap epochs, and the cumulative union of
+    /// every visited plugin plus the closure. `audit_undeclared_module`
+    /// injects a module outside the manifest's declared set so the broker's
+    /// declared-set validation must reject the report.
+    fn cluster_module_audit(
+        manifest: &ClusterManifest,
+        current_plugin: usize,
+        visited: &[usize],
+        epochs: &[(usize, usize)],
+        behavior: &str,
+    ) -> Value {
+        let mut union_plugin: Vec<String> = Vec::new();
+        for index in visited {
+            let basename = &manifest.plugins[*index].0;
+            if !union_plugin.contains(basename) {
+                union_plugin.push(basename.clone());
+            }
+        }
+        union_plugin.extend(manifest.dependencies.iter().cloned());
+        if behavior == "audit_undeclared_module" {
+            union_plugin.push("evil.dll".to_owned());
+        }
+        let union = json!({
+            "status": "passed",
+            "unknown_count": 0,
+            "worker": ["session_protocol_worker.exe"],
+            "plugin": union_plugin,
+            "system32": ["kernel32.dll"]
+        });
+        let epochs: Vec<Value> = epochs
+            .iter()
+            .map(|(old, new)| {
+                json!({
+                    "plugin_index": old,
+                    "pre_unload": cluster_audit_snapshot(manifest, *old),
+                    "post_load": cluster_audit_snapshot(manifest, *new)
+                })
+            })
+            .collect();
+        json!({
+            "schema": 1,
+            "status": "passed",
+            "phase_count": 3,
+            "unknown_count": 0,
+            "post_load": cluster_audit_snapshot(manifest, current_plugin),
+            "pre_unload": cluster_audit_snapshot(manifest, current_plugin),
+            "observed_union": union,
+            "epochs": epochs
+        })
+    }
+
+    fn default_module_audit() -> Value {
         // The broker validates a module audit on a clean exit exactly like the
         // one-shot path; this fixture reports its own honest minimal audit.
+        json!({
+            "schema": 1,
+            "status": "passed",
+            "phase_count": 3,
+            "unknown_count": 0,
+            "post_load": {
+                "status": "passed", "unknown_count": 0,
+                "worker": ["session_protocol_worker.exe"],
+                "plugin": ["plugin.plugin"],
+                "system32": ["kernel32.dll"]
+            },
+            "pre_unload": {
+                "status": "passed", "unknown_count": 0,
+                "worker": ["session_protocol_worker.exe"],
+                "plugin": ["plugin.plugin"],
+                "system32": ["kernel32.dll"]
+            },
+            "observed_union": {
+                "status": "passed", "unknown_count": 0,
+                "worker": ["session_protocol_worker.exe"],
+                "plugin": ["plugin.plugin"],
+                "system32": ["kernel32.dll"]
+            }
+        })
+    }
+
+    fn final_report(frames: u32, smart: bool, launch_payload: &str, module_audit: Value) -> String {
         // The session-mechanics keys follow the worker flavor: the classic
         // report reuses its persistent-sequence fields while the smart report
         // carries dedicated session_* fields (protocol v1.1).
@@ -247,30 +417,7 @@ mod worker {
             "handle_lifetimes_balanced": true,
             "world_lifetimes_balanced": true,
             "param_checkouts_balanced": true,
-            "module_audit": {
-                "schema": 1,
-                "status": "passed",
-                "phase_count": 3,
-                "unknown_count": 0,
-                "post_load": {
-                    "status": "passed", "unknown_count": 0,
-                    "worker": ["session_protocol_worker.exe"],
-                    "plugin": ["plugin.plugin"],
-                    "system32": ["kernel32.dll"]
-                },
-                "pre_unload": {
-                    "status": "passed", "unknown_count": 0,
-                    "worker": ["session_protocol_worker.exe"],
-                    "plugin": ["plugin.plugin"],
-                    "system32": ["kernel32.dll"]
-                },
-                "observed_union": {
-                    "status": "passed", "unknown_count": 0,
-                    "worker": ["session_protocol_worker.exe"],
-                    "plugin": ["plugin.plugin"],
-                    "system32": ["kernel32.dll"]
-                }
-            }
+            "module_audit": module_audit
         });
         report
             .as_object_mut()
@@ -285,6 +432,24 @@ mod worker {
             std::thread::sleep(std::time::Duration::from_secs(120));
             return 0;
         }
+        // Discovery session mode (issue #405, design §2.2): no positional
+        // plugin rides argv, only the cluster manifest transport.
+        if args.len() >= 2 && args[1] == "--discovery-session-v1" {
+            if args.len() != 4 || args[2] != "--cluster-manifest-v1" {
+                return 2;
+            }
+            let Some(manifest) = load_cluster_manifest(&args[3]) else {
+                return 3;
+            };
+            let behavior = std::env::var("AEXCOMPAT_TEST_SESSION_BEHAVIOR").unwrap_or_default();
+            let (Some(request), Some(response)) = (
+                env_handle("AEXCOMPAT_RENDER_SESSION_REQUEST_HANDLE"),
+                env_handle("AEXCOMPAT_RENDER_SESSION_RESPONSE_HANDLE"),
+            ) else {
+                return EXIT_PROTOCOL_VIOLATION;
+            };
+            return run_discovery(request, response, &manifest, &behavior);
+        }
         // Trailing auxiliary option pairs mirror the real worker's
         // strip_auxiliary_options contract: peel them off the tail, and for
         // --parameter-animation-v1 enforce the native loader's pin — the
@@ -292,6 +457,8 @@ mod worker {
         // cwd + target/image-transport (parameter_animation_transport.cpp) —
         // so a broker writing the sidecar somewhere the real worker would
         // reject fails these tests too.
+        let mut cluster_manifest: Option<ClusterManifest> = None;
+        let mut cluster_manifest_path: Option<String> = None;
         let mut effective = args.len();
         while effective >= 12 && args[effective - 2].starts_with("--") {
             let value = &args[effective - 1];
@@ -363,6 +530,17 @@ mod worker {
                         return 3;
                     }
                 }
+                // The cluster manifest transport (issue #405): staged inside
+                // the sealed root (design §2.3), with the same shape gate the
+                // real worker's loader enforces. A missing or malformed
+                // manifest fails the launch.
+                "--cluster-manifest-v1" => {
+                    cluster_manifest = load_cluster_manifest(value);
+                    if cluster_manifest.is_none() {
+                        return 3;
+                    }
+                    cluster_manifest_path = Some(value.clone());
+                }
                 _ => {}
             }
             effective -= 2;
@@ -399,6 +577,30 @@ mod worker {
         let smart = args[1] == "--smart-session-v1";
         if effective != 10 || (args[1] != "--render-session-v1" && !smart) {
             return 2;
+        }
+        // The positional argv contract names plugins[0] (design §2.2): the
+        // plugin path's basename and the sha256 slot must match the manifest
+        // exactly, and the manifest must sit beside the positional plugin in
+        // the sealed root (design §2.3), or the launch fails.
+        if let Some(manifest) = &cluster_manifest {
+            let basename_matches = std::path::Path::new(&args[2])
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(manifest.plugins[0].0.as_str());
+            let same_sealed_root = cluster_manifest_path.as_deref().is_some_and(|manifest_path| {
+                let canonical_parent = |path: &str| {
+                    std::path::Path::new(path)
+                        .parent()
+                        .and_then(|parent| parent.canonicalize().ok())
+                };
+                canonical_parent(&args[2]) == canonical_parent(manifest_path)
+            });
+            if !basename_matches
+                || !args[3].eq_ignore_ascii_case(&manifest.plugins[0].1)
+                || !same_sealed_root
+            {
+                return 3;
+            }
         }
         let (Ok(width), Ok(height), Ok(time_scale)) = (
             args[5].parse::<usize>(),
@@ -480,6 +682,11 @@ mod worker {
         }
 
         let mut frames = 0u32;
+        // Cluster session state (issue #405): the current plugin, every
+        // plugin loaded so far (for the audit union), and the swap epochs.
+        let mut current_plugin: usize = 0;
+        let mut visited: Vec<usize> = vec![0];
+        let mut swap_epochs: Vec<(usize, usize)> = Vec::new();
         loop {
             let mut prefix = [0u8; 4];
             if !read_exact(request, &mut prefix) {
@@ -499,6 +706,62 @@ mod worker {
             match message["type"].as_str() {
                 Some("close") => break,
                 Some("render_frame") => {}
+                Some("swap_plugin") => {
+                    // Exact-key strictness (design §4.1): only v, type, and
+                    // plugin_index may ride the message, and the index must
+                    // select another manifest member.
+                    let keys_ok = message.as_object().map(|object| object.len()) == Some(3)
+                        && message.get("v").is_some()
+                        && message.get("plugin_index").is_some();
+                    let Some(new_index) = message["plugin_index"].as_u64().map(|index| index as usize) else {
+                        return EXIT_PROTOCOL_VIOLATION;
+                    };
+                    let Some(manifest) = &cluster_manifest else {
+                        return EXIT_PROTOCOL_VIOLATION;
+                    };
+                    if !keys_ok
+                        || message["v"].as_u64() != Some(1)
+                        || new_index >= manifest.plugins.len()
+                        || new_index == current_plugin
+                    {
+                        return EXIT_PROTOCOL_VIOLATION;
+                    }
+                    match behavior.as_str() {
+                        "crash_on_swap" => std::process::exit(0xC000_0005_u32 as i32),
+                        "swap_done_wrong_index" => {
+                            // A mismatched swap_done, then silence: only the
+                            // broker's strict response validation can catch
+                            // this before the deadline.
+                            let reply = format!(
+                                "{{\"v\":1,\"type\":\"swap_done\",\"plugin_index\":{},\"status\":\"ok\"}}",
+                                new_index + 1
+                            );
+                            let _ = write_message(response, &reply);
+                            loop {
+                                std::thread::sleep(std::time::Duration::from_secs(3600));
+                            }
+                        }
+                        _ => {}
+                    }
+                    swap_epochs.push((current_plugin, new_index));
+                    visited.push(new_index);
+                    current_plugin = new_index;
+                    let reply = if behavior == "swap_global_setup_error" {
+                        // Plugin-local GLOBAL_SETUP failure (design §4.1): the
+                        // swap happened, the session continues.
+                        format!(
+                            "{{\"v\":1,\"type\":\"swap_done\",\"plugin_index\":{new_index},\"status\":\"error\",\"global_setup_error\":25}}"
+                        )
+                    } else {
+                        format!(
+                            "{{\"v\":1,\"type\":\"swap_done\",\"plugin_index\":{new_index},\"status\":\"ok\"}}"
+                        )
+                    };
+                    if !write_message(response, &reply) {
+                        return EXIT_PROTOCOL_VIOLATION;
+                    }
+                    continue;
+                }
                 _ => return EXIT_PROTOCOL_VIOLATION,
             }
             // Mirrors the real worker's message version gate (protocol
@@ -717,11 +980,195 @@ mod worker {
             if behavior == "exit_after_frame_0" && frame_index == 0 {
                 // A unilateral exit with a clean-looking report and exit code
                 // 0, violating only the close-handshake contract.
-                println!("{}", final_report(frames, smart, &args[4]));
+                println!(
+                    "{}",
+                    final_report(
+                        frames,
+                        smart,
+                        &args[4],
+                        session_module_audit(
+                            &cluster_manifest,
+                            current_plugin,
+                            &visited,
+                            &swap_epochs,
+                            &behavior
+                        )
+                    )
+                );
                 return 0;
             }
         }
-        println!("{}", final_report(frames, smart, &args[4]));
+        println!(
+            "{}",
+            final_report(
+                frames,
+                smart,
+                &args[4],
+                session_module_audit(
+                    &cluster_manifest,
+                    current_plugin,
+                    &visited,
+                    &swap_epochs,
+                    &behavior
+                )
+            )
+        );
+        0
+    }
+
+    /// The module audit for the session's final report: the cluster epoch
+    /// audit when a cluster manifest rode the launch, the single-plugin
+    /// default otherwise.
+    fn session_module_audit(
+        cluster_manifest: &Option<ClusterManifest>,
+        current_plugin: usize,
+        visited: &[usize],
+        swap_epochs: &[(usize, usize)],
+        behavior: &str,
+    ) -> Value {
+        match cluster_manifest {
+            Some(manifest) => {
+                cluster_module_audit(manifest, current_plugin, visited, swap_epochs, behavior)
+            }
+            None => default_module_audit(),
+        }
+    }
+
+    /// The discovery session loop (issue #405, design §4.2): no plugin is
+    /// loaded at launch; each `inspect_plugin` swaps to plugins[N] (recording
+    /// the swap epoch, like the render session's swap) and answers with the
+    /// parameter report the one-shot `--l2-params-only` would print.
+    fn run_discovery(
+        request: HANDLE,
+        response: HANDLE,
+        manifest: &ClusterManifest,
+        behavior: &str,
+    ) -> i32 {
+        let mut current: Option<usize> = None;
+        let mut visited: Vec<usize> = Vec::new();
+        let mut epochs: Vec<(usize, usize)> = Vec::new();
+        let mut next_request_index: u64 = 0;
+        loop {
+            let mut prefix = [0u8; 4];
+            if !read_exact(request, &mut prefix) {
+                break;
+            }
+            let length = u32::from_le_bytes(prefix) as usize;
+            if length == 0 || length > MAX_MESSAGE_BYTES {
+                return EXIT_PROTOCOL_VIOLATION;
+            }
+            let mut body = vec![0u8; length];
+            if !read_exact(request, &mut body) {
+                return EXIT_PROTOCOL_VIOLATION;
+            }
+            let Ok(message) = serde_json::from_slice::<Value>(&body) else {
+                return EXIT_PROTOCOL_VIOLATION;
+            };
+            match message["type"].as_str() {
+                Some("close") => break,
+                Some("inspect_plugin") => {}
+                _ => return EXIT_PROTOCOL_VIOLATION,
+            }
+            // Exact-key strictness (design §4.2): only v, type, plugin_index,
+            // and request_index may ride the message; the index must select a
+            // manifest member and the request serial must advance.
+            let keys_ok = message.as_object().map(|object| object.len()) == Some(4)
+                && message.get("v").is_some()
+                && message.get("plugin_index").is_some()
+                && message.get("request_index").is_some();
+            let (Some(plugin_index), Some(request_index)) = (
+                message["plugin_index"].as_u64(),
+                message["request_index"].as_u64(),
+            ) else {
+                return EXIT_PROTOCOL_VIOLATION;
+            };
+            if !keys_ok
+                || message["v"].as_u64() != Some(1)
+                || plugin_index as usize >= manifest.plugins.len()
+                || request_index != next_request_index
+            {
+                return EXIT_PROTOCOL_VIOLATION;
+            }
+            next_request_index += 1;
+            if behavior == "crash_on_inspect" {
+                std::process::exit(0xC000_0005_u32 as i32);
+            }
+            let new_index = plugin_index as usize;
+            if current != Some(new_index) {
+                if let Some(old_index) = current {
+                    epochs.push((old_index, new_index));
+                }
+                visited.push(new_index);
+                current = Some(new_index);
+            }
+            let reply = if behavior == "inspect_error_plugin_1" && new_index == 1 {
+                // Parameter-local failure (design §4.2), in the shape the
+                // real worker sends: a structured error_kind, no report. The
+                // session continues; continuing is the broker's decision.
+                json!({
+                    "v": 1,
+                    "type": "inspect_done",
+                    "plugin_index": plugin_index,
+                    "request_index": request_index,
+                    "status": "error",
+                    "error_kind": "selector_error"
+                })
+                .to_string()
+            } else {
+                let (basename, sha256) = &manifest.plugins[new_index];
+                json!({
+                    "v": 1,
+                    "type": "inspect_done",
+                    "plugin_index": plugin_index,
+                    "request_index": request_index,
+                    "status": "ok",
+                    "report": {
+                        "status": "inspected",
+                        "plugin": {"basename": basename, "sha256": sha256},
+                        "parameters": []
+                    }
+                })
+                .to_string()
+            };
+            if !write_message(response, &reply) {
+                return EXIT_PROTOCOL_VIOLATION;
+            }
+        }
+        let module_audit = match current {
+            Some(current) => cluster_module_audit(manifest, current, &visited, &epochs, behavior),
+            None => {
+                // Nothing was ever inspected: the honest audit reports only
+                // the pinned closure. With an empty closure the union carries
+                // no plugin-class module and the broker's audit fails closed,
+                // which is the correct verdict for an inspect-less session.
+                let deps_only = json!({
+                    "status": "passed",
+                    "unknown_count": 0,
+                    "worker": ["session_protocol_worker.exe"],
+                    "plugin": manifest.dependencies,
+                    "system32": ["kernel32.dll"]
+                });
+                json!({
+                    "schema": 1,
+                    "status": "passed",
+                    "phase_count": 3,
+                    "unknown_count": 0,
+                    "post_load": deps_only,
+                    "pre_unload": deps_only,
+                    "observed_union": deps_only,
+                    "epochs": []
+                })
+            }
+        };
+        println!(
+            "{}",
+            json!({
+                "schema_version": 1,
+                "stage": "discovery_session",
+                "status": "discovery_session_completed",
+                "module_audit": module_audit
+            })
+        );
         0
     }
 }

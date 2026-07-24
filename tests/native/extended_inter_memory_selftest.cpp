@@ -1,4 +1,4 @@
-≠rá^—f•ñÿ¶{MÏy 'v√Æ∂õ≠#include "extended_inter_memory.hpp"
+#include "extended_inter_memory.hpp"
 
 #include <cstdint>
 #include <cstdio>

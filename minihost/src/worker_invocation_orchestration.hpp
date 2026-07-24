@@ -1,5 +1,6 @@
 #pragma once
 #include "worker_parameter_runtime.hpp"
+#include "worker_render_session.hpp"
 #include "worker_request_parser.hpp"
 #include "worker_smart_execution.hpp"
 #include <array>
@@ -19,6 +20,9 @@ struct RenderSessionOutcome {
   int32_t frames_attempted{0};
   bool protocol_violation{false};
   bool invariant_failure{false};
+  // Cluster-session swap failure (quiescence/setdown/unload/audit, closure
+  // design §4.1/§7): the worker exits with the dedicated swap exit code.
+  bool swap_failure{false};
   int32_t width{0};
   int32_t height{0};
   int32_t rowbytes{0};
@@ -42,6 +46,11 @@ using parameters::RequestedAssignments;
 struct InvocationState {
     bool request_mode{};
     bool render_session_mode{};
+    // Discovery session (`--discovery-session-v1`, closure-session design
+    // §4.2): cluster-manifest-driven parameter inspection over the control
+    // pipes; no launch-time plug-in load.
+    bool discovery_session_mode{};
+    std::wstring cluster_manifest_path;
     bool audio_session_mode{};
     int32_t audio_session_max_samples{};
     int32_t audio_session_channels{1};
@@ -160,6 +169,10 @@ struct FinalDispatchRequest {
   bool image_render_supported{};
   bool depth_supported{};
   bool smart_render_supported{};
+  // Cluster-session swap hook (classic render session only, issue #405);
+  // null on every non-cluster path, where a swap_plugin message stays a
+  // protocol violation.
+  const worker_render_session::SwapPluginHook* cluster_swap{};
 };
 
 struct ClassicFinalDispatchResult {
@@ -179,6 +192,9 @@ struct ClassicFinalDispatchResult {
   bool persistent_sequence{};
   bool session_protocol_violation{};
   bool session_invariant_failure{};
+  // Cluster-session swap failure: dedicated non-zero exit (closure design §7)
+  // so the broker can tell a contamination-suspect abort from a crash.
+  bool session_swap_failure{};
   bool flattened_sequence{};
   bool copied_flattened_sequence{};
   int32_t persistent_sequence_setup_error{-1};

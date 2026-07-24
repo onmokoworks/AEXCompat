@@ -80,7 +80,7 @@ pub fn validate_with_limit(
     validate_approved_artifact(main_plugin, "main plugin")?;
 
     let main_basename = basename_from_path(&main_plugin.path, "main plugin")?;
-    validate_windows_basename(main_basename)?;
+    validate_windows_basename("dependency", main_basename)?;
     let mut basenames = HashSet::with_capacity(dto.dependencies.len() + 1);
     basenames.insert(fold_windows(main_basename));
     let mut paths = HashSet::with_capacity(dto.dependencies.len());
@@ -90,7 +90,7 @@ pub fn validate_with_limit(
         if !dependency.path.is_absolute() {
             return Err(invalid("dependency path must be absolute"));
         }
-        validate_windows_basename(&dependency.basename)?;
+        validate_windows_basename("dependency", &dependency.basename)?;
         if basename_from_path(&dependency.path, "dependency")? != dependency.basename {
             return Err(invalid("dependency path does not end with its basename"));
         }
@@ -103,7 +103,7 @@ pub fn validate_with_limit(
         if dependency.size == 0 {
             return Err(invalid("dependency size must be nonzero"));
         }
-        let expected_sha256 = decode_sha256(&dependency.sha256)?;
+        let expected_sha256 = decode_sha256("dependency", &dependency.sha256)?;
         validate_source_file(&dependency.path, dependency.size, &expected_sha256)?;
         approved.push(ApprovedImageArtifact {
             path: dependency.path,
@@ -138,7 +138,11 @@ fn basename_from_path<'a>(path: &'a Path, kind: &str) -> io::Result<&'a str> {
         .ok_or_else(|| invalid(format!("{kind} path must have a UTF-8 basename")))
 }
 
-fn validate_windows_basename(name: &str) -> io::Result<()> {
+/// Windows-safe basename rules shared with the cluster manifest (issue #405):
+/// a single normal path component with no separators, drive letters, control
+/// characters, trailing dots/spaces, or reserved device names. `kind` only
+/// labels the error message ("dependency" keeps the historical wording).
+pub(crate) fn validate_windows_basename(kind: &str, name: &str) -> io::Result<()> {
     let mut components = Path::new(name).components();
     if name.is_empty()
         || name == "."
@@ -149,7 +153,7 @@ fn validate_windows_basename(name: &str) -> io::Result<()> {
         || name.chars().any(char::is_control)
         || name.ends_with(['.', ' '])
     {
-        return Err(invalid("dependency basename is not Windows-safe"));
+        return Err(invalid(format!("{kind} basename is not Windows-safe")));
     }
 
     let stem = name
@@ -162,18 +166,18 @@ fn validate_windows_basename(name: &str) -> io::Result<()> {
         || matches!(upper.as_bytes(), [b'C', b'O', b'M', b'1'..=b'9'])
         || matches!(upper.as_bytes(), [b'L', b'P', b'T', b'1'..=b'9']);
     if reserved {
-        return Err(invalid(
-            "dependency basename is a reserved Windows device name",
-        ));
+        return Err(invalid(format!(
+            "{kind} basename is a reserved Windows device name",
+        )));
     }
     Ok(())
 }
 
-fn decode_sha256(value: &str) -> io::Result<[u8; 32]> {
+pub(crate) fn decode_sha256(kind: &str, value: &str) -> io::Result<[u8; 32]> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(invalid(
-            "dependency SHA-256 must be 64 hexadecimal characters",
-        ));
+        return Err(invalid(format!(
+            "{kind} SHA-256 must be 64 hexadecimal characters",
+        )));
     }
     let mut digest = [0; 32];
     for (output, pair) in digest.iter_mut().zip(value.as_bytes().chunks_exact(2)) {

@@ -1,4 +1,4 @@
-≠rá^—f•ñÿ¶{MÏy 'v√Æ∂õ≠#include "aex_string_table.hpp"
+#include "aex_string_table.hpp"
 
 #include <windows.h>
 

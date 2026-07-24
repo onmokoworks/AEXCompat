@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <string>
 
+#include "worker_parameter_execution.hpp"
+
 namespace aexcompat::worker_render_session {
 
 inline constexpr uint32_t kProtocolVersion = 1;
@@ -29,6 +31,32 @@ inline constexpr uint32_t kHeaderMagic = 0x53584541u;  // "AEXS" little-endian
 inline constexpr std::size_t kHeaderBytes = 4096;
 inline constexpr std::size_t kSlotAlignment = 4096;
 inline constexpr std::size_t kMaxMessageBytes = 64 * 1024;
+// Discovery-session inspect_done carries the full parameter report and is the
+// only message allowed past kMaxMessageBytes (closure-session design §4).
+inline constexpr std::size_t kMaxInspectReportBytes = 4 * 1024 * 1024;
+
+// Cluster-session plug-in swap hook (docs/CLOSURE_SESSION_PROTOCOL_2026-07-23.md
+// §4.1). The session frame loop owns SEQUENCE teardown and the swap_done
+// response; the hook (implemented by the dispatch owner) runs GLOBAL_SETDOWN,
+// quiescence, the plug-in-only unload, authentication and load of plugins[N],
+// GLOBAL_SETUP/PARAMS_SETUP, and the payload swap. A hard failure (quiescence,
+// unload, audit, or load) invalidates the session: the worker exits with the
+// dedicated swap-failure exit code instead of answering. A nonzero
+// global_setup_error is plug-in-local: swap_done reports status "error" and
+// the session stays alive for the broker's continue/stop decision.
+struct SwapPluginResult {
+  worker_runtime::parameter_execution::EffectEntry entry{};
+  int32_t global_setup_error{-1};
+  int32_t params_setup_error{-1};
+  bool hard_failure{};
+};
+struct SwapPluginHook {
+  void* context{};
+  SwapPluginResult (*invoke)(void* context, int32_t plugin_index){};
+  // manifest plugins.size(); indexes outside [0, plugin_count) and the
+  // current index are protocol violations.
+  int32_t plugin_count{};
+};
 
 // SessionHeader field offsets, every field u32 little-endian.
 inline constexpr std::size_t kHeaderMagicOffset = 0;
@@ -119,6 +147,32 @@ class SessionChannels {
   void* section_{};
   unsigned char* view_{};
   std::size_t view_bytes_{};
+};
+
+// Pipe-only control channel for the discovery session (closure-session design
+// §4.2): the same inherited AEXCOMPAT_RENDER_SESSION_REQUEST/RESPONSE_HANDLE
+// variables and u32-LE length-prefixed JSON framing as SessionChannels, but
+// no shared pixel section. Writes accept an enlarged cap for inspect_done,
+// the single message class allowed up to kMaxInspectReportBytes.
+class SessionPipes {
+ public:
+  SessionPipes() = default;
+  SessionPipes(const SessionPipes&) = delete;
+  SessionPipes& operator=(const SessionPipes&) = delete;
+  ~SessionPipes();
+
+  bool open_from_environment();
+  bool opened() const { return request_pipe_ != nullptr; }
+  void set_max_write_bytes(std::size_t bytes) { max_write_bytes_ = bytes; }
+
+  using ReadResult = SessionChannels::ReadResult;
+  ReadResult read_message(std::string& payload);
+  bool write_message(const std::string& payload);
+
+ private:
+  void* request_pipe_{};
+  void* response_pipe_{};
+  std::size_t max_write_bytes_{kMaxMessageBytes};
 };
 
 }  // namespace aexcompat::worker_render_session

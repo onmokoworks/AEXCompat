@@ -26,14 +26,18 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use aexcompat_broker::image_render::{
-    InteractiveParameter, RenderGpuBackend, RenderPixelFormat,
+    InteractiveParameter, RenderGpuBackend, RenderPixelFormat, encode_interactive_payload,
     inspect_experimental_with_approved_dependencies_and_diagnostics,
 };
 use aexcompat_broker::plugin_dependency_closure::{
     DependencyClosureRequest, DependencyProvenance, ResolvedDependencyClosure,
     resolve_dependency_closure, survey_dependency_closure,
 };
-use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
+use aexcompat_broker::render_session::{
+    ClusterRenderPlugins, DiscoverySession, DiscoverySessionOpenRequest, FrameStatus,
+    InspectOutcome, RenderSession, SessionOpenRequest, SwapOutcome,
+};
+use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
 use aviutl2_sys::filter2::{
     FILTER_ITEM_CHECKBOX, FILTER_ITEM_COLOR, FILTER_ITEM_COLOR_VALUE, FILTER_ITEM_SELECT,
     FILTER_ITEM_SELECT_ITEM, FILTER_ITEM_TRACK, FILTER_PLUGIN_TABLE, FILTER_PROC_VIDEO,
@@ -73,11 +77,124 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// may have installed a healthy session at the same id).
 static SESSION_SERIAL: AtomicU64 = AtomicU64::new(0);
 
+/// Cluster session bounds (issue #405, docs/CLOSURE_SESSION_PROTOCOL_2026-07-23
+/// §2.1): a cluster that cannot fit these is structurally infeasible and its
+/// members fall back to the per-plugin path. The headroom covers the modules
+/// outside the declared set (worker image, System32/WinSxS) that every audit
+/// snapshot also counts; the audit's observed union accumulates every visited
+/// plug-in plus the whole system tail of a multimedia runtime (measured ~65
+/// modules for built-in AE effects, more with GPU stacks), so undersizing it
+/// fails an honest session's close-time audit (design §5) for no safety gain —
+/// the plugin-class narrowing to the declared set is the actual bound.
+const MAX_CLUSTER_PLUGINS: usize = 256;
+const MAX_CLUSTER_MODULE_BOUND: usize = 4096;
+const CLUSTER_MODULE_HEADROOM: usize = 256;
+/// Per-inspect watchdog deadline for a cluster discovery session (design §7).
+/// The one-shot inspect carries no deadline (#354: mapping a large closure
+/// must not be decided by wall-clock), so this stays generous — its job is to
+/// catch a hung resident worker, not to time a plugin.
+const CLUSTER_INSPECT_DEADLINE: Duration = Duration::from_secs(300);
+
 /// References to every registered filter's session map, so `UninitializePlugin`
 /// can drain them on plugin unload/reload (each `FilterCtx` is leaked `'static`,
 /// so nothing else would close its worker threads if AviUtl2 unloads the plugin
 /// without exiting the process).
 static SESSION_MAPS: Mutex<Vec<&'static SessionMap>> = Mutex::new(Vec::new());
+
+/// One registered AEX in a closure-identity cluster (issue #405): what the
+/// render pool needs to put the member into a cluster manifest — its path,
+/// its discovered SHA-256, and its exposed defaults (the swap payload).
+#[derive(Clone)]
+struct ClusterMember {
+    plugin: PathBuf,
+    sha: String,
+    smart: bool,
+    defaults: Vec<InteractiveParameter>,
+}
+
+/// Registered AEXes grouped by dependency-closure identity (issue #405),
+/// populated at filter registration. The render pool opens one cluster
+/// session per (identity, geometry, smart) covering exactly these members.
+static CLUSTER_REGISTRY: Mutex<Option<HashMap<String, Vec<ClusterMember>>>> = Mutex::new(None);
+
+/// Pooled cluster render sessions (issue #405, design §8): one session per
+/// key, shared by every registered AEX with the same closure identity and
+/// render configuration; switching between those effects is a `swap_plugin`
+/// inside the session instead of a new worker process. Entries live until
+/// `UninitializePlugin` drains them (no idle reaping — the per-effect path
+/// keeps its own, and a pooled session serves every object of the cluster).
+static SESSION_POOL: Mutex<Option<HashMap<PoolKey, PoolEntry>>> = Mutex::new(None);
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PoolKey {
+    closure_identity: String,
+    geom: GeomIdentity,
+    smart: bool,
+}
+
+struct PoolEntry {
+    session: MfSession,
+    /// The manifest order the session was opened with; a member's position
+    /// is its `plugin_index` for swaps.
+    plugins: Vec<PathBuf>,
+}
+
+fn cluster_registry_members(key: &PoolKey, requester: &Path) -> Vec<ClusterMember> {
+    let members = CLUSTER_REGISTRY
+        .lock()
+        .ok()
+        .and_then(|registry| {
+            registry
+                .as_ref()
+                .and_then(|registry| registry.get(&key.closure_identity).cloned())
+        })
+        .unwrap_or_default();
+    let mut ordered: Vec<ClusterMember> = members
+        .into_iter()
+        .filter(|member| member.smart == key.smart)
+        .collect();
+    // The requester leads the manifest: it is the launch plugin (design
+    // §2.2), so the session opens already swapped to whoever asked first.
+    ordered.sort_by_key(|member| usize::from(member.plugin != requester));
+    ordered
+}
+
+/// Returns the sender + serial + this plugin's manifest index of a live
+/// pooled session, or `None` to open one.
+fn pool_sender(key: &PoolKey, plugin: &Path) -> Option<(Sender<RenderReq>, u64, u32)> {
+    let mut guard = SESSION_POOL.lock().ok()?;
+    let entry = guard.as_mut()?.get_mut(key)?;
+    let index = entry.plugins.iter().position(|path| path == plugin)? as u32;
+    entry.session.last_used = Instant::now();
+    entry
+        .session
+        .sender()
+        .map(|tx| (tx, entry.session.serial, index))
+}
+
+/// Removes and drops the pooled session at `key` matching `serial` (dropped
+/// off-lock), so the next frame reopens — matching on serial avoids dropping
+/// a healthy session a concurrent reopen installed.
+fn pool_remove(key: &PoolKey, serial: u64) {
+    let removed = {
+        let Ok(mut guard) = SESSION_POOL.lock() else {
+            return;
+        };
+        let map = match guard.as_mut() {
+            Some(map) => map,
+            None => return,
+        };
+        if map
+            .get(key)
+            .is_some_and(|entry| entry.session.serial == serial)
+        {
+            map.remove(key)
+        } else {
+            None
+        }
+    };
+    drop(removed);
+}
 
 /// A null-terminated UTF-16 string leaked for AviUtl2's lifetime (LPCWSTR).
 fn wide_leak(text: &str) -> *const u16 {
@@ -145,6 +262,21 @@ pub extern "C" fn UninitializePlugin() {
         };
         drop(drained);
     }
+
+    // Drain the pooled cluster sessions (issue #405) the same way: each
+    // MfSession drop disconnects its channel, lets the session thread run
+    // RenderSession::close, and joins it.
+    let drained: Vec<MfSession> = SESSION_POOL
+        .lock()
+        .ok()
+        .and_then(|mut pool| pool.take())
+        .map(|pool| {
+            pool.into_values()
+                .map(|entry| entry.session)
+                .collect()
+        })
+        .unwrap_or_default();
+    drop(drained);
 }
 
 #[unsafe(no_mangle)]
@@ -1223,7 +1355,7 @@ enum ItemReader {
 /// The launch-fixed geometry/time of a session (the AEX identity is fixed per
 /// FilterCtx). A frame whose object geometry or timing differs needs a fresh
 /// session, so this is compared per frame.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct GeomIdentity {
     width: u32,
     height: u32,
@@ -1254,6 +1386,10 @@ struct RenderReq {
     current_time: i32,
     rgba: Vec<u8>,
     parameters: Option<Vec<InteractiveParameter>>,
+    /// The manifest index this frame's plugin holds inside a pooled cluster
+    /// session (issue #405); always 0 for a single-plugin session, which
+    /// never swaps.
+    plugin_index: u32,
     reply: Sender<FrameReply>,
 }
 
@@ -1286,6 +1422,111 @@ impl Drop for MfSession {
     }
 }
 
+/// A render session whose close-time validation failed (issue #405, design
+/// §6/§7). Every session thread inspects its `RenderSession::close` summary;
+/// when the close-time module audit, teardown, or worker-exit checks fail,
+/// the failure is recorded here instead of being dropped — a frame the
+/// session delivered must never stand as an untracked success ("never round
+/// a failure into a success"). Bounded to the most recent failures.
+#[derive(Clone, Debug)]
+struct SessionCloseFailure {
+    /// Identity of the plug-in the session last had loaded, exactly as
+    /// approved at open.
+    plugin: PathBuf,
+    plugin_sha256: String,
+    smart: bool,
+    clustered: bool,
+    /// Why the close was not clean: the session invalidation reason (e.g.
+    /// `module_audit_mismatch`), or the worker exit classification.
+    close_reason: String,
+    /// The close-time module audit outcome when the worker left a final
+    /// report (the audit status or the invalidation detail).
+    module_audit: Option<String>,
+    /// Identity of the worker image that ran the session, hashed at close.
+    worker: PathBuf,
+    worker_sha256: Option<String>,
+    frames_ok: u32,
+    frames_errored: u32,
+    /// What the bridge does about it: the failed session is gone, so the
+    /// next frame for this plug-in opens a fresh worker process (design §6).
+    fallback: &'static str,
+}
+
+/// The recent close-time session failures, oldest first (bounded).
+static SESSION_CLOSE_FAILURES: Mutex<Vec<SessionCloseFailure>> = Mutex::new(Vec::new());
+
+/// Inspects the close summary every session thread produces and records a
+/// non-clean close as a structured failure (issue #405 review): the session
+/// is treated as invalidated, and its frames are not left as a silent
+/// success. An in-flight frame at failure time already resolves to
+/// `SessionLost` in the request loop; this record is what keeps a close-time
+/// failure discovered afterwards — a teardown, audit, or worker-exit failure
+/// with no request in flight — from being dropped.
+fn record_session_close(config: &MfSessionConfig, close: &serde_json::Value) {
+    if close.get("session_clean") == Some(&serde_json::Value::Bool(true)) {
+        return;
+    }
+    let as_u32 = |key: &str| {
+        close
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32
+    };
+    let close_reason = close
+        .get("invalidated_reason")
+        .and_then(|reason| reason.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            close
+                .get("worker")
+                .and_then(|worker| worker.get("classification"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("session_clean=false")
+                .to_owned()
+        });
+    let module_audit = close
+        .get("invalidated_reason")
+        .and_then(|reason| reason.get("detail"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            close
+                .get("final_report")
+                .and_then(|report| report.get("module_audit"))
+                .and_then(|audit| audit.get("status"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    let worker = config.repository.join(if config.smart {
+        "target/minihost-build/aex_smart_worker.exe"
+    } else {
+        "target/minihost-build/aex_render_worker.exe"
+    });
+    let worker_sha256 = std::fs::read(&worker)
+        .ok()
+        .map(|bytes| hex_lower(&Sha256::digest(&bytes)));
+    let failure = SessionCloseFailure {
+        plugin: config.plugin.clone(),
+        plugin_sha256: config.sha.clone(),
+        smart: config.smart,
+        clustered: config.cluster.is_some(),
+        close_reason,
+        module_audit,
+        worker,
+        worker_sha256,
+        frames_ok: as_u32("frames_ok"),
+        frames_errored: as_u32("frames_errored"),
+        fallback: "reopen_fresh_session",
+    };
+    if let Ok(mut failures) = SESSION_CLOSE_FAILURES.lock() {
+        if failures.len() >= 32 {
+            failures.remove(0);
+        }
+        failures.push(failure);
+    }
+}
+
 /// Per-filter userdata carried by the libffi closure. One per registered AEX,
 /// captured by that AEX's single closure and reached as `&FilterCtx` through the
 /// C callback boundary from any AviUtl2 callback thread.
@@ -1307,6 +1548,10 @@ struct FilterCtx {
     dependency: DependencyConfig,
     sha: String,
     smart: bool,
+    /// This AEX's dependency-closure identity from discovery (issue #405).
+    /// When other registered AEXes share it, renders route through the pooled
+    /// cluster session instead of a per-effect worker.
+    closure_identity: Option<String>,
     /// Exposed parameter defaults (normalized), cloned per frame as the baseline.
     defaults: Vec<InteractiveParameter>,
     /// Readers pulling each frame's current config value into the parameters.
@@ -1371,6 +1616,33 @@ struct CacheEntry {
     /// The walked spelling copied from this fallback, if it is still cached.
     #[serde(default)]
     alias_target: Option<String>,
+    /// Normalized hash of the resolved dependency closure (issue #405):
+    /// effects sharing it can be discovered/rendered through one cluster
+    /// session. `None` when the closure never resolved (such an entry cannot
+    /// cluster and always takes the per-plugin path).
+    #[serde(default)]
+    closure_identity: Option<String>,
+    /// Structured record of a cluster-session fallback (issue #405, design
+    /// §6): present when this entry was produced after a cluster discovery
+    /// session failed — never silently rounded into a plain success.
+    #[serde(default)]
+    cluster_fallback: Option<ClusterFallback>,
+}
+
+/// How one cache entry relates to a failed cluster discovery session
+/// (issue #405, design §6).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct ClusterFallback {
+    /// 0-based member index within the cluster session at which it was
+    /// invalidated (0 when the session never opened).
+    at_member: u32,
+    /// The session failure reason (broker invalidation reason, the
+    /// inspect/swap error kind, or "cluster_infeasible").
+    reason: String,
+    /// How this entry was produced instead: `invalidated` for the member the
+    /// session died on (recorded as a failure), `one_shot_fallback` for a
+    /// member re-inspected through the per-plugin path.
+    resolution: String,
 }
 
 /// The resolution behind one cache entry: where it looked, what it sealed, and
@@ -1850,6 +2122,8 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         failure_classification: None,
         alias_fallback: false,
         alias_target: None,
+        closure_identity: None,
+        cluster_fallback: None,
     }
 }
 
@@ -1923,21 +2197,52 @@ fn deterministic_failure(classification: Option<&str>) -> bool {
     matches!(classification, Some("nonzero_exit" | "crashed"))
 }
 
-/// Discovers one AEX, always returning a cache entry (cache-all): `ok = true` for
-/// a discoverable effect, `ok = false` for any failure (a genuine non-effect, or
-/// an AEX the compat host cannot load, or a timeout). Discovery runs on the
-/// background thread, so caching every outcome — even a timeout — means it is not
-/// re-probed on later launches; a spurious negative is cleared by re-touching the
-/// AEX or deleting the cache file (documented in the README).
-fn discover_one(
-    repository: &Path,
+/// The closure identity (issue #405): a normalized hash of the resolved
+/// dependency set — sorted `basename:sha256` pairs — so two plug-ins hash to
+/// the same identity exactly when their closures carry the same modules.
+/// Case-folding the basename matches the loader's own collision rules.
+fn closure_identity_of(dependencies: &[ApprovedImageArtifact]) -> String {
+    let mut entries: Vec<String> = dependencies
+        .iter()
+        .map(|dependency| {
+            let basename = dependency
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_lowercase();
+            format!("{}:{}", basename, hex_lower(&dependency.expected_sha256))
+        })
+        .collect();
+    entries.sort();
+    hex_lower(&Sha256::digest(entries.join("\n").as_bytes()))
+}
+
+/// Everything discovery learns about one AEX before any worker inspects it:
+/// the negative-by-default cache entry (sha + closure recorded) and, when
+/// the closure resolved, the closure itself plus its cluster identity.
+struct PreparedDiscovery {
+    entry: CacheEntry,
+    closure: Option<ResolvedDependencyClosure>,
+    identity: Option<String>,
+}
+
+/// The pre-inspect half of discovery (the legacy `discover_one` up to the
+/// worker dispatch): read + hash the plug-in, resolve and record its
+/// dependency closure. A plug-in whose closure fails records the surveyed
+/// negative here and never reaches an inspect — per-plugin or clustered.
+fn prepare_discovery(
     plugin: &Path,
     dependency: &DependencyConfig,
     build: BuildFingerprint,
-) -> CacheEntry {
+) -> PreparedDiscovery {
     let mut entry = negative_entry(plugin, build);
     let Ok(bytes) = std::fs::read(plugin) else {
-        return entry;
+        return PreparedDiscovery {
+            entry,
+            closure: None,
+            identity: None,
+        };
     };
     entry.sha = hex_lower(&Sha256::digest(&bytes));
     // Seal the plug-in's dependency DLLs with it, so an effect whose imports live
@@ -1974,7 +2279,11 @@ fn discover_one(
                 ..CachedClosure::default()
             },
         };
-        return entry;
+        return PreparedDiscovery {
+            entry,
+            closure: None,
+            identity: None,
+        };
     };
     let sealed_paths: Vec<PathBuf> = closure
         .dependencies()
@@ -1993,6 +2302,24 @@ fn discover_one(
         missing,
         provenance,
     };
+    let identity = closure_identity_of(closure.dependencies());
+    entry.closure_identity = Some(identity.clone());
+    PreparedDiscovery {
+        entry,
+        closure: Some(closure),
+        identity: Some(identity),
+    }
+}
+
+/// The per-plugin inspect: dispatches the one-shot worker for one prepared
+/// AEX and folds the outcome into its cache entry. This is the legacy
+/// discovery path, kept for singleton identities and as the fail-closed
+/// fallback for cluster members (issue #405, design §6).
+fn finish_one_shot(repository: &Path, plugin: &Path, mut prepared: PreparedDiscovery) -> CacheEntry {
+    let Some(closure) = prepared.closure.take() else {
+        return prepared.entry;
+    };
+    let mut entry = prepared.entry;
     match inspect_experimental_with_approved_dependencies_and_diagnostics(
         repository,
         plugin,
@@ -2016,6 +2343,409 @@ fn discover_one(
         }
     }
     entry
+}
+
+/// Discovers one AEX, always returning a cache entry (cache-all): `ok = true` for
+/// a discoverable effect, `ok = false` for any failure (a genuine non-effect, or
+/// an AEX the compat host cannot load, or a timeout). Discovery runs on the
+/// background thread, so caching every outcome — even a timeout — means it is not
+/// re-probed on later launches; a spurious negative is cleared by re-touching the
+/// AEX or deleting the cache file (documented in the README).
+fn discover_one(
+    repository: &Path,
+    plugin: &Path,
+    dependency: &DependencyConfig,
+    build: BuildFingerprint,
+) -> CacheEntry {
+    finish_one_shot(repository, plugin, prepare_discovery(plugin, dependency, build))
+}
+
+/// Parses the parameter rows of an `--l2-params-only`-shape report (what a
+/// discovery session's `inspect_done` carries, design §4.2) into broker
+/// parameters. Mirrors the conversion the one-shot broker path applies to
+/// the same report, so a cluster-inspected effect caches byte-identical
+/// parameters to a one-shot-inspected one.
+fn parameters_from_inspect_report(
+    report: &serde_json::Value,
+) -> Result<Vec<InteractiveParameter>, String> {
+    use serde_json::Value;
+    let rows = report
+        .get("parameters")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "inspection report has no parameters".to_owned())?;
+    let custom_ui_events = report
+        .get("custom_ui")
+        .and_then(|value| value.get("events"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    let mut parameters = Vec::new();
+    for row in rows {
+        let observed_type = row
+            .get("type")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| "inspection parameter has no numeric type".to_owned())?;
+        let observed_index = row
+            .get("index")
+            .and_then(Value::as_u64)
+            .filter(|value| *value <= u64::from(u16::MAX))
+            .ok_or_else(|| "inspection parameter has no bounded index".to_owned())?;
+        let default = row.get("default").and_then(Value::as_f64).unwrap_or(0.0);
+        let ui_flags = row.get("ui_flags").and_then(Value::as_u64).unwrap_or(0);
+        let default_color = row.get("default_color");
+        let channel = |name: &str| {
+            default_color
+                .and_then(|value| value.get(name))
+                .and_then(Value::as_u64)
+                .unwrap_or(if name == "alpha" { 255 } else { 0 }) as u8
+        };
+        let runtime_kind = match observed_type {
+            0 => "layer",
+            3 => "angle",
+            5 => "color",
+            6 => "point",
+            2 | 10 => "float",
+            8 => "custom",
+            9 => "no_data",
+            11 => "arbitrary_data",
+            12 => "path",
+            13 => "group_start",
+            14 => "group_end",
+            15 => "button",
+            18 => "point3d",
+            _ => "integer",
+        };
+        let host_minimum = if observed_type == 12 {
+            0.0
+        } else {
+            row.get("valid_min")
+                .and_then(Value::as_f64)
+                .unwrap_or(default)
+        };
+        let host_maximum = if observed_type == 12 {
+            1024.0
+        } else {
+            row.get("valid_max")
+                .and_then(Value::as_f64)
+                .unwrap_or(default)
+        };
+        let component_count = match observed_type {
+            3 => 1,
+            6 => 2,
+            18 => 3,
+            _ => 0,
+        };
+        if !matches!(
+            observed_type,
+            0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 18
+        ) {
+            continue;
+        }
+        parameters.push(InteractiveParameter {
+            slot: observed_index as u32,
+            name: row
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("Parameter")
+                .to_owned(),
+            kind: runtime_kind.into(),
+            minimum: host_minimum,
+            maximum: host_maximum,
+            value: default,
+            choices: row
+                .get("choices")
+                .and_then(Value::as_str)
+                .map(|text| text.split('|').map(str::to_owned).collect())
+                .unwrap_or_default(),
+            color: [
+                channel("alpha"),
+                channel("red"),
+                channel("green"),
+                channel("blue"),
+            ],
+            components: {
+                let mut result = [0.0; 3];
+                if let Some(values) = row.get("default_components").and_then(Value::as_array) {
+                    for (index, value) in values.iter().take(3).enumerate() {
+                        result[index] = value.as_f64().unwrap_or(0.0);
+                    }
+                }
+                result
+            },
+            component_count,
+            layer_path: None,
+            enabled: ui_flags & (1 << 5) == 0,
+            visible: ui_flags & (1 << 9) == 0,
+            supervised: row.get("flags").and_then(Value::as_u64).unwrap_or(0) & (1 << 6) != 0,
+            debug_summary: row
+                .get("arbitrary_summary")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            custom_ui_events,
+            control_size: [
+                row.get("ui_width").and_then(Value::as_u64).unwrap_or(0) as u16,
+                row.get("ui_height").and_then(Value::as_u64).unwrap_or(0) as u16,
+            ],
+        });
+    }
+    Ok(parameters)
+}
+
+/// Folds a successful cluster-inspect report into a member's cache entry,
+/// the cluster counterpart of the one-shot inspect tail. A report whose
+/// PARAMS_SETUP did not succeed is a plugin-local failure with no
+/// classification (retried), exactly like the one-shot
+/// "AEX rejected PF_PARAMS_SETUP"; a report without the key at all reads as
+/// success, since a failure is always reported through the `error` status
+/// the broker maps to `InspectError`.
+fn fill_entry_from_inspect_report(entry: &mut CacheEntry, report: &serde_json::Value) {
+    if report
+        .get("params_setup_error")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+        != 0
+    {
+        return;
+    }
+    let Ok(params) = parameters_from_inspect_report(report) else {
+        return;
+    };
+    // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
+    entry.smart = report
+        .get("out_flags2")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        & (1 << 10)
+        != 0;
+    entry.params = params;
+    normalize_parameters_for_cache(&mut entry.params);
+    entry.ok = true;
+}
+
+/// One unit of discovery work (issue #405): with the same worker budget as
+/// before, the work items are same-closure clusters (one DiscoverySession
+/// sweep) and singleton plug-ins (the legacy per-plugin inspect).
+enum DiscoveryTask {
+    Single(usize),
+    Cluster(Vec<usize>),
+}
+
+/// Groups the prepared plug-ins into tasks by closure identity. Identities
+/// with 2..=MAX_CLUSTER_PLUGINS members form one cluster task; everything
+/// else — singletons, failed resolutions (no identity), oversized clusters —
+/// stays on the per-plugin path (fail-closed, design §6). Deterministic:
+/// clusters in first-seen identity order, then the remaining singles in scan
+/// order.
+fn plan_tasks(identities: &[Option<String>]) -> Vec<DiscoveryTask> {
+    let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut first_seen: Vec<&str> = Vec::new();
+    for (index, identity) in identities.iter().enumerate() {
+        let Some(identity) = identity else {
+            continue;
+        };
+        groups
+            .entry(identity.as_str())
+            .or_insert_with(|| {
+                first_seen.push(identity.as_str());
+                Vec::new()
+            })
+            .push(index);
+    }
+    let mut clustered: HashSet<usize> = HashSet::new();
+    let mut tasks = Vec::new();
+    for identity in first_seen {
+        let members = &groups[identity];
+        if members.len() >= 2 && members.len() <= MAX_CLUSTER_PLUGINS {
+            clustered.extend(members.iter().copied());
+            tasks.push(DiscoveryTask::Cluster(members.clone()));
+        }
+    }
+    for index in 0..identities.len() {
+        if !clustered.contains(&index) {
+            tasks.push(DiscoveryTask::Single(index));
+        }
+    }
+    tasks
+}
+
+/// Decodes a 64-hex SHA-256 (as stored in `CacheEntry.sha`) into raw bytes
+/// for a launch-approved artifact.
+fn decode_sha256_hex(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut digest = [0u8; 32];
+    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        let high = (pair[0] as char).to_digit(16)?;
+        let low = (pair[1] as char).to_digit(16)?;
+        digest[index] = ((high << 4) | low) as u8;
+    }
+    Some(digest)
+}
+
+/// Re-inspects members per-plugin after a cluster session failure, recording
+/// the fallback on every entry (issue #405, design §6). The failed member
+/// itself is not retried here — the design records it as a failure, since
+/// the same fault would likely recur and cost another full closure staging.
+fn fallback_members(
+    repository: &Path,
+    members: Vec<(PathBuf, PreparedDiscovery)>,
+    at_member: u32,
+    reason: &str,
+) -> Vec<(PathBuf, CacheEntry)> {
+    members
+        .into_iter()
+        .map(|(path, prepared)| {
+            let mut entry = finish_one_shot(repository, &path, prepared);
+            entry.cluster_fallback = Some(ClusterFallback {
+                at_member,
+                reason: reason.to_owned(),
+                resolution: "one_shot_fallback".to_owned(),
+            });
+            (path, entry)
+        })
+        .collect()
+}
+
+/// Discovers one same-closure cluster through a single DiscoverySession
+/// (issue #405, design §4.2): the closure is sealed and mapped once, and
+/// each member is inspected by index. Every failure is fail-closed — an
+/// infeasible cluster, a failed open, or an invalidation mid-sweep falls the
+/// not-yet-processed members back to the per-plugin path with a structured
+/// `cluster_fallback` note, and a close-time audit rejection redoes every
+/// session-inspected member per-plugin.
+fn discover_cluster(
+    repository: &Path,
+    dependency: &DependencyConfig,
+    build: BuildFingerprint,
+    members: Vec<(PathBuf, PreparedDiscovery)>,
+) -> Vec<(PathBuf, CacheEntry)> {
+    let member_count = members.len();
+    // Every member's closure resolved to the same identity, so the first
+    // member's dependency set stands for the whole cluster.
+    let shared_dependencies = members[0]
+        .1
+        .closure
+        .as_ref()
+        .map(|closure| closure.dependencies().to_vec());
+    let mut plugins = Vec::with_capacity(member_count);
+    for (path, prepared) in &members {
+        let Some(expected_sha256) = decode_sha256_hex(&prepared.entry.sha) else {
+            return fallback_members(repository, members, 0, "member sha256 undecodable");
+        };
+        plugins.push(ApprovedImageArtifact {
+            path: path.clone(),
+            expected_sha256,
+            expected_size: prepared.entry.len,
+        });
+    }
+    let Some(shared_dependencies) = shared_dependencies else {
+        // Identity exists only when the closure resolved, so this cannot
+        // happen; stay fail-closed anyway.
+        return fallback_members(repository, members, 0, "cluster closure unavailable");
+    };
+    let declared = member_count + shared_dependencies.len();
+    if member_count > MAX_CLUSTER_PLUGINS
+        || declared + CLUSTER_MODULE_HEADROOM > MAX_CLUSTER_MODULE_BOUND
+    {
+        return fallback_members(repository, members, 0, "cluster_infeasible");
+    }
+    let mut session = match DiscoverySession::open(DiscoverySessionOpenRequest {
+        repository,
+        plugins,
+        dependencies: shared_dependencies,
+        module_bound: (declared + CLUSTER_MODULE_HEADROOM) as u32,
+        inspect_deadline: CLUSTER_INSPECT_DEADLINE,
+    }) {
+        Ok(session) => session,
+        Err(error) => {
+            return fallback_members(
+                repository,
+                members,
+                0,
+                &format!("cluster session open failed: {error}"),
+            );
+        }
+    };
+
+    let mut results: Vec<(PathBuf, CacheEntry)> = Vec::with_capacity(member_count);
+    // Indices whose entry came from a session exchange; a close-time audit
+    // rejection makes exactly these untrusted.
+    let mut session_produced: Vec<usize> = Vec::new();
+    let mut invalidated: Option<(u32, String)> = None;
+    for (index, (path, prepared)) in members.into_iter().enumerate() {
+        if let Some((at_member, reason)) = &invalidated {
+            let (path, entry) = fallback_members(repository, vec![(path, prepared)], *at_member, reason)
+                .into_iter()
+                .next()
+                .expect("one member yields one entry");
+            results.push((path, entry));
+            continue;
+        }
+        let request_index = index as u32;
+        match session.inspect_plugin(request_index, request_index) {
+            Ok(InspectOutcome::Inspected { report }) => {
+                let mut entry = prepared.entry;
+                fill_entry_from_inspect_report(&mut entry, &report);
+                session_produced.push(results.len());
+                results.push((path, entry));
+            }
+            // A parameter-local failure (design §4.2): the session stays
+            // usable, the member records the same verdict the one-shot path
+            // would produce.
+            Ok(InspectOutcome::InspectError { error_kind, .. }) => {
+                let mut entry = prepared.entry;
+                entry.failure_classification = match error_kind.as_str() {
+                    // The one-shot exit-12 equivalent: genuinely not an
+                    // effect (or no resolvable entrypoint) — deterministic.
+                    "entrypoint_unresolved" => Some("nonzero_exit".to_owned()),
+                    // PARAMS_SETUP rejected: no classification, retried like
+                    // the one-shot "AEX rejected PF_PARAMS_SETUP".
+                    _ => None,
+                };
+                results.push((path, entry));
+            }
+            // Session invalidation (design §6): this member is recorded as a
+            // structured failure, the remaining members fall back per-plugin.
+            Err(error) => {
+                let reason = format!("{error}");
+                let mut entry = prepared.entry;
+                entry.failure_classification = Some("cluster_session_invalidated".to_owned());
+                entry.cluster_fallback = Some(ClusterFallback {
+                    at_member: request_index,
+                    reason: reason.clone(),
+                    resolution: "invalidated".to_owned(),
+                });
+                results.push((path, entry));
+                invalidated = Some((request_index, reason));
+            }
+        }
+    }
+    let close = session.close();
+    if invalidated.is_none()
+        && close.get("session_clean") != Some(&serde_json::Value::Bool(true))
+    {
+        // The exchanges completed but close-time validation (the declared-set
+        // module audit, design §5) rejected the session: results produced
+        // inside it cannot be trusted, so every session-inspected member is
+        // redone per-plugin with a fallback note.
+        let reason = close
+            .get("invalidated_reason")
+            .and_then(|invalidation| invalidation.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("session close not clean")
+            .to_owned();
+        for position in session_produced {
+            let (path, _) = results[position].clone();
+            let mut entry = discover_one(repository, &path, dependency, build);
+            entry.cluster_fallback = Some(ClusterFallback {
+                at_member: member_count as u32,
+                reason: reason.clone(),
+                resolution: "one_shot_fallback".to_owned(),
+            });
+            results[position] = (path, entry);
+        }
+    }
+    results
 }
 
 /// Keep broker parameters JSON-round-trippable before they enter the persistent
@@ -2048,11 +2778,23 @@ fn normalize_parameters_for_cache(parameters: &mut [InteractiveParameter]) {
 
 /// Discovers the given AEX with low bounded parallelism (to keep each discovery
 /// under the worker deadline — high concurrency causes contention false-timeouts),
-/// work-stealing over the slice and caching every result. Stops promptly when
-/// `DISCOVERY_SHUTDOWN` is set (plugin unload); unprocessed paths stay misses and
-/// are retried next launch. A panic in `discover_one` (arbitrary third-party AEX)
-/// is caught and turned into a negative entry, so one bad plug-in cannot abort the
-/// process by unwinding out of the scoped thread.
+/// caching every result. Stops promptly when `DISCOVERY_SHUTDOWN` is set (plugin
+/// unload); unprocessed paths stay misses and are retried next launch.
+///
+/// Two phases with the same worker budget (`MAX_DISCOVERY_PARALLELISM`)
+/// throughout (issue #405):
+///
+/// 1. Prepare, work-stealing per plug-in: read + hash and resolve the
+///    dependency closure (the pre-inspect half of the legacy path), yielding
+///    the closure identity each plug-in clusters on.
+/// 2. Inspect, work-stealing per *task*: plug-ins sharing one closure
+///    identity form a cluster task swept by a single DiscoverySession
+///    (design §8); singletons and failed resolutions keep the per-plugin
+///    one-shot inspect.
+///
+/// A panic in any task (arbitrary third-party AEX) is caught and turned into
+/// negative entries, so one bad plug-in cannot abort the process by
+/// unwinding out of the scoped thread.
 fn discover_all(
     repository: &Path,
     paths: &[PathBuf],
@@ -2064,11 +2806,15 @@ fn discover_all(
         .unwrap_or(1)
         .min(MAX_DISCOVERY_PARALLELISM)
         .min(paths.len().max(1));
+
+    // Phase 1: prepare every plug-in (read + closure resolution) in parallel.
     let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<(PathBuf, CacheEntry)>> = Mutex::new(Vec::with_capacity(paths.len()));
+    let slots: Mutex<Vec<Option<(PathBuf, PreparedDiscovery)>>> =
+        Mutex::new((0..paths.len()).map(|_| None).collect());
     std::thread::scope(|scope| {
         for _ in 0..parallelism {
             scope.spawn(|| {
+                let slots = &slots;
                 loop {
                     if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
                         break;
@@ -2078,12 +2824,108 @@ fn discover_all(
                         break;
                     }
                     let plugin = &paths[index];
-                    let entry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        discover_one(repository, plugin, dependency, build)
+                    let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        prepare_discovery(plugin, dependency, build)
                     }))
-                    .unwrap_or_else(|_| negative_entry(plugin, build));
-                    if let Ok(mut results) = results.lock() {
-                        results.push((plugin.clone(), entry));
+                    .unwrap_or_else(|_| PreparedDiscovery {
+                        entry: negative_entry(plugin, build),
+                        closure: None,
+                        identity: None,
+                    });
+                    if let Ok(mut slots) = slots.lock() {
+                        slots[index] = Some((plugin.clone(), prepared));
+                    }
+                }
+            });
+        }
+    });
+    let slots = slots.into_inner().unwrap_or_else(|poison| poison.into_inner());
+    let identities: Vec<Option<String>> = slots
+        .iter()
+        .map(|slot| slot.as_ref().and_then(|(_, prepared)| prepared.identity.clone()))
+        .collect();
+    let tasks = plan_tasks(&identities);
+
+    // Phase 2: process tasks with the same worker budget. A cluster is one
+    // unit of work: its members are inspected sequentially inside one
+    // DiscoverySession on the worker that picked the task up.
+    let next = AtomicUsize::new(0);
+    let slots = Mutex::new(slots);
+    let results: Mutex<Vec<(PathBuf, CacheEntry)>> = Mutex::new(Vec::with_capacity(paths.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..parallelism {
+            scope.spawn(|| {
+                let slots = &slots;
+                let results = &results;
+                loop {
+                    if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= tasks.len() {
+                        break;
+                    }
+                    match &tasks[index] {
+                        DiscoveryTask::Single(slot_index) => {
+                            let taken = slots
+                                .lock()
+                                .ok()
+                                .and_then(|mut slots| slots[*slot_index].take());
+                            let Some((plugin, prepared)) = taken else {
+                                continue;
+                            };
+                            let entry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                || finish_one_shot(repository, &plugin, prepared),
+                            ))
+                            .unwrap_or_else(|_| negative_entry(&plugin, build));
+                            if let Ok(mut results) = results.lock() {
+                                results.push((plugin, entry));
+                            }
+                        }
+                        DiscoveryTask::Cluster(indices) => {
+                            let mut members = Vec::with_capacity(indices.len());
+                            if let Ok(mut slots) = slots.lock() {
+                                for slot_index in indices {
+                                    if let Some(member) = slots[*slot_index].take() {
+                                        members.push(member);
+                                    }
+                                }
+                            }
+                            if members.is_empty() {
+                                continue;
+                            }
+                            // A shutdown gap can leave a cluster with a single
+                            // prepared member; it takes the per-plugin path.
+                            if members.len() == 1 {
+                                let (plugin, prepared) = members.pop().expect("one member");
+                                let entry = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| {
+                                        finish_one_shot(repository, &plugin, prepared)
+                                    }),
+                                )
+                                .unwrap_or_else(|_| negative_entry(&plugin, build));
+                                if let Ok(mut results) = results.lock() {
+                                    results.push((plugin, entry));
+                                }
+                                continue;
+                            }
+                            let member_paths: Vec<PathBuf> =
+                                members.iter().map(|(path, _)| path.clone()).collect();
+                            let cluster_results = std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| {
+                                    discover_cluster(repository, dependency, build, members)
+                                }),
+                            )
+                            .unwrap_or_else(|_| {
+                                member_paths
+                                    .into_iter()
+                                    .map(|path| (path.clone(), negative_entry(&path, build)))
+                                    .collect()
+                            });
+                            if let Ok(mut results) = results.lock() {
+                                results.extend(cluster_results);
+                            }
+                        }
                     }
                 }
             });
@@ -2136,13 +2978,31 @@ fn register_discovered(
         dependency: dependency.clone(),
         sha: entry.sha.clone(),
         smart: entry.smart,
-        defaults,
+        closure_identity: entry.closure_identity.clone(),
+        defaults: defaults.clone(),
         readers,
         sessions: Mutex::new(HashMap::new()),
     }));
     // Register this filter's session map so UninitializePlugin can drain it.
     if let Ok(mut maps) = SESSION_MAPS.lock() {
         maps.push(&userdata.sessions);
+    }
+    // Register the closure-identity cluster membership (issue #405), so the
+    // render pool can open one cluster session covering every registered AEX
+    // that shares this entry's dependency closure.
+    if let Some(identity) = &entry.closure_identity
+        && let Ok(mut registry) = CLUSTER_REGISTRY.lock()
+    {
+        registry
+            .get_or_insert_with(HashMap::new)
+            .entry(identity.clone())
+            .or_default()
+            .push(ClusterMember {
+                plugin: plugin.to_path_buf(),
+                sha: entry.sha.clone(),
+                smart: entry.smart,
+                defaults,
+            });
     }
 
     let cif = Cif::new([Type::pointer()], Type::u8());
@@ -2448,19 +3308,22 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
         time_scale,
     };
 
-    // Reuse a live matching session, else open one outside the map lock (open
-    // blocks for seconds spawning the worker). The blocking render round-trip
-    // below runs off-lock too, so concurrent objects/threads never serialize on
-    // the map.
-    let (tx, serial) = match existing_sender(&ctx.sessions, effect_id, &identity) {
-        Some(pair) => pair,
-        None => match open_and_get_sender(ctx, effect_id, &identity) {
-            Ok(pair) => pair,
-            Err(_) => return false,
-        },
+    // Reuse a live matching session, else open one outside the map/pool lock
+    // (open blocks for seconds spawning the worker). The blocking render
+    // round-trip below runs off-lock too, so concurrent objects/threads never
+    // serialize on the map. An AEX sharing its dependency closure with other
+    // registered AEXes routes through the pooled cluster session (issue
+    // #405); everything else keeps the per-effect session.
+    let route = match route_session(ctx, effect_id, &identity) {
+        Ok(route) => route,
+        Err(()) => return false,
+    };
+    let (tx, plugin_index) = match &route {
+        SessionRoute::PerEffect(tx, _) => (tx.clone(), 0),
+        SessionRoute::Pooled(tx, _, plugin_index, _) => (tx.clone(), *plugin_index),
     };
 
-    match render_on(&tx, current_time, rgba, parameters) {
+    match render_on(&tx, plugin_index, current_time, rgba, parameters) {
         FrameReply::Rendered(frame) => {
             // A filter object cannot change the image size; reject a resized frame.
             if frame.width != width || frame.height != height {
@@ -2477,10 +3340,137 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
         FrameReply::SessionLost(_) => {
             // Drop this exact instance so the next frame reopens, without
             // disturbing a healthy session a concurrent reopen may have installed.
-            remove_session(&ctx.sessions, effect_id, serial);
+            match route {
+                SessionRoute::PerEffect(_, serial) => remove_session(&ctx.sessions, effect_id, serial),
+                SessionRoute::Pooled(_, serial, _, key) => pool_remove(&key, serial),
+            }
             true
         }
     }
+}
+
+/// Which session serves one frame (issue #405): the per-effect session (one
+/// AEX, keyed by `effect_id`), or the pooled cluster session keyed by
+/// (closure identity, geometry, smart) with the frame's plugin selected by
+/// manifest index.
+enum SessionRoute {
+    PerEffect(Sender<RenderReq>, u64),
+    Pooled(Sender<RenderReq>, u64, u32, PoolKey),
+}
+
+/// Selects the session for one frame. The pooled cluster session wins
+/// whenever this AEX shares its closure identity with at least one other
+/// registered AEX of the same smart flavor (design §8); singleton and
+/// structurally oversized clusters keep the per-effect path (fail-closed).
+fn route_session(ctx: &FilterCtx, effect_id: i64, identity: &GeomIdentity) -> Result<SessionRoute, ()> {
+    if let Some(closure_identity) = &ctx.closure_identity {
+        let key = PoolKey {
+            closure_identity: closure_identity.clone(),
+            geom: identity.clone(),
+            smart: ctx.smart,
+        };
+        if let Some((tx, serial, plugin_index)) = pool_sender(&key, &ctx.plugin) {
+            return Ok(SessionRoute::Pooled(tx, serial, plugin_index, key));
+        }
+        let members = cluster_registry_members(&key, &ctx.plugin);
+        if members.len() >= 2 && members.len() <= MAX_CLUSTER_PLUGINS {
+            return pool_open_route(ctx, &key, members).map_err(|_| ());
+        }
+    }
+    let (tx, serial) = match existing_sender(&ctx.sessions, effect_id, identity) {
+        Some(pair) => pair,
+        None => open_and_get_sender(ctx, effect_id, identity).map_err(|_| ())?,
+    };
+    Ok(SessionRoute::PerEffect(tx, serial))
+}
+
+/// Opens a pooled cluster session for `key` off-lock, then installs it under
+/// a brief lock. If another thread won the race, keeps the installed session
+/// and drops ours off-lock. `members` is the manifest order, requester
+/// first.
+fn pool_open_route(
+    ctx: &FilterCtx,
+    key: &PoolKey,
+    members: Vec<ClusterMember>,
+) -> Result<SessionRoute, String> {
+    let plugins: Vec<(PathBuf, String)> = members
+        .iter()
+        .map(|member| (member.plugin.clone(), member.sha.clone()))
+        .collect();
+    let plugin_index = plugins
+        .iter()
+        .position(|(path, _)| path == &ctx.plugin)
+        .ok_or_else(|| "requester is not a cluster member".to_owned())?
+        as u32;
+    // The swap payload for a member is its exposed defaults, encoded the way
+    // the launch payload is (design §2.1/§4.1); the entry for plugins[0] is
+    // ignored because the launch argv payload wins.
+    let swap_payloads: Vec<Option<String>> = members
+        .iter()
+        .enumerate()
+        .map(|(index, member)| {
+            if index == 0 || member.defaults.is_empty() {
+                None
+            } else {
+                encode_interactive_payload(&member.defaults).ok()
+            }
+        })
+        .collect();
+    let opened = open_mf_session(MfSessionConfig {
+        repository: ctx.repository.clone(),
+        plugin: ctx.plugin.clone(),
+        dependency: ctx.dependency.clone(),
+        sha: ctx.sha.clone(),
+        smart: ctx.smart,
+        defaults: ctx.defaults.clone(),
+        identity: key.geom.clone(),
+        cluster: Some(ClusterLaunch {
+            plugins: plugins.clone(),
+            swap_payloads,
+        }),
+    })?;
+    let serial = opened.serial;
+    let plugin_paths: Vec<PathBuf> = plugins.iter().map(|(path, _)| path.clone()).collect();
+    let mut discard = None;
+    let (tx, serial, plugin_index) = {
+        let mut guard = SESSION_POOL
+            .lock()
+            .map_err(|_| "session pool poisoned".to_owned())?;
+        let map = guard.get_or_insert_with(HashMap::new);
+        let existing = map.get_mut(key).and_then(|entry| {
+            let index = entry.plugins.iter().position(|path| path == &ctx.plugin)?;
+            entry.session.last_used = Instant::now();
+            entry
+                .session
+                .sender()
+                .map(|tx| (tx, entry.session.serial, index as u32))
+        });
+        match existing {
+            // Lost the race; keep the installed session, discard ours off-lock.
+            Some(installed) => {
+                discard = Some(PoolEntry {
+                    session: opened,
+                    plugins: plugin_paths,
+                });
+                installed
+            }
+            None => {
+                let tx = opened
+                    .sender()
+                    .expect("a freshly opened session has a live sender");
+                map.insert(
+                    key.clone(),
+                    PoolEntry {
+                        session: opened,
+                        plugins: plugin_paths,
+                    },
+                );
+                (tx, serial, plugin_index)
+            }
+        }
+    };
+    drop(discard);
+    Ok(SessionRoute::Pooled(tx, serial, plugin_index, key.clone()))
 }
 
 /// The owned launch config moved into a session's thread.
@@ -2492,6 +3482,18 @@ struct MfSessionConfig {
     smart: bool,
     defaults: Vec<InteractiveParameter>,
     identity: GeomIdentity,
+    /// Cluster launch (issue #405): when set, the session opens over the
+    /// whole same-closure cluster and swaps plugins per request instead of
+    /// serving a single AEX.
+    cluster: Option<ClusterLaunch>,
+}
+
+/// The cluster a pooled session opens over (issue #405): the manifest order
+/// (requester first) and each member's swap payload. `plugins[0]` is always
+/// the requesting AEX, matching the base request's positional contract.
+struct ClusterLaunch {
+    plugins: Vec<(PathBuf, String)>,
+    swap_payloads: Vec<Option<String>>,
 }
 
 /// Opens a session on its own thread, which owns the `!Send` `RenderSession` and
@@ -2519,7 +3521,8 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         return;
                     }
                 };
-            let mut session = match RenderSession::open(SessionOpenRequest {
+            let dependency_count = dependencies.len();
+            let request = SessionOpenRequest {
                 repository: &config.repository,
                 plugin_path: &config.plugin,
                 plugin_sha256: &config.sha,
@@ -2550,15 +3553,79 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 gpu_backend: RenderGpuBackend::Auto,
                 gpu_runtime_policy: None,
                 payload_override: None,
-            }) {
-                Ok(session) => session,
-                Err(error) => {
-                    let _ = open_tx.send(Err(format!("RenderSession::open failed: {error}")));
-                    return;
+            };
+            // A pooled session opens over the whole same-closure cluster
+            // (issue #405): staging, hashing, the ACL, and the closure's
+            // LoadLibrary happen once for every member. A structurally
+            // infeasible cluster degrades fail-closed to the plain
+            // single-plugin session for the requester.
+            let (mut session, cluster_plugin_count) = match &config.cluster {
+                Some(cluster) => {
+                    let mut plugins = Vec::with_capacity(cluster.plugins.len());
+                    for (path, sha) in &cluster.plugins {
+                        let Some(expected_sha256) = decode_sha256_hex(sha) else {
+                            let _ = open_tx.send(Err(format!(
+                                "cluster member sha256 is undecodable: {}",
+                                path.display()
+                            )));
+                            return;
+                        };
+                        let expected_size = match std::fs::metadata(path) {
+                            Ok(metadata) => metadata.len(),
+                            Err(error) => {
+                                let _ = open_tx.send(Err(format!(
+                                    "cluster member is unreadable: {}: {error}",
+                                    path.display()
+                                )));
+                                return;
+                            }
+                        };
+                        plugins.push(ApprovedImageArtifact {
+                            path: path.clone(),
+                            expected_sha256,
+                            expected_size,
+                        });
+                    }
+                    let declared = plugins.len() + dependency_count;
+                    if plugins.len() > MAX_CLUSTER_PLUGINS
+                        || declared + CLUSTER_MODULE_HEADROOM > MAX_CLUSTER_MODULE_BOUND
+                    {
+                        match RenderSession::open(request) {
+                            Ok(session) => (session, 0),
+                            Err(error) => {
+                                let _ = open_tx
+                                    .send(Err(format!("RenderSession::open failed: {error}")));
+                                return;
+                            }
+                        }
+                    } else {
+                        match RenderSession::open_cluster(
+                            request,
+                            ClusterRenderPlugins {
+                                plugins,
+                                swap_payloads: cluster.swap_payloads.clone(),
+                                module_bound: (declared + CLUSTER_MODULE_HEADROOM) as u32,
+                            },
+                        ) {
+                            Ok(session) => (session, cluster.plugins.len() as u32),
+                            Err(error) => {
+                                let _ = open_tx
+                                    .send(Err(format!("RenderSession::open_cluster failed: {error}")));
+                                return;
+                            }
+                        }
+                    }
                 }
+                None => match RenderSession::open(request) {
+                    Ok(session) => (session, 0),
+                    Err(error) => {
+                        let _ = open_tx.send(Err(format!("RenderSession::open failed: {error}")));
+                        return;
+                    }
+                },
             };
             if open_tx.send(Ok(())).is_err() {
-                let _ = session.close();
+                record_session_close(&config, &session.close());
                 return;
             }
 
@@ -2566,7 +3633,34 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
             // check, decoupled from AviUtl2's `object.frame` (the host re-renders
             // and scrubs the same frame); AE time rides `current_time`.
             let mut frame_index: u32 = 0;
+            let mut current_plugin: u32 = 0;
             while let Ok(req) = rx.recv() {
+                // Pooled cluster session: swap to the frame's plugin first
+                // (design §4.1). A plugin-local GLOBAL_SETUP failure is
+                // reported frame-local and the session stays usable; an
+                // invalidation loses the session (design §6).
+                if cluster_plugin_count > 0 && req.plugin_index != current_plugin {
+                    if req.plugin_index >= cluster_plugin_count {
+                        let _ = req.reply.send(FrameReply::SessionLost(
+                            "cluster plugin index is outside the manifest".into(),
+                        ));
+                        break;
+                    }
+                    match session.swap_plugin(req.plugin_index) {
+                        Ok(SwapOutcome::Swapped) => current_plugin = req.plugin_index,
+                        Ok(SwapOutcome::PluginError { global_setup_error }) => {
+                            current_plugin = req.plugin_index;
+                            let _ = req.reply.send(FrameReply::FrameLocal(global_setup_error));
+                            continue;
+                        }
+                        Err(error) => {
+                            let _ = req.reply.send(FrameReply::SessionLost(format!(
+                                "swap_plugin failed: {error}"
+                            )));
+                            break;
+                        }
+                    }
+                }
                 let outcome = session.render_frame_with_parameters(
                     frame_index,
                     req.current_time,
@@ -2611,7 +3705,11 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                     break;
                 }
             }
-            let _ = session.close();
+            // The close-time checks (module audit, teardown, worker exit) are
+            // part of the session's acceptance criteria (design §5/§7): a
+            // non-clean close invalidates the session's delivered frames and
+            // is recorded structurally, never dropped.
+            record_session_close(&config, &session.close());
         })
         .map_err(|error| format!("failed to spawn session thread: {error}"))?;
 
@@ -2635,9 +3733,11 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
 }
 
 /// Renders one frame by round-tripping through a session's owning thread, with
-/// no map lock held.
+/// no map lock held. `plugin_index` selects the frame's plugin inside a pooled
+/// cluster session (0 for a single-plugin session, which never swaps).
 fn render_on(
     tx: &Sender<RenderReq>,
+    plugin_index: u32,
     current_time: i32,
     rgba: Vec<u8>,
     parameters: Option<Vec<InteractiveParameter>>,
@@ -2648,6 +3748,7 @@ fn render_on(
             current_time,
             rgba,
             parameters,
+            plugin_index,
             reply: reply_tx,
         })
         .is_err()
@@ -2708,6 +3809,7 @@ fn open_and_get_sender(
         smart: ctx.smart,
         defaults: ctx.defaults.clone(),
         identity: identity.clone(),
+        cluster: None,
     })?;
     let serial = opened.serial;
     let mut discard: Vec<MfSession> = Vec::new();
@@ -2864,6 +3966,8 @@ mod tests {
             failure_classification: None,
             alias_fallback: false,
             alias_target: None,
+            closure_identity: None,
+            cluster_fallback: None,
         }
     }
 
@@ -4736,5 +5840,324 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    // --- cluster sessions (issue #405) ---
+
+    fn artifact(name: &str, sha_byte: u8) -> ApprovedImageArtifact {
+        ApprovedImageArtifact {
+            path: PathBuf::from(format!(r"C:\plugins\{name}")),
+            expected_sha256: [sha_byte; 32],
+            expected_size: 64,
+        }
+    }
+
+    #[test]
+    fn closure_identity_is_order_independent_and_content_sensitive() {
+        let first = vec![artifact("a.dll", 1), artifact("B.dll", 2)];
+        let mut reversed = first.clone();
+        reversed.reverse();
+        assert_eq!(closure_identity_of(&first), closure_identity_of(&reversed));
+        // Basenames fold the way the loader's collision rules fold.
+        let folded = vec![artifact("A.dll", 1), artifact("b.dll", 2)];
+        assert_eq!(closure_identity_of(&first), closure_identity_of(&folded));
+        // Same names, different bytes: a different closure.
+        let changed = vec![artifact("a.dll", 1), artifact("B.dll", 3)];
+        assert_ne!(closure_identity_of(&first), closure_identity_of(&changed));
+        let missing = vec![artifact("a.dll", 1)];
+        assert_ne!(closure_identity_of(&first), closure_identity_of(&missing));
+    }
+
+    #[test]
+    fn plan_tasks_clusters_only_shareable_identities() {
+        let identity = |tag: &str| Some(tag.to_owned());
+        let identities = vec![
+            identity("cluster"),
+            identity("cluster"),
+            identity("single"),
+            None,
+            identity("cluster"),
+        ];
+        let tasks = plan_tasks(&identities);
+        // One cluster over members 0/1/4 (first-seen), then singles in scan
+        // order for the singleton identity and the failed resolution.
+        assert_eq!(tasks.len(), 3);
+        match &tasks[0] {
+            DiscoveryTask::Cluster(members) => assert_eq!(members, &[0, 1, 4]),
+            _ => panic!("first task must be the cluster"),
+        }
+        for (task, expected) in tasks[1..].iter().zip([2usize, 3usize]) {
+            match task {
+                DiscoveryTask::Single(index) => assert_eq!(*index, expected),
+                _ => panic!("expected a singleton task"),
+            }
+        }
+    }
+
+    #[test]
+    fn plan_tasks_keeps_oversized_clusters_on_the_per_plugin_path() {
+        let identities: Vec<Option<String>> = (0..=MAX_CLUSTER_PLUGINS)
+            .map(|_| Some("huge".to_owned()))
+            .collect();
+        let tasks = plan_tasks(&identities);
+        assert!(tasks.iter().all(|task| matches!(task, DiscoveryTask::Single(_))));
+        assert_eq!(tasks.len(), MAX_CLUSTER_PLUGINS + 1);
+    }
+
+    #[test]
+    fn decode_sha256_hex_accepts_only_64_hex_digits() {
+        let hex = "ab".repeat(32);
+        assert_eq!(decode_sha256_hex(&hex).unwrap()[0], 0xab);
+        assert!(decode_sha256_hex(&"ab".repeat(31)).is_none());
+        assert!(decode_sha256_hex(&format!("{}zz", "ab".repeat(31))).is_none());
+    }
+
+    #[test]
+    fn inspect_report_parameters_mirror_the_one_shot_conversion() {
+        let report = serde_json::json!({
+            "params_setup_error": 0,
+            "out_flags2": 1 << 10,
+            "parameters": [
+                {"index": 1, "type": 2, "name": "Gain", "default": 0.5,
+                 "valid_min": 0.0, "valid_max": 100.0},
+                {"index": 2, "type": 4, "name": "Enable", "default": 1.0,
+                 "valid_min": 0, "valid_max": 1, "ui_flags": 0},
+                {"index": 3, "type": 7, "name": "Mode", "default": 2.0,
+                 "valid_min": 1, "valid_max": 3, "choices": "A|B|C"},
+                {"index": 4, "type": 5, "name": "Tint",
+                 "default_color": {"alpha": 255, "red": 10, "green": 20, "blue": 30}},
+                {"index": 5, "type": 99, "name": "Unknown"}
+            ]
+        });
+        let mut entry = negative_entry(Path::new("effect.aex"), build(1));
+        fill_entry_from_inspect_report(&mut entry, &report);
+        assert!(entry.ok, "a clean report marks the entry discovered");
+        assert!(entry.smart, "out_flags2 bit 10 advertises SmartFX");
+        assert_eq!(entry.params.len(), 4, "unknown parameter kinds are skipped");
+        assert_eq!(entry.params[0].kind, "float");
+        assert_eq!(entry.params[0].slot, 1);
+        assert_eq!(entry.params[0].value, 0.5);
+        assert_eq!(entry.params[0].minimum, 0.0);
+        assert_eq!(entry.params[0].maximum, 100.0);
+        assert_eq!(entry.params[1].kind, "integer");
+        assert_eq!(entry.params[2].choices, vec!["A", "B", "C"]);
+        assert_eq!(entry.params[3].color, [255, 10, 20, 30]);
+
+        // PARAMS_SETUP rejection is a plugin-local failure, not a discovery.
+        let rejected = serde_json::json!({"params_setup_error": 25, "parameters": []});
+        let mut entry = negative_entry(Path::new("effect.aex"), build(1));
+        fill_entry_from_inspect_report(&mut entry, &rejected);
+        assert!(!entry.ok);
+        assert!(entry.params.is_empty());
+    }
+
+    // --- cluster session smoke tests against the protocol fixture (issue #405) ---
+
+    #[cfg(windows)]
+    mod cluster_smoke {
+        use super::*;
+
+        /// Serializes the fixture-driven smoke tests: the fixture's behavior
+        /// is selected through the inherited process environment.
+        static BEHAVIOR_LOCK: Mutex<()> = Mutex::new(());
+
+        fn build_session_fixture() -> PathBuf {
+            let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../broker/Cargo.toml");
+            let status = std::process::Command::new(env!("CARGO"))
+                .args(["build", "--manifest-path"])
+                .arg(&manifest)
+                .args(["-p", "dummy-workers", "--bin", "session_protocol_worker"])
+                .status()
+                .expect("run cargo build for the session protocol fixture");
+            assert!(status.success(), "session protocol fixture build failed");
+            manifest
+                .parent()
+                .expect("workspace root")
+                .join("target/debug/session_protocol_worker.exe")
+        }
+
+        /// A temp repository whose `target/minihost-build/aex_render_worker.exe`
+        /// is the protocol fixture and whose two "plug-ins" are two copies of
+        /// one real PE image, so the closure resolver sees identical import
+        /// sets — one shared closure identity, exactly the cluster shape. The
+        /// L2 worker is deliberately absent: the one-shot inspect cannot
+        /// succeed here, so a successful entry proves the cluster session
+        /// path produced it.
+        fn cluster_repository() -> (PathBuf, PathBuf, PathBuf) {
+            let fixture = build_session_fixture();
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "aexcompat-mf-cluster-{}-{nonce:032x}",
+                std::process::id()
+            ));
+            let worker_dir = root.join("target/minihost-build");
+            std::fs::create_dir_all(&worker_dir).unwrap();
+            std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+            let one = root.join("one.aex");
+            let two = root.join("two.aex");
+            std::fs::copy(&fixture, &one).unwrap();
+            std::fs::copy(&fixture, &two).unwrap();
+            (root, one, two)
+        }
+
+        fn dependency() -> DependencyConfig {
+            DependencyConfig {
+                dirs: Vec::new(),
+                module_limit: None,
+                byte_limit: None,
+            }
+        }
+
+        #[test]
+        fn cluster_discovery_sweeps_same_closure_plugins_in_one_session() {
+            let _guard = BEHAVIOR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+            }
+            let (root, one, two) = cluster_repository();
+            let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+            assert_eq!(results.len(), 2, "every plug-in gets a result");
+            let identities: Vec<&Option<String>> = results
+                .iter()
+                .map(|(_, entry)| &entry.closure_identity)
+                .collect();
+            assert_eq!(identities[0], identities[1]);
+            assert!(identities[0].is_some(), "both closures resolved");
+            for (path, entry) in &results {
+                assert!(
+                    entry.ok,
+                    "cluster session discovery must succeed for {}",
+                    path.display()
+                );
+                assert!(entry.cluster_fallback.is_none());
+            }
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn cluster_discovery_falls_back_structurally_when_the_session_dies() {
+            let _guard = BEHAVIOR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            unsafe {
+                std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", "crash_on_inspect");
+            }
+            let (root, one, two) = cluster_repository();
+            let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+            }
+            assert_eq!(results.len(), 2, "every plug-in gets a result");
+            let first = results
+                .iter()
+                .find(|(path, _)| path == &one)
+                .map(|(_, entry)| entry)
+                .expect("the first member has an entry");
+            let second = results
+                .iter()
+                .find(|(path, _)| path == &two)
+                .map(|(_, entry)| entry)
+                .expect("the second member has an entry");
+            // The member the session died on is a structured failure...
+            assert_eq!(
+                first.failure_classification.as_deref(),
+                Some("cluster_session_invalidated")
+            );
+            let fallback = first.cluster_fallback.as_ref().expect("fallback note");
+            assert_eq!(fallback.at_member, 0);
+            assert_eq!(fallback.resolution, "invalidated");
+            assert!(!first.ok, "a dead session is never rounded to success");
+            // ...and the remaining member was re-inspected per-plugin, which
+            // fails here (no L2 worker by design) but carries the note.
+            let fallback = second.cluster_fallback.as_ref().expect("fallback note");
+            assert_eq!(fallback.at_member, 0);
+            assert_eq!(fallback.resolution, "one_shot_fallback");
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn render_close_audit_failure_is_recorded_not_rounded_to_success() {
+            let _guard = BEHAVIOR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            unsafe {
+                std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", "audit_undeclared_module");
+            }
+            let (root, one, two) = cluster_repository();
+            let sha_of = |path: &Path| {
+                let bytes = std::fs::read(path).unwrap();
+                hex_lower(&Sha256::digest(&bytes))
+            };
+            SESSION_CLOSE_FAILURES
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+            let session = open_mf_session(MfSessionConfig {
+                repository: root.clone(),
+                plugin: one.clone(),
+                dependency: dependency(),
+                sha: sha_of(&one),
+                smart: false,
+                defaults: Vec::new(),
+                identity: GeomIdentity {
+                    width: 8,
+                    height: 4,
+                    time_step: 1,
+                    total_time: 300,
+                    time_scale: 30,
+                },
+                cluster: Some(ClusterLaunch {
+                    plugins: vec![(one.clone(), sha_of(&one)), (two.clone(), sha_of(&two))],
+                    swap_payloads: vec![None, None],
+                }),
+            })
+            .expect("open cluster render session");
+            let tx = session.sender().expect("fresh session sender");
+            // The frame renders; the close-time cluster module audit fails
+            // only afterwards (the fixture injects an undeclared module into
+            // the final report's observed union).
+            let reply = render_on(&tx, 0, 0, vec![7u8; 8 * 4 * 4], None);
+            assert!(matches!(reply, FrameReply::Rendered(_)), "the frame renders");
+            // The session thread's recv loop ends only when every sender is
+            // gone, so the reply clone goes first; dropping the handle then
+            // drives RenderSession::close on the session thread, and the
+            // close-time audit failure must be recorded, never dropped with
+            // the close summary.
+            drop(tx);
+            drop(session);
+            let failures: Vec<SessionCloseFailure> = SESSION_CLOSE_FAILURES
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+            }
+            let failure = failures
+                .iter()
+                .find(|failure| failure.plugin == one)
+                .expect("the close-time audit failure is recorded");
+            assert!(
+                failure.close_reason.contains("module_audit"),
+                "{failure:?}"
+            );
+            assert!(failure.clustered);
+            assert!(!failure.smart);
+            assert_eq!(failure.frames_ok, 1, "{failure:?}");
+            assert_eq!(failure.frames_errored, 0, "{failure:?}");
+            assert_eq!(failure.fallback, "reopen_fresh_session");
+            assert_eq!(failure.plugin_sha256, sha_of(&one));
+            assert_eq!(
+                failure.worker.file_name().and_then(|name| name.to_str()),
+                Some("aex_render_worker.exe")
+            );
+            assert_eq!(failure.worker_sha256.as_deref().map(str::len), Some(64));
+            assert!(
+                failure
+                    .module_audit
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("module audit")),
+                "{failure:?}"
+            );
+            std::fs::remove_dir_all(&root).unwrap();
+        }
     }
 }

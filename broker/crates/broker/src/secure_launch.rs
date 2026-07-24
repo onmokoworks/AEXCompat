@@ -31,7 +31,11 @@ pub struct SecureLaunchRequest<'a> {
     pub worker_program: &'a Path,
     pub worker_expected_sha256: [u8; 32],
     pub worker_expected_size: u64,
-    pub plugin_basename: &'a str,
+    /// Basename of the plugin image carried as the positional argv slot.
+    /// `None` launches without a positional plugin: cluster discovery sessions
+    /// (issue #405) select plugins by manifest index at runtime, so no plugin
+    /// path rides their argv at all.
+    pub plugin_basename: Option<&'a str>,
     pub args_before_plugin: &'a [String],
     pub args_after_plugin: &'a [String],
     /// Repository root used by the Windows launch boundary to create and
@@ -45,11 +49,16 @@ fn build_launch_args(
     tree: &SealedLoadTree,
     request: &SecureLaunchRequest<'_>,
 ) -> io::Result<Vec<String>> {
-    let plugin_path = tree.plugin_path(request.plugin_basename)?;
+    let plugin_path = request
+        .plugin_basename
+        .map(|basename| tree.plugin_path(basename))
+        .transpose()?;
     let mut args =
         Vec::with_capacity(request.args_before_plugin.len() + 1 + request.args_after_plugin.len());
     args.extend_from_slice(request.args_before_plugin);
-    args.push(plugin_path.into_os_string().to_string_lossy().into_owned());
+    if let Some(plugin_path) = plugin_path {
+        args.push(plugin_path.into_os_string().to_string_lossy().into_owned());
+    }
     args.extend_from_slice(request.args_after_plugin);
     Ok(args)
 }
@@ -392,7 +401,7 @@ mod tests {
                 worker_program: Path::new("trusted-worker.exe"),
                 worker_expected_sha256: [0; 32],
                 worker_expected_size: 0,
-                plugin_basename: target,
+                plugin_basename: Some(target),
                 args_before_plugin: &[],
                 args_after_plugin: &[],
                 repository: Path::new("."),
@@ -412,7 +421,7 @@ mod tests {
             worker_program: Path::new("trusted-worker.exe"),
             worker_expected_sha256: [0; 32],
             worker_expected_size: 0,
-            plugin_basename: "worker.exe",
+            plugin_basename: Some("worker.exe"),
             args_before_plugin: &[],
             args_after_plugin: &[],
             repository: Path::new("."),

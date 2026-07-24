@@ -21,11 +21,13 @@ use crate::image_render::{
 };
 use crate::runtime_module_policy::{WorkerModuleValidation, authenticate_gpu_worker_report};
 use crate::secure_image_dispatch::{
-    ApprovedImageArtifact, GpuRuntimeAuthorization, SecureImageDispatch, WorkerKind,
-    dispatch_secure_gpu_image_session, dispatch_secure_image_session,
+    ApprovedImageArtifact, GpuRuntimeAuthorization, SecureClusterImageDispatch, SecureImageDispatch,
+    WorkerKind, dispatch_secure_cluster_image_session, dispatch_secure_gpu_image_session,
+    dispatch_secure_image_session,
 };
 use crate::secure_launch::{SecureLaunchResult, SecureSessionProcess};
 use crate::windows_process::{SessionChildHandles, WorkerDesktopPolicy};
+use crate::worker_module_audit::ClusterAuditDeclaration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -67,6 +69,10 @@ const PROTOCOL_VERSION: u32 = 1;
 /// the header check (in both directions) instead of reading the wrong bytes.
 const SESSION_HEADER_VERSION: u32 = 3;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+/// A discovery session's `inspect_done` carries the full parameter report, so
+/// its reader allows 4 MiB frames (design §4); every other session flavor
+/// stays under the 64 KiB cap.
+const MAX_DISCOVERY_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 /// Fail-closed cap on the whole section for pathological configurations
 /// (protocol §6); ordinary full-HD sessions stay far below it.
 const SECTION_HARD_CAP_BYTES: u64 = 1 << 30;
@@ -688,6 +694,10 @@ pub struct RenderSession {
     /// SmartFX session (protocol v1.1); selects the smart worker's final
     /// report contract when validating a clean close.
     smart: bool,
+    /// Cluster session state (issue #405): present when the session was
+    /// opened with `open_cluster` and may swap plugins within the launch
+    /// manifest.
+    cluster: Option<ClusterSessionState>,
     /// Keeps the animation sidecar alive for the whole session; the worker
     /// reads it once at launch, but leaving transport files behind on drop
     /// would leak into target/image-transport.
@@ -696,6 +706,57 @@ pub struct RenderSession {
     /// and removes them on drop; the worker reads each layer once at open via
     /// its inherited handle.
     _layer_sidecars: LayerSidecars,
+}
+
+/// The launch plugin set of a cluster render session (issue #405, design
+/// §2): the whole ordered cluster, staged and sealed once, so a
+/// `swap_plugin` message only ever selects an index into this
+/// launch-authenticated list. `plugins[0]` is the launch plugin and must be
+/// the same artifact the base `SessionOpenRequest` names. The shared
+/// dependency closure travels in the base request's `dependencies` field;
+/// the launch manifest declares both together.
+pub struct ClusterRenderPlugins {
+    /// The ordered cluster including `plugins[0]`; non-empty, at most 256
+    /// (enforced by the manifest validation at launch).
+    pub plugins: Vec<ApprovedImageArtifact>,
+    /// Parallel to `plugins`: the payload applied when swapping to that
+    /// plugin. The entry for `plugins[0]` is ignored — the launch argv
+    /// payload wins (design §2.2).
+    pub swap_payloads: Vec<Option<String>>,
+    /// The declared module bound the session's module audit is validated
+    /// against at close (design §5).
+    pub module_bound: u32,
+}
+
+struct ClusterSessionState {
+    plugin_count: u32,
+    current_plugin_index: u32,
+    audit: ClusterAuditDeclaration,
+}
+
+/// The outcome of a `swap_plugin` exchange (design §4.1).
+#[derive(Debug)]
+pub enum SwapOutcome {
+    /// The worker unloaded the previous plugin, loaded the requested one,
+    /// and ran GLOBAL_SETUP cleanly; the requested plugin is now current.
+    Swapped,
+    /// GLOBAL_SETUP returned non-zero for the new plugin: a plugin-local
+    /// error, so the session stays usable and whether to continue is the
+    /// caller's decision (design §4.1). The requested plugin is loaded and
+    /// current; the next frame follows the existing deferred-setup contract.
+    PluginError { global_setup_error: i64 },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SwapDone {
+    v: u32,
+    #[serde(rename = "type")]
+    kind: String,
+    plugin_index: u32,
+    status: String,
+    #[serde(default)]
+    global_setup_error: Option<i64>,
 }
 
 struct AnimationSidecar(PathBuf);
@@ -728,7 +789,7 @@ impl RenderSession {
     /// slot in place mid-session (protocol §3, issue #262), so there is no
     /// launch-time output-capacity parameter.
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated)
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, None)
     }
 
     /// Opens a session for an explicitly interactive GUI harness. This is
@@ -737,12 +798,13 @@ impl RenderSession {
     pub(crate) fn open_on_current_desktop(
         request: SessionOpenRequest<'_>,
     ) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current)
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current, None)
     }
 
     fn open_with_desktop_policy(
         request: SessionOpenRequest<'_>,
         desktop_policy: WorkerDesktopPolicy,
+        cluster: Option<ClusterRenderPlugins>,
     ) -> io::Result<RenderSession> {
         if request.time_step <= 0
             // A zero-duration render (total_time == 0) is valid: the shared
@@ -760,6 +822,22 @@ impl RenderSession {
             || request.frame_deadline.is_zero()
         {
             return Err(invalid("render session timing is invalid"));
+        }
+        // Cluster validation fails fast at open, before any transport work:
+        // plugins[0] must be the same artifact the base request names, since
+        // the positional argv contract, the launch payload, and the manifest
+        // entry all refer to it (design §2.2). The manifest's own structural
+        // bounds are enforced by the dispatch when it builds the document.
+        if let Some(cluster) = &cluster {
+            let launch_sha256 = decode_sha256_hex(request.plugin_sha256)?;
+            if cluster.plugins.first().map(|plugin| plugin.expected_sha256)
+                != Some(launch_sha256)
+            {
+                return Err(invalid("cluster plugins[0] must match the launch plugin"));
+            }
+            if cluster.swap_payloads.len() != cluster.plugins.len() {
+                return Err(invalid("cluster swap payloads must parallel the plugin list"));
+            }
         }
         crate::render_request::validate_image_buffer_layout(
             u64::from(request.width),
@@ -868,6 +946,15 @@ impl RenderSession {
         if gpu_attempt && request.gpu_runtime_policy.is_none() {
             return Err(invalid(
                 "GPU render requires a session-bound authenticated runtime module policy report; supply gpu_runtime_policy or select the CPU backend",
+            ));
+        }
+        // A GPU attempt authenticates a single-plugin runtime module policy;
+        // combining it with a cluster manifest is out of scope for the
+        // cluster session design, so it fails closed rather than widening the
+        // trust decision silently.
+        if gpu_attempt && cluster.is_some() {
+            return Err(invalid(
+                "cluster sessions do not carry a GPU runtime module policy",
             ));
         }
         let command = session_command(request.pixel_format, request.smart, effective_backend)?;
@@ -1156,19 +1243,6 @@ impl RenderSession {
         } else {
             None
         };
-        let dispatch = SecureImageDispatch {
-            repository: request.repository,
-            worker_kind: if request.smart {
-                WorkerKind::Smart
-            } else {
-                WorkerKind::Render
-            },
-            plugin,
-            dependencies,
-            args_before_plugin: &args_before_plugin,
-            args_after_plugin: &args_after_plugin,
-            timeout: Some(request.frame_deadline),
-        };
         let child_handles = SessionChildHandles {
             request_read: request_read.raw(),
             response_write: response_write.raw(),
@@ -1178,35 +1252,82 @@ impl RenderSession {
             // carries which layer.
             layers: layer_handles.clone(),
         };
-        let process = if gpu_attempt {
-            let policy_input = request
-                .gpu_runtime_policy
-                .expect("gpu attempt was validated to carry a policy at open");
-            let backend =
-                runtime_backend(effective_backend).expect("GPU attempt has a runtime backend");
-            let report = authenticate_gpu_worker_report(
-                policy_input.module_report_json,
-                &policy_input.session_identity,
-                backend,
-                WorkerModuleValidation {
-                    policy: policy_input.policy,
-                    sealed: policy_input.sealed_modules,
-                    trusted: policy_input.trusted_modules,
-                    system32: policy_input.system32,
+        let mut cluster_state = None;
+        let process = if let Some(cluster) = cluster {
+            // Cluster session (issue #405): the whole plugin cluster plus the
+            // shared closure are sealed into one tree and the launch carries
+            // the cluster-manifest-v1 transport; the positional argv contract
+            // (plugins[0]) is unchanged.
+            let cluster_dispatch = SecureClusterImageDispatch {
+                repository: request.repository,
+                worker_kind: if request.smart {
+                    WorkerKind::Smart
+                } else {
+                    WorkerKind::Render
                 },
-            )?;
-            match desktop_policy {
-                WorkerDesktopPolicy::Dedicated => dispatch_secure_gpu_image_session(
-                    dispatch,
-                    GpuRuntimeAuthorization {
-                        backend,
-                        session_identity: policy_input.session_identity,
-                        module_report: &report,
-                    },
-                    &child_handles,
-                )?,
+                plugins: cluster.plugins,
+                dependencies,
+                positional_plugin: true,
+                swap_payloads: Some(&cluster.swap_payloads),
+                module_bound: cluster.module_bound,
+                args_before_plugin: &args_before_plugin,
+                args_after_plugin: &args_after_plugin,
+            };
+            let launch = match desktop_policy {
+                WorkerDesktopPolicy::Dedicated => {
+                    dispatch_secure_cluster_image_session(cluster_dispatch, &child_handles)?
+                }
                 WorkerDesktopPolicy::Current => {
-                    crate::secure_image_dispatch::dispatch_secure_gpu_image_session_on_current_desktop(
+                    crate::secure_image_dispatch::dispatch_secure_cluster_image_session_on_current_desktop(
+                        cluster_dispatch,
+                        &child_handles,
+                    )?
+                }
+            };
+            let audit = ClusterAuditDeclaration::new(
+                launch.manifest.declared_basenames(),
+                launch.manifest.plugin_count(),
+                launch.manifest.module_bound() as usize,
+            )?;
+            cluster_state = Some(ClusterSessionState {
+                plugin_count: launch.manifest.plugin_count() as u32,
+                current_plugin_index: 0,
+                audit,
+            });
+            launch.process
+        } else {
+            let dispatch = SecureImageDispatch {
+                repository: request.repository,
+                worker_kind: if request.smart {
+                    WorkerKind::Smart
+                } else {
+                    WorkerKind::Render
+                },
+                plugin,
+                dependencies,
+                args_before_plugin: &args_before_plugin,
+                args_after_plugin: &args_after_plugin,
+                timeout: Some(request.frame_deadline),
+            };
+            if gpu_attempt {
+                let policy_input = request
+                    .gpu_runtime_policy
+                    .expect("gpu attempt was validated to carry a policy at open");
+                let backend =
+                    runtime_backend(effective_backend).expect("GPU attempt has a runtime backend");
+                let report = authenticate_gpu_worker_report(
+                    policy_input.module_report_json,
+                    &policy_input.session_identity,
+                    backend,
+                    WorkerModuleValidation {
+                        policy: policy_input.policy,
+                        sealed: policy_input.sealed_modules,
+                        trusted: policy_input.trusted_modules,
+                        system32: policy_input.system32,
+                    },
+                )?;
+                match desktop_policy {
+                    WorkerDesktopPolicy::Dedicated => dispatch_secure_gpu_image_session(
                         dispatch,
                         GpuRuntimeAuthorization {
                             backend,
@@ -1214,19 +1335,30 @@ impl RenderSession {
                             module_report: &report,
                         },
                         &child_handles,
-                    )?
+                    )?,
+                    WorkerDesktopPolicy::Current => {
+                        crate::secure_image_dispatch::dispatch_secure_gpu_image_session_on_current_desktop(
+                            dispatch,
+                            GpuRuntimeAuthorization {
+                                backend,
+                                session_identity: policy_input.session_identity,
+                                module_report: &report,
+                            },
+                            &child_handles,
+                        )?
+                    }
                 }
-            }
-        } else {
-            match desktop_policy {
-                WorkerDesktopPolicy::Dedicated => {
-                    dispatch_secure_image_session(dispatch, &child_handles)?
-                }
-                WorkerDesktopPolicy::Current => {
-                    crate::secure_image_dispatch::dispatch_secure_image_session_on_current_desktop(
-                        dispatch,
-                        &child_handles,
-                    )?
+            } else {
+                match desktop_policy {
+                    WorkerDesktopPolicy::Dedicated => {
+                        dispatch_secure_image_session(dispatch, &child_handles)?
+                    }
+                    WorkerDesktopPolicy::Current => {
+                        crate::secure_image_dispatch::dispatch_secure_image_session_on_current_desktop(
+                            dispatch,
+                            &child_handles,
+                        )?
+                    }
                 }
             }
         };
@@ -1300,9 +1432,25 @@ impl RenderSession {
             opened: Instant::now(),
             plugin_sha256: request.plugin_sha256.to_ascii_lowercase(),
             smart: request.smart,
+            cluster: cluster_state,
             _animation_sidecar: animation_sidecar,
             _layer_sidecars: layer_sidecars,
         })
+    }
+
+    /// Opens a resident render session over a whole plugin cluster (issue
+    /// #405, design §2): every plugin and the shared closure are staged,
+    /// hashed, and sealed once, the launch carries the sealed
+    /// `cluster-manifest-v1` document inside the sealed root, and
+    /// `swap_plugin` later selects another manifest member without a new
+    /// process. The base request's `plugin_path`/`plugin_sha256` must name
+    /// `cluster.plugins[0]`; the argv positional contract is unchanged
+    /// (design §2.2).
+    pub fn open_cluster(
+        request: SessionOpenRequest<'_>,
+        cluster: ClusterRenderPlugins,
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, Some(cluster))
     }
 
     pub fn invalidation(&self) -> Option<&SessionInvalidation> {
@@ -1347,6 +1495,178 @@ impl RenderSession {
             "render session invalidated ({}): {}",
             stored.reason, stored.detail
         ))
+    }
+
+    /// Swaps the loaded plugin to another member of the launch-authenticated
+    /// cluster manifest (issue #405, design §4.1): sends
+    /// `{"v":1,"type":"swap_plugin","plugin_index":N}` and waits for
+    /// `swap_done` under the same three-way wait a frame uses (response pipe,
+    /// process-death watcher, deadline). The message carries only an index
+    /// into the manifest — never a path or hash — so no launch-time trust
+    /// decision is revisited. An out-of-manifest or current index is a plain
+    /// caller error rejected before anything is sent; a protocol violation,
+    /// worker death, or a missed deadline invalidates the whole session
+    /// fail-closed. The broker answers the swap synchronously, so the
+    /// "no render_frame until swap_done" contract (design §4.1) holds by
+    /// construction.
+    pub fn swap_plugin(&mut self, plugin_index: u32) -> io::Result<SwapOutcome> {
+        if let Some(invalidation) = &self.invalidation {
+            return Err(invalid(format!(
+                "render session is invalidated ({}): {}",
+                invalidation.reason, invalidation.detail
+            )));
+        }
+        let (plugin_count, current_index) = self
+            .cluster
+            .as_ref()
+            .map(|cluster| (cluster.plugin_count, cluster.current_plugin_index))
+            .ok_or_else(|| invalid("render session was not opened as a cluster session"))?;
+        if plugin_index >= plugin_count {
+            return Err(invalid(
+                "swap plugin index is outside the cluster manifest",
+            ));
+        }
+        if plugin_index == current_index {
+            return Err(invalid("swap plugin index is the current plugin"));
+        }
+        // Between exchanges, a queued process-death event fails the swap
+        // before anything is sent; a queued message with no exchange in
+        // flight is a protocol violation.
+        loop {
+            match self.receiver.try_recv() {
+                Ok(SessionEvent::ProcessExited) => self.process_exit_observed = true,
+                Ok(SessionEvent::ReaderViolation) => {
+                    return Err(self.invalidate(
+                        "response_framing_violation",
+                        "the worker broke the response framing before the swap".into(),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                Ok(SessionEvent::Message(_)) => {
+                    return Err(self.invalidate(
+                        "unsolicited_response",
+                        "a response arrived with no exchange in flight before the swap".into(),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                Err(_) => break,
+            }
+        }
+        if self.process_exit_observed {
+            return Err(self.invalidate(
+                "worker_exited",
+                "the worker exited before the swap was dispatched".into(),
+                true,
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            ));
+        }
+        let message = format!("{{\"v\":1,\"type\":\"swap_plugin\",\"plugin_index\":{plugin_index}}}");
+        if !self.transport.send_message(&message) {
+            return Err(self.invalidate(
+                "request_pipe_closed",
+                "the session request pipe rejected a swap_plugin message".into(),
+                true,
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            ));
+        }
+        let body = match self.await_frame_response(Instant::now() + self.frame_deadline) {
+            FrameWait::Message(body) => body,
+            FrameWait::Deadline => {
+                return Err(self.invalidate(
+                    "swap_deadline",
+                    format!(
+                        "the swap to plugin {plugin_index} exceeded the {}ms deadline",
+                        self.frame_deadline.as_millis()
+                    ),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+            FrameWait::WorkerGone => {
+                return Err(self.invalidate(
+                    "worker_exited",
+                    format!("the worker was gone before the swap to plugin {plugin_index} completed"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+            FrameWait::FramingViolation => {
+                return Err(self.invalidate(
+                    "response_framing_violation",
+                    "the worker broke the response framing during the swap".into(),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+        };
+        let done: SwapDone = match serde_json::from_slice(&body) {
+            Ok(done) => done,
+            Err(error) => {
+                return Err(self.invalidate(
+                    "malformed_swap_done",
+                    format!("the swap response did not parse strictly: {error}"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+        };
+        if done.v != PROTOCOL_VERSION || done.kind != "swap_done" || done.plugin_index != plugin_index
+        {
+            return Err(self.invalidate(
+                "swap_done_mismatch",
+                format!(
+                    "the swap response carried v={} type={} plugin_index={}",
+                    done.v, done.kind, done.plugin_index
+                ),
+                true,
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            ));
+        }
+        let outcome = match done.status.as_str() {
+            "ok" => {
+                if done.global_setup_error.is_some() {
+                    return Err(self.invalidate(
+                        "malformed_swap_done",
+                        "an ok swap response carried a global_setup_error".into(),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                SwapOutcome::Swapped
+            }
+            // A GLOBAL_SETUP failure is plugin-local (design §4.1): the
+            // session stays usable and the caller decides whether to
+            // continue. The worker did swap to the requested plugin, so the
+            // broker's current index follows it.
+            "error" => match done.global_setup_error {
+                Some(global_setup_error) if global_setup_error != 0 => {
+                    SwapOutcome::PluginError { global_setup_error }
+                }
+                _ => {
+                    return Err(self.invalidate(
+                        "malformed_swap_done",
+                        "an error swap response missed a non-zero global_setup_error".into(),
+                        true,
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+            },
+            other => {
+                return Err(self.invalidate(
+                    "unknown_swap_status",
+                    format!("the swap response reported status {other:?}"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+        };
+        self.cluster
+            .as_mut()
+            .expect("cluster state checked above")
+            .current_plugin_index = plugin_index;
+        Ok(outcome)
     }
 
     pub fn render_frame(
@@ -2247,6 +2567,35 @@ impl RenderSession {
                 None,
             ),
         };
+        // Cluster sessions validate the final report's module audit against
+        // the launch manifest's declared set (design §5), replacing the
+        // one-shot fixed-cap validator the cluster dispatch disabled at
+        // launch. A mismatch is fail-closed: the close is recorded as an
+        // invalidation even when the exit code and the report looked clean.
+        if self.invalidation.is_none() {
+            if let Some(cluster) = &self.cluster {
+                if let Some(CollectedExit {
+                    result: Some(result),
+                    ..
+                }) = &collected
+                {
+                    if result.classification == crate::ExitClassification::Ok {
+                        if let Err(error) =
+                            crate::worker_module_audit::validate_cluster_worker_audit(
+                                &result.stdout,
+                                result.stdout_truncated,
+                                &cluster.audit,
+                            )
+                        {
+                            self.invalidation = Some(SessionInvalidation {
+                                reason: "module_audit_mismatch",
+                                detail: format!("the cluster module audit failed at close: {error}"),
+                            });
+                        }
+                    }
+                }
+            }
+        }
         let session_clean = self.invalidation.is_none()
             && matches!(
                 &collected,
@@ -3299,6 +3648,607 @@ fn audio_final_report_clean(report: &Value) -> bool {
         && report.get("audio_lifetimes_balanced") == Some(&Value::Bool(true))
         && report.get("invalid_audio_operations") == Some(&json!(0))
         && report.get("session_clean") == Some(&Value::Bool(true))
+}
+
+// ---------------------------------------------------------------------------
+// Discovery session (issue #405, docs/CLOSURE_SESSION_PROTOCOL_2026-07-23.md
+// §4.2). A cluster discovery session launches the worker with
+// `--discovery-session-v1 --cluster-manifest-v1 <path>` and no positional
+// plugin, then inspects the manifest's plugins one by one over the session
+// control channel — the session-mode replacement for per-plugin one-shot
+// `--l2-params-only` dispatches. It reuses the same machinery as the image
+// and audio sessions above: inheritable pipes, SessionTransport (with a
+// header-only section, since discovery carries no pixel transport), the
+// cluster dispatch, the reader thread + process-death watcher, and the
+// three-way wait with a per-inspect deadline (design §7).
+// ---------------------------------------------------------------------------
+
+/// Spawns the response-pipe reader thread and the process-death watcher the
+/// session waits multiplex on (protocol §7): the reader enforces the session
+/// flavor's message cap and reports framing violations explicitly, the
+/// watcher reports worker death even when a descendant keeps the response
+/// pipe open.
+fn spawn_session_observers(
+    process: &SecureSessionProcess,
+    response_read: OwnedHandle,
+    max_message_bytes: usize,
+) -> io::Result<mpsc::Receiver<SessionEvent>> {
+    let (sender, receiver) = mpsc::channel::<SessionEvent>();
+    let response_handle = response_read.take() as usize;
+    let reader_sender = sender.clone();
+    thread::spawn(move || {
+        let handle = response_handle as HANDLE;
+        let _owner = match OwnedHandle::new(handle) {
+            Ok(owner) => owner,
+            Err(_) => return,
+        };
+        loop {
+            let mut prefix = [0u8; 4];
+            if !read_exact_handle(handle, &mut prefix) {
+                // EOF before a response starts is the normal end of the
+                // stream (worker exit); the process watcher reports it.
+                return;
+            }
+            let length = u32::from_le_bytes(prefix) as usize;
+            if length == 0 || length > max_message_bytes {
+                let _ = reader_sender.send(SessionEvent::ReaderViolation);
+                return;
+            }
+            let mut body = vec![0u8; length];
+            if !read_exact_handle(handle, &mut body) {
+                let _ = reader_sender.send(SessionEvent::ReaderViolation);
+                return;
+            }
+            if reader_sender.send(SessionEvent::Message(body)).is_err() {
+                return;
+            }
+        }
+    });
+    let watched_process = process.duplicated_process_handle()?;
+    thread::spawn(move || {
+        use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+        let handle = watched_process as HANDLE;
+        unsafe {
+            WaitForSingleObject(handle, INFINITE);
+            CloseHandle(handle);
+        }
+        let _ = sender.send(SessionEvent::ProcessExited);
+    });
+    Ok(receiver)
+}
+
+pub struct DiscoverySessionOpenRequest<'a> {
+    pub repository: &'a Path,
+    /// The ordered cluster to inspect, staged and sealed once; index 0 is
+    /// inspected first by convention, but any order is legal.
+    pub plugins: Vec<ApprovedImageArtifact>,
+    /// The shared closure, authenticated and staged with the plugins.
+    pub dependencies: Vec<ApprovedImageArtifact>,
+    /// The declared module bound the session's module audit is validated
+    /// against at close (design §5).
+    pub module_bound: u32,
+    /// Per-inspect watchdog deadline; the job is terminated when an inspect
+    /// response does not arrive in time (design §7).
+    pub inspect_deadline: Duration,
+}
+
+/// The outcome of an `inspect_plugin` exchange (design §4.2).
+#[derive(Debug)]
+pub enum InspectOutcome {
+    /// The plugin loaded and inspected; `report` is the same JSON document
+    /// the one-shot `--l2-params-only` path prints (minus the module audit,
+    /// which the epoch/final report carries), so callers can consume it in
+    /// the existing shape and A/B against the one-shot path directly.
+    Inspected { report: Value },
+    /// A parameter-local failure (the one-shot exit 12/20 equivalents): the
+    /// session stays usable and whether to continue is the caller's
+    /// decision. `error_kind` is the worker's structured cause
+    /// (`entrypoint_unresolved` / `selector_error`); `report` carries a
+    /// partial report when the worker produced one.
+    InspectError {
+        error_kind: String,
+        report: Option<Value>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectDone {
+    v: u32,
+    #[serde(rename = "type")]
+    kind: String,
+    plugin_index: u32,
+    request_index: u32,
+    status: String,
+    #[serde(default)]
+    report: Option<Value>,
+    #[serde(default)]
+    error_kind: Option<String>,
+}
+
+pub struct DiscoverySession {
+    process: Option<SecureSessionProcess>,
+    collected: Option<CollectedExit>,
+    transport: SessionTransport,
+    receiver: mpsc::Receiver<SessionEvent>,
+    process_exit_observed: bool,
+    inspect_deadline: Duration,
+    invalidation: Option<SessionInvalidation>,
+    plugin_count: u32,
+    next_request_index: u32,
+    inspects_ok: u32,
+    inspects_errored: u32,
+    opened: Instant,
+    audit: ClusterAuditDeclaration,
+}
+
+impl DiscoverySession {
+    /// Opens a cluster discovery session: seals the whole cluster once and
+    /// launches the worker with `--discovery-session-v1` plus the
+    //  `cluster-manifest-v1` transport. No plugin rides argv; the first
+    /// `inspect_plugin` loads plugins[N] in the worker (design §2.2).
+    pub fn open(request: DiscoverySessionOpenRequest<'_>) -> io::Result<DiscoverySession> {
+        if request.inspect_deadline.is_zero() {
+            return Err(invalid("discovery session inspect deadline is invalid"));
+        }
+        let (request_read, request_write) = inheritable_pipe(false)?;
+        let (response_read, response_write) = inheritable_pipe(true)?;
+        // Discovery carries no pixel transport; the inherited header-only
+        // section keeps the launch boundary's session handle contract uniform
+        // without giving the worker a shared pixel slot it must never use.
+        let section_bytes = HEADER_BYTES;
+        let mut security = inheritable_security();
+        let section = OwnedHandle::new(unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                &mut security,
+                PAGE_READWRITE,
+                0,
+                section_bytes as u32,
+                null(),
+            )
+        })?;
+        let view_address = unsafe { MapViewOfFile(section.raw(), FILE_MAP_ALL_ACCESS, 0, 0, 0) };
+        if view_address.Value.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let transport = SessionTransport {
+            request_write: Some(request_write),
+            section,
+            view: view_address.Value as *mut u8,
+            section_bytes,
+        };
+        let args_before_plugin = vec!["--discovery-session-v1".to_owned()];
+        let args_after_plugin: Vec<String> = Vec::new();
+        let dispatch = SecureClusterImageDispatch {
+            repository: request.repository,
+            worker_kind: WorkerKind::Render,
+            plugins: request.plugins,
+            dependencies: request.dependencies,
+            positional_plugin: false,
+            // Discovery manifests carry no payloads (design §2.1).
+            swap_payloads: None,
+            module_bound: request.module_bound,
+            args_before_plugin: &args_before_plugin,
+            args_after_plugin: &args_after_plugin,
+        };
+        let child_handles = SessionChildHandles {
+            request_read: request_read.raw(),
+            response_write: response_write.raw(),
+            section: transport.section.raw(),
+            layers: Vec::new(),
+        };
+        let launch = dispatch_secure_cluster_image_session(dispatch, &child_handles)?;
+        // The worker inherited its copies; dropping the broker's child-side
+        // ends turns a worker exit into pipe EOF instead of a hang.
+        drop(request_read);
+        drop(response_write);
+        let audit = ClusterAuditDeclaration::new(
+            launch.manifest.declared_basenames(),
+            launch.manifest.plugin_count(),
+            launch.manifest.module_bound() as usize,
+        )?;
+        let receiver = spawn_session_observers(
+            &launch.process,
+            response_read,
+            MAX_DISCOVERY_MESSAGE_BYTES,
+        )?;
+        Ok(DiscoverySession {
+            process: Some(launch.process),
+            collected: None,
+            transport,
+            receiver,
+            process_exit_observed: false,
+            inspect_deadline: request.inspect_deadline,
+            invalidation: None,
+            plugin_count: launch.manifest.plugin_count() as u32,
+            next_request_index: 0,
+            inspects_ok: 0,
+            inspects_errored: 0,
+            opened: Instant::now(),
+            audit,
+        })
+    }
+
+    pub fn invalidation(&self) -> Option<&SessionInvalidation> {
+        self.invalidation.as_ref()
+    }
+
+    fn collect_exit(&mut self, wait: Duration) {
+        if self.collected.is_some() {
+            return;
+        }
+        let Some(process) = self.process.take() else {
+            return;
+        };
+        self.collected = Some(match process.finish(Some(wait)) {
+            Ok(result) => CollectedExit {
+                result: Some(result),
+                error: None,
+            },
+            Err(error) => CollectedExit {
+                result: None,
+                error: Some(error.to_string()),
+            },
+        });
+    }
+
+    fn invalidate(&mut self, reason: &'static str, detail: String, wait: Duration) -> io::Error {
+        if let Some(process) = self.process.as_ref() {
+            let _ = process.terminate_job();
+        }
+        self.collect_exit(wait);
+        self.invalidation = Some(SessionInvalidation { reason, detail });
+        let stored = self.invalidation.as_ref().expect("just stored");
+        invalid(format!(
+            "discovery session invalidated ({}): {}",
+            stored.reason, stored.detail
+        ))
+    }
+
+    fn await_response(&mut self) -> FrameWait {
+        let deadline = Instant::now() + self.inspect_deadline;
+        loop {
+            let mut remaining = deadline.saturating_duration_since(Instant::now());
+            if self.process_exit_observed {
+                remaining = remaining.min(PROCESS_EXIT_DRAIN);
+            }
+            if remaining.is_zero() {
+                return if self.process_exit_observed {
+                    FrameWait::WorkerGone
+                } else {
+                    FrameWait::Deadline
+                };
+            }
+            match self.receiver.recv_timeout(remaining) {
+                Ok(SessionEvent::Message(body)) => return FrameWait::Message(body),
+                Ok(SessionEvent::ReaderViolation) => return FrameWait::FramingViolation,
+                Ok(SessionEvent::ProcessExited) => self.process_exit_observed = true,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return if self.process_exit_observed {
+                        FrameWait::WorkerGone
+                    } else {
+                        FrameWait::Deadline
+                    };
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return FrameWait::WorkerGone,
+            }
+        }
+    }
+
+    /// Inspects one manifest plugin (design §4.2): sends
+    /// `{"v":1,"type":"inspect_plugin","plugin_index":N,"request_index":R}`
+    /// and waits for `inspect_done` under the three-way wait. `request_index`
+    /// is the 0-based serial the worker cross-checks; an out-of-manifest
+    /// plugin index or an off-serial request index is a plain caller error
+    /// rejected before anything is sent, while a protocol violation, worker
+    /// death, or a missed deadline invalidates the whole session fail-closed.
+    /// Inspecting the current plugin again (a re-inspect) is legal.
+    pub fn inspect_plugin(
+        &mut self,
+        plugin_index: u32,
+        request_index: u32,
+    ) -> io::Result<InspectOutcome> {
+        if let Some(invalidation) = &self.invalidation {
+            return Err(invalid(format!(
+                "discovery session is invalidated ({}): {}",
+                invalidation.reason, invalidation.detail
+            )));
+        }
+        if plugin_index >= self.plugin_count {
+            return Err(invalid(
+                "inspect plugin index is outside the cluster manifest",
+            ));
+        }
+        if request_index != self.next_request_index {
+            return Err(invalid(format!(
+                "inspect request index {request_index} does not continue the serial {}",
+                self.next_request_index
+            )));
+        }
+        // Between exchanges, a queued process-death event fails the inspect
+        // before anything is sent; a queued message with no exchange in
+        // flight is a protocol violation.
+        loop {
+            match self.receiver.try_recv() {
+                Ok(SessionEvent::ProcessExited) => self.process_exit_observed = true,
+                Ok(SessionEvent::ReaderViolation) => {
+                    return Err(self.invalidate(
+                        "response_framing_violation",
+                        format!("the worker broke the response framing before {request_index}"),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                Ok(SessionEvent::Message(_)) => {
+                    return Err(self.invalidate(
+                        "unsolicited_response",
+                        format!(
+                            "a response arrived with no request in flight before {request_index}"
+                        ),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                Err(_) => break,
+            }
+        }
+        if self.process_exit_observed {
+            return Err(self.invalidate(
+                "worker_exited",
+                format!("the worker exited before request {request_index} was dispatched"),
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            ));
+        }
+        let message = format!(
+            "{{\"v\":1,\"type\":\"inspect_plugin\",\"plugin_index\":{plugin_index},\"request_index\":{request_index}}}"
+        );
+        if !self.transport.send_message(&message) {
+            return Err(self.invalidate(
+                "request_pipe_closed",
+                "the session request pipe rejected an inspect_plugin message".into(),
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            ));
+        }
+        let body = match self.await_response() {
+            FrameWait::Message(body) => body,
+            FrameWait::Deadline => {
+                return Err(self.invalidate(
+                    "inspect_deadline",
+                    format!(
+                        "request {request_index} exceeded the {}ms deadline",
+                        self.inspect_deadline.as_millis()
+                    ),
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+            FrameWait::WorkerGone => {
+                return Err(self.invalidate(
+                    "worker_exited",
+                    format!("the worker was gone before request {request_index} completed"),
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+            FrameWait::FramingViolation => {
+                return Err(self.invalidate(
+                    "response_framing_violation",
+                    format!("the worker broke the response framing during request {request_index}"),
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+        };
+        let done: InspectDone = match serde_json::from_slice(&body) {
+            Ok(done) => done,
+            Err(error) => {
+                return Err(self.invalidate(
+                    "malformed_inspect_done",
+                    format!("request {request_index} response did not parse strictly: {error}"),
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
+        };
+        if done.v != PROTOCOL_VERSION
+            || done.kind != "inspect_done"
+            || done.plugin_index != plugin_index
+            || done.request_index != request_index
+        {
+            return Err(self.invalidate(
+                "inspect_done_mismatch",
+                format!(
+                    "request {request_index} response carried v={} type={} plugin_index={} request_index={}",
+                    done.v, done.kind, done.plugin_index, done.request_index
+                ),
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            ));
+        }
+        self.next_request_index += 1;
+        match done.status.as_str() {
+            "ok" => {
+                if done.report.is_none() || done.error_kind.is_some() {
+                    return Err(self.invalidate(
+                        "malformed_inspect_done",
+                        format!("request {request_index} ok response missed its report"),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                self.inspects_ok += 1;
+                Ok(InspectOutcome::Inspected {
+                    report: done.report.expect("checked above"),
+                })
+            }
+            // A parameter-local failure (design §4.2): the session stays
+            // usable and the caller decides whether to continue. The worker
+            // structures the cause as error_kind; a partial report may ride
+            // along.
+            "error" => {
+                let error_kind = match done.error_kind.as_deref() {
+                    Some(kind @ ("entrypoint_unresolved" | "selector_error")) => kind.to_owned(),
+                    _ => {
+                        return Err(self.invalidate(
+                            "malformed_inspect_done",
+                            format!(
+                                "request {request_index} error response missed a known error_kind"
+                            ),
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
+                    }
+                };
+                self.inspects_errored += 1;
+                Ok(InspectOutcome::InspectError {
+                    error_kind,
+                    report: done.report,
+                })
+            }
+            other => Err(self.invalidate(
+                "unknown_inspect_status",
+                format!("request {request_index} reported status {other:?}"),
+                POST_TERMINATION_COLLECT_TIMEOUT,
+            )),
+        }
+    }
+
+    /// Ends the session: sends `close`, drops the request pipe, collects the
+    /// exit, validates the final report's module audit against the launch
+    /// manifest's declared set (design §5), and returns a summary.
+    pub fn close(mut self) -> Value {
+        if self.invalidation.is_none() && self.process.is_some() {
+            // The exit contract (design §7): a normal worker exit happens
+            // only AFTER the broker's close handshake.
+            loop {
+                match self.receiver.try_recv() {
+                    Ok(SessionEvent::ProcessExited) => self.process_exit_observed = true,
+                    Ok(SessionEvent::ReaderViolation) => {
+                        self.invalidation = Some(SessionInvalidation {
+                            reason: "response_framing_violation",
+                            detail: "the worker broke the response framing before close".into(),
+                        });
+                        break;
+                    }
+                    Ok(SessionEvent::Message(_)) => {
+                        self.invalidation = Some(SessionInvalidation {
+                            reason: "unsolicited_response",
+                            detail: "a response arrived with no request in flight before close"
+                                .into(),
+                        });
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if self.process_exit_observed
+                || self
+                    .process
+                    .as_ref()
+                    .is_some_and(SecureSessionProcess::has_exited)
+            {
+                self.process_exit_observed = true;
+            }
+            if self.invalidation.is_none() && self.process_exit_observed {
+                self.invalidation = Some(SessionInvalidation {
+                    reason: "premature_exit",
+                    detail: "the worker exited before the close handshake".into(),
+                });
+            }
+            if self.invalidation.is_none()
+                && !self.transport.send_message("{\"v\":1,\"type\":\"close\"}")
+            {
+                self.invalidation = Some(SessionInvalidation {
+                    reason: "close_send_failed",
+                    detail: "the close message could not be delivered".into(),
+                });
+            }
+        }
+        self.transport.close_request_pipe();
+        self.collect_exit(CLOSE_COLLECT_TIMEOUT);
+        let elapsed_ms = self.opened.elapsed().as_millis();
+        let collected = self.collected.take();
+        let (worker, final_report) = match &collected {
+            Some(CollectedExit {
+                result: Some(result),
+                ..
+            }) => {
+                let report: Option<Value> = serde_json::from_str(result.stdout.trim()).ok();
+                (
+                    json!({
+                        "classification": result.classification.as_str(),
+                        "exit_code": result.exit_code,
+                        "diagnostics": isolated_worker_diagnostics(result, elapsed_ms),
+                        // Bounded raw stderr tail: a worker that dies before
+                        // its final report (the discovery-session failure the
+                        // close otherwise cannot attribute, design §7) still
+                        // leaves its stage markers here.
+                        "stderr_tail": result.stderr
+                            .char_indices()
+                            .rev()
+                            .nth(4095)
+                            .map_or(result.stderr.as_str(), |(index, _)| &result.stderr[index..]),
+                    }),
+                    report,
+                )
+            }
+            Some(CollectedExit {
+                error: Some(error), ..
+            }) => (json!({ "collection_error": error }), None),
+            _ => (
+                json!({ "collection_error": "worker was never collected" }),
+                None,
+            ),
+        };
+        // The final report's module audit is validated against the launch
+        // manifest's declared set (design §5), replacing the one-shot
+        // fixed-cap validator the cluster dispatch disabled at launch. A
+        // mismatch is fail-closed even when the exit looked clean.
+        if self.invalidation.is_none() {
+            if let Some(CollectedExit {
+                result: Some(result),
+                ..
+            }) = &collected
+            {
+                if result.classification == crate::ExitClassification::Ok {
+                    if let Err(error) = crate::worker_module_audit::validate_cluster_worker_audit(
+                        &result.stdout,
+                        result.stdout_truncated,
+                        &self.audit,
+                    ) {
+                        self.invalidation = Some(SessionInvalidation {
+                            reason: "module_audit_mismatch",
+                            detail: format!("the cluster module audit failed at close: {error}"),
+                        });
+                    }
+                }
+            }
+        }
+        let session_clean = self.invalidation.is_none()
+            && matches!(
+                &collected,
+                Some(CollectedExit { result: Some(result), .. })
+                    if result.classification == crate::ExitClassification::Ok
+            )
+            && final_report
+                .as_ref()
+                .is_some_and(discovery_final_report_clean);
+        json!({
+            "stage": "discovery_session_close",
+            "plugin_count": self.plugin_count,
+            "inspects_ok": self.inspects_ok,
+            "inspects_errored": self.inspects_errored,
+            "invalidated": self.invalidation.is_some(),
+            "invalidated_reason": self.invalidation.as_ref().map(|invalidation| json!({
+                "reason": invalidation.reason,
+                "detail": invalidation.detail,
+            })),
+            "worker": worker,
+            "final_report": final_report,
+            "session_clean": session_clean,
+        })
+    }
+}
+
+/// A clean discovery session close requires the worker's final report to
+/// agree: the session completed (the exit code is already gated separately).
+/// The module audit itself is validated separately against the cluster
+/// declaration (design §5). Missing keys fail closed.
+fn discovery_final_report_clean(report: &Value) -> bool {
+    report.get("stage") == Some(&json!("discovery_session"))
+        && report.get("status") == Some(&json!("discovery_session_completed"))
 }
 
 #[cfg(test)]

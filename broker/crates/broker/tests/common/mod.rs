@@ -118,7 +118,7 @@ mod windows_probe {
             worker_program: &worker,
             worker_expected_sha256: Sha256::digest(&worker_bytes).into(),
             worker_expected_size: worker_bytes.len() as u64,
-            plugin_basename: "probe.plugin",
+            plugin_basename: Some("probe.plugin"),
             args_before_plugin: &[],
             args_after_plugin: &[],
             repository: &repository.0,

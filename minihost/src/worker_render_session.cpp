@@ -244,6 +244,55 @@ bool SessionChannels::static_header_matches(const SessionGeometry& geometry) con
              static_cast<uint32_t>(geometry.layer_slot_count);
 }
 
+SessionPipes::~SessionPipes() {
+  if (request_pipe_) CloseHandle(request_pipe_);
+  if (response_pipe_) CloseHandle(response_pipe_);
+}
+
+bool SessionPipes::open_from_environment() {
+  if (opened()) return false;
+  const HANDLE request = pipe_from_variable(kRequestVariable);
+  const HANDLE response = pipe_from_variable(kResponseVariable);
+  if (!request || !response) return false;
+  request_pipe_ = request;
+  response_pipe_ = response;
+  return true;
+}
+
+SessionPipes::ReadResult SessionPipes::read_message(std::string& payload) {
+  if (!request_pipe_) return ReadResult::Violation;
+  unsigned char prefix[4];
+  const std::size_t prefix_read = read_up_to(request_pipe_, prefix, sizeof(prefix));
+  if (prefix_read == 0) return ReadResult::Eof;
+  if (prefix_read != sizeof(prefix)) return ReadResult::Violation;
+  const uint32_t length = static_cast<uint32_t>(prefix[0]) |
+                          (static_cast<uint32_t>(prefix[1]) << 8) |
+                          (static_cast<uint32_t>(prefix[2]) << 16) |
+                          (static_cast<uint32_t>(prefix[3]) << 24);
+  if (length == 0 || length > kMaxMessageBytes) return ReadResult::Violation;
+  payload.resize(length);
+  return read_up_to(request_pipe_,
+                    reinterpret_cast<unsigned char*>(payload.data()),
+                    length) == length
+             ? ReadResult::Message
+             : ReadResult::Violation;
+}
+
+bool SessionPipes::write_message(const std::string& payload) {
+  if (!response_pipe_ || payload.empty() || payload.size() > max_write_bytes_)
+    return false;
+  const uint32_t length = static_cast<uint32_t>(payload.size());
+  const unsigned char prefix[4] = {
+      static_cast<unsigned char>(length & 0xFF),
+      static_cast<unsigned char>((length >> 8) & 0xFF),
+      static_cast<unsigned char>((length >> 16) & 0xFF),
+      static_cast<unsigned char>((length >> 24) & 0xFF)};
+  return write_exact(response_pipe_, prefix, sizeof(prefix)) &&
+         write_exact(response_pipe_,
+                     reinterpret_cast<const unsigned char*>(payload.data()),
+                     payload.size());
+}
+
 }  // namespace aexcompat::worker_render_session
 
 // Cross-TU declarations into worker_main's private renderers and state
@@ -443,7 +492,8 @@ RenderSessionOutcome run_session_frame_loop(
     int32_t max_width, int32_t max_height, int32_t output_capacity_width,
     int32_t output_capacity_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
-    const std::vector<ExternalLayerInput>* external_layers, FrameFn&& render_frame) {
+    const std::vector<ExternalLayerInput>* external_layers, FrameFn&& render_frame,
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr) {
   using aexcompat::strict_json::JsonValue;
   using aexcompat::strict_json::StrictJsonParser;
   using aexcompat::strict_json::json_exact_keys;
@@ -533,22 +583,34 @@ RenderSessionOutcome run_session_frame_loop(
   // setup is deferred to the first rendered frame so effects that
   // initialize persistent sequence state from in_data->current_time observe
   // that frame's time, exactly like the one-shot render lifecycle seeds the
-  // requested time before SEQUENCE_SETUP.
-  write<int32_t>(input, 228, time_step);
-  write<int32_t>(input, 232, total_time);
-  write<int32_t>(input, 236, time_step);
-  write<uint32_t>(input, 240, time_scale);
-  // Same full-resolution override the per-frame render applies: a spatial
-  // context can declare the true composition size, and the deferred
-  // SEQUENCE_SETUP must observe it exactly like the one-shot lifecycle.
-  write<int32_t>(input, 252,
-                 g_full_resolution_width > 0 ? g_full_resolution_width : max_width);
-  write<int32_t>(input, 256,
-                 g_full_resolution_height > 0 ? g_full_resolution_height : max_height);
-  const int32_t session_extent[4] = {0, 0, max_width, max_height};
-  std::memcpy(input.data() + 260, session_extent, sizeof(session_extent));
+  // requested time before SEQUENCE_SETUP. Hoisted into a lambda because a
+  // cluster-session swap re-bootstraps the buffers: the static fields must be
+  // re-applied before the swapped plug-in's first frame.
+  const auto write_session_static_fields = [&] {
+    write<int32_t>(input, 228, time_step);
+    write<int32_t>(input, 232, total_time);
+    write<int32_t>(input, 236, time_step);
+    write<uint32_t>(input, 240, time_scale);
+    // Same full-resolution override the per-frame render applies: a spatial
+    // context can declare the true composition size, and the deferred
+    // SEQUENCE_SETUP must observe it exactly like the one-shot lifecycle.
+    write<int32_t>(input, 252,
+                   g_full_resolution_width > 0 ? g_full_resolution_width : max_width);
+    write<int32_t>(input, 256,
+                   g_full_resolution_height > 0 ? g_full_resolution_height : max_height);
+    const int32_t session_extent[4] = {0, 0, max_width, max_height};
+    std::memcpy(input.data() + 260, session_extent, sizeof(session_extent));
+  };
+  write_session_static_fields();
   bool sequence_attempted = false;
   bool sequence_started = false;
+  // Cluster-session swap state (closure-session design §4.1): the manifest
+  // index of the plug-in currently loaded, and whether its GLOBAL_SETUP /
+  // PARAMS_SETUP failed (plug-in-local; frames get the
+  // continuation-impossible response while the session stays alive for the
+  // broker's continue/stop decision).
+  int32_t current_plugin_index = swap_hook ? 0 : -1;
+  bool swapped_plugin_setup_failed = false;
 
   const std::size_t input_offset = wrs::input_slot_offset();
   const std::size_t output_offset = wrs::output_slot_offset(geometry);
@@ -637,6 +699,70 @@ RenderSessionOutcome run_session_frame_loop(
           !json_exact_keys(object, {"v", "type"}))
         outcome.protocol_violation = true;
       break;
+    }
+    // Cluster-session plug-in swap (closure-session design §4.1): only an
+    // authenticated manifest index travels here; the path/hash stay with the
+    // launch-time trust decision. Without a cluster hook the message type is
+    // unknown and stays a protocol violation.
+    if (type == "swap_plugin") {
+      int32_t plugin_index{};
+      if (version != static_cast<int32_t>(wrs::kProtocolVersion) ||
+          !json_exact_keys(object, {"v", "type", "plugin_index"}) ||
+          !json_i32(object, "plugin_index", plugin_index) ||
+          !swap_hook || !swap_hook->invoke || plugin_index < 0 ||
+          plugin_index >= swap_hook->plugin_count ||
+          plugin_index == current_plugin_index) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      // 1. SEQUENCE_SETDOWN when a sequence is up (design §4.1 step 1).
+      if (sequence_started) {
+        const int32_t sequence_setdown_error = invoke_sequence_selector(
+            entry, kSequenceSetdown, input.data(), output.data());
+        write<void*>(input, kInSequenceData, nullptr);
+        sequence_started = false;
+        sequence_attempted = false;
+        if (sequence_setdown_error != 0) {
+          // Setdown failure leaves possibly-contaminated plug-in state; the
+          // session cannot safely continue (design §4.1 step 3).
+          outcome.swap_failure = true;
+          break;
+        }
+      }
+      // 2.-6. GLOBAL_SETDOWN, quiescence, plug-in-only unload, authenticated
+      // load of plugins[N], GLOBAL_SETUP/PARAMS_SETUP, and the payload swap
+      // all belong to the dispatch owner, which holds the WorkerSession, the
+      // bootstrap wiring, and the launch payload parser.
+      wrs::SwapPluginResult swap =
+          swap_hook->invoke(swap_hook->context, plugin_index);
+      if (swap.hard_failure || !swap.entry) {
+        outcome.swap_failure = true;
+        break;
+      }
+      entry = swap.entry;
+      current_plugin_index = plugin_index;
+      swapped_plugin_setup_failed =
+          swap.global_setup_error != 0 || swap.params_setup_error != 0;
+      // Re-apply the session-static in_data fields the re-bootstrap cleared.
+      write_session_static_fields();
+      std::string reply;
+      if (swap.global_setup_error == 0) {
+        reply = "{\"v\":1,\"type\":\"swap_done\",\"plugin_index\":" +
+            std::to_string(plugin_index) + ",\"status\":\"ok\"}";
+      } else {
+        // Plug-in-local GLOBAL_SETUP failure: structured swap_done error, the
+        // session stays alive and later frames answer with the
+        // continuation-impossible code (design §4.1).
+        reply = "{\"v\":1,\"type\":\"swap_done\",\"plugin_index\":" +
+            std::to_string(plugin_index) +
+            ",\"status\":\"error\",\"global_setup_error\":" +
+            std::to_string(swap.global_setup_error) + "}";
+      }
+      if (!channels.write_message(reply)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
     }
     int32_t frame_index{};
     const auto* time_value = json_member(object, "current_time");
@@ -818,6 +944,16 @@ RenderSessionOutcome run_session_frame_loop(
       break;
     }
     std::memcpy(frame_rgba.data(), channels.view() + input_offset, frame_rgba.size());
+    // A swapped-in plug-in whose GLOBAL/PARAMS setup failed can never render;
+    // answer every frame with the reserved continuation-impossible code and
+    // let the broker own the stop decision (closure-session design §4.1).
+    if (swapped_plugin_setup_failed) {
+      if (!respond_error(kSessionSequenceSetupFailed)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
     outcome.frames_attempted += 1;
     if (!sequence_started) {
       write<int32_t>(input, 224, current_time);
@@ -996,7 +1132,8 @@ RenderSessionOutcome run_render_session(
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
-    const std::vector<ExternalLayerInput>* external_layers) {
+    const std::vector<ExternalLayerInput>* external_layers,
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook) {
   // The output slot starts at the render dimensions; an expand grows it in place
   // mid-session (#262), so the initial output capacity equals max_width/height.
   return run_session_frame_loop(
@@ -1025,7 +1162,8 @@ RenderSessionOutcome run_render_session(
         frame.guard_violation = !frame_guards;
         frame.output_validation_failed = output_validation_failed;
         return frame;
-      });
+      },
+      swap_hook);
 }
 
 // SmartFX resident session frame loop (protocol v1.1): each frame runs
@@ -1087,7 +1225,9 @@ SmartRenderSessionOutcome run_smart_render_session(
                 : frame_result.render_error != 0 ? frame_result.render_error
                                                  : frame_result.gpu_setdown_error;
         return frame;
-      });
+      },
+      // Smart sessions are out of cluster-swap scope (design §1): no hook.
+      nullptr);
   return outcome;
 }
 

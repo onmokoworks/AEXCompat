@@ -149,6 +149,12 @@ Statistics pf_state_statistics() {
   return {g_pf_get_current_state_calls, g_pf_are_states_identical_calls};
 }
 
+void reset_pf_state_statistics() {
+  std::lock_guard<std::mutex> lock(g_pf_state_registry_mutex);
+  g_pf_get_current_state_calls = 0;
+  g_pf_are_states_identical_calls = 0;
+}
+
 void on_global_setdown() { reset_effect_lifetime(false); }
 
 int32_t __cdecl get_current_param_state(void* owner, int32_t index,

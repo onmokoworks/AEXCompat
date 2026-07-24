@@ -1,4 +1,4 @@
-≠rá^—f•ñÿ¶{MÏy 'v√Æ∂õ≠cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.20)
 project(AEXCompatMinihost LANGUAGES CXX)
 
 add_library(aexcompat_trace_writer STATIC
@@ -121,6 +121,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_pf_ae_channel_runtime.cpp
     src/worker_pf_state_runtime.cpp
     src/worker_report.cpp
+    src/worker_cluster_manifest.cpp
     src/worker_request_parser.cpp
     src/worker_render_session.cpp
     src/worker_audio_session.cpp

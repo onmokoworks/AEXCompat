@@ -7,6 +7,13 @@
 //! other). Run it twice — with and without `--no-deps` — to measure the unlock
 //! rate rather than assert it.
 //!
+//! `--cluster` (issue #405) switches discovery to cluster sessions: plug-ins
+//! sharing one dependency-closure identity are inspected inside a single
+//! `DiscoverySession` (one seal + one worker for the whole cluster), and the
+//! report carries per-cluster open/inspect timings next to the per-plug-in
+//! records, so a default run and a `--cluster` run give a before/after
+//! comparison of the same sweep.
+//!
 //! Run:
 //!   set AEXCOMPAT_MULTIFILTER_REPOSITORY=C:\path\to\AEXCompat
 //!   cargo run --release --example discover_sweep -- <scan-dir> [options]
@@ -15,6 +22,7 @@
 //!   --deps <dir>   extra dependency search folder (repeatable; defaults to the
 //!                  scan folder's AE `Support Files` ancestor when present)
 //!   --no-deps      seal nothing, i.e. the pre-#304 behaviour
+//!   --cluster      discover same-closure clusters through DiscoverySessions
 //!   --limit <n>    stop after n plug-ins
 //!   --jobs <n>     dispatch up to n workers concurrently (issue #404; default
 //!                  8 — measured at 353 plug-ins: 982s sequential -> 282s).
@@ -36,14 +44,24 @@ use aexcompat_broker::plugin_dependency_closure::{
     DependencyClosureRequest, DependencyProvenance, resolve_dependency_closure,
     survey_dependency_closure,
 };
+use aexcompat_broker::render_session::{
+    DiscoverySession, DiscoverySessionOpenRequest, InspectOutcome,
+};
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+
+/// Cluster session bounds (issue #405, mirror of the bridge lib).
+const MAX_CLUSTER_PLUGINS: usize = 256;
+const MAX_CLUSTER_MODULE_BOUND: usize = 4096;
+const CLUSTER_MODULE_HEADROOM: usize = 256;
+const CLUSTER_INSPECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
 
 struct Options {
     scan: PathBuf,
     dependency_dirs: Vec<PathBuf>,
     seal: bool,
+    cluster: bool,
     survey_only: bool,
     limit: usize,
     jobs: usize,
@@ -61,6 +79,7 @@ fn parse_options_from(args: Vec<String>) -> Options {
     let mut scan = None;
     let mut dependency_dirs = Vec::new();
     let mut seal = true;
+    let mut cluster = false;
     let mut survey_only = false;
     let mut limit = usize::MAX;
     let mut jobs = 8usize;
@@ -71,6 +90,7 @@ fn parse_options_from(args: Vec<String>) -> Options {
                 dependency_dirs.push(PathBuf::from(args.next().expect("--deps needs a dir")))
             }
             "--no-deps" => seal = false,
+            "--cluster" => cluster = true,
             "--survey-only" => survey_only = true,
             "--limit" => {
                 limit = args
@@ -90,15 +110,19 @@ fn parse_options_from(args: Vec<String>) -> Options {
         }
     }
     let scan = scan.expect(
-        "usage: discover_sweep <scan-dir> [--deps <dir>] [--no-deps] [--limit n] [--jobs n] [--json path]",
+        "usage: discover_sweep <scan-dir> [--deps <dir>] [--no-deps] [--cluster] [--limit n] [--jobs n] [--json path]",
     );
     if dependency_dirs.is_empty() {
         dependency_dirs.extend(default_dependency_dirs(&scan));
+    }
+    if cluster && !seal {
+        panic!("--cluster needs sealed closures; drop --no-deps");
     }
     Options {
         scan,
         dependency_dirs,
         seal,
+        cluster,
         survey_only,
         limit,
         jobs,
@@ -518,12 +542,18 @@ fn main() {
     plugins.truncate(options.limit);
     let total = plugins.len();
     eprintln!(
-        "sweeping {} plug-ins (seal dependencies: {}, search dirs: {}, jobs: {})",
+        "sweeping {} plug-ins (seal dependencies: {}, cluster: {}, search dirs: {}, jobs: {})",
         total,
         options.seal,
+        options.cluster,
         options.dependency_dirs.len(),
         options.jobs
     );
+    if options.cluster {
+        run_cluster_sweep(&options, &repository, &plugins);
+        return;
+    }
+    let sweep_started = Instant::now();
 
     let work = |index: usize| {
         let outcome = sweep_plugin(&options, &repository, index, total, &plugins[index]);
@@ -541,9 +571,385 @@ fn main() {
     for (bucket, count) in &buckets {
         println!("{count:5}  {bucket}");
     }
+    println!("total sweep time: {} ms", sweep_started.elapsed().as_millis());
     if let Some(path) = options.json {
         let report = json!({
             "sealed_dependencies": options.seal,
+            "cluster_sessions": false,
+            "total_elapsed_ms": sweep_started.elapsed().as_millis(),
+            "plugins": records,
+            "buckets": buckets,
+        });
+        std::fs::write(path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+    }
+}
+
+/// One plug-in prepared for cluster discovery: hashed, its closure resolved,
+/// and its cluster identity computed. Mirrors the bridge's prepare phase.
+struct ClusterPrepared {
+    plugin: PathBuf,
+    sha: String,
+    size_bytes: u64,
+    dependencies: Vec<ApprovedImageArtifact>,
+    sealed_bytes: u64,
+    unresolved: usize,
+    provenance: Vec<DependencyProvenance>,
+    identity: String,
+}
+
+/// The closure identity (issue #405): a normalized hash of the sorted
+/// `basename:sha256` pairs of the resolved dependency set.
+fn closure_identity_of(dependencies: &[ApprovedImageArtifact]) -> String {
+    let mut entries: Vec<String> = dependencies
+        .iter()
+        .map(|dependency| {
+            let basename = dependency
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_lowercase();
+            format!(
+                "{}:{}",
+                basename,
+                dependency
+                    .expected_sha256
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
+        })
+        .collect();
+    entries.sort();
+    format!("{:x}", Sha256::digest(entries.join("\n").as_bytes()))
+}
+
+/// The cluster-mode sweep (issue #405): plug-ins sharing one closure
+/// identity are inspected inside a single DiscoverySession — one seal, one
+/// worker, one closure LoadLibrary for the whole cluster — and the report
+/// carries per-cluster open/inspect timings so a default run and a
+/// `--cluster` run give a before/after comparison. Failures are fail-closed
+/// (design §6): a member the session died on records
+/// `cluster_session_invalidated`, and every not-yet-inspected member falls
+/// back to the per-plugin one-shot inspect with a `cluster_fallback` note.
+fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) {
+    let sweep_started = Instant::now();
+    let mut records = Vec::new();
+    let mut buckets: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut prepared: Vec<ClusterPrepared> = Vec::new();
+
+    // Phase 1: hash + resolve every closure (the pre-inspect half).
+    for plugin in plugins {
+        let started = Instant::now();
+        let file_bytes = std::fs::read(plugin).ok();
+        let size_bytes = file_bytes.as_ref().map(|bytes| bytes.len() as u64);
+        let sha = file_bytes
+            .as_ref()
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+        let Some(sha) = sha else {
+            let record = plugin_record(
+                &options.scan,
+                plugin,
+                "unreadable_file",
+                started.elapsed().as_millis(),
+                size_bytes,
+                None,
+                json!({}),
+            );
+            records.push(record);
+            *buckets.entry("unreadable_file".into()).or_default() += 1;
+            continue;
+        };
+        let mut roots: Vec<PathBuf> = Vec::new();
+        roots.extend(
+            plugin
+                .parent()
+                .and_then(|parent| std::fs::canonicalize(parent).ok()),
+        );
+        for dir in &options.dependency_dirs {
+            if let Ok(dir) = std::fs::canonicalize(dir)
+                && !roots.contains(&dir)
+            {
+                roots.push(dir);
+            }
+        }
+        match resolve_dependency_closure(DependencyClosureRequest::new(plugin, &roots)) {
+            Ok(closure) => prepared.push(ClusterPrepared {
+                plugin: plugin.clone(),
+                sha,
+                size_bytes: size_bytes.unwrap_or(0),
+                identity: closure_identity_of(closure.dependencies()),
+                dependencies: closure.dependencies().to_vec(),
+                sealed_bytes: closure.total_bytes(),
+                unresolved: closure.unresolved().len(),
+                provenance: closure.provenance().to_vec(),
+            }),
+            Err(error) => {
+                let bucket = format!("closure_error: {error}");
+                let record = plugin_record(
+                    &options.scan,
+                    plugin,
+                    &bucket,
+                    started.elapsed().as_millis(),
+                    size_bytes,
+                    Some(&sha),
+                    json!({}),
+                );
+                records.push(record);
+                *buckets.entry(bucket).or_default() += 1;
+            }
+        }
+    }
+
+    // Phase 2: group by identity; clusters of 2+ go through one
+    // DiscoverySession, everything else through the one-shot inspect.
+    let mut groups: std::collections::BTreeMap<&str, Vec<usize>> = Default::default();
+    for (index, member) in prepared.iter().enumerate() {
+        groups.entry(member.identity.as_str()).or_default().push(index);
+    }
+    let mut cluster_reports = Vec::new();
+    let mut singleton_indices = Vec::new();
+    let mut cluster_indices = Vec::new();
+    for indices in groups.values() {
+        if indices.len() >= 2 && indices.len() <= MAX_CLUSTER_PLUGINS {
+            cluster_indices.push(indices.clone());
+        } else {
+            singleton_indices.extend(indices.iter().copied());
+        }
+    }
+
+    let one_shot = |member: &ClusterPrepared, started: Instant, extra: Value| -> (String, Value) {
+        match inspect_experimental_with_approved_dependencies_and_diagnostics(
+            repository,
+            &member.plugin,
+            &member.sha,
+            member.dependencies.clone(),
+        ) {
+            Ok((parameters, _)) => (
+                "loaded".to_owned(),
+                plugin_record(
+                    &options.scan,
+                    &member.plugin,
+                    "loaded",
+                    started.elapsed().as_millis(),
+                    Some(member.size_bytes),
+                    Some(&member.sha),
+                    json!({
+                        "parameters": parameters.len(),
+                        "sealed": member.dependencies.len(),
+                        "sealed_bytes": member.sealed_bytes,
+                        "unresolved": member.unresolved,
+                        "dependency_provenance": provenance_json(&member.provenance),
+                        "cluster_identity": member.identity,
+                        "cluster_fallback": extra,
+                    }),
+                ),
+            ),
+            Err(error) => {
+                let bucket = bucket_of(&error.to_string());
+                (
+                    bucket.clone(),
+                    plugin_record(
+                        &options.scan,
+                        &member.plugin,
+                        &bucket,
+                        started.elapsed().as_millis(),
+                        Some(member.size_bytes),
+                        Some(&member.sha),
+                        json!({
+                            "sealed": member.dependencies.len(),
+                            "unresolved": member.unresolved,
+                            "cluster_identity": member.identity,
+                            "cluster_fallback": extra,
+                        }),
+                    ),
+                )
+            }
+        }
+    };
+
+    for indices in &cluster_indices {
+        let cluster_started = Instant::now();
+        let members: Vec<&ClusterPrepared> = indices.iter().map(|index| &prepared[*index]).collect();
+        let identity = members[0].identity.clone();
+        let declared = members.len() + members[0].dependencies.len();
+        let infeasible = declared + CLUSTER_MODULE_HEADROOM > MAX_CLUSTER_MODULE_BOUND;
+        let mut open_ms = 0u128;
+        let mut fallback_note = Value::Null;
+        let session = if infeasible {
+            fallback_note = json!("cluster_infeasible");
+            None
+        } else {
+            let open_started = Instant::now();
+            let plugins_artifacts: Vec<ApprovedImageArtifact> = members
+                .iter()
+                .map(|member| ApprovedImageArtifact {
+                    path: member.plugin.clone(),
+                    expected_sha256: {
+                        let bytes = member.sha.as_bytes();
+                        let mut digest = [0u8; 32];
+                        for (index, pair) in bytes.chunks_exact(2).enumerate() {
+                            digest[index] = u8::from_str_radix(
+                                std::str::from_utf8(pair).expect("hex"),
+                                16,
+                            )
+                            .expect("hex");
+                        }
+                        digest
+                    },
+                    expected_size: member.size_bytes,
+                })
+                .collect();
+            match DiscoverySession::open(DiscoverySessionOpenRequest {
+                repository,
+                plugins: plugins_artifacts,
+                dependencies: members[0].dependencies.clone(),
+                module_bound: (declared + CLUSTER_MODULE_HEADROOM) as u32,
+                inspect_deadline: CLUSTER_INSPECT_DEADLINE,
+            }) {
+                Ok(session) => {
+                    open_ms = open_started.elapsed().as_millis();
+                    Some(session)
+                }
+                Err(error) => {
+                    open_ms = open_started.elapsed().as_millis();
+                    fallback_note = json!(format!("cluster session open failed: {error}"));
+                    None
+                }
+            }
+        };
+
+        let mut inspected = 0usize;
+        let mut invalidation: Option<String> = None;
+        if let Some(mut session) = session {
+            for (index, member) in members.iter().enumerate() {
+                let inspect_started = Instant::now();
+                match session.inspect_plugin(index as u32, index as u32) {
+                    Ok(InspectOutcome::Inspected { report }) => {
+                        let parameters = report
+                            .get("parameters")
+                            .and_then(Value::as_array)
+                            .map_or(0, Vec::len);
+                        records.push(plugin_record(
+                            &options.scan,
+                            &member.plugin,
+                            "loaded",
+                            inspect_started.elapsed().as_millis(),
+                            Some(member.size_bytes),
+                            Some(&member.sha),
+                            json!({
+                                "parameters": parameters,
+                                "sealed": member.dependencies.len(),
+                                "cluster_identity": identity,
+                                "cluster_inspect": true,
+                            }),
+                        ));
+                        *buckets.entry("loaded".into()).or_default() += 1;
+                        inspected += 1;
+                    }
+                    Ok(InspectOutcome::InspectError { error_kind, .. }) => {
+                        let bucket = format!("cluster_inspect_{error_kind}");
+                        records.push(plugin_record(
+                            &options.scan,
+                            &member.plugin,
+                            &bucket,
+                            inspect_started.elapsed().as_millis(),
+                            Some(member.size_bytes),
+                            Some(&member.sha),
+                            json!({
+                                "sealed": member.dependencies.len(),
+                                "cluster_identity": identity,
+                                "cluster_inspect": true,
+                            }),
+                        ));
+                        *buckets.entry(bucket).or_default() += 1;
+                        inspected += 1;
+                    }
+                    Err(error) => {
+                        invalidation = Some(format!("{error}"));
+                        records.push(plugin_record(
+                            &options.scan,
+                            &member.plugin,
+                            "cluster_session_invalidated",
+                            inspect_started.elapsed().as_millis(),
+                            Some(member.size_bytes),
+                            Some(&member.sha),
+                            json!({
+                                "sealed": member.dependencies.len(),
+                                "cluster_identity": identity,
+                                "cluster_fallback": format!("{error}"),
+                            }),
+                        ));
+                        *buckets
+                            .entry("cluster_session_invalidated".into())
+                            .or_default() += 1;
+                        inspected += 1;
+                        break;
+                    }
+                }
+            }
+            let close = session.close();
+            if invalidation.is_none() && close["session_clean"] != json!(true) {
+                invalidation = Some("session close not clean".to_owned());
+            }
+        }
+        // Fail-closed fallback (design §6): every member the session never
+        // inspected — open failure, or everything past an invalidation — is
+        // re-inspected per-plugin with a fallback note.
+        if let Some(reason) = &invalidation {
+            fallback_note = json!(reason.clone());
+        }
+        for member in members.iter().skip(inspected) {
+            let (bucket, record) =
+                one_shot(member, Instant::now(), fallback_note.clone());
+            records.push(record);
+            *buckets.entry(bucket).or_default() += 1;
+        }
+        let total_ms = cluster_started.elapsed().as_millis();
+        eprintln!(
+            "cluster {} ({} members): open {} ms, total {} ms{}",
+            &identity[..8.min(identity.len())],
+            members.len(),
+            open_ms,
+            total_ms,
+            if invalidation.is_some() { " (fell back)" } else { "" },
+        );
+        cluster_reports.push(json!({
+            "identity": identity,
+            "members": members.len(),
+            "open_ms": open_ms,
+            "total_ms": total_ms,
+            "inspected_in_session": inspected,
+            "fallback": fallback_note,
+        }));
+    }
+
+    for index in singleton_indices {
+        let (bucket, record) = one_shot(&prepared[index], Instant::now(), Value::Null);
+        records.push(record);
+        *buckets.entry(bucket).or_default() += 1;
+    }
+
+    println!("\n=== summary ({} plug-ins, {} clusters) ===", records.len(), cluster_reports.len());
+    for (bucket, count) in &buckets {
+        println!("{count:5}  {bucket}");
+    }
+    for report in &cluster_reports {
+        println!(
+            "cluster {}: {} members, open {} ms, total {} ms",
+            &report["identity"].as_str().unwrap_or("?")[..8],
+            report["members"],
+            report["open_ms"],
+            report["total_ms"],
+        );
+    }
+    println!("total sweep time: {} ms", sweep_started.elapsed().as_millis());
+    if let Some(path) = &options.json {
+        let report = json!({
+            "sealed_dependencies": options.seal,
+            "cluster_sessions": true,
+            "total_elapsed_ms": sweep_started.elapsed().as_millis(),
+            "clusters": cluster_reports,
             "plugins": records,
             "buckets": buckets,
         });

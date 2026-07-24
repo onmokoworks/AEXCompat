@@ -108,7 +108,7 @@ pub fn run(
                 worker_program: &receipt_worker,
                 worker_expected_sha256: approved.worker_sha256,
                 worker_expected_size: approved.worker_byte_size,
-                plugin_basename: &plugin_basename,
+                plugin_basename: Some(&plugin_basename),
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
                 repository,
