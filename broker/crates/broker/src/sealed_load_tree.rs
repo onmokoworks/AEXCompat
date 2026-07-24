@@ -30,26 +30,41 @@ pub struct SealedLoadTree {
     temp_parent: PathBuf,
     manifest_digest: [u8; 32],
     manifest_filenames: Vec<String>,
+    /// Ordered plugin basenames (manifest entries whose role is a plugin);
+    /// `plugin_filenames[0]` is the main plugin `plugin_path` resolves. A
+    /// single-plugin tree holds exactly one entry; a cluster tree (issue
+    /// #405) holds the whole ordered cluster.
+    plugin_filenames: Vec<String>,
     handles: Option<Vec<File>>,
 }
 
 impl SealedLoadTree {
     pub fn create(main: LoadEntry, dependencies: Vec<LoadEntry>) -> io::Result<Self> {
+        Self::create_cluster(vec![main], dependencies)
+    }
+
+    /// Cluster variant (issue #405): stages the whole ordered plugin cluster
+    /// plus the shared dependency closure into one sealed root, so staging,
+    /// hashing, and the ACL happen once per cluster instead of once per
+    /// plugin. `plugins[0]` keeps the main-plugin manifest role, so a
+    /// single-entry cluster tree is byte-identical (manifest digest included)
+    /// to what `create` builds.
+    pub fn create_cluster(plugins: Vec<LoadEntry>, dependencies: Vec<LoadEntry>) -> io::Result<Self> {
         let temp_parent = fs::canonicalize(std::env::temp_dir())?;
         reject_reparse(&temp_parent)?;
-        Self::create_at(&temp_parent, main, dependencies)
+        Self::create_at(&temp_parent, plugins, dependencies)
     }
 
     fn create_at(
         temp_parent: &Path,
-        main: LoadEntry,
+        plugins: Vec<LoadEntry>,
         dependencies: Vec<LoadEntry>,
     ) -> io::Result<Self> {
         let temp_parent = fs::canonicalize(temp_parent)?;
         reject_reparse(&temp_parent)?;
         let _ = cleanup_stale_roots(&temp_parent, SystemTime::now(), STALE_ROOT_AGE);
         let root = create_random_root(&temp_parent)?;
-        let result = Self::populate(root.clone(), temp_parent.clone(), main, dependencies);
+        let result = Self::populate(root.clone(), temp_parent.clone(), plugins, dependencies);
         if result.is_err() {
             let _ = remove_owned_root(&root, &temp_parent);
         }
@@ -59,20 +74,31 @@ impl SealedLoadTree {
     fn populate(
         root: PathBuf,
         temp_parent: PathBuf,
-        main: LoadEntry,
+        plugins: Vec<LoadEntry>,
         mut dependencies: Vec<LoadEntry>,
     ) -> io::Result<Self> {
+        let mut plugins = plugins.into_iter();
+        let Some(main) = plugins.next() else {
+            return Err(invalid("a sealed load tree requires at least one plugin"));
+        };
         dependencies.sort_by_key(|entry| entry.relative_basename.to_lowercase());
-        let mut entries = Vec::with_capacity(dependencies.len() + 1);
+        let mut entries = Vec::with_capacity(dependencies.len() + plugins.len() + 1);
+        // Manifest roles: 0 = main plugin (byte-compatible with the original
+        // single-plugin layout), 2 = additional cluster plugin, 1 = dependency.
         entries.push((0u8, main));
+        entries.extend(plugins.map(|entry| (2u8, entry)));
         entries.extend(dependencies.into_iter().map(|entry| (1u8, entry)));
 
         let mut names = HashSet::new();
-        for (_, entry) in &entries {
+        let mut plugin_filenames = Vec::new();
+        for (role, entry) in &entries {
             validate_basename(&entry.relative_basename)?;
             let folded = entry.relative_basename.to_lowercase();
             if !names.insert(folded) {
                 return Err(invalid("duplicate or case-insensitive filename collision"));
+            }
+            if *role != 1 {
+                plugin_filenames.push(entry.relative_basename.clone());
             }
         }
 
@@ -164,6 +190,7 @@ impl SealedLoadTree {
             temp_parent,
             manifest_digest: manifest.finalize().into(),
             manifest_filenames,
+            plugin_filenames,
             handles: Some(handles),
         })
     }
@@ -192,6 +219,31 @@ impl SealedLoadTree {
             ));
         }
         Ok(self.root.join(plugin_basename))
+    }
+
+    /// Cluster plugin resolution (issue #405): like `plugin_path`, but accepts
+    /// any manifest entry whose role is a plugin — every cluster member, not
+    /// just the main one. Dependencies stay unresolvable through this API: a
+    /// caller handed a sealed root can never turn a dependency basename into
+    /// a plugin path.
+    pub fn cluster_plugin_path(&self, plugin_basename: &str) -> io::Result<PathBuf> {
+        validate_basename(plugin_basename)?;
+        if !self
+            .plugin_filenames
+            .iter()
+            .any(|name| name == plugin_basename)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "plugin basename is not an authenticated cluster plugin entry",
+            ));
+        }
+        Ok(self.root.join(plugin_basename))
+    }
+
+    /// The ordered plugin basenames of the cluster (`[0]` is the main plugin).
+    pub fn cluster_plugin_basenames(&self) -> &[String] {
+        &self.plugin_filenames
     }
 
     /// Child insertion prevention requires the future restricted worker SID/DACL boundary.
@@ -575,7 +627,7 @@ mod tests {
         let parent = source_dir();
         let main = fixture(&parent, "main.plugin", b"main");
         let source_path = main.source.clone();
-        let tree = SealedLoadTree::create_at(&parent, main, vec![]).unwrap();
+        let tree = SealedLoadTree::create_at(&parent, vec![main], vec![]).unwrap();
         let staged_path = tree.root().join("main.plugin");
 
         assert_eq!(file_identity(&source_path), file_identity(&staged_path));
@@ -703,7 +755,7 @@ mod tests {
         let main = fixture(&source, "main.plugin", b"main");
         let mut dependency = fixture(&source, "helper.dll", b"dependency");
         dependency.expected_sha256 = [9; 32];
-        assert!(SealedLoadTree::create_at(&parent, main, vec![dependency]).is_err());
+        assert!(SealedLoadTree::create_at(&parent, vec![main], vec![dependency]).is_err());
 
         let parent_leftovers = fs::read_dir(&parent)
             .unwrap()
@@ -795,10 +847,10 @@ mod tests {
         let main = fixture(&parent, "main.plugin", b"main");
         let dependency = fixture(&parent, "helper.dll", b"dependency");
         let first =
-            SealedLoadTree::create_at(&parent, main.clone(), vec![dependency.clone()]).unwrap();
+            SealedLoadTree::create_at(&parent, vec![main.clone()], vec![dependency.clone()]).unwrap();
         drop(first);
 
-        let second = SealedLoadTree::create_at(&parent, main, vec![dependency]).unwrap();
+        let second = SealedLoadTree::create_at(&parent, vec![main], vec![dependency]).unwrap();
         assert_eq!(
             second.manifest_basenames(),
             &["main.plugin".to_owned(), "helper.dll".to_owned()]
@@ -817,15 +869,83 @@ mod tests {
         crate::staging_trust::set_enabled_override_for_testing(Some(true));
         let parent = source_dir();
         let main = fixture(&parent, "main.plugin", b"main");
-        let first = SealedLoadTree::create_at(&parent, main.clone(), vec![]).unwrap();
+        let first = SealedLoadTree::create_at(&parent, vec![main.clone()], vec![]).unwrap();
         drop(first);
 
         // Different length, so the cache miss cannot hinge on mtime granularity.
         fs::write(&main.source, b"main-with-more-bytes").unwrap();
-        let error = SealedLoadTree::create_at(&parent, main, vec![]).unwrap_err();
+        let error = SealedLoadTree::create_at(&parent, vec![main], vec![]).unwrap_err();
         assert_eq!(error.to_string(), "source size mismatch");
         crate::staging_trust::set_enabled_override_for_testing(None);
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn cluster_tree_stages_every_plugin_and_resolves_them_by_basename() {
+        let source = source_dir();
+        let alpha = fixture(&source, "alpha.plugin", b"alpha");
+        let beta = fixture(&source, "beta.plugin", b"beta");
+        let dependency = fixture(&source, "helper.dll", b"dependency");
+        let tree =
+            SealedLoadTree::create_cluster(vec![alpha, beta], vec![dependency]).unwrap();
+        assert_eq!(fs::read(tree.root().join("alpha.plugin")).unwrap(), b"alpha");
+        assert_eq!(fs::read(tree.root().join("beta.plugin")).unwrap(), b"beta");
+        assert_eq!(
+            tree.cluster_plugin_basenames(),
+            &["alpha.plugin".to_owned(), "beta.plugin".to_owned()]
+        );
+        // Every cluster plugin resolves; a dependency or an unknown basename
+        // never resolves as a plugin, and the main-plugin API keeps accepting
+        // only the first entry.
+        assert_eq!(
+            tree.cluster_plugin_path("beta.plugin").unwrap(),
+            tree.root().join("beta.plugin")
+        );
+        assert_eq!(
+            tree.cluster_plugin_path("helper.dll").unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            tree.cluster_plugin_path("unknown.plugin").unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            tree.plugin_path("beta.plugin").unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            tree.plugin_path("alpha.plugin").unwrap(),
+            tree.root().join("alpha.plugin")
+        );
+        drop(tree);
+        fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn single_plugin_cluster_tree_matches_create() {
+        let source = source_dir();
+        let main = fixture(&source, "main.plugin", b"main");
+        let dependency = fixture(&source, "helper.dll", b"dependency");
+        let plain =
+            SealedLoadTree::create(main.clone(), vec![dependency.clone()]).unwrap();
+        let plain_digest = plain.manifest_digest();
+        drop(plain);
+        let clustered = SealedLoadTree::create_cluster(vec![main], vec![dependency]).unwrap();
+        assert_eq!(plain_digest, clustered.manifest_digest());
+        assert_eq!(
+            clustered.cluster_plugin_basenames(),
+            &["main.plugin".to_owned()]
+        );
+        drop(clustered);
+        fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn cluster_tree_rejects_an_empty_plugin_list() {
+        let source = source_dir();
+        let dependency = fixture(&source, "helper.dll", b"dependency");
+        assert!(SealedLoadTree::create_cluster(vec![], vec![dependency]).is_err());
+        fs::remove_dir_all(source).unwrap();
     }
 
     #[cfg(windows)]

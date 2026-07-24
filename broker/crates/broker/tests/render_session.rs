@@ -15,9 +15,11 @@ mod windows_e2e {
         InteractiveParameter, ParameterAnimation, RenderGpuBackend, RenderPixelFormat,
     };
     use aexcompat_broker::render_session::{
-        AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, FrameStatus, RenderSession,
-        SessionLayer, SessionOpenRequest, run_video_batch,
+        AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, ClusterRenderPlugins,
+        DiscoverySession, DiscoverySessionOpenRequest, FrameStatus, InspectOutcome, RenderSession,
+        SessionLayer, SessionOpenRequest, SwapOutcome, run_video_batch,
     };
+    use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -2457,5 +2459,374 @@ mod windows_e2e {
         assert_eq!(report["frames"][0]["render_error"], -40);
         // The frame-local error was recorded, the session itself closed clean.
         assert_eq!(report["session"]["invalidated"], false);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cluster session integration tests (issue #405,
+    // docs/CLOSURE_SESSION_PROTOCOL_2026-07-23.md). The fixture worker speaks
+    // swap_plugin/swap_done and the discovery session against the
+    // cluster-manifest-v1 transport, so the whole protocol round trip is
+    // exercised without a native minihost build.
+    // -----------------------------------------------------------------------
+
+    /// A temp repository with a two-plugin cluster (alpha/beta) sharing one
+    /// closure dependency (helper.dll); each member's (path, sha256) pair.
+    struct TempCluster {
+        repository: TempRepository,
+        plugins: Vec<(PathBuf, String)>,
+        dependency: PathBuf,
+    }
+
+    fn approved_artifact(path: &Path) -> ApprovedImageArtifact {
+        let bytes = std::fs::read(path).unwrap();
+        ApprovedImageArtifact {
+            path: path.to_path_buf(),
+            expected_sha256: Sha256::digest(&bytes).into(),
+            expected_size: bytes.len() as u64,
+        }
+    }
+
+    fn temp_cluster_repository() -> TempCluster {
+        let fixture = build_fixture();
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-cluster-session-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        let worker_dir = root.join("target/minihost-build");
+        std::fs::create_dir_all(&worker_dir).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        let mut plugins = Vec::new();
+        for (name, bytes) in [
+            ("alpha.plugin", b"cluster plugin alpha" as &[u8]),
+            ("beta.plugin", b"cluster plugin beta"),
+        ] {
+            let path = root.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            plugins.push((path, format!("{:x}", Sha256::digest(bytes))));
+        }
+        let dependency = root.join("helper.dll");
+        std::fs::write(&dependency, b"cluster shared dependency").unwrap();
+        TempCluster {
+            repository: TempRepository(root),
+            plugins,
+            dependency,
+        }
+    }
+
+    fn open_cluster_render_session(cluster: &TempCluster) -> RenderSession {
+        RenderSession::open_cluster(
+            SessionOpenRequest {
+                repository: &cluster.repository.0,
+                plugin_path: &cluster.plugins[0].0,
+                plugin_sha256: &cluster.plugins[0].1,
+                parameters: None,
+                payload_override: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                // The shared closure rides the base request's dependencies.
+                dependencies: vec![approved_artifact(&cluster.dependency)],
+                width: WIDTH,
+                height: HEIGHT,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                frame_deadline: Duration::from_secs(30),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+            },
+            ClusterRenderPlugins {
+                plugins: cluster
+                    .plugins
+                    .iter()
+                    .map(|(path, _)| approved_artifact(path))
+                    .collect(),
+                swap_payloads: vec![None, Some("v2|0=2.0".to_owned())],
+                module_bound: 64,
+            },
+        )
+        .expect("open cluster render session")
+    }
+
+    fn open_discovery_session(cluster: &TempCluster) -> DiscoverySession {
+        DiscoverySession::open(DiscoverySessionOpenRequest {
+            repository: &cluster.repository.0,
+            plugins: cluster
+                .plugins
+                .iter()
+                .map(|(path, _)| approved_artifact(path))
+                .collect(),
+            dependencies: vec![approved_artifact(&cluster.dependency)],
+            module_bound: 64,
+            inspect_deadline: Duration::from_secs(30),
+        })
+        .expect("open discovery session")
+    }
+
+    #[test]
+    fn cluster_render_session_swaps_plugins_and_closes_clean() {
+        if crate::common::skip_without_restricted_token_launch(
+            "cluster_render_session_swaps_plugins_and_closes_clean",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let cluster = temp_cluster_repository();
+        let mut session = open_cluster_render_session(&cluster);
+
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(3))
+            .expect("frame 0 renders on plugins[0]");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+
+        // The swap selects a manifest member by index only.
+        let swap = session.swap_plugin(1).expect("swap to plugins[1]");
+        assert!(matches!(swap, SwapOutcome::Swapped));
+
+        let outcome = session
+            .render_frame(1, 1, &input_pattern(9))
+            .expect("frame 1 renders on plugins[1]");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["invalidated"], false, "close: {close}");
+        assert_eq!(close["frames_ok"], 2, "close: {close}");
+        // The swap rode the manifest: the final report's cluster module
+        // audit records the epoch and stays inside the declared set.
+        let epochs = close["final_report"]["module_audit"]["epochs"]
+            .as_array()
+            .expect("cluster audit carries epochs");
+        assert_eq!(epochs.len(), 1, "close: {close}");
+        assert_eq!(epochs[0]["plugin_index"], 0);
+    }
+
+    #[test]
+    fn cluster_swap_rejects_out_of_manifest_and_current_index_as_caller_errors() {
+        if crate::common::skip_without_restricted_token_launch(
+            "cluster_swap_rejects_out_of_manifest_and_current_index_as_caller_errors",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let cluster = temp_cluster_repository();
+        let mut session = open_cluster_render_session(&cluster);
+
+        // An index outside the manifest, and the current index, are caller
+        // errors rejected before anything is sent; the session stays usable.
+        assert!(session.swap_plugin(2).is_err());
+        assert!(session.swap_plugin(0).is_err());
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(5))
+            .expect("the session still renders after rejected swaps");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn cluster_swap_done_mismatch_invalidates_the_session() {
+        if crate::common::skip_without_restricted_token_launch(
+            "cluster_swap_done_mismatch_invalidates_the_session",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(Some("swap_done_wrong_index"));
+        let cluster = temp_cluster_repository();
+        let mut session = open_cluster_render_session(&cluster);
+        session
+            .render_frame(0, 0, &input_pattern(3))
+            .expect("frame 0 renders");
+        let error = session
+            .swap_plugin(1)
+            .expect_err("a mismatched swap_done is a protocol violation");
+        assert!(error.to_string().contains("swap_done_mismatch"), "{error}");
+        assert_eq!(
+            session.invalidation().map(|invalidation| invalidation.reason),
+            Some("swap_done_mismatch")
+        );
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
+    }
+
+    #[test]
+    fn cluster_swap_worker_death_is_detected_by_the_three_way_wait() {
+        if crate::common::skip_without_restricted_token_launch(
+            "cluster_swap_worker_death_is_detected_by_the_three_way_wait",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(Some("crash_on_swap"));
+        let cluster = temp_cluster_repository();
+        let mut session = open_cluster_render_session(&cluster);
+        session
+            .render_frame(0, 0, &input_pattern(3))
+            .expect("frame 0 renders");
+        let error = session
+            .swap_plugin(1)
+            .expect_err("a worker dying mid-swap must fail the swap");
+        assert!(error.to_string().contains("worker_exited"), "{error}");
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
+    }
+
+    #[test]
+    fn cluster_swap_global_setup_error_is_plugin_local() {
+        if crate::common::skip_without_restricted_token_launch(
+            "cluster_swap_global_setup_error_is_plugin_local",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(Some("swap_global_setup_error"));
+        let cluster = temp_cluster_repository();
+        let mut session = open_cluster_render_session(&cluster);
+        let swap = session.swap_plugin(1).expect("the swap exchange completes");
+        let SwapOutcome::PluginError { global_setup_error } = swap else {
+            panic!("expected a plugin-local GLOBAL_SETUP error, got {swap:?}");
+        };
+        assert_eq!(global_setup_error, 25);
+        // The session continues; the caller decided to keep using it.
+        let close = session.close();
+        assert_eq!(close["invalidated"], false, "close: {close}");
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn cluster_close_rejects_an_audit_module_outside_the_declared_set() {
+        if crate::common::skip_without_restricted_token_launch(
+            "cluster_close_rejects_an_audit_module_outside_the_declared_set",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(Some("audit_undeclared_module"));
+        let cluster = temp_cluster_repository();
+        let mut session = open_cluster_render_session(&cluster);
+        session
+            .render_frame(0, 0, &input_pattern(3))
+            .expect("frame 0 renders");
+        session.swap_plugin(1).expect("swap to plugins[1]");
+        let close = session.close();
+        // The exit code and report looked clean, but the observed union
+        // carried a module the manifest never declared: fail-closed.
+        assert_eq!(close["invalidated"], true, "close: {close}");
+        assert_eq!(close["session_clean"], false, "close: {close}");
+        assert_eq!(
+            close["invalidated_reason"]["reason"],
+            "module_audit_mismatch",
+            "close: {close}"
+        );
+    }
+
+    #[test]
+    fn discovery_session_inspects_every_cluster_plugin() {
+        if crate::common::skip_without_restricted_token_launch(
+            "discovery_session_inspects_every_cluster_plugin",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let cluster = temp_cluster_repository();
+        let mut session = open_discovery_session(&cluster);
+
+        let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
+        let InspectOutcome::Inspected { report } = first else {
+            panic!("inspect plugins[0] errored: {first:?}");
+        };
+        assert_eq!(report["plugin"]["basename"], "alpha.plugin");
+        assert_eq!(report["plugin"]["sha256"], cluster.plugins[0].1);
+
+        let second = session.inspect_plugin(1, 1).expect("inspect plugins[1]");
+        let InspectOutcome::Inspected { report } = second else {
+            panic!("inspect plugins[1] errored: {second:?}");
+        };
+        assert_eq!(report["plugin"]["basename"], "beta.plugin");
+
+        // Re-inspecting the current plugin is legal (design §4.2).
+        let again = session.inspect_plugin(1, 2).expect("re-inspect plugins[1]");
+        assert!(matches!(again, InspectOutcome::Inspected { .. }));
+
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["inspects_ok"], 3, "close: {close}");
+        // The inspect swap rode the manifest: one epoch, declared-set audit.
+        let epochs = close["final_report"]["module_audit"]["epochs"]
+            .as_array()
+            .expect("cluster audit carries epochs");
+        assert_eq!(epochs.len(), 1, "close: {close}");
+        assert_eq!(epochs[0]["plugin_index"], 0);
+    }
+
+    #[test]
+    fn discovery_session_rejects_out_of_manifest_index_and_off_serial_requests() {
+        if crate::common::skip_without_restricted_token_launch(
+            "discovery_session_rejects_out_of_manifest_index_and_off_serial_requests",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let cluster = temp_cluster_repository();
+        let mut session = open_discovery_session(&cluster);
+
+        // Both are caller errors rejected before anything is sent; the
+        // session stays usable.
+        assert!(session.inspect_plugin(2, 0).is_err());
+        assert!(session.inspect_plugin(0, 5).is_err());
+        let outcome = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
+        assert!(matches!(outcome, InspectOutcome::Inspected { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn discovery_session_reports_parameter_local_error_and_continues() {
+        if crate::common::skip_without_restricted_token_launch(
+            "discovery_session_reports_parameter_local_error_and_continues",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(Some("inspect_error_plugin_1"));
+        let cluster = temp_cluster_repository();
+        let mut session = open_discovery_session(&cluster);
+        let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
+        assert!(matches!(first, InspectOutcome::Inspected { .. }));
+        let second = session.inspect_plugin(1, 1).expect("the exchange completes");
+        let InspectOutcome::InspectError { error_kind, report } = second else {
+            panic!("expected a parameter-local inspect error, got {second:?}");
+        };
+        assert_eq!(error_kind, "selector_error");
+        assert!(report.is_none());
+        let close = session.close();
+        assert_eq!(close["inspects_ok"], 1, "close: {close}");
+        assert_eq!(close["inspects_errored"], 1, "close: {close}");
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn discovery_session_worker_death_is_detected_by_the_three_way_wait() {
+        if crate::common::skip_without_restricted_token_launch(
+            "discovery_session_worker_death_is_detected_by_the_three_way_wait",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(Some("crash_on_inspect"));
+        let cluster = temp_cluster_repository();
+        let mut session = open_discovery_session(&cluster);
+        let error = session
+            .inspect_plugin(0, 0)
+            .expect_err("a worker dying mid-inspect must fail the request");
+        assert!(error.to_string().contains("worker_exited"), "{error}");
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
     }
 }

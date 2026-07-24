@@ -84,7 +84,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
         worker_program: worker,
         worker_expected_sha256: approved.worker_sha256,
         worker_expected_size: approved.worker_byte_size,
-        plugin_basename: &plugin_basename,
+        plugin_basename: Some(&plugin_basename),
         args_before_plugin: &before,
         args_after_plugin: &after,
         repository,
