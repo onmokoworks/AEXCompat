@@ -7,6 +7,9 @@ bool g_configured{};
 }
 
 SceneRuntimeState::SceneRuntimeState() noexcept {
+  for (auto& transform : layer_transforms)
+    transform.scale = {{100.0, 100.0, 100.0}};
+  layer_parent_indices = {{-1, -1, -1}};
   effect_instances[0] = {&layers[0], 3001, 0, 1, 1, true};
 }
 

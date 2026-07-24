@@ -51,7 +51,9 @@
 #include "gpu_opencl_backend.hpp"
 #include "gpu_memory_world_transport.hpp"
 #include "host_audio_runtime.hpp"
+#include "extended_inter_memory.hpp"
 #include "l2_cli_dispatch.h"
+#include "aex_string_table.hpp"
 #include "l2_mode_execution.hpp"
 #include "parameter_animation_transport.hpp"
 #include "worker_parameter_runtime.hpp"
@@ -646,7 +648,7 @@ constexpr std::size_t kPluginDataNameBytes = 256;
 constexpr std::size_t kPluginDataCategoryBytes = 256;
 constexpr std::size_t kPluginDataEntryBytes = 128;
 constexpr std::size_t kPluginDataSupportUrlBytes = 1024;
-constexpr int32_t kPluginDataRejected = 4;  // A_Err_PARAMETER
+constexpr int32_t kPluginDataRejected = 3;  // A_Err_PARAMETER
 constexpr int32_t kPluginDataException = 512;
 constexpr int32_t kPluginDataReservedInfo = 8;
 constexpr int32_t kPluginDataApiMajor = 13;
@@ -661,14 +663,14 @@ struct BoundedPluginDataText {
   std::size_t length{};
   bool readable{};
   bool terminated{};
-  bool printable{};
+  bool safe_bytes{};
 };
 
 template <std::size_t Capacity>
 BoundedPluginDataText<Capacity> copy_bounded_plugin_data_text(
     const unsigned char* source) noexcept {
   BoundedPluginDataText<Capacity> copy;
-  copy.printable = true;
+  copy.safe_bytes = true;
   if (!source) return copy;
   __try {
     for (; copy.length < Capacity; ++copy.length) {
@@ -677,7 +679,10 @@ BoundedPluginDataText<Capacity> copy_bounded_plugin_data_text(
         copy.terminated = true;
         break;
       }
-      if (value < 0x20 || value > 0x7e) copy.printable = false;
+      // Metadata is an opaque byte string in the PluginData ABI.  Preserve
+      // bounded/NUL-terminated copying and reject C0 controls and DEL, but do
+      // not reject valid non-ASCII localized names, categories, or URLs.
+      if (value < 0x20 || value == 0x7f) copy.safe_bytes = false;
       copy.text[copy.length] = static_cast<char>(value);
     }
     copy.readable = true;
@@ -715,7 +720,7 @@ struct PluginDataContext {
 };
 
 bool valid_plugin_data_export_name(const BoundedPluginDataText<kPluginDataEntryBytes>& text) {
-  if (!text.readable || !text.terminated || !text.printable || text.length == 0 ||
+  if (!text.readable || !text.terminated || !text.safe_bytes || text.length == 0 ||
       text.length > 127) return false;
   if (!(text.text[0] == '_' || (text.text[0] >= 'A' && text.text[0] <= 'Z') ||
         (text.text[0] >= 'a' && text.text[0] <= 'z')))
@@ -737,7 +742,7 @@ bool plugin_data_effect_kind(int32_t kind) {
 template <std::size_t Capacity>
 bool valid_plugin_data_text(const BoundedPluginDataText<Capacity>& text,
                             bool required) {
-  return text.readable && text.terminated && text.printable &&
+  return text.readable && text.terminated && text.safe_bytes &&
       (!required || text.length != 0);
 }
 
@@ -839,7 +844,7 @@ int32_t invoke_plugin_data_entry2_seh(PluginDataEntry2 entry,
   if (!entry || !context) return kPluginDataRejected;
   int32_t result = kPluginDataRejected;
   __try {
-    result = entry(context, &plugin_data_callback2, nullptr,
+    result = entry(context, &plugin_data_callback2, &g_basic_suite,
                    "AEXCompat", "2025");
   } __except(plugin_data_exception_filter(GetExceptionInformation(),
                                            &context->exception_code)) {
@@ -853,7 +858,7 @@ int32_t invoke_plugin_data_entry1_seh(PluginDataEntry1 entry,
   if (!entry || !context) return kPluginDataRejected;
   int32_t result = kPluginDataRejected;
   __try {
-    result = entry(context, &plugin_data_callback1, nullptr,
+    result = entry(context, &plugin_data_callback1, &g_basic_suite,
                    "AEXCompat", "2025");
   } __except(plugin_data_exception_filter(GetExceptionInformation(),
                                            &context->exception_code)) {
@@ -862,12 +867,8 @@ int32_t invoke_plugin_data_entry1_seh(PluginDataEntry1 entry,
   return result;
 }
 
-PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
-  if (!module) return {PiplPluginKind::Unknown, {}};
-  const auto entry2 = reinterpret_cast<PluginDataEntry2>(
-      GetProcAddress(module, "PluginDataEntryFunction2"));
-  const auto entry1 = reinterpret_cast<PluginDataEntry1>(
-      GetProcAddress(module, "PluginDataEntryFunction"));
+PiplEntrypoint resolve_plugin_data_entrypoints(PluginDataEntry2 entry2,
+                                               PluginDataEntry1 entry1) {
   if (!entry2 && !entry1) return {PiplPluginKind::Unknown, {}};
   PluginDataContext context;
   const int32_t result = entry2
@@ -881,10 +882,21 @@ PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
                       context.registration.entrypoint_length)};
 }
 
+PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
+  if (!module) return {PiplPluginKind::Unknown, {}};
+  const auto entry2 = reinterpret_cast<PluginDataEntry2>(
+      GetProcAddress(module, "PluginDataEntryFunction2"));
+  const auto entry1 = reinterpret_cast<PluginDataEntry1>(
+      GetProcAddress(module, "PluginDataEntryFunction"));
+  return resolve_plugin_data_entrypoints(entry2, entry1);
+}
+
 int32_t __cdecl synthetic_plugin_data_entry2(
-    PluginDataOpaque* in_ptr, PluginDataCallback2 callback, void*, const char*,
-    const char*) {
-  if (!callback) return kPluginDataRejected;
+    PluginDataOpaque* in_ptr, PluginDataCallback2 callback, void* basic_suite,
+    const char* host, const char* version) {
+  if (!callback || !basic_suite || !host || !version ||
+      std::strcmp(host, "AEXCompat") != 0 || std::strcmp(version, "2025") != 0)
+    return kPluginDataRejected;
   return callback(in_ptr,
       reinterpret_cast<const unsigned char*>("Synthetic Effect"),
       reinterpret_cast<const unsigned char*>("AEXCompat Synthetic"),
@@ -896,9 +908,11 @@ int32_t __cdecl synthetic_plugin_data_entry2(
 }
 
 int32_t __cdecl synthetic_plugin_data_entry1(
-    PluginDataOpaque* in_ptr, PluginDataCallback1 callback, void*, const char*,
-    const char*) {
-  if (!callback) return kPluginDataRejected;
+    PluginDataOpaque* in_ptr, PluginDataCallback1 callback, void* basic_suite,
+    const char* host, const char* version) {
+  if (!callback || !basic_suite || !host || !version ||
+      std::strcmp(host, "AEXCompat") != 0 || std::strcmp(version, "2025") != 0)
+    return kPluginDataRejected;
   return callback(in_ptr,
       reinterpret_cast<const unsigned char*>("Synthetic v1 Effect"),
       reinterpret_cast<const unsigned char*>("AEXCompat Synthetic v1"),
@@ -909,17 +923,13 @@ int32_t __cdecl synthetic_plugin_data_entry1(
 }
 
 bool verify_plugin_data_entrypoint() {
-  PluginDataContext v2;
-  if (invoke_plugin_data_entry2_seh(&synthetic_plugin_data_entry2, &v2) != 0 ||
-      !v2.registration.valid || v2.registration.support_url_length == 0 ||
-      std::string(v2.registration.entrypoint.data(),
-                  v2.registration.entrypoint_length) != "entryPointFunc")
+  const auto v2 = resolve_plugin_data_entrypoints(&synthetic_plugin_data_entry2,
+                                                  &synthetic_plugin_data_entry1);
+  if (v2.kind != PiplPluginKind::Effect || v2.symbol != "entryPointFunc")
     return false;
-  PluginDataContext v1;
-  if (invoke_plugin_data_entry1_seh(&synthetic_plugin_data_entry1, &v1) != 0 ||
-      !v1.registration.valid || v1.registration.support_url_present ||
-      std::string(v1.registration.entrypoint.data(),
-                  v1.registration.entrypoint_length) != "EffectMain")
+  const auto v1 = resolve_plugin_data_entrypoints(nullptr,
+                                                  &synthetic_plugin_data_entry1);
+  if (v1.kind != PiplPluginKind::Effect || v1.symbol != "EffectMain")
     return false;
   PluginDataContext duplicate;
   // Duplicate registrations are accepted and ignored: both calls must succeed
@@ -942,6 +952,19 @@ bool verify_plugin_data_entrypoint() {
       std::string(duplicate.registration.name.data(),
                   duplicate.registration.name_length) != "Name")
     return false;
+  PluginDataContext localized;
+  const unsigned char localized_name[] = {0xe3, 0x83, 0x86, 0x00};
+  const unsigned char localized_match[] = {0xe3, 0x82, 0xb9, 0x00};
+  const unsigned char localized_category[] = {0xe3, 0x83, 0x88, 0x00};
+  const unsigned char localized_url[] = {0x68, 0x74, 0x74, 0x70, 0x73,
+                                          0x3a, 0x2f, 0x2f, 0xe3, 0x00};
+  if (plugin_data_callback2(
+          &localized, localized_name, localized_match, localized_category,
+          reinterpret_cast<const unsigned char*>("EffectMain"),
+          static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+          kPluginDataApiMinor, kPluginDataReservedInfo, localized_url) != 0 ||
+      !localized.registration.valid || !localized.registration.support_url_present)
+    return false;
   PluginDataContext invalid_pointer;
   return plugin_data_callback1(
       &invalid_pointer, reinterpret_cast<const unsigned char*>(1),
@@ -957,24 +980,62 @@ bool verify_plugin_data_entrypoint() {
 // show; bundled effects call in_data+0x60 first thing in GLOBAL_SETUP
 // (allocating 0xFA0 bytes) and release it through in_data+0x70, while
 // PARAMS_SETUP resolves parameter-name strings through in_data+0x68.
+// Allocation/release is owned by extended_inter_memory (issue #395): a
+// host-owned allocation set so a plug-in cannot make the host free a static
+// or foreign pointer, and a zero-size slot still yields a releasable token.
 int32_t __cdecl host_extended_alloc(void** out, std::size_t size) {
-  if (!out || size == 0 || size > (size_t{1} << 24)) return 4;
-  void* buffer = std::calloc(1, size);
-  if (!buffer) return 4;
-  *out = buffer;
-  return 0;
+  return aexcompat::extended_inter::allocate(out, size);
 }
 int32_t __cdecl host_extended_free(void** ptr) {
-  // The plug-in passes the address of its buffer pointer (lea rcx,[local]),
-  // not the buffer itself.
-  if (ptr) std::free(*ptr);
-  return 0;
+  return aexcompat::extended_inter::release(ptr);
 }
-// TODO(#382-follow-up): resolve the real string from the plug-in's string
-// resources ($$$/... localization keys). This placeholder unblocks selector
-// dispatch but every parameter name reads "AEXCompat" for now.
-const char* __cdecl host_extended_lookup(void*, int32_t, void*, void*) {
-  return "AEXCompat";
+
+// Parameter-name strings ride the plug-in's own read-only PE string table
+// ($$$/... localization keys, issue #396): the table is parsed from the
+// loaded module's file image once per plug-in and looked up by id, replacing
+// the #382 placeholder that answered every name with "AEXCompat".
+aexcompat::aex_strings::StringTable aex_string_table;
+const aexcompat::aex_strings::StringTable* g_active_aex_string_table = nullptr;
+
+bool load_aex_string_table(HMODULE module,
+                           aexcompat::aex_strings::StringTable& table) {
+  table = aexcompat::aex_strings::StringTable{};
+  if (!module) return false;
+  std::array<wchar_t, 32768> module_buffer{};
+  const DWORD module_length = GetModuleFileNameW(
+      module, module_buffer.data(), static_cast<DWORD>(module_buffer.size()));
+  if (module_length == 0 || module_length >= module_buffer.size()) return false;
+  std::error_code file_error;
+  const uint64_t file_size =
+      std::filesystem::file_size(module_buffer.data(), file_error);
+  constexpr uint64_t kMaxImageBytes = 64ULL * 1024 * 1024;
+  if (file_error || file_size == 0 || file_size > kMaxImageBytes) return false;
+  std::ifstream input(module_buffer.data(), std::ios::binary);
+  std::vector<unsigned char> bytes(static_cast<std::size_t>(file_size));
+  if (!input.read(reinterpret_cast<char*>(bytes.data()),
+                  static_cast<std::streamsize>(bytes.size())) ||
+      input.peek() != std::ifstream::traits_type::eof())
+    return false;
+  table = aexcompat::aex_strings::parse_readonly_pe_strings(bytes.data(),
+                                                            bytes.size());
+  return table.status != aexcompat::aex_strings::ParseStatus::Invalid;
+}
+
+void refresh_aex_string_table(HMODULE module) {
+  const bool loaded = load_aex_string_table(module, aex_string_table);
+  g_active_aex_string_table = loaded ? &aex_string_table : nullptr;
+  const char* status =
+      aex_string_table.status == aexcompat::aex_strings::ParseStatus::Valid
+          ? "valid"
+          : (aex_string_table.status == aexcompat::aex_strings::ParseStatus::NoEntries
+                 ? "no_entries"
+                 : "invalid");
+  std::cerr << "string_table_status:" << status << "\n" << std::flush;
+}
+
+const char* __cdecl host_extended_lookup(void*, int32_t id, void*, void*) {
+  return g_active_aex_string_table ? g_active_aex_string_table->lookup(id)
+                                   : nullptr;
 }
 
 void append_pipl_u32(std::vector<unsigned char>& bytes, uint32_t value) {
@@ -2306,6 +2367,8 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
     result.global_setup_error = -1;
     return result;
   }
+  // The swapped-in plug-in's string table drives its PARAMS_SETUP lookups.
+  refresh_aex_string_table(module);
   // GLOBAL_SETUP / PARAMS_SETUP through the launch bootstrap on fresh
   // buffers and fresh host records (ABOUT stays whatever the launch did).
   reset_cluster_effect_state();
@@ -2607,6 +2670,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
       else
         current_entry = nullptr;
       if (current_entry) {
+        refresh_aex_string_table(current_module);
         inspect_column();
       } else {
         current_global_error = -1;
@@ -2934,6 +2998,9 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     std::cerr << "plugin_kind:unknown_no_effect_entrypoint\n" << std::flush;
     return session.finish(12);
   }
+  // The admitted plug-in's string table drives its PARAMS_SETUP lookups
+  // (issue #396).
+  refresh_aex_string_table(module);
 
   aexcompat::worker_runtime::effect_bootstrap::State effect_state{};
   auto& input = effect_state.input;

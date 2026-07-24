@@ -43,7 +43,8 @@ issue #98 本文「段階 0」の調査項目に対応する。
 
 計測方法: `aex_render_worker.exe` を直接起動 (broker の sealed staging・
 hash 検証・PNG エンコードは含まない)。fixture は `pf_sampling_probe.aex`、
-`--render-image` (8bpc)、N=12、warm。`tools/bench_oneshot_render.py` にて。
+`--render-image` (8bpc)、N=12、warm。これは #365 前の one-shot 経路の歴史的ベースラインで、
+`tools/bench_oneshot_render.py` は現在 `--render-experimental-session` を使う。
 機材はこの開発機 (Windows 11)。数値は機材・AV スキャン状態依存の参考値で、
 frozen evidence ではない。
 

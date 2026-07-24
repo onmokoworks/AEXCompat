@@ -7,6 +7,7 @@
 #include "worker_handle_runtime.hpp"
 #include "worker_pf_helper_runtime.hpp"
 #include "worker_pf_state_runtime.hpp"
+#include "render_subsystem.h"
 
 #include <algorithm>
 #include <array>
@@ -181,26 +182,140 @@ bool verify_camera_case(bool smart_case) {
 
 bool verify_matrix_case(bool smart_case) {
   if (!g_hooks.get_camera_matrix || !g_hooks.get_dimensions ||
-      !g_hooks.set_dimensions) return false;
+      !g_hooks.set_dimensions || !g_hooks.set_camera_index ||
+      !g_hooks.camera_index) return false;
   const bool saved_live = pf_state_runtime::effect_is_live();
+  const int32_t saved_camera_index = g_hooks.camera_index();
   int32_t saved_width = 0, saved_height = 0;
   g_hooks.get_dimensions(&saved_width, &saved_height);
+  const auto saved_transforms = scene_runtime_state().layer_transforms;
+  const auto saved_parent_indices = scene_runtime_state().layer_parent_indices;
+  const auto saved_camera_zoom = scene_runtime_state().layer_camera_zoom;
+  const auto saved_camera_zoom_keyframes = scene_runtime_state().layer_camera_zoom_keyframes;
+  const auto saved_spatial = aexcompat::render::render_context_state();
   pf_state_runtime::reset_effect_lifetime(true);
   g_hooks.set_dimensions(smart_case ? 1920 : 640, smart_case ? 1080 : 480);
+  auto& spatial = aexcompat::render::render_context_state();
+  spatial.downsample_x = {1, 1};
+  spatial.downsample_y = {1, 1};
+  spatial.pixel_aspect_ratio = {1, 1};
+  g_hooks.set_camera_index(-1);
   const suite_abi::AegpTime time{smart_case ? 45 : 15, 30};
   AegpMatrix4 matrix{};
   double distance = -1.0;
   int16_t width = -1, height = -1;
   const int16_t expected_width = smart_case ? 1920 : 640;
   const int16_t expected_height = smart_case ? 1080 : 480;
+  const auto near = [](double actual, double expected) {
+    return std::abs(actual - expected) < 1.0e-9;
+  };
   bool ok = g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
       &width, &height) == 0 && distance == expected_width &&
       width == expected_width && height == expected_height;
   for (std::size_t row = 0; row < 4; ++row)
     for (std::size_t column = 0; column < 4; ++column)
       ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
+
+  spatial.downsample_x = {1, 2};
+  spatial.downsample_y = {1, 2};
+  spatial.pixel_aspect_ratio = {10, 11};
+  matrix = {};
+  distance = -1.0;
+  width = -1;
+  height = -1;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
+      &width, &height) == 0 && distance == expected_width &&
+      width == expected_width && height == expected_height;
+  for (std::size_t row = 0; row < 4; ++row)
+    for (std::size_t column = 0; column < 4; ++column)
+      ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
+
+  spatial.pixel_aspect_ratio.denominator = 0;
   AegpMatrix4 sentinel{};
   std::memset(&sentinel, 0x5a, sizeof(sentinel));
+  matrix = sentinel;
+  distance = -2.0;
+  width = -2;
+  height = -2;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
+      &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0 &&
+      distance == -2.0 && width == -2 && height == -2;
+  spatial.downsample_x = {1, 1};
+  spatial.downsample_y = {1, 1};
+  spatial.pixel_aspect_ratio = {1, 1};
+
+  scene_runtime_state().layer_transforms[2] = {};
+  scene_runtime_state().layer_transforms[2].position = {{100.0, 200.0, 0.0}};
+  scene_runtime_state().layer_transforms[2].scale = {{100.0, 100.0, 100.0}};
+  scene_runtime_state().layer_transforms[2].is_3d = true;
+  scene_runtime_state().layer_parent_indices[2] = -1;
+  g_hooks.set_camera_index(2);
+  matrix = {};
+  distance = -1.0;
+  width = -1;
+  height = -1;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
+      &width, &height) == 0 && near(matrix.mat[0][3], -100.0) &&
+      near(matrix.mat[1][3], -200.0) && near(matrix.mat[2][3], 0.0) &&
+      distance == expected_width && width == expected_width && height == expected_height;
+
+  scene_runtime_state().layer_camera_zoom[2] = 1400.0;
+  matrix = {};
+  distance = -1.0;
+  width = -1;
+  height = -1;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
+      &width, &height) == 0 && near(matrix.mat[0][3], -100.0) &&
+      near(matrix.mat[1][3], -200.0) && distance == 1400.0 &&
+      width == expected_width && height == expected_height;
+
+  auto& zoom_keyframes = scene_runtime_state().layer_camera_zoom_keyframes[2];
+  zoom_keyframes = {};
+  zoom_keyframes[0].valid = true;
+  zoom_keyframes[0].time = {0, 30};
+  zoom_keyframes[0].zoom = 1000.0;
+  zoom_keyframes[1].valid = true;
+  zoom_keyframes[1].time = {60, 30};
+  zoom_keyframes[1].zoom = 2000.0;
+  const suite_abi::AegpTime zoom_midpoint{30, 30};
+  matrix = {};
+  distance = -1.0;
+  width = -1;
+  height = -1;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &zoom_midpoint, &matrix,
+      &distance, &width, &height) == 0 && near(matrix.mat[0][3], -100.0) &&
+      near(matrix.mat[1][3], -200.0) && distance == 1500.0 &&
+      width == expected_width && height == expected_height;
+  const suite_abi::AegpTime zoom_after{90, 30};
+  matrix = {};
+  distance = -1.0;
+  width = -1;
+  height = -1;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &zoom_after, &matrix,
+      &distance, &width, &height) == 0 && distance == 2000.0 &&
+      width == expected_width && height == expected_height;
+  zoom_keyframes[1].zoom = 0.0;
+  matrix = sentinel;
+  distance = -2.0;
+  width = -2;
+  height = -2;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &zoom_after, &matrix,
+      &distance, &width, &height) != 0 && std::memcmp(&matrix, &sentinel,
+      sizeof(matrix)) == 0 && distance == -2.0 && width == -2 && height == -2;
+
+  scene_runtime_state().layer_transforms[2].scale[0] = 0.0;
+  matrix = sentinel;
+  distance = -2.0;
+  width = -2;
+  height = -2;
+  ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
+      &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0 &&
+      distance == -2.0 && width == -2 && height == -2;
+  g_hooks.set_camera_index(-1);
+  scene_runtime_state().layer_transforms = saved_transforms;
+  scene_runtime_state().layer_parent_indices = saved_parent_indices;
+  scene_runtime_state().layer_camera_zoom = saved_camera_zoom;
+  scene_runtime_state().layer_camera_zoom_keyframes = saved_camera_zoom_keyframes;
   matrix = sentinel; distance = -2.0; width = -2; height = -2;
   suite_abi::AegpTime invalid{time.value, 0};
   ok = ok && g_hooks.get_camera_matrix(nullptr, &time, &matrix, &distance,
@@ -210,7 +325,9 @@ bool verify_matrix_case(bool smart_case) {
   pf_state_runtime::reset_effect_lifetime(false);
   ok = ok && g_hooks.get_camera_matrix(g_hooks.effect, &time, &matrix, &distance,
       &width, &height) != 0 && std::memcmp(&matrix, &sentinel, sizeof(matrix)) == 0;
+  spatial = saved_spatial;
   g_hooks.set_dimensions(saved_width, saved_height);
+  g_hooks.set_camera_index(saved_camera_index);
   pf_state_runtime::reset_effect_lifetime(saved_live);
   return ok;
 }
@@ -572,6 +689,11 @@ bool verify_aegp_resizer_3d_chain() {
   g_hooks.get_dimensions(&saved_width, &saved_height);
   const auto saved_in_points = g_aegp_layer_in_points;
   const auto saved_durations = g_aegp_layer_durations;
+  const auto saved_transforms = g_aegp_layer_transforms;
+  const auto saved_parent_indices = g_aegp_layer_parent_indices;
+  const auto saved_keyframes = scene_runtime_state().layer_transform_keyframes;
+  const auto saved_camera_zoom = scene_runtime_state().layer_camera_zoom;
+  const auto saved_camera_zoom_keyframes = scene_runtime_state().layer_camera_zoom_keyframes;
   g_aegp_active_camera_layer_index = 2;
   g_aegp_layer_in_points[2] = {0, 30};
   g_aegp_layer_durations[2] = {300, 30};
@@ -597,10 +719,126 @@ bool verify_aegp_resizer_3d_chain() {
     for (std::size_t column = 0; column < 4; ++column)
       ok = ok && matrix.mat[row][column] == (row == column ? 1.0 : 0.0);
   }
+  g_aegp_layer_transforms[2] = {};
+  g_aegp_layer_transforms[2].anchor = {{1.0, 2.0, 3.0}};
+  g_aegp_layer_transforms[2].position = {{10.0, 20.0, 30.0}};
+  g_aegp_layer_transforms[2].scale = {{200.0, 50.0, 100.0}};
+  g_aegp_layer_transforms[2].rotation_degrees = {{0.0, 0.0, 90.0}};
+  g_aegp_layer_transforms[2].is_3d = true;
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0;
+  const auto near = [](double actual, double expected) {
+    return std::abs(actual - expected) < 1.0e-9;
+  };
+  const double expected[4][4] = {
+      {0.0, -0.5, 0.0, 11.0},
+      {2.0, 0.0, 0.0, 18.0},
+      {0.0, 0.0, 1.0, 27.0},
+      {0.0, 0.0, 0.0, 1.0}};
+  for (std::size_t row = 0; row < 4; ++row)
+    for (std::size_t column = 0; column < 4; ++column)
+      ok = ok && near(matrix.mat[row][column], expected[row][column]);
+  AegpMatrix4 matrix_sentinel{};
+  std::memset(&matrix_sentinel, 0x5a, sizeof(matrix_sentinel));
+  g_aegp_layer_transforms[2].scale[0] = 0.0;
+  matrix = matrix_sentinel;
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  g_aegp_layer_transforms[2].scale[0] = 200.0;
+  g_aegp_layer_transforms[2].rotation_degrees[1] =
+      std::numeric_limits<double>::quiet_NaN();
+  matrix = matrix_sentinel;
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  int foreign_layer = 0;
+  matrix = matrix_sentinel;
+  ok = ok && aegp_get_layer_to_world_xform(&foreign_layer, &time, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  g_aegp_layer_transforms[2] = saved_transforms[2];
+  g_aegp_layer_transforms[2].position = {{10.0, 20.0, 30.0}};
+  g_aegp_layer_transforms[2].scale = {{100.0, 100.0, 100.0}};
+  g_aegp_layer_transforms[2].is_3d = true;
+  g_aegp_layer_transforms[1] = {};
+  g_aegp_layer_transforms[1].position = {{100.0, 200.0, 0.0}};
+  g_aegp_layer_transforms[1].scale = {{100.0, 100.0, 100.0}};
+  g_aegp_layer_transforms[1].is_3d = true;
+  g_aegp_layer_parent_indices[2] = 1;
+  void* parent = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && aegp_get_layer_parent(&g_aegp_layers[2], &parent) == 0 &&
+      parent == &g_aegp_layers[1];
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0 &&
+      near(matrix.mat[0][3], 110.0) && near(matrix.mat[1][3], 220.0) &&
+      near(matrix.mat[2][3], 30.0);
+  g_aegp_layer_parent_indices[1] = 2;
+  matrix = matrix_sentinel;
+  parent = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
+  ok = ok && aegp_get_layer_parent(&g_aegp_layers[2], &parent) == 0 &&
+      parent == &g_aegp_layers[1] &&
+      aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  g_aegp_layer_parent_indices[1] = -1;
+  g_aegp_layer_parent_indices[2] = 7;
+  matrix = matrix_sentinel;
+  parent = reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc));
+  ok = ok && aegp_get_layer_parent(&g_aegp_layers[2], &parent) != 0 &&
+      parent == reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc)) &&
+      aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  g_aegp_layer_parent_indices = saved_parent_indices;
+  g_aegp_layer_transforms[1] = saved_transforms[1];
+
+  auto& keyframes = scene_runtime_state().layer_transform_keyframes[2];
+  keyframes = {};
+  keyframes[0].valid = true;
+  keyframes[0].time = {0, 30};
+  keyframes[0].transform.position = {{10.0, 20.0, 0.0}};
+  keyframes[0].transform.scale = {{100.0, 100.0, 100.0}};
+  keyframes[0].transform.is_3d = true;
+  keyframes[1].valid = true;
+  keyframes[1].time = {60, 30};
+  keyframes[1].transform.position = {{70.0, 80.0, 30.0}};
+  keyframes[1].transform.scale = {{100.0, 100.0, 100.0}};
+  keyframes[1].transform.is_3d = true;
+  g_aegp_layer_parent_indices[2] = -1;
+  const AegpTime midpoint{30, 30};
+  matrix = {};
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &midpoint, &matrix) == 0 &&
+      near(matrix.mat[0][3], 40.0) && near(matrix.mat[1][3], 50.0) &&
+      near(matrix.mat[2][3], 15.0);
+  keyframes[1].time = {0, 30};
+  matrix = matrix_sentinel;
+  ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &midpoint, &matrix) != 0 &&
+      std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
+  scene_runtime_state().layer_transform_keyframes = saved_keyframes;
   AegpLegacyStreamVal zoom{-1.0};
   int32_t type = -1;
+  scene_runtime_state().layer_camera_zoom[2] = 0.0;
   ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
       &time, 0, &zoom, &type) == 0 && zoom.one_d == 1920.0 && type == 5;
+  scene_runtime_state().layer_camera_zoom[2] = 1400.0;
+  zoom = {-1.0};
+  type = -1;
+  ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
+      &time, 0, &zoom, &type) == 0 && near(zoom.one_d, 1400.0) && type == 5;
+  auto& zoom_keyframes = scene_runtime_state().layer_camera_zoom_keyframes[2];
+  zoom_keyframes = {};
+  zoom_keyframes[0].valid = true;
+  zoom_keyframes[0].time = {0, 30};
+  zoom_keyframes[0].zoom = 1000.0;
+  zoom_keyframes[1].valid = true;
+  zoom_keyframes[1].time = {60, 30};
+  zoom_keyframes[1].zoom = 2000.0;
+  const AegpTime zoom_midpoint{30, 30};
+  zoom = {-1.0};
+  type = -1;
+  ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
+      &zoom_midpoint, 0, &zoom, &type) == 0 && near(zoom.one_d, 1500.0) && type == 5;
+  zoom_keyframes[1].time = {0, 30};
+  zoom = {123.0};
+  type = 77;
+  ok = ok && aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 11, 1,
+      &zoom_midpoint, 0, &zoom, &type) != 0 && near(zoom.one_d, 123.0) && type == 77;
+  scene_runtime_state().layer_camera_zoom = saved_camera_zoom;
+  scene_runtime_state().layer_camera_zoom_keyframes = saved_camera_zoom_keyframes;
   void* item = nullptr;
   int32_t width = -1;
   int32_t height = -1;
@@ -616,8 +854,6 @@ bool verify_aegp_resizer_3d_chain() {
       &time, 0, &sentinel, &type) != 0 && sentinel.one_d == -2.0 && type == -2 &&
       aegp_get_layer_stream_value_v2(&g_aegp_layers[2], 10, 1,
       &time, 0, &sentinel, &type) != 0 && sentinel.one_d == -2.0 && type == -2;
-  AegpMatrix4 matrix_sentinel{};
-  std::memset(&matrix_sentinel, 0x5a, sizeof(matrix_sentinel));
   matrix = matrix_sentinel;
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &invalid, &matrix) != 0 &&
       std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
@@ -637,6 +873,11 @@ bool verify_aegp_resizer_3d_chain() {
   g_hooks.set_dimensions(saved_width, saved_height);
   g_aegp_layer_in_points = saved_in_points;
   g_aegp_layer_durations = saved_durations;
+  g_aegp_layer_transforms = saved_transforms;
+  g_aegp_layer_parent_indices = saved_parent_indices;
+  scene_runtime_state().layer_transform_keyframes = saved_keyframes;
+  scene_runtime_state().layer_camera_zoom = saved_camera_zoom;
+  scene_runtime_state().layer_camera_zoom_keyframes = saved_camera_zoom_keyframes;
   return ok && suite_leases_balanced();
 }
 

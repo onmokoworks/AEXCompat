@@ -20,6 +20,8 @@ const MAX_DIAGNOSTIC_SUMMARY_BYTES: usize = 1024;
 const MAX_AGGREGATE_SHAS: usize = 4096;
 const MAX_AGGREGATE_FILES: usize = 65_536;
 const MAX_AGGREGATE_BYTES: u64 = 64 * 1024 * 1024;
+const CLI_CONTRACT_SCHEMA: &str = "aexcompat.harness-cli-contract";
+const CLI_CONTRACT_VERSION: u64 = 1;
 
 const SCATTERMAP_HASH: &str = "223FF5EC542DD74374C727F16AA6C068073D1C2D7A5CABF20512CB289F0716EB";
 const MASKOFFSET_HASH: &str = "B7C41F4F906FCE74B26BD2F06520F6BFDF75DCD1A2682DBB85D50D1DE833877B";
@@ -3886,7 +3888,7 @@ impl HarnessApp {
                     timing,
                 )
             } else if !smart && use_registered_default && dependencies.is_empty() {
-                aexcompat_broker::image_render::render_image(
+                aexcompat_broker::image_render::render_scattermap_fixture(
                     &repository,
                     "scattermap",
                     &input,
@@ -5532,6 +5534,115 @@ fn show_viewer_texture(
     );
 }
 
+fn inspect_dependency_roots(
+    plugin: &Path,
+    requested_roots: &[std::ffi::OsString],
+) -> Result<Vec<PathBuf>, String> {
+    const MAX_ROOTS: usize = aexcompat_broker::plugin_dependency_closure::MAX_SEARCH_ROOTS;
+    let plugin = plugin
+        .canonicalize()
+        .map_err(|error| format!("selected AEX could not be resolved: {error}"))?;
+    let mut roots = Vec::with_capacity(requested_roots.len() + 1);
+    if let Some(parent) = plugin.parent() {
+        roots.push(parent.to_path_buf());
+    }
+    for requested in requested_roots {
+        let root = PathBuf::from(requested)
+            .canonicalize()
+            .map_err(|error| format!("dependency root could not be resolved: {error}"))?;
+        if !root.is_dir() {
+            return Err(format!(
+                "dependency root is not a directory: {}",
+                root.display()
+            ));
+        }
+        if !roots.iter().any(|existing| existing == &root) {
+            roots.push(root);
+        }
+    }
+    if roots.len() > MAX_ROOTS {
+        return Err(format!(
+            "at most {MAX_ROOTS} total dependency search roots may be supplied"
+        ));
+    }
+    Ok(roots)
+}
+
+fn inspect_experimental_with_dependency_roots(
+    repository: &Path,
+    plugin: &Path,
+    approved_sha256: &str,
+    requested_roots: &[std::ffi::OsString],
+) -> Result<serde_json::Value, String> {
+    let roots = inspect_dependency_roots(plugin, requested_roots)?;
+    let closure = aexcompat_broker::plugin_dependency_closure::resolve_dependency_closure(
+        aexcompat_broker::plugin_dependency_closure::DependencyClosureRequest::new(plugin, &roots),
+    )
+    .map_err(|error| format!("dependency closure resolution failed: {error}"))?;
+    let dependencies = closure.dependencies().to_vec();
+    let (parameters, diagnostics) =
+        aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics(
+            repository,
+            plugin,
+            approved_sha256,
+            dependencies.clone(),
+        )
+        .map_err(|error| format!("parameter inspection failed: {error}"))?;
+    let plugin_size = fs::metadata(plugin)
+        .map_err(|error| format!("selected AEX metadata failed: {error}"))?
+        .len();
+    let dependency_report = dependencies
+        .iter()
+        .map(|dependency| {
+            let basename = dependency
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<non-unicode>");
+            let sha256 = dependency
+                .expected_sha256
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<String>();
+            serde_json::json!({
+                "basename": basename,
+                "size_bytes": dependency.expected_size,
+                "sha256": sha256,
+            })
+        })
+        .collect::<Vec<_>>();
+    let provenance = closure
+        .provenance()
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "basename": item.basename,
+                "import_derived": item.import_derived,
+                "string_derived": item.string_derived,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "stage": "parameter_inspection",
+        "plugin_identity": {
+            "sha256": approved_sha256,
+            "size_bytes": plugin_size,
+        },
+        "parameters": parameters,
+        "worker_diagnostics": diagnostics,
+        "dependency_closure": {
+            "search_roots": roots,
+            "dependencies": dependency_report,
+            "dependency_count": dependencies.len(),
+            "total_bytes": closure.total_bytes(),
+            "unresolved_import_count": closure.unresolved().len(),
+            "unresolved_imports": closure.unresolved(),
+            "rejected_import_name_count": closure.rejected_names(),
+            "provenance": provenance,
+        },
+    }))
+}
+
 fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
     let typed_conformance_request = args.get(1).is_some_and(|command| {
         matches!(
@@ -5567,9 +5678,191 @@ fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
         })
 }
 
+fn cli_contract() -> serde_json::Value {
+    serde_json::json!({
+        "schema": CLI_CONTRACT_SCHEMA,
+        "version": CLI_CONTRACT_VERSION,
+        "program": "aexcompat-harness",
+        "transport": {
+            "success_stdout": "json",
+            "failure_stderr": true,
+            "failure_exit_code": "nonzero",
+            "unknown_or_malformed_arguments": "launch_gui"
+        },
+        "headless_mode": {
+            "prefix": "--headless",
+            "unknown_or_malformed_arguments": "structured_stderr_exit_64",
+            "gui_launch": false
+        },
+        "commands": [
+            {
+                "name": "--compare-images",
+                "argv": ["--compare-images", "<reference-image>", "<output-image>"],
+                "result": "pixel-comparison-json",
+                "exit_code": "0=exact,2=non-exact"
+            },
+            {
+                "name": "--inspect-experimental",
+                "argv": ["--inspect-experimental", "<aex>"],
+                "result": "parameter-inspection-json"
+            },
+            {
+                "name": "--render-scattermap-fixture",
+                "argv": ["--render-scattermap-fixture", "<input-image>", "<output-image>"],
+                "result": "session-render-report-json",
+                "note": "Approved ScatterMap fixture only; this is not a generic AEX path."
+            },
+            {
+                "name": "--inspect-experimental-with-deps",
+                "argv": ["--inspect-experimental-with-deps", "<aex>", "<dependency-root>..."],
+                "result": "parameter-inspection-and-dependency-closure-json"
+            },
+            {
+                "name": "--inspect-experimental-dependencies",
+                "argv": ["--inspect-experimental-dependencies", "<aex>", "all|missing"],
+                "result": "dependency-diagnostic-json"
+            },
+            {
+                "name": "--render-experimental-request",
+                "argv": ["--render-experimental-request|--render-experimental-smart-request|--render-experimental-request-16|--render-experimental-smart-request-16|--render-experimental-request-32|--render-experimental-smart-request-32-cpu", "<aex>", "<input-image>", "<output-image>", "<debug-request.json>"],
+                "result": "render-report-json"
+            },
+            {
+                "name": "--render-experimental-session",
+                "argv": ["--render-experimental-session|--render-experimental-session-param", "<aex>", "<input-image>", "<output-image>", "argb8|argb16|argb32f", "classic|smart", "<current-time>", "<total-time>", "<time-scale>", "<slot>", "<value>"],
+                "result": "session-render-report-json",
+                "aliases": ["--render-experimental-session", "--render-experimental-session-param"],
+                "note": "The final slot/value pair is required only for --render-experimental-session-param."
+            },
+            {
+                "name": "--render-experimental",
+                "argv": ["--render-experimental|--render-experimental-auto|--render-experimental-16|--render-experimental-16-deep|--render-experimental-32|--render-experimental-smart|--render-experimental-smart-16|--render-experimental-smart-16-deep|--render-experimental-smart-32|--render-experimental-smart-32-cpu", "<aex>", "<input-image>", "<output-image>"],
+                "result": "render-report-json"
+            },
+            {
+                "name": "experimental-probes",
+                "aliases": [
+                    "--probe-experimental-options-dialog",
+                    "--probe-experimental-automatic-options-dialog",
+                    "--probe-experimental-nop-render",
+                    "--probe-experimental-smart-nop-render",
+                    "--probe-experimental-input-buffer-write",
+                    "--probe-experimental-smart-input-buffer-write",
+                    "--probe-experimental-expand-buffer",
+                    "--probe-experimental-shrink-buffer",
+                    "--probe-experimental-persistent-sequence",
+                    "--probe-experimental-flattened-sequence",
+                    "--probe-experimental-copied-flattened-sequence"
+                ],
+                "argv": ["<probe-command>", "<aex>"],
+                "result": "probe-report-json",
+                "note": "Every listed probe uses the same one-AEX argument shape."
+            },
+            {
+                "name": "experimental-aegp",
+                "aliases": [
+                    "--initialize-experimental-aegp",
+                    "--dispatch-experimental-aegp-update-menu",
+                    "--dispatch-experimental-aegp-idle",
+                    "--dispatch-experimental-aegp-command-roundtrip",
+                    "--dispatch-experimental-aegp-active-idle-roundtrip",
+                    "--dispatch-experimental-aegp-comp-idle-roundtrip",
+                    "--dispatch-experimental-aegp-keyframe-roundtrip",
+                    "--dispatch-experimental-aegp-seek-roundtrip",
+                    "--dispatch-experimental-aegp-trim-roundtrip",
+                    "--dispatch-experimental-aegp-switch-roundtrip"
+                ],
+                "argv": ["<aegp-command>", "<aex>"],
+                "result": "aegp-report-json"
+            }
+        ],
+        "safety": {
+            "native_aex_execution": true,
+            "not_a_security_sandbox": true,
+            "paths_are_caller_supplied": true,
+            "use_conformance_bundle_for_hashed_reproducible_artifacts": true
+        }
+    })
+}
+
+fn read_plugin_hash(plugin: &Path) -> Result<String, std::io::Error> {
+    let bytes = fs::read(plugin)?;
+    Ok(format!("{:X}", Sha256::digest(bytes)))
+}
+
+fn plugin_read_diagnostic(plugin: &Path, error: &std::io::Error) -> serde_json::Value {
+    let _ = plugin;
+    serde_json::json!({
+        "schema": DIAGNOSTIC_SCHEMA,
+        "version": DIAGNOSTIC_VERSION,
+        "success": false,
+        "classification": "input_error",
+        "failure_stage": "input_validation",
+        "operation": "read_plugin",
+        "path_kind": "aex",
+        "error_kind": format!("{:?}", error.kind()),
+        "os_code": error.raw_os_error(),
+        "message": error.to_string(),
+    })
+}
+
+fn required_plugin_hash(plugin: &Path) -> String {
+    match read_plugin_hash(plugin) {
+        Ok(hash) => hash,
+        Err(error) => {
+            eprintln!("{}", plugin_read_diagnostic(plugin, &error));
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cli_inspection_failure_document(message: &str) -> serde_json::Value {
+    typed_failure_document(message).unwrap_or_else(|| {
+        serde_json::json!({
+            "classification": "inspection_error",
+            "failure_stage": "parameter_inspection",
+            "message": bounded_summary(message),
+        })
+    })
+}
+
+fn required_plugin_parameters(
+    repository: &Path,
+    plugin: &Path,
+    hash: &str,
+) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
+    match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+        repository, plugin, hash,
+    ) {
+        Ok((parameters, _)) => parameters,
+        Err(error) => {
+            eprintln!("{}", cli_inspection_failure_document(&error.to_string()));
+            std::process::exit(1);
+        }
+    }
+}
+
+fn print_cli_help() {
+    println!(
+        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
+    );
+}
+
 fn main() -> eframe::Result {
     aexcompat_broker::observability::init();
-    let args: Vec<_> = std::env::args_os().collect();
+    let mut args: Vec<_> = std::env::args_os().collect();
+    let headless = args.get(1).is_some_and(|arg| arg == "--headless");
+    if headless {
+        args.remove(1);
+    }
+    if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
+        print_cli_help();
+        return Ok(());
+    }
+    if args.len() == 2 && args[1] == "--print-cli-contract" {
+        println!("{}", serde_json::to_string_pretty(&cli_contract()).unwrap());
+        return Ok(());
+    }
     let repository = repository_root(&args);
     if args.len() == 4 && args[1] == "--compare-images" {
         match compare_images(Path::new(&args[2]), Path::new(&args[3])) {
@@ -5591,10 +5884,8 @@ fn main() -> eframe::Result {
     }
     if args.len() == 5 && args[1] == "--render-experimental-matrix" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let hash = required_plugin_hash(plugin);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         let report = run_effect_matrix(
             &repository,
             plugin,
@@ -5611,10 +5902,8 @@ fn main() -> eframe::Result {
     }
     if args.len() == 6 && args[1] == "--render-experimental-reference-matrix" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let hash = required_plugin_hash(plugin);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         let report = run_effect_matrix(
             &repository,
             plugin,
@@ -5632,8 +5921,87 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    if args.len() == 4 && args[1] == "--render-image" {
-        let report = aexcompat_broker::image_render::render_image(
+    if args.len() == 9 && args[1] == "--render-experimental-session-animation" {
+        use aexcompat_broker::image_render::{ParameterAnimation, RenderTiming};
+        let plugin = Path::new(&args[2]);
+        let hash = required_plugin_hash(plugin);
+        let current_time = args[5].to_string_lossy().parse::<i32>().unwrap_or(-1);
+        let total_time = args[6].to_string_lossy().parse::<i32>().unwrap_or(0);
+        let time_scale = args[7].to_string_lossy().parse::<u32>().unwrap_or(0);
+        let timing = RenderTiming {
+            current_time,
+            time_step: 1,
+            total_time,
+            time_scale,
+        };
+        let sidecar = match fs::read(&args[8])
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .map_err(|error| error.to_string())
+            }) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("parameter animation sidecar is invalid: {error}");
+                std::process::exit(1);
+            }
+        };
+        let Some(object) = sidecar.as_object() else {
+            eprintln!("parameter animation sidecar must be a JSON object");
+            std::process::exit(1);
+        };
+        if object.len() != 2
+            || !object.contains_key("schema_version")
+            || !object.contains_key("parameters")
+            || object
+                .get("schema_version")
+                .and_then(|value| value.as_u64())
+                != Some(1)
+        {
+            eprintln!("parameter animation sidecar requires schema_version=1 and parameters");
+            std::process::exit(1);
+        }
+        let animations: Vec<ParameterAnimation> =
+            match serde_json::from_value(object.get("parameters").cloned().unwrap_or_default()) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("parameter animation sidecar parameters are invalid: {error}");
+                    std::process::exit(1);
+                }
+            };
+        let parameters = match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+            &repository,
+            plugin,
+            &hash,
+        ) {
+            Ok((parameters, _diagnostics)) => parameters,
+            Err(error) => {
+                eprintln!("parameter animation inspection failed: {error}");
+                std::process::exit(1);
+            }
+        };
+        let report =
+            aexcompat_broker::image_render::render_experimental_image_with_parameter_animation(
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                &animations,
+                timing,
+            );
+        match report {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+    if args.len() == 4 && args[1] == "--render-scattermap-fixture" {
+        let report = aexcompat_broker::image_render::render_scattermap_fixture(
             &repository,
             "scattermap",
             Path::new(&args[2]),
@@ -5656,7 +6024,7 @@ fn main() -> eframe::Result {
         // (#365).
         use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat, RenderTiming};
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let gpu_backend = match args[5].to_string_lossy().as_ref() {
             "auto" => RenderGpuBackend::Auto,
             "cuda" => RenderGpuBackend::Cuda,
@@ -5676,13 +6044,7 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             }
         };
-        let (parameters, _inspection) =
-            aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
-                &repository,
-                plugin,
-                &hash,
-            )
-            .unwrap_or_default();
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         // The preflight seals the same approved dependency artifacts the render
         // dispatches with, so a plug-in that imports one loads in both.
         let render_dependencies: Vec<
@@ -5734,7 +6096,7 @@ fn main() -> eframe::Result {
         // producer; used by the A/B gate to verify the preflight independently.
         use aexcompat_broker::image_render::RenderGpuBackend;
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let gpu_backend = match args[3].to_string_lossy().as_ref() {
             "auto" => RenderGpuBackend::Auto,
             "cuda" => RenderGpuBackend::Cuda,
@@ -5807,7 +6169,7 @@ fn main() -> eframe::Result {
             time_scale,
         };
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let mut parameters = if session_with_parameter {
             match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
                 &repository,
@@ -5821,8 +6183,7 @@ fn main() -> eframe::Result {
                 }
             }
         } else {
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default()
+            required_plugin_parameters(&repository, plugin, &hash)
         };
         if session_with_parameter {
             let slot = match args[10].to_string_lossy().parse::<u32>() {
@@ -5899,7 +6260,7 @@ fn main() -> eframe::Result {
             RenderPixelFormat::Argb8
         };
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let approved_dependencies = match approved_adjacent_dependencies(plugin, &hash) {
             Ok(dependencies) => dependencies,
             Err(error) if auto_path => {
@@ -6086,7 +6447,7 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             });
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let (mut parameters, inspection_diagnostics) =
             aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics(
                 &repository,
@@ -6170,10 +6531,8 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             });
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let hash = required_plugin_hash(plugin);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
         if let Err(error) =
             apply_typed_assignments(&mut parameters, &document, Some(Path::new(&args[5])))
         {
@@ -6198,10 +6557,8 @@ fn main() -> eframe::Result {
     }
     if args.len() == 6 && args[1] == "--render-experimental-image-audio-sidecar" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let hash = required_plugin_hash(plugin);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         match aexcompat_broker::image_render::render_experimental_image_with_audio_sidecar(
             &repository,
             plugin,
@@ -6227,10 +6584,8 @@ fn main() -> eframe::Result {
     {
         let smart = args[1] == "--render-experimental-smart-layer-slots";
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let hash = required_plugin_hash(plugin);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
         if let Err(error) = assign_layer_paths(&mut parameters, &args[5..]) {
             eprintln!("{error}");
             std::process::exit(1);
@@ -6262,10 +6617,8 @@ fn main() -> eframe::Result {
     {
         let smart = args[1] == "--render-experimental-smart-param";
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let hash = required_plugin_hash(plugin);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
         let mut assigned_slots = Vec::new();
         for assignment in args[5..].chunks_exact(2) {
             let slot = assignment[0].to_string_lossy().parse::<u32>().unwrap_or(0);
@@ -6321,10 +6674,8 @@ fn main() -> eframe::Result {
             total_time: frame.saturating_add(1),
             time_scale: fps,
         };
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let hash = required_plugin_hash(plugin);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
             &repository,
             plugin,
@@ -6362,10 +6713,8 @@ fn main() -> eframe::Result {
             total_time: frame.saturating_add(1),
             time_scale: fps,
         };
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let hash = required_plugin_hash(plugin);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         let report = if smart {
             aexcompat_broker::image_render::render_experimental_smart_image_at_time(
                 &repository,
@@ -6402,10 +6751,8 @@ fn main() -> eframe::Result {
     {
         let smart = args[1] == "--render-experimental-smart-layer";
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let hash = required_plugin_hash(plugin);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
         let Some(layer) = parameters.iter_mut().find(|item| item.kind == "layer") else {
             eprintln!("AEX exposes no secondary layer parameter");
             std::process::exit(1);
@@ -6445,10 +6792,8 @@ fn main() -> eframe::Result {
     {
         let smart = args[1] == "--render-experimental-smart-layers";
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
-        let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+        let hash = required_plugin_hash(plugin);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
         let layers = parameters
             .iter_mut()
             .filter(|item| item.kind == "layer")
@@ -6488,9 +6833,28 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    if args.len() >= 4 && args[1] == "--inspect-experimental-with-deps" {
+        let plugin = Path::new(&args[2]);
+        let hash = match fs::read(plugin) {
+            Ok(bytes) => format!("{:X}", Sha256::digest(bytes)),
+            Err(error) => {
+                eprintln!("selected AEX could not be read: {error}");
+                std::process::exit(1);
+            }
+        };
+        let roots = &args[3..];
+        match inspect_experimental_with_dependency_roots(&repository, plugin, &hash, roots) {
+            Ok(report) => println!("{}", serde_json::to_string_pretty(&report).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 3 && args[1] == "--inspect-experimental" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash) {
             Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
             Err(error) => {
@@ -6521,7 +6885,7 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             }
         };
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::inspect_experimental_with_runtime_policy(
             &repository,
             plugin,
@@ -6551,7 +6915,7 @@ fn main() -> eframe::Result {
             eprintln!("dependency mode must be all or missing");
             std::process::exit(1);
         }
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::inspect_experimental_external_dependencies(
             &repository,
             plugin,
@@ -6568,7 +6932,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-options-dialog" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_options_dialog(
             &repository,
             plugin,
@@ -6584,7 +6948,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-automatic-options-dialog" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_automatic_options_dialog(
             &repository,
             plugin,
@@ -6600,7 +6964,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-nop-render" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_nop_render(
             &repository,
             plugin,
@@ -6616,7 +6980,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-smart-nop-render" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_smart_nop_render(
             &repository,
             plugin,
@@ -6632,7 +6996,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-input-buffer-write" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_input_buffer_write(
             &repository,
             plugin,
@@ -6648,7 +7012,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-smart-input-buffer-write" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_smart_input_buffer_write(
             &repository,
             plugin,
@@ -6667,7 +7031,7 @@ fn main() -> eframe::Result {
             || args[1] == "--probe-experimental-shrink-buffer")
     {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let result = if args[1] == "--probe-experimental-expand-buffer" {
             aexcompat_broker::image_render::probe_experimental_expand_buffer(
                 &repository,
@@ -6692,7 +7056,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-persistent-sequence" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_persistent_sequence(
             &repository,
             plugin,
@@ -6708,7 +7072,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-flattened-sequence" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_flattened_sequence(
             &repository,
             plugin,
@@ -6724,7 +7088,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-copied-flattened-sequence" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_copied_flattened_sequence(
             &repository,
             plugin,
@@ -6741,7 +7105,7 @@ fn main() -> eframe::Result {
     if args.len() == 4 && args[1] == "--trigger-experimental-button" {
         let plugin = Path::new(&args[2]);
         let slot = args[3].to_string_lossy().parse::<u32>().unwrap_or(0);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let parameters = match aexcompat_broker::image_render::inspect_experimental(
             &repository,
             plugin,
@@ -6785,7 +7149,7 @@ fn main() -> eframe::Result {
                 eprintln!("assignment document is invalid JSON: {error}");
                 std::process::exit(1);
             });
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let mut parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_else(|error| {
@@ -6814,7 +7178,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--initialize-experimental-aegp" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::initialize_experimental_aegp(
             &repository,
             plugin,
@@ -6830,7 +7194,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-update-menu" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_update_menu(
             &repository,
             plugin,
@@ -6846,7 +7210,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-idle" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_idle(
             &repository,
             plugin,
@@ -6862,7 +7226,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-command-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_command_roundtrip(
             &repository,
             plugin,
@@ -6878,7 +7242,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-active-idle-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_active_idle_roundtrip(
             &repository,
             plugin,
@@ -6894,7 +7258,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-comp-idle-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_comp_idle_roundtrip(
             &repository,
             plugin,
@@ -6910,7 +7274,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-keyframe-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_keyframe_roundtrip(
             &repository,
             plugin,
@@ -6926,7 +7290,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-seek-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_seek_roundtrip(
             &repository,
             plugin,
@@ -6942,7 +7306,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-trim-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_trim_roundtrip(
             &repository,
             plugin,
@@ -6958,7 +7322,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-switch-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_switch_roundtrip(
             &repository,
             plugin,
@@ -6971,6 +7335,21 @@ fn main() -> eframe::Result {
             }
         }
         return Ok(());
+    }
+    if headless {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "schema": CLI_CONTRACT_SCHEMA,
+                "version": CLI_CONTRACT_VERSION,
+                "success": false,
+                "classification": "cli_usage_error",
+                "failure_stage": "argument_validation",
+                "message": "unknown or malformed arguments",
+                "gui_launched": false
+            })
+        );
+        std::process::exit(64);
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -7712,6 +8091,50 @@ mod tests {
     }
 
     #[test]
+    fn plugin_hash_reads_bytes_and_formats_sha256() {
+        let path = temporary_aex("cli-hash");
+        let bytes = b"synthetic AEX bytes";
+        fs::write(&path, bytes).unwrap();
+
+        let hash = read_plugin_hash(&path).unwrap();
+        assert_eq!(hash, format!("{:X}", Sha256::digest(bytes)));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn plugin_read_diagnostic_is_structured_and_does_not_export_path() {
+        let path = Path::new(r"C:privatemissing-plugin.aex");
+        let error = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let diagnostic = plugin_read_diagnostic(path, &error);
+
+        assert_eq!(diagnostic["schema"], DIAGNOSTIC_SCHEMA);
+        assert_eq!(diagnostic["version"], DIAGNOSTIC_VERSION);
+        assert_eq!(diagnostic["success"], false);
+        assert_eq!(diagnostic["classification"], "input_error");
+        assert_eq!(diagnostic["failure_stage"], "input_validation");
+        assert_eq!(diagnostic["operation"], "read_plugin");
+        assert_eq!(diagnostic["path_kind"], "aex");
+        assert_eq!(diagnostic["error_kind"], "NotFound");
+        assert!(!diagnostic.to_string().contains("missing-plugin.aex"));
+        assert!(!diagnostic.to_string().contains(r"C:private"));
+    }
+
+    #[test]
+    fn plugin_hash_rejects_missing_and_directory_paths_without_panicking() {
+        let missing = temporary_aex("cli-missing");
+        let missing_error = read_plugin_hash(&missing).unwrap_err();
+        assert_eq!(missing_error.kind(), std::io::ErrorKind::NotFound);
+
+        let directory = temporary_aex("cli-directory");
+        fs::create_dir(&directory).unwrap();
+        let directory_error = read_plugin_hash(&directory).unwrap_err();
+        assert!(!directory_error.to_string().is_empty());
+
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     fn only_exact_registered_hashes_are_recognized() {
         assert_ne!(SCATTERMAP_HASH, MASKOFFSET_HASH);
         assert_eq!(SCATTERMAP_HASH.len(), 64);
@@ -7818,6 +8241,25 @@ mod tests {
         assert_eq!(document["exit_code"], 3221225477u64);
         assert_eq!(document["plugin_kind"], "unknown_no_effect_entrypoint");
         assert_eq!(document["missing_suites"][0]["name"], "PF Handle Suite");
+    }
+
+    #[test]
+    fn cli_inspection_failure_document_preserves_diagnostics_and_redacts_paths() {
+        let generic = cli_inspection_failure_document("file must have one link");
+        assert_eq!(generic["classification"], "inspection_error");
+        assert_eq!(generic["failure_stage"], "parameter_inspection");
+        assert_eq!(generic["message"], "file must have one link");
+
+        let structured = cli_inspection_failure_document(concat!(
+            "AEX parameter inspection worker failed safely: ",
+            r#"{"classification":"crashed","failure_stage":"parameter_inspection","exit_code":12}"#,
+        ));
+        assert_eq!(structured["classification"], "crashed");
+        assert_eq!(structured["failure_stage"], "parameter_inspection");
+        assert_eq!(structured["exit_code"], 12);
+
+        let path = cli_inspection_failure_document(r#"could not open C:\private\bad.aex"#);
+        assert_eq!(path["message"], "redacted");
     }
 
     #[test]

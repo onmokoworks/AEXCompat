@@ -1670,7 +1670,11 @@ fn prepare_aux_transport(
     }))
 }
 
-pub fn render_image(
+/// Render the approved ScatterMap fixture through the session-only transport.
+///
+/// The explicit name is intentional: this is not a generic AEX path and must
+/// not be confused with the deleted worker `--render-image` argv command.
+pub fn render_scattermap_fixture(
     repository: &Path,
     plugin_id: &str,
     input_path: &Path,

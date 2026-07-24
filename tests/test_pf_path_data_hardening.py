@@ -7,6 +7,7 @@ import source_owners
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_runtime.cpp"
 SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_selftests.cpp"
+CALLBACK_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
 L2_SOURCE = source_owners.L2_MAIN
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
@@ -39,6 +40,17 @@ def test_path_hardening_selftest_is_a_true_translation_unit():
     assert "bool verify_pf_path_data_hardening(" not in worker
     assert "src/worker_pf_path_selftests.cpp" in CMAKE.read_text(encoding="utf-8")
     assert "install_synthetic_scene" in implementation
+
+
+def test_pf_path_uses_exact_registered_argb_formats():
+    runtime = SOURCE.read_text(encoding="utf-8")
+    callbacks = CALLBACK_SOURCE.read_text(encoding="utf-8")
+    assert "resolve_dispatch_world_format" in callbacks
+    assert "kPixelFormatArgb128" in callbacks
+    assert "resolved.rowbytes != rowbytes" in callbacks
+    assert "supported_world_view" in runtime
+    assert "reinterpret_cast<float*>(pixel)" in runtime
+    assert "kPixelFormatArgb128" in runtime
 
 
 def test_path_hardening_runtime_self_test():

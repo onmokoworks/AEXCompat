@@ -462,8 +462,8 @@ pub struct SessionOpenRequest<'a> {
     pub plugin_sha256: &'a str,
     pub parameters: Option<&'a [InteractiveParameter]>,
     /// A pre-encoded worker payload used verbatim instead of encoding
-    /// `parameters`. The fixture-manifest route (`render_image`) builds its
-    /// payload from a descriptor profile via `encode_worker_payload`, which the
+    /// `parameters`. The fixture-manifest route (`render_scattermap_fixture`)
+    /// builds its payload from a descriptor profile via `encode_worker_payload`, which the
     /// `InteractiveParameter` list cannot represent; before #365 that route was
     /// the reason a one-shot argv transport had to exist at all. Both encoders
     /// emit the same `v2|`/`v3|` grammar the worker decodes, so the session
