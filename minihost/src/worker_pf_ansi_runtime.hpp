@@ -1,4 +1,8 @@
 #pragma once
+
+#include <cstddef>
+#include <cstdint>
+
 namespace aexcompat::pf_ansi {
 double __cdecl ansi_atan(double);
 double __cdecl ansi_atan2(double, double);
@@ -17,6 +21,7 @@ double __cdecl ansi_sqrt(double);
 double __cdecl ansi_tan(double);
 int __cdecl ansi_sprintf(char*, const char*, ...);
 char* __cdecl ansi_strcpy(char*, const char*);
+int32_t __cdecl ansi_strcpy_bounded(char*, std::size_t, const char*);
 double __cdecl ansi_asin(double);
 double __cdecl ansi_acos(double);
 }  // namespace aexcompat::pf_ansi
