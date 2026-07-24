@@ -168,7 +168,7 @@ const void* provide_bib_suite(void*) {
   return state.suite.data();
 }
 
-bool teardown_bib_suite(void*) noexcept {
+bool teardown_bib_suite_impl(void*) noexcept {
   auto& state = bib_suite_state();
   std::lock_guard<std::mutex> lock(state.mutex);
   if (!state.owned || state.termination_attempted) return true;
@@ -181,6 +181,10 @@ bool teardown_bib_suite(void*) noexcept {
   return token == kBibOwnershipToken;
 }
 }  // namespace
+
+bool teardown_bib_suite(void* context) noexcept {
+  return teardown_bib_suite_impl(context);
+}
 
 bool mask_suite_provider_available(void*) { return aexcompat::mask_runtime::model_enabled(); }
 

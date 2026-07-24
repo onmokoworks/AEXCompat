@@ -27,9 +27,7 @@ def test_bib_provider_is_fail_closed_and_does_not_load_arbitrary_paths():
         assert procedure in SOURCE
     assert "if (!state.resolver) return nullptr;" in SOURCE
 
-def test_owned_bib_ref_is_balanced_by_the_pre_unload_hook():
-    assert "using BibTerminate = uint32_t (__cdecl *)();" in SOURCE
-    assert 'GetProcAddress(bib, "BIBTerminate")' in SOURCE
-    assert "state.owned = true;" in SOURCE
-    assert "state.termination_attempted" in SOURCE
-    assert "state.terminate()" in SOURCE
+def test_pre_unload_hook_is_exported_across_translation_units():
+    assert "bool teardown_bib_suite_impl(void*) noexcept" in SOURCE
+    assert "bool teardown_bib_suite(void* context) noexcept" in SOURCE
+    assert "return teardown_bib_suite_impl(context);" in SOURCE
