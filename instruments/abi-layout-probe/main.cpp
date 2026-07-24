@@ -268,6 +268,10 @@ int main() {
   field<decltype(PF_InteractCallbacks::checkout_layer_audio)>("inter.checkout_layer_audio", offsetof(PF_InteractCallbacks, checkout_layer_audio), first);
   field<decltype(PF_InteractCallbacks::checkin_layer_audio)>("inter.checkin_layer_audio", offsetof(PF_InteractCallbacks, checkin_layer_audio), first);
   field<decltype(PF_InteractCallbacks::get_audio_data)>("inter.get_audio_data", offsetof(PF_InteractCallbacks, get_audio_data), first);
+  field<decltype(PF_UtilCallbacks::begin_sampling)>("utils.begin_sampling", offsetof(PF_UtilCallbacks, begin_sampling), first);
+  field<decltype(PF_UtilCallbacks::subpixel_sample)>("utils.subpixel_sample", offsetof(PF_UtilCallbacks, subpixel_sample), first);
+  field<decltype(PF_UtilCallbacks::area_sample)>("utils.area_sample", offsetof(PF_UtilCallbacks, area_sample), first);
+  field<decltype(PF_UtilCallbacks::end_sampling)>("utils.end_sampling", offsetof(PF_UtilCallbacks, end_sampling), first);
   field<decltype(PF_UtilCallbacks::host_new_handle)>("utils.host_new_handle", offsetof(PF_UtilCallbacks, host_new_handle), first);
   field<decltype(PF_UtilCallbacks::host_lock_handle)>("utils.host_lock_handle", offsetof(PF_UtilCallbacks, host_lock_handle), first);
   field<decltype(PF_UtilCallbacks::host_unlock_handle)>("utils.host_unlock_handle", offsetof(PF_UtilCallbacks, host_unlock_handle), first);
@@ -276,12 +280,28 @@ int main() {
   field<decltype(PF_UtilCallbacks::host_resize_handle)>("utils.host_resize_handle", offsetof(PF_UtilCallbacks, host_resize_handle), first);
   field<decltype(PF_ANSICallbacks::sin)>("utils.ansi_sin",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, sin), first);
+  field<decltype(PF_ANSICallbacks::ceil)>("utils.ansi_ceil",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, ceil), first);
+  field<decltype(PF_ANSICallbacks::fabs)>("utils.ansi_fabs",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, fabs), first);
+  field<decltype(PF_ANSICallbacks::pow)>("utils.ansi_pow",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, pow), first);
+  field<decltype(PF_ANSICallbacks::sprintf)>("utils.ansi_sprintf",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, sprintf), first);
+  field<decltype(PF_ANSICallbacks::strcpy)>("utils.ansi_strcpy",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, strcpy), first);
   field<decltype(PF_UtilCallbacks::blend)>("utils.blend", offsetof(PF_UtilCallbacks, blend), first);
   field<decltype(PF_UtilCallbacks::convolve)>("utils.convolve", offsetof(PF_UtilCallbacks, convolve), first);
   field<decltype(PF_UtilCallbacks::copy)>("utils.copy", offsetof(PF_UtilCallbacks, copy), first);
   field<decltype(PF_UtilCallbacks::fill)>("utils.fill", offsetof(PF_UtilCallbacks, fill), first);
+  field<decltype(PF_UtilCallbacks::premultiply)>("utils.premultiply", offsetof(PF_UtilCallbacks, premultiply), first);
+  field<decltype(PF_UtilCallbacks::premultiply_color)>("utils.premultiply_color", offsetof(PF_UtilCallbacks, premultiply_color), first);
+  field<decltype(PF_UtilCallbacks::iterate)>("utils.iterate", offsetof(PF_UtilCallbacks, iterate), first);
   field<decltype(PF_UtilCallbacks::new_world)>("utils.new_world", offsetof(PF_UtilCallbacks, new_world), first);
   field<decltype(PF_UtilCallbacks::dispose_world)>("utils.dispose_world", offsetof(PF_UtilCallbacks, dispose_world), first);
+  field<decltype(PF_UtilCallbacks::transform_world)>("utils.transform_world", offsetof(PF_UtilCallbacks, transform_world), first);
+  field<decltype(PF_UtilCallbacks::fill16)>("utils.fill16", offsetof(PF_UtilCallbacks, fill16), first);
+  field<decltype(PF_UtilCallbacks::premultiply_color16)>("utils.premultiply_color16", offsetof(PF_UtilCallbacks, premultiply_color16), first);
   field<decltype(PF_UtilCallbacks::get_platform_data)>("utils.get_platform_data", offsetof(PF_UtilCallbacks, get_platform_data), first);
   field<decltype(PF_UtilCallbacks::get_pixel_data8)>("utils.get_pixel_data8", offsetof(PF_UtilCallbacks, get_pixel_data8), first);
   field<decltype(PF_UtilCallbacks::get_pixel_data16)>("utils.get_pixel_data16", offsetof(PF_UtilCallbacks, get_pixel_data16), first);

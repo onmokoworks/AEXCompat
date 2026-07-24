@@ -9,12 +9,12 @@ SOURCE = (ROOT / "minihost" / "src" / "worker_effect_bootstrap.cpp").read_text(
 
 
 def test_bootstrap_owns_stable_abi_buffers_and_callback_offsets():
-    assert "alignas(8) std::array<std::byte, 408> input" in HEADER
-    assert "alignas(8) std::array<std::byte, 552> utils" in HEADER
+    assert "abi::x86_64_windows::PF_IN_DATA_SIZE> input" in HEADER
+    assert "abi::x86_64_windows::PF_UTIL_CALLBACKS_SIZE> utils" in HEADER
     assert "kInputCallbackOffsets" in SOURCE
     assert "kUtilityCallbackOffsets" in SOURCE
     assert "kUtilityColorCallbacksOffset + 64 == kUtilityPlatformDataOffset" in SOURCE
-    assert "write<void*>(state.input, 176, state.utils.data())" in SOURCE
+    assert "contract::IN_UTILS_OFFSET, state.utils.data()" in SOURCE
 
 
 def test_utility_table_wires_handle_callbacks_at_sdk_offsets():

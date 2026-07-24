@@ -6,6 +6,8 @@
 namespace aexcompat::worker_runtime::effect_bootstrap {
 namespace {
 
+namespace contract = aexcompat::abi::x86_64_windows;
+
 constexpr std::array<std::size_t, 12> kInputCallbackOffsets{
     0, 8, 16, 24, 32, 40, 48, 56, 64,
     // Extended inter slots bundled effects call (issue #382).
@@ -44,28 +46,28 @@ void install_callback_tables(State& state, const AbiHooks& abi) {
   if (abi.color_callbacks && abi.color_callbacks_size == 64)
     std::memcpy(state.utils.data() + kUtilityColorCallbacksOffset,
                 abi.color_callbacks, abi.color_callbacks_size);
-  write<void*>(state.input, 176, state.utils.data());
-  write(state.input, 384, abi.basic_suite);
-  write(state.input, 184, abi.effect_ref);
+  write<void*>(state.input, contract::IN_UTILS_OFFSET, state.utils.data());
+  write(state.input, contract::IN_PICA_BASICP_OFFSET, abi.basic_suite);
+  write(state.input, contract::IN_EFFECT_REF_OFFSET, abi.effect_ref);
 }
 
 Result run(State& state, EffectEntry entry, const AbiHooks& abi,
            const Request& request, const RuntimeHooks& hooks) {
   Result result;
   install_callback_tables(state, abi);
-  write(state.input, 192, request.quality);
-  write<int16_t>(state.input, 196, 13);
+  write(state.input, contract::IN_QUALITY_OFFSET, request.quality);
+  write<int16_t>(state.input, contract::IN_VERSION_OFFSET, 13);
   // Present the version bundled effects themselves register (13.29, #326
   // probe), matching the AE 2025 host they ship with.
   write<int16_t>(state.input, 198, 29);
-  write<uint32_t>(state.input, 204, 0x46585443u);
-  write<int32_t>(state.input, 208, 1);
-  write<int32_t>(state.input, 224, 0);
-  write<int32_t>(state.input, 228, 1);
-  write<int32_t>(state.input, 236, 1);
-  write<uint32_t>(state.input, 240, 1);
-  write(state.input, 244, request.field);
-  write(state.input, 248, request.shutter_angle);
+  write<uint32_t>(state.input, contract::IN_APPL_ID_OFFSET, 0x46585443u);
+  write<int32_t>(state.input, contract::IN_NUM_PARAMS_OFFSET, 1);
+  write<int32_t>(state.input, contract::IN_CURRENT_TIME_OFFSET, 0);
+  write<int32_t>(state.input, contract::IN_TIME_STEP_OFFSET, 1);
+  write<int32_t>(state.input, contract::IN_LOCAL_TIME_STEP_OFFSET, 1);
+  write<uint32_t>(state.input, contract::IN_TIME_SCALE_OFFSET, 1);
+  write(state.input, contract::IN_FIELD_OFFSET, request.field);
+  write(state.input, contract::IN_SHUTTER_ANGLE_OFFSET, request.shutter_angle);
   write(state.input, 392, request.pre_effect_origin[0]);
   write(state.input, 396, request.pre_effect_origin[1]);
   write(state.input, 400, request.shutter_phase);
