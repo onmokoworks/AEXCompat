@@ -8068,6 +8068,50 @@ mod tests {
     }
 
     #[test]
+    fn plugin_hash_reads_bytes_and_formats_sha256() {
+        let path = temporary_aex("cli-hash");
+        let bytes = b"synthetic AEX bytes";
+        fs::write(&path, bytes).unwrap();
+
+        let hash = read_plugin_hash(&path).unwrap();
+        assert_eq!(hash, format!("{:X}", Sha256::digest(bytes)));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn plugin_read_diagnostic_is_structured_and_does_not_export_path() {
+        let path = Path::new(r"C:\private\missing-plugin.aex");
+        let error = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let diagnostic = plugin_read_diagnostic(path, &error);
+
+        assert_eq!(diagnostic["schema"], DIAGNOSTIC_SCHEMA);
+        assert_eq!(diagnostic["version"], DIAGNOSTIC_VERSION);
+        assert_eq!(diagnostic["success"], false);
+        assert_eq!(diagnostic["classification"], "input_error");
+        assert_eq!(diagnostic["failure_stage"], "input_validation");
+        assert_eq!(diagnostic["operation"], "read_plugin");
+        assert_eq!(diagnostic["path_kind"], "aex");
+        assert_eq!(diagnostic["error_kind"], "NotFound");
+        assert!(!diagnostic.to_string().contains("missing-plugin.aex"));
+        assert!(!diagnostic.to_string().contains(r"C:\private"));
+    }
+
+    #[test]
+    fn plugin_hash_rejects_missing_and_directory_paths_without_panicking() {
+        let missing = temporary_aex("cli-missing");
+        let missing_error = read_plugin_hash(&missing).unwrap_err();
+        assert_eq!(missing_error.kind(), std::io::ErrorKind::NotFound);
+
+        let directory = temporary_aex("cli-directory");
+        fs::create_dir(&directory).unwrap();
+        let directory_error = read_plugin_hash(&directory).unwrap_err();
+        assert!(!directory_error.to_string().is_empty());
+
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     fn only_exact_registered_hashes_are_recognized() {
         assert_ne!(SCATTERMAP_HASH, MASKOFFSET_HASH);
         assert_eq!(SCATTERMAP_HASH.len(), 64);
