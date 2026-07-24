@@ -5780,6 +5780,37 @@ fn cli_contract() -> serde_json::Value {
     })
 }
 
+fn read_plugin_hash(plugin: &Path) -> Result<String, std::io::Error> {
+    let bytes = fs::read(plugin)?;
+    Ok(format!("{:X}", Sha256::digest(bytes)))
+}
+
+fn plugin_read_diagnostic(plugin: &Path, error: &std::io::Error) -> serde_json::Value {
+    let _ = plugin;
+    serde_json::json!({
+        "schema": DIAGNOSTIC_SCHEMA,
+        "version": DIAGNOSTIC_VERSION,
+        "success": false,
+        "classification": "input_error",
+        "failure_stage": "input_validation",
+        "operation": "read_plugin",
+        "path_kind": "aex",
+        "error_kind": format!("{:?}", error.kind()),
+        "os_code": error.raw_os_error(),
+        "message": error.to_string(),
+    })
+}
+
+fn required_plugin_hash(plugin: &Path) -> String {
+    match read_plugin_hash(plugin) {
+        Ok(hash) => hash,
+        Err(error) => {
+            eprintln!("{}", plugin_read_diagnostic(plugin, &error));
+            std::process::exit(1);
+        }
+    }
+}
+
 fn print_cli_help() {
     println!(
         "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI."
@@ -5818,7 +5849,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 5 && args[1] == "--render-experimental-matrix" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
@@ -5838,7 +5869,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 6 && args[1] == "--render-experimental-reference-matrix" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
@@ -5862,7 +5893,7 @@ fn main() -> eframe::Result {
     if args.len() == 9 && args[1] == "--render-experimental-session-animation" {
         use aexcompat_broker::image_render::{ParameterAnimation, RenderTiming};
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let current_time = args[5].to_string_lossy().parse::<i32>().unwrap_or(-1);
         let total_time = args[6].to_string_lossy().parse::<i32>().unwrap_or(0);
         let time_scale = args[7].to_string_lossy().parse::<u32>().unwrap_or(0);
@@ -5962,7 +5993,7 @@ fn main() -> eframe::Result {
         // (#365).
         use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat, RenderTiming};
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let gpu_backend = match args[5].to_string_lossy().as_ref() {
             "auto" => RenderGpuBackend::Auto,
             "cuda" => RenderGpuBackend::Cuda,
@@ -6040,7 +6071,7 @@ fn main() -> eframe::Result {
         // producer; used by the A/B gate to verify the preflight independently.
         use aexcompat_broker::image_render::RenderGpuBackend;
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let gpu_backend = match args[3].to_string_lossy().as_ref() {
             "auto" => RenderGpuBackend::Auto,
             "cuda" => RenderGpuBackend::Cuda,
@@ -6113,7 +6144,7 @@ fn main() -> eframe::Result {
             time_scale,
         };
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let mut parameters = if session_with_parameter {
             match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
                 &repository,
@@ -6205,7 +6236,7 @@ fn main() -> eframe::Result {
             RenderPixelFormat::Argb8
         };
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let approved_dependencies = match approved_adjacent_dependencies(plugin, &hash) {
             Ok(dependencies) => dependencies,
             Err(error) if auto_path => {
@@ -6392,7 +6423,7 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             });
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let (mut parameters, inspection_diagnostics) =
             aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics(
                 &repository,
@@ -6476,7 +6507,7 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             });
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let mut parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
@@ -6504,7 +6535,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 6 && args[1] == "--render-experimental-image-audio-sidecar" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
@@ -6533,7 +6564,7 @@ fn main() -> eframe::Result {
     {
         let smart = args[1] == "--render-experimental-smart-layer-slots";
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let mut parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
@@ -6568,7 +6599,7 @@ fn main() -> eframe::Result {
     {
         let smart = args[1] == "--render-experimental-smart-param";
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let mut parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
@@ -6627,7 +6658,7 @@ fn main() -> eframe::Result {
             total_time: frame.saturating_add(1),
             time_scale: fps,
         };
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
@@ -6668,7 +6699,7 @@ fn main() -> eframe::Result {
             total_time: frame.saturating_add(1),
             time_scale: fps,
         };
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
@@ -6708,7 +6739,7 @@ fn main() -> eframe::Result {
     {
         let smart = args[1] == "--render-experimental-smart-layer";
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let mut parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
@@ -6751,7 +6782,7 @@ fn main() -> eframe::Result {
     {
         let smart = args[1] == "--render-experimental-smart-layers";
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let mut parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_default();
@@ -6815,7 +6846,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--inspect-experimental" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash) {
             Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
             Err(error) => {
@@ -6846,7 +6877,7 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             }
         };
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::inspect_experimental_with_runtime_policy(
             &repository,
             plugin,
@@ -6876,7 +6907,7 @@ fn main() -> eframe::Result {
             eprintln!("dependency mode must be all or missing");
             std::process::exit(1);
         }
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::inspect_experimental_external_dependencies(
             &repository,
             plugin,
@@ -6893,7 +6924,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-options-dialog" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_options_dialog(
             &repository,
             plugin,
@@ -6909,7 +6940,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-automatic-options-dialog" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_automatic_options_dialog(
             &repository,
             plugin,
@@ -6925,7 +6956,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-nop-render" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_nop_render(
             &repository,
             plugin,
@@ -6941,7 +6972,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-smart-nop-render" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_smart_nop_render(
             &repository,
             plugin,
@@ -6957,7 +6988,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-input-buffer-write" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_input_buffer_write(
             &repository,
             plugin,
@@ -6973,7 +7004,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-smart-input-buffer-write" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_smart_input_buffer_write(
             &repository,
             plugin,
@@ -6992,7 +7023,7 @@ fn main() -> eframe::Result {
             || args[1] == "--probe-experimental-shrink-buffer")
     {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let result = if args[1] == "--probe-experimental-expand-buffer" {
             aexcompat_broker::image_render::probe_experimental_expand_buffer(
                 &repository,
@@ -7017,7 +7048,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-persistent-sequence" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_persistent_sequence(
             &repository,
             plugin,
@@ -7033,7 +7064,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-flattened-sequence" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_flattened_sequence(
             &repository,
             plugin,
@@ -7049,7 +7080,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--probe-experimental-copied-flattened-sequence" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::probe_experimental_copied_flattened_sequence(
             &repository,
             plugin,
@@ -7066,7 +7097,7 @@ fn main() -> eframe::Result {
     if args.len() == 4 && args[1] == "--trigger-experimental-button" {
         let plugin = Path::new(&args[2]);
         let slot = args[3].to_string_lossy().parse::<u32>().unwrap_or(0);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let parameters = match aexcompat_broker::image_render::inspect_experimental(
             &repository,
             plugin,
@@ -7110,7 +7141,7 @@ fn main() -> eframe::Result {
                 eprintln!("assignment document is invalid JSON: {error}");
                 std::process::exit(1);
             });
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         let mut parameters =
             aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
                 .unwrap_or_else(|error| {
@@ -7139,7 +7170,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--initialize-experimental-aegp" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::initialize_experimental_aegp(
             &repository,
             plugin,
@@ -7155,7 +7186,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-update-menu" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_update_menu(
             &repository,
             plugin,
@@ -7171,7 +7202,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-idle" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_idle(
             &repository,
             plugin,
@@ -7187,7 +7218,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-command-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_command_roundtrip(
             &repository,
             plugin,
@@ -7203,7 +7234,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-active-idle-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_active_idle_roundtrip(
             &repository,
             plugin,
@@ -7219,7 +7250,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-comp-idle-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_comp_idle_roundtrip(
             &repository,
             plugin,
@@ -7235,7 +7266,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-keyframe-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_keyframe_roundtrip(
             &repository,
             plugin,
@@ -7251,7 +7282,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-seek-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_seek_roundtrip(
             &repository,
             plugin,
@@ -7267,7 +7298,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-trim-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_trim_roundtrip(
             &repository,
             plugin,
@@ -7283,7 +7314,7 @@ fn main() -> eframe::Result {
     }
     if args.len() == 3 && args[1] == "--dispatch-experimental-aegp-switch-roundtrip" {
         let plugin = Path::new(&args[2]);
-        let hash = format!("{:X}", Sha256::digest(fs::read(plugin).unwrap()));
+        let hash = required_plugin_hash(plugin);
         match aexcompat_broker::image_render::dispatch_experimental_aegp_switch_roundtrip(
             &repository,
             plugin,
@@ -8034,6 +8065,50 @@ mod tests {
         assert!(error.contains("AEX output is 3x2"));
         fs::remove_file(reference_path).unwrap();
         fs::remove_file(output_path).unwrap();
+    }
+
+    #[test]
+    fn plugin_hash_reads_bytes_and_formats_sha256() {
+        let path = temporary_aex("cli-hash");
+        let bytes = b"synthetic AEX bytes";
+        fs::write(&path, bytes).unwrap();
+
+        let hash = read_plugin_hash(&path).unwrap();
+        assert_eq!(hash, format!("{:X}", Sha256::digest(bytes)));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn plugin_read_diagnostic_is_structured_and_does_not_export_path() {
+        let path = Path::new(r"C:privatemissing-plugin.aex");
+        let error = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let diagnostic = plugin_read_diagnostic(path, &error);
+
+        assert_eq!(diagnostic["schema"], DIAGNOSTIC_SCHEMA);
+        assert_eq!(diagnostic["version"], DIAGNOSTIC_VERSION);
+        assert_eq!(diagnostic["success"], false);
+        assert_eq!(diagnostic["classification"], "input_error");
+        assert_eq!(diagnostic["failure_stage"], "input_validation");
+        assert_eq!(diagnostic["operation"], "read_plugin");
+        assert_eq!(diagnostic["path_kind"], "aex");
+        assert_eq!(diagnostic["error_kind"], "NotFound");
+        assert!(!diagnostic.to_string().contains("missing-plugin.aex"));
+        assert!(!diagnostic.to_string().contains(r"C:private"));
+    }
+
+    #[test]
+    fn plugin_hash_rejects_missing_and_directory_paths_without_panicking() {
+        let missing = temporary_aex("cli-missing");
+        let missing_error = read_plugin_hash(&missing).unwrap_err();
+        assert_eq!(missing_error.kind(), std::io::ErrorKind::NotFound);
+
+        let directory = temporary_aex("cli-directory");
+        fs::create_dir(&directory).unwrap();
+        let directory_error = read_plugin_hash(&directory).unwrap_err();
+        assert!(!directory_error.to_string().is_empty());
+
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]
