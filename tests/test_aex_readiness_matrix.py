@@ -4,6 +4,8 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -2089,6 +2091,13 @@ def make_index() -> dict:
 
 
 class AexReadinessMatrixTests(unittest.TestCase):
+    def test_cli_exit_follows_overall_no_load_readiness(self):
+        args = SimpleNamespace(artifact_index="index.json", out="out.json")
+        with mock.patch.object(aex_readiness_matrix, "parse_args", return_value=args), mock.patch.object(aex_readiness_matrix, "load_artifact_index", return_value=({}, Path("index.json"))), mock.patch.object(aex_readiness_matrix, "build_readiness_matrix", return_value={"overall_ready_for_no_load_tooling": False}), mock.patch.object(aex_readiness_matrix, "write_json_create_new", return_value=Path("out.json")):
+            self.assertEqual(aex_readiness_matrix.main(), 1)
+        with mock.patch.object(aex_readiness_matrix, "parse_args", return_value=args), mock.patch.object(aex_readiness_matrix, "load_artifact_index", return_value=({}, Path("index.json"))), mock.patch.object(aex_readiness_matrix, "build_readiness_matrix", return_value={"overall_ready_for_no_load_tooling": True}), mock.patch.object(aex_readiness_matrix, "write_json_create_new", return_value=Path("out.json")):
+            self.assertEqual(aex_readiness_matrix.main(), 0)
+
     def test_clean_index_marks_no_load_foundation_ready_but_runtime_closed(self):
         matrix = aex_readiness_matrix.build_readiness_matrix(make_index(), Path("index.json"))
         self.assertEqual(matrix["report_kind"], "aex_readiness_matrix")

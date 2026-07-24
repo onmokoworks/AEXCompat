@@ -4556,7 +4556,7 @@ def main() -> int:
     matrix = build_readiness_matrix(index, source_path)
     written = write_json_create_new(Path(args.out), matrix)
     print(written)
-    return 0
+    return 0 if matrix["overall_ready_for_no_load_tooling"] else 1
 
 
 if __name__ == "__main__":
