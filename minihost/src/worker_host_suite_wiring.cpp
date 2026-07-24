@@ -102,12 +102,17 @@ using BibGetResolver = BibResolver (__cdecl *)();
 using BibInitialize4 = BibResolver (__cdecl *)(
     void*, void*, void*, void*, void*, void*, void*, void*, int32_t,
     uintptr_t, void*);
+using BibTerminate = uint32_t (__cdecl *)();
+constexpr uintptr_t kBibOwnershipToken = 0x13579BDFu;
 
 struct BibSuiteState {
   std::mutex mutex;
   std::array<void*, 1> suite{};
   BibResolver resolver{};
+  BibTerminate terminate{};
   bool attempted{};
+  bool owned{};
+  bool termination_attempted{};
 };
 
 BibSuiteState& bib_suite_state() {
@@ -132,13 +137,19 @@ const void* provide_bib_suite(void*) {
   if (!state.resolver) {
     const auto initialize = reinterpret_cast<BibInitialize4>(
         GetProcAddress(bib, "BIBInitialize4"));
-    if (!initialize) return nullptr;
+    const auto terminate = reinterpret_cast<BibTerminate>(
+        GetProcAddress(bib, "BIBTerminate"));
+    if (!initialize || !terminate) return nullptr;
     // AdobePIE's private callbacks are intentionally not guessed here. The
     // verified BIB fallback accepts null callbacks and keeps ownership inside
     // this worker process; shutdown is therefore process-scoped and never
     // releases an Adobe-owned initialization.
     state.resolver = initialize(nullptr, nullptr, nullptr, nullptr, nullptr,
-                                nullptr, nullptr, nullptr, 1, 1, nullptr);
+                                nullptr, nullptr, nullptr, 1, kBibOwnershipToken, nullptr);
+    if (state.resolver) {
+      state.terminate = terminate;
+      state.owned = true;
+    }
   }
   if (!state.resolver) return nullptr;
 
@@ -155,6 +166,19 @@ const void* provide_bib_suite(void*) {
   }
   state.suite[0] = reinterpret_cast<void*>(state.resolver);
   return state.suite.data();
+}
+
+bool teardown_bib_suite(void*) noexcept {
+  auto& state = bib_suite_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (!state.owned || state.termination_attempted) return true;
+  state.termination_attempted = true;
+  if (!state.terminate) return false;
+  const uint32_t token = state.terminate();
+  state.owned = false;
+  state.resolver = nullptr;
+  state.suite[0] = nullptr;
+  return token == kBibOwnershipToken;
 }
 }  // namespace
 
