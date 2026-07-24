@@ -1,9 +1,11 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -159,6 +161,60 @@ def write_json(path: Path, payload: dict) -> Path:
 
 
 class AexPiplResourceConsistencyAuditTests(unittest.TestCase):
+    def test_cli_exit_follows_audit_result_and_writes_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            static_root = temporary_root / "aex-static-probe"
+            catalog_root = temporary_root / "pipl-resource-catalog"
+            gate_root = temporary_root / "pipl-parser-gate"
+            audit_root = temporary_root / "pipl-resource-consistency-audit"
+            with mock.patch.object(
+                aex_pipl_resource_consistency_audit, "STATIC_REPORT_ROOT", static_root
+            ), mock.patch.object(
+                aex_pipl_resource_consistency_audit, "PIPL_CATALOG_ROOT", catalog_root
+            ), mock.patch.object(aex_pipl_resource_consistency_audit, "PIPL_GATE_ROOT", gate_root), mock.patch.object(
+                aex_pipl_resource_consistency_audit, "AUDIT_ROOT", audit_root
+            ):
+                static_path = static_root / "static.json"
+                catalog_path = catalog_root / "catalog.json"
+                gate_path = gate_root / "gate.json"
+                static_report = make_static_report()
+                catalog = aex_pipl_resource_catalog.build_catalog(static_report, static_path)
+                gate = aex_pipl_parser_gate.build_parser_gate(
+                    pipl_catalog=catalog,
+                    pipl_catalog_path=catalog_path,
+                    synthetic_selftest=make_synthetic_selftest(),
+                    synthetic_selftest_path=temporary_root / "selftest.json",
+                )
+                for path, payload in ((static_path, static_report), (catalog_path, catalog), (gate_path, gate)):
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+
+                output = audit_root / "clean.json"
+                argv = [
+                    "aex_pipl_resource_consistency_audit.py",
+                    "--static-report", str(static_path),
+                    "--pipl-catalog", str(catalog_path),
+                    "--pipl-parser-gate", str(gate_path),
+                    "--out", str(output),
+                ]
+                with mock.patch.object(sys, "argv", argv):
+                    self.assertEqual(aex_pipl_resource_consistency_audit.main(), 0)
+                self.assertTrue(json.loads(output.read_text(encoding="utf-8"))["audit_passed"])
+
+                catalog["source_static_report"] = str(catalog_path)
+                catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+                output = audit_root / "failed.json"
+                argv[-1] = str(output)
+                with mock.patch.object(sys, "argv", argv):
+                    self.assertEqual(aex_pipl_resource_consistency_audit.main(), 1)
+                report = json.loads(output.read_text(encoding="utf-8"))
+                self.assertFalse(report["audit_passed"])
+                self.assertIn(
+                    "catalog_source_static_report_matches",
+                    {check["check_id"] for check in report["checks"] if not check["passed"]},
+                )
+
     def test_audit_recomputes_catalog_and_gate_metadata(self):
         static_report, static_path, catalog, catalog_path, gate, gate_path = build_sources()
         report = aex_pipl_resource_consistency_audit.build_consistency_audit(
