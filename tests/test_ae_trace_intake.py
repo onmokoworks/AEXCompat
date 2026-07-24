@@ -92,6 +92,14 @@ class AeTraceIntakeTests(unittest.TestCase):
         self.assertEqual("<redacted-path>", json.loads(sanitized.read_text(encoding="utf-8"))["selector"])
         self.assertNotIn("Private", json.dumps(report))
 
+    def test_report_write_failure_cleans_up_accepted_sanitized_trace(self):
+        with mock.patch.object(ae_trace_intake, "write_json", side_effect=OSError("injected report write failure")):
+            code, report, sanitized = self.run_main(SYNTHETIC)
+        self.assertEqual(2, code)
+        self.assertIsNone(report)
+        self.assertFalse(sanitized.exists())
+        self.assertFalse((self.report_root / "report.json").exists())
+
     def test_redact_does_not_rescue_forbidden_field(self):
         event = json.loads(SYNTHETIC.read_text(encoding="utf-8").splitlines()[0])
         event["raw_payload"] = "D:\\Private\\payload.bin"

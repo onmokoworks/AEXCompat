@@ -147,7 +147,12 @@ def main(argv: list[str] | None = None) -> int:
         sanitized, report = intake(events, parse_errors, redact=args.redact)
         if report["accepted"]:
             write_jsonl(sanitized_path, sanitized)
-        write_json(report_path, report)
+        try:
+            write_json(report_path, report)
+        except OSError:
+            sanitized_path.unlink(missing_ok=True)
+            report_path.unlink(missing_ok=True)
+            raise
     except (OSError, ValueError) as exc:
         if isinstance(exc, FileExistsError):
             message = str(exc)
