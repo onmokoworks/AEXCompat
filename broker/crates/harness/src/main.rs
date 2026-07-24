@@ -5689,6 +5689,11 @@ fn cli_contract() -> serde_json::Value {
             "failure_exit_code": "nonzero",
             "unknown_or_malformed_arguments": "launch_gui"
         },
+        "headless_mode": {
+            "prefix": "--headless",
+            "unknown_or_malformed_arguments": "structured_stderr_exit_64",
+            "gui_launch": false
+        },
         "commands": [
             {
                 "name": "--compare-images",
@@ -5839,13 +5844,17 @@ fn required_plugin_parameters(
 
 fn print_cli_help() {
     println!(
-        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI."
+        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
     );
 }
 
 fn main() -> eframe::Result {
     aexcompat_broker::observability::init();
-    let args: Vec<_> = std::env::args_os().collect();
+    let mut args: Vec<_> = std::env::args_os().collect();
+    let headless = args.get(1).is_some_and(|arg| arg == "--headless");
+    if headless {
+        args.remove(1);
+    }
     if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
         print_cli_help();
         return Ok(());
@@ -5876,8 +5885,7 @@ fn main() -> eframe::Result {
     if args.len() == 5 && args[1] == "--render-experimental-matrix" {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let parameters =
-            required_plugin_parameters(&repository, plugin, &hash);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         let report = run_effect_matrix(
             &repository,
             plugin,
@@ -5895,8 +5903,7 @@ fn main() -> eframe::Result {
     if args.len() == 6 && args[1] == "--render-experimental-reference-matrix" {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let parameters =
-            required_plugin_parameters(&repository, plugin, &hash);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         let report = run_effect_matrix(
             &repository,
             plugin,
@@ -6525,8 +6532,7 @@ fn main() -> eframe::Result {
             });
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let mut parameters =
-            required_plugin_parameters(&repository, plugin, &hash);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
         if let Err(error) =
             apply_typed_assignments(&mut parameters, &document, Some(Path::new(&args[5])))
         {
@@ -6552,8 +6558,7 @@ fn main() -> eframe::Result {
     if args.len() == 6 && args[1] == "--render-experimental-image-audio-sidecar" {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let parameters =
-            required_plugin_parameters(&repository, plugin, &hash);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         match aexcompat_broker::image_render::render_experimental_image_with_audio_sidecar(
             &repository,
             plugin,
@@ -6580,8 +6585,7 @@ fn main() -> eframe::Result {
         let smart = args[1] == "--render-experimental-smart-layer-slots";
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let mut parameters =
-            required_plugin_parameters(&repository, plugin, &hash);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
         if let Err(error) = assign_layer_paths(&mut parameters, &args[5..]) {
             eprintln!("{error}");
             std::process::exit(1);
@@ -6614,8 +6618,7 @@ fn main() -> eframe::Result {
         let smart = args[1] == "--render-experimental-smart-param";
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let mut parameters =
-            required_plugin_parameters(&repository, plugin, &hash);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
         let mut assigned_slots = Vec::new();
         for assignment in args[5..].chunks_exact(2) {
             let slot = assignment[0].to_string_lossy().parse::<u32>().unwrap_or(0);
@@ -6672,8 +6675,7 @@ fn main() -> eframe::Result {
             time_scale: fps,
         };
         let hash = required_plugin_hash(plugin);
-        let parameters =
-            required_plugin_parameters(&repository, plugin, &hash);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
             &repository,
             plugin,
@@ -6712,8 +6714,7 @@ fn main() -> eframe::Result {
             time_scale: fps,
         };
         let hash = required_plugin_hash(plugin);
-        let parameters =
-            required_plugin_parameters(&repository, plugin, &hash);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         let report = if smart {
             aexcompat_broker::image_render::render_experimental_smart_image_at_time(
                 &repository,
@@ -6751,8 +6752,7 @@ fn main() -> eframe::Result {
         let smart = args[1] == "--render-experimental-smart-layer";
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let mut parameters =
-            required_plugin_parameters(&repository, plugin, &hash);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
         let Some(layer) = parameters.iter_mut().find(|item| item.kind == "layer") else {
             eprintln!("AEX exposes no secondary layer parameter");
             std::process::exit(1);
@@ -6793,8 +6793,7 @@ fn main() -> eframe::Result {
         let smart = args[1] == "--render-experimental-smart-layers";
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let mut parameters =
-            required_plugin_parameters(&repository, plugin, &hash);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
         let layers = parameters
             .iter_mut()
             .filter(|item| item.kind == "layer")
@@ -7336,6 +7335,21 @@ fn main() -> eframe::Result {
             }
         }
         return Ok(());
+    }
+    if headless {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "schema": CLI_CONTRACT_SCHEMA,
+                "version": CLI_CONTRACT_VERSION,
+                "success": false,
+                "classification": "cli_usage_error",
+                "failure_stage": "argument_validation",
+                "message": "unknown or malformed arguments",
+                "gui_launched": false
+            })
+        );
+        std::process::exit(64);
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -8090,7 +8104,7 @@ mod tests {
 
     #[test]
     fn plugin_read_diagnostic_is_structured_and_does_not_export_path() {
-        let path = Path::new(r"C:\private\missing-plugin.aex");
+        let path = Path::new(r"C:privatemissing-plugin.aex");
         let error = std::io::Error::from(std::io::ErrorKind::NotFound);
         let diagnostic = plugin_read_diagnostic(path, &error);
 
@@ -8103,7 +8117,7 @@ mod tests {
         assert_eq!(diagnostic["path_kind"], "aex");
         assert_eq!(diagnostic["error_kind"], "NotFound");
         assert!(!diagnostic.to_string().contains("missing-plugin.aex"));
-        assert!(!diagnostic.to_string().contains(r"C:\private"));
+        assert!(!diagnostic.to_string().contains(r"C:private"));
     }
 
     #[test]
