@@ -4,6 +4,8 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -111,6 +113,11 @@ def make_dependency_review(recommendation: str = "manual_loader_design_review_on
 
 
 class AexLoadGateCheckTests(unittest.TestCase):
+    def test_cli_exit_follows_gate_errors(self):
+        args = SimpleNamespace(design_packet="d.json", worker_selftest="s.json", dependency_review="r.json", fixture_approval=None, out="o.json")
+        with mock.patch.object(aex_load_gate_check, "load_evidence", return_value=({}, Path("d.json"), {}, Path("s.json"), {}, Path("r.json"), None, None)), mock.patch.object(aex_load_gate_check, "parse_args", return_value=args), mock.patch.object(aex_load_gate_check, "build_gate_report", return_value={"gate_errors": ["closed"]}), mock.patch.object(aex_load_gate_check, "write_json_create_new", return_value=Path("o.json")):
+            self.assertEqual(aex_load_gate_check.main(), 1)
+
     def test_gate_closes_when_fixture_approval_is_missing(self):
         report = aex_load_gate_check.build_gate_report(
             design_packet=make_design_packet(),
