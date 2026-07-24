@@ -51,7 +51,13 @@ struct Options {
 }
 
 fn parse_options() -> Options {
-    let mut args = std::env::args().skip(1);
+    parse_options_from(std::env::args().skip(1).collect())
+}
+
+/// Argument parsing, split from `env::args` so the contract (including
+/// `--jobs` validation) can be pinned by unit tests.
+fn parse_options_from(args: Vec<String>) -> Options {
+    let mut args = args.into_iter();
     let mut scan = None;
     let mut dependency_dirs = Vec::new();
     let mut seal = true;
@@ -375,6 +381,11 @@ fn sweep_plugin(
         Some(Err(_)) => (Vec::new(), 0, json!(null), json!(null)),
         None => (Vec::new(), 0, json!(null), json!(null)),
     };
+    // A dispatch failure keeps its raw error text in the record: the bucket
+    // alone cannot distinguish "worker reported structured diagnostics" from
+    // an environment failure like a full TEMP volume (os error 112), and a
+    // sweep that hides the message makes the latter look like the former.
+    let mut dispatch_error: Option<String> = None;
     let bucket = match &closure {
         Some(Err(error)) => format!("closure_error: {error}"),
         Some(Ok(_)) | None => {
@@ -406,7 +417,12 @@ fn sweep_plugin(
                         ),
                     };
                 }
-                Err(error) => bucket_of(&error.to_string()),
+                Err(error) => {
+                    let text = error.to_string();
+                    let bucket = bucket_of(&text);
+                    dispatch_error = Some(text);
+                    bucket
+                }
             }
         }
     };
@@ -418,6 +434,7 @@ fn sweep_plugin(
                 "sealed_bytes": sealed_bytes,
                 "unresolved": unresolved,
                 "dependency_provenance": dependency_provenance,
+                "error": dispatch_error,
             }),
         ),
         log: format!(
@@ -428,6 +445,65 @@ fn sweep_plugin(
         ),
         bucket,
     }
+}
+
+/// How many worker threads to spawn for `total` plug-ins: never more threads
+/// than plug-ins, and always at least one so a zero-plug-in scan still spawns
+/// a thread that exits immediately instead of taking a special-case path.
+fn effective_jobs(jobs: usize, total: usize) -> usize {
+    jobs.max(1).min(total.max(1))
+}
+
+/// Runs `work` for every index in `0..total` on a scoped thread pool and
+/// returns the results in index order. The workers are already
+/// process-isolated (private desktop, Job Object, per-dispatch
+/// randomly-named sealed root, per-process audit), so running several
+/// dispatches concurrently changes only wall time, not the safety model.
+/// Each result lands back in its own slot, so the report keeps scan order no
+/// matter which thread finished first.
+fn run_pool<T: Send>(jobs: usize, total: usize, work: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
+    let next = AtomicUsize::new(0);
+    let mut slots: Vec<Option<T>> = (0..total).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..effective_jobs(jobs, total))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut local = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        if index >= total {
+                            break;
+                        }
+                        local.push((index, work(index)));
+                    }
+                    local
+                })
+            })
+            .collect();
+        for handle in handles {
+            for (index, value) in handle.join().expect("sweep worker thread panicked") {
+                slots[index] = Some(value);
+            }
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| slot.expect("every plug-in must be processed exactly once"))
+        .collect()
+}
+
+/// Aggregates one outcome per plug-in into the report records and the bucket
+/// summary, preserving input (scan) order.
+fn collect_report(
+    outcomes: Vec<SweepOutcome>,
+) -> (Vec<Value>, std::collections::BTreeMap<String, usize>) {
+    let mut buckets: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut records = Vec::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        *buckets.entry(outcome.bucket).or_default() += 1;
+        records.push(outcome.record);
+    }
+    (records, buckets)
 }
 
 fn main() {
@@ -449,55 +525,17 @@ fn main() {
         options.jobs
     );
 
-    let mut outcomes: Vec<Option<SweepOutcome>> = (0..total).map(|_| None).collect();
-    if options.jobs <= 1 {
-        for (index, plugin) in plugins.iter().enumerate() {
-            let outcome = sweep_plugin(&options, &repository, index, total, plugin);
-            eprintln!("{}", outcome.log);
-            outcomes[index] = Some(outcome);
-        }
+    let work = |index: usize| {
+        let outcome = sweep_plugin(&options, &repository, index, total, &plugins[index]);
+        eprintln!("{}", outcome.log);
+        outcome
+    };
+    let outcomes = if options.jobs <= 1 {
+        (0..total).map(&work).collect()
     } else {
-        // The workers are already process-isolated (private desktop, Job
-        // Object, per-dispatch randomly-named sealed root, per-process audit),
-        // so running several dispatches concurrently changes only wall time,
-        // not the safety model. A thread pool indexes into the shared plug-in
-        // list; each outcome lands back in its own slot, keeping the report
-        // in scan order.
-        let next = AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..options.jobs.min(total.max(1)))
-                .map(|_| {
-                    scope.spawn(|| {
-                        let mut local = Vec::new();
-                        loop {
-                            let index = next.fetch_add(1, Ordering::Relaxed);
-                            if index >= total {
-                                break;
-                            }
-                            let outcome =
-                                sweep_plugin(&options, &repository, index, total, &plugins[index]);
-                            eprintln!("{}", outcome.log);
-                            local.push((index, outcome));
-                        }
-                        local
-                    })
-                })
-                .collect();
-            for handle in handles {
-                for (index, outcome) in handle.join().expect("sweep worker thread panicked") {
-                    outcomes[index] = Some(outcome);
-                }
-            }
-        });
-    }
-
-    let mut records = Vec::new();
-    let mut buckets: std::collections::BTreeMap<String, usize> = Default::default();
-    for outcome in outcomes {
-        let outcome = outcome.expect("every plug-in must produce exactly one outcome");
-        *buckets.entry(outcome.bucket).or_default() += 1;
-        records.push(outcome.record);
-    }
+        run_pool(options.jobs, total, &work)
+    };
+    let (records, buckets) = collect_report(outcomes);
 
     println!("\n=== summary ({} plug-ins) ===", records.len());
     for (bucket, count) in &buckets {
@@ -564,5 +602,104 @@ mod tests {
         assert_eq!(record["plugin_sha256"], "abc123");
         assert_eq!(record["plugin_identity_status"], "hashed");
         assert_eq!(record["parameters"], 2);
+    }
+
+    #[test]
+    fn default_jobs_is_eight_and_the_flag_overrides_it() {
+        let options = parse_options_from(vec!["scan".into()]);
+        assert_eq!(options.jobs, 8);
+        assert_eq!(options.scan, PathBuf::from("scan"));
+
+        let options = parse_options_from(vec!["scan".into(), "--jobs".into(), "3".into()]);
+        assert_eq!(options.jobs, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "--jobs needs a number >= 1")]
+    fn jobs_zero_is_rejected() {
+        parse_options_from(vec!["scan".into(), "--jobs".into(), "0".into()]);
+    }
+
+    #[test]
+    #[should_panic(expected = "--jobs needs a number >= 1")]
+    fn jobs_non_numeric_is_rejected() {
+        parse_options_from(vec!["scan".into(), "--jobs".into(), "many".into()]);
+    }
+
+    #[test]
+    fn effective_jobs_clamps_to_the_plugin_count_and_keeps_one_thread_for_empty_scans() {
+        assert_eq!(effective_jobs(8, 353), 8);
+        assert_eq!(effective_jobs(8, 3), 3);
+        assert_eq!(effective_jobs(8, 0), 1);
+        assert_eq!(effective_jobs(16, 0), 1);
+    }
+
+    #[test]
+    fn run_pool_restores_scan_order_and_covers_every_index() {
+        let results = run_pool(8, 353, &|index| {
+            // Varying per-index cost shuffles completion order across threads;
+            // the returned vector must still be in index order.
+            std::thread::sleep(std::time::Duration::from_millis((index % 4) as u64));
+            index
+        });
+        assert_eq!(results, (0..353).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn run_pool_returns_empty_for_a_zero_plugin_scan() {
+        let results = run_pool(8, 0, &|index| index);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn collect_report_keeps_scan_order_and_counts_one_bucket_per_plugin() {
+        let outcome = |bucket: &str, marker: &str| SweepOutcome {
+            record: json!({"marker": marker}),
+            bucket: bucket.into(),
+            log: String::new(),
+        };
+        let (records, buckets) = collect_report(vec![
+            outcome("loaded", "first"),
+            outcome("exit_20", "second"),
+            outcome("loaded", "third"),
+        ]);
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["marker"], "first");
+        assert_eq!(records[1]["marker"], "second");
+        assert_eq!(records[2]["marker"], "third");
+        assert_eq!(buckets.get("loaded"), Some(&2));
+        assert_eq!(buckets.get("exit_20"), Some(&1));
+        assert_eq!(buckets.values().sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn bucket_of_preserves_structured_diagnostics() {
+        assert_eq!(
+            bucket_of(r#"worker failed: {"classification":"nonzero_exit","exit_code":11}"#),
+            "exit_11_load_library"
+        );
+        assert_eq!(
+            bucket_of(
+                r#"worker failed: {"classification":"nonzero_exit","exit_code":12,"plugin_kind":"aegp_candidate"}"#
+            ),
+            "exit_12_aegp_candidate"
+        );
+        assert_eq!(
+            bucket_of(r#"worker failed: {"module_audit_failure":{"reason":"unsigned"}}"#),
+            "module_audit_failure"
+        );
+    }
+
+    #[test]
+    fn bucket_of_pins_environment_failures_to_unparsed_error() {
+        // os error 112 (ERROR_DISK_FULL) carries no structured diagnostics;
+        // the bucket must stay distinct from worker-reported failures so a
+        // full TEMP volume cannot masquerade as a plug-in load result.
+        assert_eq!(
+            bucket_of("ディスクに十分な空き領域がありません。 (os error 112)"),
+            "unparsed_error"
+        );
+        assert_eq!(bucket_of("some plain io error"), "unparsed_error");
     }
 }
