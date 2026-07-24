@@ -107,6 +107,21 @@ char* __cdecl ansi_strcpy(char* destination, const char* source) {
   return destination;
 }
 
+// PF ANSI Suite v2 entry at index 20 (issue #362): bounded string copy in the
+// (destination, size, source) shape plug-ins use to fill fixed-size name
+// fields. Truncates and always NUL-terminates; 0 on success, 4 on a
+// malformed call, matching the suite's error convention.
+int32_t __cdecl ansi_strcpy_bounded(char* destination, std::size_t destination_size,
+                                    const char* source) {
+  if (!destination || !source || destination_size == 0) return 4;
+  const std::size_t length = strnlen_s(source, 4096);
+  if (length == 4096) return 4;
+  const std::size_t copied = length < destination_size - 1 ? length : destination_size - 1;
+  std::memmove(destination, source, copied);
+  destination[copied] = '\0';
+  return 0;
+}
+
 double __cdecl ansi_asin(double value) {
   if (value < -1.0 || value > 1.0) return 0.0;
   return finite_ansi_unary(value, [](double x) { return std::asin(x); });

@@ -121,6 +121,8 @@ BibSuiteState& bib_suite_state() {
   return state;
 }
 
+const void* bib_resolver_entry() noexcept;
+
 const void* provide_bib_suite(void*) {
   auto& state = bib_suite_state();
   std::lock_guard<std::mutex> lock(state.mutex);
@@ -165,8 +167,21 @@ const void* provide_bib_suite(void*) {
       return nullptr;
     }
   }
-  state.suite[0] = reinterpret_cast<void*>(state.resolver);
+  state.suite[0] = reinterpret_cast<void*>(&bib_resolver_entry);
   return state.suite.data();
+}
+
+// The "AEFX Text BIB Suite" entry is arg-agnostic, exactly like the exported
+// BIBGetGetProcAddress: plug-ins (e.g. the VR family, issue #362) call it
+// with arbitrary register state to obtain the current resolver, then drive
+// the resolver with proper arguments themselves. Putting the resolver itself
+// in the slot makes that call enter the resolver with garbage arguments and
+// crash inside BIB; after teardown the slot naturally yields nullptr, again
+// matching BIBGetGetProcAddress on an uninitialized BIB.
+const void* bib_resolver_entry() noexcept {
+  auto& state = bib_suite_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.resolver;
 }
 
 bool teardown_bib_suite_impl(void*) noexcept {
@@ -179,7 +194,6 @@ bool teardown_bib_suite_impl(void*) noexcept {
   const uint32_t token = state.terminate();
   state.owned = false;
   state.resolver = nullptr;
-  state.suite[0] = nullptr;
   return token == kBibOwnershipToken;
 }
 }  // namespace
@@ -412,6 +426,7 @@ bool configure_component_suite_catalog() {
       {"PF Handle Suite", 2, &g_handle_suite},
       {"PF GPU Device Suite", 1, g_gpu_device_suite1.data()},
       {"PF ANSI Suite", 1, nullptr, &provide_ansi1},
+      {"PF ANSI Suite", 2, nullptr, &provide_ansi2},
       {"PF AE Adv Item Suite", 1, &g_adv_item_suite1, nullptr, nullptr,
        &render_worker_suite_provider_available},
       {"PF Color Settings Suite", 7, nullptr, &provide_color_settings7},

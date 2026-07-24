@@ -1,6 +1,8 @@
 #include "worker_host_suite_catalog.hpp"
+#include "worker_pf_ansi_runtime.hpp"
 #include "worker_suite_registry.hpp"
 
+#include <algorithm>
 #include <mutex>
 #include <vector>
 
@@ -33,6 +35,7 @@ struct OwnedCatalog {
   std::array<void*, 12> app5{};
   std::array<void*, 15> app6{};
   std::array<void*, 19> ansi{};
+  std::array<void*, 21> ansi2{};
   std::array<void*, 14> dynamic_stream2{};
   std::array<void*, 13> aegp_world{};
   std::array<void*, 14> layer_render_options1{};
@@ -100,6 +103,16 @@ const void* provide_app_suite4(void*) { auto& c=state(); return populate_app(c.a
 const void* provide_app_suite5(void*) { auto& c=state(); return populate_app(c.app5,true,false); }
 const void* provide_app_suite6(void*) { auto& c=state(); return populate_app(c.app6,true,true); }
 const void* provide_ansi1(void*) { auto& c=state(); c.ansi=c.assembly.ansi; return c.ansi.data(); }
+const void* provide_ansi2(void*) {
+  auto& c=state();
+  c.ansi2 = {};
+  std::copy(c.assembly.ansi.begin(), c.assembly.ansi.end(), c.ansi2.begin());
+  // Index 20 (0xa0, issue #362): bounded string copy used by the VR family to
+  // fill fixed-size parameter-name fields. Index 19 stays null (unused so
+  // far; a null there fails loudly instead of guessing an ABI).
+  c.ansi2[20] = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy_bounded);
+  return c.ansi2.data();
+}
 const void* provide_dynamic_stream2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::aegp_dynamic_stream_2>(c.dynamic_stream2); c.dynamic_stream2[5]=c.assembly.dynamic_stream_set_flag; return c.dynamic_stream2.data(); }
 const void* provide_aegp_world_suite3(void*) { auto& c=state(); c.aegp_world=c.assembly.aegp_world; return c.aegp_world.data(); }
 const void* provide_layer_render_options1(void*) { auto& c=state(); c.layer_render_options1=c.assembly.layer_render_options1; return c.layer_render_options1.data(); }

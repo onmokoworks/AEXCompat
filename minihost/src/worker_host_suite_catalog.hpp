@@ -66,6 +66,7 @@ const void* provide_app_suite4(void*);
 const void* provide_app_suite5(void*);
 const void* provide_app_suite6(void*);
 const void* provide_ansi1(void*);
+const void* provide_ansi2(void*);
 const void* provide_dynamic_stream2(void*);
 const void* provide_aegp_world_suite3(void*);
 const void* provide_layer_render_options1(void*);

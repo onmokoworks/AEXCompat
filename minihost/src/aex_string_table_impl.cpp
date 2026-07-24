@@ -40,8 +40,14 @@ bool ascii_text(std::string_view text) {
   return true;
 }
 
+// Bound for the non-LStr key form ($$$/path/key=value), whose "key" is a
+// slash-delimited path rather than digits (issue #362: the VR family uses
+// this form; the LStr form carries explicit digit ids).
+constexpr std::size_t kMaxKeyPathBytes = 256;
+
 bool parse_candidate(std::string_view candidate, int32_t& id,
-                     std::string& value, bool& is_lstr_candidate) {
+                     std::string& value, bool& is_lstr_candidate,
+                     int32_t& next_ordinal) {
   constexpr std::string_view prefix = "$$$/";
   constexpr std::string_view marker = "/LStr/";
   is_lstr_candidate = false;
@@ -49,7 +55,23 @@ bool parse_candidate(std::string_view candidate, int32_t& id,
       candidate.substr(0, prefix.size()) != prefix)
     return true;
   const std::size_t marker_offset = candidate.find(marker, prefix.size());
-  if (marker_offset == std::string_view::npos) return true;
+  if (marker_offset == std::string_view::npos) {
+    // Non-LStr form ($$$/path/key=value, issue #362): the entry's id is its
+    // ordinal position among all $$$ entries in the file, matching the
+    // numbering the plug-in's lookup calls use (the digit-suffixed entries
+    // such as .../0000= sit at the ordinal their digits name).
+    const std::size_t equals = candidate.find('=', prefix.size());
+    if (equals == std::string_view::npos || equals == prefix.size() ||
+        equals - prefix.size() > kMaxKeyPathBytes)
+      return true;
+    if (!ascii_text(candidate.substr(prefix.size(), equals - prefix.size())))
+      return false;
+    if (!ascii_text(candidate.substr(equals + 1))) return false;
+    is_lstr_candidate = true;
+    id = next_ordinal;
+    value.assign(candidate.substr(equals + 1));
+    return true;
+  }
   is_lstr_candidate = true;
 
   const std::size_t digits_begin = marker_offset + marker.size();
@@ -115,6 +137,9 @@ StringTable parse_readonly_pe_strings(const unsigned char* bytes,
 
   const unsigned char* section = optional + optional_size;
   StringTable result;
+  // Ordinal id source for non-LStr $$$ entries (issue #362), counted across
+  // all accepted entries in file order.
+  int32_t next_ordinal = 0;
   for (uint16_t section_index = 0; section_index < sections;
        ++section_index, section += kSectionHeaderBytes) {
     const uint32_t characteristics = read_u32(section + 36);
@@ -139,11 +164,12 @@ StringTable parse_readonly_pe_strings(const unsigned char* bytes,
       if (!parse_candidate(
               std::string_view(reinterpret_cast<const char*>(raw + offset),
                                end - offset),
-              id, value, is_lstr_candidate))
+              id, value, is_lstr_candidate, next_ordinal))
         return invalid_table();
       if (!is_lstr_candidate) continue;
       if (!result.values.emplace(id, std::move(value)).second)
         return invalid_table();
+      ++next_ordinal;
       result.status = ParseStatus::Valid;
       offset = end;
     }
