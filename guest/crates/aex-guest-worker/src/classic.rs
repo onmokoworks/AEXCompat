@@ -8,6 +8,13 @@ use crate::x64::{GuestEngine, GuestError};
 const CMD_GLOBAL_SETUP: u64 = 1;
 const CMD_PARAMS_SETUP: u64 = 4;
 const CMD_RENDER: u64 = 11;
+const PARAM_SLIDER: i32 = 1;
+const PARAM_FIXED_SLIDER: i32 = 2;
+const PARAM_ANGLE: i32 = 3;
+const PARAM_CHECKBOX: i32 = 4;
+const PARAM_POPUP: i32 = 7;
+const PARAM_FLOAT_SLIDER: i32 = 10;
+const ANGLE_DEFAULT_OFFSET: usize = 4;
 
 #[derive(Debug, Error)]
 pub enum ClassicError {
@@ -196,10 +203,7 @@ impl ClassicHost {
         self.engine.write_u64(params, input_param)?;
         for (index, captured) in captured_params.into_iter().enumerate() {
             let mut definition = captured.bytes;
-            if index == 0 && captured.param_type == 10 {
-                definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8]
-                    .copy_from_slice(&default_value.to_le_bytes());
-            }
+            materialize_default(&mut definition, captured.param_type);
             let parameter = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
             self.engine.write(parameter, &definition)?;
             self.engine
@@ -259,4 +263,74 @@ fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
 
 fn read_i32(bytes: &[u8], offset: usize) -> i32 {
     i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn materialize_default(definition: &mut [u8], param_type: i32) {
+    let union = abi::PARAM_U_OFFSET;
+    match param_type {
+        PARAM_SLIDER | PARAM_FIXED_SLIDER => {
+            definition.copy_within(
+                union + abi::SLIDER_DEFAULT_OFFSET
+                    ..union + abi::SLIDER_DEFAULT_OFFSET + abi::SLIDER_DEFAULT_SIZE,
+                union,
+            );
+        }
+        PARAM_ANGLE => {
+            definition.copy_within(
+                union + ANGLE_DEFAULT_OFFSET..union + ANGLE_DEFAULT_OFFSET + 4,
+                union,
+            );
+        }
+        PARAM_CHECKBOX => {
+            let value = definition[union + abi::CHECKBOX_DEFAULT_OFFSET] as u32;
+            definition[union..union + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        PARAM_POPUP => {
+            let value = i16::from_le_bytes(
+                definition[union + abi::POPUP_DEFAULT_OFFSET
+                    ..union + abi::POPUP_DEFAULT_OFFSET + abi::POPUP_DEFAULT_SIZE]
+                    .try_into()
+                    .expect("generated popup default is two bytes"),
+            ) as i32;
+            definition[union..union + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        PARAM_FLOAT_SLIDER => {
+            let value = f32::from_le_bytes(
+                definition[union + abi::FLOAT_SLIDER_DEFAULT_OFFSET
+                    ..union + abi::FLOAT_SLIDER_DEFAULT_OFFSET + abi::FLOAT_SLIDER_DEFAULT_SIZE]
+                    .try_into()
+                    .expect("generated float slider default is four bytes"),
+            ) as f64;
+            definition[union..union + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materializes_supported_parameter_defaults() {
+        let mut slider = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        slider[abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET
+            ..abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET + 4]
+            .copy_from_slice(&123i32.to_le_bytes());
+        materialize_default(&mut slider, PARAM_FIXED_SLIDER);
+        assert_eq!(
+            &slider[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4],
+            &123i32.to_le_bytes()
+        );
+
+        let mut float_slider = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        float_slider[abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET
+            ..abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET + 4]
+            .copy_from_slice(&5.0f32.to_le_bytes());
+        materialize_default(&mut float_slider, PARAM_FLOAT_SLIDER);
+        assert_eq!(
+            &float_slider[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8],
+            &5.0f64.to_le_bytes()
+        );
+    }
 }
