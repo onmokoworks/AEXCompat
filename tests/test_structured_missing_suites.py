@@ -14,9 +14,12 @@ def test_production_worker_reports_bounded_missing_suites():
         encoding="utf-8"
     )
     assert "constexpr std::size_t kMaxMissingSuites = 16" in registry
+    assert "constexpr std::size_t kMaxTelemetrySuiteNameBytes = 64" in registry
+    assert "constexpr int32_t kMaxSuiteVersion = 65535" in registry
     assert "record_missing_suite(safe_name, version)" in registry
-    assert "const bool valid_name" in registry
-    assert "if (!valid_name || version <= 0) return" in registry
+    assert "!valid_schema_text(name, kMaxTelemetrySuiteNameBytes, true)" in registry
+    assert "missing_suites_truncated_ = true" in registry
+    assert '\\"missing_suites_truncated\\":' in registry
     assert source.count("missing_suites_report_json()") >= 2
     assert "value.missing_suites_json" in report
     assert "v.missing_suites_json" in report
@@ -34,7 +37,7 @@ def test_broker_uses_structured_report_not_stderr_for_missing_suites():
         source.index("fn worker_diagnostics(") : source.index("fn failed_module_audit_summary(")
     ]
     assert "missing_suite_event" not in diagnostics
-    assert 'worker_report["missing_suites"]' in diagnostics
+    assert 'worker_report.get("missing_suites")' in diagnostics
     assert "propagate_missing_suites(&mut diagnostics, report)" in source
     inspection = source[
         source.index("fn inspect_experimental_with_diagnostics_and_runtime_policy(") :
@@ -74,13 +77,14 @@ def test_unsupported_suite_slots_flow_from_worker_report_to_broker_diagnostics()
     assert "constexpr std::size_t kMaxUnsupportedSuiteCalls = 32" in registry
     assert '"stage:suite_slot_unsupported suite="' in registry
     assert "unsupported_suite_calls" in registry
+    assert '\\"unsupported_suite_calls_truncated\\":' in registry
     assert "unsupported_suite_calls_report_json()" in source
     assert "unsupported_suite_calls_json" in l2_report_header
     assert "c.unsupported_suite_calls_json" in l2_report
     assert "unsupported_suite_calls_report_json()" in report
     assert "unsupported_suite_calls_report_json()" in smart
     assert "fn propagate_unsupported_suite_calls(" in broker
-    assert 'worker_report["unsupported_suite_calls"]' in broker
+    assert 'worker_report.get("unsupported_suite_calls")' in broker
     # Every broker path that turns a worker report into public diagnostics must
     # lift the structured suite records, or a compatibility gap stops being a
     # reproducible diagnostic. The count used to be `>= 3` because the one-shot
@@ -96,3 +100,4 @@ def test_unsupported_suite_slots_flow_from_worker_report_to_broker_diagnostics()
         body = broker[start:end]
         assert "propagate_missing_suites(&mut diagnostics" in body, owner
         assert "propagate_unsupported_suite_calls(&mut diagnostics" in body, owner
+        assert "propagate_suite_timeline(&mut diagnostics" in body, owner

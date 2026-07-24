@@ -51,6 +51,9 @@ ModuleAuditSnapshot capture_module_audit();
 void capture_module_audit_phase();
 bool module_audit_passed();
 std::string module_audit_json();
+// Bounded failure-only diagnostics. Canonical paths stay private; each
+// rejection carries only a basename, a canonical path token, and a path class.
+std::string module_audit_failure_json();
 
 // Cluster-session audit mode (design §5): replaces the fixed
 // kMaxAuditedModules enumeration/accumulation bound with the launch-time

@@ -33,3 +33,15 @@ def test_component_keeps_sensitive_paths_internal_to_nonserialized_keys():
     # Canonical unknown paths remain internal; only the filename component is
     # passed to the existing printable-ASCII basename scrubber.
     assert "names(snapshot.unknown_keys)" not in serializer
+
+
+def test_failure_diagnostics_tokenize_paths_and_bound_rejections():
+    failure = COMPONENT[COMPONENT.index("std::string module_audit_failure_json"):
+                        COMPONENT.index("uint32_t authorized_runtime_backend")]
+    assert "kMaxAuditFailureRejections" in COMPONENT
+    assert "path_token(path)" in failure
+    assert "path.wstring()" not in failure
+    assert "module_path.wstring()" not in failure
+    assert '"sealed_root"' in failure
+    assert '"external"' in failure
+    assert "rejections_truncated" in failure

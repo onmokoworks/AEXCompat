@@ -1,5 +1,6 @@
 #include "worker_host_suite_catalog.hpp"
 #include "worker_host_suite_router.hpp"
+#include "worker_suite_call_slot_probe.hpp"
 #include "worker_suite_registry.hpp"
 
 #include "pf_cache_on_load_suite.hpp"
@@ -410,6 +411,26 @@ bool configure_component_suite_catalog() {
       {"PF Effect UI Suite", 1, nullptr, &provide_effect_ui1},
       {"PF AE Adv App Suite", 1, nullptr, &provide_adv_app1},
       {"PF AE Adv App Suite", 2, nullptr, &provide_adv_app2},
+      {aexcompat::worker_runtime::suite_call_slot_probe::
+           kPrivateEffectSuiteName,
+       aexcompat::worker_runtime::suite_call_slot_probe::
+           kPrivateEffectSuiteVersion3,
+       nullptr,
+       &aexcompat::worker_runtime::suite_call_slot_probe::
+           provide_private_effect_probe3,
+       nullptr,
+       &aexcompat::worker_runtime::suite_call_slot_probe::
+           private_effect_probe3_available},
+      {aexcompat::worker_runtime::suite_call_slot_probe::
+           kPrivateEffectSuiteName,
+       aexcompat::worker_runtime::suite_call_slot_probe::
+           kPrivateEffectSuiteVersion5,
+       nullptr,
+       &aexcompat::worker_runtime::suite_call_slot_probe::
+           provide_private_effect_probe5,
+       nullptr,
+       &aexcompat::worker_runtime::suite_call_slot_probe::
+           private_effect_probe5_available},
       {"DRAWBOT Draw Suite", 1, nullptr, &provide_drawbot_draw1},
       {"DRAWBOT Supplier Suite", 1, nullptr, &provide_drawbot_supplier1},
       {"DRAWBOT Surface Suite", 2, nullptr, &provide_drawbot_surface2},

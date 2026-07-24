@@ -132,6 +132,7 @@
 #include "worker_host_suite_router.hpp"
 #include "worker_host_suite_catalog.hpp"
 #include "worker_suite_abi.hpp"
+#include "worker_suite_call_slot_probe.hpp"
 #include "worker_suite_registry.hpp"
 #include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
@@ -254,12 +255,18 @@ using aexcompat::worker_runtime::capture_module_audit;
 using aexcompat::worker_runtime::capture_module_audit_phase;
 using aexcompat::worker_runtime::effect_selector_name;
 using aexcompat::worker_runtime::guarded_effect_call;
+using aexcompat::worker_runtime::HostCallbackClassification;
 using aexcompat::worker_runtime::invoke_entry_seh;
 using aexcompat::worker_runtime::invoke_smart_pre_render_cleanup_seh;
 using aexcompat::worker_runtime::module_audit_json;
+using aexcompat::worker_runtime::observe_extended_allocation;
+using aexcompat::worker_runtime::observe_extended_free;
+using aexcompat::worker_runtime::record_host_callback_invocation;
+using aexcompat::worker_runtime::module_audit_failure_json;
 using aexcompat::worker_runtime::module_audit_passed;
 using aexcompat::worker_runtime::module_audit_report;
 using aexcompat::worker_runtime::selector_dispatch_telemetry;
+using aexcompat::worker_runtime::selector_invocations_report_json;
 using aexcompat::worker_runtime::RuntimeAdmissionRequest;
 using aexcompat::worker_runtime::RuntimeContext;
 using aexcompat::worker_runtime::RuntimeHostHooks;
@@ -982,16 +989,36 @@ bool verify_plugin_data_entrypoint() {
 // (allocating 0xFA0 bytes) and release it through in_data+0x70, while
 // PARAMS_SETUP resolves parameter-name strings through in_data+0x68.
 int32_t __cdecl host_extended_alloc(void** out, std::size_t size) {
-  if (!out || size == 0 || size > (size_t{1} << 24)) return 4;
+  if (!out || size == 0 || size > (size_t{1} << 24)) {
+    record_host_callback_invocation(
+        "inter.extended_alloc", 4,
+        HostCallbackClassification::implemented);
+    return 4;
+  }
   void* buffer = std::calloc(1, size);
-  if (!buffer) return 4;
+  if (!buffer) {
+    record_host_callback_invocation(
+        "inter.extended_alloc", 4,
+        HostCallbackClassification::implemented);
+    return 4;
+  }
   *out = buffer;
+  observe_extended_allocation(buffer);
+  record_host_callback_invocation(
+      "inter.extended_alloc", 0,
+      HostCallbackClassification::implemented);
   return 0;
 }
 int32_t __cdecl host_extended_free(void** ptr) {
   // The plug-in passes the address of its buffer pointer (lea rcx,[local]),
   // not the buffer itself.
-  if (ptr) std::free(*ptr);
+  if (ptr) {
+    observe_extended_free(*ptr);
+    std::free(*ptr);
+  }
+  record_host_callback_invocation(
+      "inter.extended_free", 0,
+      HostCallbackClassification::implemented);
   return 0;
 }
 
@@ -1035,9 +1062,13 @@ bool load_aex_string_table(
 }
 
 const char* __cdecl host_extended_lookup(void*, int32_t id, void*, void*) {
-  return g_active_aex_string_table
-             ? g_active_aex_string_table->lookup(id)
-             : nullptr;
+  const char* result = g_active_aex_string_table
+      ? g_active_aex_string_table->lookup(id)
+      : nullptr;
+  record_host_callback_invocation(
+      "inter.extended_lookup", result ? 0 : 4,
+      HostCallbackClassification::fallback);
+  return result;
 }
 
 void append_pipl_u32(std::vector<unsigned char>& bytes, uint32_t value) {
@@ -1602,6 +1633,10 @@ std::string unsupported_suite_calls_report_json() {
   return suite_registry().unsupported_suite_calls_report_json();
 }
 
+std::string suite_call_slot_probe_report_json() {
+  return aexcompat::worker_runtime::suite_call_slot_probe::report_json();
+}
+
 std::string suite_timeline_report_json() {
   return suite_registry().suite_timeline_report_json();
 }
@@ -1946,12 +1981,18 @@ std::string build_l2_report_json(
   c.suite_leases_balanced = suite_leases_balanced(); c.user_changed_param_requested = g_user_changed_param_requested;
   c.user_changed_param_slot = g_user_changed_param_slot; c.user_changed_param_error = g_user_changed_param_error;
   c.user_changed_parameters_json = requested_parameters_json(g_user_changed_parameters);
+  c.missing_suites_json = missing_suites_report_json();
+  c.suite_timeline_json = suite_timeline_report_json();
   const auto* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
   c.return_message.assign(message, strnlen_s(message, 256)); c.about_message = about_message;
   c.about_selector_dispatched = !g_skip_about; c.last_seh_selector = g_last_seh_selector; c.last_seh_error = g_last_seh_error;
   c.last_seh_exception_code = g_last_seh_exception_code;
   c.lifecycle_errors = lifecycle_errors; c.lifecycle_data_null = lifecycle_data_null;
   c.unsupported_suite_calls_json = unsupported_suite_calls_report_json();
+  c.suite_call_slot_probe_json = suite_call_slot_probe_report_json();
+  c.selector_invocations_json = selector_invocations_report_json();
+  if (!module_audit_passed())
+    c.module_audit_failure_json = module_audit_failure_json();
   if (include_module_audit) c.module_audit_json = module_audit_json();
   c.parameters.reserve(g_params.size());
   for (const auto& p : g_params) {
@@ -2212,12 +2253,90 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv);
 // #405). Extracted so every path installs the identical ABI tables and
 // runtime hooks; only the Request (worker kind, depth, audio, skip_about)
 // differs per call site.
+int32_t timeline_result(const char* callback, int32_t result) {
+  record_host_callback_invocation(
+      callback, result, HostCallbackClassification::implemented);
+  return result;
+}
+
+int32_t __cdecl timeline_checkout_param(
+    void* effect_ref, int32_t index, int32_t what_time, int32_t time_step,
+    uint32_t time_scale, void* definition) {
+  return timeline_result(
+      "inter.checkout_param",
+      checkout_param(effect_ref, index, what_time, time_step, time_scale,
+                     definition));
+}
+
+int32_t __cdecl timeline_checkin_param(
+    void* effect_ref, void* definition) {
+  return timeline_result(
+      "inter.checkin_param", checkin_param(effect_ref, definition));
+}
+
+int32_t __cdecl timeline_add_param(
+    void* effect_ref, int32_t index, void* definition) {
+  return timeline_result(
+      "inter.add_param", add_param(effect_ref, index, definition));
+}
+
+int32_t __cdecl timeline_abort_render(void* effect_ref) {
+  return timeline_result("inter.abort_render", abort_render(effect_ref));
+}
+
+int32_t __cdecl timeline_report_progress(
+    void* effect_ref, int32_t current, int32_t total) {
+  return timeline_result(
+      "inter.report_progress",
+      report_progress(effect_ref, current, total));
+}
+
+int32_t __cdecl timeline_register_custom_ui(
+    void* effect_ref, const void* custom_ui_info) {
+  return timeline_result(
+      "inter.register_custom_ui",
+      register_custom_ui(effect_ref, custom_ui_info));
+}
+
+int32_t __cdecl timeline_checkout_layer_audio(
+    void* effect_ref, int32_t index, int32_t start_time, int32_t duration,
+    uint32_t time_scale, uint32_t rate, int32_t bytes_per_sample,
+    int32_t channels, int32_t format, void** audio) {
+  return timeline_result(
+      "inter.checkout_layer_audio",
+      checkout_layer_audio(
+          effect_ref, index, start_time, duration, time_scale, rate,
+          bytes_per_sample, channels, format, audio));
+}
+
+int32_t __cdecl timeline_checkin_layer_audio(
+    void* effect_ref, void* audio) {
+  return timeline_result(
+      "inter.checkin_layer_audio",
+      checkin_layer_audio(effect_ref, audio));
+}
+
+int32_t __cdecl timeline_get_audio_data(
+    void* effect_ref, void* audio, void** data, int32_t* sample_count,
+    uint32_t* rate, int32_t* bytes_per_sample, int32_t* channels,
+    int32_t* format) {
+  return timeline_result(
+      "inter.get_audio_data",
+      get_audio_data(
+          effect_ref, audio, data, sample_count, rate, bytes_per_sample,
+          channels, format));
+}
+
 aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks() {
-  return {{reinterpret_cast<void*>(&checkout_param), reinterpret_cast<void*>(&checkin_param),
-    reinterpret_cast<void*>(&add_param), reinterpret_cast<void*>(&abort_render),
-    reinterpret_cast<void*>(&report_progress), reinterpret_cast<void*>(&register_custom_ui),
-    reinterpret_cast<void*>(&checkout_layer_audio), reinterpret_cast<void*>(&checkin_layer_audio),
-    reinterpret_cast<void*>(&get_audio_data),
+  return {{reinterpret_cast<void*>(&timeline_checkout_param),
+    reinterpret_cast<void*>(&timeline_checkin_param),
+    reinterpret_cast<void*>(&timeline_add_param),
+    reinterpret_cast<void*>(&timeline_abort_render),
+    reinterpret_cast<void*>(&timeline_report_progress),
+    reinterpret_cast<void*>(&timeline_register_custom_ui),
+    reinterpret_cast<void*>(&timeline_checkout_layer_audio),
+    reinterpret_cast<void*>(&timeline_checkin_layer_audio),
+    reinterpret_cast<void*>(&timeline_get_audio_data),
     // Extended inter slots 0x60 / 0x68 / 0x70 (issue #382).
     reinterpret_cast<void*>(&host_extended_alloc),
     reinterpret_cast<void*>(&host_extended_lookup),

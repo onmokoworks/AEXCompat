@@ -80,9 +80,13 @@ def test_scene_precedence_and_live_tls_conditional_exposure_stay_in_resolver():
 def test_missing_suite_diagnostics_remain_bounded_sanitized_and_fail_closed():
     assert "constexpr std::size_t kMaxMissingSuites = 16" in SOURCE
     assert "constexpr std::size_t kMaxSuiteNameBytes = 96" in SOURCE
+    assert "constexpr std::size_t kMaxTelemetrySuiteNameBytes = 64" in SOURCE
+    assert "constexpr int32_t kMaxSuiteVersion = 65535" in SOURCE
     assert "character >= 0x20 && character <= 0x7e" in SOURCE
-    assert "if (!valid_name || version <= 0) return" in SOURCE
-    assert "missing_suites_.size() < kMaxMissingSuites" in SOURCE
+    assert "!valid_schema_text(name, kMaxTelemetrySuiteNameBytes, true)" in SOURCE
+    assert "missing_suites_.size() >= kMaxMissingSuites" in SOURCE
+    assert "missing_suites_truncated_ = true" in SOURCE
+    assert '\\"missing_suites_truncated\\":' in SOURCE
     assert "suite_acquire(safe_name, std::max<int32_t>(version, 0), false)" in SOURCE
     assert '"stage:suite_acquire_failed name="' in SOURCE
     assert "return 1" in SOURCE
@@ -95,6 +99,7 @@ def test_acquired_suite_unsupported_slots_are_bounded_and_identified():
     assert "constexpr std::size_t kMaxUnsupportedSuiteCalls = 32" in SOURCE
     assert "call.suite == suite && call.slot == slot" in SOURCE
     assert "unsupported_suite_calls_.size() >= kMaxUnsupportedSuiteCalls" in SOURCE
+    assert "unsupported_suite_calls_truncated_ = true" in SOURCE
     assert '"stage:suite_slot_unsupported suite="' in SOURCE
     assert "unsupported_suite_calls_report_json" in SOURCE
 
@@ -129,3 +134,6 @@ def test_native_bounds_fixture_covers_guard_page_overlong_and_invalid_pointer():
     assert "g_resolver_calls == calls_before" in NATIVE
     assert "UnsupportedSuiteId::aegp_comp_21" in NATIVE
     assert "unsupported_suite_calls_report_json" in NATIVE
+    assert '"maximum_telemetry_name_bytes\\":64' in NATIVE
+    assert '"maximum_version\\":65535' in NATIVE
+    assert '"maximum_timeline_events\\":512' in NATIVE

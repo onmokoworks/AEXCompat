@@ -43,6 +43,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/strict_json.cpp
     src/suite_lease_tracker.cpp
     src/worker_selector_dispatch.cpp
+    src/worker_suite_call_slot_probe.cpp
     src/worker_suite_registry.cpp
     src/worker_runtime_admission.cpp
     src/worker_entry_admission.cpp
@@ -155,13 +156,17 @@ target_link_libraries(aex_smart_worker PRIVATE bcrypt aexcompat_trace_writer)
 add_executable(worker_suite_registry_selftest
   ../tests/native/worker_suite_registry_selftest.cpp
   src/suite_lease_tracker.cpp
+  src/worker_minidump_runtime.cpp
+  src/worker_selector_dispatch.cpp
+  src/worker_suite_call_slot_probe.cpp
   src/worker_suite_registry.cpp
 )
 target_compile_features(worker_suite_registry_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_suite_registry_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_suite_registry_selftest PRIVATE src)
-target_link_libraries(worker_suite_registry_selftest PRIVATE aexcompat_trace_writer)
+target_link_libraries(worker_suite_registry_selftest PRIVATE
+  bcrypt aexcompat_trace_writer)
 
 add_executable(aex_string_table_selftest
   ../tests/native/aex_string_table_selftest.cpp

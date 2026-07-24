@@ -28,7 +28,14 @@ pub(crate) const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
 const MAX_STAGE_EVENTS: usize = 32;
 const MAX_MISSING_SUITES: usize = 16;
 const MAX_UNSUPPORTED_SUITE_CALLS: usize = 32;
-const MAX_SUITE_NAME_LEN: usize = 96;
+const MAX_SUITE_CALL_SLOT_PROBE_SLOTS: u64 = 32;
+const MAX_SUITE_CALL_SLOT_PROBE_TARGETS: usize = 8;
+const MAX_SUITE_NAME_LEN: usize = 64;
+const MAX_SUITE_TIMELINE_EVENTS: usize = 512;
+const MAX_SELECTOR_INVOCATIONS: usize = 64;
+const MAX_HOST_CALLBACK_TIMELINE_RECORDS: usize = 128;
+const MAX_EXTENDED_ALLOCATION_TIMELINE_RECORDS: usize = 128;
+const MAX_SUITE_VERSION: i64 = u16::MAX as i64;
 const MAX_UNSUPPORTED_SUITE_SLOT: u64 = 1023;
 const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
 const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
@@ -695,6 +702,12 @@ fn worker_diagnostics(
         "first_failure_stage": first_failure_stage,
         "last_completed_stage": last_completed_stage,
         "missing_suites": [],
+        "missing_suites_truncated": false,
+        "unsupported_suite_calls": [],
+        "unsupported_suite_calls_truncated": false,
+        "suite_call_slot_probe": null,
+        "suite_timeline": [],
+        "suite_timeline_truncated": false,
         "plugin_kind": plugin_kind,
         "minidump": minidump,
     })
@@ -730,30 +743,61 @@ fn minidump_marker(line: &str) -> Option<String> {
     .then(|| format!("failed reason={reason}"))
 }
 
+fn schema_safe_suite_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (2..=MAX_SUITE_NAME_LEN).contains(&bytes.len())
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_' | b'-'))
+}
+
+fn schema_safe_suite_selector(selector: &str) -> bool {
+    let bytes = selector.as_bytes();
+    (1..=MAX_SUITE_NAME_LEN).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_' | b'-'))
+}
+
+fn reported_truncation(worker_report: &Value, key: &str) -> bool {
+    match worker_report.get(key) {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => true,
+    }
+}
+
 fn propagate_missing_suites(diagnostics: &mut Value, worker_report: &Value) {
     let mut suites = Vec::new();
     let mut seen = BTreeSet::new();
-    for suite in worker_report["missing_suites"]
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
+    let mut truncated = reported_truncation(worker_report, "missing_suites_truncated");
+    let reported = match worker_report.get("missing_suites") {
+        Some(Value::Array(reported)) => reported.as_slice(),
+        Some(_) => {
+            truncated = true;
+            &[]
+        }
+        None => &[],
+    };
+    for suite in reported {
         if suites.len() >= MAX_MISSING_SUITES {
+            truncated = true;
             break;
         }
-        let Some(name) = suite["name"].as_str().filter(|name| {
-            !name.is_empty()
-                && name.len() <= MAX_SUITE_NAME_LEN
-                && name.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-')
-                })
-        }) else {
+        let Some(name) = suite["name"]
+            .as_str()
+            .filter(|name| schema_safe_suite_name(name))
+        else {
+            truncated = true;
             continue;
         };
         let Some(version) = suite["version"]
             .as_i64()
-            .filter(|version| *version > 0 && *version <= i32::MAX as i64)
+            .filter(|version| *version > 0 && *version <= MAX_SUITE_VERSION)
         else {
+            truncated = true;
             continue;
         };
         if seen.insert((name.to_owned(), version)) {
@@ -761,44 +805,52 @@ fn propagate_missing_suites(diagnostics: &mut Value, worker_report: &Value) {
         }
     }
     diagnostics["missing_suites"] = Value::Array(suites);
+    diagnostics["missing_suites_truncated"] = Value::Bool(truncated);
 }
 
 fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Value) {
     let mut calls = Vec::new();
     let mut seen = BTreeSet::new();
-    for call in worker_report["unsupported_suite_calls"]
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
+    let mut truncated = reported_truncation(worker_report, "unsupported_suite_calls_truncated");
+    let reported = match worker_report.get("unsupported_suite_calls") {
+        Some(Value::Array(reported)) => reported.as_slice(),
+        Some(_) => {
+            truncated = true;
+            &[]
+        }
+        None => &[],
+    };
+    for call in reported {
         if calls.len() >= MAX_UNSUPPORTED_SUITE_CALLS {
+            truncated = true;
             break;
         }
-        let Some(name) = call["name"].as_str().filter(|name| {
-            !name.is_empty()
-                && name.len() <= MAX_SUITE_NAME_LEN
-                && name.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-')
-                })
-        }) else {
+        let Some(name) = call["name"]
+            .as_str()
+            .filter(|name| schema_safe_suite_name(name))
+        else {
+            truncated = true;
             continue;
         };
         let Some(version) = call["version"]
             .as_i64()
-            .filter(|version| *version > 0 && *version <= i32::MAX as i64)
+            .filter(|version| *version > 0 && *version <= MAX_SUITE_VERSION)
         else {
+            truncated = true;
             continue;
         };
         let Some(slot) = call["slot"]
             .as_u64()
             .filter(|slot| *slot <= MAX_UNSUPPORTED_SUITE_SLOT)
         else {
+            truncated = true;
             continue;
         };
         let Some(call_count) = call["call_count"]
             .as_u64()
             .filter(|count| *count > 0 && *count <= u32::MAX as u64)
         else {
+            truncated = true;
             continue;
         };
         if seen.insert((name.to_owned(), version, slot)) {
@@ -811,6 +863,1031 @@ fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Va
         }
     }
     diagnostics["unsupported_suite_calls"] = Value::Array(calls);
+    diagnostics["unsupported_suite_calls_truncated"] = Value::Bool(truncated);
+}
+
+fn probe_hex(value: &Value) -> Option<&str> {
+    value.as_str().filter(|text| {
+        text.len() == 18
+            && text.starts_with("0x")
+            && text[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn schema_safe_module_basename(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 260
+        && value.is_ascii()
+        && !value.contains(['/', '\\', ':'])
+        && !value.chars().any(char::is_control)
+        && !value.ends_with(['.', ' '])
+}
+
+fn safe_pointer_classification(value: &Value) -> Option<Value> {
+    let pointer = value.as_object()?;
+    let classification = pointer.get("classification")?.as_str()?;
+    let module = pointer.get("module")?;
+    let relative_offset = pointer.get("relative_offset")?;
+    let token = pointer.get("token")?;
+    match classification {
+        "null" | "low" if module.is_null() && relative_offset.is_null() && token.is_null() => {
+            Some(json!({
+                "classification": classification,
+                "module": null,
+                "relative_offset": null,
+                "token": null,
+            }))
+        }
+        "plugin" | "module"
+            if module.as_str().is_some_and(schema_safe_module_basename)
+                && probe_hex(relative_offset).is_some()
+                && token.is_null() =>
+        {
+            Some(json!({
+                "classification": classification,
+                "module": module.as_str().unwrap(),
+                "relative_offset": probe_hex(relative_offset)
+                    .unwrap()
+                    .to_ascii_lowercase(),
+                "token": null,
+            }))
+        }
+        "heap_or_unknown"
+            if module.is_null()
+                && relative_offset.is_null()
+                && token.as_str().is_some_and(|token| {
+                    token.len() == 20
+                        && token.starts_with("ptr-")
+                        && token[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
+                }) =>
+        {
+            Some(json!({
+                "classification": classification,
+                "module": null,
+                "relative_offset": null,
+                "token": token.as_str().unwrap().to_ascii_lowercase(),
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn safe_process_local_pointer_token(value: &Value) -> Option<&str> {
+    value.as_str().filter(|token| {
+        token.len() == 20
+            && token.starts_with("ptr-")
+            && token[4..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
+fn safe_global_data_state(value: &Value) -> Option<Value> {
+    let state = value.as_object().filter(|state| state.len() == 3)?;
+    let presence = state.get("state")?.as_str()?;
+    let classification = state.get("classification")?.as_str()?;
+    let token = state.get("process_local_token")?;
+    match presence {
+        "null" if classification == "null" && token.is_null() => Some(json!({
+            "state": "null",
+            "classification": "null",
+            "process_local_token": null,
+        })),
+        "non_null"
+            if matches!(
+                classification,
+                "low" | "plugin" | "module" | "heap_or_unknown"
+            ) =>
+        {
+            Some(json!({
+                "state": "non_null",
+                "classification": classification,
+                "process_local_token": safe_process_local_pointer_token(token)?,
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn safe_global_data_handoff(value: &Value) -> Option<Value> {
+    let handoff = value.as_object().filter(|handoff| handoff.len() == 3)?;
+    let normalize_state = |name| match handoff.get(name)? {
+        Value::Null => Some(Value::Null),
+        value => safe_global_data_state(value),
+    };
+    let input_at_entry = normalize_state("input_at_entry")?;
+    let output_after_return = normalize_state("output_after_return")?;
+    let same_identity = match handoff.get("same_identity_as_previous_output")? {
+        Value::Null => Value::Null,
+        Value::Bool(value) => Value::Bool(*value),
+        _ => return None,
+    };
+    Some(json!({
+        "input_at_entry": input_at_entry,
+        "output_after_return": output_after_return,
+        "same_identity_as_previous_output": same_identity,
+    }))
+}
+
+fn safe_effect_ref_entry(value: &Value) -> Option<Value> {
+    if value.is_null() {
+        return Some(Value::Null);
+    }
+    let entry = value.as_object().filter(|entry| entry.len() == 4)?;
+    let state = safe_global_data_state(&json!({
+        "state": entry.get("state")?,
+        "classification": entry.get("classification")?,
+        "process_local_token": entry.get("process_local_token")?,
+    }))?;
+    let same_identity = match entry.get("same_identity_as_global_setup_entry")? {
+        Value::Null => Value::Null,
+        Value::Bool(value) => Value::Bool(*value),
+        _ => return None,
+    };
+    Some(json!({
+        "state": state["state"],
+        "classification": state["classification"],
+        "process_local_token": state["process_local_token"],
+        "same_identity_as_global_setup_entry": same_identity,
+    }))
+}
+
+fn safe_application_id_entry(value: &Value) -> Option<Value> {
+    if value.is_null() {
+        return Some(Value::Null);
+    }
+    let entry = value.as_object().filter(|entry| entry.len() == 4)?;
+    let hex = entry.get("hex_u32")?.as_str().filter(|hex| {
+        hex.len() == 10
+            && hex.starts_with("0x")
+            && hex[2..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })?;
+    let numeric = u32::from_str_radix(&hex[2..], 16).ok()?;
+    let mut expected_code = String::new();
+    for shift in [24, 16, 8, 0] {
+        let byte = ((numeric >> shift) & 0xff) as u8;
+        if (0x20..=0x7e).contains(&byte) {
+            expected_code.push(char::from(byte));
+        } else {
+            expected_code.push_str(&format!("\\x{byte:02x}"));
+        }
+    }
+    let printable_code = entry
+        .get("printable_code")?
+        .as_str()
+        .filter(|code| *code == expected_code)?;
+    let same_value = match entry.get("same_value_as_global_setup_entry")? {
+        Value::Null => Value::Null,
+        Value::Bool(value) => Value::Bool(*value),
+        _ => return None,
+    };
+    if entry.get("host_setting_source")?.as_str() != Some("worker_effect_bootstrap") {
+        return None;
+    }
+    Some(json!({
+        "printable_code": printable_code,
+        "hex_u32": hex,
+        "same_value_as_global_setup_entry": same_value,
+        "host_setting_source": "worker_effect_bootstrap",
+    }))
+}
+
+fn safe_spec_version_entry(value: &Value) -> Option<Value> {
+    if value.is_null() {
+        return Some(Value::Null);
+    }
+    let entry = value.as_object().filter(|entry| entry.len() == 5)?;
+    let raw = entry.get("raw_packed_u32")?.as_str().filter(|raw| {
+        raw.len() == 10
+            && raw.starts_with("0x")
+            && raw[2..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })?;
+    let numeric = u32::from_str_radix(&raw[2..], 16).ok()?;
+    let major = entry
+        .get("major")?
+        .as_i64()
+        .filter(|value| i16::try_from(*value).is_ok())?;
+    let minor = entry
+        .get("minor")?
+        .as_i64()
+        .filter(|value| i16::try_from(*value).is_ok())?;
+    if i16::try_from(major).ok()? != (numeric as u16) as i16
+        || i16::try_from(minor).ok()? != ((numeric >> 16) as u16) as i16
+    {
+        return None;
+    }
+    let same_value = match entry.get("same_value_as_global_setup_entry")? {
+        Value::Null => Value::Null,
+        Value::Bool(value) => Value::Bool(*value),
+        _ => return None,
+    };
+    if entry.get("host_setting_source")?.as_str() != Some("worker_effect_bootstrap") {
+        return None;
+    }
+    Some(json!({
+        "raw_packed_u32": raw,
+        "major": major,
+        "minor": minor,
+        "same_value_as_global_setup_entry": same_value,
+        "host_setting_source": "worker_effect_bootstrap",
+    }))
+}
+
+fn propagate_suite_call_slot_probe(diagnostics: &mut Value, worker_report: &Value) {
+    let Some(probe) = worker_report
+        .get("suite_call_slot_probe")
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    let Some(enabled) = probe.get("enabled").and_then(Value::as_bool) else {
+        return;
+    };
+    let Some(slot_count) = probe
+        .get("slot_count")
+        .and_then(Value::as_u64)
+        .filter(|count| *count > 0 && *count <= MAX_SUITE_CALL_SLOT_PROBE_SLOTS)
+    else {
+        return;
+    };
+    let Some(maximum_targets) = probe
+        .get("maximum_targets")
+        .and_then(Value::as_u64)
+        .filter(|count| *count > 0 && *count <= MAX_SUITE_CALL_SLOT_PROBE_TARGETS as u64)
+    else {
+        return;
+    };
+    let Some(reported_targets) = probe.get("targets").and_then(Value::as_array) else {
+        return;
+    };
+    let mut configuration_truncated = probe
+        .get("configuration_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let mut targets = Vec::new();
+    let mut seen_targets = BTreeSet::new();
+    for target in reported_targets {
+        if targets.len() >= maximum_targets as usize {
+            configuration_truncated = true;
+            break;
+        }
+        let Some(name) = target
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| schema_safe_suite_name(name))
+        else {
+            configuration_truncated = true;
+            continue;
+        };
+        let Some(version) = target
+            .get("version")
+            .and_then(Value::as_i64)
+            .filter(|version| {
+                *version > 0
+                    && *version <= MAX_SUITE_VERSION
+                    && seen_targets.insert((name.to_owned(), *version))
+            })
+        else {
+            configuration_truncated = true;
+            continue;
+        };
+        let Some(target_enabled) = target.get("enabled").and_then(Value::as_bool) else {
+            configuration_truncated = true;
+            continue;
+        };
+        let Some(reported_calls) = target.get("calls").and_then(Value::as_array) else {
+            configuration_truncated = true;
+            continue;
+        };
+        let mut target_truncated = target
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let mut calls = Vec::new();
+        let mut seen_slots = BTreeSet::new();
+        for call in reported_calls {
+            if calls.len() >= slot_count as usize {
+                target_truncated = true;
+                break;
+            }
+            let Some(slot) = call
+                .get("slot")
+                .and_then(Value::as_u64)
+                .filter(|slot| *slot < slot_count && seen_slots.insert(*slot))
+            else {
+                target_truncated = true;
+                continue;
+            };
+            let Some(call_count) = call
+                .get("call_count")
+                .and_then(Value::as_u64)
+                .filter(|count| *count > 0 && *count <= u32::MAX as u64)
+            else {
+                target_truncated = true;
+                continue;
+            };
+            let Some(exception_code) = call
+                .get("exception_code")
+                .and_then(Value::as_u64)
+                .filter(|code| *code <= u32::MAX as u64)
+            else {
+                target_truncated = true;
+                continue;
+            };
+            let Some(registers) = call.get("registers").and_then(Value::as_object) else {
+                target_truncated = true;
+                continue;
+            };
+            let register_values: Option<Vec<&str>> = ["rcx", "rdx", "r8", "r9"]
+                .iter()
+                .map(|name| registers.get(*name).and_then(probe_hex))
+                .collect();
+            let Some(register_values) = register_values else {
+                target_truncated = true;
+                continue;
+            };
+            let Some(stack) = call
+                .get("stack")
+                .and_then(Value::as_array)
+                .filter(|values| values.len() == 4)
+                .and_then(|values| values.iter().map(probe_hex).collect::<Option<Vec<_>>>())
+            else {
+                target_truncated = true;
+                continue;
+            };
+            let caller_rva = match call.get("caller_rva") {
+                Some(Value::Null) => Value::Null,
+                Some(value) => match probe_hex(value) {
+                    Some(value) => json!(value),
+                    None => {
+                        target_truncated = true;
+                        continue;
+                    }
+                },
+                None => {
+                    target_truncated = true;
+                    continue;
+                }
+            };
+            calls.push(json!({
+                "slot": slot,
+                "call_count": call_count,
+                "exception_code": exception_code,
+                "registers": {
+                    "rcx": register_values[0],
+                    "rdx": register_values[1],
+                    "r8": register_values[2],
+                    "r9": register_values[3],
+                },
+                "stack": stack,
+                "caller_rva": caller_rva,
+            }));
+        }
+        targets.push(json!({
+            "name": name,
+            "version": version,
+            "enabled": target_enabled,
+            "calls": calls,
+            "truncated": target_truncated,
+        }));
+    }
+    diagnostics["suite_call_slot_probe"] = json!({
+        "enabled": enabled,
+        "slot_count": slot_count,
+        "maximum_targets": maximum_targets,
+        "targets": targets,
+        "configuration_truncated": configuration_truncated,
+    });
+}
+
+fn propagate_selector_invocations(diagnostics: &mut Value, worker_report: &Value) {
+    let Some(container) = worker_report
+        .get("selector_invocations")
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    if container.get("maximum_records").and_then(Value::as_u64)
+        != Some(MAX_SELECTOR_INVOCATIONS as u64)
+    {
+        return;
+    }
+    let Some(reported) = container.get("records").and_then(Value::as_array) else {
+        return;
+    };
+    let Some(reported_truncated) = container.get("truncated").and_then(Value::as_bool) else {
+        return;
+    };
+    let safe_i32 = |value: &Value| {
+        value
+            .as_i64()
+            .filter(|number| *number >= i32::MIN as i64 && *number <= i32::MAX as i64)
+    };
+    let mut records = Vec::new();
+    let mut truncated = reported_truncated || reported.len() > MAX_SELECTOR_INVOCATIONS;
+    for record in reported.iter().take(MAX_SELECTOR_INVOCATIONS) {
+        let Some(selector) = record
+            .get("selector")
+            .and_then(Value::as_str)
+            .filter(|selector| schema_safe_suite_selector(selector))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(completed_normally) = record
+            .get("invocation_completed_normally")
+            .and_then(Value::as_bool)
+        else {
+            truncated = true;
+            continue;
+        };
+        let raw_return_code = match record.get("raw_return_code") {
+            Some(Value::Null) if !completed_normally => Value::Null,
+            Some(value) if completed_normally => {
+                let Some(raw) = safe_i32(value) else {
+                    truncated = true;
+                    continue;
+                };
+                json!(raw)
+            }
+            _ => {
+                truncated = true;
+                continue;
+            }
+        };
+        let Some(host_result_code) = record.get("host_result_code").and_then(safe_i32) else {
+            truncated = true;
+            continue;
+        };
+        let Some(seh_caught) = record.get("seh_caught").and_then(Value::as_bool) else {
+            truncated = true;
+            continue;
+        };
+        let seh_code = match record.get("seh_code") {
+            Some(Value::Null) if !seh_caught => Value::Null,
+            Some(value) if seh_caught => {
+                let Some(code) = value
+                    .as_u64()
+                    .filter(|code| *code > 0 && *code <= u32::MAX as u64)
+                else {
+                    truncated = true;
+                    continue;
+                };
+                json!(code)
+            }
+            _ => {
+                truncated = true;
+                continue;
+            }
+        };
+        let fault_module_class = match record.get("fault_module_class") {
+            Some(Value::Null) if !seh_caught => Value::Null,
+            Some(Value::String(classification))
+                if seh_caught
+                    && matches!(
+                        classification.as_str(),
+                        "plugin" | "worker" | "other_module" | "unmapped" | "unknown"
+                    ) =>
+            {
+                json!(classification)
+            }
+            _ => {
+                truncated = true;
+                continue;
+            }
+        };
+        let fault_module = match record.get("fault_module") {
+            Some(Value::Null) if !seh_caught => Value::Null,
+            Some(Value::Null) if seh_caught => Value::Null,
+            Some(Value::String(module)) if seh_caught && schema_safe_module_basename(module) => {
+                json!(module)
+            }
+            _ => {
+                truncated = true;
+                continue;
+            }
+        };
+        let plugin_rva = match record.get("plugin_rva") {
+            Some(Value::Null) => Value::Null,
+            Some(value)
+                if fault_module_class.as_str() == Some("plugin") && probe_hex(value).is_some() =>
+            {
+                json!(probe_hex(value).unwrap().to_ascii_lowercase())
+            }
+            _ => {
+                truncated = true;
+                continue;
+            }
+        };
+        let access_type = match record.get("access_type") {
+            Some(Value::Null) => Value::Null,
+            Some(Value::String(access_type))
+                if matches!(
+                    access_type.as_str(),
+                    "read" | "write" | "execute" | "unknown"
+                ) =>
+            {
+                json!(access_type)
+            }
+            _ => {
+                truncated = true;
+                continue;
+            }
+        };
+        let fault_address = match record.get("fault_address") {
+            Some(Value::Null) => Value::Null,
+            Some(value) => {
+                let Some(pointer) = safe_pointer_classification(value) else {
+                    truncated = true;
+                    continue;
+                };
+                pointer
+            }
+            None => {
+                truncated = true;
+                continue;
+            }
+        };
+        let registers = match record.get("registers") {
+            Some(Value::Null) => Value::Null,
+            Some(Value::Object(registers)) if registers.len() == 5 => {
+                let mut normalized = serde_json::Map::new();
+                let mut valid = true;
+                for name in ["rcx", "rdx", "r8", "r9", "rsp"] {
+                    let Some(value) = registers.get(name).and_then(safe_pointer_classification)
+                    else {
+                        valid = false;
+                        break;
+                    };
+                    normalized.insert(name.to_owned(), value);
+                }
+                if !valid {
+                    truncated = true;
+                    continue;
+                }
+                Value::Object(normalized)
+            }
+            _ => {
+                truncated = true;
+                continue;
+            }
+        };
+        let stack_pointer_values = match record.get("stack_pointer_values") {
+            Some(Value::Null) => Value::Null,
+            Some(Value::Array(values)) if values.len() == 6 => {
+                let mut normalized = Vec::with_capacity(values.len());
+                let mut valid = true;
+                for (index, value) in values.iter().enumerate() {
+                    if value.get("offset_bytes").and_then(Value::as_u64) != Some((index * 8) as u64)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    let pointer = match value.get("value") {
+                        Some(Value::Null) => Value::Null,
+                        Some(value) => {
+                            let Some(pointer) = safe_pointer_classification(value) else {
+                                valid = false;
+                                break;
+                            };
+                            pointer
+                        }
+                        None => {
+                            valid = false;
+                            break;
+                        }
+                    };
+                    normalized.push(json!({
+                        "offset_bytes": index * 8,
+                        "value": pointer,
+                    }));
+                }
+                if !valid {
+                    truncated = true;
+                    continue;
+                }
+                Value::Array(normalized)
+            }
+            _ => {
+                truncated = true;
+                continue;
+            }
+        };
+        let Some(global_data_handoff) = record
+            .get("global_data_handoff")
+            .and_then(safe_global_data_handoff)
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(effect_ref_at_entry) = record
+            .get("effect_ref_at_entry")
+            .and_then(safe_effect_ref_entry)
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(appl_id_at_entry) = record
+            .get("appl_id_at_entry")
+            .and_then(safe_application_id_entry)
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(version_at_entry) = record
+            .get("version_at_entry")
+            .and_then(safe_spec_version_entry)
+        else {
+            truncated = true;
+            continue;
+        };
+        records.push(json!({
+            "selector": selector,
+            "invocation_completed_normally": completed_normally,
+            "raw_return_code": raw_return_code,
+            "host_result_code": host_result_code,
+            "seh_caught": seh_caught,
+            "seh_code": seh_code,
+            "fault_module_class": fault_module_class,
+            "fault_module": fault_module,
+            "plugin_rva": plugin_rva,
+            "access_type": access_type,
+            "fault_address": fault_address,
+            "registers": registers,
+            "stack_pointer_values": stack_pointer_values,
+            "global_data_handoff": global_data_handoff,
+            "effect_ref_at_entry": effect_ref_at_entry,
+            "appl_id_at_entry": appl_id_at_entry,
+            "version_at_entry": version_at_entry,
+        }));
+    }
+    diagnostics["selector_invocations"] = json!({
+        "maximum_records": MAX_SELECTOR_INVOCATIONS,
+        "records": records,
+        "truncated": truncated,
+    });
+}
+
+fn schema_safe_callback_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn propagate_host_callback_timeline(diagnostics: &mut Value, worker_report: &Value) {
+    let Some(container) = worker_report
+        .get("host_callback_timeline")
+        .and_then(Value::as_object)
+        .filter(|container| container.len() == 3)
+    else {
+        return;
+    };
+    if container.get("maximum_records").and_then(Value::as_u64)
+        != Some(MAX_HOST_CALLBACK_TIMELINE_RECORDS as u64)
+    {
+        return;
+    }
+    let Some(reported) = container.get("records").and_then(Value::as_array) else {
+        return;
+    };
+    let Some(reported_truncated) = container.get("truncated").and_then(Value::as_bool) else {
+        return;
+    };
+    let mut records = Vec::new();
+    let mut truncated = reported_truncated || reported.len() > MAX_HOST_CALLBACK_TIMELINE_RECORDS;
+    let mut previous_sequence = None;
+    for record in reported.iter().take(MAX_HOST_CALLBACK_TIMELINE_RECORDS) {
+        let Some(record) = record.as_object().filter(|record| record.len() == 7) else {
+            truncated = true;
+            continue;
+        };
+        let Some(sequence) = record
+            .get("sequence")
+            .and_then(Value::as_u64)
+            .filter(|sequence| *sequence <= u32::MAX as u64)
+            .filter(|sequence| previous_sequence.is_none_or(|previous| *sequence > previous))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(callback) = record
+            .get("callback")
+            .and_then(Value::as_str)
+            .filter(|callback| schema_safe_callback_id(callback))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(selector) = record
+            .get("selector")
+            .and_then(Value::as_str)
+            .filter(|selector| matches!(*selector, "GLOBAL_SETUP" | "PARAMS_SETUP"))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(call_count) = record
+            .get("call_count")
+            .and_then(Value::as_u64)
+            .filter(|count| *count > 0 && *count <= u32::MAX as u64)
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(status) = record
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|status| matches!(*status, "success" | "failure"))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(return_code) = record
+            .get("return_code")
+            .and_then(Value::as_i64)
+            .filter(|code| *code >= i32::MIN as i64 && *code <= i32::MAX as i64)
+        else {
+            truncated = true;
+            continue;
+        };
+        if (status == "success") != (return_code == 0) {
+            truncated = true;
+            continue;
+        }
+        let Some(classification) =
+            record
+                .get("classification")
+                .and_then(Value::as_str)
+                .filter(|classification| {
+                    matches!(*classification, "implemented" | "unsupported" | "fallback")
+                })
+        else {
+            truncated = true;
+            continue;
+        };
+        previous_sequence = Some(sequence);
+        records.push(json!({
+            "sequence": sequence,
+            "callback": callback,
+            "selector": selector,
+            "call_count": call_count,
+            "status": status,
+            "return_code": return_code,
+            "classification": classification,
+        }));
+    }
+    diagnostics["host_callback_timeline"] = json!({
+        "maximum_records": MAX_HOST_CALLBACK_TIMELINE_RECORDS,
+        "records": records,
+        "truncated": truncated,
+    });
+}
+
+fn propagate_extended_allocation_timeline(diagnostics: &mut Value, worker_report: &Value) {
+    let Some(container) = worker_report
+        .get("extended_allocation_timeline")
+        .and_then(Value::as_object)
+        .filter(|container| container.len() == 3)
+    else {
+        return;
+    };
+    if container.get("maximum_records").and_then(Value::as_u64)
+        != Some(MAX_EXTENDED_ALLOCATION_TIMELINE_RECORDS as u64)
+    {
+        return;
+    }
+    let Some(reported) = container.get("records").and_then(Value::as_array) else {
+        return;
+    };
+    let Some(reported_truncated) = container.get("truncated").and_then(Value::as_bool) else {
+        return;
+    };
+    let mut records = Vec::new();
+    let mut truncated =
+        reported_truncated || reported.len() > MAX_EXTENDED_ALLOCATION_TIMELINE_RECORDS;
+    let mut previous_sequence = None;
+    for record in reported
+        .iter()
+        .take(MAX_EXTENDED_ALLOCATION_TIMELINE_RECORDS)
+    {
+        let Some(record) = record.as_object().filter(|record| record.len() == 10) else {
+            truncated = true;
+            continue;
+        };
+        let Some(sequence) = record
+            .get("sequence")
+            .and_then(Value::as_u64)
+            .filter(|sequence| *sequence <= u32::MAX as u64)
+            .filter(|sequence| previous_sequence.is_none_or(|previous| *sequence > previous))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(selector) = record
+            .get("selector")
+            .and_then(Value::as_str)
+            .filter(|selector| schema_safe_suite_selector(selector))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(boundary) = record
+            .get("boundary")
+            .and_then(Value::as_str)
+            .filter(|boundary| matches!(*boundary, "entry" | "exit"))
+        else {
+            truncated = true;
+            continue;
+        };
+        let count = |name| {
+            record
+                .get(name)
+                .and_then(Value::as_u64)
+                .filter(|count| *count <= u32::MAX as u64)
+        };
+        let Some(live_allocation_count) = count("live_allocation_count") else {
+            truncated = true;
+            continue;
+        };
+        let Some(new_allocations) = count("new_allocations") else {
+            truncated = true;
+            continue;
+        };
+        let Some(frees) = count("frees") else {
+            truncated = true;
+            continue;
+        };
+        let Some(invalid_frees) = count("invalid_frees") else {
+            truncated = true;
+            continue;
+        };
+        let Some(double_frees) = count("double_frees") else {
+            truncated = true;
+            continue;
+        };
+        let Some(global_setup_live_allocation_count) = count("global_setup_live_allocation_count")
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(reported_allocations) = record
+            .get("allocations")
+            .and_then(Value::as_array)
+            .filter(|allocations| allocations.len() <= MAX_EXTENDED_ALLOCATION_TIMELINE_RECORDS)
+        else {
+            truncated = true;
+            continue;
+        };
+        let mut allocations = Vec::new();
+        let mut computed_live_count = 0u64;
+        let mut computed_global_live_count = 0u64;
+        let mut allocations_valid = true;
+        for allocation in reported_allocations {
+            let Some(allocation) = allocation
+                .as_object()
+                .filter(|allocation| allocation.len() == 3)
+            else {
+                allocations_valid = false;
+                break;
+            };
+            let Some(token) = allocation
+                .get("allocation_token")
+                .and_then(safe_process_local_pointer_token)
+            else {
+                allocations_valid = false;
+                break;
+            };
+            let Some(state) = allocation
+                .get("state")
+                .and_then(Value::as_str)
+                .filter(|state| matches!(*state, "live" | "non_live"))
+            else {
+                allocations_valid = false;
+                break;
+            };
+            let Some(owner_selector) = allocation
+                .get("owner_selector")
+                .and_then(Value::as_str)
+                .filter(|selector| schema_safe_suite_selector(selector))
+            else {
+                allocations_valid = false;
+                break;
+            };
+            if state == "live" {
+                computed_live_count += 1;
+                if owner_selector == "GLOBAL_SETUP" {
+                    computed_global_live_count += 1;
+                }
+            }
+            allocations.push(json!({
+                "allocation_token": token,
+                "state": state,
+                "owner_selector": owner_selector,
+            }));
+        }
+        if !allocations_valid
+            || computed_live_count != live_allocation_count
+            || computed_global_live_count != global_setup_live_allocation_count
+        {
+            truncated = true;
+            continue;
+        }
+        previous_sequence = Some(sequence);
+        records.push(json!({
+            "sequence": sequence,
+            "selector": selector,
+            "boundary": boundary,
+            "live_allocation_count": live_allocation_count,
+            "new_allocations": new_allocations,
+            "frees": frees,
+            "invalid_frees": invalid_frees,
+            "double_frees": double_frees,
+            "global_setup_live_allocation_count": global_setup_live_allocation_count,
+            "allocations": allocations,
+        }));
+    }
+    diagnostics["extended_allocation_timeline"] = json!({
+        "maximum_records": MAX_EXTENDED_ALLOCATION_TIMELINE_RECORDS,
+        "records": records,
+        "truncated": truncated,
+    });
+}
+
+fn propagate_suite_timeline(diagnostics: &mut Value, worker_report: &Value) {
+    let mut timeline = Vec::new();
+    let mut truncated = reported_truncation(worker_report, "suite_timeline_truncated");
+    let reported = match worker_report.get("suite_timeline") {
+        Some(Value::Array(reported)) => reported.as_slice(),
+        Some(_) => {
+            truncated = true;
+            &[]
+        }
+        None => &[],
+    };
+    for event in reported {
+        if timeline.len() >= MAX_SUITE_TIMELINE_EVENTS {
+            truncated = true;
+            break;
+        }
+        let Some(sequence) = event["sequence"]
+            .as_u64()
+            .filter(|value| *value <= u32::MAX as u64)
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(action) = event["action"]
+            .as_str()
+            .filter(|action| matches!(*action, "acquire" | "release"))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(name) = event["name"]
+            .as_str()
+            .filter(|name| schema_safe_suite_name(name))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(version) = event["version"]
+            .as_i64()
+            .filter(|version| *version > 0 && *version <= MAX_SUITE_VERSION)
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(selector) = event["selector"]
+            .as_str()
+            .filter(|selector| schema_safe_suite_selector(selector))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(result) = event["result"]
+            .as_i64()
+            .filter(|result| *result >= i32::MIN as i64 && *result <= i32::MAX as i64)
+        else {
+            truncated = true;
+            continue;
+        };
+        timeline.push(json!({
+            "sequence": sequence,
+            "action": action,
+            "name": name,
+            "version": version,
+            "selector": selector,
+            "result": result,
+        }));
+    }
+    diagnostics["suite_timeline"] = Value::Array(timeline);
+    diagnostics["suite_timeline_truncated"] = Value::Bool(truncated);
 }
 
 fn module_audit_summary(audit: &Value) -> Option<Value> {
@@ -842,6 +1919,106 @@ fn module_audit_summary(audit: &Value) -> Option<Value> {
         "phase_count": audit.get("phase_count").and_then(Value::as_u64),
         "authorized_policy_modules": policy,
         "unknown_modules": unknown,
+    }))
+}
+
+fn module_audit_failure_summary(
+    worker_report: &Value,
+    selector_phase: Option<&str>,
+) -> Option<Value> {
+    let failure = worker_report
+        .get("module_audit_failure")
+        .and_then(Value::as_object)?;
+    if failure.get("status").and_then(Value::as_str) != Some("failed") {
+        return None;
+    }
+    let reason = failure
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|reason| {
+            matches!(
+                *reason,
+                "loaded_module_policy_rejection" | "module_enumeration_or_path_resolution_failed"
+            )
+        })?;
+    let unknown_count = failure
+        .get("unknown_count")
+        .and_then(Value::as_u64)
+        .filter(|count| *count > 0 && *count <= 4096)?;
+    let unattributed_count = failure
+        .get("unattributed_count")
+        .and_then(Value::as_u64)
+        .filter(|count| *count <= unknown_count)?;
+    let rejections_truncated = failure
+        .get("rejections_truncated")
+        .and_then(Value::as_bool)?;
+    let reported = failure.get("rejections").and_then(Value::as_array)?;
+    let mut rejections = Vec::new();
+    let mut seen = BTreeSet::new();
+    for rejection in reported.iter().take(MAX_MISSING_SUITES) {
+        let Some(basename) = rejection
+            .get("basename")
+            .and_then(Value::as_str)
+            .filter(|name| {
+                !name.is_empty()
+                    && name.len() <= 260
+                    && !name.contains(['/', '\\', ':'])
+                    && !name.chars().any(char::is_control)
+                    && !name.ends_with(['.', ' '])
+            })
+        else {
+            continue;
+        };
+        let path_token = match rejection.get("canonical_path_token") {
+            Some(Value::Null) => Value::Null,
+            Some(Value::String(token))
+                if token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+            {
+                json!(token.to_ascii_lowercase())
+            }
+            _ => continue,
+        };
+        let Some(path_class) = rejection
+            .get("path_class")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "sealed_root" | "external"))
+        else {
+            continue;
+        };
+        let Some(rejection_reason) =
+            rejection
+                .get("reason")
+                .and_then(Value::as_str)
+                .filter(|value| {
+                    matches!(
+                        *value,
+                        "undeclared_sealed_module" | "outside_allowed_roots_or_unapproved_policy"
+                    )
+                })
+        else {
+            continue;
+        };
+        if seen.insert((basename.to_ascii_lowercase(), path_class, rejection_reason)) {
+            rejections.push(json!({
+                "basename": basename,
+                "canonical_path_token": path_token,
+                "path_class": path_class,
+                "reason": rejection_reason,
+            }));
+        }
+    }
+    let selector_phase = selector_phase
+        .filter(|phase| schema_safe_suite_selector(phase))
+        .map_or(Value::Null, |phase| json!(phase));
+    Some(json!({
+        "status": "failed",
+        "reason": reason,
+        "unknown_count": unknown_count,
+        "unattributed_count": unattributed_count,
+        "selector_phase": selector_phase,
+        "rejections": rejections,
+        "rejections_truncated": rejections_truncated
+            || reported.len() > MAX_MISSING_SUITES,
     }))
 }
 
@@ -3240,9 +4417,23 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     if let Some(report) = &worker_report {
         propagate_missing_suites(&mut diagnostics, report);
         propagate_unsupported_suite_calls(&mut diagnostics, report);
+        propagate_suite_call_slot_probe(&mut diagnostics, report);
+        propagate_selector_invocations(&mut diagnostics, report);
+        propagate_host_callback_timeline(&mut diagnostics, report);
+        propagate_extended_allocation_timeline(&mut diagnostics, report);
+        propagate_suite_timeline(&mut diagnostics, report);
+        let selector_phase = diagnostics
+            .get("failure_stage")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(summary) = module_audit_failure_summary(report, selector_phase.as_deref()) {
+            diagnostics["module_audit_failure"] = summary;
+        }
     }
     if isolated.classification.as_str() != "ok" {
-        if let Some(summary) = failed_module_audit_summary(&isolated.stdout) {
+        if diagnostics.get("module_audit_failure").is_none()
+            && let Some(summary) = failed_module_audit_summary(&isolated.stdout)
+        {
             diagnostics["module_audit_failure"] = summary;
         }
         return Err(invalid(format!(
@@ -5329,6 +6520,11 @@ fn render_classic_via_length_one_session(
     // had to move here rather than go with it.
     propagate_missing_suites(&mut diagnostics, &final_report);
     propagate_unsupported_suite_calls(&mut diagnostics, &final_report);
+    propagate_suite_call_slot_probe(&mut diagnostics, &final_report);
+    propagate_selector_invocations(&mut diagnostics, &final_report);
+    propagate_host_callback_timeline(&mut diagnostics, &final_report);
+    propagate_extended_allocation_timeline(&mut diagnostics, &final_report);
+    propagate_suite_timeline(&mut diagnostics, &final_report);
     // Name the stage when the worker itself rejected its output pixels. The
     // gate below turns that into an error carrying these diagnostics, so
     // without this the failure reads as an unattributed validation failure.
@@ -7211,6 +8407,633 @@ mod tests {
     }
 
     #[test]
+    fn module_audit_failure_summary_bounds_and_revalidates_rejections() {
+        let summary = module_audit_failure_summary(
+            &json!({
+                "module_audit_failure": {
+                    "status": "failed",
+                    "reason": "loaded_module_policy_rejection",
+                    "unknown_count": 3,
+                    "unattributed_count": 1,
+                    "rejections": [
+                        {
+                            "basename": "outside.dll",
+                            "canonical_path_token": "a".repeat(64),
+                            "path_class": "external",
+                            "reason": "outside_allowed_roots_or_unapproved_policy"
+                        },
+                        {
+                            "basename": "C:\\private\\leak.dll",
+                            "canonical_path_token": "b".repeat(64),
+                            "path_class": "external",
+                            "reason": "outside_allowed_roots_or_unapproved_policy"
+                        }
+                    ],
+                    "rejections_truncated": false
+                }
+            }),
+            Some("params_setup"),
+        )
+        .unwrap();
+
+        assert_eq!(summary["selector_phase"], "params_setup");
+        assert_eq!(summary["rejections"].as_array().unwrap().len(), 1);
+        assert_eq!(summary["rejections"][0]["basename"], "outside.dll");
+        assert_eq!(
+            summary["rejections"][0]["canonical_path_token"],
+            "a".repeat(64)
+        );
+        assert!(!summary.to_string().contains("private"));
+    }
+
+    #[test]
+    fn selector_invocation_diagnostics_distinguish_normal_return_from_seh() {
+        let report = json!({
+            "selector_invocations": {
+                "maximum_records": 64,
+                "records": [
+                    {
+                        "selector": "PARAMS_SETUP",
+                        "invocation_completed_normally": true,
+                        "raw_return_code": 512,
+                        "host_result_code": 512,
+                        "seh_caught": false,
+                        "seh_code": null,
+                        "fault_module_class": null,
+                        "fault_module": null,
+                        "plugin_rva": null,
+                        "access_type": null,
+                        "fault_address": null,
+                        "registers": null,
+                        "stack_pointer_values": null,
+                        "global_data_handoff": {
+                            "input_at_entry": {
+                                "state": "null",
+                                "classification": "null",
+                                "process_local_token": null
+                            },
+                            "output_after_return": {
+                                "state": "non_null",
+                                "classification": "heap_or_unknown",
+                                "process_local_token": "ptr-0123456789abcdef"
+                            },
+                            "same_identity_as_previous_output": null
+                        },
+                        "effect_ref_at_entry": {
+                            "state": "null",
+                            "classification": "null",
+                            "process_local_token": null,
+                            "same_identity_as_global_setup_entry": null
+                        },
+                        "appl_id_at_entry": {
+                            "printable_code": "FXTC",
+                            "hex_u32": "0x46585443",
+                            "same_value_as_global_setup_entry": null,
+                            "host_setting_source": "worker_effect_bootstrap"
+                        },
+                        "version_at_entry": {
+                            "raw_packed_u32": "0x001d000d",
+                            "major": 13,
+                            "minor": 29,
+                            "same_value_as_global_setup_entry": null,
+                            "host_setting_source": "worker_effect_bootstrap"
+                        }
+                    },
+                    {
+                        "selector": "PARAMS_SETUP",
+                        "invocation_completed_normally": false,
+                        "raw_return_code": null,
+                        "host_result_code": 512,
+                        "seh_caught": true,
+                        "seh_code": 0xC0000005u32,
+                        "fault_module_class": "plugin",
+                        "fault_module": "synthetic.aex",
+                        "plugin_rva": "0x0000000000001234",
+                        "access_type": "read",
+                        "fault_address": {
+                            "classification": "low",
+                            "module": null,
+                            "relative_offset": null,
+                            "token": null
+                        },
+                        "registers": {
+                            "rcx": {
+                                "classification": "low",
+                                "module": null,
+                                "relative_offset": null,
+                                "token": null
+                            },
+                            "rdx": {
+                                "classification": "null",
+                                "module": null,
+                                "relative_offset": null,
+                                "token": null
+                            },
+                            "r8": {
+                                "classification": "plugin",
+                                "module": "synthetic.aex",
+                                "relative_offset": "0x0000000000002000",
+                                "token": null
+                            },
+                            "r9": {
+                                "classification": "module",
+                                "module": "kernel32.dll",
+                                "relative_offset": "0x0000000000003000",
+                                "token": null
+                            },
+                            "rsp": {
+                                "classification": "heap_or_unknown",
+                                "module": null,
+                                "relative_offset": null,
+                                "token": "ptr-0123456789abcdef"
+                            }
+                        },
+                        "stack_pointer_values": [
+                            {"offset_bytes": 0, "value": null},
+                            {"offset_bytes": 8, "value": null},
+                            {"offset_bytes": 16, "value": null},
+                            {"offset_bytes": 24, "value": null},
+                            {"offset_bytes": 32, "value": null},
+                            {"offset_bytes": 40, "value": null}
+                        ],
+                        "global_data_handoff": {
+                            "input_at_entry": {
+                                "state": "non_null",
+                                "classification": "heap_or_unknown",
+                                "process_local_token": "ptr-0123456789abcdef"
+                            },
+                            "output_after_return": {
+                                "state": "non_null",
+                                "classification": "heap_or_unknown",
+                                "process_local_token": "ptr-0123456789abcdef"
+                            },
+                            "same_identity_as_previous_output": true
+                        },
+                        "effect_ref_at_entry": {
+                            "state": "non_null",
+                            "classification": "heap_or_unknown",
+                            "process_local_token": "ptr-fedcba9876543210",
+                            "same_identity_as_global_setup_entry": true
+                        },
+                        "appl_id_at_entry": {
+                            "printable_code": "FXTC",
+                            "hex_u32": "0x46585443",
+                            "same_value_as_global_setup_entry": true,
+                            "host_setting_source": "worker_effect_bootstrap"
+                        },
+                        "version_at_entry": {
+                            "raw_packed_u32": "0x001d000d",
+                            "major": 13,
+                            "minor": 29,
+                            "same_value_as_global_setup_entry": true,
+                            "host_setting_source": "worker_effect_bootstrap"
+                        }
+                    }
+                ],
+                "truncated": false
+            }
+        });
+        let mut diagnostics = json!({});
+        propagate_selector_invocations(&mut diagnostics, &report);
+        let records = diagnostics["selector_invocations"]["records"]
+            .as_array()
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["invocation_completed_normally"], true);
+        assert_eq!(records[0]["raw_return_code"], 512);
+        assert_eq!(records[0]["seh_caught"], false);
+        assert_eq!(records[1]["invocation_completed_normally"], false);
+        assert_eq!(records[1]["raw_return_code"], Value::Null);
+        assert_eq!(records[1]["seh_caught"], true);
+        assert_eq!(records[1]["seh_code"], 0xC0000005u32);
+        assert_eq!(records[1]["fault_module_class"], "plugin");
+        assert_eq!(records[1]["plugin_rva"], "0x0000000000001234");
+        assert_eq!(records[1]["access_type"], "read");
+        assert_eq!(records[1]["fault_address"]["classification"], "low");
+        assert_eq!(records[1]["registers"]["rdx"]["classification"], "null");
+        assert_eq!(
+            records[1]["registers"]["rsp"]["token"],
+            "ptr-0123456789abcdef"
+        );
+        assert_eq!(
+            records[1]["stack_pointer_values"].as_array().unwrap().len(),
+            6
+        );
+        assert_eq!(
+            records[0]["global_data_handoff"]["output_after_return"]["process_local_token"],
+            "ptr-0123456789abcdef"
+        );
+        assert_eq!(
+            records[1]["global_data_handoff"]["same_identity_as_previous_output"],
+            true
+        );
+        assert_eq!(records[0]["effect_ref_at_entry"]["state"], "null");
+        assert_eq!(
+            records[1]["effect_ref_at_entry"]["process_local_token"],
+            "ptr-fedcba9876543210"
+        );
+        assert_eq!(
+            records[1]["effect_ref_at_entry"]["same_identity_as_global_setup_entry"],
+            true
+        );
+        assert_eq!(records[0]["appl_id_at_entry"]["printable_code"], "FXTC");
+        assert_eq!(records[1]["appl_id_at_entry"]["hex_u32"], "0x46585443");
+        assert_eq!(
+            records[1]["appl_id_at_entry"]["same_value_as_global_setup_entry"],
+            true
+        );
+        assert_eq!(
+            records[0]["version_at_entry"]["raw_packed_u32"],
+            "0x001d000d"
+        );
+        assert_eq!(records[1]["version_at_entry"]["major"], 13);
+        assert_eq!(records[1]["version_at_entry"]["minor"], 29);
+        assert_eq!(
+            records[1]["version_at_entry"]["same_value_as_global_setup_entry"],
+            true
+        );
+        assert!(
+            !records[1]["global_data_handoff"]
+                .to_string()
+                .contains("raw_pointer")
+        );
+    }
+
+    #[test]
+    fn selector_invocation_rejects_unbounded_global_data_handoff_fields() {
+        let report = json!({
+            "selector_invocations": {
+                "maximum_records": 64,
+                "records": [{
+                    "selector": "GLOBAL_SETUP",
+                    "invocation_completed_normally": true,
+                    "raw_return_code": 0,
+                    "host_result_code": 0,
+                    "seh_caught": false,
+                    "seh_code": null,
+                    "fault_module_class": null,
+                    "fault_module": null,
+                    "plugin_rva": null,
+                    "access_type": null,
+                    "fault_address": null,
+                    "registers": null,
+                    "stack_pointer_values": null,
+                    "global_data_handoff": {
+                        "input_at_entry": null,
+                        "output_after_return": {
+                            "state": "non_null",
+                            "classification": "heap_or_unknown",
+                            "process_local_token": "ptr-0123456789abcdef",
+                            "raw_pointer": "0x1234"
+                        },
+                        "same_identity_as_previous_output": null
+                    },
+                    "effect_ref_at_entry": {
+                        "state": "non_null",
+                        "classification": "heap_or_unknown",
+                        "process_local_token": "ptr-0123456789abcdef",
+                        "same_identity_as_global_setup_entry": null
+                    },
+                    "appl_id_at_entry": {
+                        "printable_code": "FXTC",
+                        "hex_u32": "0x46585443",
+                        "same_value_as_global_setup_entry": null,
+                        "host_setting_source": "worker_effect_bootstrap"
+                    },
+                    "version_at_entry": {
+                        "raw_packed_u32": "0x001d000d",
+                        "major": 13,
+                        "minor": 29,
+                        "same_value_as_global_setup_entry": null,
+                        "host_setting_source": "worker_effect_bootstrap"
+                    }
+                }],
+                "truncated": false
+            }
+        });
+        let mut diagnostics = json!({});
+        propagate_selector_invocations(&mut diagnostics, &report);
+        assert!(
+            diagnostics["selector_invocations"]["records"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(diagnostics["selector_invocations"]["truncated"], true);
+    }
+
+    #[test]
+    fn selector_invocation_rejects_unbounded_effect_ref_fields() {
+        let report = json!({
+            "selector_invocations": {
+                "maximum_records": 64,
+                "records": [{
+                    "selector": "GLOBAL_SETUP",
+                    "invocation_completed_normally": true,
+                    "raw_return_code": 0,
+                    "host_result_code": 0,
+                    "seh_caught": false,
+                    "seh_code": null,
+                    "fault_module_class": null,
+                    "fault_module": null,
+                    "plugin_rva": null,
+                    "access_type": null,
+                    "fault_address": null,
+                    "registers": null,
+                    "stack_pointer_values": null,
+                    "global_data_handoff": {
+                        "input_at_entry": null,
+                        "output_after_return": null,
+                        "same_identity_as_previous_output": null
+                    },
+                    "effect_ref_at_entry": {
+                        "state": "non_null",
+                        "classification": "heap_or_unknown",
+                        "process_local_token": "ptr-0123456789abcdef",
+                        "same_identity_as_global_setup_entry": null,
+                        "raw_pointer": "0x1234"
+                    },
+                    "appl_id_at_entry": {
+                        "printable_code": "FXTC",
+                        "hex_u32": "0x46585443",
+                        "same_value_as_global_setup_entry": null,
+                        "host_setting_source": "worker_effect_bootstrap"
+                    },
+                    "version_at_entry": {
+                        "raw_packed_u32": "0x001d000d",
+                        "major": 13,
+                        "minor": 29,
+                        "same_value_as_global_setup_entry": null,
+                        "host_setting_source": "worker_effect_bootstrap"
+                    }
+                }],
+                "truncated": false
+            }
+        });
+        let mut diagnostics = json!({});
+        propagate_selector_invocations(&mut diagnostics, &report);
+        assert!(
+            diagnostics["selector_invocations"]["records"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(diagnostics["selector_invocations"]["truncated"], true);
+        assert!(
+            !diagnostics["selector_invocations"]
+                .to_string()
+                .contains("0x1234")
+        );
+    }
+
+    #[test]
+    fn application_id_entry_requires_canonical_code_and_source() {
+        let expected = json!({
+            "printable_code": "FXTC",
+            "hex_u32": "0x46585443",
+            "same_value_as_global_setup_entry": true,
+            "host_setting_source": "worker_effect_bootstrap"
+        });
+        let escaped = json!({
+            "printable_code": "\\x00\\x01\\x02\\x03",
+            "hex_u32": "0x00010203",
+            "same_value_as_global_setup_entry": false,
+            "host_setting_source": "worker_effect_bootstrap"
+        });
+        assert_eq!(safe_application_id_entry(&expected), Some(expected));
+        assert_eq!(safe_application_id_entry(&escaped), Some(escaped));
+        assert!(
+            safe_application_id_entry(&json!({
+                "printable_code": "PrMr",
+                "hex_u32": "0x46585443",
+                "same_value_as_global_setup_entry": false,
+                "host_setting_source": "worker_effect_bootstrap"
+            }))
+            .is_none()
+        );
+        assert!(
+            safe_application_id_entry(&json!({
+                "printable_code": "FXTC",
+                "hex_u32": "0x46585443",
+                "same_value_as_global_setup_entry": false,
+                "host_setting_source": "unknown"
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn spec_version_entry_requires_consistent_packing_and_source() {
+        let expected = json!({
+            "raw_packed_u32": "0x001d000d",
+            "major": 13,
+            "minor": 29,
+            "same_value_as_global_setup_entry": true,
+            "host_setting_source": "worker_effect_bootstrap"
+        });
+        let changed = json!({
+            "raw_packed_u32": "0x001c000d",
+            "major": 13,
+            "minor": 28,
+            "same_value_as_global_setup_entry": false,
+            "host_setting_source": "worker_effect_bootstrap"
+        });
+        let zero = json!({
+            "raw_packed_u32": "0x00000000",
+            "major": 0,
+            "minor": 0,
+            "same_value_as_global_setup_entry": true,
+            "host_setting_source": "worker_effect_bootstrap"
+        });
+        let invalid = json!({
+            "raw_packed_u32": "0xffffffff",
+            "major": -1,
+            "minor": -1,
+            "same_value_as_global_setup_entry": false,
+            "host_setting_source": "worker_effect_bootstrap"
+        });
+        assert_eq!(safe_spec_version_entry(&expected), Some(expected));
+        assert_eq!(safe_spec_version_entry(&changed), Some(changed));
+        assert_eq!(safe_spec_version_entry(&zero), Some(zero));
+        assert_eq!(safe_spec_version_entry(&invalid), Some(invalid));
+        assert!(
+            safe_spec_version_entry(&json!({
+                "raw_packed_u32": "0x001d000d",
+                "major": 13,
+                "minor": 28,
+                "same_value_as_global_setup_entry": false,
+                "host_setting_source": "worker_effect_bootstrap"
+            }))
+            .is_none()
+        );
+        assert!(
+            safe_spec_version_entry(&json!({
+                "raw_packed_u32": "0x001d000d",
+                "major": 13,
+                "minor": 29,
+                "same_value_as_global_setup_entry": true,
+                "host_setting_source": "unknown"
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn host_callback_timeline_normalizes_outcomes_and_rejects_arguments() {
+        let report = json!({
+            "host_callback_timeline": {
+                "maximum_records": 128,
+                "records": [
+                    {
+                        "sequence": 0,
+                        "callback": "inter.extended_alloc",
+                        "selector": "GLOBAL_SETUP",
+                        "call_count": 1,
+                        "status": "success",
+                        "return_code": 0,
+                        "classification": "implemented"
+                    },
+                    {
+                        "sequence": 1,
+                        "callback": "synthetic.unsupported",
+                        "selector": "GLOBAL_SETUP",
+                        "call_count": 2,
+                        "status": "failure",
+                        "return_code": 4,
+                        "classification": "unsupported"
+                    },
+                    {
+                        "sequence": 3,
+                        "callback": "inter.extended_lookup",
+                        "selector": "PARAMS_SETUP",
+                        "call_count": 3,
+                        "status": "failure",
+                        "return_code": 4,
+                        "classification": "fallback"
+                    },
+                    {
+                        "sequence": 6,
+                        "callback": "synthetic.raw",
+                        "selector": "PARAMS_SETUP",
+                        "call_count": 1,
+                        "status": "success",
+                        "return_code": 0,
+                        "classification": "implemented",
+                        "arguments": ["0x1234"]
+                    }
+                ],
+                "truncated": false
+            }
+        });
+        let mut diagnostics = json!({});
+        propagate_host_callback_timeline(&mut diagnostics, &report);
+        let records = diagnostics["host_callback_timeline"]["records"]
+            .as_array()
+            .unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["callback"], "inter.extended_alloc");
+        assert_eq!(records[0]["status"], "success");
+        assert_eq!(records[1]["classification"], "unsupported");
+        assert_eq!(records[2]["classification"], "fallback");
+        assert_eq!(records[2]["call_count"], 3);
+        assert_eq!(diagnostics["host_callback_timeline"]["truncated"], true);
+        assert!(
+            !diagnostics["host_callback_timeline"]
+                .to_string()
+                .contains("0x1234")
+        );
+    }
+
+    #[test]
+    fn extended_allocation_timeline_normalizes_lifetime_without_pointer_details() {
+        let allocation = json!({
+            "allocation_token": "ptr-0123456789abcdef",
+            "state": "live",
+            "owner_selector": "GLOBAL_SETUP"
+        });
+        let report = json!({
+            "extended_allocation_timeline": {
+                "maximum_records": 128,
+                "records": [
+                    {
+                        "sequence": 0,
+                        "selector": "GLOBAL_SETUP",
+                        "boundary": "entry",
+                        "live_allocation_count": 0,
+                        "new_allocations": 0,
+                        "frees": 0,
+                        "invalid_frees": 0,
+                        "double_frees": 0,
+                        "global_setup_live_allocation_count": 0,
+                        "allocations": []
+                    },
+                    {
+                        "sequence": 1,
+                        "selector": "GLOBAL_SETUP",
+                        "boundary": "exit",
+                        "live_allocation_count": 1,
+                        "new_allocations": 1,
+                        "frees": 0,
+                        "invalid_frees": 0,
+                        "double_frees": 0,
+                        "global_setup_live_allocation_count": 1,
+                        "allocations": [allocation.clone()]
+                    },
+                    {
+                        "sequence": 2,
+                        "selector": "PARAMS_SETUP",
+                        "boundary": "entry",
+                        "live_allocation_count": 1,
+                        "new_allocations": 0,
+                        "frees": 0,
+                        "invalid_frees": 0,
+                        "double_frees": 0,
+                        "global_setup_live_allocation_count": 1,
+                        "allocations": [allocation]
+                    },
+                    {
+                        "sequence": 3,
+                        "selector": "PARAMS_SETUP",
+                        "boundary": "exit",
+                        "live_allocation_count": 1,
+                        "new_allocations": 0,
+                        "frees": 0,
+                        "invalid_frees": 0,
+                        "double_frees": 0,
+                        "global_setup_live_allocation_count": 1,
+                        "allocations": [{
+                            "allocation_token": "ptr-0123456789abcdef",
+                            "state": "live",
+                            "owner_selector": "GLOBAL_SETUP",
+                            "size": 4000
+                        }]
+                    }
+                ],
+                "truncated": false
+            }
+        });
+        let mut diagnostics = json!({});
+        propagate_extended_allocation_timeline(&mut diagnostics, &report);
+        let records = diagnostics["extended_allocation_timeline"]["records"]
+            .as_array()
+            .unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[1]["new_allocations"], 1);
+        assert_eq!(records[2]["selector"], "PARAMS_SETUP");
+        assert_eq!(records[2]["global_setup_live_allocation_count"], 1);
+        assert_eq!(records[2]["allocations"][0]["state"], "live");
+        assert_eq!(
+            diagnostics["extended_allocation_timeline"]["truncated"],
+            true
+        );
+        assert!(
+            !diagnostics["extended_allocation_timeline"]
+                .to_string()
+                .contains("size")
+        );
+    }
+
+    #[test]
     fn worker_stage_diagnostics_identify_active_and_failed_selectors() {
         let diagnostics = worker_diagnostics(
             "untrusted C:\\private\\plugin\nstage:global_setup_begin\nstage:global_setup_end error=0\nstage:render_begin\n",
@@ -7300,6 +9123,7 @@ mod tests {
         propagate_missing_suites(&mut diagnostics, &json!({"missing_suites": reported}));
         let suites = diagnostics["missing_suites"].as_array().unwrap();
         assert_eq!(suites.len(), MAX_MISSING_SUITES);
+        assert_eq!(diagnostics["missing_suites_truncated"], true);
         assert_eq!(suites[0], json!({"name": "PF World Suite", "version": 2}));
         assert_eq!(
             suites
@@ -7335,6 +9159,7 @@ mod tests {
         );
         let calls = diagnostics["unsupported_suite_calls"].as_array().unwrap();
         assert_eq!(calls.len(), MAX_UNSUPPORTED_SUITE_CALLS);
+        assert_eq!(diagnostics["unsupported_suite_calls_truncated"], true);
         assert_eq!(
             calls[0],
             json!({"name": "AEGP Comp Suite", "version": 21, "slot": 7, "call_count": 2})
@@ -7347,6 +9172,69 @@ mod tests {
             1
         );
         assert!(!diagnostics.to_string().contains("private"));
+    }
+
+    #[test]
+    fn structured_worker_report_supplies_bounded_suite_timeline_without_rounding_failure() {
+        let boundary_name = format!("A{}Z", "n".repeat(MAX_SUITE_NAME_LEN - 2));
+        let boundary_selector = "S".repeat(MAX_SUITE_NAME_LEN);
+        let mut reported = vec![
+            json!({
+                "sequence": 0,
+                "action": "acquire",
+                "name": boundary_name,
+                "version": MAX_SUITE_VERSION,
+                "selector": boundary_selector,
+                "result": i32::MIN,
+            }),
+            json!({
+                "sequence": 1,
+                "action": "acquire",
+                "name": "A".repeat(MAX_SUITE_NAME_LEN + 1),
+                "version": 1,
+                "selector": "HOST",
+                "result": 0,
+            }),
+            json!({
+                "sequence": 2,
+                "action": "acquire",
+                "name": "PF World Suite",
+                "version": MAX_SUITE_VERSION + 1,
+                "selector": "HOST",
+                "result": 0,
+            }),
+        ];
+        for sequence in 3..(MAX_SUITE_TIMELINE_EVENTS + 10) {
+            reported.push(json!({
+                "sequence": sequence,
+                "action": if sequence % 2 == 0 { "acquire" } else { "release" },
+                "name": "PF World Suite",
+                "version": 2,
+                "selector": "PF Cmd RENDER",
+                "result": 0,
+            }));
+        }
+        let mut diagnostics = worker_diagnostics("", false, "nonzero_exit", 13, 1);
+        propagate_suite_timeline(
+            &mut diagnostics,
+            &json!({
+                "suite_timeline": reported,
+                "suite_timeline_truncated": false,
+            }),
+        );
+
+        assert_eq!(
+            diagnostics["suite_timeline"].as_array().unwrap().len(),
+            MAX_SUITE_TIMELINE_EVENTS
+        );
+        assert_eq!(diagnostics["suite_timeline_truncated"], true);
+        assert_eq!(diagnostics["classification"], "nonzero_exit");
+        assert_eq!(diagnostics["exit_code"], 13);
+        assert_eq!(
+            diagnostics["suite_timeline"][0]["version"],
+            MAX_SUITE_VERSION
+        );
+        assert_eq!(diagnostics["suite_timeline"][0]["result"], i32::MIN);
     }
 
     #[test]

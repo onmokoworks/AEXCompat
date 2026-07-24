@@ -540,10 +540,11 @@ class MinihostL2SourceTests(unittest.TestCase):
         text = SOURCE.read_text(encoding="utf-8") + registry + dispatch + guards
         for marker in (
             "struct SuiteTimelineEvent",
-            "kMaxSuiteTimeline = 65536",
+            "kMaxSuiteTimeline = 512",
             "suite_timeline_report_json",
             '\\"suite_timeline\\"',
-            "set_suite_timeline_selector(effect_selector_name(command))",
+            "const char* selector = effect_selector_name(command)",
+            "set_suite_timeline_selector(selector)",
             "g_suite_selector ? g_suite_selector : \"HOST\"",
             "copy_bounded_suite_name",
             "char* unterminated",

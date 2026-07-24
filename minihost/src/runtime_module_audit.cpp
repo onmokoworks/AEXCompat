@@ -20,6 +20,7 @@ namespace {
 #pragma comment(lib, "bcrypt.lib")
 
 constexpr std::size_t kMaxAuditedModules = 512;
+constexpr std::size_t kMaxAuditFailureRejections = 16;
 // Cluster sessions (issue #405) replace the fixed bound with the manifest's
 // launch-time authenticated module_bound (design §5) and narrow the `plugin`
 // classification to the manifest's declared basenames. Zero/empty means the
@@ -564,6 +565,59 @@ std::string module_audit_json() {
   }
   output << ",\"phase_count\":" << g_module_audit.phase_count
          << ",\"unknown_count\":" << g_module_audit.observed_union.unknown_count
+         << '}';
+  return output.str();
+}
+
+std::string module_audit_failure_json() {
+  if (!g_module_audit.required || module_audit_passed()) return {};
+  const ModuleAuditSnapshot& snapshot = g_module_audit.observed_union;
+  std::filesystem::path plugin_root;
+  const bool plugin_root_available =
+      canonical_path(g_module_audit.plugin_path.parent_path(), plugin_root);
+  auto string_value = [](std::ostringstream& output, const std::string& value) {
+    output << '"';
+    for (char ch : value) {
+      if (ch == '"' || ch == '\\') output << '\\';
+      output << ch;
+    }
+    output << '"';
+  };
+  const std::size_t rejection_count =
+      (std::min)(snapshot.unknown_keys.size(), kMaxAuditFailureRejections);
+  const uint32_t attributed_count = static_cast<uint32_t>(
+      (std::min)(snapshot.unknown_keys.size(),
+                 static_cast<std::size_t>(snapshot.unknown_count)));
+  std::ostringstream output;
+  output << "{\"status\":\"failed\",\"reason\":\""
+         << (snapshot.unknown_keys.empty()
+                 ? "module_enumeration_or_path_resolution_failed"
+                 : "loaded_module_policy_rejection")
+         << "\",\"unknown_count\":" << snapshot.unknown_count
+         << ",\"unattributed_count\":"
+         << (snapshot.unknown_count - attributed_count)
+         << ",\"rejections\":[";
+  for (std::size_t index = 0; index < rejection_count; ++index) {
+    if (index) output << ',';
+    const std::filesystem::path path(snapshot.unknown_keys[index]);
+    const std::string basename = audit_basename(path);
+    const bool sealed_root =
+        plugin_root_available && same_path(path.parent_path(), plugin_root);
+    output << "{\"basename\":";
+    string_value(output, basename);
+    output << ",\"canonical_path_token\":";
+    const std::string token = path_token(path);
+    if (token.empty()) output << "null";
+    else string_value(output, token);
+    output << ",\"path_class\":\""
+           << (sealed_root ? "sealed_root" : "external")
+           << "\",\"reason\":\""
+           << (sealed_root ? "undeclared_sealed_module"
+                           : "outside_allowed_roots_or_unapproved_policy")
+           << "\"}";
+  }
+  output << "],\"rejections_truncated\":"
+         << (snapshot.unknown_keys.size() > rejection_count ? "true" : "false")
          << '}';
   return output.str();
 }
