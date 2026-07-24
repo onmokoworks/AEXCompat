@@ -183,7 +183,7 @@ def main() -> int:
     report = build_stub_report(gate_report, gate_path)
     written = write_json_create_new(Path(args.out), report)
     print(written)
-    return 0
+    return 1 if report["stub_state"] == "invalid_evidence_refused" else 0
 
 
 if __name__ == "__main__":

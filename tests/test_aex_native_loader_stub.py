@@ -4,6 +4,8 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +71,29 @@ class AexNativeLoaderStubTests(unittest.TestCase):
         self.assertEqual(report["stub_state"], "invalid_evidence_refused")
         self.assertIn("load gate native_load_performed must be false", report["refusal_reasons"])
         self.assertFalse(report["native_load_performed"])
+
+    def test_cli_exit_only_fails_for_invalid_evidence(self):
+        args = SimpleNamespace(load_gate="gate.json", out="report.json")
+        for report, expected_exit in (
+            ({"stub_state": "refused_gate_closed", "refusal_reasons": ["gate closed"]}, 0),
+            ({"stub_state": "invalid_evidence_refused", "refusal_reasons": ["invalid evidence"]}, 1),
+        ):
+            with (
+                mock.patch.object(aex_native_loader_stub, "parse_args", return_value=args),
+                mock.patch.object(
+                    aex_native_loader_stub,
+                    "load_gate_report",
+                    return_value=({}, Path("gate.json")),
+                ),
+                mock.patch.object(aex_native_loader_stub, "build_stub_report", return_value=report),
+                mock.patch.object(
+                    aex_native_loader_stub,
+                    "write_json_create_new",
+                    return_value=Path("report.json"),
+                ) as write_report,
+            ):
+                self.assertEqual(aex_native_loader_stub.main(), expected_exit)
+                write_report.assert_called_once_with(Path("report.json"), report)
 
     def test_ready_gate_still_does_not_load(self):
         report = aex_native_loader_stub.build_stub_report(
