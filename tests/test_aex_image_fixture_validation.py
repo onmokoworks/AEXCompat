@@ -5,6 +5,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +73,42 @@ def make_suite(width: int = 5, height: int = 4) -> dict:
 
 
 class AexImageFixtureValidationTests(unittest.TestCase):
+    def test_cli_exit_code_matches_validation_state_and_writes_report(self):
+        suite = make_suite()
+        suite_path = LAB_ROOT / "target" / "image-fixture-suite" / f"{time.time_ns()}-cli-suite.local.json"
+        suite_path.parent.mkdir(parents=True, exist_ok=True)
+        suite_path.write_text(json.dumps(suite), encoding="utf-8")
+        original = aex_image_fixture_validation.build_validation_report
+
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                def build_report(source, path):
+                    mutated = json.loads(json.dumps(source))
+                    if failed:
+                        mutated["fixtures"][0]["width"] = 999999
+                    return original(mutated, path)
+
+                output = LAB_ROOT / "target" / "image-fixture-validation" / f"{time.time_ns()}-cli.local.json"
+                argv = [
+                    "aex_image_fixture_validation.py",
+                    "--image-suite", str(suite_path),
+                    "--out", str(output),
+                ]
+                with mock.patch.object(
+                    aex_image_fixture_validation,
+                    "build_validation_report",
+                    side_effect=build_report,
+                ), mock.patch.object(sys, "argv", argv):
+                    exit_code = aex_image_fixture_validation.main()
+                report = json.loads(output.read_text(encoding="utf-8"))
+                self.assertEqual(report["validation_passed"], not failed)
+                self.assertEqual(
+                    report["validation_state"],
+                    "image_fixture_validation_failed" if failed
+                    else "image_fixture_validation_passed_no_load",
+                )
+                self.assertEqual(exit_code, 1 if failed else 0)
+
     def test_fixture_paths_are_unique_even_for_repeated_names(self):
         first = create_ppm("same-name", 2, 2, "checker")
         second = create_ppm("same-name", 2, 2, "checker")
