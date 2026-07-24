@@ -96,9 +96,9 @@ std::filesystem::path normalize_verbatim(const std::filesystem::path& path);
 // The pinned closure (design §3): every manifest dependency loaded once with
 // the admission LoadLibraryExW flags and held for the whole session so
 // FreeLibrary of a swapped plug-in cannot unload shared dependencies. Pins
-// release in reverse load order. The worker authenticates each file (size +
-// SHA-256) before loading it and verifies the loaded module's path stays
-// directly under the sealed root.
+// release in reverse load order — except in the deferred-release model
+// (issue #474), where nothing is released mid-process and every module
+// unloads in one loader-ordered pass at process exit.
 class ClosurePins {
  public:
   ClosurePins() = default;
@@ -109,10 +109,14 @@ class ClosurePins {
   // On failure every already-pinned module is released in reverse order.
   bool pin(const Manifest& manifest, FileSha256 hash_file);
   void release() noexcept;
+  // Deferred release (issue #474): the destructor keeps the pins mapped for
+  // the process lifetime instead of releasing them.
+  void suppress_release_on_destroy() noexcept { release_on_destroy_ = false; }
   std::size_t count() const noexcept { return pins_.size(); }
 
  private:
   std::vector<HMODULE> pins_;
+  bool release_on_destroy_{true};
 };
 
 }  // namespace aexcompat::worker_runtime::cluster

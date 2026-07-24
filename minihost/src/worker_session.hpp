@@ -49,19 +49,28 @@ class WorkerSession final {
   bool set_swap_quiesce_hook(PreUnloadHook hook, void* context) noexcept;
 
   // Cluster-session plug-in swap (docs/CLOSURE_SESSION_PROTOCOL_2026-07-23.md
-  // §4.1): releases only the plug-in image while the AddDllDirectory cookie
-  // and the pinned closure dependencies stay loaded. swap_release_module runs
+  // §4.1, amended by issue #474's deferred release): swap_release_module runs
   // the per-swap quiescence hook (never the session-global pre-unload hook),
-  // captures the epoch's pre_unload snapshot, and frees the plug-in HMODULE;
-  // swap_adopt_module captures post_load, records the epoch
+  // captures the epoch's pre_unload (post-logical-teardown) snapshot, and
+  // retires the outgoing plug-in WITHOUT freeing it; swap_adopt_module
+  // captures post_load, records the epoch
   // {outgoing_index, pre_unload, post_load}, and takes ownership of the next
-  // plug-in only on success (a rejected module is freed inside the session
-  // and never adopted). A false return is a swap failure (quiescence, audit,
-  // or FreeLibrary): the session cannot safely continue and the caller must
+  // plug-in only on success. A false return is a swap failure (quiescence,
+  // audit, or load): the session cannot safely continue and the caller must
   // terminate with the dedicated swap-failure exit code.
   bool swap_release_module(uint32_t outgoing_index) noexcept;
   bool swap_adopt_module(HMODULE module, const std::filesystem::path& plugin_path,
                          uint32_t incoming_index) noexcept;
+
+  // Deferred module release (issue #474): cluster sessions set this so the
+  // terminal lifecycle never frees plug-in images or the sealed-directory
+  // cookie mid-process. Everything unloads in one loader-ordered pass at
+  // process exit, keeping the closure's CRT atexit handlers (e.g. the dvacore
+  // notification registry and BIB) from dereferencing an already-unmapped
+  // plug-in image.
+  void set_deferred_module_release() noexcept {
+    deferred_module_release_ = true;
+  }
 
   // Captures the terminal loaded-module set before protocol output and restores
   // stdout. On audit rejection it emits the canonical fail-closed report.
@@ -113,6 +122,11 @@ class WorkerSession final {
   bool swap_pending_{};
   uint32_t swap_outgoing_index_{};
   ModuleAuditSnapshot swap_pre_unload_{};
+  // Deferred release (issue #474): when set, swapped-out plug-in images move
+  // here instead of being freed, and the terminal lifecycle unloads nothing
+  // mid-process.
+  bool deferred_module_release_{};
+  std::vector<HMODULE> retired_modules_{};
   TraceWriter* trace_writer_{};
   TraceWriter** active_trace_writer_{};
   bool trace_started_{};

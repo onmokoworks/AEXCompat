@@ -2549,7 +2549,8 @@ impl RenderSession {
                 result: Some(result),
                 ..
             }) => {
-                let report: Option<Value> = serde_json::from_str(result.stdout.trim()).ok();
+                let report: Option<Value> =
+                    crate::worker_module_audit::parse_report_prefix(&result.stdout).ok();
                 (
                     json!({
                         "classification": result.classification.as_str(),
@@ -3590,7 +3591,8 @@ impl AudioRenderSession {
                 result: Some(result),
                 ..
             }) => {
-                let report: Option<Value> = serde_json::from_str(result.stdout.trim()).ok();
+                let report: Option<Value> =
+                    crate::worker_module_audit::parse_report_prefix(&result.stdout).ok();
                 (
                     json!({
                         "classification": result.classification.as_str(),
@@ -4165,7 +4167,8 @@ impl DiscoverySession {
                 result: Some(result),
                 ..
             }) => {
-                let report: Option<Value> = serde_json::from_str(result.stdout.trim()).ok();
+                let report: Option<Value> =
+                    crate::worker_module_audit::parse_report_prefix(&result.stdout).ok();
                 (
                     json!({
                         "classification": result.classification.as_str(),

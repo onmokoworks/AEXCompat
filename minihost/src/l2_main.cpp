@@ -2457,6 +2457,11 @@ int run_discovery_session(const std::wstring& manifest_argument,
     RemoveDllDirectory(sealed_cookie);
     return 11;
   }
+  // Deferred release (issue #474): this session never frees plug-in images or
+  // pins mid-process; everything unloads in one loader-ordered pass at
+  // process exit, so the closure's CRT atexit handlers (the dvacore
+  // notification registry, BIB) can never dereference an unmapped plug-in.
+  pins.suppress_release_on_destroy();
   wr::configure_module_audit_cluster(manifest.module_bound,
                                      cluster::declared_basenames(manifest));
   wr::ModuleAuditReport& audit = wr::module_audit_report();
@@ -2486,11 +2491,12 @@ int run_discovery_session(const std::wstring& manifest_argument,
   bool bib_teardown_failed = false;
 
   // Terminal teardown shared by every exit path after the session loop. The
-  // ownership order is explicit (owner review P1-1): GLOBAL_SETDOWN →
-  // plug-in/module audit → BIB owned-only Terminate (session-global, runs
-  // exactly once here — never per swap — and never for a borrowed, missing,
-  // or init-failed BIB) → FreeLibrary. Pin release (reverse), cookie removal,
-  // stdout restore, final report follow.
+  // ownership order is explicit (owner review P1-1, amended by issue #474's
+  // deferred release): GLOBAL_SETDOWN → plug-in/module audit → BIB owned-only
+  // Terminate (session-global, runs exactly once here — never per swap — and
+  // never for a borrowed, missing, or init-failed BIB). No plug-in image or
+  // pin is freed mid-process: everything unloads in one loader-ordered pass
+  // at process exit. Cookie removal, stdout restore, final report follow.
   const auto finish_session = [&](int exit_code) -> int {
     if (current_module) {
       if (current_entry) {
@@ -2504,15 +2510,14 @@ int run_discovery_session(const std::wstring& manifest_argument,
       }
       audit.pre_unload = wr::capture_module_audit();
       if (!teardown_bib_suite(nullptr)) bib_teardown_failed = true;
-      FreeLibrary(current_module);
       current_module = nullptr;
     } else {
       // No plug-in survived to teardown, but an owned BIB may still be live
       // from an earlier plug-in; terminate it before the pins release.
       if (!teardown_bib_suite(nullptr)) bib_teardown_failed = true;
     }
-    pins.release();
-    RemoveDllDirectory(sealed_cookie);
+    // The sealed-directory cookie stays too: a detaching DLL may delay-load
+    // from the sealed root during process teardown.
     runtime_hooks.restore_native_stdout();
     const bool audit_ok = !audit.required ||
         (audit.pre_unload.status == "passed" && wr::module_audit_passed());
@@ -2662,12 +2667,10 @@ int run_discovery_session(const std::wstring& manifest_argument,
           swap_failure = true;
           break;
         }
-        if (!FreeLibrary(current_module)) {
-          std::cerr << "stage:cluster_swap step=free_library error="
-                    << GetLastError() << "\n" << std::flush;
-          swap_failure = true;
-          break;
-        }
+        // Deferred release (issue #474): the outgoing plug-in image is
+        // retired, not freed — its logical teardown already happened and it
+        // stays mapped until process exit. Later snapshots keep listing it
+        // (declared in the manifest), and the audit union stays monotonic.
         outgoing_index = current_index;
         current_module = nullptr;
         current_entry = nullptr;
@@ -3171,6 +3174,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         cluster::declared_basenames(cluster_manifest));
     if (!cluster_pins.pin(cluster_manifest, runtime_hooks.hash_file))
       return session.finish(11);
+    // Deferred release (issue #474): this cluster session never frees plug-in
+    // images or pins mid-process; everything unloads in one loader-ordered
+    // pass at process exit.
+    cluster_pins.suppress_release_on_destroy();
+    session.set_deferred_module_release();
     cluster_swap_context.session = &session;
     cluster_swap_context.entry = &entry;
     cluster_swap_context.effect_state = &effect_state;
