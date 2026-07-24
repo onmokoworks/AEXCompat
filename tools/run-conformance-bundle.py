@@ -1,3 +1,7 @@
+Exit code: 0
+Wall time: 0.3 seconds
+Total output lines: 1231
+Output:
 #!/usr/bin/env python3
 """Create a self-contained AEX conformance evidence bundle."""
 
@@ -78,6 +82,8 @@ NATIVE_WORKERS = (
 )
 RESERVED_BUNDLE_FILES = {"manifest.json", "report.json"}
 RESERVED_BUNDLE_DIRECTORIES = {"diagnostics", "outputs", "raw", "requests", "target"}
+SUCCESS_CLASSIFICATIONS = frozenset({"ok", "empty_result"})
+RESULT_FAILURE_EXIT_CODE = 3
 
 
 def load_json(path: Path) -> Any:
@@ -512,235 +518,7 @@ def schema_valid_suite_timeline(timeline: Any) -> list[dict[str, Any]] | None:
     # Drop timeline entries the report schema would reject so a single
     # schema-incompatible suite name cannot make validate_bundle discard the whole
     # bundle. A non-list (or absent) timeline stays null.
-    if not isinstance(timeline, list):
-        return None
-    return [event for event in timeline if _valid_suite_event(event)][:65536]
-
-
-def normalize_structured_failure(
-    depth: str,
-    value: dict[str, Any],
-    input_world: dict[str, Any],
-    render_path: str = "smartfx",
-) -> dict[str, Any]:
-    classification = value.get("classification")
-    if value.get("plugin_kind") in {"aegp_candidate", "invalid_pipl", "unknown_no_effect_entrypoint"}:
-        classification = "loader_error"
-    # Schema-filter the reported missing suites up front. Only entries whose name
-    # the report schema accepts make a render a missing_suite; an unfiltered copy
-    # of a schema-incompatible name would make validate_bundle reject the whole
-    # report and discard the otherwise-useful bounded evidence.
-    raw_missing = value.get("missing_suites")
-    if not raw_missing and isinstance(value.get("worker_diagnostics"), dict):
-        raw_missing = value["worker_diagnostics"].get("missing_suites")
-    missing = schema_valid_missing_suites(raw_missing)
-    # The native harness reports a process-level classification that is usually
-    # the generic `nonzero_exit`, alongside report evidence (render_error,
-    # pre_render_error, depth_supported, missing_suites). Treat `nonzero_exit`
-    # (and any unrecognized value) as refinable so the evidence branches below
-    # can upgrade it to the actionable selector_error/unsupported/missing_suite,
-    # while keeping specific classes (crashes, timeouts, loader/host errors) final.
-    if classification not in {
-        "loader_error",
-        "unsupported",
-        "selector_error",
-        "missing_suite",
-        "crashed",
-        "timeout_killed",
-        "invalid_output",
-        "host_validation_error",
-    }:
-        worker_classification = value.get("worker_classification")
-        if worker_classification in {"crashed", "timeout_killed", "host_validation_error"}:
-            classification = worker_classification
-        elif missing:
-            classification = "missing_suite"
-        elif meaningful_selector_error(value) is not None:
-            classification = "selector_error"
-        elif value.get("depth_supported") is False or value.get("smart_render_supported") is False:
-            classification = "unsupported"
-        else:
-            classification = "nonzero_exit"
-    selector = value.get("selector")
-    if not isinstance(selector, dict):
-        selector = {
-            "render_path": render_path,
-            "completed": False,
-            "error_code": meaningful_selector_error(value),
-        }
-    actual_input_world = value.get("input_world")
-    if not isinstance(actual_input_world, dict):
-        actual_input_world = input_world
-    actual_world = value.get("output_world")
-    if not isinstance(actual_world, dict):
-        actual_world = None
-    result = {
-        "depth": depth,
-        "classification": classification,
-        "selector": selector,
-        "input_world": actual_input_world,
-        "world": actual_world,
-        "raw_input": None,
-        "raw_output": None,
-        "output_sha256": None,
-        "suite_timeline": schema_valid_suite_timeline(value.get("suite_timeline")),
-        "oracle": {"state": "not_captured", "identity_match": False, "exact": False},
-    }
-    if isinstance(value.get("parameter_metadata"), list):
-        result["_parameter_metadata"] = value["parameter_metadata"]
-    if value.get("plugin_kind") in {"aegp_candidate", "invalid_pipl", "unknown_no_effect_entrypoint"}:
-        result["plugin_kind"] = value["plugin_kind"]
-    # Reconcile the classification with the schema-valid missing suites: a
-    # generic nonzero_exit with valid missing suites becomes missing_suite, while
-    # a missing_suite with no schema-valid entry falls back to nonzero_exit
-    # (the schema requires at least one entry for missing_suite).
-    if missing and result["classification"] == "nonzero_exit":
-        result["classification"] = "missing_suite"
-    if result["classification"] == "missing_suite":
-        if missing:
-            result["missing_suites"] = missing
-        else:
-            result["classification"] = "nonzero_exit"
-    return result
-
-
-def _stream_to_bounded_file(
-    stream, destination: Path, state: dict[str, Any], limit: int
-) -> None:
-    kept = 0
-    try:
-        with destination.open("wb") as output:
-            while True:
-                chunk = stream.read(64 * 1024)
-                if not chunk:
-                    break
-                remaining = max(0, limit - kept)
-                if kept < limit:
-                    retained = chunk[:remaining]
-                    output.write(retained)
-                    kept += len(retained)
-                if len(chunk) > remaining:
-                    state["truncated"] = True
-    except (OSError, ValueError) as error:
-        state["error"] = str(error)
-    state["bytes_kept"] = kept
-
-
-def _read_bounded_file(path: Path, state: dict[str, Any], limit: int) -> dict[str, Any]:
-    try:
-        result = bounded_protocol_bytes(path.read_bytes()) if limit == MAX_PROTOCOL_BYTES else bounded_bytes(path.read_bytes())
-    except OSError as error:
-        result = bounded_text(str(error))
-        result["read_error"] = True
-    result["truncated"] = bool(result.get("truncated") or state.get("truncated"))
-    result["bytes_kept"] = state.get("bytes_kept", result.get("bytes_kept", 0))
-    if state.get("error"):
-        result["stream_error"] = state["error"]
-    return result
-
-
-def _private_path_argument(value: str) -> bool:
-    return Path(value).is_absolute() or ":\\" in value or value.startswith("\\\\")
-
-
-def structured_argv(
-    command: list[str], bundle_root: Path, known_paths: dict[str, tuple[str, str]]
-) -> list[dict[str, Any]]:
-    known = {str(Path(key)).casefold(): value for key, value in known_paths.items()}
-    result = []
-    for index, value in enumerate(command):
-        role_value = known.get(str(Path(value)).casefold())
-        if role_value:
-            role, relative = role_value
-            result.append({"index": index, "kind": "path", "role": role, "value": f"<bundle>/{relative}"})
-        elif index == 0:
-            result.append({"index": index, "kind": "executable", "value": Path(value).name})
-        elif _private_path_argument(value):
-            result.append({"index": index, "kind": "private_path", "value": f"<private>/{Path(value).name}"})
-        else:
-            result.append({"index": index, "kind": "argument", "value": value})
-    return result
-
-
-def run_process(
-    command: list[str], cwd: Path, environment: dict[str, str]
-) -> tuple[int | None, str, str, bool, dict[str, Any]]:
-    with tempfile.TemporaryDirectory(prefix="aexcompat-process-") as temporary:
-        stdout_path = Path(temporary) / "stdout.bin"
-        stderr_path = Path(temporary) / "stderr.bin"
-        stdout_state: dict[str, Any] = {}
-        stderr_state: dict[str, Any] = {}
-        try:
-            process = subprocess.Popen(
-                command,
-                cwd=cwd,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except OSError as error:
-            return None, "", "", False, {"spawn_error": str(error)}
-
-        stdout_thread = threading.Thread(
-            target=_stream_to_bounded_file,
-            args=(process.stdout, stdout_path, stdout_state, MAX_PROTOCOL_BYTES),
-            daemon=True,
-        )
-        stderr_thread = threading.Thread(
-            target=_stream_to_bounded_file,
-            args=(process.stderr, stderr_path, stderr_state, MAX_DIAGNOSTIC_BYTES),
-            daemon=True,
-        )
-        stdout_thread.start()
-        stderr_thread.start()
-        timed_out = False
-        try:
-            returncode = process.wait(timeout=120)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            process.kill()
-            returncode = process.wait()
-        for thread in (stdout_thread, stderr_thread):
-            thread.join(timeout=5)
-        if stdout_thread.is_alive() or stderr_thread.is_alive():
-            for stream in (process.stdout, process.stderr):
-                if stream is not None:
-                    stream.close()
-            stdout_thread.join(timeout=1)
-            stderr_thread.join(timeout=1)
-
-        stdout_detail = _read_bounded_file(stdout_path, stdout_state, MAX_PROTOCOL_BYTES)
-        stderr_detail = _read_bounded_file(stderr_path, stderr_state, MAX_DIAGNOSTIC_BYTES)
-        stdout = stdout_detail["text"]
-        stderr = stderr_detail["text"]
-        return returncode, stdout, stderr, timed_out, {
-            "stdout": stdout_detail,
-            "stderr": stderr_detail,
-        }
-
-
-def _parameter_assignment(
-    parameter: dict[str, Any], pinned_paths: dict[str, str]
-) -> dict[str, Any]:
-    value = parameter["value"]
-    assignment: dict[str, Any] = {"slot": parameter["index"]}
-    parameter_type = parameter["type"].casefold().replace(" ", "_")
-    if isinstance(value, bool):
-        assignment["value"] = 1 if value else 0
-    elif isinstance(value, (int, float)):
-        assignment["value"] = value
-    elif isinstance(value, str):
-        if parameter_type == "layer":
-            normalized = value.replace("\\", "/")
-            canonical = pinned_paths.get(normalized.casefold())
-            if canonical is None:
-                raise ValueError(
-                    f"layer parameter {parameter['index']} must reference a pinned bundle artifact"
-                )
-            # Persist a bundle-relative path so the request sidecar stays portable
-            # (moving or replaying the bundle elsewhere keeps resolving) and never
-            # leaks the creator's absolute filesystem layout. The harness resolves
-            # it against the request's own bundle root at execution time, the same
+    if not isinstance(timeline, lis…2514 tokens truncated… the same
             # way it resolves pinned dependencies.
             assignment["layer"] = canonical.replace("\\", "/")
         else:
@@ -1022,7 +800,11 @@ def runner_identity() -> dict[str, Any]:
 
 
 def write_run_state(
-    output_root: Path, status: str, depth_diagnostics: dict[str, Any], report_written: bool
+    output_root: Path,
+    status: str,
+    depth_diagnostics: dict[str, Any],
+    report_written: bool,
+    failure_classifications: list[str] | None = None,
 ) -> None:
     path = output_root / "diagnostics" / "run.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1030,6 +812,7 @@ def write_run_state(
         "schema_version": 1,
         "status": status,
         "report_written": report_written,
+        "failure_classifications": failure_classifications or [],
         "bundle_runner": runner_identity(),
         "depths": depth_diagnostics,
     }
@@ -1058,6 +841,11 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--adapter-command", type=Path)
+    parser.add_argument(
+        "--allow-failures",
+        action="store_true",
+        help="write a completed_with_failures bundle and return zero when a depth fails",
+    )
     args = parser.parse_args()
 
     output_root = args.out.resolve()
@@ -1190,7 +978,23 @@ def main() -> int:
         (output_root / "report.json").write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-        write_run_state(output_root, "completed", depth_diagnostics, True)
+        failure_classifications = sorted(
+            {
+                str(result["classification"])
+                for result in results
+                if result["classification"] not in SUCCESS_CLASSIFICATIONS
+            }
+        )
+        run_status = "completed_with_failures" if failure_classifications else "completed"
+        write_run_state(
+            output_root,
+            run_status,
+            depth_diagnostics,
+            True,
+            failure_classifications,
+        )
+        if failure_classifications and not args.allow_failures:
+            return RESULT_FAILURE_EXIT_CODE
     except Exception as error:
         write_failure_evidence(output_root, stage, error)
         write_run_state(output_root, "failed", depth_diagnostics, False)
@@ -1200,3 +1004,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

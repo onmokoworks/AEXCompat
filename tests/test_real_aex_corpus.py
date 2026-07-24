@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 0.3 seconds
+Output:
 import importlib.util, json
 from pathlib import Path
 import pytest
@@ -27,6 +30,10 @@ def test_suite_aggregation_is_distinct_sha_and_gap_safe():
 def test_issue4_runner_maps_every_explicit_path_and_depth():
     assert set(bundle.DEPTH_COMMANDS)=={(path,depth) for path in ("classic","smartfx") for depth in ("argb8","argb16","argb32f")}
     assert bundle.DEPTH_COMMANDS[("classic","argb32f")]=="--render-experimental-request-32"
+
+def test_real_corpus_aggregation_explicitly_allows_bundle_failures():
+    source = (ROOT / "tools" / "run-real-aex-corpus.py").read_text(encoding="utf-8")
+    assert "--allow-failures" in source
 
 def test_normalize_classification_covers_every_report_schema_class():
     schema=json.loads((ROOT/"schemas/conformance-report.schema.json").read_text(encoding="utf-8"))
@@ -121,3 +128,4 @@ def test_synthetic_main_publishes_schema_valid_redacted_gap_and_private_mapping(
     assert "ntsc-rs" not in encoded and "private-name" not in encoded and "case-000001" not in encoded and "0.5" not in encoded
     assert json.loads((private/"gap-map.json").read_text(encoding="utf-8"))["mapping"][0]["case_ids"]==["case-000001"]
     assert corpus.hashlib.sha256(next((public/"evidence").glob("*.json")).read_bytes()).hexdigest()==gaps["records"][0]["evidence"]["sha256"]
+
