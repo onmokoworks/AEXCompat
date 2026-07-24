@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -120,6 +121,31 @@ class DescriptorManifestPromotionTests(unittest.TestCase):
         result = json.loads(report.read_text(encoding="utf-8"))
         self.assertFalse(result["matches_promoted"])
         self.assertNotEqual(result["candidate_canonical_sha256"], result["promoted_canonical_sha256"])
+
+    def test_report_write_failure_cleans_up_candidate(self):
+        source = self.write_report(l2_report(self.manifest))
+        candidate = promotion.OUTPUT_ROOT / "failed-candidate.json"
+        report = promotion.OUTPUT_ROOT / "failed-report.json"
+        original_write_new = promotion.write_new
+        calls = 0
+
+        def fail_on_report_write(path, value):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected report write failure")
+            original_write_new(path, value)
+
+        with mock.patch.object(promotion, "write_new", side_effect=fail_on_report_write):
+            with self.assertRaisesRegex(OSError, "injected report write failure"):
+                promotion.run(
+                    source,
+                    promotion.PROFILE_ROOT / "scattermap/parameter_descriptors.json",
+                    candidate,
+                    report,
+                )
+        self.assertFalse(candidate.exists())
+        self.assertFalse(report.exists())
 
     def test_failed_l2_and_output_escape_are_rejected_without_outputs(self):
         failed = l2_report(self.manifest)

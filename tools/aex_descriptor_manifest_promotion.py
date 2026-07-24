@@ -217,8 +217,13 @@ def run(source_path: Path, promoted_path: Path, candidate_path: Path, report_pat
         "review_required": review_required,
         "native_process_started": False,
     }
-    write_new(candidate_output, candidate)
-    write_new(report_output, report)
+    try:
+        write_new(candidate_output, candidate)
+        write_new(report_output, report)
+    except OSError:
+        candidate_output.unlink(missing_ok=True)
+        report_output.unlink(missing_ok=True)
+        raise
     return matches
 
 
