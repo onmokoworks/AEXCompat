@@ -30,6 +30,10 @@ struct AuditSnapshot {
     system32: Vec<String>,
     #[serde(default)]
     winsxs: Vec<String>,
+    /// OS DriverStore (`System32\DriverStore\FileRepository`) modules
+    /// (issue #362): absent in reports from pre-#362 workers.
+    #[serde(default)]
+    driverstore: Vec<String>,
     #[serde(default)]
     policy: Option<Vec<String>>,
     #[serde(default)]
@@ -70,10 +74,12 @@ pub fn validate_required_worker_audit(stdout: &str, stdout_truncated: bool) -> i
     require_subset(&audit.post_load.plugin, &audit.observed_union.plugin)?;
     require_subset(&audit.post_load.system32, &audit.observed_union.system32)?;
     require_subset(&audit.post_load.winsxs, &audit.observed_union.winsxs)?;
+    require_subset(&audit.post_load.driverstore, &audit.observed_union.driverstore)?;
     require_subset(&audit.pre_unload.worker, &audit.observed_union.worker)?;
     require_subset(&audit.pre_unload.plugin, &audit.observed_union.plugin)?;
     require_subset(&audit.pre_unload.system32, &audit.observed_union.system32)?;
     require_subset(&audit.pre_unload.winsxs, &audit.observed_union.winsxs)?;
+    require_subset(&audit.pre_unload.driverstore, &audit.observed_union.driverstore)?;
     require_optional_subset(&audit.post_load.policy, &audit.observed_union.policy)?;
     require_optional_subset(&audit.pre_unload.policy, &audit.observed_union.policy)?;
     require_subset(&audit.post_load.unknown, &audit.observed_union.unknown)?;
@@ -94,6 +100,7 @@ fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
         .chain(&snapshot.plugin)
         .chain(&snapshot.system32)
         .chain(&snapshot.winsxs)
+        .chain(&snapshot.driverstore)
         .chain(snapshot.policy.iter().flatten())
         .chain(&snapshot.unknown)
     {
@@ -106,6 +113,7 @@ fn validate_snapshot(snapshot: &AuditSnapshot, label: &str) -> io::Result<()> {
         + snapshot.plugin.len()
         + snapshot.system32.len()
         + snapshot.winsxs.len()
+        + snapshot.driverstore.len()
         + snapshot.policy.as_ref().map_or(0, Vec::len)
         + snapshot.unknown.len();
     if count > MAX_AUDITED_MODULES {
@@ -143,6 +151,7 @@ fn module_audit_limit_error(
             "plugin": snapshot.plugin.len(),
             "system32": snapshot.system32.len(),
             "winsxs": snapshot.winsxs.len(),
+            "driverstore": snapshot.driverstore.len(),
             "policy": snapshot.policy.as_ref().map_or(0, Vec::len),
             "unknown": snapshot.unknown.len(),
         },
@@ -151,6 +160,7 @@ fn module_audit_limit_error(
             "plugin": samples(&snapshot.plugin),
             "system32": samples(&snapshot.system32),
             "winsxs": samples(&snapshot.winsxs),
+            "driverstore": samples(&snapshot.driverstore),
             "policy": snapshot.policy.as_ref().map_or_else(Vec::new, |values| samples(values)),
             "unknown": samples(&snapshot.unknown),
         },
@@ -305,6 +315,7 @@ pub fn validate_cluster_worker_audit(
         require_subset(&snapshot.plugin, &audit.observed_union.plugin)?;
         require_subset(&snapshot.system32, &audit.observed_union.system32)?;
         require_subset(&snapshot.winsxs, &audit.observed_union.winsxs)?;
+        require_subset(&snapshot.driverstore, &audit.observed_union.driverstore)?;
         require_optional_subset(&snapshot.policy, &audit.observed_union.policy)?;
         require_subset(&snapshot.unknown, &audit.observed_union.unknown)?;
     }
@@ -328,6 +339,7 @@ fn validate_cluster_snapshot(
         .chain(&snapshot.plugin)
         .chain(&snapshot.system32)
         .chain(&snapshot.winsxs)
+        .chain(&snapshot.driverstore)
         .chain(snapshot.policy.iter().flatten())
         .chain(&snapshot.unknown)
     {
@@ -352,6 +364,7 @@ fn validate_cluster_snapshot(
         + snapshot.plugin.len()
         + snapshot.system32.len()
         + snapshot.winsxs.len()
+        + snapshot.driverstore.len()
         + snapshot.policy.as_ref().map_or(0, Vec::len)
         + snapshot.unknown.len();
     if count > declaration.module_bound {
@@ -451,6 +464,38 @@ mod tests {
     #[test]
     fn accepts_complete_cumulative_audit() {
         validate_required_worker_audit(&valid_report(), false).unwrap();
+    }
+
+    #[test]
+    fn accepts_driverstore_modules_like_winsxs_assemblies() {
+        // Issue #362: user-mode driver DLLs from the OS DriverStore classify
+        // into their own category, accepted on both the one-shot and the
+        // cluster paths, and held to the same union/dedup invariants.
+        let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
+        for snapshot in ["post_load", "pre_unload", "observed_union"] {
+            report["module_audit"][snapshot]["driverstore"] = json!(["nvoglv64.dll"]);
+        }
+        validate_required_worker_audit(&report.to_string(), false).unwrap();
+
+        // A snapshot entry missing from the union fails closed.
+        let mut inconsistent = report.clone();
+        inconsistent["module_audit"]["observed_union"]["driverstore"] = json!([]);
+        assert!(validate_required_worker_audit(&inconsistent.to_string(), false).is_err());
+
+        // The same basename in two categories is a duplicate.
+        let mut duplicate = report.clone();
+        duplicate["module_audit"]["post_load"]["system32"] =
+            json!(["kernel32.dll", "NVOGLV64.dll"]);
+        assert!(validate_required_worker_audit(&duplicate.to_string(), false).is_err());
+
+        // The cluster validator counts and accepts the category too.
+        let mut cluster_report: Value =
+            serde_json::from_str(&valid_cluster_report()).unwrap();
+        for snapshot in ["post_load", "pre_unload", "observed_union"] {
+            cluster_report["module_audit"][snapshot]["driverstore"] = json!(["nvoglv64.dll"]);
+        }
+        validate_cluster_worker_audit(&cluster_report.to_string(), false, &cluster_declaration())
+            .unwrap();
     }
 
     #[test]

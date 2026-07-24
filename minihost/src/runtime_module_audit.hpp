@@ -15,6 +15,7 @@ struct ModuleAuditSnapshot {
   std::vector<std::string> plugin;
   std::vector<std::string> system32;
   std::vector<std::string> winsxs;
+  std::vector<std::string> driverstore;
   std::vector<std::string> policy;
   uint32_t unknown_count{};
   std::vector<std::wstring> unknown_keys;

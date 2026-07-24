@@ -68,6 +68,35 @@ def test_only_worker_plugin_root_system32_and_winsxs_assembly_children_are_allow
     assert "snapshot.unknown_keys.push_back" in SOURCE
 
 
+def test_driverstore_classification_mirrors_the_winsxs_rule():
+    """The OS DriverStore (issue #362) classifies like a WinSxS assembly:
+    only direct children of System32\\DriverStore\\FileRepository\\<package>,
+    with the same reparse-point rejection, and an empty root (a machine
+    without the store) admitting nothing rather than failing closed."""
+    helper = SOURCE[SOURCE.index("bool is_driverstore_module"):
+                    SOURCE.index("std::string audit_basename")]
+    assert "if (driverstore_root.empty()) return false;" in helper
+    # Only the package directory's direct children, exactly the winsxs shape.
+    assert "!module_path.filename().empty()" in helper
+    assert "!package.filename().empty()" in helper
+    assert "same_path(package.parent_path(), driverstore_root)" in helper
+    assert "contains_reparse_component(module_path)" in helper
+    # The root derives from the system directory's DriverStore\FileRepository
+    # and is cleared when it cannot be trusted.
+    assert 'system32 / L"DriverStore" / L"FileRepository"' in SOURCE
+    assert "driverstore_root.clear()" in SOURCE
+    # Classification order: winsxs, then driverstore, then policy, then
+    # unknown — driverstore never widens past the policy check.
+    winsxs = SOURCE.index("snapshot.winsxs.push_back")
+    driverstore = SOURCE.index("snapshot.driverstore.push_back")
+    policy = SOURCE.index("snapshot.policy.push_back")
+    unknown = SOURCE.index("snapshot.unknown_keys.push_back", policy)
+    assert winsxs < driverstore < policy < unknown
+    # The observed union accumulates the new category like every other.
+    assert ("append_unique(g_module_audit.observed_union.driverstore, "
+            "snapshot.driverstore)") in SOURCE
+
+
 def test_report_exposes_schema_snapshots_counts_and_basenames_not_paths():
     serializer = SOURCE[SOURCE.index("std::string module_audit_snapshot_json"):]
     assert '"schema\\\":1' in serializer
@@ -79,6 +108,9 @@ def test_report_exposes_schema_snapshots_counts_and_basenames_not_paths():
     assert "audit_basename(module_path)" in SOURCE
     assert '"winsxs\\\":"' in serializer
     assert '"unknown\\\":"' in serializer
+    # The driverstore field sits between winsxs and policy in every snapshot.
+    assert serializer.index('"winsxs\\\":"') < serializer.index(
+        '"driverstore\\\":"') < serializer.index('"policy\\\":"')
     assert "audit_basename(std::filesystem::path(key))" in serializer
     assert "module_path.wstring()" not in serializer
     assert "plugin_root.wstring()" not in serializer

@@ -29,6 +29,7 @@ def test_component_keeps_sensitive_paths_internal_to_nonserialized_keys():
     assert "module_path.wstring()" not in serializer
     assert "plugin_root.wstring()" not in serializer
     assert '"winsxs\\\":"' in serializer
+    assert '"driverstore\\\":"' in serializer
     # Canonical unknown paths remain internal; only the filename component is
     # passed to the existing printable-ASCII basename scrubber.
     assert "names(snapshot.unknown_keys)" not in serializer
