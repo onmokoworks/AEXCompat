@@ -19,9 +19,16 @@ def test_bib_suite_is_cataloged_as_a_single_resolver_slot():
     assert "state.suite[0] = reinterpret_cast<void*>(state.resolver)" not in SOURCE
 
 
-def test_bib_provider_is_fail_closed_and_does_not_load_arbitrary_paths():
+def test_bib_provider_is_fail_closed_and_loads_only_from_the_sealed_dir():
     assert 'GetModuleHandleW(L"BIB.dll")' in SOURCE
-    assert "LoadLibrary" not in SOURCE
+    # Closures that never link BIB statically (Scribble, issue #362 selector
+    # families) get exactly one bounded load attempt: the admitted plug-in's
+    # own directory joined with the fixed name "BIB.dll", resolved with
+    # LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32. No
+    # PATH, CWD, or caller-controlled component is ever involved.
+    assert 'std::filesystem::path(g_plugin_file_path).parent_path() / L"BIB.dll"' in SOURCE
+    assert "LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR" in SOURCE
+    assert 'LoadLibraryExW(L"BIB.dll"' not in SOURCE
     assert 'GetProcAddress(bib, "BIBInitialize4")' in SOURCE
     for procedure in (
         "BIBRegisterProcAddress",

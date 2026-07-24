@@ -1,5 +1,7 @@
 #include "worker_host_suite_catalog.hpp"
 #include "worker_host_suite_router.hpp"
+#include "worker_extended_diag.hpp"
+#include "worker_compute_cache_suite.hpp"
 #include "worker_suite_registry.hpp"
 
 #include "pf_cache_on_load_suite.hpp"
@@ -34,8 +36,10 @@
 #include "worker_world_registry.hpp"
 
 #include <cstdint>
+#include <filesystem>
 #include <iterator>
 #include <mutex>
+#include <string>
 #include <windows.h>
 
 // Host suite catalog wiring moved from worker_main (issue #171): the
@@ -44,6 +48,11 @@
 // callbacks resolve through their owner headers; worker-entry mode state
 // reads through its Phase D owners.
 namespace aexcompat::l2_detail {
+
+// Current plug-in path, owned by l2_main (bounds the on-demand BIB.dll
+// load to the admitted plug-in directory, issue #362).
+extern std::wstring g_plugin_file_path;
+
 
 // Mirrors the l2_main.cpp preamble that worker_l2_suite_abi.hpp relies on:
 // the ABI header captures these signatures with decltype before the wiring
@@ -129,10 +138,26 @@ const void* provide_bib_suite(void*) {
   if (state.attempted) return state.resolver ? state.suite.data() : nullptr;
   state.attempted = true;
 
-  // The dependency closure has already authenticated and loaded BIB.dll before
-  // the worker reaches the suite catalog. Do not turn a suite request into an
-  // arbitrary DLL load or bypass the sealed dependency/module audit.
-  const HMODULE bib = GetModuleHandleW(L"BIB.dll");
+  // The dependency closure usually loads BIB.dll before the worker reaches
+  // the suite catalog. Closures that never link BIB statically (issue #362:
+  // Scribble acquires the BIB suite without importing BIB.dll) get one
+  // bounded load attempt: USER_DIRS + SYSTEM32 only, so the image can only
+  // come from the admitted plug-in directory set, never an arbitrary path,
+  // and the module audit observes it exactly like a static import. In real
+  // AE the PICA basic is a host facility that is always available.
+  HMODULE bib = GetModuleHandleW(L"BIB.dll");
+  if (!bib && !g_plugin_file_path.empty()) {
+    // The admitted plug-in directory is the only root a suite request
+    // may load from (the params-only admission loads the plug-in by
+    // absolute path, so USER_DIRS does not cover it).
+    const std::filesystem::path sealed_bib =
+        std::filesystem::path(g_plugin_file_path).parent_path() / L"BIB.dll";
+    bib = LoadLibraryExW(sealed_bib.c_str(), nullptr,
+                         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                             LOAD_LIBRARY_SEARCH_SYSTEM32);
+  }
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:bib_provide module=" << (void*)bib << "\n" << std::flush;
   if (!bib) return nullptr;
   const auto get_resolver = reinterpret_cast<BibGetResolver>(
       GetProcAddress(bib, "BIBGetGetProcAddress"));
@@ -163,6 +188,8 @@ const void* provide_bib_suite(void*) {
   };
   for (const char* procedure : required) {
     if (!state.resolver("BIB", procedure, procedure)) {
+      if (aexcompat::l2_detail::extended_diag_enabled())
+        std::cerr << "extended_diag:bib_provide missing_proc=" << procedure << "\n" << std::flush;
       state.resolver = nullptr;
       return nullptr;
     }
@@ -233,6 +260,11 @@ const void* provide_batch_sampling1(void*) {
 const void* provide_color_settings7(void*) {
   configure_host_hooks({&composition_handle, &acquire_suite, &release_suite});
   return aexcompat::color_settings::suite();
+}
+// Version 6 of "PF Color Settings Suite" is the frozen 14-function prefix of
+// the v7 table (issue #362: the OCIO family acquires exactly v6).
+const void* provide_compute_cache1(void*) {
+  return &aexcompat::compute_cache::suite_table();
 }
 const void* provide_iterate8(void*) {
   g_iterate8_suite2.iterate = reinterpret_cast<void*>(&iterate_world8); return &g_iterate8_suite2;
@@ -353,7 +385,9 @@ bool configure_component_suite_catalog() {
       {"PF AE Adv Time Suite", 4,
        aexcompat::worker_runtime::pf_adv_time::suite(4)},
       {"AEGP Memory Suite", 1, &g_aegp_memory_suite},
+      {"AEGP Utility Suite", 3, &g_utility_suite1},
       {"AEGP Utility Suite", 7, &g_utility_suite3},
+      {"AEGP Utility Suite", 11, &g_utility_suite5},
       {"AEGP Utility Suite", 13, &g_utility_suite},
       {"PF Pixel Data Suite", 1, &g_pixel_data_suite1},
       {"PF Pixel Data Suite", 2, &g_pixel_data_suite2},
@@ -429,7 +463,9 @@ bool configure_component_suite_catalog() {
       {"PF ANSI Suite", 2, nullptr, &provide_ansi2},
       {"PF AE Adv Item Suite", 1, &g_adv_item_suite1, nullptr, nullptr,
        &render_worker_suite_provider_available},
+      {"PF Color Settings Suite", 6, nullptr, &provide_color_settings7},
       {"PF Color Settings Suite", 7, nullptr, &provide_color_settings7},
+      {"AEGP Compute Cache", 1, nullptr, &provide_compute_cache1},
       {"PF Iterate8 Suite", 1, nullptr, &provide_iterate8},
       {"PF Iterate8 Suite", 2, nullptr, &provide_iterate8},
       {"PF iterate16 Suite", 1, &g_iterate16_suite2},
@@ -458,7 +494,13 @@ int32_t __cdecl acquire_suite(const char* name, int32_t version,
     if (suite) *suite = nullptr;
     return 4;
   }
-  return acquire_catalog_suite(name, version, suite, g_trace_writer);
+  const int32_t result =
+      acquire_catalog_suite(name, version, suite, g_trace_writer);
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:acquire_suite name=\""
+              << (name ? name : "(null)") << "\" version=" << version
+              << " -> " << result << "\n" << std::flush;
+  return result;
 }
 int32_t __cdecl release_suite(const char* name, int32_t version) {
   return aexcompat::worker_runtime::host_suites::release_catalog_suite(

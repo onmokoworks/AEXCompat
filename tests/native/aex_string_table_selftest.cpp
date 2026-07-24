@@ -13,7 +13,7 @@ constexpr std::size_t kPeOffset = 0x80;
 constexpr std::size_t kSectionTableOffset = 0x188;
 constexpr std::size_t kCodeOffset = 0x300;
 constexpr std::size_t kDataOffset = 0x500;
-constexpr std::size_t kRawSize = 0x100;
+constexpr std::size_t kRawSize = 0x400;
 
 void write_u16(std::vector<unsigned char>& bytes, std::size_t offset,
                uint16_t value) {
@@ -28,9 +28,8 @@ void write_u32(std::vector<unsigned char>& bytes, std::size_t offset,
 }
 
 std::vector<unsigned char> make_pe(const std::vector<std::string>& strings,
-                                   bool duplicate_data = false,
                                    bool invalid_data_range = false) {
-  std::vector<unsigned char> bytes(0x700, 0);
+  std::vector<unsigned char> bytes(0x900, 0);
   write_u16(bytes, 0, IMAGE_DOS_SIGNATURE);
   write_u32(bytes, 0x3c, static_cast<uint32_t>(kPeOffset));
   write_u32(bytes, kPeOffset, IMAGE_NT_SIGNATURE);
@@ -57,10 +56,6 @@ std::vector<unsigned char> make_pe(const std::vector<std::string>& strings,
     std::memcpy(bytes.data() + cursor, string.c_str(), string.size() + 1);
     cursor += string.size() + 1;
   }
-  if (duplicate_data) {
-    const std::string duplicate = "$$$/AE/Other/LStr/0003=Duplicate";
-    std::memcpy(bytes.data() + cursor, duplicate.c_str(), duplicate.size() + 1);
-  }
   return bytes;
 }
 
@@ -76,19 +71,62 @@ bool valid_case() {
          table.lookup(1) == nullptr;
 }
 
+// Entry values are free-form text (issue #362 selector families): bundled
+// effects ship UTF-8 values, embedded newlines, and empty values, and the
+// real host serves them verbatim.
+bool freeform_value_cases() {
+  const auto utf8 = make_pe({std::string("$$$/AE/Arithmetic/LStr/0003=Op") +
+                             std::string({static_cast<char>(0xc3),
+                                          static_cast<char>(0xa9)})});
+  const auto newline = make_pe({std::string("$$$/AE/Arithmetic/LStr/0003=Unable to load\n'@0'")});
+  const auto empty = make_pe({std::string("$$$/AE/Arithmetic/LStr/0003=")});
+  const auto utf8_table = aexcompat::aex_strings::parse_readonly_pe_strings(
+      utf8.data(), utf8.size());
+  const auto newline_table = aexcompat::aex_strings::parse_readonly_pe_strings(
+      newline.data(), newline.size());
+  const auto empty_table = aexcompat::aex_strings::parse_readonly_pe_strings(
+      empty.data(), empty.size());
+  return utf8_table.status == aexcompat::aex_strings::ParseStatus::Valid &&
+         newline_table.status == aexcompat::aex_strings::ParseStatus::Valid &&
+         empty_table.status == aexcompat::aex_strings::ParseStatus::Valid &&
+         empty_table.lookup(3) != nullptr &&
+         std::string(empty_table.lookup(3)).empty();
+}
+
+// One image can carry several LStr groups (match-name/category, shared
+// libraries such as CAMLIGHT, sibling effects). The runtime lookup serves
+// the unique group whose id 0 is the about-version string ", v%".
+bool primary_group_case() {
+  const auto bytes = make_pe({"$$$/AE/Card_Dance/LStr/0000=Card Dance",
+                              "$$$/AE/Card_Dance/LStr/0001=Simulation",
+                              "$$$/AE/Card_Dance/Res/4147/LStr/0000=Card Dance, v%ld.%ld",
+                              "$$$/AE/Card_Dance/Res/4147/LStr/0001=Rows & Columns",
+                              "$$$/AE/CAMLIGHT/LStr/0000=Camera System",
+                              "$$$/AE/CAMLIGHT/LStr/0001=Camera Position"});
+  const auto table = aexcompat::aex_strings::parse_readonly_pe_strings(
+      bytes.data(), bytes.size());
+  return table.status == aexcompat::aex_strings::ParseStatus::Valid &&
+         table.values.size() == 2 &&
+         std::string(table.lookup(0)) == "Card Dance, v%ld.%ld" &&
+         std::string(table.lookup(1)) == "Rows & Columns";
+}
+
 bool negative_cases() {
-  const auto duplicate = make_pe({"$$$/AE/Arithmetic/LStr/0003=Operator"}, true);
-  const auto non_ascii = make_pe({std::string("$$$/AE/Arithmetic/LStr/0003=Op") +
-                                  std::string({static_cast<char>(0xc3),
-                                               static_cast<char>(0xa9)})});
-  const auto out_of_range = make_pe({}, false, true);
+  // Same-group duplicate ids stay fail-closed.
+  const auto duplicate = make_pe({"$$$/AE/Arithmetic/LStr/0003=Operator",
+                                  "$$$/AE/Arithmetic/LStr/0003=Duplicate"});
+  // Multiple groups with no about-version id 0 are ambiguous: no group can
+  // be identified as the one the calling effect was built against.
+  const auto ambiguous = make_pe({"$$$/AE/Arithmetic/LStr/0003=Operator",
+                                  "$$$/AE/Other/LStr/0003=Other"});
+  const auto out_of_range = make_pe({}, true);
   const auto executable_only = make_pe({});
   const auto duplicate_result =
       aexcompat::aex_strings::parse_readonly_pe_strings(duplicate.data(),
                                                         duplicate.size());
-  const auto non_ascii_result =
-      aexcompat::aex_strings::parse_readonly_pe_strings(non_ascii.data(),
-                                                        non_ascii.size());
+  const auto ambiguous_result =
+      aexcompat::aex_strings::parse_readonly_pe_strings(ambiguous.data(),
+                                                        ambiguous.size());
   const auto out_of_range_result =
       aexcompat::aex_strings::parse_readonly_pe_strings(out_of_range.data(),
                                                         out_of_range.size());
@@ -96,7 +134,7 @@ bool negative_cases() {
       aexcompat::aex_strings::parse_readonly_pe_strings(executable_only.data(),
                                                         executable_only.size());
   return duplicate_result.status == aexcompat::aex_strings::ParseStatus::Invalid &&
-         non_ascii_result.status == aexcompat::aex_strings::ParseStatus::Invalid &&
+         ambiguous_result.status == aexcompat::aex_strings::ParseStatus::Invalid &&
          out_of_range_result.status == aexcompat::aex_strings::ParseStatus::Invalid &&
          executable_result.status == aexcompat::aex_strings::ParseStatus::NoEntries;
 }
@@ -104,7 +142,8 @@ bool negative_cases() {
 }  // namespace
 
 int main() {
-  const bool passed = valid_case() && negative_cases();
+  const bool passed = valid_case() && freeform_value_cases() &&
+                      primary_group_case() && negative_cases();
   std::cout << "{\"aex_string_table\":\""
             << (passed ? "passed" : "failed")
             << "\",\"readonly_sections_only\":true,\"duplicate_fail_closed\":"

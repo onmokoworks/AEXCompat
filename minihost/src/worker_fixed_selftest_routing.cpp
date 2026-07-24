@@ -3,6 +3,7 @@
 
 #include "worker_aegp_compat_selftests.hpp"
 #include "worker_aegp_utility_suite.hpp"
+#include "worker_compute_cache_suite.hpp"
 #include "worker_host_guard_selftests.hpp"
 #include "worker_minidump_runtime.hpp"
 #include "worker_pf_adv_time_suite.hpp"
@@ -104,11 +105,20 @@ int selftest_effect_param_union(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+int selftest_compute_cache(int, wchar_t**) {
+  const bool passed = aexcompat::compute_cache::selftest();
+  std::cout << "{\"aegp_compute_cache_suite1\":\"" << (passed ? "passed" : "failed")
+            << "\",\"register_dedup\":true,\"miss_pending\":true"
+            << ",\"compute_checkout_roundtrip\":true,\"receipt_single_checkin\":true"
+            << ",\"unregister_purges\":true}\n";
+  return passed ? 0 : 1;
+}
+
 }  // namespace
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 7> host_commands{{
+  const std::array<selftest::HostCommand, 8> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
       {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
       {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
@@ -117,6 +127,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-pf-adv-app-suite", 2, &selftest_pf_adv_app},
       {L"--self-test-aegp-effect-param-union-suite4", 2,
        &selftest_effect_param_union},
+      {L"--self-test-compute-cache", 2, &selftest_compute_cache},
   }};
   if (const auto exit = selftest::dispatch_host(
           request.argc, request.argv, host_commands.data(), host_commands.size()))

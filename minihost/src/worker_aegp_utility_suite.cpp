@@ -39,6 +39,8 @@ int32_t __cdecl get_main_hwnd(void* main_hwnd) {
 
 UtilitySuite g_utility_suite{{}, &register_with_aegp, &get_main_hwnd, {}};
 UtilitySuite3 g_utility_suite3{{}, &register_with_aegp, &get_main_hwnd, {}};
+UtilitySuite1 g_utility_suite1{{}, &register_with_aegp, &get_main_hwnd};
+UtilitySuite5 g_utility_suite5{{}, &register_with_aegp, &get_main_hwnd, {}};
 
 bool verify_suite_entry_guards_and_utility13() {
   const uint32_t acquires_before = suite_acquire_count();

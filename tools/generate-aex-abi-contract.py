@@ -157,6 +157,11 @@ CALLBACK_TABLES = {
         "utils.host_dispose_handle",
         "utils.host_get_handle_size",
         "utils.host_resize_handle",
+        # Legacy application-specific callback `app` at PF_UtilCallbacks+0xC8
+        # (issue #362 selector families: PIN-era effects such as Drop_Shadow
+        # call it from GLOBAL_SETUP). Kept last so the hook order in
+        # l2_main's make_bootstrap_abi_hooks matches one-to-one.
+        "utils.app",
     ),
 }
 REQUIRED_FIELDS.update(

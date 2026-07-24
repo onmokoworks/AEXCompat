@@ -1,6 +1,7 @@
 #include "worker_param_checkout_runtime.hpp"
 
 #include "worker_classic_runtime.hpp"
+#include "worker_extended_diag.hpp"
 #include "worker_parameter_runtime.hpp"
 
 #include <cstddef>
@@ -35,7 +36,15 @@ auto& g_last_param_checkout_time_scale = g_parameter_runtime.checkout.last_time_
 
 int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t time_step,
                                uint32_t time_scale, void* definition) {
-  if (!definition || time_step <= 0 || time_scale == 0) return 4;
+  if (extended_diag_enabled())
+    std::cerr << "extended_diag:checkout_param index=" << index
+              << " time=" << what_time << "/" << time_scale << "\n"
+              << std::flush;
+  if (!definition || time_step <= 0 || time_scale == 0) {
+    if (extended_diag_enabled())
+      std::cerr << "extended_diag:checkout_param -> 4 (args)\n" << std::flush;
+    return 4;
+  }
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();
   if (!classic_context && aexcompat::worker_runtime::classic::dispatch_active()) return 4;
   if (classic_context && !classic_context->checkout_time_allowed(what_time, time_scale))

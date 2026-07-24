@@ -52,6 +52,7 @@
 #include "gpu_memory_world_transport.hpp"
 #include "host_audio_runtime.hpp"
 #include "l2_cli_dispatch.h"
+#include "worker_extended_diag.hpp"
 #include "aex_string_table.hpp"
 #include "l2_mode_execution.hpp"
 #include "parameter_animation_transport.hpp"
@@ -127,6 +128,7 @@
 #include "worker_classic_runtime.hpp"
 #include "worker_classic_execution.hpp"
 #include "worker_color_settings_runtime.hpp"
+#include "worker_compute_cache_suite.hpp"
 #include "worker_color_settings_selftests.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_host_suite_router.hpp"
@@ -981,7 +983,18 @@ bool verify_plugin_data_entrypoint() {
 // show; bundled effects call in_data+0x60 first thing in GLOBAL_SETUP
 // (allocating 0xFA0 bytes) and release it through in_data+0x70, while
 // PARAMS_SETUP resolves parameter-name strings through in_data+0x68.
+// Diagnostics (worker_extended_diag.hpp): defined near
+// make_bootstrap_abi_hooks; dumps host callback addresses once so external
+// debugger breakpoints can trace a plug-in's call path.
+void diag_dump_callback_addresses();
+
 int32_t __cdecl host_extended_alloc(void** out, std::size_t size) {
+  if (extended_diag_enabled()) {
+    diag_dump_callback_addresses();
+    std::cerr << "extended_diag:alloc out=" << static_cast<const void*>(out)
+              << " size=0x" << std::hex << size << std::dec << "\n"
+              << std::flush;
+  }
   if (!out || size == 0 || size > (size_t{1} << 24)) return 4;
   void* buffer = std::calloc(1, size);
   if (!buffer) return 4;
@@ -1034,10 +1047,30 @@ bool load_aex_string_table(
   return table.status != aexcompat::aex_strings::ParseStatus::Invalid;
 }
 
-const char* __cdecl host_extended_lookup(void*, int32_t id, void*, void*) {
-  return g_active_aex_string_table
-             ? g_active_aex_string_table->lookup(id)
-             : nullptr;
+const char* __cdecl host_extended_lookup(void* arg0, int32_t id, void* arg2,
+                                         void* arg3) {
+  const char* result =
+      g_active_aex_string_table ? g_active_aex_string_table->lookup(id)
+                                : nullptr;
+  // LoadString semantics for a valid table (issue #362): bundled effects
+  // probe optional string ids and use the result unchecked (Three-Way Color
+  // Corrector strlens the answer for the absent id 610), so a missing id in
+  // a valid table yields an empty string, never null. An absent/invalid
+  // table stays fail-closed and keeps returning null.
+  if (!result && g_active_aex_string_table &&
+      g_active_aex_string_table->status ==
+          aexcompat::aex_strings::ParseStatus::Valid) {
+    static constexpr char kEmptyString[] = "";
+    result = kEmptyString;
+  }
+  if (extended_diag_enabled()) {
+    std::cerr << "extended_diag:lookup id=" << id;
+    diag_probe_arg("a0", arg0);
+    diag_probe_arg("a2", arg2);
+    diag_probe_arg("a3", arg3);
+    std::cerr << " -> " << (result ? result : "(null)") << "\n" << std::flush;
+  }
+  return result;
 }
 
 void append_pipl_u32(std::vector<unsigned char>& bytes, uint32_t value) {
@@ -1162,6 +1195,49 @@ auto& g_parameter_timelines = g_parameter_runtime.timelines;
 // Retained entry/admission state: the admitted plug-in path, set once after
 // WorkerSession admission for diagnostics.
 std::wstring g_plugin_file_path;
+
+// Legacy-support-library process initialization (issue #362 selector
+// families): PIN-era bundled effects (Curves, FILE.dll-based classics)
+// allocate through U.dll's process-wide allocator, which real AE initializes
+// at process start by calling U_Birth. Nothing in the plug-in closure calls
+// it (verified: no staged DLL imports U_Birth), so the host must, once per
+// process, the first time a closure containing U.dll is loaded. Failures
+// leave the plug-in no worse off than before (its U_AllocateHandle calls
+// keep failing as they already did).
+int u_birth_seh_filter(EXCEPTION_POINTERS*) {
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void initialize_legacy_support_libraries() {
+  static bool attempted = false;
+  if (attempted) return;
+  attempted = true;
+  const HMODULE u_module = GetModuleHandleW(L"U.dll");
+  if (!u_module) {
+    std::cerr << "stage:legacy_support_init status=absent\n" << std::flush;
+    return;
+  }
+  using UBirth = int(__cdecl*)(void*, uint8_t);
+  const auto u_birth =
+      reinterpret_cast<UBirth>(GetProcAddress(u_module, "U_Birth"));
+  if (!u_birth) {
+    std::cerr << "stage:legacy_support_init status=no_u_birth\n" << std::flush;
+    return;
+  }
+  int result = -1;
+  __try {
+    // The first argument is an optional host context block; a zeroed buffer
+    // keeps the late-field reads in U_Birth from faulting (null crashes
+    // after the allocator init, which is the part the plug-ins need).
+    static std::byte host_context[64]{};
+    result = u_birth(host_context, 0);
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    result = -1;
+  }
+  std::cerr << "stage:legacy_support_init status=called result=" << result
+            << "\n" << std::flush;
+}
+
 const aexcompat::host_audio::Telemetry& audio_telemetry() {
   return aexcompat::host_audio::runtime().telemetry();
 }
@@ -1789,6 +1865,20 @@ bool close_render_ui_context(EffectEntry entry, std::array<std::byte, kInSize>& 
 // below keep resolving them through the declarations above.
 
 
+// Legacy application-specific callback at utils+0xC8 (issue #362): PIN-era
+// effects call app(effect_ref, selector, arg) during GLOBAL_SETUP — traced
+// Drop_Shadow passing selector 3 with an effect-owned callback table, which
+// real AE accepts. Selectors are accepted and logged; nothing in the
+// headless worker consumes the registered tables.
+int32_t __cdecl host_app_callback(void* effect_ref, int32_t selector,
+                                  void* arg) {
+  if (extended_diag_enabled())
+    std::cerr << "extended_diag:app selector=" << selector << " arg=" << arg
+              << "\n" << std::flush;
+  if (!effect_ref) return 4;
+  return 0;
+}
+
 int32_t __cdecl get_platform_data(void* effect_ref, int32_t which, void* data) {
   constexpr int32_t kExeFilePathWide = 7;
   constexpr int32_t kResourceFilePathWide = 8;
@@ -1976,6 +2066,39 @@ void report(const char* status, int32_t global_error, int32_t params_error,
 // moved to worker_early_mode_bridge.cpp (issue #165); worker_main keeps
 // resolving it through worker_early_mode_bridge.hpp.
 
+
+// Diagnostics (worker_extended_diag.hpp): one-shot dump of host callback
+// entry points for external debugger tracing (issue #362).
+void diag_dump_callback_addresses() {
+  static bool dumped = false;
+  if (dumped) return;
+  dumped = true;
+  std::cerr << std::hex << std::showbase;
+  std::cerr << "extended_diag:addr add_param=" << reinterpret_cast<void*>(&add_param)
+            << " checkout_param=" << reinterpret_cast<void*>(&checkout_param)
+            << " checkin_param=" << reinterpret_cast<void*>(&checkin_param) << "\n";
+  std::cerr << "extended_diag:addr abort_render=" << reinterpret_cast<void*>(&abort_render)
+            << " report_progress=" << reinterpret_cast<void*>(&report_progress)
+            << " register_custom_ui=" << reinterpret_cast<void*>(&register_custom_ui) << "\n";
+  std::cerr << "extended_diag:addr ext_alloc=" << reinterpret_cast<void*>(&host_extended_alloc)
+            << " ext_lookup=" << reinterpret_cast<void*>(&host_extended_lookup)
+            << " ext_free=" << reinterpret_cast<void*>(&host_extended_free) << "\n";
+  std::cerr << "extended_diag:addr acquire_suite=" << reinterpret_cast<void*>(&acquire_suite)
+            << " ansi_strcpy=" << reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy)
+            << " ansi_strcpy_bounded="
+            << reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy_bounded)
+            << " ansi_sprintf=" << reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf)
+            << "\n";
+  std::cerr << "extended_diag:addr new_handle=" << reinterpret_cast<void*>(&new_handle)
+            << " lock_handle=" << reinterpret_cast<void*>(&lock_handle)
+            << " unlock_handle=" << reinterpret_cast<void*>(&unlock_handle)
+            << " dispose_handle=" << reinterpret_cast<void*>(&dispose_handle)
+            << " handle_size=" << reinterpret_cast<void*>(&handle_size)
+            << " resize_handle=" << reinterpret_cast<void*>(&resize_handle) << "\n";
+  std::cerr << "extended_diag:addr get_platform_data="
+            << reinterpret_cast<void*>(&get_platform_data) << "\n";
+  std::cerr << std::dec << std::noshowbase << std::flush;
+}
 
 }  // namespace aexcompat::l2_detail
 
@@ -2241,11 +2364,13 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
     // Handle callbacks in in_data->utils (issue #220): a conformant AE host
     // provides host_new_handle/lock/unlock/dispose/get_handle_size/resize
     // through the utility block, not only through the PF Handle Suite. The
-    // index order here must match the tail of kUtilityCallbackOffsets
-    // (160/168/176/184/440/464) in worker_effect_bootstrap.cpp.
+    // index order here must match the tail of the generated
+    // UTILITY_CALLBACK_OFFSETS (160/168/176/184/440/464/200, see
+    // tools/generate-aex-abi-contract.py).
     reinterpret_cast<void*>(&new_handle), reinterpret_cast<void*>(&lock_handle),
     reinterpret_cast<void*>(&unlock_handle), reinterpret_cast<void*>(&dispose_handle),
-    reinterpret_cast<void*>(&handle_size), reinterpret_cast<void*>(&resize_handle)},
+    reinterpret_cast<void*>(&handle_size), reinterpret_cast<void*>(&resize_handle),
+    reinterpret_cast<void*>(&host_app_callback)},
    &g_color_suite8, sizeof(g_color_suite8),
    &g_basic_suite, &g_effect};
 }
@@ -2271,6 +2396,7 @@ aexcompat::worker_runtime::effect_bootstrap::RuntimeHooks make_bootstrap_runtime
 // leak checks, not per-plug-in reports.
 void reset_cluster_effect_state() {
   g_params.clear();
+  aexcompat::compute_cache::purge_registry();
   g_parameter_runtime.arbitrary = aexcompat::worker_runtime::parameters::ArbitraryTelemetry{};
   g_parameter_runtime.ui = aexcompat::worker_runtime::parameters::UiState{};
   g_parameter_runtime.checkout.definitions.clear();
@@ -2394,6 +2520,9 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   // The swapped-in plug-in's string table drives its PARAMS_SETUP lookups
   // (issue #396), replacing the launch plug-in's table.
   activate_plugin_string_table(module, context.aex_string_table);
+  // Legacy support libraries in the closure (U.dll allocator for PIN-era
+  // effects) get their one-time process init on first sight (issue #362).
+  initialize_legacy_support_libraries();
   // GLOBAL_SETUP / PARAMS_SETUP through the launch bootstrap on fresh
   // buffers and fresh host records (ABOUT stays whatever the launch did).
   reset_cluster_effect_state();
@@ -2715,6 +2844,8 @@ int run_discovery_session(const std::wstring& manifest_argument,
         current_entry = nullptr;
       if (current_entry) {
         activate_plugin_string_table(current_module, aex_string_table);
+        // One-time U.dll process init for PIN-era closures (issue #362).
+        initialize_legacy_support_libraries();
         inspect_column();
       } else {
         current_global_error = -1;
@@ -3047,6 +3178,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
 
   aexcompat::aex_strings::StringTable aex_string_table;
   load_aex_string_table(module, aex_string_table);
+  // One-time U.dll process init for PIN-era closures (issue #362).
+  initialize_legacy_support_libraries();
   const char* string_table_status =
       aex_string_table.status == aexcompat::aex_strings::ParseStatus::Valid
           ? "valid"

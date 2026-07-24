@@ -109,6 +109,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_classic_execution.cpp
     src/worker_color_settings_runtime.cpp
     src/worker_color_settings_selftests.cpp
+    src/worker_compute_cache_suite.cpp
     src/worker_handle_runtime.cpp
     src/worker_host_suite_router.cpp
     src/worker_host_suite_catalog.cpp

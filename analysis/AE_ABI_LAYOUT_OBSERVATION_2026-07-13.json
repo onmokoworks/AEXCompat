@@ -153,6 +153,7 @@
     "utils.get_platform_data":{"offset":432,"size":8},
     "utils.get_pixel_data8":{"offset":528,"size":8},
     "utils.get_pixel_data16":{"offset":536,"size":8},
+    "utils.app":{"offset":200,"size":8},
     "out.my_version":{"offset":0,"size":4},
     "out.start_samp":{"offset":356,"size":4},
     "out.duration_samples":{"offset":360,"size":4},
