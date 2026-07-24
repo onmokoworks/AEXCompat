@@ -4,6 +4,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +118,38 @@ def build_gate(**overrides):
 
 
 class AexPiplParserGateTests(unittest.TestCase):
+    def test_cli_exit_code_matches_gate_readiness_and_keeps_report(self):
+        for ready in (True, False):
+            with self.subTest(ready=ready):
+                catalog = make_pipl_catalog()
+                if not ready:
+                    for row in catalog["rows"]:
+                        row["metadata_state"] = "pipl_resource_metadata_present_effect_main_missing"
+                        row["pipl_resource_data_entry_count"] = 0
+                selftest = make_synthetic_selftest()
+                output = LAB_ROOT / "target" / "pipl-parser-gate" / f"{time.time_ns()}-cli.local.json"
+                argv = [
+                    "aex_pipl_parser_gate.py",
+                    "--pipl-catalog", "catalog.json",
+                    "--synthetic-selftest", "selftest.json",
+                    "--out", str(output),
+                ]
+                with mock.patch.object(
+                    aex_pipl_parser_gate,
+                    "load_pipl_catalog",
+                    return_value=(catalog, Path("catalog.json")),
+                ), mock.patch.object(
+                    aex_pipl_parser_gate,
+                    "load_synthetic_selftest",
+                    return_value=(selftest, Path("selftest.json")),
+                ), mock.patch.object(sys, "argv", argv):
+                    exit_code = aex_pipl_parser_gate.main()
+                report = json.loads(output.read_text(encoding="utf-8"))
+                self.assertEqual(report["gate_ready_for_review"], ready)
+                self.assertEqual(exit_code, 0 if ready else 1)
+                self.assertEqual(report["gate_state"], "pipl_parser_gate_closed_no_real_payload")
+                self.assertFalse(report["real_pipl_payload_parsed"])
+
     def test_gate_ready_for_review_but_real_parser_closed(self):
         gate = build_gate()
         self.assertEqual(gate["report_kind"], "aex_pipl_parser_gate")
