@@ -32,6 +32,26 @@ FIELD_CONTAINER_SIZES = {
     "smart_callbacks": "pf_smart_render_callbacks_size",
 }
 
+REQUIRED_FIELDS = {
+    "in.inter",
+    "in.utils",
+    "in.effect_ref",
+    "in.quality",
+    "in.version",
+    "in.appl_id",
+    "in.num_params",
+    "in.pica_basicP",
+    "inter.checkout_param",
+    "inter.checkin_param",
+    "inter.add_param",
+    "param.param_type",
+    "param.u",
+    "layer.data",
+    "layer.rowbytes",
+    "layer.width",
+    "layer.height",
+}
+
 
 class ContractError(ValueError):
     pass
@@ -76,6 +96,9 @@ def load_contract(path: Path) -> dict[str, Any]:
     fields = data.get("fields")
     if not isinstance(fields, dict) or not fields:
         raise ContractError("fields must be a non-empty object")
+    missing = sorted(REQUIRED_FIELDS - fields.keys())
+    if missing:
+        raise ContractError(f"missing required fields: {', '.join(missing)}")
     for name, field in fields.items():
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.]+", name):
             raise ContractError(f"invalid field name: {name!r}")
@@ -99,7 +122,8 @@ def ident(name: str) -> str:
 
 
 def constants(data: dict[str, Any]) -> list[tuple[str, int]]:
-    values = [
+    values = [("SCHEMA_VERSION", data["schema_version"])]
+    values += [
         (ident(name), value)
         for name, value in data.items()
         if (name.endswith("_size") or name == "pointer_size") and type(value) is int

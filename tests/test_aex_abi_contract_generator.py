@@ -33,6 +33,7 @@ def test_cpp_and_rust_share_observed_constants():
     cpp = (ROOT / "minihost" / "src" / "generated" / "aex_abi_contract.hpp").read_text()
     rust = (ROOT / "guest" / "crates" / "aex-abi" / "src" / "generated.rs").read_text()
     for name, value in (
+        ("SCHEMA_VERSION", 1),
         ("PF_IN_DATA_SIZE", 408),
         ("PF_OUT_DATA_SIZE", 408),
         ("PF_UTIL_CALLBACKS_SIZE", 552),
@@ -61,6 +62,15 @@ def test_malformed_contract_is_rejected(tmp_path):
     path = tmp_path / "malformed.json"
     path.write_text('{"schema_version":', encoding="utf-8")
     with pytest.raises(ValueError):
+        load_generator().load_contract(path)
+
+
+def test_missing_required_field_is_rejected(tmp_path):
+    data = json.loads(OBSERVATION.read_text(encoding="utf-8"))
+    del data["fields"]["inter.add_param"]
+    path = tmp_path / "missing-field.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing required fields: inter.add_param"):
         load_generator().load_contract(path)
 
 

@@ -587,6 +587,7 @@ inline constexpr std::size_t PRE_OUTPUT_MAX_RESULT_RECT_OFFSET = 16;
 inline constexpr std::size_t PRE_OUTPUT_MAX_RESULT_RECT_SIZE = 16;
 inline constexpr std::size_t PRE_OUTPUT_RESULT_RECT_OFFSET = 0;
 inline constexpr std::size_t PRE_OUTPUT_RESULT_RECT_SIZE = 16;
+inline constexpr std::size_t SCHEMA_VERSION = 1;
 inline constexpr std::size_t SLIDER_DEFAULT_OFFSET = 84;
 inline constexpr std::size_t SLIDER_DEFAULT_SIZE = 4;
 inline constexpr std::size_t SLIDER_SLIDER_MAX_OFFSET = 80;

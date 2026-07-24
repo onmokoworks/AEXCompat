@@ -583,6 +583,7 @@ pub const PRE_OUTPUT_MAX_RESULT_RECT_OFFSET: usize = 16;
 pub const PRE_OUTPUT_MAX_RESULT_RECT_SIZE: usize = 16;
 pub const PRE_OUTPUT_RESULT_RECT_OFFSET: usize = 0;
 pub const PRE_OUTPUT_RESULT_RECT_SIZE: usize = 16;
+pub const SCHEMA_VERSION: usize = 1;
 pub const SLIDER_DEFAULT_OFFSET: usize = 84;
 pub const SLIDER_DEFAULT_SIZE: usize = 4;
 pub const SLIDER_SLIDER_MAX_OFFSET: usize = 80;
