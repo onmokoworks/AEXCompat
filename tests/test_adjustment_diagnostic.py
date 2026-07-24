@@ -77,24 +77,31 @@ def _report_validator():
     return Draft202012Validator(report, registry=registry)
 
 
-def test_pairwise_adapter_runs_two_standard_scenes_and_preserves_pixel_diff(tmp_path):
+def test_pairwise_adapter_defaults_to_structural_diagnostics_and_can_opt_into_pixel_diff(tmp_path):
     manifest, adapter = _fixture(tmp_path)
     output = tmp_path / "diagnostic"
     result = subprocess.run([sys.executable, str(RUNNER), "--manifest", str(manifest), "--out", str(output), "--adapter-command", str(adapter)], cwd=ROOT, capture_output=True, text=True, env={**os.environ, "PYTHONUTF8": "1"})
-    assert result.returncode == 3, result.stderr
+    assert result.returncode == 0, result.stderr
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     _report_validator().validate(report)
     assert report["execution_evidence"] == "adapter"
     assert [scene["scene_id"] for scene in report["scenes"]] == ["opaque_full_frame", "alpha_extent_roi"]
-    assert report["pairs"][0]["classification"] == "equivalent"
-    assert report["pairs"][1]["classification"] == "pixel_diverged"
-    assert "composite_input" in report["pairs"][1]["cause_candidates"]
-    assert report["pairs"][1]["diff"]["depths"][0]["mismatched_pixels"] > 0
+    assert all(pair["classification"] == "both_succeeded" for pair in report["pairs"])
+    assert all(pair["diff"] is None for pair in report["pairs"])
     assert report["pairs"][1]["layer_stacks"]["adjustment"][-1]["kind"] == "adjustment"
     assert all(item["identity_match"] for item in report["pairs"][1]["composite_input"]["raw_inputs"])
     assert report["pairs"][0]["direct"]["diagnostics"]["session"]["application_mode"].endswith("-direct")
     assert report["pairs"][0]["direct"]["results"][0]["raw_input"]["path"].startswith("pairs/opaque_full_frame-direct/")
     assert (output / "inputs" / "alpha_extent_roi.png").is_file()
+
+    detailed = tmp_path / "detailed"
+    result = subprocess.run([sys.executable, str(RUNNER), "--manifest", str(manifest), "--out", str(detailed), "--adapter-command", str(adapter), "--pixel-diff"], cwd=ROOT, capture_output=True, text=True, env={**os.environ, "PYTHONUTF8": "1"})
+    assert result.returncode == 3, result.stderr
+    detailed_report = json.loads((detailed / "report.json").read_text(encoding="utf-8"))
+    _report_validator().validate(detailed_report)
+    assert detailed_report["pairs"][1]["classification"] == "pixel_diverged"
+    assert "composite_input" in detailed_report["pairs"][1]["cause_candidates"]
+    assert detailed_report["pairs"][1]["diff"]["depths"][0]["mismatched_pixels"] > 0
 
 
 def test_missing_scene_capable_external_is_blocked_and_not_success(tmp_path):
@@ -117,3 +124,4 @@ def test_source_contract_reuses_issue4_runner_and_fail_closed_labels():
     assert 'AEXCOMPAT_ADJUSTMENT_APPLICATION' in source
     assert '"blocked_external"' in source
     assert 'execution_evidence' in source
+    assert '"--pixel-diff"' in source

@@ -58,7 +58,7 @@
       "depth": {"enum": ["argb8", "argb16", "argb32f"]}, "comparable": {"type": "boolean"}, "mismatched_pixels": {"type": "integer", "minimum": 0}, "alpha_mismatched_pixels": {"type": "integer", "minimum": 0}, "premultiplication_mismatch": {"type": "boolean"}
     }}}}},
     "path": {"type": "string", "minLength": 1, "pattern": "^(?![/\\\\])(?!.*\\\\)[A-Za-z0-9._ -]+(?:/[A-Za-z0-9._ -]+)*$"},
-    "pair": {"type": "object", "additionalProperties": false, "required": ["pair_id", "scene_id", "application_modes", "common_identity", "layer_stacks", "composite_input", "direct", "adjustment", "classification", "cause_candidates", "diff"], "properties": {
+    "pair": {"type": "object", "additionalProperties": false, "required": ["pair_id", "scene_id", "application_modes", "common_identity", "layer_stacks", "composite_input", "direct", "adjustment", "classification", "cause_candidates"], "properties": {
       "pair_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
       "scene_id": {"enum": ["opaque_full_frame", "alpha_extent_roi"]},
       "application_modes": {"const": ["direct", "adjustment"]},
@@ -66,9 +66,9 @@
         "aex": {"$ref": "#/$defs/artifact"}, "parameters": {"type": "array"}, "time": {"type": "object"}, "resolution": {"type": "object"}, "depths": {"type": "array"}, "renderer": {"type": "string"}, "alpha_policy": {"type": "string"}, "premultiplication": {"type": "string"}, "downsample": {"type": "object"}
       }},
       "layer_stacks": {"type": "object", "additionalProperties": false, "required": ["direct", "adjustment"], "properties": {"direct": {"type": "array", "items": {"$ref": "#/$defs/layer"}}, "adjustment": {"type": "array", "items": {"$ref": "#/$defs/layer"}}}}, "composite_input": {"type": "object", "additionalProperties": false, "required": ["source_ids", "png", "recomputed_sha256", "raw_inputs"], "properties": {"source_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}, "png": {"$ref": "#/$defs/artifact"}, "recomputed_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "raw_inputs": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "object", "additionalProperties": false, "required": ["depth", "expected", "adjustment", "identity_match"], "properties": {"depth": {"enum": ["argb8", "argb16", "argb32f"]}, "expected": {"$ref": "#/$defs/artifact"}, "adjustment": {"type": ["object", "null"]}, "identity_match": {"type": "boolean"}}}}}}, "direct": {"$ref": "#/$defs/outcome"}, "adjustment": {"$ref": "#/$defs/outcome"},
-      "classification": {"enum": ["equivalent", "pixel_diverged", "direct_ok_adjustment_failed", "direct_failed_adjustment_ok", "both_failed", "blocked_external", "identity_mismatch"]},
+      "classification": {"enum": ["both_succeeded", "pixel_diverged", "direct_ok_adjustment_failed", "direct_failed_adjustment_ok", "both_failed", "blocked_external", "identity_mismatch"]},
       "cause_candidates": {"type": "array", "uniqueItems": true, "items": {"enum": ["layer_flag_or_admission", "composite_input", "effect_stack_order", "extent_roi", "alpha_premultiplication", "resolution_downsample", "selector_suite", "session_transport", "identity_mismatch", "external_unavailable"]}},
-      "diff": {"$ref": "#/$defs/diff"}
+      "diff": {"anyOf": [{"$ref": "#/$defs/diff"}, {"type": "null"}]}
     }}
   }
 }

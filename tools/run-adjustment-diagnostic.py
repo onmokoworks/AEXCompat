@@ -211,7 +211,7 @@ def _outcome(bundle: Path, top_root: Path, mode: str, returncode: int) -> dict[s
         return {"status": "blocked_external", "manifest_path": f"{prefix}/manifest.json", "report_path": f"{prefix}/report.json", "results": [{
             "depth": "argb8", "classification": "blocked_external", "selector": {"render_path": "classic", "completed": False, "error_code": None},
             "input_world": None, "world": None, "raw_input": None, "raw_output": None, "output_sha256": None, "suite_timeline": None,
-        }]}
+        }], "diagnostics": {"selector": [], "suite_timeline": [], "session": {"application_mode": mode, "status": "blocked_external"}, "worker": None}}
     report = _json(report_path)
     results = []
     for result in report.get("results", []):
@@ -253,7 +253,7 @@ def _diff_depth(top_root: Path, direct: dict[str, Any], adjustment: dict[str, An
     return {"depth": depth, "comparable": True, "mismatched_pixels": mismatched, "alpha_mismatched_pixels": alpha_mismatched, "premultiplication_mismatch": worlds_differ}
 
 
-def _classify(direct: dict[str, Any], adjustment: dict[str, Any], diffs: list[dict[str, Any]], blocked: bool, input_identity_match: bool) -> tuple[str, list[str]]:
+def _classify(direct: dict[str, Any], adjustment: dict[str, Any], diffs: list[dict[str, Any]] | None, blocked: bool, input_identity_match: bool) -> tuple[str, list[str]]:
     if blocked:
         return "blocked_external", ["external_unavailable"]
     if not input_identity_match:
@@ -261,12 +261,12 @@ def _classify(direct: dict[str, Any], adjustment: dict[str, Any], diffs: list[di
     direct_ok = all(item["classification"] in {"ok", "empty_result"} for item in direct["results"])
     adjustment_ok = all(item["classification"] in {"ok", "empty_result"} for item in adjustment["results"])
     if direct_ok and adjustment_ok:
-        if any(item["comparable"] and item["mismatched_pixels"] for item in diffs):
+        if diffs is not None and any(item["comparable"] and item["mismatched_pixels"] for item in diffs):
             causes = ["composite_input"]
             if any(item["alpha_mismatched_pixels"] or item["premultiplication_mismatch"] for item in diffs):
                 causes.append("alpha_premultiplication")
             return "pixel_diverged", causes
-        return "equivalent", []
+        return "both_succeeded", []
     if direct_ok and not adjustment_ok:
         return "direct_ok_adjustment_failed", ["layer_flag_or_admission", "effect_stack_order"]
     if not direct_ok and adjustment_ok:
@@ -279,7 +279,7 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def run(manifest_path: Path, output_root: Path, adapter: Path | None) -> int:
+def run(manifest_path: Path, output_root: Path, adapter: Path | None, include_pixel_diff: bool = False) -> int:
     manifest = _json(manifest_path)
     _validate_manifest(manifest)
     source_root = manifest_path.parent.resolve()
@@ -329,7 +329,7 @@ def run(manifest_path: Path, output_root: Path, adapter: Path | None) -> int:
                 completed = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True)
                 _write_json(output_root / "diagnostics" / f"{scene_id}-{mode}-process.json", {"returncode": completed.returncode, "stdout": completed.stdout[-4096:], "stderr": completed.stderr[-4096:], "application_mode": mode})
                 outcomes[mode] = _outcome(bundle, output_root, f"{scene_id}-{mode}", completed.returncode)
-            diffs = [_diff_depth(output_root, outcomes["direct"], outcomes["adjustment"], depth) for depth in manifest["requested_depths"]]
+            diffs = [_diff_depth(output_root, outcomes["direct"], outcomes["adjustment"], depth) for depth in manifest["requested_depths"]] if include_pixel_diff else None
             raw_inputs = []
             for depth in manifest["requested_depths"]:
                 expected = _expected_raw_input(input_paths[scene_id], output_root, scene_id, depth, manifest["execution"]["premultiplication"])
@@ -341,8 +341,8 @@ def run(manifest_path: Path, output_root: Path, adapter: Path | None) -> int:
             input_identity_match = all(item["identity_match"] for item in raw_inputs)
             blocked = outcomes["direct"]["status"] == "blocked_external" or outcomes["adjustment"]["status"] == "blocked_external"
             classification, causes = _classify(outcomes["direct"], outcomes["adjustment"], diffs, blocked, input_identity_match)
-            pairs.append({"pair_id": f"{manifest['diagnostic_id']}-{scene_id}", "scene_id": scene_id, "application_modes": ["direct", "adjustment"], "common_identity": common_identity[scene_id], "layer_stacks": {"direct": _application_layers(scene, "direct"), "adjustment": _application_layers(scene, "adjustment")}, "composite_input": {"source_ids": ["opaque"] if scene_id == "opaque_full_frame" else ["opaque", "alpha"], "png": scene["composite_input"], "recomputed_sha256": _digest(input_paths[scene_id]), "raw_inputs": raw_inputs}, "direct": outcomes["direct"], "adjustment": outcomes["adjustment"], "classification": classification, "cause_candidates": causes, "diff": {"depths": diffs}})
-        top_status = "blocked_external" if all(pair["classification"] == "blocked_external" for pair in pairs) else ("completed" if all(pair["classification"] == "equivalent" for pair in pairs) else "completed_with_failures")
+            pairs.append({"pair_id": f"{manifest['diagnostic_id']}-{scene_id}", "scene_id": scene_id, "application_modes": ["direct", "adjustment"], "common_identity": common_identity[scene_id], "layer_stacks": {"direct": _application_layers(scene, "direct"), "adjustment": _application_layers(scene, "adjustment")}, "composite_input": {"source_ids": ["opaque"] if scene_id == "opaque_full_frame" else ["opaque", "alpha"], "png": scene["composite_input"], "recomputed_sha256": _digest(input_paths[scene_id]), "raw_inputs": raw_inputs}, "direct": outcomes["direct"], "adjustment": outcomes["adjustment"], "classification": classification, "cause_candidates": causes, "diff": {"depths": diffs} if include_pixel_diff else None})
+        top_status = "blocked_external" if all(pair["classification"] == "blocked_external" for pair in pairs) else ("completed" if all(pair["classification"] == "both_succeeded" for pair in pairs) else "completed_with_failures")
         report = {"schema_version": 1, "diagnostic_id": manifest["diagnostic_id"], "status": top_status, "execution_evidence": "adapter" if adapter else "none", "blocked_reason": None if adapter else "no scene-capable native AEX execution was available", "identity": {"aex": manifest["plugin"]["aex"], "dependencies": manifest["plugin"]["dependencies"], "runner": manifest["runner"]}, "scenes": scenes, "pairs": pairs}
         _write_json(output_root / "manifest.json", manifest)
         _write_json(output_root / "report.json", report)
@@ -356,9 +356,10 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--adapter-command", type=Path, help="test-only adapter; evidence is labelled adapter")
+    parser.add_argument("--pixel-diff", action="store_true", help="optional detailed raw-pixel/alpha diff artifact")
     args = parser.parse_args()
     try:
-        return run(args.manifest.resolve(), args.out, args.adapter_command)
+        return run(args.manifest.resolve(), args.out, args.adapter_command, args.pixel_diff)
     except Exception as error:
         if args.out:
             args.out.mkdir(parents=True, exist_ok=True)
