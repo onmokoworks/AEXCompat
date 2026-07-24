@@ -6,5 +6,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod classic;
 pub mod pe;
 pub mod x64;
