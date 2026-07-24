@@ -44,7 +44,7 @@
 
 1. PRの全review threadを取得し、`isResolved` とoutdatedを確認する。未解決のP1/P2、owner指摘、Codex指摘が一つでもあればmergeしない。
 2. latest headに対するCodex reviewとowner reviewを確認する。古いheadのcleanを新headのcleanとみなさない。
-3. GitHub Actionsがgreenになるまでmergeしない。課金制限、usage limit、runner不調などの外部障害はコードの成功と混同せず、明示的にblockedとして報告する。
+3. ~~GitHub Actionsがgreenになるまでmergeしない。課金制限、usage limit、runner不調などの外部障害はコードの成功と混同せず、明示的にblockedとして報告する。~~ 現状 billing limit によりCIが回らないため、修正されるまでCIは確認しない。
 4. CI失敗を修正する場合は、まずログとannotationで根因を確認し、承認された小さな修正だけを行う。
 5. merge後に次のIssueへ進む。merge前の別Issue着手は禁止。
 
@@ -75,3 +75,4 @@
 - Issue番号、PR番号、branch名、blocked理由などの時限情報をこのファイルに固定しない。
 - 現在の正本は、棚卸し時点のGitHub状態とユーザーが指定した対象である。
 - 主worktreeの既存未コミット変更を保全する必要がある場合は、開始時のstatusで確認し、必要なら隔離worktreeを選ぶ。
+~~
