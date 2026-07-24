@@ -89,6 +89,18 @@ def test_missing_required_field_is_rejected(tmp_path):
         (lambda data: data.update(architecture="arm64-macos"), "architecture"),
         (lambda data: data.update(pointer_size=4), "pointer_size"),
         (
+            lambda data: data.update(native_aex_loaded=True),
+            "native_aex_loaded must be false",
+        ),
+        (
+            lambda data: data.update(selector_dispatched=True),
+            "selector_dispatched must be false",
+        ),
+        (
+            lambda data: data.update(sdk_boundary="runtime_observation"),
+            "sdk_boundary must be instrument_observation",
+        ),
+        (
             lambda data: data["fields"].update(
                 {"in.bad": {"offset": data["pf_in_data_size"], "size": 8}}
             ),
@@ -105,6 +117,18 @@ def test_missing_required_field_is_rejected(tmp_path):
                 offset=data["fields"]["utils.begin_sampling"]["offset"]
             ),
             "UTILITY_CALLBACK_OFFSETS contains duplicate offsets",
+        ),
+        (
+            lambda data: data["fields"].update(
+                {"unknown_family.field": {"offset": 0, "size": 8}}
+            ),
+            "no container size mapping for field family",
+        ),
+        (
+            lambda data: data["fields"]["batch_sampling.get_func16"].update(
+                offset=data["pf_batch_sampling_suite1_size"]
+            ),
+            "exceeds pf_batch_sampling_suite1_size",
         ),
     ],
 )

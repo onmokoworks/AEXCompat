@@ -16,6 +16,37 @@ DEFAULT_CPP = ROOT / "minihost" / "src" / "generated" / "aex_abi_contract.hpp"
 DEFAULT_RUST = ROOT / "guest" / "crates" / "aex-abi" / "src" / "generated.rs"
 
 FIELD_CONTAINER_SIZES = {
+    "adjust_cursor": "pf_adjust_cursor_info_size",
+    "adv_app": "pf_adv_app_suite2_size",
+    "aegp_collection": "aegp_collection_suite2_size",
+    "aegp_collection_item": "aegp_collection_item_v2_size",
+    "aegp_command": "aegp_command_suite1_size",
+    "aegp_comp": "aegp_comp_suite11_size",
+    "aegp_effect": "aegp_effect_suite4_size",
+    "aegp_item": "aegp_item_suite9_size",
+    "aegp_keyframe": "aegp_keyframe_suite5_size",
+    "aegp_layer": "aegp_layer_suite9_size",
+    "aegp_layer5": "aegp_layer_suite5_size",
+    "aegp_layer8": "aegp_layer_suite8_size",
+    "aegp_layer9": "aegp_layer_suite9_size",
+    "aegp_register": "aegp_register_suite5_size",
+    "aegp_stream": "aegp_stream_suite6_size",
+    "aegp_stream_value": "aegp_stream_value2_size",
+    "app4": "pf_app_suite4_size",
+    "arb_compare": "pf_arb_params_extra_size",
+    "arb_copy": "pf_arb_params_extra_size",
+    "arb_dispose": "pf_arb_params_extra_size",
+    "arb_extra": "pf_arb_params_extra_size",
+    "arb_flat_size": "pf_arb_params_extra_size",
+    "arb_flatten": "pf_arb_params_extra_size",
+    "arb_interp": "pf_arb_params_extra_size",
+    "arb_new": "pf_arb_params_extra_size",
+    "arb_print": "pf_arb_params_extra_size",
+    "arb_print_size": "pf_arb_params_extra_size",
+    "arb_unflatten": "pf_arb_params_extra_size",
+    "arbitrary": "pf_arbitrary_def_size",
+    "batch_sampling": "pf_batch_sampling_suite1_size",
+    "checkbox": "pf_checkbox_def_size",
     "in": "pf_in_data_size",
     "out": "pf_out_data_size",
     "inter": "pf_interact_callbacks_size",
@@ -30,6 +61,33 @@ FIELD_CONTAINER_SIZES = {
     "context": "pf_context_size",
     "pre_callbacks": "pf_pre_render_callbacks_size",
     "smart_callbacks": "pf_smart_render_callbacks_size",
+    "context": "pf_context_size",
+    "custom_ui": "pf_custom_ui_info_size",
+    "do_click": "pf_do_click_event_info_size",
+    "drawbot_draw": "drawbot_draw_suite_size",
+    "drawbot_path": "drawbot_path_suite_size",
+    "drawbot_supplier": "drawbot_supplier_suite_size",
+    "drawbot_surface": "drawbot_surface_suite_size",
+    "effect_custom_ui": "pf_effect_custom_ui_suite1_size",
+    "effect_window": "pf_effect_window_info_size",
+    "event": "pf_event_extra_size",
+    "external_dependencies": "pf_ext_dependencies_extra_size",
+    "float_slider": "pf_float_slider_def_size",
+    "gpu_setdown_extra": "pf_gpu_device_setdown_extra_size",
+    "gpu_setdown_input": "pf_gpu_device_setdown_input_size",
+    "gpu_setup_extra": "pf_gpu_device_setup_extra_size",
+    "gpu_setup_input": "pf_gpu_device_setup_input_size",
+    "gpu_setup_output": "pf_gpu_device_setup_output_size",
+    "key_down": "pf_key_down_event_size",
+    "overlay_theme": "pf_effect_overlay_theme_suite1_size",
+    "popup": "pf_popup_def_size",
+    "pre_extra": "pf_pre_render_extra_size",
+    "pre_input": "pf_pre_render_input_size",
+    "pre_output": "pf_pre_render_output_size",
+    "slider": "pf_slider_def_size",
+    "smart_extra": "pf_smart_render_extra_size",
+    "smart_input": "pf_smart_render_input_size",
+    "user_changed": "pf_user_changed_param_extra_size",
 }
 
 REQUIRED_FIELDS = {
@@ -137,6 +195,12 @@ def load_contract(path: Path) -> dict[str, Any]:
         raise ContractError("schema_version must be 1")
     if data.get("source_kind") != "compiled_instrument_observation":
         raise ContractError("source_kind must be compiled_instrument_observation")
+    if data.get("sdk_boundary") != "instrument_observation":
+        raise ContractError("sdk_boundary must be instrument_observation")
+    if data.get("native_aex_loaded") is not False:
+        raise ContractError("native_aex_loaded must be false")
+    if data.get("selector_dispatched") is not False:
+        raise ContractError("selector_dispatched must be false")
     if data.get("architecture") != "x86_64-windows":
         raise ContractError("architecture must be x86_64-windows")
     if data.get("pointer_size") != 8:
@@ -163,8 +227,13 @@ def load_contract(path: Path) -> dict[str, Any]:
             raise ContractError(f"{name}.offset must be a non-negative integer")
         if type(size) is not int or size <= 0:
             raise ContractError(f"{name}.size must be a positive integer")
-        container_key = FIELD_CONTAINER_SIZES.get(name.split(".", 1)[0])
-        if container_key and container_key in data and offset + size > data[container_key]:
+        family = name.split(".", 1)[0]
+        container_key = FIELD_CONTAINER_SIZES.get(family)
+        if container_key is None:
+            raise ContractError(f"no container size mapping for field family: {family}")
+        if container_key not in data:
+            raise ContractError(f"missing container size: {container_key}")
+        if offset + size > data[container_key]:
             raise ContractError(
                 f"{name} exceeds {container_key}: {offset} + {size} > {data[container_key]}"
             )
