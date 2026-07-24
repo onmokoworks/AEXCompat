@@ -4,6 +4,8 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -268,6 +270,45 @@ class AexCandidateLoadGateDryrunTests(unittest.TestCase):
         report = build_report(candidate_dependency_scope=scope)
         self.assertEqual(report["candidate_scoped_load_gate_dry_run_state"], "invalid_evidence_closed")
         self.assertTrue(any("candidate_relative_path" in error for error in report["gate_errors"]))
+
+    def test_cli_exit_follows_gate_errors(self):
+        args = SimpleNamespace(
+            worker_design="design.json",
+            worker_selftest="selftest.json",
+            fixture_decision="decision.json",
+            fixture_manual_review="manual-review.json",
+            candidate_dependency_scope="scope.json",
+            source_load_gate=None,
+            out="report.json",
+        )
+        loaders = (
+            "load_worker_design",
+            "load_worker_selftest",
+            "load_fixture_decision",
+            "load_fixture_manual_review",
+            "load_candidate_dependency_scope",
+        )
+        for gate_errors, expected_exit in (([], 0), (["invalid evidence"], 1)):
+            report = {"gate_errors": gate_errors}
+            with (
+                mock.patch.object(aex_candidate_load_gate_dryrun, "parse_args", return_value=args),
+                mock.patch.multiple(
+                    aex_candidate_load_gate_dryrun,
+                    **{name: mock.Mock(return_value=({}, Path(f"{name}.json"))) for name in loaders},
+                ),
+                mock.patch.object(
+                    aex_candidate_load_gate_dryrun,
+                    "build_candidate_load_gate_dryrun",
+                    return_value=report,
+                ),
+                mock.patch.object(
+                    aex_candidate_load_gate_dryrun,
+                    "write_json_create_new",
+                    return_value=Path("report.json"),
+                ) as write_report,
+            ):
+                self.assertEqual(aex_candidate_load_gate_dryrun.main(), expected_exit)
+                write_report.assert_called_once_with(Path("report.json"), report)
 
     def test_paths_are_confined_and_output_is_create_new(self):
         roots = {
