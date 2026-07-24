@@ -5689,6 +5689,11 @@ fn cli_contract() -> serde_json::Value {
             "failure_exit_code": "nonzero",
             "unknown_or_malformed_arguments": "launch_gui"
         },
+        "headless_mode": {
+            "prefix": "--headless",
+            "unknown_or_malformed_arguments": "structured_stderr_exit_64",
+            "gui_launch": false
+        },
         "commands": [
             {
                 "name": "--compare-images",
@@ -5839,13 +5844,17 @@ fn required_plugin_parameters(
 
 fn print_cli_help() {
     println!(
-        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI."
+        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
     );
 }
 
 fn main() -> eframe::Result {
     aexcompat_broker::observability::init();
-    let args: Vec<_> = std::env::args_os().collect();
+    let mut args: Vec<_> = std::env::args_os().collect();
+    let headless = args.get(1).is_some_and(|arg| arg == "--headless");
+    if headless {
+        args.remove(1);
+    }
     if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
         print_cli_help();
         return Ok(());
@@ -7326,6 +7335,21 @@ fn main() -> eframe::Result {
             }
         }
         return Ok(());
+    }
+    if headless {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "schema": CLI_CONTRACT_SCHEMA,
+                "version": CLI_CONTRACT_VERSION,
+                "success": false,
+                "classification": "cli_usage_error",
+                "failure_stage": "argument_validation",
+                "message": "unknown or malformed arguments",
+                "gui_launched": false
+            })
+        );
+        std::process::exit(64);
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

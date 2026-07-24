@@ -14,6 +14,10 @@ def test_harness_exposes_machine_readable_agent_cli_contract():
     assert '"success_stdout": "json"' in source
     assert '"failure_stderr": true' in source
     assert '"unknown_or_malformed_arguments": "launch_gui"' in source
+    assert '"prefix": "--headless"' in source
+    assert '"unknown_or_malformed_arguments": "structured_stderr_exit_64"' in source
+    assert '"gui_launched": false' in source
+    assert 'args.get(1).is_some_and(|arg| arg == "--headless")' in source
     assert 'args[1] == "--render-scattermap-fixture"' in source
     assert 'args[1] == "--render-image"' not in source
     assert "render_scattermap_fixture" in source

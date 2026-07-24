@@ -64,3 +64,7 @@ argument shapes, JSON result channel, failure channel, and the explicit GUI fall
 or malformed arguments. This is command metadata only; it does not load an AEX. Native AEX
 execution remains isolated worker execution and is not a security sandbox. For hash-pinned,
 redacted evidence, use the conformance bundle runner above.
+
+For LLM, CI, and other headless callers, prefix a command with `--headless`. In that mode,
+unknown or malformed arguments never launch the GUI; they write a bounded structured diagnostic
+to stderr and exit with code 64. The default no-argument/GUI behavior remains unchanged.
