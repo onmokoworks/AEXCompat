@@ -35,6 +35,8 @@
 
 #include <cstdint>
 #include <iterator>
+#include <mutex>
+#include <windows.h>
 
 // Host suite catalog wiring moved from worker_main (issue #171): the
 // component providers, the assembly hook table, the static suite catalog,
@@ -92,6 +94,68 @@ auto& g_gpu_device_suite1 =
 bool& g_aegp_init_mode = aexcompat::worker_runtime::aegp_init::state().init_mode;
 bool& g_aegp_command_roundtrip_mode =
     aexcompat::scene_runtime::scene_runtime_state().command_roundtrip_mode;
+
+using BibResolver = void* (__cdecl *)(const char* interface_name,
+                                      const char* procedure_name,
+                                      const char* signature);
+using BibGetResolver = BibResolver (__cdecl *)();
+using BibInitialize4 = BibResolver (__cdecl *)(
+    void*, void*, void*, void*, void*, void*, void*, void*, int32_t,
+    uintptr_t, void*);
+
+struct BibSuiteState {
+  std::mutex mutex;
+  std::array<void*, 1> suite{};
+  BibResolver resolver{};
+  bool attempted{};
+};
+
+BibSuiteState& bib_suite_state() {
+  static BibSuiteState state;
+  return state;
+}
+
+const void* provide_bib_suite(void*) {
+  auto& state = bib_suite_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.attempted) return state.resolver ? state.suite.data() : nullptr;
+  state.attempted = true;
+
+  // The dependency closure has already authenticated and loaded BIB.dll before
+  // the worker reaches the suite catalog. Do not turn a suite request into an
+  // arbitrary DLL load or bypass the sealed dependency/module audit.
+  const HMODULE bib = GetModuleHandleW(L"BIB.dll");
+  if (!bib) return nullptr;
+  const auto get_resolver = reinterpret_cast<BibGetResolver>(
+      GetProcAddress(bib, "BIBGetGetProcAddress"));
+  if (get_resolver) state.resolver = get_resolver();
+  if (!state.resolver) {
+    const auto initialize = reinterpret_cast<BibInitialize4>(
+        GetProcAddress(bib, "BIBInitialize4"));
+    if (!initialize) return nullptr;
+    // AdobePIE's private callbacks are intentionally not guessed here. The
+    // verified BIB fallback accepts null callbacks and keeps ownership inside
+    // this worker process; shutdown is therefore process-scoped and never
+    // releases an Adobe-owned initialization.
+    state.resolver = initialize(nullptr, nullptr, nullptr, nullptr, nullptr,
+                                nullptr, nullptr, nullptr, 1, 1, nullptr);
+  }
+  if (!state.resolver) return nullptr;
+
+  constexpr const char* required[] = {
+      "BIBRegisterProcAddress", "BIBReportError",
+      "BIBUnregisterInterface", "BIBGetUnregisterCountAddr",
+      "BIBIsMultiThreaded",
+  };
+  for (const char* procedure : required) {
+    if (!state.resolver("BIB", procedure, procedure)) {
+      state.resolver = nullptr;
+      return nullptr;
+    }
+  }
+  state.suite[0] = reinterpret_cast<void*>(state.resolver);
+  return state.suite.data();
+}
 }  // namespace
 
 bool mask_suite_provider_available(void*) { return aexcompat::mask_runtime::model_enabled(); }
@@ -225,6 +289,7 @@ bool configure_component_suite_catalog() {
   const StaticSuite component_suites[] = {
       {"AE Plugin Helper Suite", 1, aexcompat::pf_helper::suite1()},
       {"AE Plugin Helper Suite2", 2, aexcompat::pf_helper::suite2()},
+      {"AEFX Text BIB Suite", 1, nullptr, &provide_bib_suite},
       {"PF Cache On Load Suite", 1, &cache_on_load_suite()},
       {"PF AE Adv Time Suite", 1,
        aexcompat::worker_runtime::pf_adv_time::suite(1)},
