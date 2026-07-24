@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/schemas/ae-startup-crash-probe.schema.json",
+  "title": "AEXCompat AE startup crash probe bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "probe_id", "evidence_origin", "status", "failure_classes", "target", "preflight", "launch", "telemetry", "dump", "cleanup", "artifacts", "limitations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "kind": {"const": "aexcompat.ae-startup-crash-probe"},
+    "probe_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "evidence_origin": {"enum": ["real_ae", "controlled_fixture"]},
+    "status": {"enum": ["completed", "completed_with_failures", "failed"]},
+    "failure_classes": {"type": "array", "uniqueItems": true, "items": {"enum": ["ok", "startup_failed", "plugin_not_loaded", "plugin_load_crash", "host_crash_after_plugin_load", "timeout_killed", "dialog_or_lingering_process", "dump_unavailable", "preflight_failed"]}},
+    "target": {"$ref": "#/$defs/target"},
+    "preflight": {
+      "type": "object", "additionalProperties": false,
+      "required": ["static_pipl", "plugindata", "linked_to_launch"],
+      "properties": {
+        "static_pipl": {"$ref": "#/$defs/preflight_result"},
+        "plugindata": {"$ref": "#/$defs/preflight_result"},
+        "linked_to_launch": {"type": "boolean"}
+      }
+    },
+    "launch": {
+      "type": "object", "additionalProperties": false,
+      "required": ["started", "pid", "start_error", "start_time_utc", "deadline_utc", "end_time_utc", "exit_code", "process_tree", "loaded_modules", "loaded_aex_identity", "classification"],
+      "properties": {
+        "started": {"type": "boolean"},
+        "pid": {"type": ["integer", "null"], "minimum": 0},
+        "start_error": {"type": ["string", "null"]},
+        "start_time_utc": {"type": ["string", "null"], "format": "date-time"},
+        "deadline_utc": {"type": ["string", "null"], "format": "date-time"},
+        "end_time_utc": {"type": ["string", "null"], "format": "date-time"},
+        "exit_code": {"type": ["integer", "null"]},
+        "process_tree": {"type": "array", "items": {"$ref": "#/$defs/process"}},
+        "loaded_modules": {"type": "array", "items": {"$ref": "#/$defs/module"}},
+        "loaded_aex_identity": {"type": ["object", "null"]},
+        "classification": {"enum": ["ok", "startup_failed", "plugin_not_loaded", "plugin_load_crash", "host_crash_after_plugin_load", "timeout_killed", "dialog_or_lingering_process"]}
+      }
+    },
+    "telemetry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wer_event_count", "events_artifact", "faulting_module", "exception_code", "fault_offset", "report_id"],
+      "properties": {
+        "wer_event_count": {"type": "integer", "minimum": 0},
+        "events_artifact": {"$ref": "#/$defs/artifact"},
+        "faulting_module": {"type": ["string", "null"]},
+        "exception_code": {"type": ["string", "null"]},
+        "fault_offset": {"type": ["string", "null"]},
+        "report_id": {"type": ["string", "null"]}
+      }
+    },
+    "dump": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "state", "reason", "artifacts", "max_single_bytes", "max_total_bytes", "max_retained"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "state": {"enum": ["disabled", "captured", "unavailable", "not_requested"]},
+        "reason": {"type": ["string", "null"]},
+        "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}},
+        "max_single_bytes": {"type": "integer", "minimum": 1},
+        "max_total_bytes": {"type": "integer", "minimum": 1},
+        "max_retained": {"type": "integer", "minimum": 1}
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["staging_removed", "registry_rollback", "registry_originally_present", "removed_dump_count", "retained_dump_count"],
+      "properties": {
+        "staging_removed": {"type": "boolean"},
+        "registry_rollback": {"enum": ["not_requested", "restored", "failed"]},
+        "registry_originally_present": {"type": "boolean"},
+        "removed_dump_count": {"type": "integer", "minimum": 0},
+        "retained_dump_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}},
+    "limitations": {
+      "type": "object", "additionalProperties": false,
+      "required": ["real_ae_executed", "mock_output_is_real_ae_evidence", "resume_conditions"],
+      "properties": {
+        "real_ae_executed": {"type": "boolean"},
+        "mock_output_is_real_ae_evidence": {"const": false},
+        "resume_conditions": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^[A-Za-z0-9._ -]+(?:/[A-Za-z0-9._ -]+)*$"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0, "maximum": 68719476736}
+      }
+    },
+    "external_identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "file_id", "canonical_path_sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "file_id": {"type": "string", "minLength": 1},
+        "canonical_path_sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["after_effects", "aex", "ae_version", "ae_build"],
+      "properties": {
+        "after_effects": {"$ref": "#/$defs/external_identity"},
+        "aex": {"$ref": "#/$defs/external_identity"},
+        "ae_version": {"type": "string"},
+        "ae_build": {"type": "string"}
+      }
+    },
+    "preflight_result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "exit_code", "artifact", "stderr", "summary"],
+      "properties": {
+        "status": {"enum": ["completed", "failed", "unavailable"]},
+        "exit_code": {"type": ["integer", "null"]},
+        "artifact": {"$ref": "#/$defs/artifact"},
+        "stderr": {"type": "string", "maxLength": 4096},
+        "summary": {"type": "object"}
+      }
+    },
+    "process": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pid", "parent_pid", "name", "path"],
+      "properties": {"pid": {"type": "integer", "minimum": 0}, "parent_pid": {"type": "integer", "minimum": 0}, "name": {"type": "string"}, "path": {"type": ["string", "null"]}}
+    },
+    "module": {
+      "type": "object", "additionalProperties": false,
+      "required": ["process_id", "path"],
+      "properties": {"process_id": {"type": "integer", "minimum": 0}, "path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}, "file_id": {"type": "string"}}
+    }
+  }
+}
