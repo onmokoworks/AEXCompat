@@ -1,9 +1,11 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -146,6 +148,46 @@ class AexImageInputSmokeToolTests(unittest.TestCase):
                 worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
                 output_prefix=f"{time.time_ns()}-bad",
             )
+
+    def test_ofx_identity_failure_cleans_up_worker_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ppm_root = root / "ppm"
+            worker_root = root / "worker"
+            ofx_root = root / "ofx"
+            ppm_root.mkdir()
+            input_ppm = ppm_root / "input.ppm"
+            input_ppm.write_bytes(b"fixture")
+            worker_output = worker_root / "race-worker-identity.ppm"
+
+            def write_worker_output(**kwargs):
+                output = kwargs["output_ppm"]
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"worker-output")
+                return {"pixel_match": True, "dimension_match": True}, []
+
+            with (
+                mock.patch.object(aex_image_input_smoke_tool, "PPM_FIXTURE_ROOT", ppm_root),
+                mock.patch.object(aex_image_input_smoke_tool, "WORKER_SELFTEST_ROOT", worker_root),
+                mock.patch.object(aex_image_input_smoke_tool, "OFX_NOOP_ROOT", ofx_root),
+                mock.patch.object(aex_image_input_smoke_tool, "run_worker_identity", side_effect=write_worker_output),
+                mock.patch.object(
+                    aex_image_input_smoke_tool.aex_ofx_noop_mock,
+                    "build_mock_report",
+                    side_effect=FileExistsError("injected OFX output collision"),
+                ),
+            ):
+                with self.assertRaisesRegex(FileExistsError, "injected OFX output collision"):
+                    aex_image_input_smoke_tool.build_smoke_report(
+                        input_ppm=input_ppm,
+                        route_contract=make_route_contract(),
+                        route_contract_path=root / "route.json",
+                        ofx_facade=make_ofx_facade(),
+                        ofx_facade_path=root / "facade.json",
+                        worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
+                        output_prefix="race",
+                    )
+            self.assertFalse(worker_output.exists())
 
     def test_paths_are_confined_and_report_is_create_new(self):
         contract_root = LAB_ROOT / "target" / "ofx-route-contract"

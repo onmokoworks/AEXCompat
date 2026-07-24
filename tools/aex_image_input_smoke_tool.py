@@ -296,12 +296,16 @@ def build_smoke_report(
         input_ppm=resolved_input,
         output_ppm=worker_output_ppm,
     )
-    ofx_mock_report = aex_ofx_noop_mock.build_mock_report(
-        packet=ofx_facade,
-        packet_path=ofx_facade_path,
-        input_ppm=resolved_input,
-        output_ppm=ofx_output_ppm,
-    )
+    try:
+        ofx_mock_report = aex_ofx_noop_mock.build_mock_report(
+            packet=ofx_facade,
+            packet_path=ofx_facade_path,
+            input_ppm=resolved_input,
+            output_ppm=ofx_output_ppm,
+        )
+    except OSError:
+        worker_output_ppm.unlink(missing_ok=True)
+        raise
     if ofx_mock_report.get("mock_state") != "mock_identity_completed_route_closed":
         raise AssertionError(f"OFX no-op mock did not complete identity: {ofx_mock_report}")
     ofx_identity_check = ofx_mock_report.get("identity_check")
