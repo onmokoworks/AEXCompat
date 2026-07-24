@@ -1,8 +1,10 @@
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +15,43 @@ SPEC.loader.exec_module(gate)
 
 
 class MissingSuiteDiagnosticGateTests(unittest.TestCase):
+    def invoke_main(self, report: dict) -> int:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            fixture_root = root / "fixtures"
+            fixture_root.mkdir(parents=True)
+            harness = root / "harness.exe"
+            harness.write_bytes(b"fixture")
+            summary = Path(directory) / "summary.json"
+            argv = [
+                "aex_missing_suite_diagnostic_gate.py",
+                "--repository", str(root),
+                "--fixture-root", str(fixture_root),
+                "--harness", str(harness),
+                "--summary-out", str(summary),
+            ]
+            with mock.patch.object(gate, "run", return_value=report), mock.patch.object(
+                sys, "argv", argv
+            ):
+                exit_code = gate.main()
+            self.assertTrue(summary.exists())
+            self.assertEqual(json.loads(summary.read_text(encoding="utf-8")), report)
+            return exit_code
+
+    def test_cli_exit_code_propagates_inspection_failures(self):
+        self.assertEqual(
+            self.invoke_main({"inspect_failure_count": 1, "effect_inspect_failure_count": 1}),
+            1,
+        )
+        self.assertEqual(
+            self.invoke_main({"inspect_failure_count": 1, "effect_inspect_failure_count": 0}),
+            1,
+        )
+        self.assertEqual(
+            self.invoke_main({"inspect_failure_count": 0, "effect_inspect_failure_count": 0}),
+            0,
+        )
+
     def test_extracts_only_bounded_valid_unique_suites(self):
         stderr = 'failed: diagnostics={"missing_suites":[{"name":"PF World Suite","version":2},{"name":"PF World Suite","version":2},{"name":"C:\\\\private","version":1},{"name":"Bad","version":0}]}, report='
         self.assertEqual(gate.missing_suites(stderr), [{"name": "PF World Suite", "version": 2}])

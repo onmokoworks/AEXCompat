@@ -363,7 +363,7 @@ def main() -> int:
         json.dump(report, stream, indent=2, sort_keys=True)
         stream.write("\n")
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0
+    return 1 if report["inspect_failure_count"] or report["effect_inspect_failure_count"] else 0
 
 
 if __name__ == "__main__":
