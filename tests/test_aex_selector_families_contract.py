@@ -16,7 +16,10 @@ COLOR = (ROOT / "minihost/src/worker_color_settings_runtime.cpp").read_text(
 COMPUTE = (ROOT / "minihost/src/worker_compute_cache_suite.cpp").read_text(
     encoding="utf-8"
 )
-BOOTSTRAP_CPP = (ROOT / "minihost/src/worker_effect_bootstrap.cpp").read_text(
+CONTRACT = (ROOT / "minihost/src/generated/aex_abi_contract.hpp").read_text(
+    encoding="utf-8"
+)
+GENERATOR = (ROOT / "tools/generate-aex-abi-contract.py").read_text(
     encoding="utf-8"
 )
 
@@ -78,5 +81,9 @@ def test_compute_cache_suite_is_cataloged_and_purged_on_cluster_reset():
 
 def test_legacy_app_callback_is_wired_at_utils_offset_200():
     assert "host_app_callback" in L2
-    assert "// Legacy application-specific callback `app` (issue #362" in BOOTSTRAP_CPP
-    assert "200};" in BOOTSTRAP_CPP
+    # The app slot is generated into UTILITY_CALLBACK_OFFSETS from the ABI
+    # observation (issue #482 generator), last in the table so the hook order
+    # in make_bootstrap_abi_hooks matches one-to-one.
+    assert '"utils.app"' in GENERATOR
+    assert "UTILS_APP_OFFSET = 200" in CONTRACT
+    assert "std::array<std::size_t, 32> UTILITY_CALLBACK_OFFSETS" in CONTRACT

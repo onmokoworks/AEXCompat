@@ -2364,8 +2364,9 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
     // Handle callbacks in in_data->utils (issue #220): a conformant AE host
     // provides host_new_handle/lock/unlock/dispose/get_handle_size/resize
     // through the utility block, not only through the PF Handle Suite. The
-    // index order here must match the tail of kUtilityCallbackOffsets
-    // (160/168/176/184/440/464) in worker_effect_bootstrap.cpp.
+    // index order here must match the tail of the generated
+    // UTILITY_CALLBACK_OFFSETS (160/168/176/184/440/464/200, see
+    // tools/generate-aex-abi-contract.py).
     reinterpret_cast<void*>(&new_handle), reinterpret_cast<void*>(&lock_handle),
     reinterpret_cast<void*>(&unlock_handle), reinterpret_cast<void*>(&dispose_handle),
     reinterpret_cast<void*>(&handle_size), reinterpret_cast<void*>(&resize_handle),
