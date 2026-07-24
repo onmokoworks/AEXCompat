@@ -302,7 +302,7 @@ def main() -> int:
     )
     written = write_json_create_new(Path(args.out), audit)
     print(written)
-    return 0
+    return 0 if audit["audit_passed"] else 1
 
 
 if __name__ == "__main__":

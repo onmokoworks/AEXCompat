@@ -1,9 +1,11 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -168,6 +170,63 @@ def write_payloads(payloads: dict[str, dict]) -> dict[str, Path]:
 
 
 class AexSafetyChainAuditTests(unittest.TestCase):
+    def test_cli_exit_follows_audit_result_and_writes_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            roots = {
+                label: temporary_root / "inputs" / label
+                for label in aex_safety_chain_audit.ROOTS
+            }
+            output_root = temporary_root / "safety-audit"
+            with mock.patch.object(aex_safety_chain_audit, "ROOTS", roots), mock.patch.object(
+                aex_safety_chain_audit, "SAFETY_AUDIT_ROOT", output_root
+            ):
+                paths = write_payloads(artifact_payloads())
+                output = output_root / "clean.json"
+                argv = [
+                    "aex_safety_chain_audit.py",
+                    "--static-report", str(paths["static_report"]),
+                    "--fixture-manifest", str(paths["fixture_manifest"]),
+                    "--fixture-decision", str(paths["fixture_decision"]),
+                    "--worker-design", str(paths["worker_design"]),
+                    "--worker-selftest", str(paths["worker_selftest"]),
+                    "--dependency-review", str(paths["dependency_review"]),
+                    "--load-gate", str(paths["load_gate"]),
+                    "--native-loader-stub", str(paths["native_loader_stub"]),
+                    "--ofx-facade", str(paths["ofx_facade"]),
+                    "--ofx-noop-mock", str(paths["ofx_noop_mock"]),
+                    "--out", str(output),
+                ]
+                with mock.patch.object(sys, "argv", argv):
+                    self.assertEqual(aex_safety_chain_audit.main(), 0)
+                self.assertTrue(json.loads(output.read_text(encoding="utf-8"))["audit_passed"])
+
+                payloads = artifact_payloads()
+                payloads["ofx_noop_mock"]["ofx_route_invoked"] = True
+                paths = write_payloads(payloads)
+                output = output_root / "failed.json"
+                argv[-1] = str(output)
+                for index, label in enumerate(
+                    (
+                        "static_report",
+                        "fixture_manifest",
+                        "fixture_decision",
+                        "worker_design",
+                        "worker_selftest",
+                        "dependency_review",
+                        "load_gate",
+                        "native_loader_stub",
+                        "ofx_facade",
+                        "ofx_noop_mock",
+                    )
+                ):
+                    argv[2 + index * 2] = str(paths[label])
+                with mock.patch.object(sys, "argv", argv):
+                    self.assertEqual(aex_safety_chain_audit.main(), 1)
+                report = json.loads(output.read_text(encoding="utf-8"))
+                self.assertFalse(report["audit_passed"])
+                self.assertIn("ofx_noop_mock ofx_route_invoked must be false", report["errors"])
+
     def test_audit_passes_clean_no_load_chain(self):
         paths = write_payloads(artifact_payloads())
         report = aex_safety_chain_audit.build_audit(paths)
