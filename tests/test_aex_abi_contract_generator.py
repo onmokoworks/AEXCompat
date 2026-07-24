@@ -41,11 +41,13 @@ def test_cpp_and_rust_share_observed_constants():
     ):
         assert f"{name} = {value}" in cpp
         assert f"{name}: usize = {value}" in rust
-    input_offsets = "0, 8, 16, 24, 32, 40, 48, 56, 64, 96, 104, 112"
+    input_offsets = (
+        "INTER_CHECKOUT_PARAM_OFFSET, INTER_CHECKIN_PARAM_OFFSET, "
+        "INTER_ADD_PARAM_OFFSET"
+    )
     utility_offsets = (
-        "0, 8, 16, 32, 48, 56, 64, 72, 96, 104, 488, 496, 88, 112, "
-        "120, 152, 224, 248, 296, 304, 328, 336, 432, 528, 536, 160, "
-        "168, 176, 184, 440, 464"
+        "UTILS_BEGIN_SAMPLING_OFFSET, UTILS_SUBPIXEL_SAMPLE_OFFSET, "
+        "UTILS_AREA_SAMPLE_OFFSET"
     )
     for output in (cpp, rust):
         assert input_offsets in output
@@ -86,6 +88,10 @@ def test_missing_required_field_is_rejected(tmp_path):
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
+        (
+            lambda data: data.update(schema_version=True),
+            "schema_version must be 1",
+        ),
         (lambda data: data.update(architecture="arm64-macos"), "architecture"),
         (lambda data: data.update(pointer_size=4), "pointer_size"),
         (

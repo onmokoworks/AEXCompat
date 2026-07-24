@@ -191,7 +191,7 @@ def load_contract(path: Path) -> dict[str, Any]:
         raise ContractError(str(exc)) from exc
     if not isinstance(data, dict):
         raise ContractError("contract root must be an object")
-    if data.get("schema_version") != 1:
+    if type(data.get("schema_version")) is not int or data["schema_version"] != 1:
         raise ContractError("schema_version must be 1")
     if data.get("source_kind") != "compiled_instrument_observation":
         raise ContractError("source_kind must be compiled_instrument_observation")
@@ -281,7 +281,7 @@ def render_cpp(data: dict[str, Any], source: Path) -> str:
     tables = "\n".join(
         "inline constexpr std::array<std::size_t, "
         f"{len(field_names)}> {table_name}{{"
-        + ", ".join(str(data["fields"][name]["offset"]) for name in field_names)
+        + ", ".join(f"{ident(name)}_OFFSET" for name in field_names)
         + "};"
         for table_name, field_names in CALLBACK_TABLES.items()
     )
@@ -303,7 +303,7 @@ def render_rust(data: dict[str, Any], source: Path) -> str:
     )
     tables = "\n".join(
         f"pub const {table_name}: [usize; {len(field_names)}] = ["
-        + ", ".join(str(data["fields"][name]["offset"]) for name in field_names)
+        + ", ".join(f"{ident(name)}_OFFSET" for name in field_names)
         + "];"
         for table_name, field_names in CALLBACK_TABLES.items()
     )
