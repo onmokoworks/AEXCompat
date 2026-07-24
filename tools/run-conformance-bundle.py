@@ -78,6 +78,8 @@ NATIVE_WORKERS = (
 )
 RESERVED_BUNDLE_FILES = {"manifest.json", "report.json"}
 RESERVED_BUNDLE_DIRECTORIES = {"diagnostics", "outputs", "raw", "requests", "target"}
+SUCCESS_CLASSIFICATIONS = frozenset({"ok", "empty_result"})
+RESULT_FAILURE_EXIT_CODE = 3
 
 
 def load_json(path: Path) -> Any:
@@ -1022,7 +1024,11 @@ def runner_identity() -> dict[str, Any]:
 
 
 def write_run_state(
-    output_root: Path, status: str, depth_diagnostics: dict[str, Any], report_written: bool
+    output_root: Path,
+    status: str,
+    depth_diagnostics: dict[str, Any],
+    report_written: bool,
+    failure_classifications: list[str] | None = None,
 ) -> None:
     path = output_root / "diagnostics" / "run.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1030,6 +1036,7 @@ def write_run_state(
         "schema_version": 1,
         "status": status,
         "report_written": report_written,
+        "failure_classifications": failure_classifications or [],
         "bundle_runner": runner_identity(),
         "depths": depth_diagnostics,
     }
@@ -1058,6 +1065,11 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--adapter-command", type=Path)
+    parser.add_argument(
+        "--allow-failures",
+        action="store_true",
+        help="write a completed_with_failures bundle and return zero when a depth fails",
+    )
     args = parser.parse_args()
 
     output_root = args.out.resolve()
@@ -1190,7 +1202,23 @@ def main() -> int:
         (output_root / "report.json").write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-        write_run_state(output_root, "completed", depth_diagnostics, True)
+        failure_classifications = sorted(
+            {
+                str(result["classification"])
+                for result in results
+                if result["classification"] not in SUCCESS_CLASSIFICATIONS
+            }
+        )
+        run_status = "completed_with_failures" if failure_classifications else "completed"
+        write_run_state(
+            output_root,
+            run_status,
+            depth_diagnostics,
+            True,
+            failure_classifications,
+        )
+        if failure_classifications and not args.allow_failures:
+            return RESULT_FAILURE_EXIT_CODE
     except Exception as error:
         write_failure_evidence(output_root, stage, error)
         write_run_state(output_root, "failed", depth_diagnostics, False)

@@ -365,3 +365,31 @@ bridge (aviutl2-multifilter):
   manifest 外 index → プロトコル違反、audit 不一致 → fail-closed。
 - 計測: `examples/sweep_stage_timing.rs` をクラスタ対応に拡張し、
   同一クラスタの sweep 時間を before/after で記録する。
+
+## 10. BIB (#395) との統合 (owner review P1-1、2026-07-24 追記)
+
+main の #395 (BIB suite provider + `set_pre_unload_hook(&teardown_bib_suite,
+nullptr)` による終端 teardown) とクラスタセッションの共存契約:
+
+- **BIB teardown は session-global**。swap では消費せず、セッションの最後の
+  終了時に 1 回だけ実行する。`WorkerSession` は per-swap の quiesce と
+  終端 pre-unload hook を別機構に分離する: `set_pre_unload_hook` (終端、
+  BIB 用、1 回 latch) と `set_swap_quiesce_hook` (swap 用、latch なし)。
+  `swap_release_module` は swap 用 hook のみを呼び、終端 hook には触れない。
+- **render クラスタセッション**: launch 時の
+  `set_pre_unload_hook(&teardown_bib_suite, nullptr)` は main と同一。
+  swap は per-swap quiesce (hook 未設定なら trivial pass) のみで、BIB
+  teardown は `session.finish*` の terminal capture 時に 1 回だけ走る。
+- **discovery セッション** (WorkerSession を介さない手動経路): 各 swap と
+  terminal teardown の順序を **GLOBAL_SETDOWN → plug-in/module audit →
+  BIB owned-only Terminate → FreeLibrary** とする。per-swap では audit →
+  FreeLibrary のみ (BIB は呼ばない)。terminal では audit capture 後に
+  `teardown_bib_suite(nullptr)` を明示呼出ししてから FreeLibrary する。
+- **borrowed / missing / init-failure の BIB には Terminate を呼ばない**。
+  これは `teardown_bib_suite` 自身の `owned && !termination_attempted`
+  ゲートが保証する (owned 化した場合だけ terminate する)。
+- **receipt**: discovery の最終 stdout レポートに `bib_terminations`
+  (worker_host_suite_wiring の `bib_termination_attempt_count()`、latch
+  により 0 または 1) を含め、audit/epoch と併せて BIB 終了回数を検証
+  可能にする。BIB teardown 失敗 (owned だが token 不一致等) は fail-closed
+  で exit 25 (swap/BIB-teardown 失敗系統) とする。

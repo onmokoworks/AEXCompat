@@ -1,23 +1,23 @@
-# Conformance bundle contract / ???bundle??
+# Conformance bundle contract / 互換性bundle契約
 
-??????????English follows each section.
+日本語を正とします。English follows each section.
 
-## ?? / Purpose
+## 目的 / Purpose
 
-Issue #4 runner????????fixture???????????manifest?????identity??????????report?depth??selector?world?failure classification?Suite???oracle?????????
+Issue #4 runnerが生成・検証するfixtureと結果の最小契約です。manifestは実行前のidentityと実行条件を固定し、reportはdepth別のselector、world、failure classification、Suite履歴、oracle状態を記録します。
 
 This is the minimum fixture and result contract generated and verified by the Issue #4 runner. The manifest pins pre-run identities and execution conditions. The report records selectors, worlds, failure classifications, Suite history, and oracle state for each depth.
 
-## ?? / Rules
+## 規則 / Rules
 
-- ?artifact?bundle root?????POSIX path?lowercase SHA-256?byte size???????
-- validator???????file handle????hash?????Windows??`CreateFileW`?`GetFinalPathNameByHandleW`?POSIX??`dirfd`?`O_NOFOLLOW`??????????handle-based open???????platform?fail-closed???
-- ??field???path??directory???backslash path?Windows??????????
-- captured oracle?requested depth???????depth?artifact map?????result?expected hash???depth?artifact??????
-- `exact: true`?AE oracle?captured?identity????render???raw output?????hash????pixel mismatch?0??????????
-- manifest????parameter??premultiplication?color management?linear light?renderer???????
-- report?parameter metadata?depth?input/output world?raw artifact?Suite timeline???????
-- AEX?????DLL????runner??identity?????????
+- 全artifactはbundle rootからの相対POSIX path、lowercase SHA-256、byte sizeで識別します。
+- validatorは実際に開いたfile handleを検証・hash化します。Windowsでは`CreateFileW`と`GetFinalPathNameByHandleW`、POSIXでは`dirfd`と`O_NOFOLLOW`を使用します。安全なhandle-based openを提供できないplatformはfail-closedです。
+- 未知field、絶対path、親directory参照、backslash path、Windows予約名を拒否します。
+- captured oracleはrequested depthと完全一致するdepth別artifact mapを持ち、各resultのexpected hashを同じdepthのartifactへ結びます。
+- `exact: true`はAE oracleがcaptured、identityが一致、render成功、raw outputが存在し、hash一致かつpixel mismatchが0の場合だけ有効です。
+- manifestは時間、parameter値、premultiplication、color management、linear light、rendererを固定します。
+- reportはparameter metadata、depth別input/output worldとraw artifact、Suite timelineを保持します。
+- AEX本体、依存DLL、入力、runnerは別identityとして保持します。
 
 All artifacts use bundle-relative POSIX paths, lowercase SHA-256, and byte size. The validator hashes the opened file handle itself. It uses `CreateFileW` plus `GetFinalPathNameByHandleW` on Windows and `dirfd` plus `O_NOFOLLOW` on POSIX; unsupported platforms fail closed. Captured oracle artifacts form a depth-keyed map that exactly matches requested depths, and each result binds to the oracle artifact for the same depth. Exact agreement additionally requires matching identities, a successful render, a real raw output, matching hashes, and zero mismatched pixels.
 
@@ -47,6 +47,12 @@ Current native execution supports disabled color management, no working space, l
 disabled, and the `AEXCompat CPU`/`software` renderer aliases. Generated bundle paths
 (`manifest.json`, `report.json`, and the `diagnostics`, `outputs`, `raw`, `requests`, and
 `target` namespaces) are reserved and cannot be used by pinned artifacts.
+
+The runner returns exit code `0` only when every requested depth is `ok` or the legal SmartFX
+`empty_result`. A report containing another classification is still written for diagnosis, but
+the default exit code is `3` and `diagnostics/run.json` records `completed_with_failures`. Batch
+collectors that intentionally aggregate failed cells must pass `--allow-failures`; that keeps exit
+code `0` while retaining the `completed_with_failures` state.
 
 ## Agent-facing harness contract
 

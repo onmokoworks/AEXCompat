@@ -35,6 +35,8 @@
 
 #include <cstdint>
 #include <iterator>
+#include <mutex>
+#include <windows.h>
 
 // Host suite catalog wiring moved from worker_main (issue #171): the
 // component providers, the assembly hook table, the static suite catalog,
@@ -92,7 +94,108 @@ auto& g_gpu_device_suite1 =
 bool& g_aegp_init_mode = aexcompat::worker_runtime::aegp_init::state().init_mode;
 bool& g_aegp_command_roundtrip_mode =
     aexcompat::scene_runtime::scene_runtime_state().command_roundtrip_mode;
+
+using BibResolver = void* (__cdecl *)(const char* interface_name,
+                                      const char* procedure_name,
+                                      const char* signature);
+using BibGetResolver = BibResolver (__cdecl *)();
+using BibInitialize4 = BibResolver (__cdecl *)(
+    void*, void*, void*, void*, void*, void*, void*, void*, int32_t,
+    uintptr_t, void*);
+using BibTerminate = uint32_t (__cdecl *)();
+constexpr uintptr_t kBibOwnershipToken = 0x13579BDFu;
+
+struct BibSuiteState {
+  std::mutex mutex;
+  std::array<void*, 1> suite{};
+  BibResolver resolver{};
+  BibTerminate terminate{};
+  bool attempted{};
+  bool owned{};
+  bool termination_attempted{};
+  uint32_t termination_attempts{};
+};
+
+BibSuiteState& bib_suite_state() {
+  static BibSuiteState state;
+  return state;
+}
+
+const void* provide_bib_suite(void*) {
+  auto& state = bib_suite_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.attempted) return state.resolver ? state.suite.data() : nullptr;
+  state.attempted = true;
+
+  // The dependency closure has already authenticated and loaded BIB.dll before
+  // the worker reaches the suite catalog. Do not turn a suite request into an
+  // arbitrary DLL load or bypass the sealed dependency/module audit.
+  const HMODULE bib = GetModuleHandleW(L"BIB.dll");
+  if (!bib) return nullptr;
+  const auto get_resolver = reinterpret_cast<BibGetResolver>(
+      GetProcAddress(bib, "BIBGetGetProcAddress"));
+  if (get_resolver) state.resolver = get_resolver();
+  if (!state.resolver) {
+    const auto initialize = reinterpret_cast<BibInitialize4>(
+        GetProcAddress(bib, "BIBInitialize4"));
+    const auto terminate = reinterpret_cast<BibTerminate>(
+        GetProcAddress(bib, "BIBTerminate"));
+    if (!initialize || !terminate) return nullptr;
+    // AdobePIE's private callbacks are intentionally not guessed here. The
+    // verified BIB fallback accepts null callbacks and keeps ownership inside
+    // this worker process; shutdown is therefore process-scoped and never
+    // releases an Adobe-owned initialization.
+    state.resolver = initialize(nullptr, nullptr, nullptr, nullptr, nullptr,
+                                nullptr, nullptr, nullptr, 1, kBibOwnershipToken, nullptr);
+    if (state.resolver) {
+      state.terminate = terminate;
+      state.owned = true;
+    }
+  }
+  if (!state.resolver) return nullptr;
+
+  constexpr const char* required[] = {
+      "BIBRegisterProcAddress", "BIBReportError",
+      "BIBUnregisterInterface", "BIBGetUnregisterCountAddr",
+      "BIBIsMultiThreaded",
+  };
+  for (const char* procedure : required) {
+    if (!state.resolver("BIB", procedure, procedure)) {
+      state.resolver = nullptr;
+      return nullptr;
+    }
+  }
+  state.suite[0] = reinterpret_cast<void*>(state.resolver);
+  return state.suite.data();
+}
+
+bool teardown_bib_suite_impl(void*) noexcept {
+  auto& state = bib_suite_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (!state.owned || state.termination_attempted) return true;
+  state.termination_attempted = true;
+  ++state.termination_attempts;
+  if (!state.terminate) return false;
+  const uint32_t token = state.terminate();
+  state.owned = false;
+  state.resolver = nullptr;
+  state.suite[0] = nullptr;
+  return token == kBibOwnershipToken;
+}
 }  // namespace
+
+bool teardown_bib_suite(void* context) noexcept {
+  return teardown_bib_suite_impl(context);
+}
+
+// Number of owned-BIB termination attempts so far (0 or 1 by construction:
+// the latch above makes the teardown single-shot). Read by the cluster
+// session's final receipt (owner review P1-1, issue #405).
+uint32_t bib_termination_attempt_count() noexcept {
+  auto& state = bib_suite_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.termination_attempts;
+}
 
 bool mask_suite_provider_available(void*) { return aexcompat::mask_runtime::model_enabled(); }
 
@@ -225,6 +328,7 @@ bool configure_component_suite_catalog() {
   const StaticSuite component_suites[] = {
       {"AE Plugin Helper Suite", 1, aexcompat::pf_helper::suite1()},
       {"AE Plugin Helper Suite2", 2, aexcompat::pf_helper::suite2()},
+      {"AEFX Text BIB Suite", 1, nullptr, &provide_bib_suite},
       {"PF Cache On Load Suite", 1, &cache_on_load_suite()},
       {"PF AE Adv Time Suite", 1,
        aexcompat::worker_runtime::pf_adv_time::suite(1)},

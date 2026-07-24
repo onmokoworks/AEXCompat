@@ -51,7 +51,6 @@
 #include "gpu_opencl_backend.hpp"
 #include "gpu_memory_world_transport.hpp"
 #include "host_audio_runtime.hpp"
-#include "extended_inter_memory.hpp"
 #include "l2_cli_dispatch.h"
 #include "aex_string_table.hpp"
 #include "l2_mode_execution.hpp"
@@ -170,6 +169,8 @@ using namespace aexcompat::color_settings;
 
 int32_t __cdecl acquire_suite(const char* name, int32_t version, const void** suite);
 int32_t __cdecl release_suite(const char* name, int32_t version);
+bool teardown_bib_suite(void*) noexcept;
+uint32_t bib_termination_attempt_count() noexcept;
 
 // Retained worker-entry identity state (issue #126 Phase D). The worker-kind
 // selector is set once by the entry shims before worker_main runs and is part
@@ -980,62 +981,63 @@ bool verify_plugin_data_entrypoint() {
 // show; bundled effects call in_data+0x60 first thing in GLOBAL_SETUP
 // (allocating 0xFA0 bytes) and release it through in_data+0x70, while
 // PARAMS_SETUP resolves parameter-name strings through in_data+0x68.
-// Allocation/release is owned by extended_inter_memory (issue #395): a
-// host-owned allocation set so a plug-in cannot make the host free a static
-// or foreign pointer, and a zero-size slot still yields a releasable token.
 int32_t __cdecl host_extended_alloc(void** out, std::size_t size) {
-  return aexcompat::extended_inter::allocate(out, size);
+  if (!out || size == 0 || size > (size_t{1} << 24)) return 4;
+  void* buffer = std::calloc(1, size);
+  if (!buffer) return 4;
+  *out = buffer;
+  return 0;
 }
 int32_t __cdecl host_extended_free(void** ptr) {
-  return aexcompat::extended_inter::release(ptr);
+  // The plug-in passes the address of its buffer pointer (lea rcx,[local]),
+  // not the buffer itself.
+  if (ptr) std::free(*ptr);
+  return 0;
 }
 
-// Parameter-name strings ride the plug-in's own read-only PE string table
-// ($$$/... localization keys, issue #396): the table is parsed from the
-// loaded module's file image once per plug-in and looked up by id, replacing
-// the #382 placeholder that answered every name with "AEXCompat".
-aexcompat::aex_strings::StringTable aex_string_table;
-const aexcompat::aex_strings::StringTable* g_active_aex_string_table = nullptr;
+constexpr std::uintmax_t kMaxAexStringTableFileBytes = 256u * 1024u * 1024u;
+thread_local const aexcompat::aex_strings::StringTable*
+    g_active_aex_string_table = nullptr;
 
-bool load_aex_string_table(HMODULE module,
-                           aexcompat::aex_strings::StringTable& table) {
-  table = aexcompat::aex_strings::StringTable{};
-  if (!module) return false;
-  std::array<wchar_t, 32768> module_buffer{};
-  const DWORD module_length = GetModuleFileNameW(
-      module, module_buffer.data(), static_cast<DWORD>(module_buffer.size()));
-  if (module_length == 0 || module_length >= module_buffer.size()) return false;
-  std::error_code file_error;
-  const uint64_t file_size =
-      std::filesystem::file_size(module_buffer.data(), file_error);
-  constexpr uint64_t kMaxImageBytes = 64ULL * 1024 * 1024;
-  if (file_error || file_size == 0 || file_size > kMaxImageBytes) return false;
-  std::ifstream input(module_buffer.data(), std::ios::binary);
-  std::vector<unsigned char> bytes(static_cast<std::size_t>(file_size));
-  if (!input.read(reinterpret_cast<char*>(bytes.data()),
-                  static_cast<std::streamsize>(bytes.size())) ||
-      input.peek() != std::ifstream::traits_type::eof())
+bool load_aex_string_table(
+    HMODULE module, aexcompat::aex_strings::StringTable& table) {
+  table = {};
+  wchar_t module_path[32768]{};
+  const DWORD length = GetModuleFileNameW(
+      module, module_path, static_cast<DWORD>(std::size(module_path)));
+  if (length == 0 || length >= std::size(module_path)) {
+    table.status = aexcompat::aex_strings::ParseStatus::Invalid;
     return false;
-  table = aexcompat::aex_strings::parse_readonly_pe_strings(bytes.data(),
-                                                            bytes.size());
+  }
+  std::ifstream input(std::filesystem::path(module_path), std::ios::binary);
+  if (!input) {
+    table.status = aexcompat::aex_strings::ParseStatus::Invalid;
+    return false;
+  }
+  input.seekg(0, std::ios::end);
+  const std::streamoff end = input.tellg();
+  if (end <= 0 || static_cast<std::uintmax_t>(end) >
+                       kMaxAexStringTableFileBytes) {
+    table.status = aexcompat::aex_strings::ParseStatus::Invalid;
+    return false;
+  }
+  input.seekg(0, std::ios::beg);
+  std::vector<unsigned char> bytes(static_cast<std::size_t>(end));
+  input.read(reinterpret_cast<char*>(bytes.data()),
+             static_cast<std::streamsize>(bytes.size()));
+  if (!input) {
+    table.status = aexcompat::aex_strings::ParseStatus::Invalid;
+    return false;
+  }
+  table = aexcompat::aex_strings::parse_readonly_pe_strings(
+      bytes.data(), bytes.size());
   return table.status != aexcompat::aex_strings::ParseStatus::Invalid;
 }
 
-void refresh_aex_string_table(HMODULE module) {
-  const bool loaded = load_aex_string_table(module, aex_string_table);
-  g_active_aex_string_table = loaded ? &aex_string_table : nullptr;
-  const char* status =
-      aex_string_table.status == aexcompat::aex_strings::ParseStatus::Valid
-          ? "valid"
-          : (aex_string_table.status == aexcompat::aex_strings::ParseStatus::NoEntries
-                 ? "no_entries"
-                 : "invalid");
-  std::cerr << "string_table_status:" << status << "\n" << std::flush;
-}
-
 const char* __cdecl host_extended_lookup(void*, int32_t id, void*, void*) {
-  return g_active_aex_string_table ? g_active_aex_string_table->lookup(id)
-                                   : nullptr;
+  return g_active_aex_string_table
+             ? g_active_aex_string_table->lookup(id)
+             : nullptr;
 }
 
 void append_pipl_u32(std::vector<unsigned char>& bytes, uint32_t value) {
@@ -2280,6 +2282,23 @@ void reset_cluster_effect_state() {
   aexcompat::pf_state_runtime::reset_pf_state_statistics();
 }
 
+// Cluster-session plug-in string table (#405 on the #396 contract): the
+// launch path keeps its own local table; swapped/inspected plug-ins keep
+// theirs in the session scope so the thread-local active pointer never
+// dangles past the loader's frame.
+void activate_plugin_string_table(HMODULE module,
+                                  aexcompat::aex_strings::StringTable& table) {
+  load_aex_string_table(module, table);
+  const char* status =
+      table.status == aexcompat::aex_strings::ParseStatus::Valid
+          ? "valid"
+          : table.status == aexcompat::aex_strings::ParseStatus::NoEntries
+              ? "none"
+              : "invalid";
+  std::cerr << "string_table_status:" << status << "\n" << std::flush;
+  g_active_aex_string_table = &table;
+}
+
 // Render-session cluster swap (closure-session design §4.1): the session
 // frame loop owns SEQUENCE teardown and the swap_done response; this hook
 // owns everything from GLOBAL_SETDOWN to GLOBAL_SETUP/PARAMS_SETUP and the
@@ -2295,6 +2314,9 @@ struct ClusterSwapContext {
       run_bootstrap;
   int32_t current_plugin_index{0};
   int32_t current_global_error{-1};
+  // String table of the currently loaded plug-in (#396): swapped in place so
+  // the thread-local active pointer tracks the session's current plug-in.
+  aexcompat::aex_strings::StringTable aex_string_table;
 };
 
 aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
@@ -2319,8 +2341,10 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
     result.hard_failure = true;
     return result;
   }
-  // Steps 2-4: quiescence, epoch pre_unload, FreeLibrary of the plug-in only
-  // (the cookie and pinned closure dependencies stay loaded).
+  // Steps 2-4: per-swap quiescence (the session-global BIB teardown hook is
+  // NOT consumed here; it runs once at the terminal teardown), epoch
+  // pre_unload, FreeLibrary of the plug-in only (the cookie and pinned
+  // closure dependencies stay loaded).
   if (!context.session->swap_release_module(
           static_cast<uint32_t>(context.current_plugin_index))) {
     result.hard_failure = true;
@@ -2367,8 +2391,9 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
     result.global_setup_error = -1;
     return result;
   }
-  // The swapped-in plug-in's string table drives its PARAMS_SETUP lookups.
-  refresh_aex_string_table(module);
+  // The swapped-in plug-in's string table drives its PARAMS_SETUP lookups
+  // (issue #396), replacing the launch plug-in's table.
+  activate_plugin_string_table(module, context.aex_string_table);
   // GLOBAL_SETUP / PARAMS_SETUP through the launch bootstrap on fresh
   // buffers and fresh host records (ABOUT stays whatever the launch did).
   reset_cluster_effect_state();
@@ -2413,7 +2438,8 @@ int run_discovery_session(const std::wstring& manifest_argument,
   using aexcompat::strict_json::json_string;
   // Exit codes on this path: 2 usage, 3 manifest/config rejection, 11 DLL
   // policy/pin failure, 13 stdout redirect failure, 14 terminal audit
-  // failure, 23 protocol violation, 25 swap failure (closure design §7).
+  // failure, 23 protocol violation, 25 swap/BIB-teardown failure (closure
+  // design §7).
   if (manifest_argument.empty()) return 2;
   cluster::Manifest manifest;
   if (!cluster::load_manifest(manifest_argument, manifest)) return 3;
@@ -2443,6 +2469,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
   }
 
   aexcompat::worker_runtime::effect_bootstrap::State effect_state;
+  aexcompat::aex_strings::StringTable aex_string_table;
   HMODULE current_module = nullptr;
   EffectEntry current_entry = nullptr;
   int32_t current_index = -1;
@@ -2456,10 +2483,14 @@ int run_discovery_session(const std::wstring& manifest_argument,
   int32_t expected_request_index = 0;
   bool protocol_violation = false;
   bool swap_failure = false;
+  bool bib_teardown_failed = false;
 
-  // Terminal teardown shared by every exit path after the session loop:
-  // GLOBAL_SETDOWN, the terminal pre_unload audit, plug-in unload, pin
-  // release (reverse), cookie removal, stdout restore, final report.
+  // Terminal teardown shared by every exit path after the session loop. The
+  // ownership order is explicit (owner review P1-1): GLOBAL_SETDOWN →
+  // plug-in/module audit → BIB owned-only Terminate (session-global, runs
+  // exactly once here — never per swap — and never for a borrowed, missing,
+  // or init-failed BIB) → FreeLibrary. Pin release (reverse), cookie removal,
+  // stdout restore, final report follow.
   const auto finish_session = [&](int exit_code) -> int {
     if (current_module) {
       if (current_entry) {
@@ -2472,8 +2503,13 @@ int run_discovery_session(const std::wstring& manifest_argument,
         }
       }
       audit.pre_unload = wr::capture_module_audit();
+      if (!teardown_bib_suite(nullptr)) bib_teardown_failed = true;
       FreeLibrary(current_module);
       current_module = nullptr;
+    } else {
+      // No plug-in survived to teardown, but an owned BIB may still be live
+      // from an earlier plug-in; terminate it before the pins release.
+      if (!teardown_bib_suite(nullptr)) bib_teardown_failed = true;
     }
     pins.release();
     RemoveDllDirectory(sealed_cookie);
@@ -2481,9 +2517,12 @@ int run_discovery_session(const std::wstring& manifest_argument,
     const bool audit_ok = !audit.required ||
         (audit.pre_unload.status == "passed" && wr::module_audit_passed());
     std::cout << "{\"schema_version\":1,\"stage\":\"discovery_session\",\"status\":\""
-              << (exit_code == 0 ? "discovery_session_completed" : "discovery_session_failed")
-              << "\",\"module_audit\":" << wr::module_audit_json() << "}\n";
+              << (exit_code == 0 && !bib_teardown_failed
+                      ? "discovery_session_completed" : "discovery_session_failed")
+              << "\",\"bib_terminations\":" << bib_termination_attempt_count()
+              << ",\"module_audit\":" << wr::module_audit_json() << "}\n";
     if (!audit_ok && exit_code == 0) return 14;
+    if (bib_teardown_failed && exit_code == 0) return 25;
     return exit_code;
   };
 
@@ -2592,6 +2631,8 @@ int run_discovery_session(const std::wstring& manifest_argument,
     if (plugin_index != current_index) {
       // Swap to plugins[N] (design §4.2): the same column as the render
       // swap (GLOBAL_SETDOWN → quiesce → unload → load → GLOBAL_SETUP).
+      // BIB teardown is session-global and deliberately NOT run here; it
+      // runs once in finish_session above.
       wr::ModuleAuditSnapshot pre_unload;
       int32_t outgoing_index = -1;
       if (current_module) {
@@ -2611,8 +2652,8 @@ int run_discovery_session(const std::wstring& manifest_argument,
           }
           current_setdown_pending = false;
         }
-        // Quiescence barrier: no pre-unload hook is registered on this path,
-        // so the barrier is the terminal-audit owner's trivial pass.
+        // Per-swap quiescence barrier: no swap hook is registered on this
+        // path, so the barrier is the terminal-audit owner's trivial pass.
         pre_unload = wr::capture_module_audit();
         if (pre_unload.status != "passed" || !wr::module_audit_passed()) {
           std::cerr << "stage:cluster_swap step=pre_unload_audit status="
@@ -2670,7 +2711,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
       else
         current_entry = nullptr;
       if (current_entry) {
-        refresh_aex_string_table(current_module);
+        activate_plugin_string_table(current_module, aex_string_table);
         inspect_column();
       } else {
         current_global_error = -1;
@@ -2713,6 +2754,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
   if (swap_failure) return finish_session(25);
   return finish_session(0);
 }
+
 
 int worker_main_impl(int argc, wchar_t **argv) {
   if (const int bootstrap_error = configure_worker_entry_bootstrap())
@@ -2902,6 +2944,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       runtime_context);
   if (admission_error != 0) return admission_error;
   WorkerSession session(runtime_context, trace_writer.get(), &g_trace_writer);
+  (void)session.set_pre_unload_hook(&teardown_bib_suite, nullptr);
   g_plugin_file_path = session.plugin_path().wstring();
   HMODULE module = session.module();
   if (g_aegp_init_mode) {
@@ -2998,10 +3041,17 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     std::cerr << "plugin_kind:unknown_no_effect_entrypoint\n" << std::flush;
     return session.finish(12);
   }
-  // The admitted plug-in's string table drives its PARAMS_SETUP lookups
-  // (issue #396).
-  refresh_aex_string_table(module);
 
+  aexcompat::aex_strings::StringTable aex_string_table;
+  load_aex_string_table(module, aex_string_table);
+  const char* string_table_status =
+      aex_string_table.status == aexcompat::aex_strings::ParseStatus::Valid
+          ? "valid"
+          : aex_string_table.status == aexcompat::aex_strings::ParseStatus::NoEntries
+              ? "none"
+              : "invalid";
+  std::cerr << "string_table_status:" << string_table_status << "\n" << std::flush;
+  g_active_aex_string_table = &aex_string_table;
   aexcompat::worker_runtime::effect_bootstrap::State effect_state{};
   auto& input = effect_state.input;
   auto& output = effect_state.output;
@@ -3028,6 +3078,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         make_bootstrap_runtime_hooks());
   };
   const auto bootstrap = run_bootstrap(entry);
+  g_active_aex_string_table = nullptr;
   const int32_t global_error = bootstrap.global_error;
   const int32_t about_error = bootstrap.about_error;
   const int32_t params_error = bootstrap.params_error;
@@ -3102,8 +3153,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       !invocation.cluster_manifest_path.empty()) {
     std::error_code cluster_canonical_error;
     const std::filesystem::path launch_plugin_root = std::filesystem::canonical(
-        cluster::normalize_verbatim(session.plugin_path()).parent_path(),
-        cluster_canonical_error);
+        session.plugin_path().parent_path(), cluster_canonical_error);
     if (!cluster::load_manifest(invocation.cluster_manifest_path, cluster_manifest))
       return session.finish(3);
     std::string argv_sha256;
@@ -3315,7 +3365,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         {entry, &input, &output, &invocation, argv, params_error,
          image_render_supported, depth_supported, smart_render_supported,
          cluster_session_active ? &cluster_swap_hook : nullptr});
-    if (dispatch.case_id_rejected) return session.finish(2);
+    if (dispatch.case_id_rejected) {
+      dispose_arbitrary_defaults(entry, input, output);
+      if (global_error == 0)
+        invoke_global_setdown(entry, input.data(), output.data());
+      return session.finish(2);
+    }
     case_id = dispatch.case_id;
     input_hash = dispatch.input_hash;
     output_hash = dispatch.output_hash;
@@ -3349,7 +3404,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     const auto dispatch = aexcompat::worker_runtime::invocation::run_smart_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,
          image_render_supported, depth_supported, smart_render_supported});
-    if (dispatch.case_id_rejected) return session.finish(2);
+    if (dispatch.case_id_rejected) {
+      dispose_arbitrary_defaults(entry, input, output);
+      if (global_error == 0)
+        invoke_global_setdown(entry, input.data(), output.data());
+      return session.finish(2);
+    }
     case_id = dispatch.case_id;
     smart = dispatch.smart;
     lifetime_fault_observed = dispatch.lifetime_fault_observed;

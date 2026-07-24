@@ -1422,6 +1422,111 @@ impl Drop for MfSession {
     }
 }
 
+/// A render session whose close-time validation failed (issue #405, design
+/// §6/§7). Every session thread inspects its `RenderSession::close` summary;
+/// when the close-time module audit, teardown, or worker-exit checks fail,
+/// the failure is recorded here instead of being dropped — a frame the
+/// session delivered must never stand as an untracked success ("never round
+/// a failure into a success"). Bounded to the most recent failures.
+#[derive(Clone, Debug)]
+struct SessionCloseFailure {
+    /// Identity of the plug-in the session last had loaded, exactly as
+    /// approved at open.
+    plugin: PathBuf,
+    plugin_sha256: String,
+    smart: bool,
+    clustered: bool,
+    /// Why the close was not clean: the session invalidation reason (e.g.
+    /// `module_audit_mismatch`), or the worker exit classification.
+    close_reason: String,
+    /// The close-time module audit outcome when the worker left a final
+    /// report (the audit status or the invalidation detail).
+    module_audit: Option<String>,
+    /// Identity of the worker image that ran the session, hashed at close.
+    worker: PathBuf,
+    worker_sha256: Option<String>,
+    frames_ok: u32,
+    frames_errored: u32,
+    /// What the bridge does about it: the failed session is gone, so the
+    /// next frame for this plug-in opens a fresh worker process (design §6).
+    fallback: &'static str,
+}
+
+/// The recent close-time session failures, oldest first (bounded).
+static SESSION_CLOSE_FAILURES: Mutex<Vec<SessionCloseFailure>> = Mutex::new(Vec::new());
+
+/// Inspects the close summary every session thread produces and records a
+/// non-clean close as a structured failure (issue #405 review): the session
+/// is treated as invalidated, and its frames are not left as a silent
+/// success. An in-flight frame at failure time already resolves to
+/// `SessionLost` in the request loop; this record is what keeps a close-time
+/// failure discovered afterwards — a teardown, audit, or worker-exit failure
+/// with no request in flight — from being dropped.
+fn record_session_close(config: &MfSessionConfig, close: &serde_json::Value) {
+    if close.get("session_clean") == Some(&serde_json::Value::Bool(true)) {
+        return;
+    }
+    let as_u32 = |key: &str| {
+        close
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32
+    };
+    let close_reason = close
+        .get("invalidated_reason")
+        .and_then(|reason| reason.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            close
+                .get("worker")
+                .and_then(|worker| worker.get("classification"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("session_clean=false")
+                .to_owned()
+        });
+    let module_audit = close
+        .get("invalidated_reason")
+        .and_then(|reason| reason.get("detail"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            close
+                .get("final_report")
+                .and_then(|report| report.get("module_audit"))
+                .and_then(|audit| audit.get("status"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    let worker = config.repository.join(if config.smart {
+        "target/minihost-build/aex_smart_worker.exe"
+    } else {
+        "target/minihost-build/aex_render_worker.exe"
+    });
+    let worker_sha256 = std::fs::read(&worker)
+        .ok()
+        .map(|bytes| hex_lower(&Sha256::digest(&bytes)));
+    let failure = SessionCloseFailure {
+        plugin: config.plugin.clone(),
+        plugin_sha256: config.sha.clone(),
+        smart: config.smart,
+        clustered: config.cluster.is_some(),
+        close_reason,
+        module_audit,
+        worker,
+        worker_sha256,
+        frames_ok: as_u32("frames_ok"),
+        frames_errored: as_u32("frames_errored"),
+        fallback: "reopen_fresh_session",
+    };
+    if let Ok(mut failures) = SESSION_CLOSE_FAILURES.lock() {
+        if failures.len() >= 32 {
+            failures.remove(0);
+        }
+        failures.push(failure);
+    }
+}
+
 /// Per-filter userdata carried by the libffi closure. One per registered AEX,
 /// captured by that AEX's single closure and reached as `&FilterCtx` through the
 /// C callback boundary from any AviUtl2 callback thread.
@@ -3520,7 +3625,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 },
             };
             if open_tx.send(Ok(())).is_err() {
-                let _ = session.close();
+                record_session_close(&config, &session.close());
                 return;
             }
 
@@ -3600,7 +3705,11 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                     break;
                 }
             }
-            let _ = session.close();
+            // The close-time checks (module audit, teardown, worker exit) are
+            // part of the session's acceptance criteria (design §5/§7): a
+            // non-clean close invalidates the session's delivered frames and
+            // is recorded structurally, never dropped.
+            record_session_close(&config, &session.close());
         })
         .map_err(|error| format!("failed to spawn session thread: {error}"))?;
 
@@ -5964,6 +6073,90 @@ mod tests {
             let fallback = second.cluster_fallback.as_ref().expect("fallback note");
             assert_eq!(fallback.at_member, 0);
             assert_eq!(fallback.resolution, "one_shot_fallback");
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn render_close_audit_failure_is_recorded_not_rounded_to_success() {
+            let _guard = BEHAVIOR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            unsafe {
+                std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", "audit_undeclared_module");
+            }
+            let (root, one, two) = cluster_repository();
+            let sha_of = |path: &Path| {
+                let bytes = std::fs::read(path).unwrap();
+                hex_lower(&Sha256::digest(&bytes))
+            };
+            SESSION_CLOSE_FAILURES
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+            let session = open_mf_session(MfSessionConfig {
+                repository: root.clone(),
+                plugin: one.clone(),
+                dependency: dependency(),
+                sha: sha_of(&one),
+                smart: false,
+                defaults: Vec::new(),
+                identity: GeomIdentity {
+                    width: 8,
+                    height: 4,
+                    time_step: 1,
+                    total_time: 300,
+                    time_scale: 30,
+                },
+                cluster: Some(ClusterLaunch {
+                    plugins: vec![(one.clone(), sha_of(&one)), (two.clone(), sha_of(&two))],
+                    swap_payloads: vec![None, None],
+                }),
+            })
+            .expect("open cluster render session");
+            let tx = session.sender().expect("fresh session sender");
+            // The frame renders; the close-time cluster module audit fails
+            // only afterwards (the fixture injects an undeclared module into
+            // the final report's observed union).
+            let reply = render_on(&tx, 0, 0, vec![7u8; 8 * 4 * 4], None);
+            assert!(matches!(reply, FrameReply::Rendered(_)), "the frame renders");
+            // The session thread's recv loop ends only when every sender is
+            // gone, so the reply clone goes first; dropping the handle then
+            // drives RenderSession::close on the session thread, and the
+            // close-time audit failure must be recorded, never dropped with
+            // the close summary.
+            drop(tx);
+            drop(session);
+            let failures: Vec<SessionCloseFailure> = SESSION_CLOSE_FAILURES
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+            }
+            let failure = failures
+                .iter()
+                .find(|failure| failure.plugin == one)
+                .expect("the close-time audit failure is recorded");
+            assert!(
+                failure.close_reason.contains("module_audit"),
+                "{failure:?}"
+            );
+            assert!(failure.clustered);
+            assert!(!failure.smart);
+            assert_eq!(failure.frames_ok, 1, "{failure:?}");
+            assert_eq!(failure.frames_errored, 0, "{failure:?}");
+            assert_eq!(failure.fallback, "reopen_fresh_session");
+            assert_eq!(failure.plugin_sha256, sha_of(&one));
+            assert_eq!(
+                failure.worker.file_name().and_then(|name| name.to_str()),
+                Some("aex_render_worker.exe")
+            );
+            assert_eq!(failure.worker_sha256.as_deref().map(str::len), Some(64));
+            assert!(
+                failure
+                    .module_audit
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("module audit")),
+                "{failure:?}"
+            );
             std::fs::remove_dir_all(&root).unwrap();
         }
     }

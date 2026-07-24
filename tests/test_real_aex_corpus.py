@@ -28,6 +28,10 @@ def test_issue4_runner_maps_every_explicit_path_and_depth():
     assert set(bundle.DEPTH_COMMANDS)=={(path,depth) for path in ("classic","smartfx") for depth in ("argb8","argb16","argb32f")}
     assert bundle.DEPTH_COMMANDS[("classic","argb32f")]=="--render-experimental-request-32"
 
+def test_real_corpus_aggregation_explicitly_allows_bundle_failures():
+    source = (ROOT / "tools" / "run-real-aex-corpus.py").read_text(encoding="utf-8")
+    assert "--allow-failures" in source
+
 def test_normalize_classification_covers_every_report_schema_class():
     schema=json.loads((ROOT/"schemas/conformance-report.schema.json").read_text(encoding="utf-8"))
     classes=schema["$defs"]["depth_result"]["properties"]["classification"]["enum"]

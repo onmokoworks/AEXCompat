@@ -40,6 +40,14 @@ bool WorkerSession::set_pre_unload_hook(PreUnloadHook hook,
   return true;
 }
 
+bool WorkerSession::set_swap_quiesce_hook(PreUnloadHook hook,
+                                          void* context) noexcept {
+  if (!hook || swap_quiesce_hook_ || terminal_audit_captured_) return false;
+  swap_quiesce_hook_ = hook;
+  swap_quiesce_context_ = context;
+  return true;
+}
+
 bool WorkerSession::quiesce_once() noexcept {
   if (pre_unload_hook_invoked_) return pre_unload_hook_passed_;
   pre_unload_hook_invoked_ = true;
@@ -150,9 +158,11 @@ int WorkerSession::finish(int exit_code) noexcept {
 
 bool WorkerSession::swap_release_module(uint32_t outgoing_index) noexcept {
   if (!module_ || swap_pending_ || terminal_audit_captured_) return false;
-  // Never unload code while its owner reports callbacks may still run; a
-  // quiescence failure already marks the terminal lifecycle failed.
-  if (!quiesce_once()) return false;
+  // Per-swap quiescence only: the session-global pre-unload hook (BIB
+  // teardown, #395) is NOT run or consumed here — it fires exactly once at
+  // the terminal lifecycle. An unset swap hook quiesces trivially.
+  if (swap_quiesce_hook_ && !swap_quiesce_hook_(swap_quiesce_context_))
+    return false;
   ModuleAuditReport& audit = module_audit_report();
   ModuleAuditSnapshot pre_unload;
   if (audit.required) {
@@ -167,10 +177,6 @@ bool WorkerSession::swap_release_module(uint32_t outgoing_index) noexcept {
   swap_pending_ = true;
   swap_outgoing_index_ = outgoing_index;
   swap_pre_unload_ = std::move(pre_unload);
-  // Re-arm the barrier so the next swap (or the terminal path) quiesces the
-  // newly adopted plug-in rather than replaying this latch.
-  pre_unload_hook_invoked_ = false;
-  pre_unload_hook_passed_ = true;
   return true;
 }
 

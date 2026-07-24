@@ -110,7 +110,7 @@ def matrix_cases(inventory, matrix):
 
 @contextmanager
 def argv_for(manifest: Path, output: Path):
-    previous = sys.argv; sys.argv = [str(ROOT / "tools/run-conformance-bundle.py"), "--manifest", str(manifest), "--out", str(output)]
+    previous = sys.argv; sys.argv = [str(ROOT / "tools/run-conformance-bundle.py"), "--manifest", str(manifest), "--out", str(output), "--allow-failures"]
     try: yield
     finally: sys.argv = previous
 
