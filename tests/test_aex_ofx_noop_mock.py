@@ -4,6 +4,8 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +94,34 @@ class AexOfxNoopMockTests(unittest.TestCase):
         self.assertFalse(output_ppm.exists())
         self.assertFalse(report["mock_describe_performed"])
         self.assertIn("OFX facade packet ofx_route_invoked must be false", report["packet_errors"])
+
+    def test_cli_exit_follows_invalid_packet_state(self):
+        args = SimpleNamespace(
+            ofx_packet="packet.json",
+            input_ppm="input.ppm",
+            output_ppm="output.ppm",
+            out="report.json",
+        )
+        for report, expected_exit in (
+            ({"mock_state": "mock_identity_completed_route_closed", "packet_errors": []}, 0),
+            ({"mock_state": "invalid_ofx_packet_refused", "packet_errors": ["invalid packet"]}, 1),
+        ):
+            with (
+                mock.patch.object(aex_ofx_noop_mock, "parse_args", return_value=args),
+                mock.patch.object(
+                    aex_ofx_noop_mock,
+                    "load_packet",
+                    return_value=({}, Path("packet.json")),
+                ),
+                mock.patch.object(aex_ofx_noop_mock, "build_mock_report", return_value=report),
+                mock.patch.object(
+                    aex_ofx_noop_mock,
+                    "write_json_create_new",
+                    return_value=Path("report.json"),
+                ) as write_report,
+            ):
+                self.assertEqual(aex_ofx_noop_mock.main(), expected_exit)
+                write_report.assert_called_once_with(Path("report.json"), report)
 
     def test_paths_are_confined_and_outputs_are_create_new(self):
         packet_root = LAB_ROOT / "target" / "ofx-facade"

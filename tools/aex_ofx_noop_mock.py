@@ -245,7 +245,7 @@ def main() -> int:
     )
     written = write_json_create_new(Path(args.out), report)
     print(written)
-    return 0
+    return 1 if report["mock_state"] == "invalid_ofx_packet_refused" else 0
 
 
 if __name__ == "__main__":
