@@ -1484,7 +1484,7 @@ def main() -> int:
     index = build_index()
     written = write_json_create_new(Path(args.out), index)
     print(written)
-    return 0
+    return 0 if not index["errors"] else 1
 
 
 if __name__ == "__main__":

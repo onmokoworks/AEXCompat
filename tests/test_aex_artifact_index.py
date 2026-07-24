@@ -4,6 +4,8 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +52,13 @@ def write_payload(label: str, name: str, payload: dict | None = None) -> Path:
 
 
 class AexArtifactIndexTests(unittest.TestCase):
+    def test_cli_exit_follows_index_errors(self):
+        args = SimpleNamespace(out="out.json")
+        with mock.patch.object(aex_artifact_index, "parse_args", return_value=args), mock.patch.object(aex_artifact_index, "build_index", return_value={"errors": ["missing"]}), mock.patch.object(aex_artifact_index, "write_json_create_new", return_value=Path("out.json")):
+            self.assertEqual(aex_artifact_index.main(), 1)
+        with mock.patch.object(aex_artifact_index, "parse_args", return_value=args), mock.patch.object(aex_artifact_index, "build_index", return_value={"errors": []}), mock.patch.object(aex_artifact_index, "write_json_create_new", return_value=Path("out.json")):
+            self.assertEqual(aex_artifact_index.main(), 0)
+
     def test_preferred_pattern_rank_prefers_real_chain_names(self):
         self.assertGreater(
             aex_artifact_index.preferred_pattern_rank(Path("ae-load-gate-with-hold-1.local.json"), ["ae-load-gate-with-hold-*.local.json"]),
