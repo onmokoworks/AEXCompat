@@ -5811,6 +5811,32 @@ fn required_plugin_hash(plugin: &Path) -> String {
     }
 }
 
+fn cli_inspection_failure_document(message: &str) -> serde_json::Value {
+    typed_failure_document(message).unwrap_or_else(|| {
+        serde_json::json!({
+            "classification": "inspection_error",
+            "failure_stage": "parameter_inspection",
+            "message": bounded_summary(message),
+        })
+    })
+}
+
+fn required_plugin_parameters(
+    repository: &Path,
+    plugin: &Path,
+    hash: &str,
+) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
+    match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+        repository, plugin, hash,
+    ) {
+        Ok((parameters, _)) => parameters,
+        Err(error) => {
+            eprintln!("{}", cli_inspection_failure_document(&error.to_string()));
+            std::process::exit(1);
+        }
+    }
+}
+
 fn print_cli_help() {
     println!(
         "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI."
@@ -5851,8 +5877,7 @@ fn main() -> eframe::Result {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
         let parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+            required_plugin_parameters(&repository, plugin, &hash);
         let report = run_effect_matrix(
             &repository,
             plugin,
@@ -5871,8 +5896,7 @@ fn main() -> eframe::Result {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
         let parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+            required_plugin_parameters(&repository, plugin, &hash);
         let report = run_effect_matrix(
             &repository,
             plugin,
@@ -6158,8 +6182,7 @@ fn main() -> eframe::Result {
                 }
             }
         } else {
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default()
+            required_plugin_parameters(&repository, plugin, &hash)
         };
         if session_with_parameter {
             let slot = match args[10].to_string_lossy().parse::<u32>() {
@@ -6509,8 +6532,7 @@ fn main() -> eframe::Result {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
         let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+            required_plugin_parameters(&repository, plugin, &hash);
         if let Err(error) =
             apply_typed_assignments(&mut parameters, &document, Some(Path::new(&args[5])))
         {
@@ -6537,8 +6559,7 @@ fn main() -> eframe::Result {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
         let parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+            required_plugin_parameters(&repository, plugin, &hash);
         match aexcompat_broker::image_render::render_experimental_image_with_audio_sidecar(
             &repository,
             plugin,
@@ -6566,8 +6587,7 @@ fn main() -> eframe::Result {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
         let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+            required_plugin_parameters(&repository, plugin, &hash);
         if let Err(error) = assign_layer_paths(&mut parameters, &args[5..]) {
             eprintln!("{error}");
             std::process::exit(1);
@@ -6601,8 +6621,7 @@ fn main() -> eframe::Result {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
         let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+            required_plugin_parameters(&repository, plugin, &hash);
         let mut assigned_slots = Vec::new();
         for assignment in args[5..].chunks_exact(2) {
             let slot = assignment[0].to_string_lossy().parse::<u32>().unwrap_or(0);
@@ -6660,8 +6679,7 @@ fn main() -> eframe::Result {
         };
         let hash = required_plugin_hash(plugin);
         let parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+            required_plugin_parameters(&repository, plugin, &hash);
         let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
             &repository,
             plugin,
@@ -6701,8 +6719,7 @@ fn main() -> eframe::Result {
         };
         let hash = required_plugin_hash(plugin);
         let parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+            required_plugin_parameters(&repository, plugin, &hash);
         let report = if smart {
             aexcompat_broker::image_render::render_experimental_smart_image_at_time(
                 &repository,
@@ -6741,8 +6758,7 @@ fn main() -> eframe::Result {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
         let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+            required_plugin_parameters(&repository, plugin, &hash);
         let Some(layer) = parameters.iter_mut().find(|item| item.kind == "layer") else {
             eprintln!("AEX exposes no secondary layer parameter");
             std::process::exit(1);
@@ -6784,8 +6800,7 @@ fn main() -> eframe::Result {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
         let mut parameters =
-            aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash)
-                .unwrap_or_default();
+            required_plugin_parameters(&repository, plugin, &hash);
         let layers = parameters
             .iter_mut()
             .filter(|item| item.kind == "layer")
@@ -8218,6 +8233,25 @@ mod tests {
         assert_eq!(document["exit_code"], 3221225477u64);
         assert_eq!(document["plugin_kind"], "unknown_no_effect_entrypoint");
         assert_eq!(document["missing_suites"][0]["name"], "PF Handle Suite");
+    }
+
+    #[test]
+    fn cli_inspection_failure_document_preserves_diagnostics_and_redacts_paths() {
+        let generic = cli_inspection_failure_document("file must have one link");
+        assert_eq!(generic["classification"], "inspection_error");
+        assert_eq!(generic["failure_stage"], "parameter_inspection");
+        assert_eq!(generic["message"], "file must have one link");
+
+        let structured = cli_inspection_failure_document(concat!(
+            "AEX parameter inspection worker failed safely: ",
+            r#"{"classification":"crashed","failure_stage":"parameter_inspection","exit_code":12}"#,
+        ));
+        assert_eq!(structured["classification"], "crashed");
+        assert_eq!(structured["failure_stage"], "parameter_inspection");
+        assert_eq!(structured["exit_code"], 12);
+
+        let path = cli_inspection_failure_document(r#"could not open C:\private\bad.aex"#);
+        assert_eq!(path["message"], "redacted");
     }
 
     #[test]
