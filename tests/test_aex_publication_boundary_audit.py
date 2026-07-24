@@ -4,6 +4,8 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +45,13 @@ def make_safety_audit() -> dict:
 
 
 class AexPublicationBoundaryAuditTests(unittest.TestCase):
+    def test_cli_exit_follows_evidence_errors(self):
+        args = SimpleNamespace(safety_audit="audit.json", out="out.json")
+        with mock.patch.object(aex_publication_boundary_audit, "parse_args", return_value=args), mock.patch.object(aex_publication_boundary_audit, "load_safety_audit", return_value=({}, Path("audit.json"))), mock.patch.object(aex_publication_boundary_audit, "build_publication_report", return_value={"evidence_errors": ["invalid"]}), mock.patch.object(aex_publication_boundary_audit, "write_json_create_new", return_value=Path("out.json")):
+            self.assertEqual(aex_publication_boundary_audit.main(), 1)
+        with mock.patch.object(aex_publication_boundary_audit, "parse_args", return_value=args), mock.patch.object(aex_publication_boundary_audit, "load_safety_audit", return_value=({}, Path("audit.json"))), mock.patch.object(aex_publication_boundary_audit, "build_publication_report", return_value={"evidence_errors": []}), mock.patch.object(aex_publication_boundary_audit, "write_json_create_new", return_value=Path("out.json")):
+            self.assertEqual(aex_publication_boundary_audit.main(), 0)
+
     def test_clean_safety_audit_is_still_not_publishable(self):
         report = aex_publication_boundary_audit.build_publication_report(make_safety_audit(), Path("audit.json"))
         self.assertEqual(report["report_kind"], "aex_publication_boundary_audit")
