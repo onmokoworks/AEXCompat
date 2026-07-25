@@ -511,10 +511,29 @@ fn trace_instruction(
         let target_rva = target
             .filter(|target| (image_base..image_end).contains(target))
             .map(|target| target - image_base);
+        let pc_rva = (image_base..image_end)
+            .contains(&address)
+            .then(|| address - image_base);
         let is_tail_target = target.is_some_and(|_| target_rva.is_none())
             || unicorn.get_data().trace.as_ref().is_some_and(|capture| {
                 target_rva.is_some_and(|rva| capture.known_function_entries.contains(&rva))
             });
+        let matching_watches = unicorn
+            .get_data()
+            .trace
+            .as_ref()
+            .map(|capture| {
+                capture
+                    .watch_specs
+                    .iter()
+                    .filter(|spec| {
+                        spec.function_rva.is_some_and(|rva| Some(rva) == target_rva)
+                            || spec.instruction_rva.is_some_and(|rva| Some(rva) == pc_rva)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         if is_tail_target && let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
             push_trace_event(
                 capture,
@@ -531,7 +550,7 @@ fn trace_instruction(
                         .flatten()
                         .copied()
                         .next(),
-                    pc_rva: Some(address.saturating_sub(image_base)),
+                    pc_rva,
                     target_rva,
                     name: target.map(|target| format!("runtime_target={target:#x}")),
                     arguments,
@@ -549,6 +568,39 @@ fn trace_instruction(
                 && let Some(active_function) = capture.function_stack.last_mut()
             {
                 *active_function = Some(target_rva);
+            }
+        }
+        if is_tail_target {
+            let pending = matching_watches
+                .into_iter()
+                .map(|spec| {
+                    let address = trace_register_value(unicorn, spec.register).unwrap_or(0);
+                    PendingTraceWatch {
+                        spec_id: spec.id,
+                        register: spec.register,
+                        call_id: unicorn
+                            .get_data()
+                            .trace
+                            .as_ref()
+                            .and_then(|capture| capture.call_id_stack.last().copied()),
+                        function_rva: target_rva,
+                        pc_rva,
+                        address,
+                        before: trace_memory_snapshot(
+                            unicorn, address, spec.size, image_base, image_end,
+                        ),
+                        image_coordinate: spec.image_coordinate,
+                        image_row_offset: spec.image_row_offset,
+                        image_format: spec.image_format,
+                    }
+                })
+                .collect::<Vec<_>>();
+            if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+                if let Some(active_watches) = capture.watch_stack.last_mut() {
+                    active_watches.extend(pending);
+                } else {
+                    capture.watch_stack.push(pending);
+                }
             }
         }
     } else if matches!(
@@ -3570,12 +3622,26 @@ mod tests {
     #[test]
     fn execution_trace_records_jump_to_known_function_as_tail_call() {
         const CODE: u64 = 0x1000_0000;
-        // call target; jmp target; padding; target: mov eax,42; ret
+        // call target; jmp target; padding; target: inc byte ptr [rcx]; mov eax,42; ret
         let mut engine = test_engine(&[
-            0xe8, 0x06, 0, 0, 0, 0xeb, 0x04, 0x90, 0x90, 0x90, 0x90, 0xb8, 42, 0, 0, 0, 0xc3,
+            0xe8, 0x06, 0, 0, 0, 0xeb, 0x04, 0x90, 0x90, 0x90, 0x90, 0xfe, 0x01, 0xb8, 42, 0, 0, 0,
+            0xc3,
         ]);
+        let buffer = engine.allocate(1, 1).unwrap();
+        engine.write(buffer, &[1]).unwrap();
+        engine.configure_trace_watches(vec![TraceWatchSpec {
+            id: "tail-target".into(),
+            function_rva: Some(11),
+            instruction_rva: None,
+            absolute_address: None,
+            register: "rcx",
+            size: 1,
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
+        }]);
         engine.begin_execution_trace("GLOBAL_SETUP", CODE).unwrap();
-        let result = engine.call_win64(CODE, [0; 6]).unwrap();
+        let result = engine.call_win64(CODE, [buffer, 0, 0, 0, 0, 0]).unwrap();
         let trace = engine.finish_execution_trace(result).unwrap();
 
         assert_eq!(result, 42);
@@ -3589,13 +3655,13 @@ mod tests {
         assert_eq!(tail.call_kind, Some("runtime_jmp"));
         assert!(trace.events.iter().any(|event| {
             event.kind == "guest_return"
-                && event.pc_rva == Some(16)
+                && event.pc_rva == Some(18)
                 && event.target_rva.is_none()
                 && event.function_rva == Some(11)
         }));
         assert!(!trace.events.iter().any(|event| {
             event.kind == "guest_return"
-                && event.pc_rva == Some(16)
+                && event.pc_rva == Some(18)
                 && event.function_rva == Some(0)
         }));
         let entry_function = trace
@@ -3605,6 +3671,10 @@ mod tests {
             .unwrap();
         assert_eq!(entry_function.observed_calls, 2);
         assert_eq!(entry_function.callees, vec![11]);
+        assert_eq!(trace.memory_witnesses.len(), 2);
+        assert_eq!(trace.memory_witnesses[1].watch_id, "tail-target");
+        assert_eq!(trace.memory_witnesses[1].before.u8_values, [2]);
+        assert_eq!(trace.memory_witnesses[1].after.u8_values, [3]);
     }
 
     #[test]
