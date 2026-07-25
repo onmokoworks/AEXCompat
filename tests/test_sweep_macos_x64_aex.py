@@ -118,6 +118,31 @@ def test_validate_ready_rejects_nonzero_setup_error():
         SWEEP.validate_ready(message, 42)
 
 
+def test_require_backend_rejects_swapped_worker_label():
+    ready = {"setup": _setup_message()}
+
+    with pytest.raises(SWEEP.SweepError, match="worker backend differs"):
+        SWEEP.require_backend(ready, "native-x86_64-carrier", "native")
+
+
+def test_source_pair_requires_summary_to_bind_exact_inventory_sha():
+    inventory = {"entries": [{}, {}]}
+    summary = {
+        "schema_version": 1,
+        "corpus": {
+            "inventory_sha256": "a" * 64,
+            "canonical_count": 2,
+            "processed": 2,
+            "remaining": 0,
+            "ordered_path_sha_identity_exact": True,
+        },
+    }
+
+    SWEEP.validate_source_pair(inventory, summary, "a" * 64)
+    with pytest.raises(SWEEP.SweepError, match="does not bind"):
+        SWEEP.validate_source_pair(inventory, summary, "b" * 64)
+
+
 def test_validate_close_accepts_complete_clean_contract():
     SWEEP.validate_close(_close_message(), 42, 1)
 
@@ -181,3 +206,7 @@ def test_cleanup_failure_is_not_misclassified_as_suite_gap():
     message = "resident cleanup was not clean; suite_requests=['AEGP Compute Cache v1']"
 
     assert SWEEP.classify_failure(message) == "cleanup"
+
+
+def test_signal_evidence_is_classified_as_crash():
+    assert SWEEP.classify_failure("signal=SIGSEGV(11)") == "crash"

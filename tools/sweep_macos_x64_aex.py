@@ -230,6 +230,18 @@ def validate_ready(value: dict[str, object], pid: int) -> None:
     validate_setup(value["setup"])
 
 
+def require_backend(
+    ready: dict[str, object], expected_backend: str, label: str
+) -> None:
+    setup = ready["setup"]
+    assert isinstance(setup, dict)
+    actual = setup["execution_backend"]
+    if actual != expected_backend:
+        raise SweepError(
+            f"{label} worker backend differs: {actual} != {expected_backend}"
+        )
+
+
 def validate_probe(value: dict[str, object], pid: int) -> None:
     require_exact_keys(
         value,
@@ -364,6 +376,22 @@ def read_stderr_bounded(process: subprocess.Popen[bytes]) -> str:
     return bytes(chunks[:MAX_ERROR_BYTES]).decode("utf-8", errors="replace")
 
 
+def process_exit_evidence(process: subprocess.Popen[bytes], stderr: str) -> str:
+    returncode = process.returncode
+    if returncode is None:
+        status = "exit_status=unknown"
+    elif returncode < 0:
+        number = -returncode
+        try:
+            name = signal.Signals(number).name
+        except ValueError:
+            name = "UNKNOWN"
+        status = f"signal={name}({number})"
+    else:
+        status = f"exit_status={returncode}"
+    return f"{status}; stderr={stderr}" if stderr else status
+
+
 def terminate_worker(process: subprocess.Popen[bytes]) -> str:
     if process.stdin:
         try:
@@ -380,7 +408,7 @@ def terminate_worker(process: subprocess.Popen[bytes]) -> str:
                 process.wait(timeout=CLOSE_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 return "worker process group did not exit after SIGKILL"
-    return read_stderr_bounded(process)
+    return process_exit_evidence(process, read_stderr_bounded(process))
 
 
 def close_worker(process: subprocess.Popen[bytes], expected_frames: int) -> dict[str, object]:
@@ -426,6 +454,7 @@ def launch_ready(
 
 def run_backend(
     worker: Path,
+    expected_backend: str,
     plugin: Path,
     argb8: bytes,
     width: int,
@@ -440,6 +469,7 @@ def run_backend(
         worker, plugin, input_slot, output_slot, width, height
     )
     try:
+        require_backend(probe_ready, expected_backend, "probe")
         if probe.stdin is None or probe.stdout is None:
             raise SweepError("probe control pipes are unavailable")
         write_message(probe.stdin, {"v": 1, "type": "probe"})
@@ -455,6 +485,7 @@ def run_backend(
         worker, plugin, input_slot, output_slot, width, height
     )
     try:
+        require_backend(ready, expected_backend, "render")
         if process.stdin is None or process.stdout is None:
             raise SweepError("render control pipes are unavailable")
         write_message(
@@ -495,6 +526,9 @@ def classify_failure(message: str) -> str:
     for needle, bucket in (
         ("timed out", "timeout"),
         ("cleanup", "cleanup"),
+        ("signal=", "crash"),
+        ("crash_snapshot", "crash"),
+        ("cpu exception", "crash"),
         ("missing import", "import"),
         ("unsupported import", "import"),
         ("dllmain", "DllMain"),
@@ -513,26 +547,52 @@ def classify_failure(message: str) -> str:
     return "guest-runtime"
 
 
+def validate_source_pair(
+    inventory: dict[str, object],
+    windows_summary: dict[str, object],
+    inventory_sha: str,
+) -> None:
+    if windows_summary.get("schema_version") != 1:
+        raise SweepError("Windows summary schema_version must be 1")
+    corpus = windows_summary.get("corpus")
+    entries = inventory.get("entries")
+    if not isinstance(corpus, dict) or not isinstance(entries, list):
+        raise SweepError("Windows summary/inventory has no corpus entries")
+    if (
+        corpus.get("inventory_sha256") != inventory_sha
+        or corpus.get("canonical_count") != len(entries)
+        or corpus.get("processed") != len(entries)
+        or corpus.get("remaining") != 0
+        or corpus.get("ordered_path_sha_identity_exact") is not True
+    ):
+        raise SweepError("Windows summary does not bind the supplied inventory")
+
+
 def run_sweep(args: argparse.Namespace) -> dict[str, object]:
     inventory_path = args.inventory.resolve(strict=True)
     summary_path = args.windows_summary.resolve(strict=True)
     inventory_sha = sha256_file(inventory_path)
     summary_sha = sha256_file(summary_path)
-    if args.expected_inventory_sha256 and inventory_sha != args.expected_inventory_sha256:
+    if inventory_sha != args.expected_inventory_sha256:
         raise SweepError("Windows inventory SHA-256 differs from the expected identity")
-    if args.expected_summary_sha256 and summary_sha != args.expected_summary_sha256:
+    if summary_sha != args.expected_summary_sha256:
         raise SweepError("Windows summary SHA-256 differs from the expected identity")
     inventory = load_json_strict(inventory_path)
     windows_summary = load_json_strict(summary_path)
-    if windows_summary.get("schema_version") != 1:
-        raise SweepError("Windows summary schema_version must be 1")
+    validate_source_pair(inventory, windows_summary, inventory_sha)
     mapped = map_corpus(inventory, args.corpus_root)
     width, height, argb8 = png_to_argb8(args.input_png.resolve(strict=True))
     workers = {
-        "native": args.native_worker.resolve(strict=True),
-        "unicorn": args.unicorn_worker.resolve(strict=True),
+        "native": (
+            args.native_worker.resolve(strict=True),
+            "native-x86_64-carrier",
+        ),
+        "unicorn": (
+            args.unicorn_worker.resolve(strict=True),
+            "unicorn-x86_64",
+        ),
     }
-    for name, worker in workers.items():
+    for name, (worker, _) in workers.items():
         if not worker.is_file():
             raise SweepError(f"{name} worker is not a file: {worker}")
     output = args.output.resolve()
@@ -543,13 +603,14 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
     counts: Counter[str] = Counter()
     for index, item in enumerate(mapped):
         backend_results = {}
-        for backend, worker in workers.items():
+        for backend, (worker, expected_backend) in workers.items():
             directory = run_root / f"{index:04d}-{item['sha256'][:12]}-{backend}"
             directory.mkdir(parents=True, exist_ok=True)
             started = time.monotonic()
             try:
                 result = run_backend(
                     worker,
+                    expected_backend,
                     item["path"],
                     argb8,
                     width,
@@ -587,8 +648,8 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
             "mapped_entries": len(mapped),
             "input_png_sha256": sha256_file(args.input_png),
             "input_dimensions": [width, height],
-            "native_worker_sha256": sha256_file(workers["native"]),
-            "unicorn_worker_sha256": sha256_file(workers["unicorn"]),
+            "native_worker_sha256": sha256_file(workers["native"][0]),
+            "unicorn_worker_sha256": sha256_file(workers["unicorn"][0]),
         },
         "summary": {
             "entry_count": len(entries),
@@ -613,8 +674,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--native-worker", type=Path, required=True)
     parser.add_argument("--unicorn-worker", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--expected-inventory-sha256")
-    parser.add_argument("--expected-summary-sha256")
+    parser.add_argument("--expected-inventory-sha256", required=True)
+    parser.add_argument("--expected-summary-sha256", required=True)
     return parser.parse_args()
 
 
