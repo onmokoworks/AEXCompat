@@ -1,6 +1,6 @@
 use aex_abi::x86_64_windows as abi;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::backend::{
@@ -10,6 +10,7 @@ use crate::backend::{
 use crate::pe::PeImage;
 
 const CMD_GLOBAL_SETUP: u64 = 1;
+const CMD_GLOBAL_SETDOWN: u64 = 3;
 const CMD_PARAMS_SETUP: u64 = 4;
 const CMD_SEQUENCE_SETUP: u64 = 5;
 const CMD_SEQUENCE_SETDOWN: u64 = 8;
@@ -25,6 +26,9 @@ const PARAM_CHECKBOX: i32 = 4;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
 const ANGLE_DEFAULT_OFFSET: usize = 4;
+const CLEANUP_GUEST_ERROR: i32 = -40;
+const OUTPUT_GUARD_BYTES: usize = 64;
+const OUTPUT_GUARD_PATTERN: u8 = 0xa5;
 pub const MAX_RENDER_WIDTH: u32 = 1920;
 pub const MAX_RENDER_HEIGHT: u32 = 1080;
 
@@ -43,7 +47,7 @@ pub enum ClassicError {
     Input(String),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ParameterReport {
     pub slot: usize,
     pub index: i32,
@@ -59,6 +63,7 @@ pub struct ParameterReport {
 
 #[derive(Clone, Debug)]
 pub struct ParameterValue {
+    pub slot: Option<usize>,
     pub name: String,
     pub value: f64,
 }
@@ -69,7 +74,7 @@ pub struct AppliedParameter {
     pub value: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SetupReport {
     pub schema_version: u32,
     pub execution_backend: &'static str,
@@ -95,6 +100,20 @@ pub struct FailureReport {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ResidentCloseReport {
+    pub schema_version: u32,
+    pub execution_backend: &'static str,
+    pub frames_rendered: u64,
+    pub frame_setdown_error: i32,
+    pub sequence_setdown_error: i32,
+    pub global_setdown_error: i32,
+    pub suite_requests: Vec<String>,
+    pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
+    pub dropped_unsupported_suite_calls: u64,
+    pub session_clean: bool,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RenderReport {
     pub schema_version: u32,
     pub setup: SetupReport,
@@ -102,6 +121,7 @@ pub struct RenderReport {
     pub render_mode: &'static str,
     pub width: u32,
     pub height: u32,
+    pub guards_intact: bool,
     pub parameter_values: Vec<AppliedParameter>,
     pub output_request: [i32; 4],
     pub input_requests: Vec<[i32; 4]>,
@@ -119,6 +139,26 @@ pub struct ClassicHost {
     input: u64,
     output: u64,
     trace_output_pixel: Option<[u32; 2]>,
+    setup_report: Option<SetupReport>,
+    global_active: bool,
+    sequence_active: bool,
+    frame_resources: Option<FrameResources>,
+    resident_frames: u64,
+    resident_frame_setdown_error: i32,
+}
+
+#[derive(Clone)]
+struct FrameResources {
+    width: u32,
+    height: u32,
+    pixel_bytes: usize,
+    input_param: u64,
+    params: u64,
+    output_world: u64,
+    input_pixels: u64,
+    output_guard_base: u64,
+    output_pixels: u64,
+    parameter_definitions: Vec<u64>,
 }
 
 impl ClassicHost {
@@ -230,10 +270,19 @@ impl ClassicHost {
             input,
             output,
             trace_output_pixel: None,
+            setup_report: None,
+            global_active: false,
+            sequence_active: false,
+            frame_resources: None,
+            resident_frames: 0,
+            resident_frame_setdown_error: 0,
         })
     }
 
     pub fn setup(&mut self) -> Result<SetupReport, ClassicError> {
+        if let Some(report) = &self.setup_report {
+            return Ok(report.clone());
+        }
         let global_setup_error =
             self.invoke(CMD_GLOBAL_SETUP)
                 .map_err(|source| ClassicError::SelectorGuest {
@@ -246,6 +295,7 @@ impl ClassicHost {
                 error: global_setup_error,
             });
         }
+        self.global_active = true;
         let mut output = vec![0u8; abi::PF_OUT_DATA_SIZE];
         self.engine.read(self.output, &mut output)?;
         let global_data = read_u64(&output, abi::OUT_GLOBAL_DATA_OFFSET);
@@ -294,7 +344,7 @@ impl ClassicHost {
                 }
             })
             .collect();
-        Ok(SetupReport {
+        let report = SetupReport {
             schema_version: 1,
             execution_backend: self.engine.backend_name(),
             global_setup_error,
@@ -306,7 +356,155 @@ impl ClassicHost {
             suite_requests: self.engine.suite_requests().to_vec(),
             unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
             dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
-        })
+        };
+        self.setup_report = Some(report.clone());
+        Ok(report)
+    }
+
+    pub fn begin_resident_session(
+        &mut self,
+        width: u32,
+        height: u32,
+        time_scale: u32,
+    ) -> Result<SetupReport, ClassicError> {
+        if width == 0
+            || height == 0
+            || width > MAX_RENDER_WIDTH
+            || height > MAX_RENDER_HEIGHT
+            || time_scale == 0
+        {
+            return Err(ClassicError::Input(format!(
+                "resident session requires dimensions within 1x1..={MAX_RENDER_WIDTH}x{MAX_RENDER_HEIGHT} and nonzero time scale"
+            )));
+        }
+        let setup = match self.setup() {
+            Ok(setup) => setup,
+            Err(error) => {
+                let _ = self.end_global();
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.write_frame_context(width, height, 0, time_scale) {
+            let _ = self.end_global();
+            return Err(error);
+        }
+        if !self.sequence_active {
+            let result = match self.invoke(CMD_SEQUENCE_SETUP) {
+                Ok(result) => result as i32,
+                Err(error) => {
+                    let _ = self.end_global();
+                    return Err(error.into());
+                }
+            };
+            if result != 0 {
+                let _ = self.end_global();
+                return Err(ClassicError::Selector {
+                    selector: "SEQUENCE_SETUP",
+                    error: result,
+                });
+            }
+            self.sequence_active = true;
+            let sequence_data = match self.read_output_pointer(abi::OUT_SEQUENCE_DATA_OFFSET) {
+                Ok(sequence_data) => sequence_data,
+                Err(error) => {
+                    let _ = self.end_sequence(false);
+                    let _ = self.end_global();
+                    return Err(error.into());
+                }
+            };
+            if let Err(error) =
+                self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, sequence_data)
+            {
+                let _ = self.end_sequence(false);
+                let _ = self.end_global();
+                return Err(error.into());
+            }
+        }
+        Ok(setup)
+    }
+
+    pub fn render_resident_argb8(
+        &mut self,
+        width: u32,
+        height: u32,
+        current_time: i32,
+        time_scale: u32,
+        input_argb8: &[u8],
+        parameter_values: &[ParameterValue],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_argb8_mode(
+            width,
+            height,
+            current_time,
+            time_scale,
+            input_argb8,
+            parameter_values,
+            true,
+        )
+    }
+
+    pub fn probe_resident_argb8(
+        &mut self,
+        width: u32,
+        height: u32,
+        time_scale: u32,
+        input_argb8: &[u8],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_argb8_mode(width, height, 0, time_scale, input_argb8, &[], false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_resident_argb8_mode(
+        &mut self,
+        width: u32,
+        height: u32,
+        current_time: i32,
+        time_scale: u32,
+        input_argb8: &[u8],
+        parameter_values: &[ParameterValue],
+        count_frame: bool,
+    ) -> Result<RenderReport, ClassicError> {
+        if !self.sequence_active {
+            return Err(ClassicError::Input(
+                "resident session has not been opened".into(),
+            ));
+        }
+        self.write_frame_context(width, height, current_time, time_scale)?;
+        let report = self
+            .render_argb8_with_request_mode(
+                width,
+                height,
+                input_argb8,
+                parameter_values,
+                [0, 0, width as i32, height as i32],
+                false,
+                false,
+                true,
+            )?
+            .0;
+        if count_frame {
+            self.resident_frames += 1;
+        }
+        Ok(report)
+    }
+
+    pub fn close_resident_session(&mut self) -> ResidentCloseReport {
+        let sequence_setdown_error = cleanup_error_code(self.end_sequence(false));
+        let global_setdown_error = cleanup_error_code(self.end_global());
+        ResidentCloseReport {
+            schema_version: 1,
+            execution_backend: self.engine.backend_name(),
+            frames_rendered: self.resident_frames,
+            frame_setdown_error: self.resident_frame_setdown_error,
+            sequence_setdown_error,
+            global_setdown_error,
+            suite_requests: self.engine.suite_requests().to_vec(),
+            unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
+            dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
+            session_clean: self.resident_frame_setdown_error == 0
+                && sequence_setdown_error == 0
+                && global_setdown_error == 0,
+        }
     }
 
     pub fn failure_report(&self, error: &ClassicError) -> FailureReport {
@@ -474,6 +672,29 @@ impl ClassicHost {
         census_enabled: bool,
         trace_enabled: bool,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        self.render_argb8_with_request_mode(
+            width,
+            height,
+            input_argb8,
+            parameter_values,
+            output_request,
+            census_enabled,
+            trace_enabled,
+            false,
+        )
+    }
+
+    fn render_argb8_with_request_mode(
+        &mut self,
+        width: u32,
+        height: u32,
+        input_argb8: &[u8],
+        parameter_values: &[ParameterValue],
+        output_request: [i32; 4],
+        census_enabled: bool,
+        trace_enabled: bool,
+        persistent_sequence: bool,
+    ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
             return Err(ClassicError::Input(format!(
                 "dimensions must be within 1x1..={MAX_RENDER_WIDTH}x{MAX_RENDER_HEIGHT}, got {width}x{height}"
@@ -512,11 +733,14 @@ impl ClassicHost {
         }
         let captured_params = self.engine.parameters().to_vec();
         let mut applied_values = Vec::with_capacity(parameter_values.len());
-        let input_param = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
-        let params = self.engine.allocate((captured_params.len() + 1) * 8, 8)?;
-        let output_world = self.engine.allocate(abi::PF_LAYER_DEF_SIZE, 8)?;
-        let input_pixels = self.engine.allocate(pixel_bytes, 64)?;
-        let output_pixels = self.engine.allocate(pixel_bytes, 64)?;
+        let mut applied_requests = BTreeSet::new();
+        let resources =
+            self.ensure_frame_resources(width, height, pixel_bytes, captured_params.len())?;
+        let input_param = resources.input_param;
+        let params = resources.params;
+        let output_world = resources.output_world;
+        let input_pixels = resources.input_pixels;
+        let output_pixels = resources.output_pixels;
         if let Some([x, y]) = self.trace_output_pixel {
             if x >= width || y >= height {
                 return Err(ClassicError::Input(format!(
@@ -559,37 +783,49 @@ impl ClassicHost {
             .copy_from_slice(&input_world);
         self.engine.write(input_param, &input_definition)?;
         self.engine.write(input_pixels, input_argb8)?;
+        let output_guard = vec![OUTPUT_GUARD_PATTERN; OUTPUT_GUARD_BYTES];
+        self.engine
+            .write(resources.output_guard_base, &output_guard)?;
+        self.engine
+            .write(output_pixels + pixel_bytes as u64, &output_guard)?;
+        // A resident frame must not inherit pixels the previous frame left in
+        // a partially written result region.
+        self.engine.write(output_pixels, &vec![0u8; pixel_bytes])?;
         self.engine.write_u64(params, input_param)?;
-        let mut parameter_definitions = Vec::with_capacity(captured_params.len());
         for (index, captured) in captured_params.into_iter().enumerate() {
             let mut definition = captured.bytes;
             materialize_default(&mut definition, captured.param_type);
-            if let Some(requested) = parameter_values
-                .iter()
-                .find(|requested| requested.name == captured.name)
+            if let Some((request_index, requested)) =
+                parameter_values
+                    .iter()
+                    .enumerate()
+                    .find(|(request_index, requested)| {
+                        !applied_requests.contains(request_index)
+                            && requested
+                                .slot
+                                .map_or(requested.name == captured.name, |slot| slot == index + 1)
+                    })
             {
                 apply_parameter_value(&mut definition, captured.param_type, requested.value)?;
+                applied_requests.insert(request_index);
                 applied_values.push(AppliedParameter {
                     name: captured.name.clone(),
                     value: requested.value,
                 });
             }
-            let parameter = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
+            let parameter = resources.parameter_definitions[index];
             self.engine.write(parameter, &definition)?;
-            parameter_definitions.push(parameter);
             self.engine
                 .write_u64(params + ((index + 1) * 8) as u64, parameter)?;
         }
         self.engine
-            .configure_parameter_definitions(parameter_definitions);
-        if applied_values.len() != parameter_values.len() {
+            .configure_parameter_definitions(resources.parameter_definitions);
+        if applied_requests.len() != parameter_values.len() {
             let missing = parameter_values
                 .iter()
-                .find(|requested| {
-                    !applied_values
-                        .iter()
-                        .any(|applied| applied.name == requested.name)
-                })
+                .enumerate()
+                .find(|(index, _)| !applied_requests.contains(index))
+                .map(|(_, requested)| requested)
                 .expect("parameter count mismatch has a missing value");
             return Err(ClassicError::Input(format!(
                 "AEX did not declare a supported parameter named {:?}",
@@ -611,21 +847,24 @@ impl ClassicHost {
         write_rect(&mut input_data, abi::IN_EXTENT_HINT_OFFSET, width, height);
         self.engine.write(self.input, &input_data)?;
         let mut traces = Vec::new();
-        let (sequence_setup_result, trace) = self.call_with_optional_trace(
-            "SEQUENCE_SETUP",
-            [CMD_SEQUENCE_SETUP, self.input, self.output, 0, 0, 0],
-            trace_enabled,
-        )?;
-        traces.extend(trace);
-        let sequence_setup_error = sequence_setup_result as i32;
-        if sequence_setup_error != 0 {
-            return Err(ClassicError::Selector {
-                selector: "SEQUENCE_SETUP",
-                error: sequence_setup_error,
-            });
+        if !self.sequence_active {
+            let (sequence_setup_result, trace) = self.call_with_optional_trace(
+                "SEQUENCE_SETUP",
+                [CMD_SEQUENCE_SETUP, self.input, self.output, 0, 0, 0],
+                trace_enabled,
+            )?;
+            traces.extend(trace);
+            let sequence_setup_error = sequence_setup_result as i32;
+            if sequence_setup_error != 0 {
+                return Err(ClassicError::Selector {
+                    selector: "SEQUENCE_SETUP",
+                    error: sequence_setup_error,
+                });
+            }
+            let sequence_data = self.read_output_pointer(abi::OUT_SEQUENCE_DATA_OFFSET)?;
+            self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, sequence_data)?;
+            self.sequence_active = true;
         }
-        let sequence_data = self.read_output_pointer(abi::OUT_SEQUENCE_DATA_OFFSET)?;
-        self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, sequence_data)?;
 
         let (frame_setup_result, trace) = self.call_with_optional_trace(
             "FRAME_SETUP",
@@ -642,42 +881,44 @@ impl ClassicHost {
         traces.extend(trace);
         let frame_setup_error = frame_setup_result as i32;
         if frame_setup_error != 0 {
-            let _ = self.invoke(CMD_SEQUENCE_SETDOWN);
+            if !persistent_sequence {
+                let _ = self.end_sequence(false);
+            }
             return Err(ClassicError::Selector {
                 selector: "FRAME_SETUP",
                 error: frame_setup_error,
             });
         }
-        let frame_data = self.read_output_pointer(abi::OUT_FRAME_DATA_OFFSET)?;
-        self.write_input_pointer(abi::IN_FRAME_DATA_OFFSET, frame_data)?;
-
-        let (mut render_error, census, render_traces) = if smart_render {
-            self.render_smart(
-                params,
-                input_param,
-                output_world,
-                width,
-                height,
-                rowbytes,
-                output_request,
-                census_enabled,
-                trace_enabled,
-            )?
-        } else {
-            if output_request != [0, 0, width as i32, height as i32] {
-                return Err(ClassicError::Input(
-                    "region rendering requires Smart Render support".into(),
-                ));
+        let frame_execution = (|| {
+            let frame_data = self.read_output_pointer(abi::OUT_FRAME_DATA_OFFSET)?;
+            self.write_input_pointer(abi::IN_FRAME_DATA_OFFSET, frame_data)?;
+            if smart_render {
+                self.render_smart(
+                    params,
+                    input_param,
+                    output_world,
+                    width,
+                    height,
+                    rowbytes,
+                    output_request,
+                    census_enabled,
+                    trace_enabled,
+                )
+            } else {
+                if output_request != [0, 0, width as i32, height as i32] {
+                    return Err(ClassicError::Input(
+                        "region rendering requires Smart Render support".into(),
+                    ));
+                }
+                let (return_value, trace) = self.call_with_optional_trace(
+                    "RENDER",
+                    [CMD_RENDER, self.input, self.output, params, output_world, 0],
+                    trace_enabled,
+                )?;
+                Ok((return_value as i32, None, trace.into_iter().collect()))
             }
-            let (return_value, trace) = self.call_with_optional_trace(
-                "RENDER",
-                [CMD_RENDER, self.input, self.output, params, output_world, 0],
-                trace_enabled,
-            )?;
-            (return_value as i32, None, trace.into_iter().collect())
-        };
-        traces.extend(render_traces);
-        let (frame_setdown_result, trace) = self.call_with_optional_trace(
+        })();
+        let frame_setdown = self.call_with_optional_trace(
             "FRAME_SETDOWN",
             [
                 CMD_FRAME_SETDOWN,
@@ -688,29 +929,72 @@ impl ClassicHost {
                 0,
             ],
             trace_enabled,
-        )?;
-        traces.extend(trace);
-        let frame_setdown_error = frame_setdown_result as i32;
+        );
+        let mut frame_setdown_error = match frame_setdown {
+            Ok((result, trace)) => {
+                traces.extend(trace);
+                result as i32
+            }
+            Err(_) => CLEANUP_GUEST_ERROR,
+        };
+        if self
+            .write_input_pointer(abi::IN_FRAME_DATA_OFFSET, 0)
+            .is_err()
+            && frame_setdown_error == 0
+        {
+            frame_setdown_error = CLEANUP_GUEST_ERROR;
+        }
+        if persistent_sequence && self.resident_frame_setdown_error == 0 && frame_setdown_error != 0
+        {
+            self.resident_frame_setdown_error = frame_setdown_error;
+        }
+        let (mut render_error, census, render_traces) = match frame_execution {
+            Ok(result) => result,
+            Err(error) => {
+                if !persistent_sequence {
+                    let _ = self.end_sequence(false);
+                }
+                return Err(error);
+            }
+        };
+        traces.extend(render_traces);
         if render_error == 0 {
             render_error = frame_setdown_error;
         }
-        self.write_input_pointer(abi::IN_FRAME_DATA_OFFSET, 0)?;
-        let (sequence_setdown_result, trace) = self.call_with_optional_trace(
-            "SEQUENCE_SETDOWN",
-            [CMD_SEQUENCE_SETDOWN, self.input, self.output, 0, 0, 0],
-            trace_enabled,
-        )?;
-        traces.extend(trace);
-        let sequence_setdown_error = sequence_setdown_result as i32;
-        if render_error == 0 {
-            render_error = sequence_setdown_error;
+        if !persistent_sequence {
+            let (sequence_setdown_result, trace) = self.call_with_optional_trace(
+                "SEQUENCE_SETDOWN",
+                [CMD_SEQUENCE_SETDOWN, self.input, self.output, 0, 0, 0],
+                trace_enabled,
+            )?;
+            traces.extend(trace);
+            let sequence_setdown_error = sequence_setdown_result as i32;
+            if render_error == 0 {
+                render_error = sequence_setdown_error;
+            }
+            self.sequence_active = false;
+            self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, 0)?;
         }
-        self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, 0)?;
         if render_error != 0 {
             return Err(ClassicError::Selector {
                 selector: "RENDER",
                 error: render_error,
             });
+        }
+        let mut leading_guard = vec![0u8; OUTPUT_GUARD_BYTES];
+        let mut trailing_guard = vec![0u8; OUTPUT_GUARD_BYTES];
+        self.engine
+            .read(resources.output_guard_base, &mut leading_guard)?;
+        self.engine
+            .read(output_pixels + pixel_bytes as u64, &mut trailing_guard)?;
+        if leading_guard
+            .iter()
+            .chain(&trailing_guard)
+            .any(|byte| *byte != OUTPUT_GUARD_PATTERN)
+        {
+            return Err(ClassicError::Input(
+                "guest render corrupted an output pixel guard".into(),
+            ));
         }
         let mut argb8 = vec![0u8; pixel_bytes];
         self.engine.read(output_pixels, &mut argb8)?;
@@ -728,6 +1012,7 @@ impl ClassicHost {
                 },
                 width,
                 height,
+                guards_intact: true,
                 parameter_values: applied_values,
                 output_request,
                 input_requests: self.engine.pre_checkout_requests().to_vec(),
@@ -741,9 +1026,119 @@ impl ClassicHost {
         ))
     }
 
+    fn ensure_frame_resources(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixel_bytes: usize,
+        parameter_count: usize,
+    ) -> Result<FrameResources, ClassicError> {
+        if let Some(resources) = &self.frame_resources {
+            if resources.width != width
+                || resources.height != height
+                || resources.pixel_bytes != pixel_bytes
+                || resources.parameter_definitions.len() != parameter_count
+            {
+                return Err(ClassicError::Input(
+                    "resident frame structure changed; reopen the session".into(),
+                ));
+            }
+            return Ok(resources.clone());
+        }
+        let input_param = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
+        let params = self.engine.allocate((parameter_count + 1) * 8, 8)?;
+        let output_world = self.engine.allocate(abi::PF_LAYER_DEF_SIZE, 8)?;
+        let input_pixels = self.engine.allocate(pixel_bytes, 64)?;
+        let guarded_output_bytes = pixel_bytes
+            .checked_add(OUTPUT_GUARD_BYTES * 2)
+            .ok_or_else(|| ClassicError::Input("guarded output size overflow".into()))?;
+        let output_guard_base = self.engine.allocate(guarded_output_bytes, 64)?;
+        let output_pixels = output_guard_base + OUTPUT_GUARD_BYTES as u64;
+        let mut parameter_definitions = Vec::with_capacity(parameter_count);
+        for _ in 0..parameter_count {
+            parameter_definitions.push(self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?);
+        }
+        let resources = FrameResources {
+            width,
+            height,
+            pixel_bytes,
+            input_param,
+            params,
+            output_world,
+            input_pixels,
+            output_guard_base,
+            output_pixels,
+            parameter_definitions,
+        };
+        self.frame_resources = Some(resources.clone());
+        Ok(resources)
+    }
+
     fn invoke(&mut self, selector: u64) -> Result<u64, GuestError> {
         self.engine
             .call_win64(self.entry, [selector, self.input, self.output, 0, 0, 0])
+    }
+
+    fn write_frame_context(
+        &mut self,
+        width: u32,
+        height: u32,
+        current_time: i32,
+        time_scale: u32,
+    ) -> Result<(), ClassicError> {
+        let mut input = vec![0u8; abi::PF_IN_DATA_SIZE];
+        self.engine.read(self.input, &mut input)?;
+        write_i32(&mut input, abi::IN_WIDTH_OFFSET, width as i32);
+        write_i32(&mut input, abi::IN_HEIGHT_OFFSET, height as i32);
+        write_i32(&mut input, abi::IN_CURRENT_TIME_OFFSET, current_time);
+        write_i32(&mut input, abi::IN_TIME_STEP_OFFSET, 1);
+        write_i32(&mut input, abi::IN_LOCAL_TIME_STEP_OFFSET, 1);
+        write_u32(&mut input, abi::IN_TIME_SCALE_OFFSET, time_scale);
+        write_rect(&mut input, abi::IN_EXTENT_HINT_OFFSET, width, height);
+        self.engine.write(self.input, &input)?;
+        Ok(())
+    }
+
+    fn end_sequence(&mut self, trace_enabled: bool) -> Result<i32, ClassicError> {
+        if !self.sequence_active {
+            return Ok(0);
+        }
+        let result = self.call_with_optional_trace(
+            "SEQUENCE_SETDOWN",
+            [CMD_SEQUENCE_SETDOWN, self.input, self.output, 0, 0, 0],
+            trace_enabled,
+        );
+        self.sequence_active = false;
+        let clear = self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, 0);
+        match result {
+            Ok((result, _)) => {
+                clear?;
+                Ok(result as i32)
+            }
+            Err(error) => {
+                let _ = clear;
+                Err(error)
+            }
+        }
+    }
+
+    fn end_global(&mut self) -> Result<i32, ClassicError> {
+        if !self.global_active {
+            return Ok(0);
+        }
+        let result = self.invoke(CMD_GLOBAL_SETDOWN);
+        self.global_active = false;
+        let clear = self.write_input_pointer(abi::IN_GLOBAL_DATA_OFFSET, 0);
+        match result {
+            Ok(result) => {
+                clear?;
+                Ok(result as i32)
+            }
+            Err(error) => {
+                let _ = clear;
+                Err(error.into())
+            }
+        }
     }
 
     fn call_with_optional_trace(
@@ -1222,6 +1617,10 @@ fn numeric_descriptor(
     }
 }
 
+fn cleanup_error_code(result: Result<i32, ClassicError>) -> i32 {
+    result.unwrap_or(CLEANUP_GUEST_ERROR)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1274,6 +1673,16 @@ mod tests {
                     .expect("parameter value is eight bytes")
             ),
             42.25
+        );
+    }
+
+    #[test]
+    fn cleanup_guest_failures_are_reported_as_unclean() {
+        assert_eq!(cleanup_error_code(Ok(0)), 0);
+        assert_eq!(cleanup_error_code(Ok(17)), 17);
+        assert_eq!(
+            cleanup_error_code(Err(ClassicError::Input("fixture failure".into()))),
+            CLEANUP_GUEST_ERROR
         );
     }
 }

@@ -120,6 +120,7 @@
 #include "worker_param_checkout_runtime.hpp"
 #include "worker_entry_bootstrap.hpp"
 #include "worker_effect_bootstrap.hpp"
+#include "worker_aegp_compute_cache.hpp"
 #include "worker_aegp_timeline_probe.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_host_selftests.hpp"
@@ -134,6 +135,7 @@
 #include "worker_host_suite_router.hpp"
 #include "worker_host_suite_catalog.hpp"
 #include "worker_suite_abi.hpp"
+#include "worker_suite_call_slot_probe.hpp"
 #include "worker_suite_registry.hpp"
 #include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
@@ -255,13 +257,23 @@ using aexcompat::worker_runtime::configure_runtime_module_hash;
 using aexcompat::worker_runtime::capture_module_audit;
 using aexcompat::worker_runtime::capture_module_audit_phase;
 using aexcompat::worker_runtime::effect_selector_name;
+using aexcompat::worker_runtime::ExtendedLookupOutcome;
+using aexcompat::worker_runtime::ExtendedLookupOpaqueTableClassification;
+using aexcompat::worker_runtime::ExtendedLookupStringTableState;
 using aexcompat::worker_runtime::guarded_effect_call;
+using aexcompat::worker_runtime::HostCallbackClassification;
 using aexcompat::worker_runtime::invoke_entry_seh;
 using aexcompat::worker_runtime::invoke_smart_pre_render_cleanup_seh;
 using aexcompat::worker_runtime::module_audit_json;
+using aexcompat::worker_runtime::observe_extended_allocation;
+using aexcompat::worker_runtime::observe_extended_free;
+using aexcompat::worker_runtime::record_extended_lookup_diagnostic;
+using aexcompat::worker_runtime::record_host_callback_invocation;
+using aexcompat::worker_runtime::module_audit_failure_json;
 using aexcompat::worker_runtime::module_audit_passed;
 using aexcompat::worker_runtime::module_audit_report;
 using aexcompat::worker_runtime::selector_dispatch_telemetry;
+using aexcompat::worker_runtime::selector_invocations_report_json;
 using aexcompat::worker_runtime::RuntimeAdmissionRequest;
 using aexcompat::worker_runtime::RuntimeContext;
 using aexcompat::worker_runtime::RuntimeHostHooks;
@@ -457,6 +469,47 @@ bool pipl_tag(const unsigned char* bytes, const char (&tag)[5]) {
   return std::memcmp(bytes, tag, 4) == 0;
 }
 
+bool terminal_zero_ae_reserved_property(const unsigned char* bytes,
+                                        std::size_t size) {
+  // Some shipping Boris Continuum PiPLs append the public AE_Reserved
+  // (8BIM/aeRD) zero property without including it in PIPropertyList::count.
+  // Accept only that exact, complete 20-byte record; all other trailing data
+  // remains invalid and fail-closed.
+  return bytes && size == 20 && pipl_tag(bytes, "MIB8") &&
+      pipl_tag(bytes + 4, "DRea") && read_pipl_u32(bytes + 8) == 0 &&
+      read_pipl_u32(bytes + 12) == 4 && read_pipl_u32(bytes + 16) == 0;
+}
+
+bool terminal_match_name_reserved_info_length_drift(
+    const unsigned char* bytes, std::size_t size, uint32_t declared_length,
+    uint32_t property_index, uint32_t property_count,
+    uint32_t& corrected_length) {
+  // Two shipping Boris obsolete stubs overstate the final eMNA data length by
+  // exactly eight bytes, swallowing only the vendor/key of the following
+  // public AE_Reserved_Info property. Recover solely when the entire remaining
+  // structure is exact: padded Pascal match name, aeFL(value 8), then the
+  // already-supported count-external aeRD(value 0). This is not a generic
+  // Pascal-string or property-length repair.
+  if (!bytes || size == 0 || property_index + 2 != property_count) return false;
+  const uint32_t string_length = uint32_t(bytes[0]) + 1U;
+  if (string_length > std::numeric_limits<uint32_t>::max() - 3U) return false;
+  const uint32_t padded_length = (string_length + 3U) & ~3U;
+  if (declared_length != padded_length + 8U ||
+      size != std::size_t(padded_length) + 40U) return false;
+  for (uint32_t index = string_length; index < padded_length; ++index)
+    if (bytes[index] != 0) return false;
+  const unsigned char* reserved_info = bytes + padded_length;
+  if (!pipl_tag(reserved_info, "MIB8") ||
+      !pipl_tag(reserved_info + 4, "LFea") ||
+      read_pipl_u32(reserved_info + 8) != 0 ||
+      read_pipl_u32(reserved_info + 12) != 4 ||
+      read_pipl_u32(reserved_info + 16) != 8 ||
+      !terminal_zero_ae_reserved_property(reserved_info + 20, 20))
+    return false;
+  corrected_length = padded_length;
+  return true;
+}
+
 bool valid_export_symbol(const unsigned char* bytes, std::size_t size,
                          std::string& symbol) {
   if (size == 0 || size > 256) return false;
@@ -505,9 +558,16 @@ PiplEntrypoint parse_pipl_entrypoint(const unsigned char* bytes, std::size_t siz
       return result;
     }
     const unsigned char* property = bytes + offset;
-    const uint32_t length = read_pipl_u32(property + 12);
+    uint32_t length = read_pipl_u32(property + 12);
     const bool adobe_vendor = pipl_tag(property, "MIB8");
     offset += 16;
+    if (adobe_vendor && pipl_tag(property + 4, "ANMe")) {
+      uint32_t corrected_length{};
+      if (terminal_match_name_reserved_info_length_drift(
+              bytes + offset, size - offset, length, index, count,
+              corrected_length))
+        length = corrected_length;
+    }
     if (length > size - offset || length > std::numeric_limits<uint32_t>::max() - 3U) {
       result.kind = PiplPluginKind::Invalid;
       return result;
@@ -540,7 +600,14 @@ PiplEntrypoint parse_pipl_entrypoint(const unsigned char* bytes, std::size_t siz
       }
     offset += padded_length;
   }
-  if (offset != size || !saw_kind) {
+  if (offset != size) {
+    if (!terminal_zero_ae_reserved_property(bytes + offset, size - offset)) {
+      result.kind = PiplPluginKind::Invalid;
+      return result;
+    }
+    offset = size;
+  }
+  if (!saw_kind) {
     result.kind = PiplPluginKind::Invalid;
     return result;
   }
@@ -995,22 +1062,43 @@ int32_t __cdecl host_extended_alloc(void** out, std::size_t size) {
               << " size=0x" << std::hex << size << std::dec << "\n"
               << std::flush;
   }
-  if (!out || size == 0 || size > (size_t{1} << 24)) return 4;
+  if (!out || size == 0 || size > (size_t{1} << 24)) {
+    record_host_callback_invocation(
+        "inter.extended_alloc", 4,
+        HostCallbackClassification::implemented);
+    return 4;
+  }
   void* buffer = std::calloc(1, size);
-  if (!buffer) return 4;
+  if (!buffer) {
+    record_host_callback_invocation(
+        "inter.extended_alloc", 4,
+        HostCallbackClassification::implemented);
+    return 4;
+  }
   *out = buffer;
+  observe_extended_allocation(buffer);
+  record_host_callback_invocation(
+      "inter.extended_alloc", 0,
+      HostCallbackClassification::implemented);
   return 0;
 }
 int32_t __cdecl host_extended_free(void** ptr) {
   // The plug-in passes the address of its buffer pointer (lea rcx,[local]),
   // not the buffer itself.
-  if (ptr) std::free(*ptr);
+  if (ptr) {
+    observe_extended_free(*ptr);
+    std::free(*ptr);
+  }
+  record_host_callback_invocation(
+      "inter.extended_free", 0,
+      HostCallbackClassification::implemented);
   return 0;
 }
 
 constexpr std::uintmax_t kMaxAexStringTableFileBytes = 256u * 1024u * 1024u;
 thread_local const aexcompat::aex_strings::StringTable*
     g_active_aex_string_table = nullptr;
+thread_local HMODULE g_active_effect_module = nullptr;
 
 bool load_aex_string_table(
     HMODULE module, aexcompat::aex_strings::StringTable& table) {
@@ -1047,11 +1135,43 @@ bool load_aex_string_table(
   return table.status != aexcompat::aex_strings::ParseStatus::Invalid;
 }
 
-const char* __cdecl host_extended_lookup(void* arg0, int32_t id, void* arg2,
+ExtendedLookupStringTableState extended_lookup_table_state(
+    aexcompat::aex_strings::ParseStatus status) noexcept {
+  return status == aexcompat::aex_strings::ParseStatus::Valid
+             ? ExtendedLookupStringTableState::valid
+         : status == aexcompat::aex_strings::ParseStatus::NoEntries
+             ? ExtendedLookupStringTableState::none
+             : ExtendedLookupStringTableState::invalid;
+}
+
+ExtendedLookupOpaqueTableClassification classify_other_lookup_module(
+    void* module) noexcept {
+  switch (aexcompat::worker_runtime::classify_loaded_module_provenance(
+      module)) {
+    case aexcompat::worker_runtime::LoadedModuleProvenance::sealed:
+      return ExtendedLookupOpaqueTableClassification::
+          other_loaded_sealed_module;
+    case aexcompat::worker_runtime::LoadedModuleProvenance::system:
+      return ExtendedLookupOpaqueTableClassification::
+          other_loaded_system_module;
+    case aexcompat::worker_runtime::LoadedModuleProvenance::unrecognized:
+      return ExtendedLookupOpaqueTableClassification::unrecognized;
+  }
+  return ExtendedLookupOpaqueTableClassification::unrecognized;
+}
+
+const char* __cdecl host_extended_lookup(void* table, int32_t id, void* arg2,
                                          void* arg3) {
-  const char* result =
-      g_active_aex_string_table ? g_active_aex_string_table->lookup(id)
-                                : nullptr;
+  // `table` is opaque and is never dereferenced. The diagnostics use only
+  // VirtualQuery/GetModuleHandleEx containment plus authenticated module
+  // provenance; resource ownership and lookup behavior remain unchanged.
+  const ExtendedLookupOpaqueTableClassification table_classification =
+      aexcompat::worker_runtime::classify_extended_lookup_table(
+          table, g_active_effect_module, nullptr,
+          &classify_other_lookup_module);
+  const char* result = g_active_aex_string_table
+      ? g_active_aex_string_table->lookup(id)
+      : nullptr;
   // LoadString semantics for a valid table (issue #362): bundled effects
   // probe optional string ids and use the result unchecked (Three-Way Color
   // Corrector strlens the answer for the absent id 610), so a missing id in
@@ -1065,11 +1185,31 @@ const char* __cdecl host_extended_lookup(void* arg0, int32_t id, void* arg2,
   }
   if (extended_diag_enabled()) {
     std::cerr << "extended_diag:lookup id=" << id;
-    diag_probe_arg("a0", arg0);
+    diag_probe_arg("a0", table);
     diag_probe_arg("a2", arg2);
     diag_probe_arg("a3", arg3);
     std::cerr << " -> " << (result ? result : "(null)") << "\n" << std::flush;
   }
+  const ExtendedLookupStringTableState raw_private_table_state =
+      extended_lookup_table_state(
+          g_active_aex_string_table
+              ? g_active_aex_string_table->status
+              : aexcompat::aex_strings::ParseStatus::NoEntries);
+  const ExtendedLookupStringTableState windows_resource_source_state =
+      ExtendedLookupStringTableState::none;
+  const int32_t return_code = result ? 0 : 4;
+  const ExtendedLookupOutcome outcome =
+      result ? ExtendedLookupOutcome::found
+             : raw_private_table_state ==
+                       ExtendedLookupStringTableState::invalid
+                   ? ExtendedLookupOutcome::invalid
+                   : ExtendedLookupOutcome::missing;
+  record_extended_lookup_diagnostic(
+      table_classification, raw_private_table_state,
+      windows_resource_source_state, id, outcome, return_code);
+  record_host_callback_invocation(
+      "inter.extended_lookup", return_code,
+      HostCallbackClassification::fallback);
   return result;
 }
 
@@ -1117,6 +1257,53 @@ bool verify_pipl_entrypoint_parser() {
   auto hostile_length = effect;
   std::fill(hostile_length.begin() + 22, hostile_length.begin() + 26, 0xff);
   if (parse_pipl_entrypoint(hostile_length.data(), hostile_length.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto terminal_reserved = effect;
+  append_pipl_property(terminal_reserved, "DRea", {0, 0, 0, 0});
+  const auto reserved_parsed =
+      parse_pipl_entrypoint(terminal_reserved.data(), terminal_reserved.size());
+  if (reserved_parsed.kind != PiplPluginKind::Effect ||
+      reserved_parsed.symbol != "entryPointFunc") return false;
+  auto nonzero_terminal_reserved = terminal_reserved;
+  nonzero_terminal_reserved.back() = 1;
+  if (parse_pipl_entrypoint(nonzero_terminal_reserved.data(),
+                            nonzero_terminal_reserved.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto duplicate_terminal_reserved = terminal_reserved;
+  append_pipl_property(duplicate_terminal_reserved, "DRea", {0, 0, 0, 0});
+  if (parse_pipl_entrypoint(duplicate_terminal_reserved.data(),
+                            duplicate_terminal_reserved.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto unrelated_terminal_property = effect;
+  append_pipl_property(unrelated_terminal_property, "eman", {0, 0, 0, 0});
+  if (parse_pipl_entrypoint(unrelated_terminal_property.data(),
+                            unrelated_terminal_property.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto match_name_length_drift = effect;
+  match_name_length_drift[6] = 4;
+  const std::size_t match_name_offset = match_name_length_drift.size();
+  append_pipl_property(
+      match_name_length_drift, "ANMe",
+      {16, 'B', 'C', 'C', '3', 'O', 'p', 't', 'i', 'c', 'a', 'l', ' ',
+       'F', 'l', 'o', 'w', 0, 0, 0});
+  std::fill(match_name_length_drift.begin() + match_name_offset + 12,
+            match_name_length_drift.begin() + match_name_offset + 16, 0);
+  match_name_length_drift[match_name_offset + 12] = 28;
+  append_pipl_property(match_name_length_drift, "LFea", {8, 0, 0, 0});
+  append_pipl_property(match_name_length_drift, "DRea", {0, 0, 0, 0});
+  const auto drift_parsed = parse_pipl_entrypoint(
+      match_name_length_drift.data(), match_name_length_drift.size());
+  if (drift_parsed.kind != PiplPluginKind::Effect ||
+      drift_parsed.symbol != "entryPointFunc") return false;
+  auto wrong_reserved_info = match_name_length_drift;
+  wrong_reserved_info[wrong_reserved_info.size() - 24] = 9;
+  if (parse_pipl_entrypoint(wrong_reserved_info.data(),
+                            wrong_reserved_info.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto wrong_length_drift = match_name_length_drift;
+  wrong_length_drift[match_name_offset + 12] = 24;
+  if (parse_pipl_entrypoint(wrong_length_drift.data(),
+                            wrong_length_drift.size()).kind !=
       PiplPluginKind::Invalid) return false;
   auto vendor_private_duplicate = effect;
   vendor_private_duplicate[6] = 3;
@@ -1678,6 +1865,14 @@ std::string unsupported_suite_calls_report_json() {
   return suite_registry().unsupported_suite_calls_report_json();
 }
 
+std::string suite_call_slot_probe_report_json() {
+  return aexcompat::worker_runtime::suite_call_slot_probe::report_json();
+}
+
+std::string compute_cache_timeline_report_json() {
+  return aexcompat::worker_runtime::compute_cache::telemetry_report_json();
+}
+
 std::string suite_timeline_report_json() {
   return suite_registry().suite_timeline_report_json();
 }
@@ -1880,13 +2075,26 @@ int32_t __cdecl host_app_callback(void* effect_ref, int32_t selector,
 }
 
 int32_t __cdecl get_platform_data(void* effect_ref, int32_t which, void* data) {
+  constexpr int32_t kExeFilePathDeprecated = 1;
+  constexpr int32_t kResourceFilePathDeprecated = 2;
   constexpr int32_t kExeFilePathWide = 7;
   constexpr int32_t kResourceFilePathWide = 8;
   constexpr std::size_t kMaxPath = 260;
   if (!effect_ref || !data ||
-      (which != kExeFilePathWide && which != kResourceFilePathWide) ||
+      (which != kExeFilePathDeprecated &&
+       which != kResourceFilePathDeprecated &&
+       which != kExeFilePathWide && which != kResourceFilePathWide) ||
       g_plugin_file_path.empty() || g_plugin_file_path.size() >= kMaxPath ||
       !std::filesystem::path(g_plugin_file_path).is_absolute()) return 4;
+  if (which == kExeFilePathDeprecated ||
+      which == kResourceFilePathDeprecated) {
+    BOOL used_default_character = FALSE;
+    const int written = WideCharToMultiByte(
+        CP_ACP, WC_NO_BEST_FIT_CHARS, g_plugin_file_path.c_str(), -1,
+        static_cast<char*>(data), static_cast<int>(kMaxPath), nullptr,
+        &used_default_character);
+    return written > 0 && !used_default_character ? 0 : 4;
+  }
   auto* destination = static_cast<wchar_t*>(data);
   std::wmemcpy(destination, g_plugin_file_path.c_str(), g_plugin_file_path.size() + 1);
   return 0;
@@ -2036,12 +2244,19 @@ std::string build_l2_report_json(
   c.suite_leases_balanced = suite_leases_balanced(); c.user_changed_param_requested = g_user_changed_param_requested;
   c.user_changed_param_slot = g_user_changed_param_slot; c.user_changed_param_error = g_user_changed_param_error;
   c.user_changed_parameters_json = requested_parameters_json(g_user_changed_parameters);
+  c.missing_suites_json = missing_suites_report_json();
+  c.suite_timeline_json = suite_timeline_report_json();
   const auto* message = reinterpret_cast<const char*>(output.data() + kOutMessage);
   c.return_message.assign(message, strnlen_s(message, 256)); c.about_message = about_message;
   c.about_selector_dispatched = !g_skip_about; c.last_seh_selector = g_last_seh_selector; c.last_seh_error = g_last_seh_error;
   c.last_seh_exception_code = g_last_seh_exception_code;
   c.lifecycle_errors = lifecycle_errors; c.lifecycle_data_null = lifecycle_data_null;
   c.unsupported_suite_calls_json = unsupported_suite_calls_report_json();
+  c.suite_call_slot_probe_json = suite_call_slot_probe_report_json();
+  c.compute_cache_timeline_json = compute_cache_timeline_report_json();
+  c.selector_invocations_json = selector_invocations_report_json();
+  if (!module_audit_passed())
+    c.module_audit_failure_json = module_audit_failure_json();
   if (include_module_audit) c.module_audit_json = module_audit_json();
   c.parameters.reserve(g_params.size());
   for (const auto& p : g_params) {
@@ -2335,12 +2550,90 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv);
 // #405). Extracted so every path installs the identical ABI tables and
 // runtime hooks; only the Request (worker kind, depth, audio, skip_about)
 // differs per call site.
+int32_t timeline_result(const char* callback, int32_t result) {
+  record_host_callback_invocation(
+      callback, result, HostCallbackClassification::implemented);
+  return result;
+}
+
+int32_t __cdecl timeline_checkout_param(
+    void* effect_ref, int32_t index, int32_t what_time, int32_t time_step,
+    uint32_t time_scale, void* definition) {
+  return timeline_result(
+      "inter.checkout_param",
+      checkout_param(effect_ref, index, what_time, time_step, time_scale,
+                     definition));
+}
+
+int32_t __cdecl timeline_checkin_param(
+    void* effect_ref, void* definition) {
+  return timeline_result(
+      "inter.checkin_param", checkin_param(effect_ref, definition));
+}
+
+int32_t __cdecl timeline_add_param(
+    void* effect_ref, int32_t index, void* definition) {
+  return timeline_result(
+      "inter.add_param", add_param(effect_ref, index, definition));
+}
+
+int32_t __cdecl timeline_abort_render(void* effect_ref) {
+  return timeline_result("inter.abort_render", abort_render(effect_ref));
+}
+
+int32_t __cdecl timeline_report_progress(
+    void* effect_ref, int32_t current, int32_t total) {
+  return timeline_result(
+      "inter.report_progress",
+      report_progress(effect_ref, current, total));
+}
+
+int32_t __cdecl timeline_register_custom_ui(
+    void* effect_ref, const void* custom_ui_info) {
+  return timeline_result(
+      "inter.register_custom_ui",
+      register_custom_ui(effect_ref, custom_ui_info));
+}
+
+int32_t __cdecl timeline_checkout_layer_audio(
+    void* effect_ref, int32_t index, int32_t start_time, int32_t duration,
+    uint32_t time_scale, uint32_t rate, int32_t bytes_per_sample,
+    int32_t channels, int32_t format, void** audio) {
+  return timeline_result(
+      "inter.checkout_layer_audio",
+      checkout_layer_audio(
+          effect_ref, index, start_time, duration, time_scale, rate,
+          bytes_per_sample, channels, format, audio));
+}
+
+int32_t __cdecl timeline_checkin_layer_audio(
+    void* effect_ref, void* audio) {
+  return timeline_result(
+      "inter.checkin_layer_audio",
+      checkin_layer_audio(effect_ref, audio));
+}
+
+int32_t __cdecl timeline_get_audio_data(
+    void* effect_ref, void* audio, void** data, int32_t* sample_count,
+    uint32_t* rate, int32_t* bytes_per_sample, int32_t* channels,
+    int32_t* format) {
+  return timeline_result(
+      "inter.get_audio_data",
+      get_audio_data(
+          effect_ref, audio, data, sample_count, rate, bytes_per_sample,
+          channels, format));
+}
+
 aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks() {
-  return {{reinterpret_cast<void*>(&checkout_param), reinterpret_cast<void*>(&checkin_param),
-    reinterpret_cast<void*>(&add_param), reinterpret_cast<void*>(&abort_render),
-    reinterpret_cast<void*>(&report_progress), reinterpret_cast<void*>(&register_custom_ui),
-    reinterpret_cast<void*>(&checkout_layer_audio), reinterpret_cast<void*>(&checkin_layer_audio),
-    reinterpret_cast<void*>(&get_audio_data),
+  return {{reinterpret_cast<void*>(&timeline_checkout_param),
+    reinterpret_cast<void*>(&timeline_checkin_param),
+    reinterpret_cast<void*>(&timeline_add_param),
+    reinterpret_cast<void*>(&timeline_abort_render),
+    reinterpret_cast<void*>(&timeline_report_progress),
+    reinterpret_cast<void*>(&timeline_register_custom_ui),
+    reinterpret_cast<void*>(&timeline_checkout_layer_audio),
+    reinterpret_cast<void*>(&timeline_checkin_layer_audio),
+    reinterpret_cast<void*>(&timeline_get_audio_data),
     // Extended inter slots 0x60 / 0x68 / 0x70 (issue #382).
     reinterpret_cast<void*>(&host_extended_alloc),
     reinterpret_cast<void*>(&host_extended_lookup),
@@ -2422,6 +2715,7 @@ void activate_plugin_string_table(HMODULE module,
               ? "none"
               : "invalid";
   std::cerr << "string_table_status:" << status << "\n" << std::flush;
+  g_active_effect_module = module;
   g_active_aex_string_table = &table;
 }
 
@@ -3187,6 +3481,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
               ? "none"
               : "invalid";
   std::cerr << "string_table_status:" << string_table_status << "\n" << std::flush;
+  g_active_effect_module = module;
   g_active_aex_string_table = &aex_string_table;
   aexcompat::worker_runtime::effect_bootstrap::State effect_state{};
   auto& input = effect_state.input;
@@ -3215,6 +3510,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   };
   const auto bootstrap = run_bootstrap(entry);
   g_active_aex_string_table = nullptr;
+  g_active_effect_module = nullptr;
   const int32_t global_error = bootstrap.global_error;
   const int32_t about_error = bootstrap.about_error;
   const int32_t params_error = bootstrap.params_error;

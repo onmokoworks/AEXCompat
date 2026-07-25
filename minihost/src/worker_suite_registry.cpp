@@ -18,7 +18,10 @@ namespace {
 constexpr std::size_t kMaxMissingSuites = 16;
 constexpr std::size_t kMaxUnsupportedSuiteCalls = 32;
 constexpr std::size_t kMaxSuiteNameBytes = 96;
-constexpr std::size_t kMaxSuiteTimeline = 65536;
+constexpr std::size_t kMaxTelemetrySuiteNameBytes = 64;
+constexpr std::size_t kMaxSuiteSelectorBytes = 64;
+constexpr std::size_t kMaxSuiteTimeline = 512;
+constexpr int32_t kMaxSuiteVersion = 65535;
 constexpr uint32_t kMaxUnsupportedSuiteSlot = 1023;
 thread_local const char* g_suite_selector = "HOST";
 
@@ -48,6 +51,18 @@ SuiteNameCopy copy_bounded_suite_name(const char* source) noexcept {
   }
   copy.text[copy.length] = '\0';
   return copy;
+}
+
+bool valid_schema_text(const std::string& text, std::size_t maximum,
+                       bool require_alpha_first) {
+  return !text.empty() && text.size() <= maximum &&
+      (!require_alpha_first ||
+       std::isalpha(static_cast<unsigned char>(text.front()))) &&
+      std::isalnum(static_cast<unsigned char>(text.back())) &&
+      std::all_of(text.begin(), text.end(), [](unsigned char character) {
+        return std::isalnum(character) || character == ' ' ||
+            character == '_' || character == '-';
+      });
 }
 
 std::string escape_json(const std::string& input) {
@@ -122,15 +137,14 @@ int32_t SuiteRegistry::acquire(const char* name, int32_t version,
                                TraceWriter* trace_writer) {
   const SuiteNameCopy owned_name = copy_bounded_suite_name(name);
   const auto record = [&](int32_t result) {
-    std::lock_guard<std::mutex> lock(timeline_mutex_);
-    if (suite_timeline_.size() >= kMaxSuiteTimeline) return;
-    suite_timeline_.push_back({static_cast<uint32_t>(suite_timeline_.size()), true,
-        std::string(owned_name.text.data(), owned_name.length), version,
-        g_suite_selector ? g_suite_selector : "HOST", result});
+    record_suite_timeline(true, owned_name.text.data(), owned_name.length,
+                          owned_name.readable && owned_name.terminated,
+                          version, result);
   };
   if (!suite) { record(4); return 4; }
   *suite = nullptr;
-  if (!name || !resolver || !owned_name.readable || !owned_name.terminated) {
+  if (!name || !resolver || !owned_name.readable || !owned_name.terminated ||
+      version <= 0 || version > kMaxSuiteVersion) {
     record(4);
     return 4;
   }
@@ -165,16 +179,31 @@ int32_t SuiteRegistry::release(const char* name, int32_t version,
   const char* const safe_name = owned_name.text.data();
   const bool valid_name = owned_name.readable && owned_name.terminated;
   const bool released = valid_name && lease_tracker_.release(safe_name, version);
-  {
-    std::lock_guard<std::mutex> lock(timeline_mutex_);
-    if (suite_timeline_.size() < kMaxSuiteTimeline)
-      suite_timeline_.push_back({static_cast<uint32_t>(suite_timeline_.size()), false,
-          std::string(owned_name.text.data(), owned_name.length), version,
-          g_suite_selector ? g_suite_selector : "HOST", released ? 0 : 1});
-  }
+  record_suite_timeline(false, owned_name.text.data(), owned_name.length,
+                        valid_name, version, released ? 0 : 1);
   if (trace_writer && valid_name && owned_name.length != 0)
     trace_writer->suite_release(safe_name, std::max<int32_t>(version, 0), released);
   return released ? 0 : 1;
+}
+
+void SuiteRegistry::record_suite_timeline(bool acquire, const char* name,
+                                          std::size_t name_length,
+                                          bool valid_name, int32_t version,
+                                          int32_t result) {
+  const std::string owned_name(name ? std::string(name, name_length) : std::string());
+  const std::string selector(g_suite_selector ? g_suite_selector : "HOST");
+  std::lock_guard<std::mutex> lock(timeline_mutex_);
+  if (!valid_name ||
+      !valid_schema_text(owned_name, kMaxTelemetrySuiteNameBytes, true) ||
+      !valid_schema_text(selector, kMaxSuiteSelectorBytes, false) ||
+      version <= 0 || version > kMaxSuiteVersion ||
+      suite_timeline_.size() >= kMaxSuiteTimeline) {
+    suite_timeline_truncated_ = true;
+    return;
+  }
+  suite_timeline_.push_back({
+      static_cast<uint32_t>(suite_timeline_.size()), acquire, owned_name,
+      version, selector, result});
 }
 
 std::string SuiteRegistry::safe_missing_name(const char* name) {
@@ -193,19 +222,20 @@ std::string SuiteRegistry::safe_missing_name(const char* name) {
 
 void SuiteRegistry::record_missing_suite(const std::string& name,
                                          int32_t version) {
-  const bool valid_name = !name.empty() && name.size() <= kMaxSuiteNameBytes &&
-      std::all_of(name.begin(), name.end(), [](unsigned char character) {
-        return std::isalnum(character) || character == ' ' || character == '.' ||
-            character == '_' || character == '-';
-      });
-  if (!valid_name || version <= 0) return;
   std::lock_guard<std::mutex> lock(missing_suites_mutex_);
-  const auto entry = std::make_pair(name, version);
-  if (std::find(missing_suites_.begin(), missing_suites_.end(), entry) ==
-          missing_suites_.end() &&
-      missing_suites_.size() < kMaxMissingSuites) {
-    missing_suites_.push_back(entry);
+  if (!valid_schema_text(name, kMaxTelemetrySuiteNameBytes, true) ||
+      version <= 0 || version > kMaxSuiteVersion) {
+    missing_suites_truncated_ = true;
+    return;
   }
+  const auto entry = std::make_pair(name, version);
+  if (std::find(missing_suites_.begin(), missing_suites_.end(), entry) !=
+      missing_suites_.end()) return;
+  if (missing_suites_.size() >= kMaxMissingSuites) {
+    missing_suites_truncated_ = true;
+    return;
+  }
+  missing_suites_.push_back(entry);
 }
 
 int32_t SuiteRegistry::reject_unknown(const char* name, int32_t version,
@@ -254,7 +284,8 @@ std::string SuiteRegistry::missing_suites_report_json() const {
     json << "{\"name\":\"" << missing_suites_[index].first
          << "\",\"version\":" << missing_suites_[index].second << '}';
   }
-  json << ']';
+  json << "],\"missing_suites_truncated\":"
+       << (missing_suites_truncated_ ? "true" : "false");
   return json.str();
 }
 
@@ -276,7 +307,10 @@ void SuiteRegistry::note_unsupported_suite_call(UnsupportedSuiteId suite,
         ++found->call_count;
       return;
     }
-    if (unsupported_suite_calls_.size() >= kMaxUnsupportedSuiteCalls) return;
+    if (unsupported_suite_calls_.size() >= kMaxUnsupportedSuiteCalls) {
+      unsupported_suite_calls_truncated_ = true;
+      return;
+    }
     unsupported_suite_calls_.push_back({suite, slot, 1});
     inserted = true;
   } catch (...) {
@@ -305,7 +339,8 @@ std::string SuiteRegistry::unsupported_suite_calls_report_json() const {
          << ",\"slot\":" << call.slot
          << ",\"call_count\":" << call.call_count << '}';
   }
-  json << ']';
+  json << "],\"unsupported_suite_calls_truncated\":"
+       << (unsupported_suite_calls_truncated_ ? "true" : "false");
   return json.str();
 }
 
@@ -323,7 +358,8 @@ std::string SuiteRegistry::suite_timeline_report_json() const {
          << ",\"selector\":\"" << escape_json(event.selector)
          << "\",\"result\":" << event.result << '}';
   }
-  json << ']';
+  json << "],\"suite_timeline_truncated\":"
+       << (suite_timeline_truncated_ ? "true" : "false");
   return json.str();
 }
 
@@ -342,6 +378,10 @@ const char* set_suite_timeline_selector(const char* selector) noexcept {
   const char* previous = g_suite_selector;
   g_suite_selector = selector;
   return previous;
+}
+
+const char* current_suite_timeline_selector() noexcept {
+  return g_suite_selector;
 }
 
 }  // namespace aexcompat::worker_runtime

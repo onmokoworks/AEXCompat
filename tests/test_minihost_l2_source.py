@@ -540,10 +540,11 @@ class MinihostL2SourceTests(unittest.TestCase):
         text = SOURCE.read_text(encoding="utf-8") + registry + dispatch + guards
         for marker in (
             "struct SuiteTimelineEvent",
-            "kMaxSuiteTimeline = 65536",
+            "kMaxSuiteTimeline = 512",
             "suite_timeline_report_json",
             '\\"suite_timeline\\"',
-            "set_suite_timeline_selector(effect_selector_name(command))",
+            "const char* selector = effect_selector_name(command)",
+            "set_suite_timeline_selector(selector)",
             "g_suite_selector ? g_suite_selector : \"HOST\"",
             "copy_bounded_suite_name",
             "char* unterminated",
@@ -1263,8 +1264,13 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_platform_data_is_absolute_bounded_and_fail_closed(self):
         text = l2_family_source()
         for marker in ("kUtilsGetPlatformData = 432",
+                       "kExeFilePathDeprecated = 1",
+                       "kResourceFilePathDeprecated = 2",
                        "kExeFilePathWide = 7",
                        "kResourceFilePathWide = 8",
+                       "WideCharToMultiByte(",
+                       "WC_NO_BEST_FIT_CHARS",
+                       "used_default_character",
                        "g_plugin_file_path.size() >= kMaxPath",
                        "std::filesystem::path(g_plugin_file_path).is_absolute()",
                        "write(utils, kUtilsGetPlatformData, &get_platform_data)"):

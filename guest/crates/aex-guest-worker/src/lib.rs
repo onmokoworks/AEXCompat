@@ -16,4 +16,5 @@ pub mod classic;
 #[cfg(feature = "native-carrier")]
 pub mod native_x64;
 pub mod pe;
+pub mod resident;
 pub mod x64;

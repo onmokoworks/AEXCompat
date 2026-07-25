@@ -36,17 +36,21 @@ const HOST_HANDLE_SIZE: u64 = STUB_BASE + 0x80100;
 const HOST_RESIZE_HANDLE: u64 = STUB_BASE + 0x80110;
 const HOST_AEGP_REGISTER: u64 = STUB_BASE + 0x80120;
 const HOST_AEGP_GET_MAIN_WINDOW: u64 = STUB_BASE + 0x80130;
-const HOST_AEGP_NEW_MEM_HANDLE: u64 = STUB_BASE + 0x80140;
-const HOST_AEGP_FREE_MEM_HANDLE: u64 = STUB_BASE + 0x80150;
-const HOST_AEGP_LOCK_MEM_HANDLE: u64 = STUB_BASE + 0x80160;
-const HOST_AEGP_UNLOCK_MEM_HANDLE: u64 = STUB_BASE + 0x80170;
-const HOST_AEGP_MEM_HANDLE_SIZE: u64 = STUB_BASE + 0x80180;
-const HOST_AEGP_RESIZE_MEM_HANDLE: u64 = STUB_BASE + 0x80190;
-const HOST_AEGP_MEMORY_UNSUPPORTED: u64 = STUB_BASE + 0x801a0;
+const HOST_ITERATE8: u64 = STUB_BASE + 0x80140;
+const HOST_ITERATE8_CONTINUE: u64 = STUB_BASE + 0x80150;
+const HOST_AEGP_NEW_MEM_HANDLE: u64 = STUB_BASE + 0x80160;
+const HOST_AEGP_FREE_MEM_HANDLE: u64 = STUB_BASE + 0x80170;
+const HOST_AEGP_LOCK_MEM_HANDLE: u64 = STUB_BASE + 0x80180;
+const HOST_AEGP_UNLOCK_MEM_HANDLE: u64 = STUB_BASE + 0x80190;
+const HOST_AEGP_MEM_HANDLE_SIZE: u64 = STUB_BASE + 0x801a0;
+const HOST_AEGP_RESIZE_MEM_HANDLE: u64 = STUB_BASE + 0x801b0;
+const HOST_AEGP_MEMORY_UNSUPPORTED: u64 = STUB_BASE + 0x801c0;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
-const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81100;
+const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
+const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81200;
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
+const HOST_ITERATE8_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x88000;
 const DATA_BASE: u64 = 0x0000_0000_4000_0000;
 const DATA_SIZE: u64 = 0x1000_0000;
 const HANDLE_DATA_BASE: u64 = DATA_BASE + 0x400_0000;
@@ -70,6 +74,7 @@ const TRACE_DISTINCT_FINGERPRINTS: usize = 4096;
 const MAX_TRACE_WATCH_BYTES: usize = 4096;
 const MAX_TRACE_WITNESSES: usize = 256;
 const MAX_UNSUPPORTED_SUITE_CALLS: usize = 256;
+const MAX_SUITE_REQUESTS: usize = 256;
 
 pub(crate) fn utility_suite_layout(version: u32) -> Option<(usize, usize, usize)> {
     match version {
@@ -100,6 +105,14 @@ fn unsupported_suite_stub_address(version: u32, slot: usize) -> Option<u64> {
         _ => return None,
     };
     Some(HOST_AEGP_UNSUPPORTED_STUBS + version_index * 0x1000 + slot as u64 * STUB_STRIDE)
+}
+
+fn iterate8_suite_table_address(version: u64) -> Option<u64> {
+    match version {
+        1 => Some(HOST_ITERATE8_SUITE),
+        2 => Some(HOST_ITERATE8_SUITE + 0x40),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1315,14 +1328,30 @@ pub(crate) fn record_unsupported_suite_call(
     version: u32,
     slot: usize,
 ) {
+    record_named_unsupported_suite_call(calls, dropped, "AEGP Utility Suite", version, slot);
+}
+
+pub(crate) fn record_suite_request(requests: &mut Vec<String>, request: String) {
+    if requests.len() < MAX_SUITE_REQUESTS && !requests.iter().any(|seen| seen == &request) {
+        requests.push(request);
+    }
+}
+
+fn record_named_unsupported_suite_call(
+    calls: &mut Vec<UnsupportedSuiteCall>,
+    dropped: &mut u64,
+    name: &'static str,
+    version: u32,
+    slot: usize,
+) {
     if let Some(call) = calls
         .iter_mut()
-        .find(|call| call.version == version && call.slot == slot)
+        .find(|call| call.name == name && call.version == version && call.slot == slot)
     {
         call.call_count += 1;
     } else if calls.len() < MAX_UNSUPPORTED_SUITE_CALLS {
         calls.push(UnsupportedSuiteCall {
-            name: "AEGP Utility Suite",
+            name,
             version,
             slot,
             call_count: 1,
@@ -1359,6 +1388,24 @@ struct GuestState {
     trace: Option<TraceCapture>,
     trace_labels: HashMap<u64, TraceLabel>,
     trace_watches: Vec<TraceWatchSpec>,
+    pending_iterate8: Option<PendingIterate8>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingIterate8 {
+    caller_rsp: u64,
+    return_address: u64,
+    refcon: u64,
+    pixel_function: u64,
+    source_data: u64,
+    source_rowbytes: u64,
+    destination_data: u64,
+    destination_rowbytes: u64,
+    left: i32,
+    right: i32,
+    bottom: i32,
+    x: i32,
+    y: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -1972,6 +2019,8 @@ impl GuestEngine<'static> {
                 "write AEGP resize-memory callback",
                 HOST_AEGP_RESIZE_MEM_HANDLE,
             ),
+            ("write Iterate8 callback", HOST_ITERATE8),
+            ("write Iterate8 continuation", HOST_ITERATE8_CONTINUE),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -2049,6 +2098,18 @@ impl GuestEngine<'static> {
                 HOST_AEGP_GET_MAIN_WINDOW,
                 HOST_AEGP_GET_MAIN_WINDOW,
                 emulate_aegp_get_main_window,
+            ),
+        )?;
+        uc(
+            "install Iterate8 callback",
+            unicorn.add_code_hook(HOST_ITERATE8, HOST_ITERATE8, emulate_iterate8),
+        )?;
+        uc(
+            "install Iterate8 continuation",
+            unicorn.add_code_hook(
+                HOST_ITERATE8_CONTINUE,
+                HOST_ITERATE8_CONTINUE,
+                continue_iterate8,
             ),
         )?;
         uc(
@@ -2167,6 +2228,7 @@ impl GuestEngine<'static> {
             "write AEGP Memory Suite",
             unicorn.mem_write(HOST_AEGP_MEMORY_SUITE, &aegp_memory_suite),
         )?;
+        install_iterate8_suites(&mut unicorn)?;
         install_aegp_utility_suites(&mut unicorn)?;
         for (address, name) in [
             (HOST_ADD_PARAM, "add_param"),
@@ -2195,6 +2257,8 @@ impl GuestEngine<'static> {
             (HOST_AEGP_UNLOCK_MEM_HANDLE, "aegp_unlock_mem_handle"),
             (HOST_AEGP_MEM_HANDLE_SIZE, "aegp_mem_handle_size"),
             (HOST_AEGP_RESIZE_MEM_HANDLE, "aegp_resize_mem_handle"),
+            (HOST_ITERATE8, "iterate8"),
+            (HOST_ITERATE8_CONTINUE, "iterate8_continue"),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -2727,31 +2791,36 @@ impl GuestEngine<'static> {
     }
 
     pub fn call_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
-        self.call_win64_with_timeout(address, args, TIMEOUT_MICROSECONDS)
+        self.call_win64_with_timeout(address, &args, TIMEOUT_MICROSECONDS)
     }
 
     fn call_win64_with_timeout(
         &mut self,
         address: u64,
-        args: [u64; 6],
+        args: &[u64],
         timeout_microseconds: u64,
     ) -> Result<u64, GuestError> {
+        if args.len() < 4 || args.len() > 16 {
+            return Err(GuestError::Callback(format!(
+                "Win64 call requires 4..=16 arguments, got {}",
+                args.len()
+            )));
+        }
         let stack_top = STACK_BASE + STACK_SIZE;
-        // Win64 function entry observes RSP % 16 == 8. Reserve a return address,
-        // 32-byte shadow space, two stack arguments, and bounded scratch.
+        // Win64 function entry observes RSP % 16 == 8. Reserve a return
+        // address, 32-byte shadow space, bounded stack arguments, and scratch.
         let rsp = (stack_top - 0x108) | 8;
         uc(
             "write return address",
             self.unicorn.mem_write(rsp, &RETURN_ADDRESS.to_le_bytes()),
         )?;
-        uc(
-            "write argument 5",
-            self.unicorn.mem_write(rsp + 0x28, &args[4].to_le_bytes()),
-        )?;
-        uc(
-            "write argument 6",
-            self.unicorn.mem_write(rsp + 0x30, &args[5].to_le_bytes()),
-        )?;
+        for (index, value) in args.iter().copied().enumerate().skip(4) {
+            uc(
+                "write stack argument",
+                self.unicorn
+                    .mem_write(rsp + 0x28 + ((index - 4) * 8) as u64, &value.to_le_bytes()),
+            )?;
+        }
         for (register, value) in [
             (RegisterX86::RSP, rsp),
             (RegisterX86::RCX, args[0]),
@@ -3449,6 +3518,277 @@ fn emulate_checkout_output(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
     finish_callback(unicorn, result);
 }
 
+fn read_guest_u64(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    description: &str,
+) -> Result<u64, String> {
+    let mut bytes = [0u8; 8];
+    unicorn
+        .mem_read(address, &mut bytes)
+        .map_err(|error| format!("{description}: {error}"))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn read_guest_i32(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    description: &str,
+) -> Result<i32, String> {
+    let mut bytes = [0u8; 4];
+    unicorn
+        .mem_read(address, &mut bytes)
+        .map_err(|error| format!("{description}: {error}"))?;
+    Ok(i32::from_le_bytes(bytes))
+}
+
+fn schedule_iterate8_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), String> {
+    let pending = unicorn
+        .get_data()
+        .pending_iterate8
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "Iterate8 continuation has no pending call".to_string())?;
+    let input = if pending.source_data == 0 {
+        0
+    } else {
+        pending.source_data + pending.y as u64 * pending.source_rowbytes + pending.x as u64 * 4
+    };
+    let output = pending.destination_data
+        + pending.y as u64 * pending.destination_rowbytes
+        + pending.x as u64 * 4;
+    let callback_rsp = pending
+        .caller_rsp
+        .checked_sub(0x30)
+        .ok_or_else(|| "Iterate8 callback stack underflow".to_string())?;
+    unicorn
+        .mem_write(callback_rsp, &HOST_ITERATE8_CONTINUE.to_le_bytes())
+        .map_err(|error| format!("Iterate8 callback return address: {error}"))?;
+    unicorn
+        .mem_write(callback_rsp + 0x28, &output.to_le_bytes())
+        .map_err(|error| format!("Iterate8 callback output argument: {error}"))?;
+    for (register, value) in [
+        (RegisterX86::RSP, callback_rsp),
+        (RegisterX86::RCX, pending.refcon),
+        (RegisterX86::RDX, pending.x as u32 as u64),
+        (RegisterX86::R8, pending.y as u32 as u64),
+        (RegisterX86::R9, input),
+        (RegisterX86::RIP, pending.pixel_function),
+    ] {
+        unicorn
+            .reg_write(register, value)
+            .map_err(|error| format!("Iterate8 callback register: {error}"))?;
+    }
+    Ok(())
+}
+
+fn finish_iterate8(unicorn: &mut Unicorn<'_, GuestState>, result: u64) -> Result<(), String> {
+    let pending = unicorn
+        .get_data_mut()
+        .pending_iterate8
+        .take()
+        .ok_or_else(|| "Iterate8 completion has no pending call".to_string())?;
+    for (register, value) in [
+        (RegisterX86::RSP, pending.caller_rsp + 8),
+        (RegisterX86::RIP, pending.return_address),
+        (RegisterX86::RAX, result),
+    ] {
+        unicorn
+            .reg_write(register, value)
+            .map_err(|error| format!("Iterate8 completion register: {error}"))?;
+    }
+    Ok(())
+}
+
+fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        if unicorn.get_data().pending_iterate8.is_some() {
+            return Err("nested PF Iterate8 calls are unsupported".to_string());
+        }
+        let caller_rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("Iterate8 stack: {error}"))?;
+        let return_address = read_guest_u64(unicorn, caller_rsp, "Iterate8 return address")?;
+        let source_world = unicorn
+            .reg_read(RegisterX86::R9)
+            .map_err(|error| format!("Iterate8 source world: {error}"))?;
+        let area = read_guest_u64(unicorn, caller_rsp + 0x28, "Iterate8 area")?;
+        let refcon = read_guest_u64(unicorn, caller_rsp + 0x30, "Iterate8 refcon")?;
+        let pixel_function = read_guest_u64(unicorn, caller_rsp + 0x38, "Iterate8 pixel callback")?;
+        let destination_world =
+            read_guest_u64(unicorn, caller_rsp + 0x40, "Iterate8 destination world")?;
+        if pixel_function == 0 || destination_world == 0 {
+            unicorn
+                .reg_write(RegisterX86::RAX, 4)
+                .map_err(|error| format!("Iterate8 invalid-call return: {error}"))?;
+            return Ok(());
+        }
+        let destination_data = read_guest_u64(
+            unicorn,
+            destination_world + abi::LAYER_DATA_OFFSET as u64,
+            "Iterate8 destination data",
+        )?;
+        let destination_rowbytes = read_guest_i32(
+            unicorn,
+            destination_world + abi::LAYER_ROWBYTES_OFFSET as u64,
+            "Iterate8 destination rowbytes",
+        )?;
+        let destination_width = read_guest_i32(
+            unicorn,
+            destination_world + abi::LAYER_WIDTH_OFFSET as u64,
+            "Iterate8 destination width",
+        )?;
+        let destination_height = read_guest_i32(
+            unicorn,
+            destination_world + abi::LAYER_HEIGHT_OFFSET as u64,
+            "Iterate8 destination height",
+        )?;
+        let (source_data, source_rowbytes, width, height) = if source_world == 0 {
+            (0, 0, destination_width, destination_height)
+        } else {
+            let data = read_guest_u64(
+                unicorn,
+                source_world + abi::LAYER_DATA_OFFSET as u64,
+                "Iterate8 source data",
+            )?;
+            let rowbytes = read_guest_i32(
+                unicorn,
+                source_world + abi::LAYER_ROWBYTES_OFFSET as u64,
+                "Iterate8 source rowbytes",
+            )?;
+            let source_width = read_guest_i32(
+                unicorn,
+                source_world + abi::LAYER_WIDTH_OFFSET as u64,
+                "Iterate8 source width",
+            )?;
+            let source_height = read_guest_i32(
+                unicorn,
+                source_world + abi::LAYER_HEIGHT_OFFSET as u64,
+                "Iterate8 source height",
+            )?;
+            (
+                data,
+                rowbytes,
+                source_width.min(destination_width),
+                source_height.min(destination_height),
+            )
+        };
+        if destination_data == 0
+            || source_world != 0 && source_data == 0
+            || source_world != 0 && source_rowbytes < width.saturating_mul(4)
+            || destination_rowbytes < width.saturating_mul(4)
+            || width <= 0
+            || height <= 0
+        {
+            unicorn
+                .reg_write(RegisterX86::RAX, 4)
+                .map_err(|error| format!("Iterate8 invalid-world return: {error}"))?;
+            return Ok(());
+        }
+        let mut bounds = [0, 0, width, height];
+        if area != 0 {
+            for (index, value) in bounds.iter_mut().enumerate() {
+                *value = read_guest_i32(unicorn, area + (index * 4) as u64, "Iterate8 area field")?;
+            }
+            bounds[0] = bounds[0].clamp(0, width);
+            bounds[1] = bounds[1].clamp(0, height);
+            bounds[2] = bounds[2].clamp(bounds[0], width);
+            bounds[3] = bounds[3].clamp(bounds[1], height);
+        }
+        if bounds[0] >= bounds[2] || bounds[1] >= bounds[3] {
+            unicorn
+                .reg_write(RegisterX86::RAX, 4)
+                .map_err(|error| format!("Iterate8 empty-area return: {error}"))?;
+            return Ok(());
+        }
+        unicorn.get_data_mut().pending_iterate8 = Some(PendingIterate8 {
+            caller_rsp,
+            return_address,
+            refcon,
+            pixel_function,
+            source_data,
+            source_rowbytes: source_rowbytes as u64,
+            destination_data,
+            destination_rowbytes: destination_rowbytes as u64,
+            left: bounds[0],
+            right: bounds[2],
+            bottom: bounds[3],
+            x: bounds[0],
+            y: bounds[1],
+        });
+        schedule_iterate8_pixel(unicorn)
+    })();
+    if let Err(error) = result {
+        unicorn.get_data_mut().callback_error = Some(error);
+        let _ = unicorn.emu_stop();
+    }
+}
+
+fn continue_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let callback_error = unicorn
+            .reg_read(RegisterX86::RAX)
+            .map_err(|error| format!("Iterate8 callback return: {error}"))?;
+        if callback_error as u32 != 0 {
+            return finish_iterate8(unicorn, callback_error as u32 as u64);
+        }
+        let pending = unicorn
+            .get_data_mut()
+            .pending_iterate8
+            .as_mut()
+            .ok_or_else(|| "Iterate8 continuation has no pending call".to_string())?;
+        pending.x += 1;
+        if pending.x >= pending.right {
+            pending.x = pending.left;
+            pending.y += 1;
+        }
+        if pending.y >= pending.bottom {
+            finish_iterate8(unicorn, 0)
+        } else {
+            schedule_iterate8_pixel(unicorn)
+        }
+    })();
+    if let Err(error) = result {
+        unicorn.get_data_mut().callback_error = Some(error);
+        let _ = unicorn.emu_stop();
+    }
+}
+
+fn install_iterate8_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+    for version in [1u32, 2] {
+        let table =
+            iterate8_suite_table_address(version as u64).expect("known PF Iterate8 Suite version");
+        let mut bytes = [0u8; 40];
+        bytes[..8].copy_from_slice(&HOST_ITERATE8.to_le_bytes());
+        for slot in 1..5usize {
+            let stub = HOST_ITERATE8_UNSUPPORTED_STUBS
+                + (version as u64 - 1) * 0x100
+                + (slot as u64 - 1) * STUB_STRIDE;
+            uc(
+                "write Iterate8 unsupported callback",
+                unicorn.mem_write(stub, &[0xc3]),
+            )?;
+            uc(
+                "install Iterate8 unsupported callback",
+                unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                    let state = unicorn.get_data_mut();
+                    record_named_unsupported_suite_call(
+                        &mut state.unsupported_suite_calls,
+                        &mut state.dropped_unsupported_suite_calls,
+                        "PF Iterate8 Suite",
+                        version,
+                        slot,
+                    );
+                    let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+                }),
+            )?;
+            bytes[slot * 8..slot * 8 + 8].copy_from_slice(&stub.to_le_bytes());
+        }
+        uc("write PF Iterate8 Suite", unicorn.mem_write(table, &bytes))?;
+    }
+    Ok(())
+}
+
 fn install_aegp_utility_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
     for version in [3u32, 7, 11, 13] {
         let (slot_count, register_slot, window_slot) =
@@ -3509,10 +3849,10 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         }
     }
     let name = String::from_utf8_lossy(&bytes);
-    unicorn
-        .get_data_mut()
-        .suite_requests
-        .push(format!("{name} v{version}"));
+    record_suite_request(
+        &mut unicorn.get_data_mut().suite_requests,
+        format!("{name} v{version}"),
+    );
     let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
     if output != 0 {
         let _ = unicorn.mem_write(output, &0u64.to_le_bytes());
@@ -3533,6 +3873,14 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         && unicorn
             .mem_write(output, &HOST_AEGP_MEMORY_SUITE.to_le_bytes())
             .is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
+    if name == "PF Iterate8 Suite"
+        && output != 0
+        && let Some(table) = iterate8_suite_table_address(version)
+        && unicorn.mem_write(output, &table.to_le_bytes()).is_ok()
     {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         return;
@@ -4205,6 +4553,8 @@ mod tests {
             HOST_AEGP_UNLOCK_MEM_HANDLE,
             HOST_AEGP_MEM_HANDLE_SIZE,
             HOST_AEGP_RESIZE_MEM_HANDLE,
+            HOST_ITERATE8,
+            HOST_ITERATE8_CONTINUE,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -4267,6 +4617,17 @@ mod tests {
         unicorn
             .mem_write(HOST_AEGP_MEMORY_SUITE, &aegp_memory_suite)
             .unwrap();
+        unicorn
+            .add_code_hook(HOST_ITERATE8, HOST_ITERATE8, emulate_iterate8)
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_ITERATE8_CONTINUE,
+                HOST_ITERATE8_CONTINUE,
+                continue_iterate8,
+            )
+            .unwrap();
+        install_iterate8_suites(&mut unicorn).unwrap();
         install_aegp_utility_suites(&mut unicorn).unwrap();
         let mut trace_points = Vec::new();
         let mut decoder = Decoder::with_ip(64, code, CODE, DecoderOptions::NONE);
@@ -4305,6 +4666,108 @@ mod tests {
         // mov rax, rcx; add rax, rdx; ret
         let mut engine = test_engine(&[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3]);
         assert_eq!(engine.call_win64(CODE, [40, 2, 0, 0, 0, 0]).unwrap(), 42);
+    }
+
+    #[test]
+    fn iterate8_calls_guest_pixel_callback_for_each_argb8_pixel() {
+        const CODE: u64 = 0x1000_0000;
+        // mov rax,[rsp+0x28]; mov edx,[r9]; mov [rax],edx; xor eax,eax; ret
+        let mut engine = test_engine(&[
+            0x48, 0x8b, 0x44, 0x24, 0x28, 0x41, 0x8b, 0x11, 0x89, 0x10, 0x31, 0xc0, 0xc3,
+        ]);
+        let source_pixels = engine.allocate(8, 4).unwrap();
+        let destination_pixels = engine.allocate(8, 4).unwrap();
+        let source_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        engine
+            .write(source_pixels, &[1, 2, 3, 4, 5, 6, 7, 8])
+            .unwrap();
+        for (world, pixels) in [
+            (source_world, source_pixels),
+            (destination_world, destination_pixels),
+        ] {
+            let mut bytes = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+            bytes[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                .copy_from_slice(&pixels.to_le_bytes());
+            bytes[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                .copy_from_slice(&8i32.to_le_bytes());
+            bytes[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+                .copy_from_slice(&2i32.to_le_bytes());
+            bytes[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+                .copy_from_slice(&1i32.to_le_bytes());
+            engine.write(world, &bytes).unwrap();
+        }
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_ITERATE8,
+                    &[0, 0, 1, source_world, 0, 0, CODE, destination_world],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        let mut output = [0u8; 8];
+        engine.read(destination_pixels, &mut output).unwrap();
+        assert_eq!(output, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn iterate8_preserves_null_source_pixel_for_generators() {
+        const CODE: u64 = 0x1000_0000;
+        // mov rax,[rsp+0x28]; xor edx,edx; test r9,r9; setne dl;
+        // mov [rax],edx; xor eax,eax; ret
+        let mut engine = test_engine(&[
+            0x48, 0x8b, 0x44, 0x24, 0x28, 0x31, 0xd2, 0x4d, 0x85, 0xc9, 0x0f, 0x95, 0xc2, 0x89,
+            0x10, 0x31, 0xc0, 0xc3,
+        ]);
+        let destination_pixels = engine.allocate(4, 4).unwrap();
+        let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let mut world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        world[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&destination_pixels.to_le_bytes());
+        world[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&4i32.to_le_bytes());
+        world[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&1i32.to_le_bytes());
+        world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&1i32.to_le_bytes());
+        engine.write(destination_world, &world).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_ITERATE8,
+                    &[0, 0, 1, 0, 0, 0, CODE, destination_world],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        let mut output = [0xffu8; 4];
+        engine.read(destination_pixels, &mut output).unwrap();
+        assert_eq!(output, [0; 4]);
+    }
+
+    #[test]
+    fn iterate8_unsupported_slots_fail_closed_with_suite_diagnostics() {
+        let mut engine = test_engine(&[0xc3]);
+        let mut callback = [0u8; 8];
+        engine.read(HOST_ITERATE8_SUITE + 8, &mut callback).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(u64::from_le_bytes(callback), [0; 6])
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            engine.unsupported_suite_calls(),
+            [UnsupportedSuiteCall {
+                name: "PF Iterate8 Suite",
+                version: 1,
+                slot: 1,
+                call_count: 1,
+            }]
+        );
     }
 
     #[test]
@@ -5275,7 +5738,7 @@ mod tests {
         const CODE: u64 = 0x1000_0000;
         let mut engine = test_engine(&[0xeb, 0xfe]); // jmp $
         let error = engine
-            .call_win64_with_timeout(CODE, [0; 6], 1_000)
+            .call_win64_with_timeout(CODE, &[0; 6], 1_000)
             .unwrap_err();
         assert!(
             error.to_string().contains("before the guest returned"),

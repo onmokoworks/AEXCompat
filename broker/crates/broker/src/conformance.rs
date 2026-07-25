@@ -3,9 +3,10 @@ use serde_json::Value;
 use std::io;
 
 const MAX_MISSING_SUITES: usize = 16;
-// A native report can contain 65,536 Suite events with 96-byte safely copied
-// names. Keep failure parsing bounded, but large enough to retain even the
-// escaped worker-bounded report instead of degrading failures to `nonzero_exit`.
+const MAX_SUITE_TIMELINE_EVENTS: usize = 512;
+// Native suite telemetry is bounded to 512 schema-safe events. Keep failure
+// parsing large enough for the complete worker-bounded report without allowing
+// untrusted report text to grow without limit.
 const MAX_ERROR_TEXT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ERROR_JSON_BYTES: usize = 24 * 1024 * 1024;
 // Keep normalized worlds inside conformance-report.schema.json.  Successful
@@ -447,7 +448,7 @@ fn suite_timeline(report: &Value) -> Vec<SuiteEvent> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .take(65_536)
+        .take(MAX_SUITE_TIMELINE_EVENTS)
         .filter_map(|item| {
             let event = SuiteEvent {
                 sequence: u32::try_from(item.get("sequence")?.as_u64()?).ok()?,
@@ -1581,7 +1582,7 @@ mod tests {
         let failure = runtime_failure_from_io(RenderPath::Classic, &io::Error::other(message));
         assert_eq!(failure.classification, Classification::SelectorError);
         assert_eq!(failure.selector_error, Some(25));
-        assert_eq!(failure.suite_timeline.len(), 600);
+        assert_eq!(failure.suite_timeline.len(), MAX_SUITE_TIMELINE_EVENTS);
     }
 
     #[test]

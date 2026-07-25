@@ -4,6 +4,7 @@
 #include "parameter_animation_transport.hpp"
 #include "render_pixel_transport.hpp"
 #include "render_subsystem.h"
+#include "worker_aegp_compute_cache.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_parameter_runtime.hpp"
 #include "worker_pf_helper_runtime.hpp"
@@ -186,9 +187,15 @@ int32_t invoke_global_setdown(EffectEntry entry, void* input, void* output) {
   const int32_t error = invoke_entry_seh(entry, kGlobalSetdown, input, output,
                                          nullptr, nullptr, nullptr,
                                          &exception_code);
+  const bool compute_cache_teardown_safe =
+      aexcompat::worker_runtime::compute_cache::teardown_owner_from_entry(
+          reinterpret_cast<const void*>(entry));
   on_global_setdown();
   aexcompat::pf_helper::reset();
-  return error;
+  return error != 0 ? error
+                    : (compute_cache_teardown_safe
+                           ? aexcompat::worker_runtime::compute_cache::kErrNone
+                           : aexcompat::worker_runtime::compute_cache::kErrStruct);
 }
 
 int32_t invoke_sequence_selector(EffectEntry entry, int32_t selector, void* input,

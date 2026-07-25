@@ -77,6 +77,13 @@ bool is_aegp_candidate_without_execution(
   return aegp_candidate;
 }
 
+int report_load_failure(const char* stage, DWORD error) noexcept {
+  std::cerr << "stage:load_failure stage=" << stage
+            << " win32_error=" << static_cast<unsigned long>(error) << '\n'
+            << std::flush;
+  return 11;
+}
+
 }  // namespace
 
 int admit_runtime(const RuntimeHostHooks& hooks,
@@ -111,7 +118,9 @@ int admit_runtime(const RuntimeHostHooks& hooks,
   }
 
   if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 |
-                                LOAD_LIBRARY_SEARCH_USER_DIRS)) return 11;
+                                LOAD_LIBRARY_SEARCH_USER_DIRS)) {
+    return report_load_failure("set_default_dll_directories", GetLastError());
+  }
   // Static imports use DLL_LOAD_DIR below. Delay-load helpers call
   // LoadLibrary(name) later, so only an authenticated sealed root is admitted
   // to the process-wide USER_DIRS search set. PATH/CWD and arbitrary absolute
@@ -119,13 +128,16 @@ int admit_runtime(const RuntimeHostHooks& hooks,
   DLL_DIRECTORY_COOKIE sealed_directory_cookie{};
   if (sealed) {
     sealed_directory_cookie = AddDllDirectory(plugin_path.parent_path().c_str());
-    if (!sealed_directory_cookie) return 11;
+    if (!sealed_directory_cookie) {
+      return report_load_failure("add_dll_directory", GetLastError());
+    }
   }
   HMODULE module = LoadLibraryExW(plugin_path.c_str(), nullptr,
       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
   if (!module) {
+    const DWORD error = GetLastError();
     remove_directory_cookie(sealed_directory_cookie);
-    return 11;
+    return report_load_failure("load_library", error);
   }
 
   ModuleAuditReport& audit = module_audit_report();
