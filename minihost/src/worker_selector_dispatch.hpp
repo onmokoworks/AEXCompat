@@ -183,6 +183,7 @@ void configure_selector_dispatch_audit(AuditCapture capture,
                                        AuditPassed passed) noexcept;
 void configure_selector_dispatch_trace(SelectorDispatchTrace trace) noexcept;
 SelectorDispatchTelemetry& selector_dispatch_telemetry() noexcept;
+void* active_selector_module() noexcept;
 HostCallbackTimelineTelemetry& host_callback_timeline_telemetry() noexcept;
 void reset_host_callback_timeline() noexcept;
 const char* set_host_callback_timeline_selector(

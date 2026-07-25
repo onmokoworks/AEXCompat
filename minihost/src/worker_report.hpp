@@ -40,6 +40,7 @@ struct L2ReportContext {
   int32_t user_changed_param_slot{}, user_changed_param_error{};
   std::string user_changed_parameters_json, unsupported_suite_calls_json;
   std::string suite_call_slot_probe_json;
+  std::string compute_cache_timeline_json;
   std::string selector_invocations_json;
   std::string missing_suites_json, suite_timeline_json;
   std::string module_audit_failure_json;

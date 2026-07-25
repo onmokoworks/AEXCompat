@@ -6,6 +6,7 @@
 #include "pf_cache_on_load_suite.hpp"
 #include "gpu_memory_world_transport.hpp"
 #include "trace_writer.hpp"
+#include "worker_aegp_compute_cache.hpp"
 #include "worker_aegp_command_suites.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_layer_render_runtime.hpp"
@@ -431,6 +432,10 @@ bool configure_component_suite_catalog() {
        nullptr,
        &aexcompat::worker_runtime::suite_call_slot_probe::
            private_effect_probe5_available},
+      {aexcompat::worker_runtime::compute_cache::kSuiteName,
+       aexcompat::worker_runtime::compute_cache::kSuiteVersion1,
+       nullptr,
+       &aexcompat::worker_runtime::compute_cache::provide_suite1},
       {"DRAWBOT Draw Suite", 1, nullptr, &provide_drawbot_draw1},
       {"DRAWBOT Supplier Suite", 1, nullptr, &provide_drawbot_supplier1},
       {"DRAWBOT Surface Suite", 2, nullptr, &provide_drawbot_surface2},

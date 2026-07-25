@@ -378,4 +378,8 @@ const char* set_suite_timeline_selector(const char* selector) noexcept {
   return previous;
 }
 
+const char* current_suite_timeline_selector() noexcept {
+  return g_suite_selector;
+}
+
 }  // namespace aexcompat::worker_runtime

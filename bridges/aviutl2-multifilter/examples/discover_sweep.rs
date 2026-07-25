@@ -235,6 +235,21 @@ fn diagnostics_of(error: &str) -> Option<Value> {
     serde_json::from_str(&error[start..]).ok()
 }
 
+fn attach_inspection_diagnostics(extra: &mut Value, diagnostics: &Value) {
+    for key in [
+        "compute_cache_timeline",
+        "suite_timeline",
+        "suite_timeline_truncated",
+        "selector_invocations",
+        "missing_suites",
+        "missing_suites_truncated",
+    ] {
+        if let Some(value) = diagnostics.get(key) {
+            extra[key] = value.clone();
+        }
+    }
+}
+
 fn bucket_of(error: &str) -> String {
     let Some(diagnostics) = diagnostics_of(error) else {
         return "unparsed_error".into();
@@ -425,18 +440,17 @@ fn sweep_plugin(
                 sha,
                 dependencies.clone(),
             ) {
-                Ok((parameters, _)) => {
+                Ok((parameters, diagnostics)) => {
+                    let mut extra = json!({
+                        "parameters": parameters.len(),
+                        "sealed": dependencies.len(),
+                        "sealed_bytes": sealed_bytes,
+                        "unresolved": unresolved,
+                        "dependency_provenance": dependency_provenance,
+                    });
+                    attach_inspection_diagnostics(&mut extra, &diagnostics);
                     return SweepOutcome {
-                        record: record(
-                            "loaded",
-                            json!({
-                                "parameters": parameters.len(),
-                                "sealed": dependencies.len(),
-                                "sealed_bytes": sealed_bytes,
-                                "unresolved": unresolved,
-                                "dependency_provenance": dependency_provenance,
-                            }),
-                        ),
+                        record: record("loaded", extra),
                         bucket: "loaded".into(),
                         log: format!(
                             "[{}/{}] {name} -> loaded ({} params, {} deps)",
@@ -744,26 +758,30 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
             &member.sha,
             member.dependencies.clone(),
         ) {
-            Ok((parameters, _)) => (
-                "loaded".to_owned(),
-                plugin_record(
-                    &options.scan,
-                    &member.plugin,
-                    "loaded",
-                    started.elapsed().as_millis(),
-                    Some(member.size_bytes),
-                    Some(&member.sha),
-                    json!({
-                        "parameters": parameters.len(),
-                        "sealed": member.dependencies.len(),
-                        "sealed_bytes": member.sealed_bytes,
-                        "unresolved": member.unresolved,
-                        "dependency_provenance": provenance_json(&member.provenance),
-                        "cluster_identity": member.identity,
-                        "cluster_fallback": extra,
-                    }),
-                ),
-            ),
+            Ok((parameters, diagnostics)) => {
+                let mut loaded_extra = json!({
+                    "parameters": parameters.len(),
+                    "sealed": member.dependencies.len(),
+                    "sealed_bytes": member.sealed_bytes,
+                    "unresolved": member.unresolved,
+                    "dependency_provenance": provenance_json(&member.provenance),
+                    "cluster_identity": member.identity,
+                    "cluster_fallback": extra,
+                });
+                attach_inspection_diagnostics(&mut loaded_extra, &diagnostics);
+                (
+                    "loaded".to_owned(),
+                    plugin_record(
+                        &options.scan,
+                        &member.plugin,
+                        "loaded",
+                        started.elapsed().as_millis(),
+                        Some(member.size_bytes),
+                        Some(&member.sha),
+                        loaded_extra,
+                    ),
+                )
+            }
             Err(error) => {
                 let bucket = bucket_of(&error.to_string());
                 (
@@ -1123,6 +1141,29 @@ mod tests {
             bucket_of(r#"worker failed: {"module_audit_failure":{"reason":"unsigned"}}"#),
             "module_audit_failure"
         );
+    }
+
+    #[test]
+    fn loaded_records_copy_only_vetted_inspection_diagnostics() {
+        let diagnostics = json!({
+            "compute_cache_timeline": {"maximum_records": 128, "records": [], "truncated": false},
+            "suite_timeline": [],
+            "suite_timeline_truncated": false,
+            "selector_invocations": {"maximum_records": 64, "records": [], "truncated": false},
+            "missing_suites": [],
+            "missing_suites_truncated": false,
+            "absolute_path": "C:\\private\\effect.aex",
+            "worker_private": {"address": "0x1234"}
+        });
+        let mut extra = json!({"parameters": 4});
+        attach_inspection_diagnostics(&mut extra, &diagnostics);
+        assert_eq!(extra["parameters"], 4);
+        assert!(extra.get("compute_cache_timeline").is_some());
+        assert!(extra.get("suite_timeline").is_some());
+        assert!(extra.get("selector_invocations").is_some());
+        assert!(extra.get("missing_suites").is_some());
+        assert!(extra.get("absolute_path").is_none());
+        assert!(extra.get("worker_private").is_none());
     }
 
     #[test]

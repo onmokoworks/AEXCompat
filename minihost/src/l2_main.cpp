@@ -119,6 +119,7 @@
 #include "worker_param_checkout_runtime.hpp"
 #include "worker_entry_bootstrap.hpp"
 #include "worker_effect_bootstrap.hpp"
+#include "worker_aegp_compute_cache.hpp"
 #include "worker_aegp_timeline_probe.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_host_selftests.hpp"
@@ -1692,6 +1693,10 @@ std::string suite_call_slot_probe_report_json() {
   return aexcompat::worker_runtime::suite_call_slot_probe::report_json();
 }
 
+std::string compute_cache_timeline_report_json() {
+  return aexcompat::worker_runtime::compute_cache::telemetry_report_json();
+}
+
 std::string suite_timeline_report_json() {
   return suite_registry().suite_timeline_report_json();
 }
@@ -2045,6 +2050,7 @@ std::string build_l2_report_json(
   c.lifecycle_errors = lifecycle_errors; c.lifecycle_data_null = lifecycle_data_null;
   c.unsupported_suite_calls_json = unsupported_suite_calls_report_json();
   c.suite_call_slot_probe_json = suite_call_slot_probe_report_json();
+  c.compute_cache_timeline_json = compute_cache_timeline_report_json();
   c.selector_invocations_json = selector_invocations_report_json();
   if (!module_audit_passed())
     c.module_audit_failure_json = module_audit_failure_json();

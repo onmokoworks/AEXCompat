@@ -12,6 +12,7 @@
 #include <sstream>
 
 #include "worker_minidump_runtime.hpp"
+#include "worker_aegp_compute_cache.hpp"
 #include "worker_suite_registry.hpp"
 namespace aexcompat::worker_runtime {
 namespace {
@@ -660,6 +661,10 @@ SelectorDispatchTelemetry& selector_dispatch_telemetry() noexcept {
   return g_telemetry;
 }
 
+void* active_selector_module() noexcept {
+  return g_active_entry_module;
+}
+
 HostCallbackTimelineTelemetry& host_callback_timeline_telemetry() noexcept {
   return g_host_callback_timeline;
 }
@@ -1172,6 +1177,7 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
     reset_host_callback_timeline();
     reset_extended_lookup_diagnostics();
     reset_extended_allocation_diagnostics();
+    compute_cache::reset_telemetry();
   }
   const char* previous_callback_selector =
       set_host_callback_timeline_selector(selector);

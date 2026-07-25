@@ -34,6 +34,7 @@ const MAX_SUITE_NAME_LEN: usize = 64;
 const MAX_SUITE_TIMELINE_EVENTS: usize = 512;
 const MAX_SELECTOR_INVOCATIONS: usize = 64;
 const MAX_HOST_CALLBACK_TIMELINE_RECORDS: usize = 128;
+const MAX_COMPUTE_CACHE_TIMELINE_RECORDS: usize = 128;
 const MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS: usize = 128;
 const MAX_EXTENDED_ALLOCATION_TIMELINE_RECORDS: usize = 128;
 const MAX_SUITE_VERSION: i64 = u16::MAX as i64;
@@ -1655,6 +1656,164 @@ fn fail_closed_extended_lookup_timeline(diagnostics: &mut Value) {
         "maximum_records": MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS,
         "records": [],
         "truncated": true,
+    });
+}
+
+fn fail_closed_compute_cache_timeline(diagnostics: &mut Value) {
+    diagnostics["compute_cache_timeline"] = json!({
+        "maximum_records": MAX_COMPUTE_CACHE_TIMELINE_RECORDS,
+        "records": [],
+        "truncated": true,
+    });
+}
+
+fn propagate_compute_cache_timeline(diagnostics: &mut Value, worker_report: &Value) {
+    let Some(reported_container) = worker_report.get("compute_cache_timeline") else {
+        return;
+    };
+    let Some(container) = reported_container.as_object().filter(|container| {
+        container.len() == 3
+            && container.contains_key("maximum_records")
+            && container.contains_key("records")
+            && container.contains_key("truncated")
+    }) else {
+        fail_closed_compute_cache_timeline(diagnostics);
+        return;
+    };
+    if container.get("maximum_records").and_then(Value::as_u64)
+        != Some(MAX_COMPUTE_CACHE_TIMELINE_RECORDS as u64)
+    {
+        fail_closed_compute_cache_timeline(diagnostics);
+        return;
+    }
+    let Some(reported) = container.get("records").and_then(Value::as_array) else {
+        fail_closed_compute_cache_timeline(diagnostics);
+        return;
+    };
+    let Some(reported_truncated) = container.get("truncated").and_then(Value::as_bool) else {
+        fail_closed_compute_cache_timeline(diagnostics);
+        return;
+    };
+    let mut records = Vec::new();
+    let mut truncated = reported_truncated || reported.len() > MAX_COMPUTE_CACHE_TIMELINE_RECORDS;
+    let mut previous_sequence = None;
+    for record in reported.iter().take(MAX_COMPUTE_CACHE_TIMELINE_RECORDS) {
+        let Some(record) = record.as_object().filter(|record| {
+            record.len() == 7
+                && record.contains_key("sequence")
+                && record.contains_key("selector")
+                && record.contains_key("slot")
+                && record.contains_key("operation")
+                && record.contains_key("outcome")
+                && record.contains_key("return_code")
+                && record.contains_key("call_count")
+        }) else {
+            truncated = true;
+            continue;
+        };
+        let Some(sequence) = record
+            .get("sequence")
+            .and_then(Value::as_u64)
+            .filter(|value| *value <= u32::MAX as u64)
+        else {
+            truncated = true;
+            continue;
+        };
+        if previous_sequence.is_some_and(|previous| sequence <= previous) {
+            truncated = true;
+            continue;
+        }
+        let Some(selector) = record
+            .get("selector")
+            .and_then(Value::as_str)
+            .filter(|selector| schema_safe_suite_selector(selector))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(slot) = record
+            .get("slot")
+            .and_then(Value::as_u64)
+            .filter(|slot| *slot <= 5)
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(operation) = record
+            .get("operation")
+            .and_then(Value::as_str)
+            .filter(|operation| {
+                matches!(
+                    *operation,
+                    "class_register"
+                        | "class_unregister"
+                        | "compute_if_needed_and_checkout"
+                        | "checkout_cached"
+                        | "get_receipt_compute_value"
+                        | "checkin_compute_receipt"
+                        | "global_teardown"
+                )
+            })
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(outcome) = record
+            .get("outcome")
+            .and_then(Value::as_str)
+            .filter(|outcome| {
+                matches!(
+                    *outcome,
+                    "registered"
+                        | "unregistered"
+                        | "computed"
+                        | "cache_hit"
+                        | "cache_miss"
+                        | "compute_pending"
+                        | "value_returned"
+                        | "checked_in"
+                        | "invalid"
+                        | "callback_failure"
+                        | "capacity_failure"
+                        | "cleanup"
+                        | "cleanup_deferred"
+                )
+            })
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(return_code) = record
+            .get("return_code")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= i32::MIN as i64 && *value <= i32::MAX as i64)
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(call_count) = record
+            .get("call_count")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0 && *value <= u32::MAX as u64)
+        else {
+            truncated = true;
+            continue;
+        };
+        previous_sequence = Some(sequence);
+        records.push(json!({
+            "sequence": sequence,
+            "selector": selector,
+            "slot": slot,
+            "operation": operation,
+            "outcome": outcome,
+            "return_code": return_code,
+            "call_count": call_count,
+        }));
+    }
+    diagnostics["compute_cache_timeline"] = json!({
+        "maximum_records": MAX_COMPUTE_CACHE_TIMELINE_RECORDS,
+        "records": records,
+        "truncated": truncated,
     });
 }
 
@@ -4594,6 +4753,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         propagate_suite_call_slot_probe(&mut diagnostics, report);
         propagate_selector_invocations(&mut diagnostics, report);
         propagate_host_callback_timeline(&mut diagnostics, report);
+        propagate_compute_cache_timeline(&mut diagnostics, report);
         propagate_extended_lookup_timeline(&mut diagnostics, report);
         propagate_extended_allocation_timeline(&mut diagnostics, report);
         propagate_suite_timeline(&mut diagnostics, report);
@@ -6698,6 +6858,7 @@ fn render_classic_via_length_one_session(
     propagate_suite_call_slot_probe(&mut diagnostics, &final_report);
     propagate_selector_invocations(&mut diagnostics, &final_report);
     propagate_host_callback_timeline(&mut diagnostics, &final_report);
+    propagate_compute_cache_timeline(&mut diagnostics, &final_report);
     propagate_extended_lookup_timeline(&mut diagnostics, &final_report);
     propagate_extended_allocation_timeline(&mut diagnostics, &final_report);
     propagate_suite_timeline(&mut diagnostics, &final_report);
@@ -9117,6 +9278,172 @@ mod tests {
             !diagnostics["host_callback_timeline"]
                 .to_string()
                 .contains("0x1234")
+        );
+    }
+
+    #[test]
+    fn compute_cache_timeline_is_exact_key_bounded_and_fail_closed() {
+        let report = json!({
+            "compute_cache_timeline": {
+                "maximum_records": 128,
+                "records": [
+                    {
+                        "sequence": 0,
+                        "selector": "GLOBAL_SETUP",
+                        "slot": 0,
+                        "operation": "class_register",
+                        "outcome": "registered",
+                        "return_code": 0,
+                        "call_count": 1
+                    },
+                    {
+                        "sequence": 1,
+                        "selector": "RENDER",
+                        "slot": 2,
+                        "operation": "compute_if_needed_and_checkout",
+                        "outcome": "compute_pending",
+                        "return_code": 22,
+                        "call_count": 3
+                    },
+                    {
+                        "sequence": 2,
+                        "selector": "GLOBAL_SETDOWN",
+                        "slot": 1,
+                        "operation": "class_unregister",
+                        "outcome": "unregistered",
+                        "return_code": 0,
+                        "call_count": 1
+                    }
+                ],
+                "truncated": false
+            }
+        });
+        let mut diagnostics = json!({});
+        propagate_compute_cache_timeline(&mut diagnostics, &report);
+        assert_eq!(
+            diagnostics["compute_cache_timeline"]["maximum_records"],
+            128
+        );
+        assert_eq!(
+            diagnostics["compute_cache_timeline"]["records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            diagnostics["compute_cache_timeline"]["records"][1]["return_code"],
+            22
+        );
+        assert_eq!(
+            diagnostics["compute_cache_timeline"]["records"][1]["call_count"],
+            3
+        );
+        assert_eq!(diagnostics["compute_cache_timeline"]["truncated"], false);
+
+        let near_miss = json!({
+            "compute_cache_timeline_extra": {
+                "maximum_records": 128,
+                "records": [],
+                "truncated": false
+            }
+        });
+        let mut near_miss_diagnostics = json!({});
+        propagate_compute_cache_timeline(&mut near_miss_diagnostics, &near_miss);
+        assert!(
+            near_miss_diagnostics
+                .get("compute_cache_timeline")
+                .is_none()
+        );
+
+        let malformed = json!({
+            "compute_cache_timeline": {
+                "maximum_records": 128,
+                "records": [{
+                    "sequence": 0,
+                    "selector": "GLOBAL_SETUP",
+                    "slot": 6,
+                    "operation": "class_register",
+                    "outcome": "registered",
+                    "return_code": 0,
+                    "call_count": 1,
+                    "address": "0x1234"
+                }],
+                "truncated": false
+            }
+        });
+        let mut malformed_diagnostics = json!({});
+        propagate_compute_cache_timeline(&mut malformed_diagnostics, &malformed);
+        assert_eq!(
+            malformed_diagnostics["compute_cache_timeline"]["records"],
+            json!([])
+        );
+        assert_eq!(
+            malformed_diagnostics["compute_cache_timeline"]["truncated"],
+            true
+        );
+        assert!(
+            !malformed_diagnostics["compute_cache_timeline"]
+                .to_string()
+                .contains("0x1234")
+        );
+
+        let wrong_container = json!({
+            "compute_cache_timeline": {
+                "maximum_records": 128,
+                "records": [],
+                "truncated": false,
+                "absolute_path": "C:\\private\\effect.aex"
+            }
+        });
+        let mut wrong_container_diagnostics = json!({});
+        propagate_compute_cache_timeline(&mut wrong_container_diagnostics, &wrong_container);
+        assert_eq!(
+            wrong_container_diagnostics["compute_cache_timeline"]["records"],
+            json!([])
+        );
+        assert_eq!(
+            wrong_container_diagnostics["compute_cache_timeline"]["truncated"],
+            true
+        );
+        assert!(
+            !wrong_container_diagnostics["compute_cache_timeline"]
+                .to_string()
+                .contains("private")
+        );
+
+        let overflow_records = (0..=MAX_COMPUTE_CACHE_TIMELINE_RECORDS)
+            .map(|sequence| {
+                json!({
+                    "sequence": sequence,
+                    "selector": "RENDER",
+                    "slot": 3,
+                    "operation": "checkout_cached",
+                    "outcome": "cache_hit",
+                    "return_code": 0,
+                    "call_count": 1
+                })
+            })
+            .collect::<Vec<_>>();
+        let overflow = json!({
+            "compute_cache_timeline": {
+                "maximum_records": 128,
+                "records": overflow_records,
+                "truncated": false
+            }
+        });
+        let mut overflow_diagnostics = json!({});
+        propagate_compute_cache_timeline(&mut overflow_diagnostics, &overflow);
+        assert_eq!(
+            overflow_diagnostics["compute_cache_timeline"]["records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_COMPUTE_CACHE_TIMELINE_RECORDS
+        );
+        assert_eq!(
+            overflow_diagnostics["compute_cache_timeline"]["truncated"],
+            true
         );
     }
 

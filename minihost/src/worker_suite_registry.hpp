@@ -131,5 +131,6 @@ class SuiteRegistry final {
 
 SuiteRegistry& suite_registry();
 const char* set_suite_timeline_selector(const char* selector) noexcept;
+const char* current_suite_timeline_selector() noexcept;
 
 }  // namespace aexcompat::worker_runtime
