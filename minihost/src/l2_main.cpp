@@ -1987,13 +1987,26 @@ bool close_render_ui_context(EffectEntry entry, std::array<std::byte, kInSize>& 
 
 
 int32_t __cdecl get_platform_data(void* effect_ref, int32_t which, void* data) {
+  constexpr int32_t kExeFilePathDeprecated = 1;
+  constexpr int32_t kResourceFilePathDeprecated = 2;
   constexpr int32_t kExeFilePathWide = 7;
   constexpr int32_t kResourceFilePathWide = 8;
   constexpr std::size_t kMaxPath = 260;
   if (!effect_ref || !data ||
-      (which != kExeFilePathWide && which != kResourceFilePathWide) ||
+      (which != kExeFilePathDeprecated &&
+       which != kResourceFilePathDeprecated &&
+       which != kExeFilePathWide && which != kResourceFilePathWide) ||
       g_plugin_file_path.empty() || g_plugin_file_path.size() >= kMaxPath ||
       !std::filesystem::path(g_plugin_file_path).is_absolute()) return 4;
+  if (which == kExeFilePathDeprecated ||
+      which == kResourceFilePathDeprecated) {
+    BOOL used_default_character = FALSE;
+    const int written = WideCharToMultiByte(
+        CP_ACP, WC_NO_BEST_FIT_CHARS, g_plugin_file_path.c_str(), -1,
+        static_cast<char*>(data), static_cast<int>(kMaxPath), nullptr,
+        &used_default_character);
+    return written > 0 && !used_default_character ? 0 : 4;
+  }
   auto* destination = static_cast<wchar_t*>(data);
   std::wmemcpy(destination, g_plugin_file_path.c_str(), g_plugin_file_path.size() + 1);
   return 0;

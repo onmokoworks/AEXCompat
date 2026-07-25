@@ -1264,8 +1264,13 @@ class MinihostL2SourceTests(unittest.TestCase):
     def test_platform_data_is_absolute_bounded_and_fail_closed(self):
         text = l2_family_source()
         for marker in ("kUtilsGetPlatformData = 432",
+                       "kExeFilePathDeprecated = 1",
+                       "kResourceFilePathDeprecated = 2",
                        "kExeFilePathWide = 7",
                        "kResourceFilePathWide = 8",
+                       "WideCharToMultiByte(",
+                       "WC_NO_BEST_FIT_CHARS",
+                       "used_default_character",
                        "g_plugin_file_path.size() >= kMaxPath",
                        "std::filesystem::path(g_plugin_file_path).is_absolute()",
                        "write(utils, kUtilsGetPlatformData, &get_platform_data)"):
