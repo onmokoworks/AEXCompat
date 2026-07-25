@@ -579,7 +579,8 @@ impl MacHarnessApp {
                             changed |= parameter.reset();
                         }
                     });
-                    let previous = parameter.value;
+                    let previous_value = parameter.value;
+                    let previous_color = parameter.color;
                     ui.add_enabled_ui(!self.busy, |ui| match parameter.param_type {
                         4 => {
                             let mut checked = parameter.value != 0.0;
@@ -602,6 +603,16 @@ impl MacHarnessApp {
                                     }
                                 });
                         }
+                        5 => {
+                            let [alpha, red, green, blue] =
+                                parameter.color.unwrap_or([255, 0, 0, 0]);
+                            let mut color =
+                                Color32::from_rgba_unmultiplied(red, green, blue, alpha);
+                            if ui.color_edit_button_srgba(&mut color).changed() {
+                                parameter.color =
+                                    Some([color.a(), color.r(), color.g(), color.b()]);
+                            }
+                        }
                         _ => {
                             ui.add(
                                 egui::Slider::new(
@@ -613,7 +624,8 @@ impl MacHarnessApp {
                             );
                         }
                     });
-                    changed |= parameter.value != previous;
+                    changed |=
+                        parameter.value != previous_value || parameter.color != previous_color;
                     ui.add_space(6.0);
                 }
             });
@@ -785,19 +797,27 @@ fn read_control_message(reader: &mut impl Read) -> Result<Option<Value>, String>
     })
 }
 
-fn parameter_payload(parameters: &[GuiParameter]) -> String {
+fn parameter_payload(parameters: &[GuiParameter]) -> Result<String, String> {
     let assignments = parameters
         .iter()
         .map(|parameter| {
-            let (kind, value) = if matches!(parameter.param_type, 1 | 4 | 7) {
+            let (kind, value) = if parameter.param_type == 5 {
+                let [alpha, red, green, blue] = parameter.color.ok_or_else(|| {
+                    format!("color parameter slot {} has no ARGB8 value", parameter.slot)
+                })?;
+                ("argb8", format!("{alpha},{red},{green},{blue}"))
+            } else if matches!(parameter.param_type, 1 | 4 | 7) {
                 ("i32", format!("{}", parameter.value.round() as i32))
             } else {
                 ("f64", format!("{}", parameter.value))
             };
-            format!("param_{}@{}:{kind}={value}", parameter.slot, parameter.slot)
+            Ok(format!(
+                "param_{}@{}:{kind}={value}",
+                parameter.slot, parameter.slot
+            ))
         })
-        .collect::<Vec<_>>();
-    format!("v2|{}", assignments.join(";"))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(format!("v2|{}", assignments.join(";")))
 }
 
 fn write_argb8_slot(input: &Path, slot: &Path) -> Result<(u32, u32), String> {
@@ -1125,14 +1145,16 @@ fn start_resident_session(
                     parameters,
                     output,
                 }) => {
-                    let request = json!({
+                    let result = parameter_payload(&parameters).and_then(|payload| {
+                        let request = json!({
                         "v": 2,
                         "type": "render_frame",
                         "frame_index": frame_index,
                         "current_time": {"value": 0, "scale": 30},
-                        "parameters": parameter_payload(&parameters),
-                    });
-                    let result = write_control_message(&mut stdin, &request).and_then(|()| {
+                        "parameters": payload,
+                        });
+                        write_control_message(&mut stdin, &request)
+                    }).and_then(|()| {
                         let response = response_receiver
                             .recv_timeout(RESIDENT_RENDER_DEADLINE)
                             .map_err(|error| format!("resident render response timeout: {error}"))?
@@ -1237,6 +1259,10 @@ fn discover_parameters(
         .map_err(|error| format!("worker setup report is not UTF-8: {error}"))?;
     let value: serde_json::Value =
         serde_json::from_str(&report).map_err(|error| format!("parse setup report: {error}"))?;
+    Ok((gui_parameters_from_setup(&value)?, report))
+}
+
+fn gui_parameters_from_setup(value: &Value) -> Result<Vec<GuiParameter>, String> {
     let declared = value["parameters"]
         .as_array()
         .ok_or_else(|| "setup report has no parameters array".to_string())?;
@@ -1249,13 +1275,30 @@ fn discover_parameters(
             .as_u64()
             .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| "parameter has no numeric slot".to_string())?;
-        if !matches!(param_type, 1 | 2 | 4 | 7 | 10) {
+        if !matches!(param_type, 1 | 2 | 4 | 5 | 7 | 10) {
             continue;
         }
         let name = parameter["name"]
             .as_str()
             .ok_or_else(|| "parameter has no name".to_string())?
             .to_string();
+        if param_type == 5 {
+            let current = parse_argb8_parameter(parameter, "current_color", &name)?;
+            let default = parse_argb8_parameter(parameter, "default_color", &name)?;
+            parameters.push(GuiParameter {
+                slot,
+                name,
+                param_type,
+                value: 0.0,
+                default_value: 0.0,
+                color: Some(current),
+                default_color: Some(default),
+                minimum: 0.0,
+                maximum: 255.0,
+                precision: 0,
+            });
+            continue;
+        }
         let value = parameter["default_value"]
             .as_f64()
             .ok_or_else(|| format!("editable parameter {name:?} has no default value"))?;
@@ -1278,12 +1321,35 @@ fn discover_parameters(
             param_type,
             value: value.clamp(minimum, maximum),
             default_value: value.clamp(minimum, maximum),
+            color: None,
+            default_color: None,
             minimum,
             maximum,
             precision: parameter["precision"].as_u64().unwrap_or(0).min(8) as usize,
         });
     }
-    Ok((parameters, report))
+    Ok(parameters)
+}
+
+fn parse_argb8_parameter(parameter: &Value, field: &str, name: &str) -> Result<[u8; 4], String> {
+    let components = parameter[field]
+        .as_array()
+        .ok_or_else(|| format!("color parameter {name:?} has no {field} ARGB8 array"))?;
+    if components.len() != 4 {
+        return Err(format!(
+            "color parameter {name:?} {field} must contain four components"
+        ));
+    }
+    let mut color = [0u8; 4];
+    for (destination, component) in color.iter_mut().zip(components) {
+        *destination = component
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .ok_or_else(|| {
+                format!("color parameter {name:?} {field} components must be 0..=255")
+            })?;
+    }
+    Ok(color)
 }
 
 #[derive(Clone, Debug)]
@@ -1513,6 +1579,8 @@ mod tests {
                 param_type: 10,
                 value: 50.25,
                 default_value: 5.0,
+                color: None,
+                default_color: None,
                 minimum: 0.0,
                 maximum: 100.0,
                 precision: 2,
@@ -1523,15 +1591,76 @@ mod tests {
                 param_type: 4,
                 value: 1.0,
                 default_value: 0.0,
+                color: None,
+                default_color: None,
                 minimum: 0.0,
                 maximum: 1.0,
                 precision: 0,
             },
         ];
         assert_eq!(
-            parameter_payload(&parameters),
+            parameter_payload(&parameters).unwrap(),
             "v2|param_1@1:f64=50.25;param_2@2:i32=1"
         );
+    }
+
+    #[test]
+    fn resident_parameter_payload_encodes_slot_qualified_argb8() {
+        let parameters = [GuiParameter {
+            slot: 2,
+            name: "Color".into(),
+            param_type: 5,
+            value: 0.0,
+            default_value: 0.0,
+            color: Some([255, 64, 128, 192]),
+            default_color: Some([255, 0, 0, 0]),
+            minimum: 0.0,
+            maximum: 255.0,
+            precision: 0,
+        }];
+        assert_eq!(
+            parameter_payload(&parameters).unwrap(),
+            "v2|param_2@2:argb8=255,64,128,192"
+        );
+    }
+
+    #[test]
+    fn argb8_setup_fields_are_exact_and_bounded() {
+        let parameter = json!({
+            "current_color": [255, 64, 128, 192],
+            "default_color": [255, 0, 0, 0]
+        });
+        assert_eq!(
+            parse_argb8_parameter(&parameter, "current_color", "Color").unwrap(),
+            [255, 64, 128, 192]
+        );
+        assert!(
+            parse_argb8_parameter(
+                &json!({"current_color": [256, 0, 0, 0]}),
+                "current_color",
+                "Color"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn setup_discovery_exposes_color_parameter_to_gui() {
+        let parameters = gui_parameters_from_setup(&json!({
+            "parameters": [{
+                "slot": 2,
+                "param_type": 5,
+                "name": "Color",
+                "current_color": [255, 64, 128, 192],
+                "default_color": [255, 0, 0, 0]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(parameters[0].slot, 2);
+        assert_eq!(parameters[0].param_type, 5);
+        assert_eq!(parameters[0].color, Some([255, 64, 128, 192]));
+        assert_eq!(parameters[0].default_color, Some([255, 0, 0, 0]));
     }
 
     #[test]
@@ -1633,6 +1762,8 @@ mod tests {
             param_type: 1,
             value,
             default_value: 0.0,
+            color: None,
+            default_color: None,
             minimum: 0.0,
             maximum: 4000.0,
             precision: 0,

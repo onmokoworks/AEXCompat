@@ -80,6 +80,7 @@ pub struct ParameterValue {
 
 #[derive(Debug, Serialize)]
 pub struct AppliedParameter {
+    pub slot: usize,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
@@ -908,6 +909,7 @@ impl ClassicHost {
                 apply_parameter_value(&mut definition, captured.param_type, requested)?;
                 applied_requests.insert(request_index);
                 applied_values.push(AppliedParameter {
+                    slot: index + 1,
                     name: captured.name.clone(),
                     value: requested.value,
                     color: requested.color,
@@ -1915,6 +1917,15 @@ mod tests {
             &definition[union..union + abi::PF_PIXEL_SIZE],
             &[255, 64, 128, 192]
         );
+        let applied = serde_json::to_value(AppliedParameter {
+            slot: 2,
+            name: "Color".into(),
+            value: None,
+            color: Some([255, 64, 128, 192]),
+        })
+        .unwrap();
+        assert_eq!(applied["slot"], 2);
+        assert_eq!(applied["color"], serde_json::json!([255, 64, 128, 192]));
     }
 
     #[test]
