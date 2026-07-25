@@ -3,7 +3,9 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
-use crate::backend::{ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue};
+use crate::backend::{
+    ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue, TraceWatchSpec,
+};
 use crate::pe::PeImage;
 
 const CMD_GLOBAL_SETUP: u64 = 1;
@@ -100,6 +102,7 @@ pub struct ClassicHost {
     entry: u64,
     input: u64,
     output: u64,
+    trace_output_pixel: Option<[u32; 2]>,
 }
 
 impl ClassicHost {
@@ -210,6 +213,7 @@ impl ClassicHost {
             entry,
             input,
             output,
+            trace_output_pixel: None,
         })
     }
 
@@ -416,6 +420,20 @@ impl ClassicHost {
         Ok((report, traces))
     }
 
+    pub fn render_argb8_trace_with_watches(
+        &mut self,
+        width: u32,
+        height: u32,
+        input_argb8: &[u8],
+        parameter_values: &[ParameterValue],
+        watches: Vec<TraceWatchSpec>,
+        output_pixel: Option<[u32; 2]>,
+    ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        self.engine.configure_trace_watches(watches);
+        self.trace_output_pixel = output_pixel;
+        self.render_argb8_trace(width, height, input_argb8, parameter_values)
+    }
+
     fn render_argb8_with_request(
         &mut self,
         width: u32,
@@ -469,6 +487,27 @@ impl ClassicHost {
         let output_world = self.engine.allocate(abi::PF_LAYER_DEF_SIZE, 8)?;
         let input_pixels = self.engine.allocate(pixel_bytes, 64)?;
         let output_pixels = self.engine.allocate(pixel_bytes, 64)?;
+        if let Some([x, y]) = self.trace_output_pixel {
+            if x >= width || y >= height {
+                return Err(ClassicError::Input(format!(
+                    "watch output pixel ({x},{y}) is outside {width}x{height}"
+                )));
+            }
+            let row_offset = u64::from(y) * u64::from(rowbytes);
+            self.engine.add_trace_watch(TraceWatchSpec {
+                id: format!("output-pixel-{x}-{y}"),
+                function_rva: None,
+                instruction_rva: None,
+                absolute_address: Some(
+                    output_pixels + row_offset + u64::from(x) * abi::PF_PIXEL_SIZE as u64,
+                ),
+                register: "absolute",
+                size: abi::PF_PIXEL_SIZE,
+                image_coordinate: Some([x, y]),
+                image_row_offset: Some(row_offset),
+                image_format: Some("argb8"),
+            });
+        }
 
         let mut input_world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
         write_u64(&mut input_world, abi::LAYER_DATA_OFFSET, input_pixels);
