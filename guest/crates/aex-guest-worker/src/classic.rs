@@ -85,6 +85,16 @@ pub struct SetupReport {
 }
 
 #[derive(Debug, Serialize)]
+pub struct FailureReport {
+    pub schema_version: u32,
+    pub execution_backend: &'static str,
+    pub error: String,
+    pub suite_requests: Vec<String>,
+    pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
+    pub dropped_unsupported_suite_calls: u64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RenderReport {
     pub schema_version: u32,
     pub setup: SetupReport,
@@ -297,6 +307,17 @@ impl ClassicHost {
             unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
             dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
         })
+    }
+
+    pub fn failure_report(&self, error: &ClassicError) -> FailureReport {
+        FailureReport {
+            schema_version: 1,
+            execution_backend: self.engine.backend_name(),
+            error: error.to_string(),
+            suite_requests: self.engine.suite_requests().to_vec(),
+            unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
+            dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
+        }
     }
 
     pub fn trace_setup_selector(
