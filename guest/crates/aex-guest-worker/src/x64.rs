@@ -42,6 +42,7 @@ const HOST_AEGP_LOCK_MEM_HANDLE: u64 = STUB_BASE + 0x80160;
 const HOST_AEGP_UNLOCK_MEM_HANDLE: u64 = STUB_BASE + 0x80170;
 const HOST_AEGP_MEM_HANDLE_SIZE: u64 = STUB_BASE + 0x80180;
 const HOST_AEGP_RESIZE_MEM_HANDLE: u64 = STUB_BASE + 0x80190;
+const HOST_AEGP_MEMORY_UNSUPPORTED: u64 = STUB_BASE + 0x801a0;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81100;
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
@@ -50,6 +51,7 @@ const DATA_BASE: u64 = 0x0000_0000_4000_0000;
 const DATA_SIZE: u64 = 0x1000_0000;
 const HANDLE_DATA_BASE: u64 = DATA_BASE + 0x400_0000;
 const HANDLE_DATA_END: u64 = DATA_BASE + DATA_SIZE;
+const AEGP_MEMORY_HANDLE_BASE: u64 = STUB_BASE + 0x90000;
 const MAX_AEGP_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_AEGP_MEMORY_HANDLES: usize = 256;
 // A nonzero Unicorn instruction limit enables instruction counting across the
@@ -1348,7 +1350,9 @@ struct GuestState {
     parameter_definitions: Vec<u64>,
     next_handle_data: u64,
     handles: HashMap<u64, GuestHandle>,
-    aegp_memory_handles: HashMap<u64, GuestHandle>,
+    aegp_memory_handles: HashMap<u64, AegpMemoryHandle>,
+    aegp_memory_free: Vec<AegpMemoryBlock>,
+    next_aegp_memory_handle: u64,
     math_calls: Vec<String>,
     handle_allocations: Vec<u64>,
     census_blocks: HashMap<(u64, u32), u64>,
@@ -1362,6 +1366,20 @@ struct GuestHandle {
     data: u64,
     size: u64,
     locks: u32,
+}
+
+#[derive(Clone, Debug)]
+struct AegpMemoryHandle {
+    data: u64,
+    size: u64,
+    locks: u32,
+    end: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AegpMemoryBlock {
+    data: u64,
+    end: u64,
 }
 
 pub struct GuestEngine<'a> {
@@ -1805,6 +1823,7 @@ impl GuestEngine<'static> {
             Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()),
         )?;
         unicorn.get_data_mut().next_handle_data = HANDLE_DATA_BASE;
+        unicorn.get_data_mut().next_aegp_memory_handle = AEGP_MEMORY_HANDLE_BASE;
         let image_size =
             u64::try_from(image.mapped_bytes().len()).map_err(|_| GuestError::ImageAlignment)?;
         if image.image_base() % PAGE_SIZE != 0 || image_size % PAGE_SIZE != 0 {
@@ -1911,6 +1930,10 @@ impl GuestEngine<'static> {
         uc(
             "write poison callback",
             unicorn.mem_write(HOST_POISON, &[0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3]),
+        )?;
+        uc(
+            "write unsupported AEGP Memory callback",
+            unicorn.mem_write(HOST_AEGP_MEMORY_UNSUPPORTED, &[0xb8, 4, 0, 0, 0, 0xc3]),
         )?;
         uc(
             "write ANSI strcpy callback",
@@ -2132,8 +2155,8 @@ impl GuestEngine<'static> {
             HOST_AEGP_UNLOCK_MEM_HANDLE,
             HOST_AEGP_MEM_HANDLE_SIZE,
             HOST_AEGP_RESIZE_MEM_HANDLE,
-            HOST_POISON,
-            HOST_POISON,
+            HOST_AEGP_MEMORY_UNSUPPORTED,
+            HOST_AEGP_MEMORY_UNSUPPORTED,
         ]
         .into_iter()
         .enumerate()
@@ -3564,6 +3587,73 @@ fn valid_aegp_memory_size(size: u64) -> Option<u64> {
     (size <= i32::MAX as u64 && size <= MAX_AEGP_MEMORY_BYTES).then_some(size)
 }
 
+fn aegp_memory_capacity(size: u64) -> Option<u64> {
+    size.max(1).checked_add(15).map(|size| size & !15)
+}
+
+fn select_aegp_memory_block(
+    state: &GuestState,
+    size: u64,
+) -> Option<(AegpMemoryBlock, Option<usize>, Option<AegpMemoryBlock>)> {
+    let capacity = aegp_memory_capacity(size)?;
+    if let Some((index, block)) = state
+        .aegp_memory_free
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, block)| block.end - block.data >= capacity)
+    {
+        let end = block.data.checked_add(capacity)?;
+        let remainder = (end < block.end).then_some(AegpMemoryBlock {
+            data: end,
+            end: block.end,
+        });
+        return Some((
+            AegpMemoryBlock {
+                data: block.data,
+                end,
+            },
+            Some(index),
+            remainder,
+        ));
+    }
+    let data = (state.next_handle_data + 15) & !15;
+    let end = data.checked_add(capacity)?;
+    (end <= HANDLE_DATA_END).then_some((AegpMemoryBlock { data, end }, None, None))
+}
+
+fn commit_aegp_memory_block(
+    state: &mut GuestState,
+    block: AegpMemoryBlock,
+    free_index: Option<usize>,
+    remainder: Option<AegpMemoryBlock>,
+) {
+    if let Some(index) = free_index {
+        state.aegp_memory_free.remove(index);
+        if let Some(remainder) = remainder {
+            state.aegp_memory_free.push(remainder);
+        }
+    } else {
+        state.next_handle_data = block.end;
+    }
+}
+
+fn reclaim_aegp_memory_block(state: &mut GuestState, block: AegpMemoryBlock) {
+    state.aegp_memory_free.push(block);
+    state.aegp_memory_free.sort_by_key(|block| block.data);
+    let mut merged: Vec<AegpMemoryBlock> = Vec::with_capacity(state.aegp_memory_free.len());
+    for block in state.aegp_memory_free.drain(..) {
+        if let Some(last) = merged.last_mut()
+            && block.data <= last.end
+        {
+            last.end = last.end.max(block.end);
+        } else {
+            merged.push(block);
+        }
+    }
+    state.aegp_memory_free = merged;
+}
+
 fn emulate_aegp_new_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let plugin_id = unicorn
@@ -3593,33 +3683,31 @@ fn emulate_aegp_new_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _:
         if state.aegp_memory_handles.len() >= MAX_AEGP_MEMORY_HANDLES {
             return Err("AEGP Memory handle limit reached".to_string());
         }
-        let handle = (state.next_handle_data + 7) & !7;
-        let data = (handle + 8 + 15) & !15;
-        let end = data
-            .checked_add(size.max(1))
-            .ok_or("AEGP Memory allocation overflow")?;
-        if end > HANDLE_DATA_END {
-            return Err("AEGP Memory arena exhausted".to_string());
-        }
-        unicorn
-            .mem_write(handle, &data.to_le_bytes())
-            .map_err(|error| error.to_string())?;
+        let handle = state.next_aegp_memory_handle;
+        let next_handle = handle
+            .checked_add(8)
+            .filter(|next| *next != 0)
+            .ok_or("AEGP Memory handle space exhausted")?;
+        let (block, free_index, remainder) =
+            select_aegp_memory_block(state, size).ok_or("AEGP Memory arena exhausted")?;
         if size != 0 {
             unicorn
-                .mem_write(data, &vec![0u8; size as usize])
+                .mem_write(block.data, &vec![0u8; size as usize])
                 .map_err(|error| error.to_string())?;
         }
         unicorn
             .mem_write(output, &handle.to_le_bytes())
             .map_err(|error| error.to_string())?;
         let state = unicorn.get_data_mut();
-        state.next_handle_data = end;
+        commit_aegp_memory_block(state, block, free_index, remainder);
+        state.next_aegp_memory_handle = next_handle;
         state.aegp_memory_handles.insert(
             handle,
-            GuestHandle {
-                data,
+            AegpMemoryHandle {
+                data: block.data,
                 size,
                 locks: 0,
+                end: block.end,
             },
         );
         Ok(())
@@ -3639,7 +3727,18 @@ fn emulate_aegp_free_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _
         .get(&handle)
         .is_some_and(|record| record.locks == 0);
     if can_free {
-        unicorn.get_data_mut().aegp_memory_handles.remove(&handle);
+        let state = unicorn.get_data_mut();
+        let record = state
+            .aegp_memory_handles
+            .remove(&handle)
+            .expect("checked handle exists");
+        reclaim_aegp_memory_block(
+            state,
+            AegpMemoryBlock {
+                data: record.data,
+                end: record.end,
+            },
+        );
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
     } else {
         aegp_memory_error(unicorn);
@@ -3737,13 +3836,35 @@ fn emulate_aegp_resize_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64,
         if old.locks != 0 {
             return Err("AEGP Memory handle is locked".to_string());
         }
-        let data = (unicorn.get_data().next_handle_data + 15) & !15;
-        let end = data
-            .checked_add(size.max(1))
-            .ok_or("AEGP Memory resize overflow")?;
-        if end > HANDLE_DATA_END {
-            return Err("AEGP Memory arena exhausted".to_string());
+        let old_capacity = old.end - old.data;
+        let new_capacity = aegp_memory_capacity(size).ok_or("AEGP Memory resize overflow")?;
+        if new_capacity <= old_capacity {
+            if size > old.size {
+                unicorn
+                    .mem_write(old.data + old.size, &vec![0u8; (size - old.size) as usize])
+                    .map_err(|error| error.to_string())?;
+            }
+            let new_end = old.data + new_capacity;
+            let state = unicorn.get_data_mut();
+            let record = state
+                .aegp_memory_handles
+                .get_mut(&handle)
+                .ok_or("AEGP Memory handle disappeared")?;
+            record.size = size;
+            record.end = new_end;
+            if new_end < old.end {
+                reclaim_aegp_memory_block(
+                    state,
+                    AegpMemoryBlock {
+                        data: new_end,
+                        end: old.end,
+                    },
+                );
+            }
+            return Ok(());
         }
+        let (block, free_index, remainder) = select_aegp_memory_block(unicorn.get_data(), size)
+            .ok_or("AEGP Memory arena exhausted")?;
         let mut bytes = vec![0u8; size as usize];
         let copied = old.size.min(size) as usize;
         if copied != 0 {
@@ -3753,20 +3874,25 @@ fn emulate_aegp_resize_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64,
         }
         if size != 0 {
             unicorn
-                .mem_write(data, &bytes)
+                .mem_write(block.data, &bytes)
                 .map_err(|error| error.to_string())?;
         }
-        unicorn
-            .mem_write(handle, &data.to_le_bytes())
-            .map_err(|error| error.to_string())?;
         let state = unicorn.get_data_mut();
+        commit_aegp_memory_block(state, block, free_index, remainder);
         let record = state
             .aegp_memory_handles
             .get_mut(&handle)
             .ok_or("AEGP Memory handle disappeared")?;
-        record.data = data;
+        record.data = block.data;
         record.size = size;
-        state.next_handle_data = end;
+        record.end = block.end;
+        reclaim_aegp_memory_block(
+            state,
+            AegpMemoryBlock {
+                data: old.data,
+                end: old.end,
+            },
+        );
         Ok(())
     })();
     if result.is_ok() {
@@ -4051,6 +4177,7 @@ mod tests {
             Mode::MODE_64,
             GuestState {
                 next_handle_data: HANDLE_DATA_BASE,
+                next_aegp_memory_handle: AEGP_MEMORY_HANDLE_BASE,
                 ..GuestState::default()
             },
         )
@@ -4083,6 +4210,9 @@ mod tests {
         }
         unicorn
             .mem_write(HOST_POISON, &[0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3])
+            .unwrap();
+        unicorn
+            .mem_write(HOST_AEGP_MEMORY_UNSUPPORTED, &[0xb8, 4, 0, 0, 0, 0xc3])
             .unwrap();
         unicorn
             .add_code_hook(
@@ -4126,8 +4256,8 @@ mod tests {
             HOST_AEGP_UNLOCK_MEM_HANDLE,
             HOST_AEGP_MEM_HANDLE_SIZE,
             HOST_AEGP_RESIZE_MEM_HANDLE,
-            HOST_POISON,
-            HOST_POISON,
+            HOST_AEGP_MEMORY_UNSUPPORTED,
+            HOST_AEGP_MEMORY_UNSUPPORTED,
         ]
         .into_iter()
         .enumerate()
@@ -4424,13 +4554,108 @@ mod tests {
                 .unwrap(),
             4
         );
+        assert_eq!(engine.call_win64(callbacks[6], [0; 6]).unwrap(), 4);
+        assert_eq!(engine.call_win64(callbacks[7], [0; 6]).unwrap(), 4);
+    }
+
+    #[test]
+    fn aegp_memory_v1_reclaims_backing_storage_for_alloc_free_and_resize_cycles() {
+        let mut engine = test_engine(&[0xc3]);
+        let suite_name = engine.allocate(18, 1).unwrap();
+        engine.write(suite_name, b"AEGP Memory Suite\0").unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
         assert_eq!(
-            engine.call_win64(callbacks[6], [0; 6]).unwrap(),
-            u32::MAX as u64
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [suite_name, 1, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut bytes = [0u8; 8];
+        engine.read(suite_output, &mut bytes).unwrap();
+        let table = u64::from_le_bytes(bytes);
+        let mut callbacks = [0u64; 6];
+        for (slot, callback) in callbacks.iter_mut().enumerate() {
+            engine.read(table + (slot * 8) as u64, &mut bytes).unwrap();
+            *callback = u64::from_le_bytes(bytes);
+        }
+        let label = engine.allocate(4, 1).unwrap();
+        engine.write(label, b"olm\0").unwrap();
+        let handle_output = engine.allocate(8, 8).unwrap();
+        let data_output = engine.allocate(8, 8).unwrap();
+
+        let mut first_handle = 0;
+        let mut first_data = 0;
+        for cycle in 0..(MAX_AEGP_MEMORY_HANDLES * 2) {
+            assert_eq!(
+                engine
+                    .call_win64(callbacks[0], [1, label, 32, 0, handle_output, 0])
+                    .unwrap(),
+                0
+            );
+            engine.read(handle_output, &mut bytes).unwrap();
+            let handle = u64::from_le_bytes(bytes);
+            assert_ne!(handle, first_handle);
+            assert_eq!(
+                engine
+                    .call_win64(callbacks[2], [handle, data_output, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            engine.read(data_output, &mut bytes).unwrap();
+            let data = u64::from_le_bytes(bytes);
+            if cycle == 0 {
+                first_handle = handle;
+                first_data = data;
+            } else {
+                assert_eq!(data, first_data);
+            }
+            assert_eq!(
+                engine
+                    .call_win64(callbacks[3], [handle, 0, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                engine
+                    .call_win64(callbacks[1], [handle, 0, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+        }
+
+        assert_eq!(
+            engine
+                .call_win64(callbacks[0], [1, label, 32, 0, handle_output, 0])
+                .unwrap(),
+            0
+        );
+        engine.read(handle_output, &mut bytes).unwrap();
+        let handle = u64::from_le_bytes(bytes);
+        for _ in 0..(MAX_AEGP_MEMORY_HANDLES * 2) {
+            assert_eq!(
+                engine
+                    .call_win64(callbacks[5], [label, 128, handle, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                engine
+                    .call_win64(callbacks[5], [label, 32, handle, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            engine
+                .call_win64(callbacks[1], [handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
         );
         assert_eq!(
-            engine.call_win64(callbacks[7], [0; 6]).unwrap(),
-            u32::MAX as u64
+            engine
+                .call_win64(callbacks[2], [first_handle, data_output, 0, 0, 0, 0])
+                .unwrap(),
+            4
         );
     }
 
