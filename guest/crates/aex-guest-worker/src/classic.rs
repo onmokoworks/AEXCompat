@@ -85,6 +85,8 @@ pub struct RenderReport {
     pub width: u32,
     pub height: u32,
     pub parameter_values: Vec<AppliedParameter>,
+    pub output_request: [i32; 4],
+    pub input_requests: Vec<[i32; 4]>,
     pub argb8: Vec<u8>,
 }
 
@@ -296,9 +298,48 @@ impl ClassicHost {
         input_argb8: &[u8],
         parameter_values: &[ParameterValue],
     ) -> Result<RenderReport, ClassicError> {
+        self.render_argb8_with_request(
+            width,
+            height,
+            input_argb8,
+            parameter_values,
+            [0, 0, width as i32, height as i32],
+        )
+    }
+
+    pub fn render_argb8_region(
+        &mut self,
+        width: u32,
+        height: u32,
+        input_argb8: &[u8],
+        parameter_values: &[ParameterValue],
+        output_request: [i32; 4],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_argb8_with_request(width, height, input_argb8, parameter_values, output_request)
+    }
+
+    fn render_argb8_with_request(
+        &mut self,
+        width: u32,
+        height: u32,
+        input_argb8: &[u8],
+        parameter_values: &[ParameterValue],
+        output_request: [i32; 4],
+    ) -> Result<RenderReport, ClassicError> {
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
             return Err(ClassicError::Input(format!(
                 "dimensions must be within 1x1..={MAX_RENDER_WIDTH}x{MAX_RENDER_HEIGHT}, got {width}x{height}"
+            )));
+        }
+        if output_request[0] < 0
+            || output_request[1] < 0
+            || output_request[2] > width as i32
+            || output_request[3] > height as i32
+            || output_request[0] >= output_request[2]
+            || output_request[1] >= output_request[3]
+        {
+            return Err(ClassicError::Input(format!(
+                "output request must be a non-empty rectangle inside {width}x{height}, got {output_request:?}"
             )));
         }
         let rowbytes = width
@@ -432,8 +473,21 @@ impl ClassicHost {
 
         let smart_render = setup.out_flags2 & (1 << 10) != 0;
         let mut render_error = if smart_render {
-            self.render_smart(params, input_param, output_world, width, height, rowbytes)?
+            self.render_smart(
+                params,
+                input_param,
+                output_world,
+                width,
+                height,
+                rowbytes,
+                output_request,
+            )?
         } else {
+            if output_request != [0, 0, width as i32, height as i32] {
+                return Err(ClassicError::Input(
+                    "region rendering requires Smart Render support".into(),
+                ));
+            }
             self.engine.call_win64(
                 self.entry,
                 [CMD_RENDER, self.input, self.output, params, output_world, 0],
@@ -471,10 +525,18 @@ impl ClassicHost {
             schema_version: 1,
             setup,
             render_error,
-            render_mode: if smart_render { "smart-cpu" } else { "classic" },
+            render_mode: if output_request != [0, 0, width as i32, height as i32] {
+                "smart-cpu-region"
+            } else if smart_render {
+                "smart-cpu"
+            } else {
+                "classic"
+            },
             width,
             height,
             parameter_values: applied_values,
+            output_request,
+            input_requests: self.engine.pre_checkout_requests().to_vec(),
             argb8,
         })
     }
@@ -492,6 +554,7 @@ impl ClassicHost {
         width: u32,
         height: u32,
         _rowbytes: u32,
+        output_request: [i32; 4],
     ) -> Result<i32, ClassicError> {
         let input_world = input_param + abi::PARAM_U_OFFSET as u64;
         self.engine
@@ -502,11 +565,10 @@ impl ClassicHost {
         let pre_callbacks = self.engine.allocate(abi::PF_PRE_RENDER_CALLBACKS_SIZE, 8)?;
         let pre_extra = self.engine.allocate(abi::PF_PRE_RENDER_EXTRA_SIZE, 8)?;
         let mut pre_input_bytes = vec![0u8; abi::PF_PRE_RENDER_INPUT_SIZE];
-        write_rect(
+        write_rect_values(
             &mut pre_input_bytes,
             abi::PRE_INPUT_OUTPUT_REQUEST_OFFSET,
-            width,
-            height,
+            output_request,
         );
         write_i16(&mut pre_input_bytes, abi::SMART_INPUT_BITDEPTH_OFFSET, 8);
         self.engine.write(pre_input, &pre_input_bytes)?;
@@ -661,10 +723,14 @@ fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
 }
 
 fn write_rect(bytes: &mut [u8], offset: usize, width: u32, height: u32) {
-    write_i32(bytes, offset, 0);
-    write_i32(bytes, offset + 4, 0);
-    write_i32(bytes, offset + 8, width as i32);
-    write_i32(bytes, offset + 12, height as i32);
+    write_rect_values(bytes, offset, [0, 0, width as i32, height as i32]);
+}
+
+fn write_rect_values(bytes: &mut [u8], offset: usize, rect: [i32; 4]) {
+    write_i32(bytes, offset, rect[0]);
+    write_i32(bytes, offset + 4, rect[1]);
+    write_i32(bytes, offset + 8, rect[2]);
+    write_i32(bytes, offset + 12, rect[3]);
 }
 
 fn read_i32(bytes: &[u8], offset: usize) -> i32 {
