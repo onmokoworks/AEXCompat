@@ -592,10 +592,15 @@ impl ClassicHost {
                 .take(MAX_FAILURE_UNSUPPORTED_SUITE_CALLS)
                 .cloned()
                 .collect(),
-            dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls()
-                + unsupported_suite_calls
-                    .len()
-                    .saturating_sub(MAX_FAILURE_UNSUPPORTED_SUITE_CALLS) as u64,
+            dropped_unsupported_suite_calls: self
+                .engine
+                .dropped_unsupported_suite_calls()
+                .saturating_add(
+                    unsupported_suite_calls
+                        .len()
+                        .saturating_sub(MAX_FAILURE_UNSUPPORTED_SUITE_CALLS)
+                        as u64,
+                ),
         }
     }
 
