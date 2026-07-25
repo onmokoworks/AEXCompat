@@ -656,12 +656,17 @@ fn run_guest_workers(
         let deadline = candidate.native.then_some(native_deadline);
         match run_worker(&candidate.path, arguments, deadline) {
             Ok(output) if output.status.success() => return Ok(output),
-            Ok(output) => failures.push(format!(
-                "{} exited {}: {}",
-                candidate.path.display(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                failures.push(format!(
+                    "{} exited {}: {}; worker stdout: {}",
+                    candidate.path.display(),
+                    output.status,
+                    stderr.trim(),
+                    stdout.trim()
+                ));
+            }
             Err(error) => failures.push(format!("{}: {error}", candidate.path.display())),
         }
     }
@@ -783,6 +788,27 @@ mod tests {
             run_guest_workers(&workers, &["1".to_string()], Duration::from_millis(20)).unwrap();
         assert!(output.status.success());
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn failed_worker_preserves_structured_stdout_diagnostics() {
+        let workers = [GuestWorkerCandidate {
+            path: PathBuf::from("/bin/sh"),
+            native: false,
+        }];
+        let error = run_guest_workers(
+            &workers,
+            &[
+                "-c".to_string(),
+                "printf '%s' '{\"unsupported_suite_calls\":[{\"name\":\"AEGP Utility Suite\",\"version\":13,\"slot\":11,\"call_count\":1}]}' >&1; printf '%s' 'selector returned 4' >&2; exit 1".to_string(),
+            ],
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+        assert!(error.contains("selector returned 4"));
+        assert!(error.contains(
+            "worker stdout: {\"unsupported_suite_calls\":[{\"name\":\"AEGP Utility Suite\",\"version\":13,\"slot\":11,\"call_count\":1}]}"
+        ));
     }
 
     #[test]
