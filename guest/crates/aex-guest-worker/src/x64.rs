@@ -53,6 +53,7 @@ const HANDLE_DATA_BASE: u64 = DATA_BASE + 0x400_0000;
 const PF_HANDLE_DATA_BASE: u64 = 0x0000_0001_0000_0000;
 const PF_HANDLE_DATA_END: u64 = PF_HANDLE_DATA_BASE + 0x2_0000_0000;
 const MAX_PF_HANDLE_SIZE: u64 = 0x8000_0000;
+const MAX_PF_HANDLE_COUNT: usize = 1024;
 // A nonzero Unicorn instruction limit enables instruction counting across the
 // whole run, which is prohibitively expensive for image kernels. The wall-clock
 // timeout and return-sentinel check still bound and validate guest execution.
@@ -4096,6 +4097,34 @@ fn aligned_pf_region_size(size: u64) -> Result<u64, String> {
         .ok_or_else(|| "PF Handle region size overflow".to_string())
 }
 
+fn validate_pf_handle_budget(
+    state: &GuestState,
+    size: u64,
+    replacing: Option<&GuestHandle>,
+) -> Result<(), String> {
+    if size > MAX_PF_HANDLE_SIZE {
+        return Err(format!(
+            "handle allocation exceeds {} bytes: {size}",
+            MAX_PF_HANDLE_SIZE
+        ));
+    }
+    let live_bytes = state
+        .handles
+        .values()
+        .map(|record| record.size)
+        .sum::<u64>();
+    let replaced_bytes = replacing.map_or(0, |record| record.size);
+    let live_count = state.handles.len() - usize::from(replacing.is_some());
+    if live_count >= MAX_PF_HANDLE_COUNT || live_bytes - replaced_bytes > MAX_PF_HANDLE_SIZE - size
+    {
+        return Err(format!(
+            "PF Handle live budget exceeded: size={size}, live_bytes={live_bytes}, live_count={}",
+            state.handles.len()
+        ));
+    }
+    Ok(())
+}
+
 fn find_pf_region(
     state: &GuestState,
     mapped_size: u64,
@@ -4141,12 +4170,7 @@ fn emulate_new_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let size = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX);
     unicorn.get_data_mut().handle_allocations.push(size);
     let allocation = (|| {
-        if size > MAX_PF_HANDLE_SIZE {
-            return Err(format!(
-                "handle allocation exceeds {} bytes: {size}",
-                MAX_PF_HANDLE_SIZE
-            ));
-        }
+        validate_pf_handle_budget(unicorn.get_data(), size, None)?;
         let handle_region = find_pf_region(unicorn.get_data(), PAGE_SIZE, None)?;
         unicorn
             .mem_map(handle_region, PAGE_SIZE, Prot::READ | Prot::WRITE)
@@ -4327,6 +4351,7 @@ fn emulate_resize_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         if old.locks != 0 {
             return Err("resize-handle locked handle".to_string());
         }
+        validate_pf_handle_budget(unicorn.get_data(), size, Some(&old))?;
         let data_mapped_size = aligned_pf_region_size(size)?;
         let data_region = find_pf_region(unicorn.get_data(), data_mapped_size, None)?;
         unicorn
@@ -4660,6 +4685,46 @@ mod tests {
             find_pf_region(&state, 2 * PAGE_SIZE, None).unwrap(),
             PF_HANDLE_DATA_BASE + 3 * PAGE_SIZE
         );
+    }
+
+    #[test]
+    fn pf_handle_budget_bounds_live_bytes_and_handle_count() {
+        let observed_size = 333_294_848;
+        let mut state = GuestState::default();
+        for index in 0..6u64 {
+            state.handles.insert(
+                PF_HANDLE_DATA_BASE + index * PAGE_SIZE,
+                GuestHandle {
+                    data: 0,
+                    size: observed_size,
+                    locks: 0,
+                    handle_region: 0,
+                    data_region: 0,
+                    data_mapped_size: PAGE_SIZE,
+                },
+            );
+        }
+        assert!(validate_pf_handle_budget(&state, observed_size, None).is_err());
+        let existing = state.handles.values().next().unwrap().clone();
+        assert!(validate_pf_handle_budget(&state, observed_size, Some(&existing)).is_ok());
+
+        state.handles.clear();
+        for index in 0..MAX_PF_HANDLE_COUNT as u64 {
+            state.handles.insert(
+                PF_HANDLE_DATA_BASE + index * PAGE_SIZE,
+                GuestHandle {
+                    data: 0,
+                    size: 0,
+                    locks: 0,
+                    handle_region: 0,
+                    data_region: 0,
+                    data_mapped_size: PAGE_SIZE,
+                },
+            );
+        }
+        assert!(validate_pf_handle_budget(&state, 0, None).is_err());
+        let existing = state.handles.values().next().unwrap().clone();
+        assert!(validate_pf_handle_budget(&state, 1, Some(&existing)).is_ok());
     }
 
     #[test]
