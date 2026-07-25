@@ -11,9 +11,10 @@ int32_t __cdecl get_main_hwnd(void* main_hwnd);
 struct UtilitySuite {
   // Function pointer positions mirror the reviewed Adobe suite versions.
   // AEGP_UtilitySuite6 (acquisition version 13) publishes 33 slots; only
-  // RegisterWithAEGP (slot 9) and GetMainHWND (slot 10) are supported, the
-  // rest stay null so out-of-range reads fail closed instead of leaving the
-  // table shorter than the ABI the effect compiled against.
+  // RegisterWithAEGP (slot 9) and GetMainHWND (slot 10) are supported. The
+  // other ABI slots receive fail-closed diagnostic callbacks, so a plugin
+  // that reaches one cannot jump through a null pointer without leaving a
+  // version/slot record in the worker report.
   void* unsupported[9]{};
   decltype(&register_with_aegp) register_with_aegp;
   decltype(&get_main_hwnd) get_main_hwnd;
@@ -24,7 +25,8 @@ static_assert(offsetof(UtilitySuite, register_with_aegp) == 9 * sizeof(void*));
 static_assert(offsetof(UtilitySuite, get_main_hwnd) == 10 * sizeof(void*));
 struct UtilitySuite3 {
   // AEGP_UtilitySuite3 (acquisition version 7) publishes 25 slots with
-  // RegisterWithAEGP at slot 7 and GetMainHWND at slot 8.
+  // RegisterWithAEGP at slot 7 and GetMainHWND at slot 8. The remaining
+  // slots use the same fail-closed diagnostic boundary as version 13.
   void* unsupported[7]{};
   decltype(&register_with_aegp) register_with_aegp;
   decltype(&get_main_hwnd) get_main_hwnd;
