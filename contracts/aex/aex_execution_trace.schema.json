@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://onmokoworks.local/aexcompat/aex_execution_trace.schema.json",
+  "schema_name": "aexcompat.aex-execution-trace-schema",
   "title": "AEXCompat x64 AEX execution trace",
   "type": "object",
   "additionalProperties": false,

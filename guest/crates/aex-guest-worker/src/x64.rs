@@ -3,7 +3,6 @@ use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::{RegisterX86, UcHookId, Unicorn};
@@ -144,24 +143,25 @@ fn trace_observation(event: &TraceEvent, observation: u64) -> Option<TraceObserv
     {
         return None;
     }
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = Sha256::new();
     for argument in &event.arguments {
-        argument.register.hash(&mut hasher);
-        argument.value.raw.hash(&mut hasher);
+        hasher.update(argument.register.as_bytes());
+        hasher.update(argument.value.raw.to_le_bytes());
     }
     for xmm in &event.xmm_arguments {
-        xmm.register.hash(&mut hasher);
-        xmm.raw_hex.hash(&mut hasher);
+        hasher.update(xmm.register.as_bytes());
+        hasher.update(xmm.raw_hex.as_bytes());
     }
     for argument in &event.stack_arguments {
-        argument.index.hash(&mut hasher);
-        argument.value.raw.hash(&mut hasher);
+        hasher.update(argument.index.to_le_bytes());
+        hasher.update(argument.value.raw.to_le_bytes());
     }
     if let Some(returned) = &event.return_value {
-        returned.rax.raw.hash(&mut hasher);
-        returned.xmm0.raw_hex.hash(&mut hasher);
+        hasher.update(returned.rax.raw.to_le_bytes());
+        hasher.update(returned.xmm0.raw_hex.as_bytes());
     }
-    let fingerprint = hasher.finish();
+    let digest = hasher.finalize();
+    let fingerprint = u64::from_be_bytes(digest[..8].try_into().expect("eight-byte digest"));
     Some(TraceObservation {
         observation,
         fingerprint: format!("{fingerprint:016x}"),
@@ -3451,6 +3451,28 @@ mod tests {
             .unwrap();
         assert_eq!(call.call_kind, Some("indirect"));
         assert_eq!(call.target_rva, Some(13));
+    }
+
+    #[test]
+    fn execution_trace_resolves_rip_relative_indirect_guest_target() {
+        const CODE: u64 = 0x1000_0000;
+        let target = CODE + 16;
+        // call qword ptr [rip+2]; ret; nop; dq target; ret
+        let mut code = vec![0xff, 0x15, 0x02, 0, 0, 0, 0xc3, 0x90];
+        code.extend_from_slice(&target.to_le_bytes());
+        code.push(0xc3);
+        let mut engine = test_engine(&code);
+        engine.begin_execution_trace("GLOBAL_SETUP", CODE).unwrap();
+        let result = engine.call_win64(CODE, [0; 6]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        let call = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "guest_call")
+            .unwrap();
+        assert_eq!(call.call_kind, Some("indirect"));
+        assert_eq!(call.target_rva, Some(16));
     }
 
     #[test]
