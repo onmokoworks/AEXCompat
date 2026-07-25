@@ -604,13 +604,10 @@ impl MacHarnessApp {
                                 });
                         }
                         5 => {
-                            let [alpha, red, green, blue] =
-                                parameter.color.unwrap_or([255, 0, 0, 0]);
-                            let mut color =
-                                Color32::from_rgba_unmultiplied(red, green, blue, alpha);
-                            if ui.color_edit_button_srgba(&mut color).changed() {
-                                parameter.color =
-                                    Some([color.a(), color.r(), color.g(), color.b()]);
+                            let mut rgba =
+                                argb8_to_rgba8(parameter.color.unwrap_or([255, 0, 0, 0]));
+                            if ui.color_edit_button_srgba_unmultiplied(&mut rgba).changed() {
+                                parameter.color = Some(rgba8_to_argb8(rgba));
                             }
                         }
                         _ => {
@@ -818,6 +815,14 @@ fn parameter_payload(parameters: &[GuiParameter]) -> Result<String, String> {
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(format!("v2|{}", assignments.join(";")))
+}
+
+fn argb8_to_rgba8([alpha, red, green, blue]: [u8; 4]) -> [u8; 4] {
+    [red, green, blue, alpha]
+}
+
+fn rgba8_to_argb8([red, green, blue, alpha]: [u8; 4]) -> [u8; 4] {
+    [alpha, red, green, blue]
 }
 
 fn write_argb8_slot(input: &Path, slot: &Path) -> Result<(u32, u32), String> {
@@ -1622,6 +1627,12 @@ mod tests {
             parameter_payload(&parameters).unwrap(),
             "v2|param_2@2:argb8=255,64,128,192"
         );
+    }
+
+    #[test]
+    fn translucent_color_editor_transport_preserves_unmultiplied_rgb() {
+        let argb = [64, 200, 100, 50];
+        assert_eq!(rgba8_to_argb8(argb8_to_rgba8(argb)), argb);
     }
 
     #[test]
