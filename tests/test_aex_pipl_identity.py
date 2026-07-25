@@ -150,6 +150,46 @@ def test_terminal_ae_reserved_compatibility_is_exact_and_fail_closed():
         assert record["reason"] == "trailing_bytes_after_properties"
 
 
+def _match_name_reserved_info_length_drift_payload() -> bytes:
+    match_name = bytes([len("BCC3Optical Flow")]) + b"BCC3Optical Flow" + b"\x00" * 3
+    properties = [
+        _kind("eFKT"),
+        _property("8664", b"EffectMain\x00"),
+        _property("eMNA", match_name),
+        _property("aeFL", struct.pack("<I", 8)),
+    ]
+    payload = bytearray(_payload(properties) + _property("aeRD", struct.pack("<I", 0)))
+    match_name_offset = 10 + len(properties[0]) + len(properties[1])
+    struct.pack_into("<I", payload, match_name_offset + 12, len(match_name) + 8)
+    return bytes(payload)
+
+
+def test_exact_terminal_match_name_reserved_info_length_drift_is_accepted():
+    record = ident.parse_pipl_payload(_match_name_reserved_info_length_drift_payload())
+    assert record["parse_state"] == "parsed"
+    assert record["dispatchable_effect"] is True
+    assert record["entrypoint_win64"] == "EffectMain"
+    assert record["match_name"] == "BCC3Optical Flow"
+    assert record["property_keys"][-2:] == ["aeFL", "aeRD"]
+
+
+def test_terminal_match_name_reserved_info_length_drift_is_fail_closed():
+    base = bytearray(_match_name_reserved_info_length_drift_payload())
+    match_name_offset = 10 + len(_kind("eFKT")) + len(_property("8664", b"EffectMain\x00"))
+    reserved_info_value = match_name_offset + 16 + 20 + 16
+
+    wrong_reserved_info = bytearray(base)
+    struct.pack_into("<I", wrong_reserved_info, reserved_info_value, 9)
+    wrong_length = bytearray(base)
+    struct.pack_into("<I", wrong_length, match_name_offset + 12, 24)
+    wrong_padding = bytearray(base)
+    wrong_padding[match_name_offset + 16 + 19] = 0x7F
+
+    for payload in (wrong_reserved_info, wrong_length, wrong_padding):
+        record = ident.parse_pipl_payload(bytes(payload))
+        assert record["parse_state"] == "invalid"
+
+
 def test_short_payload_is_invalid():
     assert ident.parse_pipl_payload(b"")["reason"] == "payload_shorter_than_header"
     assert ident.parse_pipl_payload(None)["reason"] == "no_payload"

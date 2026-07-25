@@ -144,6 +144,31 @@ def _terminal_zero_ae_reserved_property(data: bytes) -> bool:
     )
 
 
+def _terminal_match_name_reserved_info_length_drift(
+    data: bytes, declared_length: int, property_index: int, property_count: int
+) -> int | None:
+    """Return the exact corrected eMNA length for the bounded public tail shape."""
+    if not data or property_index + 2 != property_count:
+        return None
+    string_length = data[0] + 1
+    padded_length = (string_length + 3) & ~3
+    if declared_length != padded_length + 8 or len(data) != padded_length + 40:
+        return None
+    if any(byte != 0 for byte in data[string_length:padded_length]):
+        return None
+    reserved_info = data[padded_length : padded_length + 20]
+    if not (
+        reserved_info[0:4] == VENDOR_ADOBE
+        and reserved_info[4:8] == b"LFea"  # serialized little-endian ``aeFL``
+        and _u32(reserved_info, 8) == 0
+        and _u32(reserved_info, 12) == 4
+        and _u32(reserved_info, 16) == 8
+        and _terminal_zero_ae_reserved_property(data[padded_length + 20 :])
+    ):
+        return None
+    return padded_length
+
+
 def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
     """Decode one PiPL resource payload into an identity record.
 
@@ -202,7 +227,7 @@ def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
     kind_count = 0
     code_count = 0
     offset = 10
-    for _ in range(count):
+    for property_index in range(count):
         if offset > size or size - offset < 16:
             record["reason"] = "truncated_property_header"
             return record
@@ -210,6 +235,12 @@ def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
         key_raw = payload[offset + 4 : offset + 8]
         length = _u32(payload, offset + 12)
         offset += 16
+        if vendor == VENDOR_ADOBE and key_raw == b"ANMe":
+            corrected_length = _terminal_match_name_reserved_info_length_drift(
+                payload[offset:], length, property_index, count
+            )
+            if corrected_length is not None:
+                length = corrected_length
         if length > size - offset:
             record["reason"] = "property_length_overflow"
             return record

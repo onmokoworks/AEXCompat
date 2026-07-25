@@ -478,6 +478,36 @@ bool terminal_zero_ae_reserved_property(const unsigned char* bytes,
       read_pipl_u32(bytes + 12) == 4 && read_pipl_u32(bytes + 16) == 0;
 }
 
+bool terminal_match_name_reserved_info_length_drift(
+    const unsigned char* bytes, std::size_t size, uint32_t declared_length,
+    uint32_t property_index, uint32_t property_count,
+    uint32_t& corrected_length) {
+  // Two shipping Boris obsolete stubs overstate the final eMNA data length by
+  // exactly eight bytes, swallowing only the vendor/key of the following
+  // public AE_Reserved_Info property. Recover solely when the entire remaining
+  // structure is exact: padded Pascal match name, aeFL(value 8), then the
+  // already-supported count-external aeRD(value 0). This is not a generic
+  // Pascal-string or property-length repair.
+  if (!bytes || size == 0 || property_index + 2 != property_count) return false;
+  const uint32_t string_length = uint32_t(bytes[0]) + 1U;
+  if (string_length > std::numeric_limits<uint32_t>::max() - 3U) return false;
+  const uint32_t padded_length = (string_length + 3U) & ~3U;
+  if (declared_length != padded_length + 8U ||
+      size != std::size_t(padded_length) + 40U) return false;
+  for (uint32_t index = string_length; index < padded_length; ++index)
+    if (bytes[index] != 0) return false;
+  const unsigned char* reserved_info = bytes + padded_length;
+  if (!pipl_tag(reserved_info, "MIB8") ||
+      !pipl_tag(reserved_info + 4, "LFea") ||
+      read_pipl_u32(reserved_info + 8) != 0 ||
+      read_pipl_u32(reserved_info + 12) != 4 ||
+      read_pipl_u32(reserved_info + 16) != 8 ||
+      !terminal_zero_ae_reserved_property(reserved_info + 20, 20))
+    return false;
+  corrected_length = padded_length;
+  return true;
+}
+
 bool valid_export_symbol(const unsigned char* bytes, std::size_t size,
                          std::string& symbol) {
   if (size == 0 || size > 256) return false;
@@ -526,9 +556,16 @@ PiplEntrypoint parse_pipl_entrypoint(const unsigned char* bytes, std::size_t siz
       return result;
     }
     const unsigned char* property = bytes + offset;
-    const uint32_t length = read_pipl_u32(property + 12);
+    uint32_t length = read_pipl_u32(property + 12);
     const bool adobe_vendor = pipl_tag(property, "MIB8");
     offset += 16;
+    if (adobe_vendor && pipl_tag(property + 4, "ANMe")) {
+      uint32_t corrected_length{};
+      if (terminal_match_name_reserved_info_length_drift(
+              bytes + offset, size - offset, length, index, count,
+              corrected_length))
+        length = corrected_length;
+    }
     if (length > size - offset || length > std::numeric_limits<uint32_t>::max() - 3U) {
       result.kind = PiplPluginKind::Invalid;
       return result;
@@ -1210,6 +1247,32 @@ bool verify_pipl_entrypoint_parser() {
   append_pipl_property(unrelated_terminal_property, "eman", {0, 0, 0, 0});
   if (parse_pipl_entrypoint(unrelated_terminal_property.data(),
                             unrelated_terminal_property.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto match_name_length_drift = effect;
+  match_name_length_drift[6] = 4;
+  const std::size_t match_name_offset = match_name_length_drift.size();
+  append_pipl_property(
+      match_name_length_drift, "ANMe",
+      {16, 'B', 'C', 'C', '3', 'O', 'p', 't', 'i', 'c', 'a', 'l', ' ',
+       'F', 'l', 'o', 'w', 0, 0, 0});
+  std::fill(match_name_length_drift.begin() + match_name_offset + 12,
+            match_name_length_drift.begin() + match_name_offset + 16, 0);
+  match_name_length_drift[match_name_offset + 12] = 28;
+  append_pipl_property(match_name_length_drift, "LFea", {8, 0, 0, 0});
+  append_pipl_property(match_name_length_drift, "DRea", {0, 0, 0, 0});
+  const auto drift_parsed = parse_pipl_entrypoint(
+      match_name_length_drift.data(), match_name_length_drift.size());
+  if (drift_parsed.kind != PiplPluginKind::Effect ||
+      drift_parsed.symbol != "entryPointFunc") return false;
+  auto wrong_reserved_info = match_name_length_drift;
+  wrong_reserved_info[wrong_reserved_info.size() - 24] = 9;
+  if (parse_pipl_entrypoint(wrong_reserved_info.data(),
+                            wrong_reserved_info.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto wrong_length_drift = match_name_length_drift;
+  wrong_length_drift[match_name_offset + 12] = 24;
+  if (parse_pipl_entrypoint(wrong_length_drift.data(),
+                            wrong_length_drift.size()).kind !=
       PiplPluginKind::Invalid) return false;
   auto vendor_private_duplicate = effect;
   vendor_private_duplicate[6] = 3;
