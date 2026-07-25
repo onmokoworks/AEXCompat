@@ -103,19 +103,19 @@ fn push_trace_event(capture: &mut TraceCapture, mut event: TraceEvent) {
             call_kind: event.call_kind,
         })
     };
-    if let Some(key) = &key {
-        if let Some(index) = capture.event_index.get(key).copied() {
-            let observation_number = capture.events[index].observed_count + 1;
-            if let Some(observation) = trace_observation(&event, observation_number) {
-                update_exemplars(
-                    &mut capture.events[index].exemplars,
-                    capture.event_fingerprints.entry(index).or_default(),
-                    observation,
-                );
-            }
-            capture.events[index].observed_count = observation_number;
-            return;
+    if let Some(key) = &key
+        && let Some(index) = capture.event_index.get(key).copied()
+    {
+        let observation_number = capture.events[index].observed_count + 1;
+        if let Some(observation) = trace_observation(&event, observation_number) {
+            update_exemplars(
+                &mut capture.events[index].exemplars,
+                capture.event_fingerprints.entry(index).or_default(),
+                observation,
+            );
         }
+        capture.events[index].observed_count = observation_number;
+        return;
     }
     if capture.events.len() >= MAX_TRACE_EVENTS {
         capture.truncated = true;
