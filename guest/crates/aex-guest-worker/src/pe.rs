@@ -11,6 +11,8 @@ const MAX_IMAGE_SIZE: usize = 256 * 1024 * 1024;
 const MAX_SECTIONS: usize = 96;
 const MAX_IMPORTS: usize = 4096;
 const MAX_EXPORTS: usize = 4096;
+const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
 
 #[derive(Debug, Error)]
 pub enum PeError {
@@ -80,6 +82,15 @@ pub struct PeImage {
     has_tls: bool,
     has_exception_directory: bool,
     file_size: usize,
+    section_protections: Vec<SectionProtection>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SectionProtection {
+    pub virtual_address: usize,
+    pub virtual_size: usize,
+    pub executable: bool,
+    pub writable: bool,
 }
 
 impl PeImage {
@@ -117,6 +128,7 @@ impl PeImage {
         }
 
         let mut mapped = vec![0u8; image_size];
+        let mut section_protections = Vec::with_capacity(pe.sections.len());
         mapped[..header_size].copy_from_slice(&file[..header_size]);
         for section in &pe.sections {
             let name = section.name().unwrap_or("<invalid>").to_string();
@@ -138,6 +150,12 @@ impl PeImage {
             if raw_size != 0 {
                 mapped[virtual_start..virtual_end].copy_from_slice(&file[raw_start..raw_end]);
             }
+            section_protections.push(SectionProtection {
+                virtual_address: virtual_start,
+                virtual_size: (section.virtual_size as usize).max(raw_size),
+                executable: section.characteristics & IMAGE_SCN_MEM_EXECUTE != 0,
+                writable: section.characteristics & IMAGE_SCN_MEM_WRITE != 0,
+            });
         }
 
         let candidates = ["EffectMain", "entryPointFunc", "entry_point"];
@@ -181,6 +199,7 @@ impl PeImage {
             has_tls: pe.tls_data.is_some(),
             has_exception_directory: pe.exception_data.is_some(),
             file_size: file.len(),
+            section_protections,
         })
     }
 
@@ -202,6 +221,10 @@ impl PeImage {
 
     pub fn imports(&self) -> &[ImportLibrary] {
         &self.imports
+    }
+
+    pub fn section_protections(&self) -> &[SectionProtection] {
+        &self.section_protections
     }
 
     pub fn report(&self) -> PeReport {

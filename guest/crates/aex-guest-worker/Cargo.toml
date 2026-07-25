@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license = "GPL-2.0-only"
 
+[features]
+default = []
+native-carrier = []
+
 [dependencies]
 aex-abi = { path = "../aex-abi" }
 goblin.workspace = true
