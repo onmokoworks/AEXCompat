@@ -211,9 +211,10 @@ impl MacHarnessApp {
         match result {
             Ok(result) => match load_texture(ctx, "mac-output", &result.output) {
                 Ok((texture, width, height)) => {
+                    let had_output = self.output_texture.is_some();
                     self.output = Some(result.output);
                     self.output_texture = Some(texture);
-                    self.viewer_mode = ViewerMode::Output;
+                    self.viewer_mode = self.viewer_mode.after_successful_render(had_output);
                     self.status = format!("Completed: {width}x{height} ARGB8 output");
                     self.report = result.report;
                 }

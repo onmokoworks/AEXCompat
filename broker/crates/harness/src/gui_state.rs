@@ -35,6 +35,16 @@ pub(crate) enum ViewerMode {
     Compare,
 }
 
+impl ViewerMode {
+    pub(crate) fn after_successful_render(self, had_output: bool) -> Self {
+        if !had_output && self == Self::Input {
+            Self::Output
+        } else {
+            self
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct LiveRenderState {
     enabled: bool,
@@ -147,5 +157,25 @@ mod tests {
         state.set_enabled(false);
         assert!(!state.enabled());
         assert!(!state.take_due(started + Duration::from_secs(1), false, true));
+    }
+
+    #[test]
+    fn first_render_reveals_output_without_overriding_later_viewer_choices() {
+        assert_eq!(
+            ViewerMode::Input.after_successful_render(false),
+            ViewerMode::Output
+        );
+        assert_eq!(
+            ViewerMode::Compare.after_successful_render(false),
+            ViewerMode::Compare
+        );
+        assert_eq!(
+            ViewerMode::Input.after_successful_render(true),
+            ViewerMode::Input
+        );
+        assert_eq!(
+            ViewerMode::Compare.after_successful_render(true),
+            ViewerMode::Compare
+        );
     }
 }
