@@ -26,6 +26,7 @@ const PARAM_CHECKBOX: i32 = 4;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
 const ANGLE_DEFAULT_OFFSET: usize = 4;
+const CLEANUP_GUEST_ERROR: i32 = -40;
 pub const MAX_RENDER_WIDTH: u32 = 1920;
 pub const MAX_RENDER_HEIGHT: u32 = 1080;
 
@@ -101,6 +102,7 @@ pub struct ResidentCloseReport {
     pub schema_version: u32,
     pub execution_backend: &'static str,
     pub frames_rendered: u64,
+    pub frame_setdown_error: i32,
     pub sequence_setdown_error: i32,
     pub global_setdown_error: i32,
     pub suite_requests: Vec<String>,
@@ -139,6 +141,7 @@ pub struct ClassicHost {
     sequence_active: bool,
     frame_resources: Option<FrameResources>,
     resident_frames: u64,
+    resident_frame_setdown_error: i32,
 }
 
 #[derive(Clone)]
@@ -268,6 +271,7 @@ impl ClassicHost {
             sequence_active: false,
             frame_resources: None,
             resident_frames: 0,
+            resident_frame_setdown_error: 0,
         })
     }
 
@@ -446,20 +450,23 @@ impl ClassicHost {
         Ok(report)
     }
 
-    pub fn close_resident_session(&mut self) -> Result<ResidentCloseReport, ClassicError> {
-        let sequence_setdown_error = self.end_sequence(false)?;
-        let global_setdown_error = self.end_global()?;
-        Ok(ResidentCloseReport {
+    pub fn close_resident_session(&mut self) -> ResidentCloseReport {
+        let sequence_setdown_error = cleanup_error_code(self.end_sequence(false));
+        let global_setdown_error = cleanup_error_code(self.end_global());
+        ResidentCloseReport {
             schema_version: 1,
             execution_backend: self.engine.backend_name(),
             frames_rendered: self.resident_frames,
+            frame_setdown_error: self.resident_frame_setdown_error,
             sequence_setdown_error,
             global_setdown_error,
             suite_requests: self.engine.suite_requests().to_vec(),
             unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
             dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
-            session_clean: sequence_setdown_error == 0 && global_setdown_error == 0,
-        })
+            session_clean: self.resident_frame_setdown_error == 0
+                && sequence_setdown_error == 0
+                && global_setdown_error == 0,
+        }
     }
 
     pub fn failure_report(&self, error: &ClassicError) -> FailureReport {
@@ -839,36 +846,36 @@ impl ClassicHost {
                 error: frame_setup_error,
             });
         }
-        let frame_data = self.read_output_pointer(abi::OUT_FRAME_DATA_OFFSET)?;
-        self.write_input_pointer(abi::IN_FRAME_DATA_OFFSET, frame_data)?;
-
-        let (mut render_error, census, render_traces) = if smart_render {
-            self.render_smart(
-                params,
-                input_param,
-                output_world,
-                width,
-                height,
-                rowbytes,
-                output_request,
-                census_enabled,
-                trace_enabled,
-            )?
-        } else {
-            if output_request != [0, 0, width as i32, height as i32] {
-                return Err(ClassicError::Input(
-                    "region rendering requires Smart Render support".into(),
-                ));
+        let frame_execution = (|| {
+            let frame_data = self.read_output_pointer(abi::OUT_FRAME_DATA_OFFSET)?;
+            self.write_input_pointer(abi::IN_FRAME_DATA_OFFSET, frame_data)?;
+            if smart_render {
+                self.render_smart(
+                    params,
+                    input_param,
+                    output_world,
+                    width,
+                    height,
+                    rowbytes,
+                    output_request,
+                    census_enabled,
+                    trace_enabled,
+                )
+            } else {
+                if output_request != [0, 0, width as i32, height as i32] {
+                    return Err(ClassicError::Input(
+                        "region rendering requires Smart Render support".into(),
+                    ));
+                }
+                let (return_value, trace) = self.call_with_optional_trace(
+                    "RENDER",
+                    [CMD_RENDER, self.input, self.output, params, output_world, 0],
+                    trace_enabled,
+                )?;
+                Ok((return_value as i32, None, trace.into_iter().collect()))
             }
-            let (return_value, trace) = self.call_with_optional_trace(
-                "RENDER",
-                [CMD_RENDER, self.input, self.output, params, output_world, 0],
-                trace_enabled,
-            )?;
-            (return_value as i32, None, trace.into_iter().collect())
-        };
-        traces.extend(render_traces);
-        let (frame_setdown_result, trace) = self.call_with_optional_trace(
+        })();
+        let frame_setdown = self.call_with_optional_trace(
             "FRAME_SETDOWN",
             [
                 CMD_FRAME_SETDOWN,
@@ -879,13 +886,38 @@ impl ClassicHost {
                 0,
             ],
             trace_enabled,
-        )?;
-        traces.extend(trace);
-        let frame_setdown_error = frame_setdown_result as i32;
+        );
+        let mut frame_setdown_error = match frame_setdown {
+            Ok((result, trace)) => {
+                traces.extend(trace);
+                result as i32
+            }
+            Err(_) => CLEANUP_GUEST_ERROR,
+        };
+        if self
+            .write_input_pointer(abi::IN_FRAME_DATA_OFFSET, 0)
+            .is_err()
+            && frame_setdown_error == 0
+        {
+            frame_setdown_error = CLEANUP_GUEST_ERROR;
+        }
+        if persistent_sequence && self.resident_frame_setdown_error == 0 && frame_setdown_error != 0
+        {
+            self.resident_frame_setdown_error = frame_setdown_error;
+        }
+        let (mut render_error, census, render_traces) = match frame_execution {
+            Ok(result) => result,
+            Err(error) => {
+                if !persistent_sequence {
+                    let _ = self.end_sequence(false);
+                }
+                return Err(error);
+            }
+        };
+        traces.extend(render_traces);
         if render_error == 0 {
             render_error = frame_setdown_error;
         }
-        self.write_input_pointer(abi::IN_FRAME_DATA_OFFSET, 0)?;
         if !persistent_sequence {
             let (sequence_setdown_result, trace) = self.call_with_optional_trace(
                 "SEQUENCE_SETDOWN",
@@ -1007,24 +1039,42 @@ impl ClassicHost {
         if !self.sequence_active {
             return Ok(0);
         }
-        let (result, _) = self.call_with_optional_trace(
+        let result = self.call_with_optional_trace(
             "SEQUENCE_SETDOWN",
             [CMD_SEQUENCE_SETDOWN, self.input, self.output, 0, 0, 0],
             trace_enabled,
-        )?;
+        );
         self.sequence_active = false;
-        self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, 0)?;
-        Ok(result as i32)
+        let clear = self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, 0);
+        match result {
+            Ok((result, _)) => {
+                clear?;
+                Ok(result as i32)
+            }
+            Err(error) => {
+                let _ = clear;
+                Err(error)
+            }
+        }
     }
 
     fn end_global(&mut self) -> Result<i32, ClassicError> {
         if !self.global_active {
             return Ok(0);
         }
-        let result = self.invoke(CMD_GLOBAL_SETDOWN)? as i32;
+        let result = self.invoke(CMD_GLOBAL_SETDOWN);
         self.global_active = false;
-        self.write_input_pointer(abi::IN_GLOBAL_DATA_OFFSET, 0)?;
-        Ok(result)
+        let clear = self.write_input_pointer(abi::IN_GLOBAL_DATA_OFFSET, 0);
+        match result {
+            Ok(result) => {
+                clear?;
+                Ok(result as i32)
+            }
+            Err(error) => {
+                let _ = clear;
+                Err(error.into())
+            }
+        }
     }
 
     fn call_with_optional_trace(
@@ -1503,6 +1553,10 @@ fn numeric_descriptor(
     }
 }
 
+fn cleanup_error_code(result: Result<i32, ClassicError>) -> i32 {
+    result.unwrap_or(CLEANUP_GUEST_ERROR)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1555,6 +1609,16 @@ mod tests {
                     .expect("parameter value is eight bytes")
             ),
             42.25
+        );
+    }
+
+    #[test]
+    fn cleanup_guest_failures_are_reported_as_unclean() {
+        assert_eq!(cleanup_error_code(Ok(0)), 0);
+        assert_eq!(cleanup_error_code(Ok(17)), 17);
+        assert_eq!(
+            cleanup_error_code(Err(ClassicError::Input("fixture failure".into()))),
+            CLEANUP_GUEST_ERROR
         );
     }
 }

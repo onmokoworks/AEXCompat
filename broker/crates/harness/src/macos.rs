@@ -96,8 +96,9 @@ fn validate_resident_close(value: &Value, worker_pid: u32) -> Result<(), String>
     let close = value["close"]
         .as_object()
         .ok_or_else(|| format!("resident close report is missing: {value}"))?;
-    if close.len() != 9
+    if close.len() != 10
         || close.get("session_clean").and_then(Value::as_bool) != Some(true)
+        || close.get("frame_setdown_error").and_then(Value::as_i64) != Some(0)
         || close.get("sequence_setdown_error").and_then(Value::as_i64) != Some(0)
         || close.get("global_setdown_error").and_then(Value::as_i64) != Some(0)
     {

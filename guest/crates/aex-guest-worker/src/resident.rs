@@ -135,7 +135,7 @@ pub fn run_resident_session(
         }
     })();
 
-    let close = host.close_resident_session()?;
+    let close = host.close_resident_session();
     let close_value = serde_json::to_value(&close)
         .map_err(|error| SessionError::Protocol(format!("serialize close report: {error}")))?;
     write_message(
