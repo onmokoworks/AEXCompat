@@ -24,9 +24,12 @@ const PARAM_FIXED_SLIDER: i32 = 2;
 const PARAM_ANGLE: i32 = 3;
 const PARAM_CHECKBOX: i32 = 4;
 pub(crate) const PARAM_COLOR: i32 = 5;
+pub(crate) const PARAM_POINT: i32 = 6;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
 const ANGLE_DEFAULT_OFFSET: usize = 4;
+const POINT_DEFAULT_X_OFFSET: usize = 12;
+const POINT_DEFAULT_Y_OFFSET: usize = 16;
 const CLEANUP_GUEST_ERROR: i32 = -40;
 const OUTPUT_GUARD_BYTES: usize = 64;
 const OUTPUT_GUARD_PATTERN: u8 = 0xa5;
@@ -76,6 +79,7 @@ pub struct ParameterValue {
     pub name: String,
     pub value: Option<f64>,
     pub color: Option<[u8; 4]>,
+    pub point: Option<[f64; 2]>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +90,8 @@ pub struct AppliedParameter {
     pub value: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point: Option<[f64; 2]>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -832,6 +838,32 @@ impl ClassicHost {
             ));
         }
         let captured_params = self.engine.parameters().to_vec();
+        for requested in parameter_values {
+            if let Some(slot) = requested.slot {
+                if slot == 0 || slot > captured_params.len() {
+                    return Err(ClassicError::Input(format!(
+                        "AEX did not declare parameter slot #{slot}"
+                    )));
+                }
+            } else {
+                let matches = captured_params
+                    .iter()
+                    .filter(|captured| captured.name == requested.name)
+                    .count();
+                if matches == 0 {
+                    return Err(ClassicError::Input(format!(
+                        "AEX did not declare a supported parameter named {:?}",
+                        requested.name
+                    )));
+                }
+                if matches > 1 {
+                    return Err(ClassicError::Input(format!(
+                        "parameter name {:?} is ambiguous; use Name@slot=value",
+                        requested.name
+                    )));
+                }
+            }
+        }
         let mut applied_values = Vec::with_capacity(parameter_values.len());
         let mut applied_requests = BTreeSet::new();
         let resources =
@@ -894,7 +926,7 @@ impl ClassicHost {
         self.engine.write_u64(params, input_param)?;
         for (index, captured) in captured_params.into_iter().enumerate() {
             let mut definition = captured.bytes;
-            materialize_default(&mut definition, captured.param_type);
+            materialize_default(&mut definition, captured.param_type, width, height);
             if let Some((request_index, requested)) =
                 parameter_values
                     .iter()
@@ -913,6 +945,7 @@ impl ClassicHost {
                     name: captured.name.clone(),
                     value: requested.value,
                     color: requested.color,
+                    point: requested.point,
                 });
             }
             let parameter = resources.parameter_definitions[index];
@@ -923,15 +956,10 @@ impl ClassicHost {
         self.engine
             .configure_parameter_definitions(resources.parameter_definitions)?;
         if applied_requests.len() != parameter_values.len() {
-            let missing = parameter_values
-                .iter()
-                .enumerate()
-                .find(|(index, _)| !applied_requests.contains(index))
-                .map(|(_, requested)| requested)
-                .expect("parameter count mismatch has a missing value");
             return Err(ClassicError::Input(format!(
-                "AEX did not declare a supported parameter named {:?}",
-                missing.name
+                "parameter application count mismatch: requested {}, applied {}",
+                parameter_values.len(),
+                applied_values.len()
             )));
         }
 
@@ -1583,7 +1611,7 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
-fn materialize_default(definition: &mut [u8], param_type: i32) {
+fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, height: u32) {
     let union = abi::PARAM_U_OFFSET;
     match param_type {
         PARAM_SLIDER | PARAM_FIXED_SLIDER => {
@@ -1627,6 +1655,16 @@ fn materialize_default(definition: &mut [u8], param_type: i32) {
             ) as f64;
             definition[union..union + 8].copy_from_slice(&value.to_le_bytes());
         }
+        PARAM_POINT => {
+            let coordinate = |default_offset, extent: u32| {
+                let percent = read_i32(definition, union + default_offset) as f64 / 65536.0;
+                (percent * f64::from(extent) * 65536.0 / 100.0).round() as i32
+            };
+            let x = coordinate(POINT_DEFAULT_X_OFFSET, width);
+            let y = coordinate(POINT_DEFAULT_Y_OFFSET, height);
+            definition[union..union + 4].copy_from_slice(&x.to_le_bytes());
+            definition[union + 4..union + 8].copy_from_slice(&y.to_le_bytes());
+        }
         _ => {}
     }
 }
@@ -1649,9 +1687,39 @@ fn apply_parameter_value(
             .copy_from_slice(&color);
         return Ok(());
     }
+    if param_type == PARAM_POINT {
+        let [x, y] = requested.point.ok_or_else(|| {
+            ClassicError::Input("point parameter requires two comma-separated values".into())
+        })?;
+        if requested.value.is_some()
+            || requested.color.is_some()
+            || !x.is_finite()
+            || !y.is_finite()
+        {
+            return Err(ClassicError::Input(
+                "point parameter components must be finite and typed".into(),
+            ));
+        }
+        for (offset, value) in [(0, x), (4, y)] {
+            let fixed = value * 65536.0;
+            if fixed < i32::MIN as f64 || fixed > i32::MAX as f64 {
+                return Err(ClassicError::Input(format!(
+                    "point component is outside 16.16 range: {value}"
+                )));
+            }
+            definition[abi::PARAM_U_OFFSET + offset..abi::PARAM_U_OFFSET + offset + 4]
+                .copy_from_slice(&(fixed.round() as i32).to_le_bytes());
+        }
+        return Ok(());
+    }
     if requested.color.is_some() {
         return Err(ClassicError::Input(format!(
             "parameter type {param_type} does not accept an ARGB8 color value"
+        )));
+    }
+    if requested.point.is_some() {
+        return Err(ClassicError::Input(format!(
+            "parameter type {param_type} does not accept a point value"
         )));
     }
     let value = requested.value.ok_or_else(|| {
@@ -1832,7 +1900,7 @@ mod tests {
         slider[abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET
             ..abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET + 4]
             .copy_from_slice(&123i32.to_le_bytes());
-        materialize_default(&mut slider, PARAM_FIXED_SLIDER);
+        materialize_default(&mut slider, PARAM_FIXED_SLIDER, 32, 20);
         assert_eq!(
             &slider[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4],
             &123i32.to_le_bytes()
@@ -1842,7 +1910,7 @@ mod tests {
         float_slider[abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET
             ..abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET + 4]
             .copy_from_slice(&5.0f32.to_le_bytes());
-        materialize_default(&mut float_slider, PARAM_FLOAT_SLIDER);
+        materialize_default(&mut float_slider, PARAM_FLOAT_SLIDER, 32, 20);
         assert_eq!(
             &float_slider[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8],
             &5.0f64.to_le_bytes()
@@ -1851,10 +1919,29 @@ mod tests {
         let mut color = vec![0u8; abi::PF_PARAM_DEF_SIZE];
         color[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8]
             .copy_from_slice(&[1, 2, 3, 4, 255, 64, 128, 192]);
-        materialize_default(&mut color, PARAM_COLOR);
+        materialize_default(&mut color, PARAM_COLOR, 32, 20);
         assert_eq!(
             &color[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4],
             &[255, 64, 128, 192]
+        );
+
+        let mut point = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        point[abi::PARAM_U_OFFSET + POINT_DEFAULT_X_OFFSET
+            ..abi::PARAM_U_OFFSET + POINT_DEFAULT_X_OFFSET + 4]
+            .copy_from_slice(&(50 * 65536i32).to_le_bytes());
+        point[abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET
+            ..abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET + 4]
+            .copy_from_slice(&(25 * 65536i32).to_le_bytes());
+        materialize_default(&mut point, PARAM_POINT, 32, 20);
+        assert_eq!(
+            read_i32(&point, abi::PARAM_U_OFFSET),
+            16 * 65536,
+            "point x percentage default must become a source coordinate"
+        );
+        assert_eq!(
+            read_i32(&point, abi::PARAM_U_OFFSET + 4),
+            5 * 65536,
+            "point y percentage default must become a source coordinate"
         );
     }
 
@@ -1868,6 +1955,7 @@ mod tests {
             name: "fixture".into(),
             value: Some(value),
             color: None,
+            point: None,
         };
         apply_parameter_value(&mut fixed, PARAM_FIXED_SLIDER, &scalar(12.5)).unwrap();
         assert_eq!(read_i32(&fixed, union), 12 * 65536 + 32768);
@@ -1890,6 +1978,28 @@ mod tests {
             ),
             42.25
         );
+
+        let mut point = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        apply_parameter_value(
+            &mut point,
+            PARAM_POINT,
+            &ParameterValue {
+                name: "point".into(),
+                slot: None,
+                value: None,
+                color: None,
+                point: Some([42.5, -7.25]),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_i32(&point, abi::PARAM_U_OFFSET),
+            (42.5 * 65536.0) as i32
+        );
+        assert_eq!(
+            read_i32(&point, abi::PARAM_U_OFFSET + 4),
+            (-7.25 * 65536.0) as i32
+        );
     }
 
     #[test]
@@ -1910,6 +2020,7 @@ mod tests {
                 name: "Key Color".into(),
                 value: None,
                 color: Some([255, 64, 128, 192]),
+                point: None,
             },
         )
         .unwrap();
@@ -1922,10 +2033,12 @@ mod tests {
             name: "Color".into(),
             value: None,
             color: Some([255, 64, 128, 192]),
+            point: None,
         })
         .unwrap();
         assert_eq!(applied["slot"], 2);
         assert_eq!(applied["color"], serde_json::json!([255, 64, 128, 192]));
+        assert!(applied.get("point").is_none());
     }
 
     #[test]
@@ -1939,6 +2052,7 @@ mod tests {
                 name: "Amount".into(),
                 value: None,
                 color: Some([255, 1, 2, 3]),
+                point: None,
             },
         )
         .unwrap_err();

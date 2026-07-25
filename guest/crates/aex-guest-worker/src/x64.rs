@@ -39,9 +39,11 @@ const HOST_AEGP_GET_MAIN_WINDOW: u64 = STUB_BASE + 0x80130;
 const HOST_ITERATE8: u64 = STUB_BASE + 0x80140;
 const HOST_ITERATE8_CONTINUE: u64 = STUB_BASE + 0x80150;
 const HOST_COLOR_PARAM_VALUE: u64 = STUB_BASE + 0x80160;
+const HOST_POINT_PARAM_VALUE: u64 = STUB_BASE + 0x80170;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
 const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
+const HOST_POINT_PARAM_SUITE: u64 = STUB_BASE + 0x81300;
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
 const HOST_ITERATE8_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x88000;
@@ -2007,6 +2009,7 @@ impl GuestEngine<'static> {
             ("write Iterate8 callback", HOST_ITERATE8),
             ("write Iterate8 continuation", HOST_ITERATE8_CONTINUE),
             ("write color-param callback", HOST_COLOR_PARAM_VALUE),
+            ("write point-param callback", HOST_POINT_PARAM_VALUE),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -2107,6 +2110,14 @@ impl GuestEngine<'static> {
             ),
         )?;
         uc(
+            "install point-param callback",
+            unicorn.add_code_hook(
+                HOST_POINT_PARAM_VALUE,
+                HOST_POINT_PARAM_VALUE,
+                emulate_point_param_value,
+            ),
+        )?;
+        uc(
             "install checkout-param callback",
             unicorn.add_code_hook(
                 HOST_CHECKOUT_PARAM,
@@ -2180,6 +2191,13 @@ impl GuestEngine<'static> {
                 &HOST_COLOR_PARAM_VALUE.to_le_bytes(),
             ),
         )?;
+        uc(
+            "write PF PointParamSuite",
+            unicorn.mem_write(
+                HOST_POINT_PARAM_SUITE,
+                &HOST_POINT_PARAM_VALUE.to_le_bytes(),
+            ),
+        )?;
         install_aegp_utility_suites(&mut unicorn)?;
         for (address, name) in [
             (HOST_ADD_PARAM, "add_param"),
@@ -2205,6 +2223,7 @@ impl GuestEngine<'static> {
             (HOST_ITERATE8, "iterate8"),
             (HOST_ITERATE8_CONTINUE, "iterate8_continue"),
             (HOST_COLOR_PARAM_VALUE, "color_param_value"),
+            (HOST_POINT_PARAM_VALUE, "point_param_value"),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -3865,6 +3884,16 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         return;
     }
+    if name == "PF PointParamSuite"
+        && version == 1
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_POINT_PARAM_SUITE.to_le_bytes())
+            .is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
     if name == "AEGP Utility Suite"
         && output != 0
         && let Some(table) = u32::try_from(version)
@@ -3970,6 +3999,34 @@ fn emulate_aegp_get_main_window(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _
     } else {
         let _ = unicorn.reg_write(RegisterX86::RAX, 4);
     }
+}
+
+fn emulate_point_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let definition = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    if definition == 0 || output == 0 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+        return;
+    }
+    let mut fixed = [0u8; 8];
+    if unicorn
+        .mem_read(definition + abi::PARAM_U_OFFSET as u64, &mut fixed)
+        .is_err()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+        return;
+    }
+    let x = i32::from_le_bytes(fixed[..4].try_into().unwrap()) as f64 / 65536.0;
+    let y = i32::from_le_bytes(fixed[4..].try_into().unwrap()) as f64 / 65536.0;
+    let mut values = [0u8; 16];
+    values[..8].copy_from_slice(&x.to_le_bytes());
+    values[8..].copy_from_slice(&y.to_le_bytes());
+    let result = if unicorn.mem_write(output, &values).is_ok() {
+        0
+    } else {
+        4
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, result);
 }
 
 fn emulate_checkout_param(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
@@ -4261,6 +4318,7 @@ mod tests {
             HOST_ITERATE8,
             HOST_ITERATE8_CONTINUE,
             HOST_COLOR_PARAM_VALUE,
+            HOST_POINT_PARAM_VALUE,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -4302,11 +4360,24 @@ mod tests {
                 emulate_color_param_value,
             )
             .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_POINT_PARAM_VALUE,
+                HOST_POINT_PARAM_VALUE,
+                emulate_point_param_value,
+            )
+            .unwrap();
         install_iterate8_suites(&mut unicorn).unwrap();
         unicorn
             .mem_write(
                 HOST_COLOR_PARAM_SUITE,
                 &HOST_COLOR_PARAM_VALUE.to_le_bytes(),
+            )
+            .unwrap();
+        unicorn
+            .mem_write(
+                HOST_POINT_PARAM_SUITE,
+                &HOST_POINT_PARAM_VALUE.to_le_bytes(),
             )
             .unwrap();
         install_aegp_utility_suites(&mut unicorn).unwrap();
@@ -4442,6 +4513,56 @@ mod tests {
                 .call_win64(HOST_COLOR_PARAM_VALUE, [0, definition, output, 0, 0, 0])
                 .unwrap(),
             516
+        );
+    }
+
+    #[test]
+    fn point_param_suite_returns_signed_fixed_values_as_doubles() {
+        let mut engine = test_engine(&[0xc3]);
+        let name = engine.allocate(32, 1).unwrap();
+        engine.write(name, b"PF PointParamSuite\0").unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [name, 1, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut pointer = [0u8; 8];
+        engine.read(suite_output, &mut pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(pointer), HOST_POINT_PARAM_SUITE);
+        engine.read(HOST_POINT_PARAM_SUITE, &mut pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(pointer), HOST_POINT_PARAM_VALUE);
+
+        let definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+        engine
+            .write(
+                definition + abi::PARAM_U_OFFSET as u64,
+                &[98304i32.to_le_bytes(), (-147456i32).to_le_bytes()].concat(),
+            )
+            .unwrap();
+        let output = engine.allocate(16, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_POINT_PARAM_VALUE, [1, definition, output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut values = [0u8; 16];
+        engine.read(output, &mut values).unwrap();
+        assert_eq!(f64::from_le_bytes(values[..8].try_into().unwrap()), 1.5);
+        assert_eq!(f64::from_le_bytes(values[8..].try_into().unwrap()), -2.25);
+        assert_eq!(
+            engine
+                .call_win64(HOST_POINT_PARAM_VALUE, [1, 0, output, 0, 0, 0])
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_POINT_PARAM_VALUE, [1, definition, 0, 0, 0, 0])
+                .unwrap(),
+            4
         );
     }
 
