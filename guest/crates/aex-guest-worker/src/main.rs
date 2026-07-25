@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use aex_guest_worker::backend::TraceWatchSpec;
 use aex_guest_worker::classic::{ClassicHost, ParameterValue};
 use aex_guest_worker::pe::PeImage;
+use sha2::{Digest, Sha256};
 
 fn main() -> ExitCode {
     let mut args = env::args_os();
@@ -47,15 +48,17 @@ fn main() -> ExitCode {
     } else {
         None
     };
-    let watches = match parse_trace_watches(&mut trailing_args) {
-        Ok(watches) => watches,
+    let (watches, output_pixel) = match parse_trace_watches(&mut trailing_args) {
+        Ok(options) => options,
         Err(error) => {
             eprintln!("aex_guest_error: {error}");
             return ExitCode::from(2);
         }
     };
-    if command != "render-trace-png" && !watches.is_empty() {
-        eprintln!("aex_guest_error: --watch is only valid with render-trace-png");
+    if command != "render-trace-png" && (!watches.is_empty() || output_pixel.is_some()) {
+        eprintln!(
+            "aex_guest_error: --watch and --watch-output-pixel are only valid with render-trace-png"
+        );
         return ExitCode::from(2);
     }
     if ((command == "render-png"
@@ -130,6 +133,7 @@ fn main() -> ExitCode {
                 false,
                 false,
                 &[],
+                None,
             ),
             Some("render-trace-png") => render_png(
                 &image,
@@ -140,6 +144,7 @@ fn main() -> ExitCode {
                 false,
                 true,
                 &watches,
+                output_pixel,
             ),
             Some("render-region-png") => render_png(
                 &image,
@@ -150,6 +155,7 @@ fn main() -> ExitCode {
                 false,
                 false,
                 &[],
+                None,
             ),
             Some("census-png") => render_png(
                 &image,
@@ -160,6 +166,7 @@ fn main() -> ExitCode {
                 true,
                 false,
                 &[],
+                None,
             ),
             _ => Err(
                 "command must be inspect, setup, trace-selector, render, render-png, render-trace-png, render-region-png, or census-png".to_string(),
@@ -194,7 +201,7 @@ fn usage() {
         "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [name=value ...]"
     );
     eprintln!(
-        "       aex-guest-worker render-trace-png <x64.aex> <input.png> <output.png> [name=value ...]"
+        "       aex-guest-worker render-trace-png <x64.aex> <input.png> <output.png> [--watch <spec>] [--watch-output-pixel x,y] [name=value ...]"
     );
     eprintln!(
         "       aex-guest-worker render-region-png <x64.aex> <input.png> <output.png> <left> <top> <right> <bottom> [name=value ...]"
@@ -213,7 +220,11 @@ fn render_png(
     census: bool,
     trace: bool,
     watches: &[TraceWatchSpec],
+    output_pixel: Option<[u32; 2]>,
 ) -> Result<String, String> {
+    let input_png_sha256 = fs::read(input)
+        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+        .map_err(|error| format!("read input PNG for provenance: {error}"))?;
     let rgba = image::open(input)
         .map_err(|error| format!("decode input PNG: {error}"))?
         .into_rgba8();
@@ -231,6 +242,7 @@ fn render_png(
                     &argb8,
                     parameter_values,
                     watches.to_vec(),
+                    output_pixel,
                 )
             } else {
                 match (region, census) {
@@ -259,6 +271,7 @@ fn render_png(
     let mut report_json =
         serde_json::to_value(&report).map_err(|error| format!("serialize report: {error}"))?;
     report_json["pixel_bytes"] = serde_json::json!(report.argb8.len());
+    report_json["input_png_sha256"] = serde_json::json!(input_png_sha256);
     report_json["output_png"] = serde_json::json!(output);
     if !execution_traces.is_empty() {
         report_json["execution_traces"] = serde_json::to_value(execution_traces)
@@ -272,14 +285,39 @@ fn render_png(
 
 fn parse_trace_watches(
     values: &mut Vec<std::ffi::OsString>,
-) -> Result<Vec<TraceWatchSpec>, String> {
+) -> Result<(Vec<TraceWatchSpec>, Option<[u32; 2]>), String> {
     let mut watches = Vec::new();
+    let mut output_pixel = None;
     let mut parameters = Vec::new();
     let mut arguments = values.drain(..).peekable();
     while let Some(value) = arguments.next() {
         let Some(text) = value.to_str() else {
             return Err("trace watch or parameter assignment must be UTF-8".into());
         };
+        if text == "--watch-output-pixel" || text.starts_with("--watch-output-pixel=") {
+            let coordinate = if let Some(coordinate) = text.strip_prefix("--watch-output-pixel=") {
+                coordinate.to_string()
+            } else {
+                arguments
+                    .next()
+                    .ok_or_else(|| "--watch-output-pixel requires x,y".to_string())?
+                    .into_string()
+                    .map_err(|_| "output pixel must be UTF-8".to_string())?
+            };
+            let (x, y) = coordinate
+                .split_once(',')
+                .ok_or_else(|| "output pixel must be x,y".to_string())?;
+            if output_pixel.is_some() {
+                return Err("duplicate --watch-output-pixel".into());
+            }
+            output_pixel = Some([
+                x.parse()
+                    .map_err(|error| format!("invalid output pixel x: {error}"))?,
+                y.parse()
+                    .map_err(|error| format!("invalid output pixel y: {error}"))?,
+            ]);
+            continue;
+        }
         let specification = if text == "--watch" {
             arguments
                 .next()
@@ -346,13 +384,17 @@ fn parse_trace_watches(
             id: format!("watch-{}", watches.len() + 1),
             function_rva,
             instruction_rva,
+            absolute_address: None,
             register,
             size,
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
         });
     }
     drop(arguments);
     *values = parameters;
-    Ok(watches)
+    Ok((watches, output_pixel))
 }
 
 fn parse_watch_number(value: &str) -> Result<u64, String> {
@@ -412,12 +454,14 @@ mod tests {
             OsString::from("Amount=2.5"),
             OsString::from("--watch"),
             OsString::from("rva=0x350b,register=r9,size=64"),
+            OsString::from("--watch-output-pixel=92,841"),
         ];
-        let watches = parse_trace_watches(&mut values).unwrap();
+        let (watches, output_pixel) = parse_trace_watches(&mut values).unwrap();
         assert_eq!(watches.len(), 2);
         assert_eq!(watches[0].function_rva, Some(0xcce0));
         assert_eq!(watches[0].register, "rcx");
         assert_eq!(watches[1].instruction_rva, Some(0x350b));
+        assert_eq!(output_pixel, Some([92, 841]));
         assert_eq!(values, [OsString::from("Amount=2.5")]);
     }
 }

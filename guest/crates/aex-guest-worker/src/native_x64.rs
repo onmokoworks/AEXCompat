@@ -356,6 +356,8 @@ impl GuestEngine<'static> {
 
     pub fn configure_trace_watches(&mut self, _: Vec<TraceWatchSpec>) {}
 
+    pub fn add_trace_watch(&mut self, _: TraceWatchSpec) {}
+
     pub fn configure_parameter_definitions(&mut self, definitions: Vec<u64>) {
         self.state.parameter_definitions = definitions;
     }

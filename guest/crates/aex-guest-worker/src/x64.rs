@@ -72,6 +72,12 @@ pub enum GuestError {
     Callback(String),
     #[error("DLL process attach returned FALSE")]
     DllProcessAttach,
+    #[error("guest execution failed: {reason}; crash_snapshot={snapshot_json}")]
+    ExecutionCrash {
+        reason: String,
+        snapshot_json: String,
+        snapshot: Box<TraceCrashSnapshot>,
+    },
 }
 
 fn uc<T>(
@@ -114,6 +120,7 @@ fn push_trace_event(capture: &mut TraceCapture, mut event: TraceEvent) {
     }
     if capture.events.len() >= MAX_TRACE_EVENTS {
         capture.truncated = true;
+        capture.dropped_events += 1;
         return;
     }
     if let Some(key) = key {
@@ -209,6 +216,14 @@ fn update_numeric_ranges(exemplars: &mut TraceExemplars, observation: &TraceObse
         for (lane, value) in xmm.f32_lanes.iter().enumerate() {
             if let Some(value) = value {
                 values.push((format!("{}.f32[{lane}]", xmm.register), f64::from(*value)));
+            }
+        }
+    }
+    if let Some(returned) = &observation.return_value {
+        values.push(("rax".into(), returned.rax.raw as f64));
+        for (lane, value) in returned.xmm0.f32_lanes.iter().enumerate() {
+            if let Some(value) = value {
+                values.push((format!("xmm0.f32[{lane}]"), f64::from(*value)));
             }
         }
     }
@@ -451,14 +466,16 @@ fn trace_instruction(
                         .get_data()
                         .trace
                         .as_ref()
-                        .and_then(|capture| capture.call_id_stack.last().copied())
-                        .unwrap_or(0),
+                        .and_then(|capture| capture.call_id_stack.last().copied()),
                     function_rva: target_rva,
                     pc_rva,
                     address,
                     before: trace_memory_snapshot(
                         unicorn, address, spec.size, image_base, image_end,
                     ),
+                    image_coordinate: spec.image_coordinate,
+                    image_row_offset: spec.image_row_offset,
+                    image_format: spec.image_format,
                 }
             })
             .collect::<Vec<_>>();
@@ -522,6 +539,9 @@ fn trace_instruction(
                     function_rva: pending.function_rva,
                     pc_rva: pending.pc_rva,
                     register: pending.register,
+                    image_coordinate: pending.image_coordinate,
+                    image_row_offset: pending.image_row_offset,
+                    image_format: pending.image_format,
                     changed_ranges: trace_changed_ranges(&pending.before, &after),
                     before: pending.before,
                     after,
@@ -775,6 +795,9 @@ fn trace_memory_snapshot(
     let mut pointer_chain = Vec::new();
     let mut pointer = address;
     for _ in 0..3 {
+        if size < 8 {
+            break;
+        }
         let mut raw = [0; 8];
         if unicorn.mem_read(pointer, &mut raw).is_err() {
             break;
@@ -787,9 +810,13 @@ fn trace_memory_snapshot(
         {
             break;
         }
+        let next_value = classify_trace_value(next, image_base, image_end);
+        if next_value.classification == "scalar" {
+            break;
+        }
         pointer_chain.push(TracePointerHop {
             address: next,
-            classification: classify_trace_value(next, image_base, image_end).classification,
+            classification: next_value.classification,
         });
         pointer = next;
     }
@@ -1090,6 +1117,7 @@ pub struct GuestEngine<'a> {
     trace_points: Vec<u64>,
     image_sha256: String,
     entry_export: String,
+    trace_modules: Vec<TraceModule>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1116,6 +1144,7 @@ struct TraceCapture {
     next_call_id: u64,
     watch_specs: Vec<TraceWatchSpec>,
     watch_stack: Vec<Vec<PendingTraceWatch>>,
+    selector_watches: Vec<PendingTraceWatch>,
     witnesses: Vec<TraceMemoryWitness>,
     dropped_witnesses: u64,
     basic_blocks: HashMap<(u64, u32), u64>,
@@ -1124,26 +1153,64 @@ struct TraceCapture {
     event_index: HashMap<TraceEventKey, usize>,
     event_fingerprints: HashMap<usize, HashSet<u64>>,
     truncated: bool,
+    dropped_events: u64,
 }
 
 #[derive(Clone, Debug)]
 struct PendingTraceWatch {
     spec_id: String,
     register: &'static str,
-    call_id: u64,
+    call_id: Option<u64>,
     function_rva: Option<u64>,
     pc_rva: Option<u64>,
     address: u64,
     before: TraceMemorySnapshot,
+    image_coordinate: Option<[u32; 2]>,
+    image_row_offset: Option<u64>,
+    image_format: Option<&'static str>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TraceWatchSpec {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub function_rva: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_rva: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub absolute_address: Option<u64>,
     pub register: &'static str,
     pub size: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_coordinate: Option<[u32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_row_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_format: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceModule {
+    pub name: String,
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    pub symbols: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceConfiguration {
+    pub max_events: usize,
+    pub max_witnesses: usize,
+    pub max_watch_bytes: usize,
+    pub watches: Vec<TraceWatchSpec>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceTruncation {
+    pub category: &'static str,
+    pub reason: &'static str,
+    pub dropped: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1187,12 +1254,19 @@ pub struct TraceChangedRange {
 #[derive(Clone, Debug, Serialize)]
 pub struct TraceMemoryWitness {
     pub watch_id: String,
-    pub call_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_rva: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pc_rva: Option<u64>,
     pub register: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_coordinate: Option<[u32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_row_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_format: Option<&'static str>,
     pub before: TraceMemorySnapshot,
     pub after: TraceMemorySnapshot,
     pub changed_ranges: Vec<TraceChangedRange>,
@@ -1210,6 +1284,26 @@ pub struct TraceBranchEdge {
     pub from_rva: u64,
     pub to_rva: u64,
     pub observed_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceCrashFrame {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_rva: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceCrashSnapshot {
+    pub reason: String,
+    pub registers: BTreeMap<String, u64>,
+    pub xmm_registers: Vec<TraceXmmValue>,
+    pub call_stack: Vec<TraceCrashFrame>,
+    pub instruction_address: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_rva: Option<u64>,
+    pub instruction_bytes: String,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1347,6 +1441,9 @@ pub struct ExecutionTrace {
     pub image_sha256: String,
     pub preferred_image_base: u64,
     pub entry_export: String,
+    pub worker_build_identity: String,
+    pub modules: Vec<TraceModule>,
+    pub trace_configuration: TraceConfiguration,
     pub selector: String,
     pub entry_rva: u64,
     pub return_value: u64,
@@ -1358,6 +1455,7 @@ pub struct ExecutionTrace {
     pub dropped_memory_witnesses: u64,
     pub basic_blocks: Vec<TraceBasicBlock>,
     pub branch_edges: Vec<TraceBranchEdge>,
+    pub truncation: Vec<TraceTruncation>,
     pub timeline: Vec<String>,
 }
 
@@ -1417,6 +1515,24 @@ impl GuestEngine<'static> {
     pub fn load(image: &PeImage) -> Result<Self, GuestError> {
         let trace_points = discover_trace_points(image);
         let image_report = image.report();
+        let mut trace_modules = vec![TraceModule {
+            name: image_report.entry_export.clone(),
+            kind: "mapped_pe",
+            sha256: Some(image_report.sha256.clone()),
+            symbols: vec![image_report.entry_export.clone()],
+        }];
+        trace_modules.extend(image_report.imports.iter().map(|library| {
+            TraceModule {
+                name: library.name.clone(),
+                kind: "emulated_import_stubs",
+                sha256: None,
+                symbols: library
+                    .symbols
+                    .iter()
+                    .map(|symbol| symbol.name.clone())
+                    .collect(),
+            }
+        }));
         let mut unicorn = uc(
             "create x86_64 engine",
             Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()),
@@ -1719,6 +1835,7 @@ impl GuestEngine<'static> {
             trace_points,
             image_sha256: image_report.sha256,
             entry_export: image_report.entry_export,
+            trace_modules,
         };
         if let Some(entry) = image.dll_entry_address() {
             let attached = engine.call_win64(entry, [image.image_base(), 1, 0, 0, 0, 0])?;
@@ -1740,6 +1857,30 @@ impl GuestEngine<'static> {
             ));
         }
         let watch_specs = self.unicorn.get_data().trace_watches.clone();
+        let selector_watches = watch_specs
+            .iter()
+            .filter_map(|spec| {
+                let address = spec.absolute_address?;
+                Some(PendingTraceWatch {
+                    spec_id: spec.id.clone(),
+                    register: spec.register,
+                    call_id: None,
+                    function_rva: None,
+                    pc_rva: None,
+                    address,
+                    before: trace_memory_snapshot(
+                        &self.unicorn,
+                        address,
+                        spec.size,
+                        self.image_base,
+                        self.image_end,
+                    ),
+                    image_coordinate: spec.image_coordinate,
+                    image_row_offset: spec.image_row_offset,
+                    image_format: spec.image_format,
+                })
+            })
+            .collect();
         self.unicorn.get_data_mut().trace = Some(TraceCapture {
             selector: selector.to_string(),
             entry_rva: entry_address.saturating_sub(self.image_base),
@@ -1768,6 +1909,7 @@ impl GuestEngine<'static> {
             next_call_id: 1,
             watch_specs,
             watch_stack: Vec::new(),
+            selector_watches,
             witnesses: Vec::new(),
             dropped_witnesses: 0,
             basic_blocks: HashMap::new(),
@@ -1776,6 +1918,7 @@ impl GuestEngine<'static> {
             event_index: HashMap::new(),
             event_fingerprints: HashMap::new(),
             truncated: false,
+            dropped_events: 0,
         });
         let image_base = self.image_base;
         let image_end = self.image_end;
@@ -1843,13 +1986,53 @@ impl GuestEngine<'static> {
                 self.unicorn.remove_hook(hook),
             )?;
         }
+        let selector_watches = self
+            .unicorn
+            .get_data()
+            .trace
+            .as_ref()
+            .map(|capture| capture.selector_watches.clone())
+            .unwrap_or_default();
+        let selector_witnesses = selector_watches
+            .into_iter()
+            .map(|pending| {
+                let after = trace_memory_snapshot(
+                    &self.unicorn,
+                    pending.address,
+                    pending.before.size,
+                    self.image_base,
+                    self.image_end,
+                );
+                TraceMemoryWitness {
+                    watch_id: pending.spec_id,
+                    call_id: None,
+                    function_rva: None,
+                    pc_rva: None,
+                    register: pending.register,
+                    image_coordinate: pending.image_coordinate,
+                    image_row_offset: pending.image_row_offset,
+                    image_format: pending.image_format,
+                    changed_ranges: trace_changed_ranges(&pending.before, &after),
+                    before: pending.before,
+                    after,
+                }
+            })
+            .collect::<Vec<_>>();
         let mut capture =
             self.unicorn.get_data_mut().trace.take().ok_or_else(|| {
                 GuestError::Callback("guest execution trace is not active".into())
             })?;
+        for witness in selector_witnesses {
+            if capture.witnesses.len() < MAX_TRACE_WITNESSES {
+                capture.witnesses.push(witness);
+            } else {
+                capture.dropped_witnesses += 1;
+            }
+        }
         if capture.events.len() >= MAX_TRACE_EVENTS {
             capture.events.pop();
             capture.truncated = true;
+            capture.dropped_events += 1;
         }
         let entry_rva = capture.entry_rva;
         push_trace_event(
@@ -1885,6 +2068,27 @@ impl GuestEngine<'static> {
             }
         }
         let timeline = capture.events.iter().map(format_trace_event).collect();
+        let mut truncation = Vec::new();
+        if capture.truncated {
+            truncation.push(TraceTruncation {
+                category: "events",
+                reason: "event_budget",
+                dropped: capture.dropped_events,
+            });
+        }
+        if capture.dropped_witnesses > 0 {
+            truncation.push(TraceTruncation {
+                category: "memory_witnesses",
+                reason: "witness_budget",
+                dropped: capture.dropped_witnesses,
+            });
+        }
+        let trace_configuration = TraceConfiguration {
+            max_events: MAX_TRACE_EVENTS,
+            max_witnesses: MAX_TRACE_WITNESSES,
+            max_watch_bytes: MAX_TRACE_WATCH_BYTES,
+            watches: capture.watch_specs.clone(),
+        };
         Ok(ExecutionTrace {
             schema: "aexcompat.aex-execution-trace",
             schema_version: 1,
@@ -1892,6 +2096,14 @@ impl GuestEngine<'static> {
             image_sha256: self.image_sha256.clone(),
             preferred_image_base: self.image_base,
             entry_export: self.entry_export.clone(),
+            worker_build_identity: format!(
+                "aex-guest-worker/{} ({}/{})",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+            modules: self.trace_modules.clone(),
+            trace_configuration,
             selector: capture.selector,
             entry_rva: capture.entry_rva,
             return_value,
@@ -1919,12 +2131,17 @@ impl GuestEngine<'static> {
                     observed_count,
                 })
                 .collect(),
+            truncation,
             timeline,
         })
     }
 
     pub fn configure_trace_watches(&mut self, watches: Vec<TraceWatchSpec>) {
         self.unicorn.get_data_mut().trace_watches = watches;
+    }
+
+    pub fn add_trace_watch(&mut self, watch: TraceWatchSpec) {
+        self.unicorn.get_data_mut().trace_watches.push(watch);
     }
 
     pub fn begin_block_census(&mut self) -> Result<(), GuestError> {
@@ -2121,36 +2338,116 @@ impl GuestEngine<'static> {
             timeout_microseconds,
             MAX_INSTRUCTIONS,
         ) {
-            let rip = self.unicorn.reg_read(RegisterX86::RIP).unwrap_or(0);
-            let rbx = self.unicorn.reg_read(RegisterX86::RBX).unwrap_or(0);
-            let rcx = self.unicorn.reg_read(RegisterX86::RCX).unwrap_or(0);
-            let rdx = self.unicorn.reg_read(RegisterX86::RDX).unwrap_or(0);
-            let rbp = self.unicorn.reg_read(RegisterX86::RBP).unwrap_or(0);
-            let r8 = self.unicorn.reg_read(RegisterX86::R8).unwrap_or(0);
-            let suites = self.unicorn.get_data().suite_requests.join(", ");
-            let math_calls = self.unicorn.get_data().math_calls.join(", ");
-            let handle_allocations = &self.unicorn.get_data().handle_allocations;
-            return Err(GuestError::Unicorn {
-                operation: "execute guest function",
-                detail: format!(
-                    "{error} at RIP={rip:#x}, RBX={rbx:#x}, RBP={rbp:#x}, RCX={rcx:#x}, RDX={rdx:#x}, R8={r8:#x}, suite requests=[{suites}], handle allocations={handle_allocations:?}, math calls=[{math_calls}]"
-                ),
-            });
+            return Err(self.execution_crash(format!("emulation error: {error}")));
         }
         let rip = uc(
             "read instruction pointer",
             self.unicorn.reg_read(RegisterX86::RIP),
         )?;
         if rip != RETURN_ADDRESS {
-            return Err(GuestError::Unicorn {
-                operation: "execute guest function",
-                detail: format!("execution stopped before the guest returned (RIP={rip:#x})"),
-            });
+            return Err(self.execution_crash(format!(
+                "execution stopped before the guest returned (RIP={rip:#x})"
+            )));
         }
         if let Some(error) = self.unicorn.get_data_mut().callback_error.take() {
             return Err(GuestError::Callback(error));
         }
         uc("read return value", self.unicorn.reg_read(RegisterX86::RAX))
+    }
+
+    fn execution_crash(&self, reason: String) -> GuestError {
+        let registers = [
+            ("rax", RegisterX86::RAX),
+            ("rbx", RegisterX86::RBX),
+            ("rcx", RegisterX86::RCX),
+            ("rdx", RegisterX86::RDX),
+            ("rsi", RegisterX86::RSI),
+            ("rdi", RegisterX86::RDI),
+            ("rbp", RegisterX86::RBP),
+            ("rsp", RegisterX86::RSP),
+            ("r8", RegisterX86::R8),
+            ("r9", RegisterX86::R9),
+            ("r10", RegisterX86::R10),
+            ("r11", RegisterX86::R11),
+            ("r12", RegisterX86::R12),
+            ("r13", RegisterX86::R13),
+            ("r14", RegisterX86::R14),
+            ("r15", RegisterX86::R15),
+            ("rip", RegisterX86::RIP),
+            ("rflags", RegisterX86::EFLAGS),
+        ]
+        .into_iter()
+        .map(|(name, register)| {
+            (
+                name.to_string(),
+                self.unicorn.reg_read(register).unwrap_or(0),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+        let xmm_registers = [
+            ("xmm0", RegisterX86::XMM0),
+            ("xmm1", RegisterX86::XMM1),
+            ("xmm2", RegisterX86::XMM2),
+            ("xmm3", RegisterX86::XMM3),
+            ("xmm4", RegisterX86::XMM4),
+            ("xmm5", RegisterX86::XMM5),
+            ("xmm6", RegisterX86::XMM6),
+            ("xmm7", RegisterX86::XMM7),
+            ("xmm8", RegisterX86::XMM8),
+            ("xmm9", RegisterX86::XMM9),
+            ("xmm10", RegisterX86::XMM10),
+            ("xmm11", RegisterX86::XMM11),
+            ("xmm12", RegisterX86::XMM12),
+            ("xmm13", RegisterX86::XMM13),
+            ("xmm14", RegisterX86::XMM14),
+            ("xmm15", RegisterX86::XMM15),
+        ]
+        .into_iter()
+        .filter_map(|(name, register)| read_xmm(&self.unicorn, name, register))
+        .collect();
+        let call_stack = self
+            .unicorn
+            .get_data()
+            .trace
+            .as_ref()
+            .map(|capture| {
+                capture
+                    .function_stack
+                    .iter()
+                    .enumerate()
+                    .map(|(index, function_rva)| TraceCrashFrame {
+                        call_id: index
+                            .checked_sub(1)
+                            .and_then(|index| capture.call_id_stack.get(index).copied()),
+                        function_rva: *function_rva,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let rip = *registers.get("rip").unwrap_or(&0);
+        let mut instruction = [0; 32];
+        let instruction_bytes = if self.unicorn.mem_read(rip, &mut instruction).is_ok() {
+            bytes_to_hex(&instruction)
+        } else {
+            String::new()
+        };
+        let snapshot = TraceCrashSnapshot {
+            reason: reason.clone(),
+            registers,
+            xmm_registers,
+            call_stack,
+            instruction_address: rip,
+            instruction_rva: (self.image_base..self.image_end)
+                .contains(&rip)
+                .then(|| rip - self.image_base),
+            instruction_bytes,
+        };
+        GuestError::ExecutionCrash {
+            reason,
+            snapshot_json: serde_json::to_string(&snapshot)
+                .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}")),
+            snapshot: Box::new(snapshot),
+        }
     }
 
     pub fn allocate(&mut self, size: usize, alignment: u64) -> Result<u64, GuestError> {
@@ -3047,6 +3344,12 @@ mod tests {
             trace_points,
             image_sha256: "synthetic".into(),
             entry_export: "fixture_entry".into(),
+            trace_modules: vec![TraceModule {
+                name: "fixture".into(),
+                kind: "mapped_pe",
+                sha256: None,
+                symbols: vec!["fixture_entry".into()],
+            }],
         }
     }
 
@@ -3177,6 +3480,29 @@ mod tests {
     }
 
     #[test]
+    fn execution_trace_records_rip_relative_constant_access() {
+        const CODE: u64 = 0x1000_0000;
+        let value = 0x1122_3344_5566_7788u64;
+        // mov rax,[rip+1]; ret; dq value
+        let mut code = vec![0x48, 0x8b, 0x05, 0x01, 0, 0, 0, 0xc3];
+        code.extend_from_slice(&value.to_le_bytes());
+        let mut engine = test_engine(&code);
+        engine.begin_execution_trace("GLOBAL_SETUP", CODE).unwrap();
+        let result = engine.call_win64(CODE, [0; 6]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        assert_eq!(result, value);
+        let access = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "rip_constant")
+            .unwrap();
+        assert_eq!(access.pc_rva, Some(0));
+        assert_eq!(access.target_rva, Some(8));
+        assert!(access.name.as_deref().unwrap().contains("1122334455667788"));
+    }
+
+    #[test]
     fn execution_trace_folds_repeated_call_sites_without_losing_count() {
         const CODE: u64 = 0x1000_0000;
         // mov ecx,2; loop: call return; dec ecx; jnz loop; return: ret
@@ -3219,8 +3545,12 @@ mod tests {
             id: "target-buffer".into(),
             function_rva: Some(6),
             instruction_rva: None,
+            absolute_address: None,
             register: "rcx",
             size: 4,
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
         }]);
         engine.begin_execution_trace("RENDER", CODE).unwrap();
         let result = engine.call_win64(CODE, [buffer, 0, 0, 0, 0, 0]).unwrap();
@@ -3238,12 +3568,31 @@ mod tests {
             .unwrap();
         assert_eq!(call.call_id, returned.call_id);
         let witness = trace.memory_witnesses.first().unwrap();
-        assert_eq!(witness.call_id, call.call_id.unwrap());
+        assert_eq!(witness.call_id, call.call_id);
         assert_eq!(witness.before.u8_values, [1, 2, 3, 4]);
         assert_eq!(witness.after.u8_values, [42, 2, 3, 4]);
         assert_eq!(witness.changed_ranges.len(), 1);
         assert_eq!(witness.changed_ranges[0].offset, 0);
         assert_eq!(witness.changed_ranges[0].size, 1);
+    }
+
+    #[test]
+    fn memory_witness_reports_unmapped_and_oversized_reads() {
+        const CODE: u64 = 0x1000_0000;
+        let engine = test_engine(&[0xc3]);
+        let unmapped =
+            trace_memory_snapshot(&engine.unicorn, 0xdead_beef, 16, CODE, CODE + PAGE_SIZE);
+        assert_eq!(unmapped.status, "unmapped");
+        assert!(unmapped.sha256.is_none());
+        let oversized = trace_memory_snapshot(
+            &engine.unicorn,
+            DATA_BASE,
+            MAX_TRACE_WATCH_BYTES + 1,
+            CODE,
+            CODE + PAGE_SIZE,
+        );
+        assert_eq!(oversized.status, "oversized");
+        assert!(oversized.hex.is_none());
     }
 
     #[test]
@@ -3297,6 +3646,7 @@ mod tests {
             next_call_id: 1,
             watch_specs: Vec::new(),
             watch_stack: Vec::new(),
+            selector_watches: Vec::new(),
             witnesses: Vec::new(),
             dropped_witnesses: 0,
             basic_blocks: HashMap::new(),
@@ -3305,6 +3655,7 @@ mod tests {
             event_index: HashMap::new(),
             event_fingerprints: HashMap::new(),
             truncated: false,
+            dropped_events: 0,
         };
         for index in 0..=MAX_TRACE_EVENTS {
             push_trace_event(
@@ -3347,9 +3698,18 @@ mod tests {
         let mut engine = test_engine(&[0xeb, 0xfe]); // jmp $
         let error = engine
             .call_win64_with_timeout(CODE, [0; 6], 1_000)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("before the guest returned"), "{error}");
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("before the guest returned"),
+            "{error}"
+        );
+        let GuestError::ExecutionCrash { snapshot, .. } = error else {
+            panic!("expected structured crash snapshot");
+        };
+        assert_eq!(snapshot.registers.len(), 18);
+        assert_eq!(snapshot.xmm_registers.len(), 16);
+        assert_eq!(snapshot.instruction_rva, Some(0));
+        assert!(!snapshot.instruction_bytes.is_empty());
     }
 
     #[test]

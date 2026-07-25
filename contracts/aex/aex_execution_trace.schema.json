@@ -27,6 +27,13 @@
     "image_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "preferred_image_base": { "type": "integer", "minimum": 0 },
     "entry_export": { "type": "string", "minLength": 1 },
+    "worker_build_identity": { "type": "string", "minLength": 1 },
+    "modules": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/module" }
+    },
+    "trace_configuration": { "$ref": "#/$defs/trace_configuration" },
     "selector": {
       "enum": [
         "GLOBAL_SETUP",
@@ -70,6 +77,10 @@
     "branch_edges": {
       "type": "array",
       "items": { "$ref": "#/$defs/branch_edge" }
+    },
+    "truncation": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/truncation" }
     },
     "timeline": {
       "type": "array",
@@ -319,7 +330,6 @@
       "additionalProperties": false,
       "required": [
         "watch_id",
-        "call_id",
         "register",
         "before",
         "after",
@@ -341,8 +351,21 @@
             "stack6",
             "stack7",
             "stack8"
+            ,"absolute"
           ]
         },
+        "image_coordinate": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "integer", "minimum": 0 }
+          ],
+          "items": false
+        },
+        "image_row_offset": { "type": "integer", "minimum": 0 },
+        "image_format": { "enum": ["argb8"] },
         "before": { "$ref": "#/$defs/memory_snapshot" },
         "after": { "$ref": "#/$defs/memory_snapshot" },
         "changed_ranges": {
@@ -443,6 +466,78 @@
         "from_rva": { "type": "integer", "minimum": 0 },
         "to_rva": { "type": "integer", "minimum": 0 },
         "observed_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "symbols"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["mapped_pe", "emulated_import_stubs"] },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "symbols": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "trace_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_events",
+        "max_witnesses",
+        "max_watch_bytes",
+        "watches"
+      ],
+      "properties": {
+        "max_events": { "type": "integer", "minimum": 1 },
+        "max_witnesses": { "type": "integer", "minimum": 1 },
+        "max_watch_bytes": { "type": "integer", "minimum": 1 },
+        "watches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "register",
+              "size"
+            ],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "function_rva": { "type": "integer", "minimum": 0 },
+              "instruction_rva": { "type": "integer", "minimum": 0 },
+              "absolute_address": { "type": "integer", "minimum": 0 },
+              "register": { "type": "string", "minLength": 1 },
+              "size": { "type": "integer", "minimum": 1, "maximum": 4096 },
+              "image_coordinate": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "prefixItems": [
+                  { "type": "integer", "minimum": 0 },
+                  { "type": "integer", "minimum": 0 }
+                ],
+                "items": false
+              },
+              "image_row_offset": { "type": "integer", "minimum": 0 },
+              "image_format": { "enum": ["argb8"] }
+            }
+          }
+        }
+      }
+    },
+    "truncation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "reason", "dropped"],
+      "properties": {
+        "category": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "dropped": { "type": "integer", "minimum": 0 }
       }
     }
   }
