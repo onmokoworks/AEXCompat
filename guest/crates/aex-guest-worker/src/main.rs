@@ -413,23 +413,69 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
         let value = value
             .to_str()
             .ok_or_else(|| "parameter assignment must be UTF-8".to_string())?;
-        let (name, number) = value
+        let (name, raw_value) = value
             .split_once('=')
             .ok_or_else(|| format!("parameter assignment must be name=value: {value:?}"))?;
         if name.is_empty() {
             return Err("parameter name must not be empty".into());
         }
-        if parsed
-            .iter()
-            .any(|existing: &ParameterValue| existing.name == name)
-        {
+        let (parameter_name, slot) = name
+            .rsplit_once('@')
+            .map(|(parameter_name, raw)| {
+                if parameter_name.is_empty() {
+                    return Err("parameter name before @slot must not be empty".to_string());
+                }
+                raw.parse::<usize>()
+                    .map_err(|error| format!("invalid parameter slot {name:?}: {error}"))
+                    .and_then(|slot| {
+                        if slot == 0 {
+                            Err("parameter slot must be greater than zero".to_string())
+                        } else {
+                            Ok(slot)
+                        }
+                    })
+                    .map(|slot| (parameter_name, Some(slot)))
+            })
+            .transpose()?
+            .unwrap_or((name, None));
+        if parsed.iter().any(|existing: &ParameterValue| {
+            slot.map_or(
+                existing.slot.is_none() && existing.name == parameter_name,
+                |slot| existing.slot == Some(slot),
+            )
+        }) {
             return Err(format!("duplicate parameter assignment: {name:?}"));
         }
+        let components = raw_value.split(',').collect::<Vec<_>>();
+        let (scalar, point) = match components.as_slice() {
+            [number] => (
+                Some(
+                    number
+                        .parse()
+                        .map_err(|error| format!("invalid value for {name:?}: {error}"))?,
+                ),
+                None,
+            ),
+            [x, y] => (
+                None,
+                Some([
+                    x.parse()
+                        .map_err(|error| format!("invalid point x for {name:?}: {error}"))?,
+                    y.parse()
+                        .map_err(|error| format!("invalid point y for {name:?}: {error}"))?,
+                ]),
+            ),
+            _ => {
+                return Err(format!(
+                    "parameter assignment must contain one scalar or two point components: {value:?}"
+                ));
+            }
+        };
         parsed.push(ParameterValue {
-            name: name.to_string(),
-            value: number
-                .parse()
-                .map_err(|error| format!("invalid value for {name:?}: {error}"))?,
+            name: parameter_name.to_string(),
+            slot,
+            value: scalar,
+            point,
         });
     }
     Ok(parsed)
@@ -437,7 +483,7 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_trace_watches, selector_error};
+    use super::{parse_parameter_values, parse_trace_watches, selector_error};
     use std::ffi::OsString;
 
     #[test]
@@ -445,6 +491,22 @@ mod tests {
         assert_eq!(selector_error(0), None);
         assert_eq!(selector_error(7), Some(7));
         assert_eq!(selector_error(u64::MAX), Some(-1));
+    }
+
+    #[test]
+    fn parameter_parser_accepts_scalar_and_point_assignments() {
+        let values = parse_parameter_values(&[
+            OsString::from("Amount=12.5"),
+            OsString::from("Center=42,-7.25"),
+            OsString::from("Strength@4=100"),
+        ])
+        .unwrap();
+        assert_eq!(values[0].value, Some(12.5));
+        assert_eq!(values[0].point, None);
+        assert_eq!(values[1].value, None);
+        assert_eq!(values[1].point, Some([42.0, -7.25]));
+        assert_eq!(values[2].slot, Some(4));
+        assert_eq!(values[2].value, Some(100.0));
     }
 
     #[test]

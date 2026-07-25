@@ -99,6 +99,7 @@ struct NativeState {
     arena_next: u64,
     arena_end: u64,
     handle_suite: u64,
+    point_param_suite: u64,
 }
 
 thread_local! {
@@ -209,6 +210,9 @@ impl GuestEngine<'static> {
             engine.write_u64(handle_suite + (index * 8) as u64, callback)?;
         }
         engine.state.handle_suite = handle_suite;
+        let point_param_suite = engine.allocate(8, 8)?;
+        engine.write_u64(point_param_suite, callback_address!(point_param_value))?;
+        engine.state.point_param_suite = point_param_suite;
         for version in [3u32, 7, 11, 13] {
             let callbacks =
                 native_utility_callbacks(version).expect("known AEGP Utility Suite version");
@@ -864,6 +868,11 @@ unsafe extern "win64" fn acquire_suite(
                 *(output as *mut u64) = state.handle_suite;
             }
             0
+        } else if name == "PF PointParamSuite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.point_param_suite;
+            }
+            0
         } else if name == "AEGP Utility Suite" && output != 0 {
             let Some(table) = u32::try_from(version)
                 .ok()
@@ -881,6 +890,31 @@ unsafe extern "win64" fn acquire_suite(
         }
     })
     .unwrap_or(u32::MAX as u64)
+}
+
+unsafe extern "win64" fn point_param_value(
+    _: u64,
+    definition: u64,
+    output: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    if definition == 0 || output == 0 {
+        return 4;
+    }
+    let x = unsafe { ptr::read_unaligned((definition + abi::PARAM_U_OFFSET as u64) as *const i32) }
+        as f64
+        / 65536.0;
+    let y =
+        unsafe { ptr::read_unaligned((definition + abi::PARAM_U_OFFSET as u64 + 4) as *const i32) }
+            as f64
+            / 65536.0;
+    unsafe {
+        ptr::write_unaligned(output as *mut f64, x);
+        ptr::write_unaligned((output + 8) as *mut f64, y);
+    }
+    0
 }
 
 unsafe extern "win64" fn checkout_param(

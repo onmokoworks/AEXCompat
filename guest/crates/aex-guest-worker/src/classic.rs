@@ -22,9 +22,12 @@ const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
 const PARAM_ANGLE: i32 = 3;
 const PARAM_CHECKBOX: i32 = 4;
+const PARAM_POINT: i32 = 6;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
 const ANGLE_DEFAULT_OFFSET: usize = 4;
+const POINT_DEFAULT_X_OFFSET: usize = 12;
+const POINT_DEFAULT_Y_OFFSET: usize = 16;
 pub const MAX_RENDER_WIDTH: u32 = 1920;
 pub const MAX_RENDER_HEIGHT: u32 = 1080;
 
@@ -60,13 +63,19 @@ pub struct ParameterReport {
 #[derive(Clone, Debug)]
 pub struct ParameterValue {
     pub name: String,
-    pub value: f64,
+    pub slot: Option<usize>,
+    pub value: Option<f64>,
+    pub point: Option<[f64; 2]>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct AppliedParameter {
+    pub slot: usize,
     pub name: String,
-    pub value: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point: Option<[f64; 2]>,
 }
 
 #[derive(Debug, Serialize)]
@@ -490,6 +499,32 @@ impl ClassicHost {
             ));
         }
         let captured_params = self.engine.parameters().to_vec();
+        for requested in parameter_values {
+            if let Some(slot) = requested.slot {
+                if slot == 0 || slot > captured_params.len() {
+                    return Err(ClassicError::Input(format!(
+                        "AEX did not declare parameter slot #{slot}"
+                    )));
+                }
+            } else {
+                let matches = captured_params
+                    .iter()
+                    .filter(|captured| captured.name == requested.name)
+                    .count();
+                if matches == 0 {
+                    return Err(ClassicError::Input(format!(
+                        "AEX did not declare a supported parameter named {:?}",
+                        requested.name
+                    )));
+                }
+                if matches > 1 {
+                    return Err(ClassicError::Input(format!(
+                        "parameter name {:?} is ambiguous; use Name@slot=value",
+                        requested.name
+                    )));
+                }
+            }
+        }
         let mut applied_values = Vec::with_capacity(parameter_values.len());
         let input_param = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
         let params = self.engine.allocate((captured_params.len() + 1) * 8, 8)?;
@@ -542,15 +577,18 @@ impl ClassicHost {
         let mut parameter_definitions = Vec::with_capacity(captured_params.len());
         for (index, captured) in captured_params.into_iter().enumerate() {
             let mut definition = captured.bytes;
-            materialize_default(&mut definition, captured.param_type);
-            if let Some(requested) = parameter_values
-                .iter()
-                .find(|requested| requested.name == captured.name)
-            {
-                apply_parameter_value(&mut definition, captured.param_type, requested.value)?;
+            materialize_default(&mut definition, captured.param_type, width, height);
+            if let Some(requested) = parameter_values.iter().find(|requested| {
+                requested
+                    .slot
+                    .map_or(requested.name == captured.name, |slot| slot == index + 1)
+            }) {
+                apply_parameter_value(&mut definition, captured.param_type, requested)?;
                 applied_values.push(AppliedParameter {
+                    slot: index + 1,
                     name: captured.name.clone(),
                     value: requested.value,
+                    point: requested.point,
                 });
             }
             let parameter = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
@@ -562,17 +600,10 @@ impl ClassicHost {
         self.engine
             .configure_parameter_definitions(parameter_definitions);
         if applied_values.len() != parameter_values.len() {
-            let missing = parameter_values
-                .iter()
-                .find(|requested| {
-                    !applied_values
-                        .iter()
-                        .any(|applied| applied.name == requested.name)
-                })
-                .expect("parameter count mismatch has a missing value");
             return Err(ClassicError::Input(format!(
-                "AEX did not declare a supported parameter named {:?}",
-                missing.name
+                "parameter application count mismatch: requested {}, applied {}",
+                parameter_values.len(),
+                applied_values.len()
             )));
         }
 
@@ -1049,7 +1080,7 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
-fn materialize_default(definition: &mut [u8], param_type: i32) {
+fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, height: u32) {
     let union = abi::PARAM_U_OFFSET;
     match param_type {
         PARAM_SLIDER | PARAM_FIXED_SLIDER => {
@@ -1087,6 +1118,16 @@ fn materialize_default(definition: &mut [u8], param_type: i32) {
             ) as f64;
             definition[union..union + 8].copy_from_slice(&value.to_le_bytes());
         }
+        PARAM_POINT => {
+            let coordinate = |default_offset, extent: u32| {
+                let percent = read_i32(definition, union + default_offset) as f64 / 65536.0;
+                (percent * f64::from(extent) * 65536.0 / 100.0).round() as i32
+            };
+            let x = coordinate(POINT_DEFAULT_X_OFFSET, width);
+            let y = coordinate(POINT_DEFAULT_Y_OFFSET, height);
+            definition[union..union + 4].copy_from_slice(&x.to_le_bytes());
+            definition[union + 4..union + 8].copy_from_slice(&y.to_le_bytes());
+        }
         _ => {}
     }
 }
@@ -1094,8 +1135,37 @@ fn materialize_default(definition: &mut [u8], param_type: i32) {
 fn apply_parameter_value(
     definition: &mut [u8],
     param_type: i32,
-    value: f64,
+    requested: &ParameterValue,
 ) -> Result<(), ClassicError> {
+    if param_type == PARAM_POINT {
+        let [x, y] = requested.point.ok_or_else(|| {
+            ClassicError::Input("point parameter requires two comma-separated values".into())
+        })?;
+        if requested.value.is_some() || !x.is_finite() || !y.is_finite() {
+            return Err(ClassicError::Input(
+                "point parameter components must be finite".into(),
+            ));
+        }
+        for (offset, value) in [(0, x), (4, y)] {
+            let fixed = value * 65536.0;
+            if fixed < i32::MIN as f64 || fixed > i32::MAX as f64 {
+                return Err(ClassicError::Input(format!(
+                    "point component is outside 16.16 range: {value}"
+                )));
+            }
+            definition[abi::PARAM_U_OFFSET + offset..abi::PARAM_U_OFFSET + offset + 4]
+                .copy_from_slice(&(fixed.round() as i32).to_le_bytes());
+        }
+        return Ok(());
+    }
+    if requested.point.is_some() {
+        return Err(ClassicError::Input(format!(
+            "parameter type {param_type} does not accept a point value"
+        )));
+    }
+    let value = requested
+        .value
+        .ok_or_else(|| ClassicError::Input("scalar parameter requires one value".into()))?;
     if !value.is_finite() {
         return Err(ClassicError::Input(
             "parameter values must be finite".into(),
@@ -1106,7 +1176,7 @@ fn apply_parameter_value(
         PARAM_SLIDER | PARAM_POPUP => {
             definition[union..union + 4].copy_from_slice(&(value.round() as i32).to_le_bytes());
         }
-        PARAM_FIXED_SLIDER => {
+        PARAM_FIXED_SLIDER | PARAM_ANGLE => {
             let fixed = value * 65536.0;
             if fixed < i32::MIN as f64 || fixed > i32::MAX as f64 {
                 return Err(ClassicError::Input(format!(
@@ -1211,7 +1281,7 @@ mod tests {
         slider[abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET
             ..abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET + 4]
             .copy_from_slice(&123i32.to_le_bytes());
-        materialize_default(&mut slider, PARAM_FIXED_SLIDER);
+        materialize_default(&mut slider, PARAM_FIXED_SLIDER, 32, 20);
         assert_eq!(
             &slider[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4],
             &123i32.to_le_bytes()
@@ -1221,10 +1291,29 @@ mod tests {
         float_slider[abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET
             ..abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET + 4]
             .copy_from_slice(&5.0f32.to_le_bytes());
-        materialize_default(&mut float_slider, PARAM_FLOAT_SLIDER);
+        materialize_default(&mut float_slider, PARAM_FLOAT_SLIDER, 32, 20);
         assert_eq!(
             &float_slider[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8],
             &5.0f64.to_le_bytes()
+        );
+
+        let mut point = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        point[abi::PARAM_U_OFFSET + POINT_DEFAULT_X_OFFSET
+            ..abi::PARAM_U_OFFSET + POINT_DEFAULT_X_OFFSET + 4]
+            .copy_from_slice(&(50 * 65536i32).to_le_bytes());
+        point[abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET
+            ..abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET + 4]
+            .copy_from_slice(&(25 * 65536i32).to_le_bytes());
+        materialize_default(&mut point, PARAM_POINT, 32, 20);
+        assert_eq!(
+            read_i32(&point, abi::PARAM_U_OFFSET),
+            16 * 65536,
+            "point x percentage default must become a source coordinate"
+        );
+        assert_eq!(
+            read_i32(&point, abi::PARAM_U_OFFSET + 4),
+            5 * 65536,
+            "point y percentage default must become a source coordinate"
         );
     }
 
@@ -1233,19 +1322,73 @@ mod tests {
         let union = abi::PARAM_U_OFFSET;
 
         let mut fixed = vec![0u8; abi::PF_PARAM_DEF_SIZE];
-        apply_parameter_value(&mut fixed, PARAM_FIXED_SLIDER, 12.5).unwrap();
+        apply_parameter_value(
+            &mut fixed,
+            PARAM_FIXED_SLIDER,
+            &ParameterValue {
+                name: "fixed".into(),
+                slot: None,
+                value: Some(12.5),
+                point: None,
+            },
+        )
+        .unwrap();
         assert_eq!(read_i32(&fixed, union), 12 * 65536 + 32768);
 
         let mut checkbox = vec![0u8; abi::PF_PARAM_DEF_SIZE];
-        apply_parameter_value(&mut checkbox, PARAM_CHECKBOX, 1.0).unwrap();
+        apply_parameter_value(
+            &mut checkbox,
+            PARAM_CHECKBOX,
+            &ParameterValue {
+                name: "checkbox".into(),
+                slot: None,
+                value: Some(1.0),
+                point: None,
+            },
+        )
+        .unwrap();
         assert_eq!(read_i32(&checkbox, union), 1);
 
+        let mut angle = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        apply_parameter_value(
+            &mut angle,
+            PARAM_ANGLE,
+            &ParameterValue {
+                name: "angle".into(),
+                slot: None,
+                value: Some(-7.25),
+                point: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(read_i32(&angle, union), -7 * 65536 - 16384);
+
         let mut popup = vec![0u8; abi::PF_PARAM_DEF_SIZE];
-        apply_parameter_value(&mut popup, PARAM_POPUP, 2.0).unwrap();
+        apply_parameter_value(
+            &mut popup,
+            PARAM_POPUP,
+            &ParameterValue {
+                name: "popup".into(),
+                slot: None,
+                value: Some(2.0),
+                point: None,
+            },
+        )
+        .unwrap();
         assert_eq!(read_i32(&popup, union), 2);
 
         let mut float_slider = vec![0u8; abi::PF_PARAM_DEF_SIZE];
-        apply_parameter_value(&mut float_slider, PARAM_FLOAT_SLIDER, 42.25).unwrap();
+        apply_parameter_value(
+            &mut float_slider,
+            PARAM_FLOAT_SLIDER,
+            &ParameterValue {
+                name: "float".into(),
+                slot: None,
+                value: Some(42.25),
+                point: None,
+            },
+        )
+        .unwrap();
         assert_eq!(
             f64::from_le_bytes(
                 float_slider[union..union + 8]
@@ -1253,6 +1396,27 @@ mod tests {
                     .expect("parameter value is eight bytes")
             ),
             42.25
+        );
+
+        let mut point = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        apply_parameter_value(
+            &mut point,
+            PARAM_POINT,
+            &ParameterValue {
+                name: "point".into(),
+                slot: None,
+                value: None,
+                point: Some([42.5, -7.25]),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_i32(&point, abi::PARAM_U_OFFSET),
+            (42.5 * 65536.0) as i32
+        );
+        assert_eq!(
+            read_i32(&point, abi::PARAM_U_OFFSET + 4),
+            (-7.25 * 65536.0) as i32
         );
     }
 }
