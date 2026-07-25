@@ -205,12 +205,10 @@ impl GuestEngine<'static> {
         // OS/SEH imports have typed implementations. The native carrier keeps
         // it opt-in; the Unicorn backend remains the exact lifecycle fallback.
         let run_dllmain = std::env::var_os("AEXCOMPAT_NATIVE_RUN_DLLMAIN").is_some();
-        if run_dllmain {
-            if let Some(entry) = image.dll_entry_address() {
-                let attached = engine.call_win64(entry, [image.image_base(), 1, 0, 0, 0, 0])?;
-                if attached == 0 {
-                    return Err(GuestError::DllProcessAttach);
-                }
+        if run_dllmain && let Some(entry) = image.dll_entry_address() {
+            let attached = engine.call_win64(entry, [image.image_base(), 1, 0, 0, 0, 0])?;
+            if attached == 0 {
+                return Err(GuestError::DllProcessAttach);
             }
         }
         Ok(engine)
