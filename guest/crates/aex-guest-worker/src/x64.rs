@@ -1,7 +1,8 @@
 use aex_abi::x86_64_windows as abi;
 use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::{RegisterX86, UcHookId, Unicorn};
@@ -45,6 +46,9 @@ const MAX_INSTRUCTIONS: usize = 0;
 const TIMEOUT_MICROSECONDS: u64 = 600_000_000;
 const MAX_TRACE_EVENTS: usize = 50_000;
 const TRACE_STACK_ARGUMENTS: usize = 4;
+const TRACE_FIRST_SAMPLES: usize = 3;
+const TRACE_LAST_SAMPLES: usize = 3;
+const TRACE_DISTINCT_SAMPLES: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum GuestError {
@@ -93,7 +97,15 @@ fn push_trace_event(capture: &mut TraceCapture, mut event: TraceEvent) {
     };
     if let Some(key) = &key {
         if let Some(index) = capture.event_index.get(key).copied() {
-            capture.events[index].observed_count += 1;
+            let observation_number = capture.events[index].observed_count + 1;
+            if let Some(observation) = trace_observation(&event, observation_number) {
+                update_exemplars(
+                    &mut capture.events[index].exemplars,
+                    capture.event_fingerprints.entry(index).or_default(),
+                    observation,
+                );
+            }
+            capture.events[index].observed_count = observation_number;
             return;
         }
     }
@@ -102,10 +114,116 @@ fn push_trace_event(capture: &mut TraceCapture, mut event: TraceEvent) {
         return;
     }
     if let Some(key) = key {
-        capture.event_index.insert(key, capture.events.len());
+        let index = capture.events.len();
+        capture.event_index.insert(key, index);
+        if let Some(observation) = trace_observation(&event, 1) {
+            let mut fingerprints = HashSet::new();
+            update_exemplars(&mut event.exemplars, &mut fingerprints, observation);
+            capture.event_fingerprints.insert(index, fingerprints);
+        }
     }
     event.sequence = capture.events.len();
     capture.events.push(event);
+}
+
+fn trace_observation(event: &TraceEvent, observation: u64) -> Option<TraceObservation> {
+    if event.arguments.is_empty()
+        && event.xmm_arguments.is_empty()
+        && event.stack_arguments.is_empty()
+        && event.return_value.is_none()
+    {
+        return None;
+    }
+    let mut hasher = DefaultHasher::new();
+    for argument in &event.arguments {
+        argument.register.hash(&mut hasher);
+        argument.value.raw.hash(&mut hasher);
+    }
+    for xmm in &event.xmm_arguments {
+        xmm.register.hash(&mut hasher);
+        xmm.raw_hex.hash(&mut hasher);
+    }
+    for argument in &event.stack_arguments {
+        argument.index.hash(&mut hasher);
+        argument.value.raw.hash(&mut hasher);
+    }
+    if let Some(returned) = &event.return_value {
+        returned.rax.raw.hash(&mut hasher);
+        returned.xmm0.raw_hex.hash(&mut hasher);
+    }
+    let fingerprint = hasher.finish();
+    Some(TraceObservation {
+        observation,
+        fingerprint: format!("{fingerprint:016x}"),
+        arguments: event.arguments.clone(),
+        xmm_arguments: event.xmm_arguments.clone(),
+        stack_arguments: event.stack_arguments.clone(),
+        return_value: event.return_value.clone(),
+    })
+}
+
+fn update_exemplars(
+    exemplars: &mut TraceExemplars,
+    fingerprints: &mut HashSet<u64>,
+    observation: TraceObservation,
+) {
+    if exemplars.first.len() < TRACE_FIRST_SAMPLES {
+        exemplars.first.push(observation.clone());
+    }
+    exemplars.last.push(observation.clone());
+    if exemplars.last.len() > TRACE_LAST_SAMPLES {
+        exemplars.last.remove(0);
+    }
+    let fingerprint = u64::from_str_radix(&observation.fingerprint, 16)
+        .expect("trace fingerprint is hexadecimal");
+    if fingerprints.insert(fingerprint) {
+        exemplars.distinct_fingerprints += 1;
+        if exemplars.distinct.len() < TRACE_DISTINCT_SAMPLES {
+            exemplars.distinct.push(observation.clone());
+        } else {
+            exemplars.dropped_distinct_fingerprints += 1;
+        }
+    }
+    update_numeric_ranges(exemplars, &observation);
+}
+
+fn update_numeric_ranges(exemplars: &mut TraceExemplars, observation: &TraceObservation) {
+    let mut values = Vec::new();
+    values.extend(
+        observation
+            .arguments
+            .iter()
+            .map(|argument| (argument.register.to_string(), argument.value.raw as f64)),
+    );
+    values.extend(observation.stack_arguments.iter().map(|argument| {
+        (
+            format!("stack_arg_{}", argument.index),
+            argument.value.raw as f64,
+        )
+    }));
+    for xmm in &observation.xmm_arguments {
+        for (lane, value) in xmm.f32_lanes.iter().enumerate() {
+            if let Some(value) = value {
+                values.push((format!("{}.f32[{lane}]", xmm.register), f64::from(*value)));
+            }
+        }
+    }
+    for (field, value) in values {
+        if let Some(range) = exemplars
+            .numeric_ranges
+            .iter_mut()
+            .find(|range| range.field == field)
+        {
+            range.minimum = range.minimum.min(value);
+            range.maximum = range.maximum.max(value);
+        } else {
+            exemplars.numeric_ranges.push(TraceNumericRange {
+                field,
+                minimum: value,
+                maximum: value,
+            });
+        }
+    }
 }
 
 fn trace_instruction(
@@ -143,6 +261,7 @@ fn trace_instruction(
                     xmm_arguments: Vec::new(),
                     stack_arguments: Vec::new(),
                     return_value: Some(return_value.clone()),
+                    exemplars: TraceExemplars::default(),
                     call_kind: None,
                     instruction_bytes: None,
                 },
@@ -181,6 +300,7 @@ fn trace_instruction(
                 xmm_arguments: xmm_arguments.clone(),
                 stack_arguments: entry_stack_arguments,
                 return_value: None,
+                exemplars: TraceExemplars::default(),
                 call_kind: None,
                 instruction_bytes: None,
             },
@@ -228,6 +348,7 @@ fn trace_instruction(
                     xmm_arguments,
                     stack_arguments: call_stack_arguments,
                     return_value: None,
+                    exemplars: TraceExemplars::default(),
                     call_kind: Some(
                         if matches!(
                             instruction.op0_kind(),
@@ -275,6 +396,7 @@ fn trace_instruction(
                 xmm_arguments: Vec::new(),
                 stack_arguments: Vec::new(),
                 return_value: Some(return_value),
+                exemplars: TraceExemplars::default(),
                 call_kind: None,
                 instruction_bytes: Some(bytes_to_hex(&bytes[..instruction.len().min(bytes.len())])),
             },
@@ -657,6 +779,7 @@ struct TraceCapture {
     function_stack: Vec<Option<u64>>,
     call_rsp_stack: Vec<u64>,
     event_index: HashMap<TraceEventKey, usize>,
+    event_fingerprints: HashMap<usize, HashSet<u64>>,
     truncated: bool,
 }
 
@@ -709,6 +832,34 @@ pub struct TraceReturnValue {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct TraceObservation {
+    pub observation: u64,
+    pub fingerprint: String,
+    pub arguments: Vec<TraceArgument>,
+    pub xmm_arguments: Vec<TraceXmmValue>,
+    pub stack_arguments: Vec<TraceStackArgument>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_value: Option<TraceReturnValue>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceNumericRange {
+    pub field: String,
+    pub minimum: f64,
+    pub maximum: f64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct TraceExemplars {
+    pub distinct_fingerprints: u64,
+    pub dropped_distinct_fingerprints: u64,
+    pub first: Vec<TraceObservation>,
+    pub last: Vec<TraceObservation>,
+    pub distinct: Vec<TraceObservation>,
+    pub numeric_ranges: Vec<TraceNumericRange>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct TraceEvent {
     pub sequence: usize,
     pub observed_count: u64,
@@ -730,6 +881,7 @@ pub struct TraceEvent {
     pub stack_arguments: Vec<TraceStackArgument>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_value: Option<TraceReturnValue>,
+    pub exemplars: TraceExemplars,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_kind: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1166,6 +1318,7 @@ impl GuestEngine<'static> {
                 xmm_arguments: Vec::new(),
                 stack_arguments: Vec::new(),
                 return_value: None,
+                exemplars: TraceExemplars::default(),
                 call_kind: None,
                 instruction_bytes: None,
             }],
@@ -1173,6 +1326,7 @@ impl GuestEngine<'static> {
             function_stack: vec![Some(entry_address.saturating_sub(self.image_base))],
             call_rsp_stack: Vec::new(),
             event_index: HashMap::new(),
+            event_fingerprints: HashMap::new(),
             truncated: false,
         });
         let image_base = self.image_base;
@@ -1249,6 +1403,7 @@ impl GuestEngine<'static> {
                 xmm_arguments: Vec::new(),
                 stack_arguments: Vec::new(),
                 return_value: None,
+                exemplars: TraceExemplars::default(),
                 call_kind: None,
                 instruction_bytes: None,
             },
@@ -2520,6 +2675,16 @@ mod tests {
             .unwrap();
         assert_eq!(call.pc_rva, Some(5));
         assert_eq!(call.observed_count, 2);
+        assert_eq!(call.exemplars.distinct_fingerprints, 2);
+        assert_eq!(call.exemplars.first.len(), 2);
+        assert_eq!(call.exemplars.last.len(), 2);
+        let rcx = call
+            .exemplars
+            .numeric_ranges
+            .iter()
+            .find(|range| range.field == "rcx")
+            .unwrap();
+        assert_eq!((rcx.minimum, rcx.maximum), (1.0, 2.0));
         assert!(trace.timeline.iter().any(|line| line.contains("×2")));
     }
 
@@ -2571,6 +2736,7 @@ mod tests {
             function_stack: Vec::new(),
             call_rsp_stack: Vec::new(),
             event_index: HashMap::new(),
+            event_fingerprints: HashMap::new(),
             truncated: false,
         };
         for index in 0..=MAX_TRACE_EVENTS {
@@ -2589,6 +2755,7 @@ mod tests {
                     xmm_arguments: Vec::new(),
                     stack_arguments: Vec::new(),
                     return_value: None,
+                    exemplars: TraceExemplars::default(),
                     call_kind: None,
                     instruction_bytes: None,
                 },

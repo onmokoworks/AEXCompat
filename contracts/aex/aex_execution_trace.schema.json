@@ -104,6 +104,9 @@
         },
         "return_value": {
           "$ref": "#/$defs/return_value"
+        },
+        "exemplars": {
+          "$ref": "#/$defs/exemplars"
         }
       }
     },
@@ -161,6 +164,78 @@
       "properties": {
         "rax": { "$ref": "#/$defs/value" },
         "xmm0": { "$ref": "#/$defs/xmm_value" }
+      }
+    },
+    "exemplars": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "distinct_fingerprints",
+        "dropped_distinct_fingerprints",
+        "first",
+        "last",
+        "distinct",
+        "numeric_ranges"
+      ],
+      "properties": {
+        "distinct_fingerprints": { "type": "integer", "minimum": 0 },
+        "dropped_distinct_fingerprints": { "type": "integer", "minimum": 0 },
+        "first": {
+          "type": "array",
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/observation" }
+        },
+        "last": {
+          "type": "array",
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/observation" }
+        },
+        "distinct": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/observation" }
+        },
+        "numeric_ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["field", "minimum", "maximum"],
+            "properties": {
+              "field": { "type": "string", "minLength": 1 },
+              "minimum": { "type": "number" },
+              "maximum": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation",
+        "fingerprint",
+        "arguments",
+        "xmm_arguments",
+        "stack_arguments"
+      ],
+      "properties": {
+        "observation": { "type": "integer", "minimum": 1 },
+        "fingerprint": { "type": "string", "pattern": "^[a-f0-9]{16}$" },
+        "arguments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/argument" }
+        },
+        "xmm_arguments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/xmm_value" }
+        },
+        "stack_arguments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stack_argument" }
+        },
+        "return_value": { "$ref": "#/$defs/return_value" }
       }
     },
     "value": {
