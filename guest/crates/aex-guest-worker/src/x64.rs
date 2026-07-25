@@ -36,7 +36,10 @@ const DATA_BASE: u64 = 0x0000_0000_4000_0000;
 const DATA_SIZE: u64 = 0x1000_0000;
 const HANDLE_DATA_BASE: u64 = DATA_BASE + 0x400_0000;
 const HANDLE_DATA_END: u64 = DATA_BASE + DATA_SIZE;
-const MAX_INSTRUCTIONS: usize = 4_000_000_000;
+// A nonzero Unicorn instruction limit enables instruction counting across the
+// whole run, which is prohibitively expensive for image kernels. The wall-clock
+// timeout and return-sentinel check still bound and validate guest execution.
+const MAX_INSTRUCTIONS: usize = 0;
 const TIMEOUT_MICROSECONDS: u64 = 600_000_000;
 
 #[derive(Debug, Error)]
@@ -82,7 +85,6 @@ pub struct GuestParam {
 struct GuestState {
     params: Vec<GuestParam>,
     callback_error: Option<String>,
-    last_pc: u64,
     smart_input_world: u64,
     smart_output_world: u64,
     smart_width: u32,
@@ -129,16 +131,6 @@ impl GuestEngine<'static> {
         uc(
             "write PE image",
             unicorn.mem_write(image.image_base(), image.mapped_bytes()),
-        )?;
-        uc(
-            "install image execution trace",
-            unicorn.add_code_hook(
-                image.image_base(),
-                image.image_base() + image_size - 1,
-                |unicorn, address, _| {
-                    unicorn.get_data_mut().last_pc = address;
-                },
-            ),
         )?;
         uc(
             "map import stubs",
@@ -428,7 +420,6 @@ impl GuestEngine<'static> {
             MAX_INSTRUCTIONS,
         ) {
             let rip = self.unicorn.reg_read(RegisterX86::RIP).unwrap_or(0);
-            let last_pc = self.unicorn.get_data().last_pc;
             let rbx = self.unicorn.reg_read(RegisterX86::RBX).unwrap_or(0);
             let rcx = self.unicorn.reg_read(RegisterX86::RCX).unwrap_or(0);
             let rdx = self.unicorn.reg_read(RegisterX86::RDX).unwrap_or(0);
@@ -440,7 +431,7 @@ impl GuestEngine<'static> {
             return Err(GuestError::Unicorn {
                 operation: "execute guest function",
                 detail: format!(
-                    "{error} at RIP={rip:#x}, last guest PC={last_pc:#x}, RBX={rbx:#x}, RBP={rbp:#x}, RCX={rcx:#x}, RDX={rdx:#x}, R8={r8:#x}, suite requests=[{suites}], handle allocations={handle_allocations:?}, math calls=[{math_calls}]"
+                    "{error} at RIP={rip:#x}, RBX={rbx:#x}, RBP={rbp:#x}, RCX={rcx:#x}, RDX={rdx:#x}, R8={r8:#x}, suite requests=[{suites}], handle allocations={handle_allocations:?}, math calls=[{math_calls}]"
                 ),
             });
         }
@@ -449,12 +440,9 @@ impl GuestEngine<'static> {
             self.unicorn.reg_read(RegisterX86::RIP),
         )?;
         if rip != RETURN_ADDRESS {
-            let last_pc = self.unicorn.get_data().last_pc;
             return Err(GuestError::Unicorn {
                 operation: "execute guest function",
-                detail: format!(
-                    "execution stopped before the guest returned (RIP={rip:#x}, last guest PC={last_pc:#x})"
-                ),
+                detail: format!("execution stopped before the guest returned (RIP={rip:#x})"),
             });
         }
         if let Some(error) = self.unicorn.get_data_mut().callback_error.take() {
