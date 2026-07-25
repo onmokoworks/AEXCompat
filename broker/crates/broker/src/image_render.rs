@@ -3125,6 +3125,7 @@ pub fn inspect_experimental_with_diagnostics(
         plugin_path,
         approved_sha256,
         Vec::new(),
+        Vec::new(),
         None,
     )
 }
@@ -3140,6 +3141,7 @@ pub fn inspect_experimental_with_approved_dependencies(
         plugin_path,
         approved_sha256,
         dependencies,
+        Vec::new(),
         None,
     )
     .map(|(parameters, _)| parameters)
@@ -3156,6 +3158,28 @@ pub fn inspect_experimental_with_approved_dependencies_and_diagnostics(
         plugin_path,
         approved_sha256,
         dependencies,
+        Vec::new(),
+        None,
+    )
+}
+
+/// Resource-carrying variant (issue #362): sealed data resources
+/// (`<plugin dir>/<subdir>/` data files such as `Film Stocks/*.grain`) are
+/// staged into the sealed root with the same authentication strength as the
+/// DLL closure (docs/SEALED_DATA_RESOURCE_POLICY_2026-07-25.md).
+pub fn inspect_experimental_with_approved_dependencies_and_resources(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependencies: Vec<ApprovedImageArtifact>,
+    resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    inspect_experimental_with_diagnostics_and_runtime_policy(
+        repository,
+        plugin_path,
+        approved_sha256,
+        dependencies,
+        resources,
         None,
     )
 }
@@ -3177,6 +3201,7 @@ pub fn inspect_experimental_with_runtime_policy(
         plugin_path,
         approved_sha256,
         Vec::new(),
+        Vec::new(),
         Some((policy, backend)),
     )
 }
@@ -3186,6 +3211,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     plugin_path: &Path,
     approved_sha256: &str,
     mut dependencies: Vec<ApprovedImageArtifact>,
+    resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
@@ -3213,16 +3239,22 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     // closure was reported as "timed out", and that verdict was then cached.
     // Containment stays — the job object kills the tree when the launch handle
     // drops, and the sealed root is still torn down.
-    let isolated = if !dependencies.is_empty() {
-        dispatch_approved_image_with_dependencies(
-            repository,
-            WorkerKind::L2,
-            plugin_path,
-            approved_sha256,
-            dependencies,
-            &args_before_plugin,
-            &args_after_plugin,
-            None,
+    let isolated = if !dependencies.is_empty() || !resources.is_empty() {
+        crate::secure_image_dispatch::dispatch_secure_image_with_resources(
+            SecureImageDispatch {
+                repository,
+                worker_kind: WorkerKind::L2,
+                plugin: ApprovedImageArtifact {
+                    path: plugin_path.to_path_buf(),
+                    expected_sha256: decode_sha256_hex(approved_sha256)?,
+                    expected_size: fs::metadata(plugin_path)?.len(),
+                },
+                dependencies,
+                args_before_plugin: &args_before_plugin,
+                args_after_plugin: &args_after_plugin,
+                timeout: None,
+            },
+            resources,
         )?
     } else {
         dispatch_approved_image(

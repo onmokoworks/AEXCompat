@@ -50,13 +50,30 @@ pub fn protect_sealed_load_tree(
     worker_sid: &RestrictedWorkerSid,
 ) -> io::Result<()> {
     for child in manifest_children {
-        validate_basename(child.as_ref())?;
+        match child.as_ref().split_once('/') {
+            // A data-resource relative path (issue #362): each component
+            // follows the flat basename rules, exactly one subdirectory
+            // level, no traversal.
+            Some((subdir, basename)) => {
+                if basename.contains('/') {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "resource path must have exactly one subdirectory",
+                    ));
+                }
+                validate_basename(subdir)?;
+                validate_basename(basename)?;
+            }
+            None => validate_basename(child.as_ref())?,
+        }
     }
 
     #[cfg(windows)]
     let root_handle = open_acl_target(root)?;
     #[cfg(windows)]
     let mut child_handles = Vec::with_capacity(manifest_children.len());
+    #[cfg(windows)]
+    let mut subdir_handles = Vec::new();
 
     for child in manifest_children {
         let child = child.as_ref();
@@ -65,6 +82,17 @@ pub fn protect_sealed_load_tree(
             let handle = open_acl_target(&root.join(child))?;
             apply_protected_dacl_to_handle(&handle, worker_sid, false)?;
             child_handles.push(handle);
+            if let Some((subdir, _)) = child.split_once('/') {
+                let subdir_path = root.join(subdir);
+                if subdir_path.parent() == Some(root) {
+                    let subdir_handle = open_acl_target(&subdir_path)?;
+                    // Locked with the directory DACL (read+traverse, no child
+                    // creation), exactly like the root: staging subdirectories
+                    // are read-only data (issue #362).
+                    apply_protected_dacl_to_handle(&subdir_handle, worker_sid, true)?;
+                    subdir_handles.push(subdir_handle);
+                }
+            }
         }
         #[cfg(not(windows))]
         apply_protected_dacl(&root.join(child), worker_sid)?;

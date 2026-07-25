@@ -18,6 +18,40 @@ pub struct LoadEntry {
     pub expected_size: u64,
 }
 
+/// A sealed data resource (issue #362,
+/// docs/SEALED_DATA_RESOURCE_POLICY_2026-07-25.md): a non-module file staged
+/// into `<root>/<subdir>/<basename>` with exactly the same authentication
+/// strength as the DLL entries (size + SHA-256, reparse rejection, retained
+/// read-only handle). Data resources are never loadable modules, so the
+/// module audit does not classify them; a PE image staged this way would
+/// fail the audit closed if anything loaded it (its parent is not the sealed
+/// root itself).
+#[derive(Clone, Debug)]
+pub struct SealedResourceEntry {
+    pub source: PathBuf,
+    /// `<subdir>/<basename>` with `/` separators; each component follows the
+    /// same Windows-safe basename rules as the flat entries. v1 admits
+    /// exactly one subdirectory level.
+    pub relative_path: String,
+    pub expected_sha256: [u8; 32],
+    pub expected_size: u64,
+}
+
+/// Validates a resource relative path and returns `(subdir, basename)`.
+pub fn split_resource_relative_path(relative_path: &str) -> io::Result<(&str, &str)> {
+    let Some((subdir, basename)) = relative_path.split_once('/') else {
+        return Err(invalid("resource path must be <subdir>/<basename>"));
+    };
+    if basename.contains('/') {
+        return Err(invalid(
+            "resource path must have exactly one subdirectory level",
+        ));
+    }
+    validate_basename(subdir)?;
+    validate_basename(basename)?;
+    Ok((subdir, basename))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdditionalChildProtection {
     /// Manifest files are verified and held, but another principal can still add children.
@@ -81,9 +115,30 @@ impl SealedLoadTree {
         plugins: Vec<LoadEntry>,
         dependencies: Vec<LoadEntry>,
     ) -> io::Result<(Self, StagingStats)> {
+        Self::create_cluster_with_resources(plugins, dependencies, Vec::new())
+    }
+
+    /// Like [`Self::create`], but also seals data resources (issue #362):
+    /// authenticated non-module files staged into `<root>/<subdir>/`.
+    pub fn create_with_resources(
+        main: LoadEntry,
+        dependencies: Vec<LoadEntry>,
+        resources: Vec<SealedResourceEntry>,
+    ) -> io::Result<Self> {
+        Self::create_cluster_with_resources(vec![main], dependencies, resources)
+            .map(|(tree, _)| tree)
+    }
+
+    /// Cluster variant of [`Self::create_with_resources`], retaining the
+    /// staging-statistics report.
+    pub fn create_cluster_with_resources(
+        plugins: Vec<LoadEntry>,
+        dependencies: Vec<LoadEntry>,
+        resources: Vec<SealedResourceEntry>,
+    ) -> io::Result<(Self, StagingStats)> {
         let temp_parent = fs::canonicalize(std::env::temp_dir())?;
         reject_reparse(&temp_parent)?;
-        Self::create_at_with_stats(&temp_parent, plugins, dependencies)
+        Self::create_at_with_stats(&temp_parent, plugins, dependencies, resources)
     }
 
     #[cfg(test)]
@@ -92,13 +147,15 @@ impl SealedLoadTree {
         plugins: Vec<LoadEntry>,
         dependencies: Vec<LoadEntry>,
     ) -> io::Result<Self> {
-        Self::create_at_with_stats(temp_parent, plugins, dependencies).map(|(tree, _)| tree)
+        Self::create_at_with_stats(temp_parent, plugins, dependencies, Vec::new())
+            .map(|(tree, _)| tree)
     }
 
     fn create_at_with_stats(
         temp_parent: &Path,
         plugins: Vec<LoadEntry>,
         dependencies: Vec<LoadEntry>,
+        resources: Vec<SealedResourceEntry>,
     ) -> io::Result<(Self, StagingStats)> {
         let temp_parent = fs::canonicalize(temp_parent)?;
         reject_reparse(&temp_parent)?;
@@ -108,9 +165,9 @@ impl SealedLoadTree {
             ..StagingStats::default()
         };
         let root = create_random_root(&temp_parent)?;
-        let result = Self::populate(root.clone(), temp_parent.clone(), plugins, dependencies);
+        let result = Self::populate(root.clone(), temp_parent.clone(), plugins, dependencies, resources);
         if result.is_err() {
-            let _ = remove_owned_root(&root, &temp_parent);
+            let _ = remove_owned_root_impl(&root, &temp_parent, true);
         }
         result.map(|(tree, populate_stats)| {
             stats.hard_linked = populate_stats.hard_linked;
@@ -124,13 +181,15 @@ impl SealedLoadTree {
         temp_parent: PathBuf,
         plugins: Vec<LoadEntry>,
         mut dependencies: Vec<LoadEntry>,
+        resources: Vec<SealedResourceEntry>,
     ) -> io::Result<(Self, StagingStats)> {
         let mut plugins = plugins.into_iter();
         let Some(main) = plugins.next() else {
             return Err(invalid("a sealed load tree requires at least one plugin"));
         };
         dependencies.sort_by_key(|entry| entry.relative_basename.to_lowercase());
-        let mut entries = Vec::with_capacity(dependencies.len() + plugins.len() + 1);
+        let entry_count = dependencies.len() + plugins.len() + 1 + resources.len();
+        let mut entries = Vec::with_capacity(entry_count);
         // Manifest roles: 0 = main plugin (byte-compatible with the original
         // single-plugin layout), 2 = additional cluster plugin, 1 = dependency.
         entries.push((0u8, main));
@@ -150,12 +209,12 @@ impl SealedLoadTree {
             }
         }
 
-        let mut handles = Vec::with_capacity(entries.len());
-        let mut manifest_filenames = Vec::with_capacity(entries.len());
+        let mut handles = Vec::with_capacity(entry_count);
+        let mut manifest_filenames = Vec::with_capacity(entry_count);
         let mut stats = StagingStats::default();
         let mut manifest = Sha256::new();
         manifest.update(MANIFEST_DOMAIN);
-        manifest.update((entries.len() as u64).to_le_bytes());
+        manifest.update((entry_count as u64).to_le_bytes());
 
         for (role, entry) in entries {
             let source_parent = entry
@@ -176,57 +235,17 @@ impl SealedLoadTree {
                 return Err(invalid("source must be a direct child"));
             }
 
-            reject_reparse(&entry.source)?;
-            let mut source = open_source(&entry.source)?;
-            validate_regular_unique(&source)?;
-            let (size, digest) = staging_trust::hash_file_trusted(&mut source, hash_file)?;
-            if size != entry.expected_size {
-                return Err(invalid("source size mismatch"));
-            }
-            if digest != entry.expected_sha256 {
-                return Err(invalid("source SHA-256 mismatch"));
-            }
-            source.rewind()?;
-
             let destination = root.join(&entry.relative_basename);
             if destination.parent() != Some(root.as_path()) {
                 return Err(invalid("destination must be a direct child"));
             }
-            let staged_by_hard_link = fs::hard_link(&entry.source, &destination).is_ok();
-            if staged_by_hard_link {
-                stats.hard_linked += 1;
-            } else {
-                stats.copied += 1;
-                let mut output = create_destination(&destination)?;
-                io::copy(&mut source, &mut output)?;
-                output.flush()?;
-                output.sync_all()?;
-                reject_reparse(&destination)?;
-                validate_regular_unique(&output)?;
-                let mut verify = output.try_clone()?;
-                let (copied_size, copied_digest) = hash_file(&mut verify)?;
-                if copied_size != entry.expected_size || copied_digest != entry.expected_sha256 {
-                    return Err(invalid("destination verification failed"));
-                }
-                drop(verify);
-                drop(output);
-            }
-            reject_reparse(&destination)?;
-
-            // A retained write-capable handle conflicts with the Windows image loader,
-            // whose reopen does not share writes. Reopen read-only and authenticate the
-            // exact path again before retaining the no-write/no-delete-share handle.
-            let mut retained = open_source(&destination)?;
-            if staged_by_hard_link {
-                validate_regular_staged(&retained)?;
-            } else {
-                validate_regular_unique(&retained)?;
-            }
-            let (retained_size, retained_digest) =
-                staging_trust::hash_file_trusted(&mut retained, hash_file)?;
-            if retained_size != entry.expected_size || retained_digest != entry.expected_sha256 {
-                return Err(invalid("retained destination verification failed"));
-            }
+            let retained = stage_and_retain(
+                &entry.source,
+                entry.expected_sha256,
+                entry.expected_size,
+                &destination,
+                &mut stats,
+            )?;
 
             manifest.update([role]);
             manifest.update((entry.relative_basename.len() as u64).to_le_bytes());
@@ -234,6 +253,78 @@ impl SealedLoadTree {
             manifest.update(entry.expected_size.to_le_bytes());
             manifest.update(entry.expected_sha256);
             manifest_filenames.push(entry.relative_basename);
+            handles.push(retained);
+        }
+
+        // Data resources (role 3, issue #362): authenticated non-module files
+        // staged into `<root>/<subdir>/<basename>` with the same strength.
+        let mut resource_names = HashSet::new();
+        let mut resource_subdirs = HashSet::new();
+        for resource in resources {
+            let (subdir, basename) = split_resource_relative_path(&resource.relative_path)?;
+            if !resource_names.insert(resource.relative_path.to_lowercase()) {
+                return Err(invalid(
+                    "duplicate or case-insensitive resource path collision",
+                ));
+            }
+            // The subdirectory name itself enters the flat namespace: a DLL
+            // or plugin must not share it, or one could shadow the other.
+            if resource_subdirs.insert(subdir.to_lowercase())
+                && !names.insert(subdir.to_lowercase())
+            {
+                return Err(invalid(
+                    "resource subdirectory collides with a flat manifest entry",
+                ));
+            }
+            let source_parent = resource
+                .source
+                .parent()
+                .ok_or_else(|| invalid("resource source has no direct parent"))?;
+            reject_reparse(source_parent)?;
+            let canonical_parent = fs::canonicalize(source_parent)?;
+            reject_reparse(&canonical_parent)?;
+            let source_name = resource
+                .source
+                .file_name()
+                .ok_or_else(|| invalid("resource source has no filename"))?;
+            if source_name != basename {
+                return Err(invalid(
+                    "resource source filename differs from its relative basename",
+                ));
+            }
+            if resource.source.parent() != Some(source_parent) {
+                return Err(invalid("resource source must be a direct child"));
+            }
+
+            let subdir_path = root.join(subdir);
+            if subdir_path.parent() != Some(root.as_path()) {
+                return Err(invalid("resource subdirectory must be a direct child"));
+            }
+            if !subdir_path.exists() {
+                fs::create_dir(&subdir_path)?;
+            }
+            if !subdir_path.is_dir() {
+                return Err(invalid("resource subdirectory is not a directory"));
+            }
+            reject_reparse(&subdir_path)?;
+            let destination = subdir_path.join(basename);
+            if destination.parent() != Some(subdir_path.as_path()) {
+                return Err(invalid("resource destination must be a direct child"));
+            }
+            let retained = stage_and_retain(
+                &resource.source,
+                resource.expected_sha256,
+                resource.expected_size,
+                &destination,
+                &mut stats,
+            )?;
+
+            manifest.update([3u8]);
+            manifest.update((resource.relative_path.len() as u64).to_le_bytes());
+            manifest.update(resource.relative_path.as_bytes());
+            manifest.update(resource.expected_size.to_le_bytes());
+            manifest.update(resource.expected_sha256);
+            manifest_filenames.push(resource.relative_path);
             handles.push(retained);
         }
 
@@ -258,7 +349,9 @@ impl SealedLoadTree {
         self.manifest_digest
     }
 
-    /// Returns the validated direct-child basenames authenticated by the manifest.
+    /// Returns the validated manifest entry names authenticated by the
+    /// manifest (flat basenames for images, `<subdir>/<basename>` relative
+    /// paths for data resources).
     pub fn manifest_basenames(&self) -> &[String] {
         &self.manifest_filenames
     }
@@ -320,13 +413,28 @@ impl Drop for SealedLoadTree {
             .ok()
             .is_some_and(|path| path == self.root);
         if safe_name && safe_parent && verified_root && reject_reparse(&self.root).is_ok() {
+            let mut subdirs = HashSet::new();
             for name in &self.manifest_filenames {
-                if validate_basename(name).is_ok() {
+                if let Ok((subdir, basename)) = split_resource_relative_path(name) {
+                    // Data resource (issue #362): remove the staged file, then
+                    // its subdirectory after every staged file is gone.
+                    let subdir_path = self.root.join(subdir);
+                    if subdir_path.parent() == Some(self.root.as_path()) {
+                        let path = subdir_path.join(basename);
+                        if path.parent() == Some(subdir_path.as_path()) {
+                            let _ = fs::remove_file(path);
+                        }
+                        subdirs.insert(subdir.to_lowercase());
+                    }
+                } else if validate_basename(name).is_ok() {
                     let path = self.root.join(name);
                     if path.parent() == Some(self.root.as_path()) {
                         let _ = fs::remove_file(path);
                     }
                 }
+            }
+            for subdir in subdirs {
+                let _ = fs::remove_dir(self.root.join(subdir));
             }
             let _ = fs::remove_dir(&self.root);
         }
@@ -402,19 +510,48 @@ fn cleanup_stale_roots(parent: &Path, now: SystemTime, age: Duration) -> io::Res
 }
 
 fn remove_owned_root(root: &Path, parent: &Path) -> io::Result<bool> {
+    remove_owned_root_impl(root, parent, false)
+}
+
+/// `allow_subdirs` is set only for the create-time failure cleanup, which
+/// removes exactly the tree it just populated (data-resource subdirectories
+/// included, issue #362). The stale sweep keeps the conservative
+/// never-recurse behavior for content it did not create.
+fn remove_owned_root_impl(root: &Path, parent: &Path, allow_subdirs: bool) -> io::Result<bool> {
     if !is_owned_root(root, parent) {
         return Ok(false);
     }
 
     let mut children = Vec::new();
+    let mut subdirs = Vec::new();
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let child = entry.path();
         let metadata = fs::symlink_metadata(&child)?;
-        if metadata.file_type().is_symlink()
-            || is_reparse(&metadata)
-            || !metadata.file_type().is_file()
-        {
+        if metadata.file_type().is_symlink() || is_reparse(&metadata) {
+            return Ok(false);
+        }
+        if metadata.file_type().is_dir() {
+            if !allow_subdirs {
+                return Ok(false);
+            }
+            // Data-resource subdirectories: only plain directories holding
+            // only plain files are removed; anything else fails closed and
+            // leaves the root in place.
+            for sub_entry in fs::read_dir(&child)? {
+                let sub_entry = sub_entry?;
+                let sub_metadata = fs::symlink_metadata(sub_entry.path())?;
+                if sub_metadata.file_type().is_symlink()
+                    || is_reparse(&sub_metadata)
+                    || !sub_metadata.file_type().is_file()
+                {
+                    return Ok(false);
+                }
+            }
+            subdirs.push(child);
+            continue;
+        }
+        if !metadata.file_type().is_file() {
             return Ok(false);
         }
         let mut file = match open_source(&child) {
@@ -430,6 +567,11 @@ fn remove_owned_root(root: &Path, parent: &Path) -> io::Result<bool> {
 
     for child in children {
         if fs::remove_file(child).is_err() {
+            return Ok(false);
+        }
+    }
+    for subdir in subdirs {
+        if fs::remove_dir_all(subdir).is_err() {
             return Ok(false);
         }
     }
@@ -494,6 +636,68 @@ fn hash_file(file: &mut File) -> io::Result<(u64, [u8; 32])> {
     let mut hash = Sha256::new();
     let size = io::copy(file, &mut hash)?;
     Ok((size, hash.finalize().into()))
+}
+
+/// Stages one authenticated entry into `destination` and returns the
+/// retained read-only, no-delete-share handle. The source is re-hashed
+/// before staging, the staged bytes are re-verified (hard-link first, copy
+/// with post-copy verification on failure), and the retained handle is
+/// re-hashed — identical strength for DLL entries and data resources.
+fn stage_and_retain(
+    source_path: &Path,
+    expected_sha256: [u8; 32],
+    expected_size: u64,
+    destination: &Path,
+    stats: &mut StagingStats,
+) -> io::Result<File> {
+    reject_reparse(source_path)?;
+    let mut source = open_source(source_path)?;
+    validate_regular_unique(&source)?;
+    let (size, digest) = staging_trust::hash_file_trusted(&mut source, hash_file)?;
+    if size != expected_size {
+        return Err(invalid("source size mismatch"));
+    }
+    if digest != expected_sha256 {
+        return Err(invalid("source SHA-256 mismatch"));
+    }
+    source.rewind()?;
+
+    let staged_by_hard_link = fs::hard_link(source_path, destination).is_ok();
+    if staged_by_hard_link {
+        stats.hard_linked += 1;
+    } else {
+        stats.copied += 1;
+        let mut output = create_destination(destination)?;
+        io::copy(&mut source, &mut output)?;
+        output.flush()?;
+        output.sync_all()?;
+        reject_reparse(destination)?;
+        validate_regular_unique(&output)?;
+        let mut verify = output.try_clone()?;
+        let (copied_size, copied_digest) = hash_file(&mut verify)?;
+        if copied_size != expected_size || copied_digest != expected_sha256 {
+            return Err(invalid("destination verification failed"));
+        }
+        drop(verify);
+        drop(output);
+    }
+    reject_reparse(destination)?;
+
+    // A retained write-capable handle conflicts with the Windows image loader,
+    // whose reopen does not share writes. Reopen read-only and authenticate the
+    // exact path again before retaining the no-write/no-delete-share handle.
+    let mut retained = open_source(destination)?;
+    if staged_by_hard_link {
+        validate_regular_staged(&retained)?;
+    } else {
+        validate_regular_unique(&retained)?;
+    }
+    let (retained_size, retained_digest) =
+        staging_trust::hash_file_trusted(&mut retained, hash_file)?;
+    if retained_size != expected_size || retained_digest != expected_sha256 {
+        return Err(invalid("retained destination verification failed"));
+    }
+    Ok(retained)
 }
 
 #[cfg(windows)]
@@ -624,6 +828,18 @@ mod tests {
         LoadEntry {
             source: path,
             relative_basename: name.to_owned(),
+            expected_sha256: Sha256::digest(bytes).into(),
+            expected_size: bytes.len() as u64,
+        }
+    }
+
+    fn resource_fixture(dir: &Path, relative_path: &str, bytes: &[u8]) -> SealedResourceEntry {
+        let (_, basename) = relative_path.rsplit_once('/').unwrap();
+        let path = dir.join(basename);
+        fs::write(&path, bytes).unwrap();
+        SealedResourceEntry {
+            source: path,
+            relative_path: relative_path.to_owned(),
             expected_sha256: Sha256::digest(bytes).into(),
             expected_size: bytes.len() as u64,
         }
@@ -1012,6 +1228,72 @@ mod tests {
         let source = source_dir();
         let dependency = fixture(&source, "helper.dll", b"dependency");
         assert!(SealedLoadTree::create_cluster(vec![], vec![dependency]).is_err());
+        fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn resources_stage_into_one_subdirectory_with_the_same_authentication() {
+        let source = source_dir();
+        let main = fixture(&source, "main.plugin", b"main");
+        let grain = resource_fixture(&source, "Film Stocks/100T.grain", b"grain-bytes");
+        let plain = SealedLoadTree::create(main.clone(), vec![]).unwrap();
+        let plain_digest = plain.manifest_digest();
+        drop(plain);
+        let tree =
+            SealedLoadTree::create_with_resources(main, vec![], vec![grain]).unwrap();
+        // A resource-carrying tree digests differently (role 3 + path).
+        assert_ne!(plain_digest, tree.manifest_digest());
+        let staged = tree.root().join("Film Stocks").join("100T.grain");
+        assert_eq!(fs::read(&staged).unwrap(), b"grain-bytes");
+        assert_eq!(
+            tree.manifest_basenames(),
+            &[
+                "main.plugin".to_owned(),
+                "Film Stocks/100T.grain".to_owned()
+            ]
+        );
+        let root = tree.root().to_path_buf();
+        drop(tree);
+        // Drop removes the staged file, the subdirectory, and the root.
+        assert!(!root.exists(), "drop removes the whole tree including subdirs");
+        fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn resource_paths_reject_traversal_nesting_and_collisions() {
+        let source = source_dir();
+        for bad in [
+            "../evil.grain",
+            "a/b/c.grain",
+            "Film Stocks",
+            "Film Stocks/",
+            "/abs.grain",
+        ] {
+            assert!(
+                split_resource_relative_path(bad).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+        // The subdirectory name must not collide with a flat manifest entry.
+        let main = fixture(&source, "main.plugin", b"main");
+        let collision = resource_fixture(&source, "main.plugin/x.grain", b"x");
+        assert!(
+            SealedLoadTree::create_with_resources(main, vec![], vec![collision]).is_err()
+        );
+        // Duplicate resource paths fail closed, case-insensitively.
+        let main = fixture(&source, "main.plugin", b"main");
+        let first = resource_fixture(&source, "Film Stocks/a.grain", b"a");
+        let second = resource_fixture(&source, "Film Stocks/A.grain", b"a2");
+        assert!(
+            SealedLoadTree::create_with_resources(main, vec![], vec![first, second]).is_err()
+        );
+        // The staged basename must match the source file name.
+        let main = fixture(&source, "main.plugin", b"main");
+        let mut mismatched = resource_fixture(&source, "Film Stocks/other.grain", b"other");
+        mismatched.source = source.join("main.plugin");
+        assert!(
+            SealedLoadTree::create_with_resources(main, vec![], vec![mismatched]).is_err()
+        );
         fs::remove_dir_all(source).unwrap();
     }
 
