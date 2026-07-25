@@ -91,6 +91,7 @@ struct GuestState {
     smart_height: u32,
     suite_requests: Vec<String>,
     pre_checkout_calls: u32,
+    pre_checkout_requests: Vec<[i32; 4]>,
     checkout_pixels_calls: u32,
     checkout_output_calls: u32,
     parameter_definitions: Vec<u64>,
@@ -385,6 +386,15 @@ impl GuestEngine<'static> {
     }
 
     pub fn call_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
+        self.call_win64_with_timeout(address, args, TIMEOUT_MICROSECONDS)
+    }
+
+    fn call_win64_with_timeout(
+        &mut self,
+        address: u64,
+        args: [u64; 6],
+        timeout_microseconds: u64,
+    ) -> Result<u64, GuestError> {
         let stack_top = STACK_BASE + STACK_SIZE;
         // Win64 function entry observes RSP % 16 == 8. Reserve a return address,
         // 32-byte shadow space, two stack arguments, and bounded scratch.
@@ -416,7 +426,7 @@ impl GuestEngine<'static> {
         if let Err(error) = self.unicorn.emu_start(
             address,
             RETURN_ADDRESS,
-            TIMEOUT_MICROSECONDS,
+            timeout_microseconds,
             MAX_INSTRUCTIONS,
         ) {
             let rip = self.unicorn.reg_read(RegisterX86::RIP).unwrap_or(0);
@@ -529,6 +539,10 @@ impl GuestEngine<'static> {
         )
     }
 
+    pub fn pre_checkout_requests(&self) -> &[[i32; 4]] {
+        &self.unicorn.get_data().pre_checkout_requests
+    }
+
     pub fn handle_allocations(&self) -> &[u64] {
         &self.unicorn.get_data().handle_allocations
     }
@@ -581,6 +595,7 @@ impl GuestEngine<'static> {
         height: u32,
     ) {
         let state = self.unicorn.get_data_mut();
+        state.pre_checkout_requests.clear();
         state.smart_input_world = input_world;
         state.smart_output_world = output_world;
         state.smart_width = width;
@@ -901,6 +916,29 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
                 "unsupported smart checkout index={index} id={checkout_id}"
             ));
         }
+        let request_pointer = unicorn
+            .reg_read(RegisterX86::R9)
+            .map_err(|error| format!("pre-checkout request: {error}"))?;
+        if request_pointer == 0 {
+            return Err("pre-checkout request is null".to_string());
+        }
+        let mut request_rect_bytes = [0u8; 16];
+        unicorn
+            .mem_read(request_pointer, &mut request_rect_bytes)
+            .map_err(|error| format!("pre-checkout request rect: {error}"))?;
+        let mut request_rect = [0i32; 4];
+        for (index, value) in request_rect.iter_mut().enumerate() {
+            let offset = index * 4;
+            *value = i32::from_le_bytes(
+                request_rect_bytes[offset..offset + 4]
+                    .try_into()
+                    .expect("render request rectangle element is four bytes"),
+            );
+        }
+        unicorn
+            .get_data_mut()
+            .pre_checkout_requests
+            .push(request_rect);
         let rsp = unicorn
             .reg_read(RegisterX86::RSP)
             .map_err(|error| format!("pre-checkout stack: {error}"))?;
@@ -1204,8 +1242,7 @@ fn finish_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<(), Str
 mod tests {
     use super::*;
 
-    #[test]
-    fn win64_call_places_register_arguments_and_returns_rax() {
+    fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         const CODE: u64 = 0x1000_0000;
         let mut unicorn =
             Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()).unwrap();
@@ -1214,15 +1251,38 @@ mod tests {
         unicorn
             .mem_map(STACK_BASE, STACK_SIZE, Prot::READ | Prot::WRITE)
             .unwrap();
-        // mov rax, rcx; add rax, rdx; ret
-        unicorn
-            .mem_write(CODE, &[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3])
-            .unwrap();
+        unicorn.mem_write(CODE, code).unwrap();
         unicorn.mem_write(RETURN_ADDRESS, &[0xcc]).unwrap();
-        let mut engine = GuestEngine {
+        GuestEngine {
             unicorn,
             next_data: DATA_BASE,
-        };
+        }
+    }
+
+    #[test]
+    fn win64_call_places_register_arguments_and_returns_rax() {
+        const CODE: u64 = 0x1000_0000;
+        // mov rax, rcx; add rax, rdx; ret
+        let mut engine = test_engine(&[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3]);
         assert_eq!(engine.call_win64(CODE, [40, 2, 0, 0, 0, 0]).unwrap(), 42);
+    }
+
+    #[test]
+    fn win64_call_rejects_execution_that_does_not_reach_return_sentinel() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[0xf4]); // hlt
+        let error = engine.call_win64(CODE, [0; 6]).unwrap_err().to_string();
+        assert!(error.contains("before the guest returned"), "{error}");
+    }
+
+    #[test]
+    fn win64_call_timeout_still_fails_closed() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[0xeb, 0xfe]); // jmp $
+        let error = engine
+            .call_win64_with_timeout(CODE, [0; 6], 1_000)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("before the guest returned"), "{error}");
     }
 }

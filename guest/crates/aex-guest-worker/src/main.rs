@@ -20,10 +20,37 @@ fn main() -> ExitCode {
     };
     let input = args.next().map(PathBuf::from);
     let output = args.next().map(PathBuf::from);
-    let parameter_args = args.collect::<Vec<_>>();
-    if (command == "render-png" && (input.is_none() || output.is_none()))
+    let mut trailing_args = args.collect::<Vec<_>>();
+    let region = if command == "render-region-png" {
+        if trailing_args.len() < 4 {
+            usage();
+            return ExitCode::from(2);
+        }
+        let coordinates = trailing_args
+            .drain(..4)
+            .map(|value| {
+                value
+                    .to_str()
+                    .ok_or_else(|| "region coordinate must be UTF-8".to_string())?
+                    .parse::<i32>()
+                    .map_err(|error| format!("invalid region coordinate: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>();
+        match coordinates {
+            Ok(values) => Some([values[0], values[1], values[2], values[3]]),
+            Err(error) => {
+                eprintln!("aex_guest_error: {error}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
+    if ((command == "render-png" || command == "render-region-png")
+        && (input.is_none() || output.is_none()))
         || (command != "render-png"
-            && (input.is_some() || output.is_some() || !parameter_args.is_empty()))
+            && command != "render-region-png"
+            && (input.is_some() || output.is_some() || !trailing_args.is_empty()))
     {
         usage();
         return ExitCode::from(2);
@@ -60,9 +87,20 @@ fn main() -> ExitCode {
                 &image,
                 input.as_deref().expect("validated input path"),
                 output.as_deref().expect("validated output path"),
-                &parse_parameter_values(&parameter_args)?,
+                &parse_parameter_values(&trailing_args)?,
+                region,
             ),
-            _ => Err("command must be inspect, setup, render, or render-png".to_string()),
+            Some("render-region-png") => render_png(
+                &image,
+                input.as_deref().expect("validated input path"),
+                output.as_deref().expect("validated output path"),
+                &parse_parameter_values(&trailing_args)?,
+                region,
+            ),
+            _ => Err(
+                "command must be inspect, setup, render, render-png, or render-region-png"
+                    .to_string(),
+            ),
         });
     match result {
         Ok(json) => {
@@ -81,6 +119,9 @@ fn usage() {
     eprintln!(
         "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [name=value ...]"
     );
+    eprintln!(
+        "       aex-guest-worker render-region-png <x64.aex> <input.png> <output.png> <left> <top> <right> <bottom> [name=value ...]"
+    );
 }
 
 fn render_png(
@@ -88,6 +129,7 @@ fn render_png(
     input: &Path,
     output: &Path,
     parameter_values: &[ParameterValue],
+    region: Option<[i32; 4]>,
 ) -> Result<String, String> {
     let rgba = image::open(input)
         .map_err(|error| format!("decode input PNG: {error}"))?
@@ -98,7 +140,12 @@ fn render_png(
         argb8.extend_from_slice(&[pixel[3], pixel[0], pixel[1], pixel[2]]);
     }
     let report = ClassicHost::new(image)
-        .and_then(|mut host| host.render_argb8(width, height, &argb8, parameter_values))
+        .and_then(|mut host| match region {
+            Some(region) => {
+                host.render_argb8_region(width, height, &argb8, parameter_values, region)
+            }
+            None => host.render_argb8(width, height, &argb8, parameter_values),
+        })
         .map_err(|error| error.to_string())?;
     let mut output_rgba = Vec::with_capacity(report.argb8.len());
     for pixel in report.argb8.chunks_exact(4) {
