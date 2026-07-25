@@ -5,6 +5,7 @@ use thiserror::Error;
 
 use crate::backend::{
     ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue, TraceWatchSpec,
+    UnsupportedSuiteCall,
 };
 use crate::pe::PeImage;
 
@@ -78,6 +79,19 @@ pub struct SetupReport {
     pub out_flags: u32,
     pub out_flags2: u32,
     pub parameters: Vec<ParameterReport>,
+    pub suite_requests: Vec<String>,
+    pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
+    pub dropped_unsupported_suite_calls: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FailureReport {
+    pub schema_version: u32,
+    pub execution_backend: &'static str,
+    pub error: String,
+    pub suite_requests: Vec<String>,
+    pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
+    pub dropped_unsupported_suite_calls: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +106,8 @@ pub struct RenderReport {
     pub output_request: [i32; 4],
     pub input_requests: Vec<[i32; 4]>,
     pub suite_requests: Vec<String>,
+    pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
+    pub dropped_unsupported_suite_calls: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub census: Option<GuestCensus>,
     pub argb8: Vec<u8>,
@@ -287,7 +303,21 @@ impl ClassicHost {
             out_flags,
             out_flags2,
             parameters,
+            suite_requests: self.engine.suite_requests().to_vec(),
+            unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
+            dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
         })
+    }
+
+    pub fn failure_report(&self, error: &ClassicError) -> FailureReport {
+        FailureReport {
+            schema_version: 1,
+            execution_backend: self.engine.backend_name(),
+            error: error.to_string(),
+            suite_requests: self.engine.suite_requests().to_vec(),
+            unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
+            dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
+        }
     }
 
     pub fn trace_setup_selector(
@@ -702,6 +732,8 @@ impl ClassicHost {
                 output_request,
                 input_requests: self.engine.pre_checkout_requests().to_vec(),
                 suite_requests: self.engine.suite_requests().to_vec(),
+                unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
+                dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
                 census,
                 argb8,
             },

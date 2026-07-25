@@ -22,7 +22,10 @@ use std::ptr;
 use thiserror::Error;
 
 use crate::pe::PeImage;
-pub use crate::x64::{ExecutionTrace, GuestCensus, GuestParam, TraceWatchSpec};
+pub use crate::x64::{
+    ExecutionTrace, GuestCensus, GuestParam, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
+};
+use crate::x64::{record_unsupported_suite_call, utility_suite_layout};
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
 const MAX_HANDLE_SIZE: u64 = 128 * 1024 * 1024;
@@ -83,6 +86,9 @@ struct NativeState {
     smart_width: u32,
     smart_height: u32,
     suite_requests: Vec<String>,
+    unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
+    dropped_unsupported_suite_calls: u64,
+    utility_suites: HashMap<u32, u64>,
     pre_checkout_calls: u32,
     pre_checkout_requests: Vec<[i32; 4]>,
     checkout_pixels_calls: u32,
@@ -203,6 +209,15 @@ impl GuestEngine<'static> {
             engine.write_u64(handle_suite + (index * 8) as u64, callback)?;
         }
         engine.state.handle_suite = handle_suite;
+        for version in [3u32, 7, 11, 13] {
+            let callbacks =
+                native_utility_callbacks(version).expect("known AEGP Utility Suite version");
+            let table = engine.allocate(callbacks.len() * 8, 8)?;
+            for (slot, callback) in callbacks.into_iter().enumerate() {
+                engine.write_u64(table + (slot * 8) as u64, callback)?;
+            }
+            engine.state.utility_suites.insert(version, table);
+        }
         // Windows CRT process attach is not safe to enter natively until its
         // OS/SEH imports have typed implementations. The native carrier keeps
         // it opt-in; the Unicorn backend remains the exact lifecycle fallback.
@@ -382,6 +397,14 @@ impl GuestEngine<'static> {
 
     pub fn suite_requests(&self) -> &[String] {
         &self.state.suite_requests
+    }
+
+    pub fn unsupported_suite_calls(&self) -> &[UnsupportedSuiteCall] {
+        &self.state.unsupported_suite_calls
+    }
+
+    pub fn dropped_unsupported_suite_calls(&self) -> u64 {
+        self.state.dropped_unsupported_suite_calls
     }
 
     pub fn pre_checkout_requests(&self) -> &[[i32; 4]] {
@@ -722,6 +745,94 @@ unsafe extern "win64" fn checkout_output(
     .unwrap_or(4)
 }
 
+unsafe extern "win64" fn unsupported_utility_slot<const VERSION: u32, const SLOT: usize>(
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    with_state(|state| {
+        record_unsupported_suite_call(
+            &mut state.unsupported_suite_calls,
+            &mut state.dropped_unsupported_suite_calls,
+            VERSION,
+            SLOT,
+        );
+        4
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn register_with_aegp(
+    _: u64,
+    _: u64,
+    plugin_id: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    if plugin_id == 0 {
+        return 4;
+    }
+    unsafe {
+        *(plugin_id as *mut i32) = 1;
+    }
+    0
+}
+
+unsafe extern "win64" fn get_main_window(
+    main_window: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    if main_window == 0 {
+        return 4;
+    }
+    unsafe {
+        *(main_window as *mut u64) = 0;
+    }
+    0
+}
+
+macro_rules! utility_callbacks {
+    ($version:literal; $($slot:literal),+ $(,)?) => {{
+        vec![$(
+            callback_address!(unsupported_utility_slot::<$version, $slot>)
+        ),+]
+    }};
+}
+
+fn native_utility_callbacks(version: u32) -> Option<Vec<u64>> {
+    let mut callbacks = match version {
+        3 => utility_callbacks!(3; 0, 1, 2, 3, 4, 5, 6, 7, 8),
+        7 => utility_callbacks!(
+            7;
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            20, 21, 22, 23, 24
+        ),
+        11 => utility_callbacks!(
+            11;
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30
+        ),
+        13 => utility_callbacks!(
+            13;
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32
+        ),
+        _ => return None,
+    };
+    let (_, register_slot, window_slot) = utility_suite_layout(version)?;
+    callbacks[register_slot] = callback_address!(register_with_aegp);
+    callbacks[window_slot] = callback_address!(get_main_window);
+    Some(callbacks)
+}
+
 unsafe extern "win64" fn acquire_suite(
     name: u64,
     version: u64,
@@ -743,9 +854,26 @@ unsafe extern "win64" fn acquire_suite(
     let name = String::from_utf8_lossy(&bytes).into_owned();
     with_state(|state| {
         state.suite_requests.push(format!("{name} v{version}"));
+        if output != 0 {
+            unsafe {
+                *(output as *mut u64) = 0;
+            }
+        }
         if name == "PF Handle Suite" && version == 2 && output != 0 {
             unsafe {
                 *(output as *mut u64) = state.handle_suite;
+            }
+            0
+        } else if name == "AEGP Utility Suite" && output != 0 {
+            let Some(table) = u32::try_from(version)
+                .ok()
+                .and_then(|version| state.utility_suites.get(&version))
+                .copied()
+            else {
+                return u32::MAX as u64;
+            };
+            unsafe {
+                *(output as *mut u64) = table;
             }
             0
         } else {
@@ -901,4 +1029,63 @@ unsafe extern "win64" fn resize_handle(
         0
     })
     .unwrap_or(4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utility_v7_v13_callbacks_match_unicorn_contract() {
+        let mut state = NativeState::default();
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+
+        for version in [7u32, 13] {
+            let callbacks = native_utility_callbacks(version).unwrap();
+            let (slot_count, register_slot, window_slot) = utility_suite_layout(version).unwrap();
+            assert_eq!(callbacks.len(), slot_count);
+
+            let register: Win64Function =
+                unsafe { std::mem::transmute(callbacks[register_slot] as usize) };
+            let mut plugin_id = 0i32;
+            assert_eq!(
+                unsafe { register(0, 0, (&mut plugin_id as *mut i32) as u64, 0, 0, 0,) },
+                0
+            );
+            assert_eq!(plugin_id, 1);
+
+            let get_window: Win64Function =
+                unsafe { std::mem::transmute(callbacks[window_slot] as usize) };
+            let mut window = u64::MAX;
+            assert_eq!(
+                unsafe { get_window((&mut window as *mut u64) as u64, 0, 0, 0, 0, 0) },
+                0
+            );
+            assert_eq!(window, 0);
+
+            let unsupported: Win64Function = unsafe { std::mem::transmute(callbacks[0] as usize) };
+            assert_eq!(unsafe { unsupported(0, 0, 0, 0, 0, 0) }, 4);
+            assert_eq!(unsafe { unsupported(0, 0, 0, 0, 0, 0) }, 4);
+        }
+
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+        assert_eq!(
+            state.unsupported_suite_calls,
+            [
+                UnsupportedSuiteCall {
+                    name: "AEGP Utility Suite",
+                    version: 7,
+                    slot: 0,
+                    call_count: 2,
+                },
+                UnsupportedSuiteCall {
+                    name: "AEGP Utility Suite",
+                    version: 13,
+                    slot: 0,
+                    call_count: 2,
+                },
+            ]
+        );
+        assert_eq!(state.dropped_unsupported_suite_calls, 0);
+    }
 }

@@ -9,6 +9,34 @@ use aex_guest_worker::classic::{ClassicHost, ParameterValue};
 use aex_guest_worker::pe::PeImage;
 use sha2::{Digest, Sha256};
 
+struct CommandFailure {
+    message: String,
+    report_json: Option<String>,
+}
+
+impl CommandFailure {
+    fn with_classic_report(
+        host: &ClassicHost,
+        error: aex_guest_worker::classic::ClassicError,
+    ) -> Self {
+        let message = error.to_string();
+        let report_json = serde_json::to_string_pretty(&host.failure_report(&error)).ok();
+        Self {
+            message,
+            report_json,
+        }
+    }
+}
+
+impl From<String> for CommandFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            report_json: None,
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = env::args_os();
     let _program = args.next();
@@ -81,49 +109,48 @@ fn main() -> ExitCode {
 
     let mut traced_selector_error = None;
     let result = fs::read(&path)
-        .map_err(|error| error.to_string())
-        .and_then(|bytes| PeImage::parse_and_map(&bytes).map_err(|error| error.to_string()))
+        .map_err(|error| CommandFailure::from(error.to_string()))
+        .and_then(|bytes| {
+            PeImage::parse_and_map(&bytes)
+                .map_err(|error| CommandFailure::from(error.to_string()))
+        })
         .and_then(|image| match command.to_str() {
             Some("inspect") => {
-                serde_json::to_string_pretty(&image.report()).map_err(|error| error.to_string())
+                serde_json::to_string_pretty(&image.report())
+                    .map_err(|error| CommandFailure::from(error.to_string()))
             }
-            Some("setup") => ClassicHost::new(&image)
-                .and_then(|mut host| host.setup())
-                .and_then(|report| {
-                    serde_json::to_string_pretty(&report).map_err(|error| {
-                        aex_guest_worker::classic::ClassicError::Guest(
-                            aex_guest_worker::backend::GuestError::Callback(error.to_string()),
-                        )
-                    })
-                })
-                .map_err(|error| error.to_string()),
+            Some("setup") => {
+                let mut host = ClassicHost::new(&image)
+                    .map_err(|error| CommandFailure::from(error.to_string()))?;
+                let report = host
+                    .setup()
+                    .map_err(|error| CommandFailure::with_classic_report(&host, error))?;
+                serde_json::to_string_pretty(&report)
+                    .map_err(|error| CommandFailure::from(error.to_string()))
+            }
             Some("trace-selector") => {
                 let selector = input
                     .as_deref()
                     .and_then(Path::to_str)
-                    .ok_or_else(|| "trace selector must be UTF-8".to_string())?;
-                ClassicHost::new(&image)
-                    .and_then(|mut host| host.trace_setup_selector(selector))
-                    .and_then(|trace| {
-                        traced_selector_error = selector_error(trace.return_value);
-                        serde_json::to_string_pretty(&trace).map_err(|error| {
-                            aex_guest_worker::classic::ClassicError::Guest(
-                                aex_guest_worker::backend::GuestError::Callback(error.to_string()),
-                            )
-                        })
-                    })
-                    .map_err(|error| error.to_string())
+                    .ok_or_else(|| CommandFailure::from("trace selector must be UTF-8".to_string()))?;
+                let mut host = ClassicHost::new(&image)
+                    .map_err(|error| CommandFailure::from(error.to_string()))?;
+                let trace = host
+                    .trace_setup_selector(selector)
+                    .map_err(|error| CommandFailure::with_classic_report(&host, error))?;
+                traced_selector_error = selector_error(trace.return_value);
+                serde_json::to_string_pretty(&trace)
+                    .map_err(|error| CommandFailure::from(error.to_string()))
             }
-            Some("render") => ClassicHost::new(&image)
-                .and_then(|mut host| host.render_default_2x2())
-                .and_then(|report| {
-                    serde_json::to_string_pretty(&report).map_err(|error| {
-                        aex_guest_worker::classic::ClassicError::Guest(
-                            aex_guest_worker::backend::GuestError::Callback(error.to_string()),
-                        )
-                    })
-                })
-                .map_err(|error| error.to_string()),
+            Some("render") => {
+                let mut host = ClassicHost::new(&image)
+                    .map_err(|error| CommandFailure::from(error.to_string()))?;
+                let report = host
+                    .render_default_2x2()
+                    .map_err(|error| CommandFailure::with_classic_report(&host, error))?;
+                serde_json::to_string_pretty(&report)
+                    .map_err(|error| CommandFailure::from(error.to_string()))
+            }
             Some("render-png") => render_png(
                 &image,
                 input.as_deref().expect("validated input path"),
@@ -168,9 +195,9 @@ fn main() -> ExitCode {
                 &[],
                 None,
             ),
-            _ => Err(
+            _ => Err(CommandFailure::from(
                 "command must be inspect, setup, trace-selector, render, render-png, render-trace-png, render-region-png, or census-png".to_string(),
-            ),
+            )),
         });
     match result {
         Ok(json) => {
@@ -183,7 +210,10 @@ fn main() -> ExitCode {
             }
         }
         Err(error) => {
-            eprintln!("aex_guest_error: {error}");
+            if let Some(report_json) = error.report_json {
+                println!("{report_json}");
+            }
+            eprintln!("aex_guest_error: {}", error.message);
             ExitCode::from(1)
         }
     }
@@ -221,7 +251,7 @@ fn render_png(
     trace: bool,
     watches: &[TraceWatchSpec],
     output_pixel: Option<[u32; 2]>,
-) -> Result<String, String> {
+) -> Result<String, CommandFailure> {
     let input_png_sha256 = fs::read(input)
         .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
         .map_err(|error| format!("read input PNG for provenance: {error}"))?;
@@ -233,32 +263,32 @@ fn render_png(
     for pixel in rgba.as_raw().chunks_exact(4) {
         argb8.extend_from_slice(&[pixel[3], pixel[0], pixel[1], pixel[2]]);
     }
-    let (report, execution_traces) = ClassicHost::new(image)
-        .and_then(|mut host| {
-            if trace {
-                host.render_argb8_trace_with_watches(
-                    width,
-                    height,
-                    &argb8,
-                    parameter_values,
-                    watches.to_vec(),
-                    output_pixel,
-                )
-            } else {
-                match (region, census) {
-                    (None, true) => host
-                        .render_argb8_census(width, height, &argb8, parameter_values)
-                        .map(|report| (report, Vec::new())),
-                    (Some(region), _) => host
-                        .render_argb8_region(width, height, &argb8, parameter_values, region)
-                        .map(|report| (report, Vec::new())),
-                    (None, false) => host
-                        .render_argb8(width, height, &argb8, parameter_values)
-                        .map(|report| (report, Vec::new())),
-                }
-            }
-        })
-        .map_err(|error| error.to_string())?;
+    let mut host =
+        ClassicHost::new(image).map_err(|error| CommandFailure::from(error.to_string()))?;
+    let render_result = if trace {
+        host.render_argb8_trace_with_watches(
+            width,
+            height,
+            &argb8,
+            parameter_values,
+            watches.to_vec(),
+            output_pixel,
+        )
+    } else {
+        match (region, census) {
+            (None, true) => host
+                .render_argb8_census(width, height, &argb8, parameter_values)
+                .map(|report| (report, Vec::new())),
+            (Some(region), _) => host
+                .render_argb8_region(width, height, &argb8, parameter_values, region)
+                .map(|report| (report, Vec::new())),
+            (None, false) => host
+                .render_argb8(width, height, &argb8, parameter_values)
+                .map(|report| (report, Vec::new())),
+        }
+    };
+    let (report, execution_traces) =
+        render_result.map_err(|error| CommandFailure::with_classic_report(&host, error))?;
     let mut output_rgba = Vec::with_capacity(report.argb8.len());
     for pixel in report.argb8.chunks_exact(4) {
         output_rgba.extend_from_slice(&[pixel[1], pixel[2], pixel[3], pixel[0]]);
@@ -280,7 +310,8 @@ fn render_png(
     if let Some(object) = report_json.as_object_mut() {
         object.remove("argb8");
     }
-    serde_json::to_string_pretty(&report_json).map_err(|error| error.to_string())
+    serde_json::to_string_pretty(&report_json)
+        .map_err(|error| CommandFailure::from(error.to_string()))
 }
 
 fn parse_trace_watches(
