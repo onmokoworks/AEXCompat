@@ -90,6 +90,7 @@ pub struct AppliedParameter {
     pub value: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub point: Option<[f64; 2]>,
 }
 
@@ -1736,7 +1737,7 @@ fn apply_parameter_value(
         PARAM_SLIDER | PARAM_POPUP => {
             definition[union..union + 4].copy_from_slice(&(value.round() as i32).to_le_bytes());
         }
-        PARAM_FIXED_SLIDER | PARAM_ANGLE => {
+        PARAM_FIXED_SLIDER => {
             let fixed = value * 65536.0;
             if fixed < i32::MIN as f64 || fixed > i32::MAX as f64 {
                 return Err(ClassicError::Input(format!(
@@ -1963,21 +1964,6 @@ mod tests {
         apply_parameter_value(&mut checkbox, PARAM_CHECKBOX, &scalar(1.0)).unwrap();
         assert_eq!(read_i32(&checkbox, union), 1);
 
-        let mut angle = vec![0u8; abi::PF_PARAM_DEF_SIZE];
-        apply_parameter_value(
-            &mut angle,
-            PARAM_ANGLE,
-            &ParameterValue {
-                name: "angle".into(),
-                slot: None,
-                value: Some(-7.25),
-                color: None,
-                point: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(read_i32(&angle, union), -7 * 65536 - 16384);
-
         let mut popup = vec![0u8; abi::PF_PARAM_DEF_SIZE];
         apply_parameter_value(&mut popup, PARAM_POPUP, &scalar(2.0)).unwrap();
         assert_eq!(read_i32(&popup, union), 2);
@@ -2052,6 +2038,7 @@ mod tests {
         .unwrap();
         assert_eq!(applied["slot"], 2);
         assert_eq!(applied["color"], serde_json::json!([255, 64, 128, 192]));
+        assert!(applied.get("point").is_none());
     }
 
     #[test]
