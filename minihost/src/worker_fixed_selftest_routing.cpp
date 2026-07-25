@@ -77,14 +77,17 @@ int selftest_pf_adv_time(int, wchar_t**) {
 }
 
 int selftest_suite_entry_utility13(int, wchar_t**) {
-  const bool passed = aexcompat::l2_detail::verify_suite_entry_guards_and_utility13();
-  std::cout << "{\"suite_entry_utility13\":\"" << (passed ? "passed" : "failed")
-            << "\",\"utility_v7_acquired\":true,\"unsupported_slots_diagnosed\":true"
+  const auto result = aexcompat::l2_detail::verify_suite_entry_guards_and_utility13();
+  std::cout << "{\"suite_entry_utility13\":\"" << (result.passed ? "passed" : "failed")
+            << "\",\"utility_v7_acquired\":"
+            << (result.utility_v7_acquired ? "true" : "false")
+            << ",\"unsupported_slots_diagnosed\":"
+            << (result.unsupported_slots_diagnosed ? "true" : "false")
             << ",\"normal_effect_available\":true"
             << ",\"versions_12_14_rejected\":true,\"mask_callbacks_exposed\":false"
             << ",\"suite_leases_balanced\":"
             << (g_host->suite_leases_balanced() ? "true" : "false") << "}\n";
-  return passed ? 0 : 1;
+  return result.passed ? 0 : 1;
 }
 
 int selftest_pf_adv_app(int, wchar_t**) {

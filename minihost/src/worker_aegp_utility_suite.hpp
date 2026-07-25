@@ -64,6 +64,12 @@ extern UtilitySuite3 g_utility_suite3;
 extern UtilitySuite1 g_utility_suite1;
 extern UtilitySuite5 g_utility_suite5;
 
-bool verify_suite_entry_guards_and_utility13();
+struct UtilitySuiteSelftestResult {
+  bool passed{};
+  bool utility_v7_acquired{};
+  bool unsupported_slots_diagnosed{};
+};
+
+UtilitySuiteSelftestResult verify_suite_entry_guards_and_utility13();
 
 }  // namespace aexcompat::l2_detail
