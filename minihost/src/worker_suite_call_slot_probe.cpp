@@ -100,7 +100,7 @@ bool target_enabled(ProbeTarget target) noexcept {
 struct ProbeCall {
   uint32_t slot{};
   uint32_t call_count{};
-  std::array<uintptr_t, kCapturedArgumentCount> arguments{};
+  uint8_t argument_nonzero_mask{};
   uintptr_t caller_rva{};
   bool caller_rva_valid{};
   uint32_t exception_code{};
@@ -138,13 +138,18 @@ void record_call(ProbeTarget target, uint32_t slot,
                  uintptr_t return_address, uint32_t exception_code) noexcept {
   if (slot >= kProbeSlotCount) return;
   const auto [rva, valid_rva] = caller_rva(return_address);
+  uint8_t nonzero_mask{};
+  for (std::size_t index = 0; index < arguments.size(); ++index) {
+    if (arguments[index] != 0)
+      nonzero_mask |= static_cast<uint8_t>(1u << index);
+  }
   ProbeState& probe = states()[static_cast<std::size_t>(target)];
   try {
     std::lock_guard<std::mutex> lock(probe.mutex);
     ProbeCall& call = probe.calls[slot];
     if (!probe.observed[slot]) {
       probe.observed[slot] = true;
-      call = {slot, 1, arguments, rva, valid_rva, exception_code};
+      call = {slot, 1, nonzero_mask, rva, valid_rva, exception_code};
     } else if (call.call_count != std::numeric_limits<uint32_t>::max()) {
       ++call.call_count;
     } else {
@@ -171,10 +176,19 @@ int32_t __cdecl identifying_trap(
       Target, static_cast<uint32_t>(Slot),
       {rcx, rdx, r8, r9, stack0, stack1, stack2, stack3},
       return_address, exception_code);
+  // Do not copy process-local values into exception metadata: dumps and
+  // artifact collectors can persist RaiseException arguments. The target,
+  // slot, and zero/nonzero shape retain the bounded ABI evidence.
+  uint8_t nonzero_mask{};
+  const uintptr_t arguments[] = {rcx, rdx, r8, r9, stack0, stack1, stack2,
+                                 stack3};
+  for (std::size_t index = 0; index < std::size(arguments); ++index) {
+    if (arguments[index] != 0)
+      nonzero_mask |= static_cast<uint8_t>(1u << index);
+  }
   const ULONG_PTR exception_arguments[] = {
       static_cast<ULONG_PTR>(Target), static_cast<ULONG_PTR>(Slot),
-      static_cast<ULONG_PTR>(rcx), static_cast<ULONG_PTR>(rdx),
-      static_cast<ULONG_PTR>(r8), static_cast<ULONG_PTR>(r9)};
+      static_cast<ULONG_PTR>(nonzero_mask)};
   RaiseException(exception_code, EXCEPTION_NONCONTINUABLE,
                  static_cast<DWORD>(std::size(exception_arguments)),
                  exception_arguments);
@@ -199,6 +213,21 @@ void hex_value(std::ostringstream& json, uintptr_t value) {
        << std::setfill('0') << value << std::dec << '"';
 }
 
+const char* argument_shape(const ProbeCall& call, std::size_t index) noexcept {
+  return (call.argument_nonzero_mask & static_cast<uint8_t>(1u << index)) != 0
+      ? "nonzero"
+      : "zero";
+}
+
+uint32_t nonzero_argument_count(const ProbeCall& call) noexcept {
+  uint32_t count{};
+  for (std::size_t index = 0; index < kCapturedArgumentCount; ++index) {
+    if ((call.argument_nonzero_mask & static_cast<uint8_t>(1u << index)) != 0)
+      ++count;
+  }
+  return count;
+}
+
 void append_target_report(std::ostringstream& json, ProbeTarget target,
                           bool enabled) {
   const std::size_t target_index = static_cast<std::size_t>(target);
@@ -218,17 +247,19 @@ void append_target_report(std::ostringstream& json, ProbeTarget target,
     json << "{\"slot\":" << call.slot
          << ",\"call_count\":" << call.call_count
          << ",\"exception_code\":" << call.exception_code
+         << ",\"argument_word_count\":" << kCapturedArgumentCount
+         << ",\"nonzero_word_count\":" << nonzero_argument_count(call)
          << ",\"registers\":{";
     const char* register_names[] = {"rcx", "rdx", "r8", "r9"};
     for (std::size_t index = 0; index < 4; ++index) {
       if (index != 0) json << ',';
-      json << '"' << register_names[index] << "\":";
-      hex_value(json, call.arguments[index]);
+      json << '"' << register_names[index] << "\":\""
+           << argument_shape(call, index) << '"';
     }
     json << "},\"stack\":[";
     for (std::size_t index = 4; index < kCapturedArgumentCount; ++index) {
       if (index != 4) json << ',';
-      hex_value(json, call.arguments[index]);
+      json << '"' << argument_shape(call, index) << '"';
     }
     json << "],\"caller_rva\":";
     if (call.caller_rva_valid) {

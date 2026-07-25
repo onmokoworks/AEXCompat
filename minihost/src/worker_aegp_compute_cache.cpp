@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstring>
 #include <limits>
@@ -129,6 +130,15 @@ Runtime& runtime() {
 Telemetry& telemetry() {
   static Telemetry value;
   return value;
+}
+
+std::atomic_bool& unload_safe_state() {
+  static std::atomic_bool value{true};
+  return value;
+}
+
+void reject_unload() noexcept {
+  unload_safe_state().store(false, std::memory_order_release);
 }
 
 const char* outcome_name(Outcome outcome) noexcept {
@@ -809,7 +819,10 @@ AEGP_ComputeCacheSuite1 g_suite{
 };
 
 bool teardown_owner(HMODULE module) noexcept {
-  if (!module) return false;
+  if (!module) {
+    reject_unload();
+    return false;
+  }
   Runtime& state = runtime();
   std::vector<DeleteWork> work;
   {
@@ -824,6 +837,7 @@ bool teardown_owner(HMODULE module) noexcept {
           });
       if (computing || owner->live_receipts != 0) {
         record(1, "global_teardown", Outcome::cleanup_deferred, kErrStruct);
+        reject_unload();
         return false;
       }
       ready_count += static_cast<std::size_t>(std::count_if(
@@ -836,6 +850,7 @@ bool teardown_owner(HMODULE module) noexcept {
       work.reserve(ready_count);
     } catch (...) {
       record(1, "global_teardown", Outcome::capacity_failure, kErrAlloc);
+      reject_unload();
       return false;
     }
     for (auto iterator = state.classes.begin();
@@ -863,6 +878,10 @@ const void* provide_suite1(void*) noexcept { return suite(); }
 
 bool teardown_owner_from_entry(const void* entry) noexcept {
   return teardown_owner(module_from_address(entry));
+}
+
+bool unload_safe() noexcept {
+  return unload_safe_state().load(std::memory_order_acquire);
 }
 
 void reset_telemetry() noexcept {
@@ -930,6 +949,7 @@ bool reset_for_selftest() noexcept {
   }
   run_delete_work(work);
   reset_telemetry();
+  unload_safe_state().store(true, std::memory_order_release);
   return true;
 }
 

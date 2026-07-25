@@ -49,7 +49,11 @@ def test_every_slot_has_a_distinct_noncontinuable_identity_trap():
     assert "call.call_count" in SOURCE
     assert '\\"registers\\"' in SOURCE
     assert '\\"stack\\"' in SOURCE
+    assert '\\"argument_word_count\\"' in SOURCE
+    assert '\\"nonzero_word_count\\"' in SOURCE
     assert '\\"caller_rva\\"' in SOURCE
+    assert "call.arguments" not in SOURCE
+    assert "static_cast<ULONG_PTR>(rcx)" not in SOURCE
 
 
 def test_selector_boundary_contains_probe_seh_and_broker_keeps_failure_evidence():
@@ -66,11 +70,23 @@ def test_selector_boundary_contains_probe_seh_and_broker_keeps_failure_evidence(
     ) >= 2
 
 
-def test_native_synthetic_caller_pins_slot_registers_stack_and_exception():
+def test_native_synthetic_caller_pins_slot_shape_without_raw_values():
     assert "invoke_probe_slot" in NATIVE
     assert "slots[7] != slots[8]" in NATIVE
     assert "slots[9] != slots[10]" in NATIVE
     assert "kProbeExceptionBase + 7" in NATIVE
     assert "kProbeExceptionBase + kProbeExceptionTargetStride + 9" in NATIVE
-    for value in ("0011", "0022", "0033", "0044", "0055", "0066", "0077", "0088"):
+    assert '\\"rcx\\":\\"nonzero\\"' in NATIVE
+    assert '\\"stack\\":[\\"nonzero\\"' in NATIVE
+    for value in (
+        "0x0000000000000011",
+        "0x0000000000000022",
+        "0x0000000000000033",
+        "0x0000000000000044",
+        "0x0000000000000055",
+        "0x0000000000000066",
+        "0x0000000000000077",
+        "0x0000000000000088",
+    ):
         assert value in NATIVE
+        assert f'find("\\"{value}\\"") == std::string::npos' in NATIVE

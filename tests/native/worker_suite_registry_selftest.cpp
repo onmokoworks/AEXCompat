@@ -921,18 +921,25 @@ int main() {
           std::string::npos &&
       probe_report.find("\"exception_code\":3762452745", version5) !=
           std::string::npos &&
-      probe_report.find("\"rcx\":\"0x0000000000000011\"") !=
+      probe_report.find("\"argument_word_count\":8") !=
           std::string::npos &&
-      probe_report.find("\"rdx\":\"0x0000000000000022\"") !=
+      probe_report.find("\"nonzero_word_count\":8") !=
           std::string::npos &&
-      probe_report.find("\"r8\":\"0x0000000000000033\"") !=
+      probe_report.find("\"rcx\":\"nonzero\"") !=
           std::string::npos &&
-      probe_report.find("\"r9\":\"0x0000000000000044\"") !=
+      probe_report.find("\"rdx\":\"nonzero\"") !=
           std::string::npos &&
       probe_report.find(
-          "\"stack\":[\"0x0000000000000055\",\"0x0000000000000066\","
-          "\"0x0000000000000077\",\"0x0000000000000088\"]") !=
+          "\"stack\":[\"nonzero\",\"nonzero\",\"nonzero\",\"nonzero\"]") !=
           std::string::npos &&
+      probe_report.find("\"0x0000000000000011\"") == std::string::npos &&
+      probe_report.find("\"0x0000000000000022\"") == std::string::npos &&
+      probe_report.find("\"0x0000000000000033\"") == std::string::npos &&
+      probe_report.find("\"0x0000000000000044\"") == std::string::npos &&
+      probe_report.find("\"0x0000000000000055\"") == std::string::npos &&
+      probe_report.find("\"0x0000000000000066\"") == std::string::npos &&
+      probe_report.find("\"0x0000000000000077\"") == std::string::npos &&
+      probe_report.find("\"0x0000000000000088\"") == std::string::npos &&
       probe_report.find("\"caller_rva\":\"0x") != std::string::npos &&
       count_occurrences(probe_report, "\"truncated\":false") == 2 &&
       probe_report.find("\"configuration_truncated\":false") !=

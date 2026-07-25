@@ -1,4 +1,5 @@
 #include "worker_aegp_compute_cache.hpp"
+#include "worker_session.hpp"
 #include "worker_suite_registry.hpp"
 
 #include <atomic>
@@ -12,9 +13,42 @@
 #include <thread>
 #include <vector>
 
+// This target deliberately compiles the real WorkerSession implementation so
+// the Compute Cache refusal test below crosses the production finish/unload
+// boundary. The selftest target does not otherwise link worker_session.cpp.
+#include "../../minihost/src/worker_session.cpp"
+
 namespace cache = aexcompat::worker_runtime::compute_cache;
 using aexcompat::worker_runtime::SuiteRegistry;
 using aexcompat::worker_runtime::SuiteResolveResult;
+using aexcompat::worker_runtime::WorkerSession;
+
+namespace aexcompat::worker_runtime {
+
+// WorkerSession's audit dependency is inert in this focused lifecycle test.
+// The production worker links the real implementation; these definitions keep
+// this target focused on the unload decision and its Win32 module ownership.
+ModuleAuditReport& module_audit_report() noexcept {
+  static ModuleAuditReport report;
+  return report;
+}
+
+ModuleAuditSnapshot capture_module_audit() {
+  return {};
+}
+
+bool module_audit_passed() {
+  return true;
+}
+
+std::string module_audit_json() {
+  return "{}";
+}
+
+void record_module_audit_epoch(uint32_t, ModuleAuditSnapshot,
+                               ModuleAuditSnapshot) {}
+
+}  // namespace aexcompat::worker_runtime
 
 namespace {
 
@@ -358,14 +392,129 @@ void test_bounds_and_global_cleanup() {
   void* receipt{};
   assert(api()->AEGP_ComputeIfNeededAndCheckout(
              "teardown", &cleanup, true, &receipt) == cache::kErrNone);
+  assert(cache::unload_safe());
   assert(!cache::teardown_owner_from_entry(
       reinterpret_cast<const void*>(&generate_key)));
+  assert(!cache::unload_safe());
   assert(api()->AEGP_CheckinComputeReceipt(receipt) == cache::kErrNone);
   const int before = g_delete_calls.load();
   assert(cache::teardown_owner_from_entry(
       reinterpret_cast<const void*>(&generate_key)));
+  // The refusal is process-sticky: a later callback cannot retroactively make
+  // unloading safe in this worker.
+  assert(!cache::unload_safe());
   assert(g_delete_calls == before + 1);
   assert(api()->AEGP_ClassUnregister("teardown") == cache::kErrStruct);
+
+  reset_counts();
+  assert(cache::unload_safe());
+  assert(api()->AEGP_ClassRegister("teardown.clean", &callbacks) ==
+         cache::kErrNone);
+  assert(cache::teardown_owner_from_entry(
+      reinterpret_cast<const void*>(&generate_key)));
+  assert(cache::unload_safe());
+}
+
+void assert_worker_session_finish_preserves_unique_module() {
+  wchar_t temporary_directory[MAX_PATH]{};
+  assert(GetTempPathW(static_cast<DWORD>(std::size(temporary_directory)),
+                      temporary_directory) != 0);
+  wchar_t temporary_name[MAX_PATH]{};
+  assert(GetTempFileNameW(temporary_directory, L"aex", 0, temporary_name) != 0);
+  assert(DeleteFileW(temporary_name) != FALSE);
+  const std::filesystem::path module_path =
+      std::filesystem::path(temporary_name).concat(L".dll");
+
+  wchar_t system_directory[MAX_PATH]{};
+  assert(GetSystemDirectoryW(system_directory,
+                             static_cast<UINT>(std::size(system_directory))) !=
+         0);
+  const std::filesystem::path source_module =
+      std::filesystem::path(system_directory) / L"version.dll";
+  assert(CopyFileW(source_module.c_str(), module_path.c_str(), TRUE) != FALSE);
+  HMODULE module = LoadLibraryW(module_path.c_str());
+  assert(module);
+  const std::wstring module_basename = module_path.filename().wstring();
+
+  aexcompat::worker_runtime::RuntimeContext context;
+  context.plugin_path = module_path;
+  context.module = module;
+  {
+    WorkerSession session(context, nullptr, nullptr);
+    assert(!context.module);
+    assert(session.finish(0) == 14);
+    // This is the actual production finish()/unload_module() boundary. If it
+    // called FreeLibrary despite the rejected teardown, the unique module copy
+    // would no longer be present.
+    assert(GetModuleHandleW(module_basename.c_str()) == module);
+  }
+  assert(GetModuleHandleW(module_basename.c_str()) == module);
+
+  assert(FreeLibrary(module) != FALSE);
+  assert(GetModuleHandleW(module_basename.c_str()) == nullptr);
+  assert(DeleteFileW(module_path.c_str()) != FALSE);
+}
+
+void test_worker_session_finish_refuses_unload_with_live_receipt() {
+  reset_counts();
+  assert(api()->AEGP_ClassRegister("session.unload.receipt", &callbacks) ==
+         cache::kErrNone);
+  Options options{101, 202};
+  void* receipt{};
+  assert(api()->AEGP_ComputeIfNeededAndCheckout(
+             "session.unload.receipt", &options, true, &receipt) ==
+         cache::kErrNone);
+  assert(receipt);
+
+  // A live receipt makes owner teardown unsafe and permanently closes the
+  // process-wide unload gate before WorkerSession reaches its finish path.
+  assert(!cache::teardown_owner_from_entry(
+      reinterpret_cast<const void*>(&generate_key)));
+  assert(!cache::unload_safe());
+  assert_worker_session_finish_preserves_unique_module();
+
+  assert(api()->AEGP_CheckinComputeReceipt(receipt) == cache::kErrNone);
+  assert(cache::teardown_owner_from_entry(
+      reinterpret_cast<const void*>(&generate_key)));
+  assert(!cache::unload_safe());
+  reset_counts();
+}
+
+void test_worker_session_finish_refuses_unload_with_inflight_compute() {
+  reset_counts();
+  assert(api()->AEGP_ClassRegister("session.unload.compute", &callbacks) ==
+         cache::kErrNone);
+  Options options{303, 404};
+  options.block = true;
+  void* receipt{};
+  cache::A_Err result = -1;
+  std::thread computing([&] {
+    result = api()->AEGP_ComputeIfNeededAndCheckout(
+        "session.unload.compute", &options, true, &receipt);
+  });
+  {
+    std::unique_lock<std::mutex> lock(g_block_mutex);
+    g_block_changed.wait(lock, [] { return g_compute_entered; });
+  }
+
+  assert(!cache::teardown_owner_from_entry(
+      reinterpret_cast<const void*>(&generate_key)));
+  assert(!cache::unload_safe());
+  assert_worker_session_finish_preserves_unique_module();
+
+  {
+    std::lock_guard<std::mutex> lock(g_block_mutex);
+    g_release_compute = true;
+  }
+  g_block_changed.notify_all();
+  computing.join();
+  assert(result == cache::kErrNone);
+  assert(receipt);
+  assert(api()->AEGP_CheckinComputeReceipt(receipt) == cache::kErrNone);
+  assert(cache::teardown_owner_from_entry(
+      reinterpret_cast<const void*>(&generate_key)));
+  assert(!cache::unload_safe());
+  reset_counts();
 }
 
 SuiteResolveResult resolve_compute_cache(
@@ -456,6 +605,8 @@ int main() {
   test_invalid_foreign_and_callback_failures();
   test_concurrency_and_reentrancy();
   test_bounds_and_global_cleanup();
+  test_worker_session_finish_refuses_unload_with_live_receipt();
+  test_worker_session_finish_refuses_unload_with_inflight_compute();
   test_acquire_release_balance_and_telemetry();
   test_receipt_and_telemetry_bounds();
   assert(cache::reset_for_selftest());

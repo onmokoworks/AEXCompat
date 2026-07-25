@@ -103,6 +103,11 @@ const void* provide_suite1(void*) noexcept;
 // make cleanup unsafe.
 bool teardown_owner_from_entry(const void* entry) noexcept;
 
+// Process-sticky unload gate. A rejected owner teardown means plug-in code may
+// still be reachable through a live receipt/computation, so no later clean
+// callback may make unloading safe again in the same worker process.
+bool unload_safe() noexcept;
+
 void reset_telemetry() noexcept;
 std::string telemetry_report_json();
 

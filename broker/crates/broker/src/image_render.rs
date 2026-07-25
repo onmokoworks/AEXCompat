@@ -905,6 +905,12 @@ fn probe_hex(value: &Value) -> Option<&str> {
     })
 }
 
+fn probe_argument_shape(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .filter(|shape| matches!(*shape, "zero" | "nonzero"))
+}
+
 fn schema_safe_module_basename(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 260
@@ -1229,13 +1235,29 @@ fn propagate_suite_call_slot_probe(diagnostics: &mut Value, worker_report: &Valu
                 target_truncated = true;
                 continue;
             };
+            let Some(argument_word_count) = call
+                .get("argument_word_count")
+                .and_then(Value::as_u64)
+                .filter(|count| *count == 8)
+            else {
+                target_truncated = true;
+                continue;
+            };
+            let Some(nonzero_word_count) = call
+                .get("nonzero_word_count")
+                .and_then(Value::as_u64)
+                .filter(|count| *count <= argument_word_count)
+            else {
+                target_truncated = true;
+                continue;
+            };
             let Some(registers) = call.get("registers").and_then(Value::as_object) else {
                 target_truncated = true;
                 continue;
             };
             let register_values: Option<Vec<&str>> = ["rcx", "rdx", "r8", "r9"]
                 .iter()
-                .map(|name| registers.get(*name).and_then(probe_hex))
+                .map(|name| registers.get(*name).and_then(probe_argument_shape))
                 .collect();
             let Some(register_values) = register_values else {
                 target_truncated = true;
@@ -1245,11 +1267,25 @@ fn propagate_suite_call_slot_probe(diagnostics: &mut Value, worker_report: &Valu
                 .get("stack")
                 .and_then(Value::as_array)
                 .filter(|values| values.len() == 4)
-                .and_then(|values| values.iter().map(probe_hex).collect::<Option<Vec<_>>>())
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .map(probe_argument_shape)
+                        .collect::<Option<Vec<_>>>()
+                })
             else {
                 target_truncated = true;
                 continue;
             };
+            let observed_nonzero_count = register_values
+                .iter()
+                .chain(stack.iter())
+                .filter(|shape| **shape == "nonzero")
+                .count() as u64;
+            if observed_nonzero_count != nonzero_word_count {
+                target_truncated = true;
+                continue;
+            }
             let caller_rva = match call.get("caller_rva") {
                 Some(Value::Null) => Value::Null,
                 Some(value) => match probe_hex(value) {
@@ -1268,6 +1304,8 @@ fn propagate_suite_call_slot_probe(diagnostics: &mut Value, worker_report: &Valu
                 "slot": slot,
                 "call_count": call_count,
                 "exception_code": exception_code,
+                "argument_word_count": argument_word_count,
+                "nonzero_word_count": nonzero_word_count,
                 "registers": {
                     "rcx": register_values[0],
                     "rdx": register_values[1],
@@ -7782,6 +7820,78 @@ mod tests {
             spatial_ok: true,
             audio_input_sha256: audio_input_sha256.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn suite_call_slot_probe_keeps_shape_but_drops_raw_process_values() {
+        let raw_sentinel = "0xfeedfacecafebeef";
+        let worker_report = json!({
+            "suite_call_slot_probe": {
+                "enabled": true,
+                "slot_count": 32,
+                "maximum_targets": 8,
+                "targets": [{
+                    "name": "PF AE Private Effect Suite",
+                    "version": 3,
+                    "enabled": true,
+                    "calls": [{
+                        "slot": 7,
+                        "call_count": 1,
+                        "exception_code": 3762452487u64,
+                        "argument_word_count": 8,
+                        "nonzero_word_count": 4,
+                        "registers": {
+                            "rcx": "nonzero",
+                            "rdx": "zero",
+                            "r8": "nonzero",
+                            "r9": "zero"
+                        },
+                        "stack": ["nonzero", "zero", "nonzero", "zero"],
+                        "caller_rva": "0x0000000000001234",
+                        "raw_sentinel": raw_sentinel
+                    }, {
+                        "slot": 8,
+                        "call_count": 1,
+                        "exception_code": 3762452488u64,
+                        "argument_word_count": 8,
+                        "nonzero_word_count": 8,
+                        "registers": {
+                            "rcx": raw_sentinel,
+                            "rdx": raw_sentinel,
+                            "r8": raw_sentinel,
+                            "r9": raw_sentinel
+                        },
+                        "stack": [raw_sentinel, raw_sentinel, raw_sentinel, raw_sentinel],
+                        "caller_rva": "0x0000000000001234"
+                    }],
+                    "truncated": false
+                }],
+                "configuration_truncated": false
+            }
+        });
+        let mut diagnostics = json!({});
+        propagate_suite_call_slot_probe(&mut diagnostics, &worker_report);
+        let serialized = serde_json::to_string(&diagnostics).unwrap();
+        assert!(!serialized.contains(raw_sentinel));
+        assert_eq!(
+            diagnostics["suite_call_slot_probe"]["targets"][0]["calls"][0]["registers"]["rcx"],
+            "nonzero"
+        );
+        assert_eq!(
+            diagnostics["suite_call_slot_probe"]["targets"][0]["calls"][0]["nonzero_word_count"],
+            4
+        );
+        assert_eq!(
+            diagnostics["suite_call_slot_probe"]["targets"][0]["calls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            diagnostics["suite_call_slot_probe"]["targets"][0]["truncated"],
+            true
+        );
     }
 
     /// The session route synthesizes the public report from its own final

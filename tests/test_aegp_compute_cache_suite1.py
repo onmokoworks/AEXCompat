@@ -122,6 +122,37 @@ def test_compute_cache_provider_is_registered_and_probe_does_not_intercept():
     assert "aegp_compute_cache_probe" not in probe
 
 
+def test_compute_cache_teardown_refusal_propagates_to_the_unload_gate():
+    header = HEADER.read_text(encoding="utf-8")
+    provider = PROVIDER.read_text(encoding="utf-8")
+    helper = (
+        ROOT / "minihost/src/worker_l2_shared_helpers.cpp"
+    ).read_text(encoding="utf-8")
+    session = (
+        ROOT / "minihost/src/worker_session.cpp"
+    ).read_text(encoding="utf-8")
+    native = (
+        ROOT / "tests/native/worker_aegp_compute_cache_selftest.cpp"
+    ).read_text(encoding="utf-8")
+    assert "bool unload_safe() noexcept;" in header
+    assert "reject_unload();" in provider
+    assert "compute_cache_teardown_safe" in helper
+    assert "compute_cache::kErrStruct" in helper
+    assert "compute_cache::unload_safe()" in session
+    unload = session[session.index("void WorkerSession::unload_module"):
+                     session.index("void WorkerSession::restore_stdout")]
+    assert unload.index("compute_cache::unload_safe()") < unload.index(
+        "FreeLibrary(module_);"
+    )
+    assert "assert(!cache::unload_safe());" in native
+    assert "assert(cache::unload_safe());" in native
+    assert "test_worker_session_finish_refuses_unload_with_live_receipt" in native
+    assert "test_worker_session_finish_refuses_unload_with_inflight_compute" in native
+    assert "WorkerSession session(context, nullptr, nullptr);" in native
+    assert "assert(session.finish(0) == 14);" in native
+    assert "GetModuleHandleW(module_basename.c_str()) == module" in native
+
+
 def test_compute_cache_report_and_broker_wiring_are_bounded_and_exact_key():
     report_header = REPORT_HEADER.read_text(encoding="utf-8")
     report_source = REPORT_SOURCE.read_text(encoding="utf-8")
