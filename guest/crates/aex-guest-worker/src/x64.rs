@@ -34,7 +34,11 @@ const HOST_UNLOCK_HANDLE: u64 = STUB_BASE + 0x800e0;
 const HOST_DISPOSE_HANDLE: u64 = STUB_BASE + 0x800f0;
 const HOST_HANDLE_SIZE: u64 = STUB_BASE + 0x80100;
 const HOST_RESIZE_HANDLE: u64 = STUB_BASE + 0x80110;
+const HOST_AEGP_REGISTER: u64 = STUB_BASE + 0x80120;
+const HOST_AEGP_GET_MAIN_WINDOW: u64 = STUB_BASE + 0x80130;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
+const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
+const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
 const DATA_BASE: u64 = 0x0000_0000_4000_0000;
 const DATA_SIZE: u64 = 0x1000_0000;
 const HANDLE_DATA_BASE: u64 = DATA_BASE + 0x400_0000;
@@ -54,6 +58,38 @@ const TRACE_DISTINCT_SAMPLES: usize = 16;
 const TRACE_DISTINCT_FINGERPRINTS: usize = 4096;
 const MAX_TRACE_WATCH_BYTES: usize = 4096;
 const MAX_TRACE_WITNESSES: usize = 256;
+const MAX_UNSUPPORTED_SUITE_CALLS: usize = 256;
+
+pub(crate) fn utility_suite_layout(version: u32) -> Option<(usize, usize, usize)> {
+    match version {
+        3 => Some((9, 7, 8)),
+        7 => Some((25, 7, 8)),
+        11 => Some((31, 8, 9)),
+        13 => Some((33, 9, 10)),
+        _ => None,
+    }
+}
+
+fn utility_suite_table_address(version: u32) -> Option<u64> {
+    match version {
+        3 => Some(HOST_AEGP_UTILITY_TABLES),
+        7 => Some(HOST_AEGP_UTILITY_TABLES + 0x100),
+        11 => Some(HOST_AEGP_UTILITY_TABLES + 0x200),
+        13 => Some(HOST_AEGP_UTILITY_TABLES + 0x300),
+        _ => None,
+    }
+}
+
+fn unsupported_suite_stub_address(version: u32, slot: usize) -> Option<u64> {
+    let version_index = match version {
+        3 => 0,
+        7 => 1,
+        11 => 2,
+        13 => 3,
+        _ => return None,
+    };
+    Some(HOST_AEGP_UNSUPPORTED_STUBS + version_index * 0x1000 + slot as u64 * STUB_STRIDE)
+}
 
 #[derive(Debug, Error)]
 pub enum GuestError {
@@ -1254,6 +1290,37 @@ pub struct GuestParam {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UnsupportedSuiteCall {
+    pub name: &'static str,
+    pub version: u32,
+    pub slot: usize,
+    pub call_count: u64,
+}
+
+pub(crate) fn record_unsupported_suite_call(
+    calls: &mut Vec<UnsupportedSuiteCall>,
+    dropped: &mut u64,
+    version: u32,
+    slot: usize,
+) {
+    if let Some(call) = calls
+        .iter_mut()
+        .find(|call| call.version == version && call.slot == slot)
+    {
+        call.call_count += 1;
+    } else if calls.len() < MAX_UNSUPPORTED_SUITE_CALLS {
+        calls.push(UnsupportedSuiteCall {
+            name: "AEGP Utility Suite",
+            version,
+            slot,
+            call_count: 1,
+        });
+    } else {
+        *dropped += 1;
+    }
+}
+
 #[derive(Default)]
 struct GuestState {
     params: Vec<GuestParam>,
@@ -1263,6 +1330,8 @@ struct GuestState {
     smart_width: u32,
     smart_height: u32,
     suite_requests: Vec<String>,
+    unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
+    dropped_unsupported_suite_calls: u64,
     pre_checkout_calls: u32,
     pre_checkout_requests: Vec<[i32; 4]>,
     checkout_pixels_calls: u32,
@@ -1856,6 +1925,8 @@ impl GuestEngine<'static> {
             ("write dispose-handle callback", HOST_DISPOSE_HANDLE),
             ("write handle-size callback", HOST_HANDLE_SIZE),
             ("write resize-handle callback", HOST_RESIZE_HANDLE),
+            ("write AEGP register callback", HOST_AEGP_REGISTER),
+            ("write AEGP main-window callback", HOST_AEGP_GET_MAIN_WINDOW),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -1917,6 +1988,22 @@ impl GuestEngine<'static> {
                 HOST_ACQUIRE_SUITE,
                 HOST_ACQUIRE_SUITE,
                 emulate_acquire_suite,
+            ),
+        )?;
+        uc(
+            "install AEGP register callback",
+            unicorn.add_code_hook(
+                HOST_AEGP_REGISTER,
+                HOST_AEGP_REGISTER,
+                emulate_aegp_register,
+            ),
+        )?;
+        uc(
+            "install AEGP main-window callback",
+            unicorn.add_code_hook(
+                HOST_AEGP_GET_MAIN_WINDOW,
+                HOST_AEGP_GET_MAIN_WINDOW,
+                emulate_aegp_get_main_window,
             ),
         )?;
         uc(
@@ -1985,6 +2072,7 @@ impl GuestEngine<'static> {
             "write PF Handle Suite",
             unicorn.mem_write(HOST_HANDLE_SUITE, &handle_suite),
         )?;
+        install_aegp_utility_suites(&mut unicorn)?;
         for (address, name) in [
             (HOST_ADD_PARAM, "add_param"),
             (HOST_POISON, "unsupported_callback"),
@@ -2004,6 +2092,8 @@ impl GuestEngine<'static> {
             (HOST_DISPOSE_HANDLE, "dispose_handle"),
             (HOST_HANDLE_SIZE, "handle_size"),
             (HOST_RESIZE_HANDLE, "resize_handle"),
+            (HOST_AEGP_REGISTER, "aegp_register_with_aegp"),
+            (HOST_AEGP_GET_MAIN_WINDOW, "aegp_get_main_window"),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -2760,6 +2850,14 @@ impl GuestEngine<'static> {
         &self.unicorn.get_data().suite_requests
     }
 
+    pub fn unsupported_suite_calls(&self) -> &[UnsupportedSuiteCall] {
+        &self.unicorn.get_data().unsupported_suite_calls
+    }
+
+    pub fn dropped_unsupported_suite_calls(&self) -> u64 {
+        self.unicorn.get_data().dropped_unsupported_suite_calls
+    }
+
     pub fn smart_callback_counts(&self) -> (u32, u32, u32) {
         let state = self.unicorn.get_data();
         (
@@ -3250,6 +3348,52 @@ fn emulate_checkout_output(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
     finish_callback(unicorn, result);
 }
 
+fn install_aegp_utility_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+    for version in [3u32, 7, 11, 13] {
+        let (slot_count, register_slot, window_slot) =
+            utility_suite_layout(version).expect("known utility suite version");
+        let table =
+            utility_suite_table_address(version).expect("known utility suite table address");
+        let mut bytes = vec![0u8; slot_count * 8];
+        for slot in 0..slot_count {
+            let callback = if slot == register_slot {
+                HOST_AEGP_REGISTER
+            } else if slot == window_slot {
+                HOST_AEGP_GET_MAIN_WINDOW
+            } else {
+                let stub = unsupported_suite_stub_address(version, slot)
+                    .expect("known unsupported suite stub");
+                uc(
+                    "write AEGP unsupported callback",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install AEGP unsupported callback",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        let guest = unicorn.get_data_mut();
+                        let GuestState {
+                            unsupported_suite_calls,
+                            dropped_unsupported_suite_calls,
+                            ..
+                        } = guest;
+                        record_unsupported_suite_call(
+                            unsupported_suite_calls,
+                            dropped_unsupported_suite_calls,
+                            version,
+                            slot,
+                        );
+                        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+                    }),
+                )?;
+                stub
+            };
+            bytes[slot * 8..slot * 8 + 8].copy_from_slice(&callback.to_le_bytes());
+        }
+        uc("write AEGP Utility Suite", unicorn.mem_write(table, &bytes))?;
+    }
+    Ok(())
+}
+
 fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let name_pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let version = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
@@ -3269,6 +3413,9 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         .suite_requests
         .push(format!("{name} v{version}"));
     let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    if output != 0 {
+        let _ = unicorn.mem_write(output, &0u64.to_le_bytes());
+    }
     if name == "PF Handle Suite" && version == 2 && output != 0 {
         if unicorn
             .mem_write(output, &HOST_HANDLE_SUITE.to_le_bytes())
@@ -3278,7 +3425,35 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             return;
         }
     }
+    if name == "AEGP Utility Suite"
+        && output != 0
+        && let Some(table) = u32::try_from(version)
+            .ok()
+            .and_then(utility_suite_table_address)
+        && unicorn.mem_write(output, &table.to_le_bytes()).is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
     let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+}
+
+fn emulate_aegp_register(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    if output != 0 && unicorn.mem_write(output, &1i32.to_le_bytes()).is_ok() {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    } else {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+    }
+}
+
+fn emulate_aegp_get_main_window(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let output = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    if output != 0 && unicorn.mem_write(output, &0u64.to_le_bytes()).is_ok() {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    } else {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+    }
 }
 
 fn emulate_checkout_param(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
@@ -3563,6 +3738,35 @@ mod tests {
             .unwrap();
         unicorn.mem_write(CODE, code).unwrap();
         unicorn.mem_write(RETURN_ADDRESS, &[0xcc]).unwrap();
+        for address in [
+            HOST_ACQUIRE_SUITE,
+            HOST_AEGP_REGISTER,
+            HOST_AEGP_GET_MAIN_WINDOW,
+        ] {
+            unicorn.mem_write(address, &[0xc3]).unwrap();
+        }
+        unicorn
+            .add_code_hook(
+                HOST_ACQUIRE_SUITE,
+                HOST_ACQUIRE_SUITE,
+                emulate_acquire_suite,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_AEGP_REGISTER,
+                HOST_AEGP_REGISTER,
+                emulate_aegp_register,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_AEGP_GET_MAIN_WINDOW,
+                HOST_AEGP_GET_MAIN_WINDOW,
+                emulate_aegp_get_main_window,
+            )
+            .unwrap();
+        install_aegp_utility_suites(&mut unicorn).unwrap();
         let mut trace_points = Vec::new();
         let mut decoder = Decoder::with_ip(64, code, CODE, DecoderOptions::NONE);
         while decoder.can_decode() {
@@ -3600,6 +3804,110 @@ mod tests {
         // mov rax, rcx; add rax, rdx; ret
         let mut engine = test_engine(&[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3]);
         assert_eq!(engine.call_win64(CODE, [40, 2, 0, 0, 0, 0]).unwrap(), 42);
+    }
+
+    #[test]
+    fn aegp_utility_v7_v13_supported_and_unsupported_slots_execute() {
+        let mut engine = test_engine(&[0xc3]);
+        let suite_name = engine.allocate(19, 1).unwrap();
+        engine.write(suite_name, b"AEGP Utility Suite\0").unwrap();
+
+        for version in [7u64, 13] {
+            let output = engine.allocate(8, 8).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(HOST_ACQUIRE_SUITE, [suite_name, version, output, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            let mut table_bytes = [0u8; 8];
+            engine.read(output, &mut table_bytes).unwrap();
+            let table = u64::from_le_bytes(table_bytes);
+            let (_, register_slot, window_slot) = utility_suite_layout(version as u32).unwrap();
+
+            let mut callback_bytes = [0u8; 8];
+            engine
+                .read(table + (register_slot * 8) as u64, &mut callback_bytes)
+                .unwrap();
+            let register = u64::from_le_bytes(callback_bytes);
+            let plugin_id = engine.allocate(4, 4).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(register, [0, suite_name, plugin_id, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            let mut plugin_id_bytes = [0u8; 4];
+            engine.read(plugin_id, &mut plugin_id_bytes).unwrap();
+            assert_eq!(i32::from_le_bytes(plugin_id_bytes), 1);
+
+            engine
+                .read(table + (window_slot * 8) as u64, &mut callback_bytes)
+                .unwrap();
+            let get_window = u64::from_le_bytes(callback_bytes);
+            let window = engine.allocate(8, 8).unwrap();
+            engine.write(window, &u64::MAX.to_le_bytes()).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(get_window, [window, 0, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            let mut window_bytes = [0u8; 8];
+            engine.read(window, &mut window_bytes).unwrap();
+            assert_eq!(u64::from_le_bytes(window_bytes), 0);
+
+            engine.read(table, &mut callback_bytes).unwrap();
+            let unsupported = u64::from_le_bytes(callback_bytes);
+            assert_eq!(engine.call_win64(unsupported, [0; 6]).unwrap(), 4);
+            assert_eq!(engine.call_win64(unsupported, [0; 6]).unwrap(), 4);
+        }
+
+        let unsupported_output = engine.allocate(8, 8).unwrap();
+        engine
+            .write(unsupported_output, &u64::MAX.to_le_bytes())
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_ACQUIRE_SUITE,
+                    [suite_name, 12, unsupported_output, 0, 0, 0],
+                )
+                .unwrap(),
+            u32::MAX as u64
+        );
+        let mut unsupported_output_bytes = [0u8; 8];
+        engine
+            .read(unsupported_output, &mut unsupported_output_bytes)
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(unsupported_output_bytes), 0);
+
+        assert_eq!(
+            engine.unsupported_suite_calls(),
+            [
+                UnsupportedSuiteCall {
+                    name: "AEGP Utility Suite",
+                    version: 7,
+                    slot: 0,
+                    call_count: 2,
+                },
+                UnsupportedSuiteCall {
+                    name: "AEGP Utility Suite",
+                    version: 13,
+                    slot: 0,
+                    call_count: 2,
+                },
+            ]
+        );
+        assert_eq!(engine.dropped_unsupported_suite_calls(), 0);
+        assert_eq!(
+            engine.suite_requests(),
+            [
+                "AEGP Utility Suite v7",
+                "AEGP Utility Suite v13",
+                "AEGP Utility Suite v12",
+            ]
+        );
     }
 
     #[test]
