@@ -482,7 +482,7 @@ fn trace_instruction(
         let pending = matching_watches
             .into_iter()
             .map(|spec| {
-                let address = trace_register_value(unicorn, spec.register).unwrap_or(0);
+                let address = trace_register_value(unicorn, spec.register, 0x20).unwrap_or(0);
                 PendingTraceWatch {
                     spec_id: spec.id,
                     register: spec.register,
@@ -516,7 +516,13 @@ fn trace_instruction(
             .then(|| address - image_base);
         let is_tail_target = target.is_some_and(|_| target_rva.is_none())
             || unicorn.get_data().trace.as_ref().is_some_and(|capture| {
-                target_rva.is_some_and(|rva| capture.known_function_entries.contains(&rva))
+                target_rva.is_some_and(|rva| {
+                    capture.known_function_entries.contains(&rva)
+                        || capture
+                            .watch_specs
+                            .iter()
+                            .any(|spec| spec.function_rva == Some(rva))
+                })
             });
         let matching_watches = unicorn
             .get_data()
@@ -534,6 +540,7 @@ fn trace_instruction(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let tail_stack_arguments = trace_stack_arguments(unicorn, rsp, 0x28, image_base, image_end);
         if is_tail_target && let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
             push_trace_event(
                 capture,
@@ -555,7 +562,7 @@ fn trace_instruction(
                     name: target.map(|target| format!("runtime_target={target:#x}")),
                     arguments,
                     xmm_arguments,
-                    stack_arguments: call_stack_arguments,
+                    stack_arguments: tail_stack_arguments,
                     return_value: None,
                     exemplars: TraceExemplars::default(),
                     call_kind: Some("runtime_jmp"),
@@ -574,7 +581,7 @@ fn trace_instruction(
             let pending = matching_watches
                 .into_iter()
                 .map(|spec| {
-                    let address = trace_register_value(unicorn, spec.register).unwrap_or(0);
+                    let address = trace_register_value(unicorn, spec.register, 0x28).unwrap_or(0);
                     PendingTraceWatch {
                         spec_id: spec.id,
                         register: spec.register,
@@ -754,7 +761,11 @@ fn trace_return_value(
     }
 }
 
-fn trace_register_value(unicorn: &Unicorn<'_, GuestState>, register: &str) -> Option<u64> {
+fn trace_register_value(
+    unicorn: &Unicorn<'_, GuestState>,
+    register: &str,
+    stack_argument_offset: u64,
+) -> Option<u64> {
     if let Some(index) = register
         .strip_prefix("stack")
         .and_then(|index| index.parse::<u64>().ok())
@@ -763,7 +774,7 @@ fn trace_register_value(unicorn: &Unicorn<'_, GuestState>, register: &str) -> Op
         let rsp = unicorn.reg_read(RegisterX86::RSP).ok()?;
         let mut bytes = [0; 8];
         unicorn
-            .mem_read(rsp + 0x20 + (index - 5) * 8, &mut bytes)
+            .mem_read(rsp + stack_argument_offset + (index - 5) * 8, &mut bytes)
             .ok()?;
         return Some(u64::from_le_bytes(bytes));
     }
@@ -3675,6 +3686,43 @@ mod tests {
         assert_eq!(trace.memory_witnesses[1].watch_id, "tail-target");
         assert_eq!(trace.memory_witnesses[1].before.u8_values, [2]);
         assert_eq!(trace.memory_witnesses[1].after.u8_values, [3]);
+    }
+
+    #[test]
+    fn execution_trace_treats_explicitly_watched_first_jump_as_tail_call() {
+        const CODE: u64 = 0x1000_0000;
+        // jmp target; padding; target: mov rax,[rsp+0x28]; inc byte ptr [rax]; ret
+        let mut engine = test_engine(&[
+            0xeb, 0x02, 0x90, 0x90, 0x48, 0x8b, 0x44, 0x24, 0x28, 0xfe, 0x00, 0xc3,
+        ]);
+        let buffer = engine.allocate(1, 1).unwrap();
+        engine.write(buffer, &[1]).unwrap();
+        engine.configure_trace_watches(vec![TraceWatchSpec {
+            id: "first-tail-stack5".into(),
+            function_rva: Some(4),
+            instruction_rva: None,
+            absolute_address: None,
+            register: "stack5",
+            size: 1,
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
+        }]);
+        engine.begin_execution_trace("GLOBAL_SETUP", CODE).unwrap();
+        let result = engine.call_win64(CODE, [0, 0, 0, 0, buffer, 0]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        let tail = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "tail_call")
+            .unwrap();
+        assert_eq!(tail.target_rva, Some(4));
+        assert_eq!(tail.stack_arguments[0].value.raw, buffer);
+        let witness = trace.memory_witnesses.first().unwrap();
+        assert_eq!(witness.watch_id, "first-tail-stack5");
+        assert_eq!(witness.before.u8_values, [1]);
+        assert_eq!(witness.after.u8_values, [2]);
     }
 
     #[test]
