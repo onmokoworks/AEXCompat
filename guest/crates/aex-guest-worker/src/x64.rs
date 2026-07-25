@@ -1657,6 +1657,8 @@ impl GuestEngine<'static> {
                     .symbols
                     .iter()
                     .map(|symbol| symbol.name.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
                     .collect(),
             }
         }));
