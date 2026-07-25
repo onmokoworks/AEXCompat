@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_EFFECT_DEBUG_MATRIX_RESULT_2026-07-15.json"
 WORKER = source_owners.L2_MAIN
 REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def test_real_aex_matrix_distinguishes_supported_renders_from_depth_negotiation():

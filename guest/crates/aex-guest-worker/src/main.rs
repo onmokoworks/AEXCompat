@@ -1,24 +1,31 @@
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aex_guest_worker::classic::ClassicHost;
+use aex_guest_worker::classic::{ClassicHost, ParameterValue};
 use aex_guest_worker::pe::PeImage;
 
 fn main() -> ExitCode {
     let mut args = env::args_os();
     let _program = args.next();
     let Some(command) = args.next() else {
-        eprintln!("usage: aex-guest-worker <inspect|setup|render> <x64.aex>");
+        usage();
         return ExitCode::from(2);
     };
     let Some(path) = args.next().map(PathBuf::from) else {
-        eprintln!("usage: aex-guest-worker <inspect|setup|render> <x64.aex>");
+        usage();
         return ExitCode::from(2);
     };
-    if args.next().is_some() {
-        eprintln!("usage: aex-guest-worker <inspect|setup|render> <x64.aex>");
+    let input = args.next().map(PathBuf::from);
+    let output = args.next().map(PathBuf::from);
+    let parameter_args = args.collect::<Vec<_>>();
+    if (command == "render-png" && (input.is_none() || output.is_none()))
+        || (command != "render-png"
+            && (input.is_some() || output.is_some() || !parameter_args.is_empty()))
+    {
+        usage();
         return ExitCode::from(2);
     }
 
@@ -49,7 +56,13 @@ fn main() -> ExitCode {
                     })
                 })
                 .map_err(|error| error.to_string()),
-            _ => Err("command must be inspect, setup, or render".to_string()),
+            Some("render-png") => render_png(
+                &image,
+                input.as_deref().expect("validated input path"),
+                output.as_deref().expect("validated output path"),
+                &parse_parameter_values(&parameter_args)?,
+            ),
+            _ => Err("command must be inspect, setup, render, or render-png".to_string()),
         });
     match result {
         Ok(json) => {
@@ -61,4 +74,75 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn usage() {
+    eprintln!("usage: aex-guest-worker <inspect|setup|render> <x64.aex>");
+    eprintln!(
+        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [name=value ...]"
+    );
+}
+
+fn render_png(
+    image: &PeImage,
+    input: &Path,
+    output: &Path,
+    parameter_values: &[ParameterValue],
+) -> Result<String, String> {
+    let rgba = image::open(input)
+        .map_err(|error| format!("decode input PNG: {error}"))?
+        .into_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut argb8 = Vec::with_capacity(rgba.as_raw().len());
+    for pixel in rgba.as_raw().chunks_exact(4) {
+        argb8.extend_from_slice(&[pixel[3], pixel[0], pixel[1], pixel[2]]);
+    }
+    let report = ClassicHost::new(image)
+        .and_then(|mut host| host.render_argb8(width, height, &argb8, parameter_values))
+        .map_err(|error| error.to_string())?;
+    let mut output_rgba = Vec::with_capacity(report.argb8.len());
+    for pixel in report.argb8.chunks_exact(4) {
+        output_rgba.extend_from_slice(&[pixel[1], pixel[2], pixel[3], pixel[0]]);
+    }
+    let output_image = image::RgbaImage::from_raw(width, height, output_rgba)
+        .ok_or_else(|| "rendered pixel byte count does not match dimensions".to_string())?;
+    output_image
+        .save_with_format(output, image::ImageFormat::Png)
+        .map_err(|error| format!("write output PNG: {error}"))?;
+    let mut report_json =
+        serde_json::to_value(&report).map_err(|error| format!("serialize report: {error}"))?;
+    report_json["pixel_bytes"] = serde_json::json!(report.argb8.len());
+    report_json["output_png"] = serde_json::json!(output);
+    if let Some(object) = report_json.as_object_mut() {
+        object.remove("argb8");
+    }
+    serde_json::to_string_pretty(&report_json).map_err(|error| error.to_string())
+}
+
+fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<ParameterValue>, String> {
+    let mut parsed = Vec::with_capacity(values.len());
+    for value in values {
+        let value = value
+            .to_str()
+            .ok_or_else(|| "parameter assignment must be UTF-8".to_string())?;
+        let (name, number) = value
+            .split_once('=')
+            .ok_or_else(|| format!("parameter assignment must be name=value: {value:?}"))?;
+        if name.is_empty() {
+            return Err("parameter name must not be empty".into());
+        }
+        if parsed
+            .iter()
+            .any(|existing: &ParameterValue| existing.name == name)
+        {
+            return Err(format!("duplicate parameter assignment: {name:?}"));
+        }
+        parsed.push(ParameterValue {
+            name: name.to_string(),
+            value: number
+                .parse()
+                .map_err(|error| format!("invalid value for {name:?}: {error}"))?,
+        });
+    }
+    Ok(parsed)
 }

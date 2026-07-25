@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 HARNESS = ROOT / "broker" / "target" / "release" / "aexcompat-harness.exe"
 FIXTURE = ROOT / "target" / "sdk-fixtures" / "shifter" / "Shifter.aex"
 INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"

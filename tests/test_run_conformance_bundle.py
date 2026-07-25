@@ -1084,7 +1084,7 @@ def test_source_has_no_host_reimplementation():
 
 
 def test_harness_exposes_depth_variants_of_typed_request_cli():
-    source = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text(encoding="utf-8")
+    source = (ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs").read_text(encoding="utf-8")
     for flag in (
         '"--render-experimental-request"',
         '"--render-experimental-request-16"',

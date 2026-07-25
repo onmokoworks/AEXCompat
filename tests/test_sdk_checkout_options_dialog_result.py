@@ -8,7 +8,7 @@ RESULT = ROOT / "analysis" / "SDK_CHECKOUT_OPTIONS_DIALOG_RESULT_2026-07-15.json
 WORKER = source_owners.L2_MAIN
 MODE_EXECUTION = ROOT / "minihost" / "src" / "l2_mode_execution.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def result():

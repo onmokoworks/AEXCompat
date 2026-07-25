@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HARNESS_SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS_SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def test_built_artifact_probes_have_a_supported_session_only_entrypoint():

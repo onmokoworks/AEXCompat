@@ -8,7 +8,7 @@ RESULT = ROOT / "analysis" / "PF_INPUT_BUFFER_WRITE_RESULT_2026-07-15.json"
 WORKER = source_owners.L2_MAIN
 PIXEL_BUFFER = ROOT / "minihost" / "src" / "render_pixel_buffer.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 FIXTURE = ROOT / "instruments" / "pf-input-write-probe" / "pf_input_write_probe.cpp"
 
 

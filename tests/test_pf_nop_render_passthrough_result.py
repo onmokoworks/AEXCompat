@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "PF_NOP_RENDER_PASSTHROUGH_RESULT_2026-07-15.json"
 WORKER = source_owners.L2_MAIN
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 FIXTURE = ROOT / "instruments" / "pf-nop-render-probe" / "pf_nop_render_probe.cpp"
 
 

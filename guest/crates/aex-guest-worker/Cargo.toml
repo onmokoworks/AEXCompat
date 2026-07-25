@@ -7,6 +7,7 @@ license = "GPL-2.0-only"
 [dependencies]
 aex-abi = { path = "../aex-abi" }
 goblin.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
