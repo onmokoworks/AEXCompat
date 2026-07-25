@@ -21,7 +21,13 @@ use std::marker::PhantomData;
 use std::ptr;
 use thiserror::Error;
 
-use crate::native_aegp_memory::NativeAegpMemory;
+#[cfg(test)]
+use crate::native_aegp_memory::active_arena_next;
+use crate::native_aegp_memory::{
+    NativeAegpMemory, free_aegp_mem_handle, get_aegp_mem_handle_size, lock_aegp_mem_handle,
+    native_aegp_memory_callbacks, new_aegp_mem_handle, resize_aegp_mem_handle,
+    unlock_aegp_mem_handle, unsupported_aegp_memory_slot, with_native_aegp_memory_context,
+};
 use crate::pe::PeImage;
 pub use crate::x64::{
     ExecutionTrace, GuestCensus, GuestParam, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
@@ -41,19 +47,6 @@ macro_rules! callback_address {
     ($callback:expr) => {
         $callback as *const () as usize as u64
     };
-}
-
-fn native_aegp_memory_callbacks() -> [u64; 8] {
-    [
-        callback_address!(new_aegp_mem_handle),
-        callback_address!(free_aegp_mem_handle),
-        callback_address!(lock_aegp_mem_handle),
-        callback_address!(unlock_aegp_mem_handle),
-        callback_address!(get_aegp_mem_handle_size),
-        callback_address!(resize_aegp_mem_handle),
-        callback_address!(unsupported_aegp_memory_slot),
-        callback_address!(unsupported_aegp_memory_slot),
-    ]
 }
 
 unsafe extern "C" {
@@ -322,7 +315,12 @@ impl GuestEngine<'static> {
         self.state.callback_error = None;
         let previous = ACTIVE_STATE.with(|slot| slot.replace(&mut self.state));
         let function: Win64Function = unsafe { std::mem::transmute(address as usize) };
-        let result = unsafe { function(args[0], args[1], args[2], args[3], args[4], args[5]) };
+        let result = with_native_aegp_memory_context(
+            &mut self.state.aegp_memory,
+            &mut self.state.arena_next,
+            self.state.arena_end,
+            || unsafe { function(args[0], args[1], args[2], args[3], args[4], args[5]) },
+        );
         ACTIVE_STATE.with(|slot| slot.set(previous));
         if let Some(error) = self.state.callback_error.take() {
             Err(GuestError::Callback(error))
@@ -1364,99 +1362,6 @@ unsafe extern "win64" fn resize_handle(
     .unwrap_or(4)
 }
 
-unsafe extern "win64" fn new_aegp_mem_handle(
-    plugin_id: u64,
-    what: u64,
-    size: u64,
-    flags: u64,
-    output: u64,
-    _: u64,
-) -> u64 {
-    with_state(|state| unsafe {
-        state.aegp_memory.new_handle(
-            &mut state.arena_next,
-            state.arena_end,
-            plugin_id,
-            what,
-            size,
-            flags,
-            output,
-        )
-    })
-    .unwrap_or(4)
-}
-
-unsafe extern "win64" fn free_aegp_mem_handle(
-    handle: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-) -> u64 {
-    with_state(|state| state.aegp_memory.free_handle(handle)).unwrap_or(4)
-}
-
-unsafe extern "win64" fn lock_aegp_mem_handle(
-    handle: u64,
-    output: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-) -> u64 {
-    with_state(|state| unsafe { state.aegp_memory.lock_handle(handle, output) }).unwrap_or(4)
-}
-
-unsafe extern "win64" fn unlock_aegp_mem_handle(
-    handle: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-) -> u64 {
-    with_state(|state| state.aegp_memory.unlock_handle(handle)).unwrap_or(4)
-}
-
-unsafe extern "win64" fn get_aegp_mem_handle_size(
-    handle: u64,
-    output: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-) -> u64 {
-    with_state(|state| unsafe { state.aegp_memory.handle_size(handle, output) }).unwrap_or(4)
-}
-
-unsafe extern "win64" fn resize_aegp_mem_handle(
-    what: u64,
-    size: u64,
-    handle: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-) -> u64 {
-    with_state(|state| unsafe {
-        state
-            .aegp_memory
-            .resize_handle(&mut state.arena_next, state.arena_end, what, size, handle)
-    })
-    .unwrap_or(4)
-}
-
-unsafe extern "win64" fn unsupported_aegp_memory_slot(
-    _: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-    _: u64,
-) -> u64 {
-    4
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1518,178 +1423,209 @@ mod tests {
     #[test]
     fn aegp_memory_v1_slots_zero_through_five_match_unicorn_lifecycle() {
         let mut arena = vec![0u8; 0x10000];
+        let arena_end = arena.as_ptr() as u64 + arena.len() as u64;
         let mut state = NativeState {
             arena_next: arena.as_mut_ptr() as u64,
-            arena_end: arena.as_ptr() as u64 + arena.len() as u64,
+            arena_end,
             ..NativeState::default()
         };
-        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+        with_native_aegp_memory_context(
+            &mut state.aegp_memory,
+            &mut state.arena_next,
+            arena_end,
+            || {
+                let label = std::ffi::CString::new("olm_memory").unwrap();
+                let mut handle = u64::MAX;
+                assert_eq!(
+                    unsafe {
+                        new_aegp_mem_handle(
+                            1,
+                            label.as_ptr() as u64,
+                            i32::MAX as u64 + 1,
+                            0,
+                            (&mut handle as *mut u64) as u64,
+                            0,
+                        )
+                    },
+                    4
+                );
+                assert_eq!(handle, 0);
+                assert_eq!(
+                    unsafe {
+                        new_aegp_mem_handle(
+                            1,
+                            label.as_ptr() as u64,
+                            4,
+                            1,
+                            (&mut handle as *mut u64) as u64,
+                            0,
+                        )
+                    },
+                    0
+                );
+                assert_ne!(handle, 0);
+                assert_eq!(handle % 8, 0);
 
-        let label = std::ffi::CString::new("olm_memory").unwrap();
-        let mut handle = u64::MAX;
-        assert_eq!(
-            unsafe {
-                new_aegp_mem_handle(
-                    1,
-                    label.as_ptr() as u64,
-                    i32::MAX as u64 + 1,
-                    0,
-                    (&mut handle as *mut u64) as u64,
-                    0,
-                )
-            },
-            4
-        );
-        assert_eq!(handle, 0);
-        assert_eq!(
-            unsafe {
-                new_aegp_mem_handle(
-                    1,
-                    label.as_ptr() as u64,
-                    4,
-                    1,
-                    (&mut handle as *mut u64) as u64,
-                    0,
-                )
-            },
-            0
-        );
-        assert_ne!(handle, 0);
-        assert_eq!(handle % 8, 0);
-
-        let mut data = 0u64;
-        assert_eq!(
-            unsafe { lock_aegp_mem_handle(handle, (&mut data as *mut u64) as u64, 0, 0, 0, 0) },
-            0
-        );
-        assert_eq!(data % 16, 0);
-        assert_eq!(unsafe { *(data as *const u32) }, 0);
-        unsafe {
-            *(data as *mut u32) = 0x1122_3344;
-        }
-        assert_eq!(unsafe { free_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 4);
-        assert_eq!(
-            unsafe { resize_aegp_mem_handle(label.as_ptr() as u64, 8, handle, 0, 0, 0) },
-            4
-        );
-        assert_eq!(unsafe { unlock_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 0);
-
-        let mut size = 0u32;
-        assert_eq!(
-            unsafe { get_aegp_mem_handle_size(handle, (&mut size as *mut u32) as u64, 0, 0, 0, 0) },
-            0
-        );
-        assert_eq!(size, 4);
-        assert_eq!(
-            unsafe { resize_aegp_mem_handle(label.as_ptr() as u64, 8, handle, 0, 0, 0) },
-            0
-        );
-        let mut resized_data = 0u64;
-        assert_eq!(
-            unsafe {
-                lock_aegp_mem_handle(handle, (&mut resized_data as *mut u64) as u64, 0, 0, 0, 0)
-            },
-            0
-        );
-        assert_eq!(unsafe { *(resized_data as *const u32) }, 0x1122_3344);
-        assert_eq!(unsafe { *((resized_data + 4) as *const u32) }, 0);
-        assert_eq!(unsafe { unlock_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 0);
-        assert_eq!(unsafe { free_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 0);
-        assert_eq!(unsafe { free_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 4);
-        assert_eq!(
-            unsafe { get_aegp_mem_handle_size(handle, (&mut size as *mut u32) as u64, 0, 0, 0, 0) },
-            4
-        );
-        let callbacks = native_aegp_memory_callbacks();
-        assert_eq!(
-            callbacks[6],
-            callback_address!(unsupported_aegp_memory_slot)
-        );
-        assert_eq!(
-            callbacks[7],
-            callback_address!(unsupported_aegp_memory_slot)
-        );
-        assert_eq!(unsafe { unsupported_aegp_memory_slot(0, 0, 0, 0, 0, 0) }, 4);
-
-        let mut reuse_high_water = 0u64;
-        for cycle in 0..(MAX_AEGP_MEMORY_HANDLES * 2) {
-            let mut recycled_handle = 0u64;
-            assert_eq!(
+                let mut data = 0u64;
+                assert_eq!(
+                    unsafe {
+                        lock_aegp_mem_handle(handle, (&mut data as *mut u64) as u64, 0, 0, 0, 0)
+                    },
+                    0
+                );
+                assert_eq!(data % 16, 0);
+                assert_eq!(unsafe { *(data as *const u32) }, 0);
                 unsafe {
-                    new_aegp_mem_handle(
-                        1,
-                        label.as_ptr() as u64,
-                        32,
-                        0,
-                        (&mut recycled_handle as *mut u64) as u64,
-                        0,
-                    )
-                },
-                0
-            );
-            let mut recycled_data = 0u64;
-            assert_eq!(
-                unsafe {
-                    lock_aegp_mem_handle(
-                        recycled_handle,
-                        (&mut recycled_data as *mut u64) as u64,
-                        0,
-                        0,
-                        0,
-                        0,
-                    )
-                },
-                0
-            );
-            assert!(recycled_data >= arena.as_ptr() as u64);
-            assert!(recycled_data + 32 <= state.arena_end);
-            assert_eq!(
-                unsafe { unlock_aegp_mem_handle(recycled_handle, 0, 0, 0, 0, 0) },
-                0
-            );
-            assert_eq!(
-                unsafe { free_aegp_mem_handle(recycled_handle, 0, 0, 0, 0, 0) },
-                0
-            );
-            if cycle == 0 {
-                reuse_high_water = state.arena_next;
-            } else {
-                assert_eq!(state.arena_next, reuse_high_water);
-            }
-        }
-        let mut resize_handle = 0u64;
-        assert_eq!(
-            unsafe {
-                new_aegp_mem_handle(
-                    1,
-                    label.as_ptr() as u64,
-                    32,
-                    0,
-                    (&mut resize_handle as *mut u64) as u64,
-                    0,
-                )
-            },
-            0
-        );
-        for _ in 0..(MAX_AEGP_MEMORY_HANDLES * 2) {
-            assert_eq!(
-                unsafe {
-                    resize_aegp_mem_handle(label.as_ptr() as u64, 128, resize_handle, 0, 0, 0)
-                },
-                0
-            );
-            assert_eq!(
-                unsafe {
-                    resize_aegp_mem_handle(label.as_ptr() as u64, 32, resize_handle, 0, 0, 0)
-                },
-                0
-            );
-        }
-        assert_eq!(
-            unsafe { free_aegp_mem_handle(resize_handle, 0, 0, 0, 0, 0) },
-            0
-        );
+                    *(data as *mut u32) = 0x1122_3344;
+                }
+                assert_eq!(unsafe { free_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 4);
+                assert_eq!(
+                    unsafe { resize_aegp_mem_handle(label.as_ptr() as u64, 8, handle, 0, 0, 0) },
+                    4
+                );
+                assert_eq!(unsafe { unlock_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 0);
 
-        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+                let mut size = 0u32;
+                assert_eq!(
+                    unsafe {
+                        get_aegp_mem_handle_size(handle, (&mut size as *mut u32) as u64, 0, 0, 0, 0)
+                    },
+                    0
+                );
+                assert_eq!(size, 4);
+                assert_eq!(
+                    unsafe { resize_aegp_mem_handle(label.as_ptr() as u64, 8, handle, 0, 0, 0) },
+                    0
+                );
+                let mut resized_data = 0u64;
+                assert_eq!(
+                    unsafe {
+                        lock_aegp_mem_handle(
+                            handle,
+                            (&mut resized_data as *mut u64) as u64,
+                            0,
+                            0,
+                            0,
+                            0,
+                        )
+                    },
+                    0
+                );
+                assert_eq!(unsafe { *(resized_data as *const u32) }, 0x1122_3344);
+                assert_eq!(unsafe { *((resized_data + 4) as *const u32) }, 0);
+                assert_eq!(unsafe { unlock_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 0);
+                assert_eq!(unsafe { free_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 0);
+                assert_eq!(unsafe { free_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 4);
+                assert_eq!(
+                    unsafe {
+                        get_aegp_mem_handle_size(handle, (&mut size as *mut u32) as u64, 0, 0, 0, 0)
+                    },
+                    4
+                );
+                let callbacks = native_aegp_memory_callbacks();
+                assert_eq!(
+                    callbacks[6],
+                    callback_address!(unsupported_aegp_memory_slot)
+                );
+                assert_eq!(
+                    callbacks[7],
+                    callback_address!(unsupported_aegp_memory_slot)
+                );
+                assert_eq!(unsafe { unsupported_aegp_memory_slot(0, 0, 0, 0, 0, 0) }, 4);
+
+                let mut reuse_high_water = 0u64;
+                for cycle in 0..(MAX_AEGP_MEMORY_HANDLES * 2) {
+                    let mut recycled_handle = 0u64;
+                    assert_eq!(
+                        unsafe {
+                            new_aegp_mem_handle(
+                                1,
+                                label.as_ptr() as u64,
+                                32,
+                                0,
+                                (&mut recycled_handle as *mut u64) as u64,
+                                0,
+                            )
+                        },
+                        0
+                    );
+                    let mut recycled_data = 0u64;
+                    assert_eq!(
+                        unsafe {
+                            lock_aegp_mem_handle(
+                                recycled_handle,
+                                (&mut recycled_data as *mut u64) as u64,
+                                0,
+                                0,
+                                0,
+                                0,
+                            )
+                        },
+                        0
+                    );
+                    assert!(recycled_data >= arena.as_ptr() as u64);
+                    assert!(recycled_data + 32 <= arena_end);
+                    assert_eq!(
+                        unsafe { unlock_aegp_mem_handle(recycled_handle, 0, 0, 0, 0, 0) },
+                        0
+                    );
+                    assert_eq!(
+                        unsafe { free_aegp_mem_handle(recycled_handle, 0, 0, 0, 0, 0) },
+                        0
+                    );
+                    if cycle == 0 {
+                        reuse_high_water = active_arena_next().unwrap();
+                    } else {
+                        assert_eq!(active_arena_next().unwrap(), reuse_high_water);
+                    }
+                }
+                let mut resize_handle = 0u64;
+                assert_eq!(
+                    unsafe {
+                        new_aegp_mem_handle(
+                            1,
+                            label.as_ptr() as u64,
+                            32,
+                            0,
+                            (&mut resize_handle as *mut u64) as u64,
+                            0,
+                        )
+                    },
+                    0
+                );
+                for _ in 0..(MAX_AEGP_MEMORY_HANDLES * 2) {
+                    assert_eq!(
+                        unsafe {
+                            resize_aegp_mem_handle(
+                                label.as_ptr() as u64,
+                                128,
+                                resize_handle,
+                                0,
+                                0,
+                                0,
+                            )
+                        },
+                        0
+                    );
+                    assert_eq!(
+                        unsafe {
+                            resize_aegp_mem_handle(
+                                label.as_ptr() as u64,
+                                32,
+                                resize_handle,
+                                0,
+                                0,
+                                0,
+                            )
+                        },
+                        0
+                    );
+                }
+                assert_eq!(
+                    unsafe { free_aegp_mem_handle(resize_handle, 0, 0, 0, 0, 0) },
+                    0
+                );
+            },
+        );
     }
 }
