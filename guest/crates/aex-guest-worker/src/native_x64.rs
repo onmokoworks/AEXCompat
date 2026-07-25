@@ -38,6 +38,7 @@ const PF_INVALID_INDEX: u64 = 513;
 const PF_UNRECOGNIZED_PARAM_TYPE: u64 = 514;
 const PF_BAD_CALLBACK_PARAM: u64 = 516;
 const PARAM_TYPE_COLOR: i32 = 5;
+#[cfg(test)]
 const PARAM_TYPE_POINT: i32 = 6;
 const HOST_EFFECT_REF: u64 = 1;
 
