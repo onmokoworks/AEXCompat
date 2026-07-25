@@ -1402,6 +1402,7 @@ struct GuestState {
     parameter_definitions: Vec<u64>,
     next_handle_data: u64,
     next_pf_handle_data: u64,
+    image_region: Option<(u64, u64)>,
     handles: HashMap<u64, GuestHandle>,
     math_calls: Vec<String>,
     handle_allocations: Vec<u64>,
@@ -1889,6 +1890,13 @@ impl GuestEngine<'static> {
         unicorn.get_data_mut().next_pf_handle_data = PF_HANDLE_DATA_BASE;
         let image_size =
             u64::try_from(image.mapped_bytes().len()).map_err(|_| GuestError::ImageAlignment)?;
+        unicorn.get_data_mut().image_region = Some((
+            image.image_base(),
+            image
+                .image_base()
+                .checked_add(image_size)
+                .ok_or(GuestError::DataCapacity)?,
+        ));
         if image.image_base() % PAGE_SIZE != 0 || image_size % PAGE_SIZE != 0 {
             return Err(GuestError::ImageAlignment);
         }
@@ -4106,6 +4114,7 @@ fn find_pf_region(
             ]
         })
         .collect::<Vec<_>>();
+    occupied.extend(state.image_region);
     occupied.extend(reserved);
     occupied.sort_unstable();
     let mut candidate = PF_HANDLE_DATA_BASE;
@@ -4636,6 +4645,21 @@ mod tests {
             .call_win64(HOST_NEW_HANDLE, [size, 0, 0, 0, 0, 0])
             .unwrap();
         assert_eq!(reused, handle, "disposed address space must be reusable");
+    }
+
+    #[test]
+    fn pf_handle_region_finder_skips_the_mapped_pe_image() {
+        let state = GuestState {
+            image_region: Some((
+                PF_HANDLE_DATA_BASE + PAGE_SIZE,
+                PF_HANDLE_DATA_BASE + 3 * PAGE_SIZE,
+            )),
+            ..GuestState::default()
+        };
+        assert_eq!(
+            find_pf_region(&state, 2 * PAGE_SIZE, None).unwrap(),
+            PF_HANDLE_DATA_BASE + 3 * PAGE_SIZE
+        );
     }
 
     #[test]
