@@ -1,8 +1,10 @@
 use aex_abi::x86_64_windows as abi;
+use iced_x86::{Decoder, DecoderOptions, Mnemonic};
+use serde::Serialize;
 use std::collections::HashMap;
 use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
-use unicorn_engine::{RegisterX86, Unicorn};
+use unicorn_engine::{RegisterX86, UcHookId, Unicorn};
 
 use crate::pe::PeImage;
 
@@ -99,6 +101,7 @@ struct GuestState {
     handles: HashMap<u64, GuestHandle>,
     math_calls: Vec<String>,
     handle_allocations: Vec<u64>,
+    census_blocks: HashMap<(u64, u32), u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +114,57 @@ struct GuestHandle {
 pub struct GuestEngine<'a> {
     unicorn: Unicorn<'a, GuestState>,
     next_data: u64,
+    image_base: u64,
+    image_end: u64,
+    census_hook: Option<UcHookId>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CensusBlock {
+    pub address: u64,
+    pub rva: u64,
+    pub size_bytes: u32,
+    pub executions: u64,
+    pub instructions: u32,
+    pub dynamic_instructions: u64,
+    pub scalar_sse_fp_instructions: u32,
+    pub dynamic_scalar_sse_fp_instructions: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CensusExtent {
+    pub start_address: u64,
+    pub end_address: u64,
+    pub start_rva: u64,
+    pub end_rva: u64,
+    pub size_bytes: u64,
+    pub block_variants: usize,
+    pub dynamic_instructions: u64,
+    pub dynamic_instruction_fraction: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GuestCensus {
+    pub schema_version: u32,
+    pub distinct_blocks: usize,
+    pub total_block_executions: u64,
+    pub estimated_dynamic_instructions: u64,
+    pub output_pixels: u64,
+    pub estimated_dynamic_instructions_per_pixel: f64,
+    pub estimated_dynamic_scalar_sse_fp_instructions: u64,
+    pub scalar_sse_fp_fraction: f64,
+    pub dynamic_instructions_in_scalar_sse_blocks: u64,
+    pub scalar_sse_block_work_fraction: f64,
+    pub top_1_dynamic_instruction_fraction: f64,
+    pub top_5_dynamic_instruction_fraction: f64,
+    pub top_20_dynamic_instruction_fraction: f64,
+    pub blocks_for_80_percent: usize,
+    pub blocks: Vec<CensusBlock>,
+    pub distinct_extents: usize,
+    pub top_1_extent_dynamic_instruction_fraction: f64,
+    pub top_2_extent_dynamic_instruction_fraction: f64,
+    pub top_20_extent_dynamic_instruction_fraction: f64,
+    pub extents: Vec<CensusExtent>,
 }
 
 impl GuestEngine<'static> {
@@ -375,6 +429,9 @@ impl GuestEngine<'static> {
         let mut engine = Self {
             unicorn,
             next_data: DATA_BASE,
+            image_base: image.image_base(),
+            image_end: image.image_base() + image_size,
+            census_hook: None,
         };
         if let Some(entry) = image.dll_entry_address() {
             let attached = engine.call_win64(entry, [image.image_base(), 1, 0, 0, 0, 0])?;
@@ -383,6 +440,156 @@ impl GuestEngine<'static> {
             }
         }
         Ok(engine)
+    }
+
+    pub fn begin_block_census(&mut self) -> Result<(), GuestError> {
+        if self.census_hook.is_some() {
+            return Err(GuestError::Callback(
+                "guest block census is already active".into(),
+            ));
+        }
+        self.unicorn.get_data_mut().census_blocks.clear();
+        let hook = uc(
+            "install guest block census",
+            self.unicorn.add_block_hook(
+                self.image_base,
+                self.image_end - 1,
+                |unicorn, address, size| {
+                    *unicorn
+                        .get_data_mut()
+                        .census_blocks
+                        .entry((address, size))
+                        .or_default() += 1;
+                },
+            ),
+        )?;
+        self.census_hook = Some(hook);
+        Ok(())
+    }
+
+    pub fn finish_block_census(&mut self, output_pixels: u64) -> Result<GuestCensus, GuestError> {
+        let hook = self
+            .census_hook
+            .take()
+            .ok_or_else(|| GuestError::Callback("guest block census is not active".into()))?;
+        uc("remove guest block census", self.unicorn.remove_hook(hook))?;
+
+        let counts = std::mem::take(&mut self.unicorn.get_data_mut().census_blocks);
+        let mut blocks = Vec::with_capacity(counts.len());
+        for ((address, size), executions) in counts {
+            let mut bytes = vec![0u8; size as usize];
+            uc(
+                "read census block",
+                self.unicorn.mem_read(address, &mut bytes),
+            )?;
+            let mut decoder = Decoder::with_ip(64, &bytes, address, DecoderOptions::NONE);
+            let mut instructions = 0u32;
+            let mut scalar_sse_fp_instructions = 0u32;
+            while decoder.can_decode() {
+                let instruction = decoder.decode();
+                if instruction.is_invalid() {
+                    break;
+                }
+                instructions += 1;
+                if is_scalar_sse_fp(instruction.mnemonic()) {
+                    scalar_sse_fp_instructions += 1;
+                }
+            }
+            blocks.push(CensusBlock {
+                address,
+                rva: address - self.image_base,
+                size_bytes: size,
+                executions,
+                instructions,
+                dynamic_instructions: executions.saturating_mul(instructions as u64),
+                scalar_sse_fp_instructions,
+                dynamic_scalar_sse_fp_instructions: executions
+                    .saturating_mul(scalar_sse_fp_instructions as u64),
+            });
+        }
+        blocks.sort_by_key(|block| std::cmp::Reverse(block.dynamic_instructions));
+        let estimated_dynamic_instructions = blocks
+            .iter()
+            .map(|block| block.dynamic_instructions)
+            .sum::<u64>();
+        let estimated_dynamic_scalar_sse_fp_instructions = blocks
+            .iter()
+            .map(|block| block.dynamic_scalar_sse_fp_instructions)
+            .sum::<u64>();
+        let dynamic_instructions_in_scalar_sse_blocks = blocks
+            .iter()
+            .filter(|block| block.scalar_sse_fp_instructions != 0)
+            .map(|block| block.dynamic_instructions)
+            .sum::<u64>();
+        let fraction = |count: usize| {
+            if estimated_dynamic_instructions == 0 {
+                0.0
+            } else {
+                blocks
+                    .iter()
+                    .take(count)
+                    .map(|block| block.dynamic_instructions)
+                    .sum::<u64>() as f64
+                    / estimated_dynamic_instructions as f64
+            }
+        };
+        let blocks_for_80_percent = if estimated_dynamic_instructions == 0 {
+            0
+        } else {
+            let mut cumulative = 0u64;
+            blocks
+                .iter()
+                .position(|block| {
+                    cumulative = cumulative.saturating_add(block.dynamic_instructions);
+                    cumulative as f64 / estimated_dynamic_instructions as f64 >= 0.8
+                })
+                .map_or(blocks.len(), |index| index + 1)
+        };
+        let extents =
+            coalesce_census_extents(&blocks, self.image_base, estimated_dynamic_instructions);
+        let extent_fraction = |count: usize| {
+            extents
+                .iter()
+                .take(count)
+                .map(|extent| extent.dynamic_instruction_fraction)
+                .sum()
+        };
+        Ok(GuestCensus {
+            schema_version: 1,
+            distinct_blocks: blocks.len(),
+            total_block_executions: blocks.iter().map(|block| block.executions).sum(),
+            estimated_dynamic_instructions,
+            output_pixels,
+            estimated_dynamic_instructions_per_pixel: if output_pixels == 0 {
+                0.0
+            } else {
+                estimated_dynamic_instructions as f64 / output_pixels as f64
+            },
+            estimated_dynamic_scalar_sse_fp_instructions,
+            scalar_sse_fp_fraction: if estimated_dynamic_instructions == 0 {
+                0.0
+            } else {
+                estimated_dynamic_scalar_sse_fp_instructions as f64
+                    / estimated_dynamic_instructions as f64
+            },
+            dynamic_instructions_in_scalar_sse_blocks,
+            scalar_sse_block_work_fraction: if estimated_dynamic_instructions == 0 {
+                0.0
+            } else {
+                dynamic_instructions_in_scalar_sse_blocks as f64
+                    / estimated_dynamic_instructions as f64
+            },
+            top_1_dynamic_instruction_fraction: fraction(1),
+            top_5_dynamic_instruction_fraction: fraction(5),
+            top_20_dynamic_instruction_fraction: fraction(20),
+            blocks_for_80_percent,
+            blocks,
+            distinct_extents: extents.len(),
+            top_1_extent_dynamic_instruction_fraction: extent_fraction(1),
+            top_2_extent_dynamic_instruction_fraction: extent_fraction(2),
+            top_20_extent_dynamic_instruction_fraction: extent_fraction(20),
+            extents,
+        })
     }
 
     pub fn call_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
@@ -1238,6 +1445,83 @@ fn finish_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<(), Str
     }
 }
 
+fn is_scalar_sse_fp(mnemonic: Mnemonic) -> bool {
+    matches!(
+        mnemonic,
+        Mnemonic::Addss
+            | Mnemonic::Subss
+            | Mnemonic::Mulss
+            | Mnemonic::Divss
+            | Mnemonic::Sqrtss
+            | Mnemonic::Minss
+            | Mnemonic::Maxss
+            | Mnemonic::Comiss
+            | Mnemonic::Ucomiss
+            | Mnemonic::Cvtsi2ss
+            | Mnemonic::Cvtss2si
+            | Mnemonic::Cvttss2si
+            | Mnemonic::Addsd
+            | Mnemonic::Subsd
+            | Mnemonic::Mulsd
+            | Mnemonic::Divsd
+            | Mnemonic::Sqrtsd
+            | Mnemonic::Minsd
+            | Mnemonic::Maxsd
+            | Mnemonic::Comisd
+            | Mnemonic::Ucomisd
+            | Mnemonic::Cvtsi2sd
+            | Mnemonic::Cvtsd2si
+            | Mnemonic::Cvttsd2si
+    )
+}
+
+fn coalesce_census_extents(
+    blocks: &[CensusBlock],
+    image_base: u64,
+    total_dynamic_instructions: u64,
+) -> Vec<CensusExtent> {
+    let mut by_address = blocks.iter().collect::<Vec<_>>();
+    by_address.sort_by_key(|block| (block.address, block.size_bytes));
+    let mut extents: Vec<CensusExtent> = Vec::new();
+    for block in by_address {
+        let block_end = block.address + u64::from(block.size_bytes);
+        if let Some(extent) = extents.last_mut().filter(|extent| {
+            // Adjacent or overlapping translated blocks belong to one
+            // promotable guest-code region. QEMU may split the same bytes into
+            // several block variants depending on the incoming branch.
+            block.address <= extent.end_address
+        }) {
+            extent.end_address = extent.end_address.max(block_end);
+            extent.end_rva = extent.end_address - image_base;
+            extent.size_bytes = extent.end_address - extent.start_address;
+            extent.block_variants += 1;
+            extent.dynamic_instructions = extent
+                .dynamic_instructions
+                .saturating_add(block.dynamic_instructions);
+        } else {
+            extents.push(CensusExtent {
+                start_address: block.address,
+                end_address: block_end,
+                start_rva: block.address - image_base,
+                end_rva: block_end - image_base,
+                size_bytes: block_end - block.address,
+                block_variants: 1,
+                dynamic_instructions: block.dynamic_instructions,
+                dynamic_instruction_fraction: 0.0,
+            });
+        }
+    }
+    for extent in &mut extents {
+        extent.dynamic_instruction_fraction = if total_dynamic_instructions == 0 {
+            0.0
+        } else {
+            extent.dynamic_instructions as f64 / total_dynamic_instructions as f64
+        };
+    }
+    extents.sort_by_key(|extent| std::cmp::Reverse(extent.dynamic_instructions));
+    extents
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1256,6 +1540,9 @@ mod tests {
         GuestEngine {
             unicorn,
             next_data: DATA_BASE,
+            image_base: CODE,
+            image_end: CODE + PAGE_SIZE,
+            census_hook: None,
         }
     }
 
@@ -1284,5 +1571,53 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("before the guest returned"), "{error}");
+    }
+
+    #[test]
+    fn block_census_is_opt_in_and_counts_repeated_guest_work() {
+        const CODE: u64 = 0x1000_0000;
+        // mov ecx,10; dec ecx; jne -4; ret
+        let mut engine = test_engine(&[0xb9, 10, 0, 0, 0, 0xff, 0xc9, 0x75, 0xfc, 0xc3]);
+        engine.begin_block_census().unwrap();
+        engine.call_win64(CODE, [0; 6]).unwrap();
+        let census = engine.finish_block_census(1).unwrap();
+        assert!(census.total_block_executions >= 10);
+        assert!(census.estimated_dynamic_instructions >= 20);
+        assert_eq!(census.output_pixels, 1);
+        assert_eq!(
+            census.estimated_dynamic_instructions_per_pixel,
+            census.estimated_dynamic_instructions as f64
+        );
+        assert!(!census.extents.is_empty());
+        assert!(census.top_1_extent_dynamic_instruction_fraction > 0.0);
+    }
+
+    #[test]
+    fn census_extents_merge_overlapping_translation_block_variants() {
+        let block = |address, size_bytes, dynamic_instructions| CensusBlock {
+            address,
+            rva: address - 0x1000,
+            size_bytes,
+            executions: 1,
+            instructions: dynamic_instructions as u32,
+            dynamic_instructions,
+            scalar_sse_fp_instructions: 0,
+            dynamic_scalar_sse_fp_instructions: 0,
+        };
+        let extents = coalesce_census_extents(
+            &[
+                block(0x1010, 8, 20),
+                block(0x1014, 8, 30),
+                block(0x1020, 4, 60),
+            ],
+            0x1000,
+            110,
+        );
+        assert_eq!(extents.len(), 2);
+        assert_eq!(extents[0].start_rva, 0x20);
+        assert_eq!(extents[0].dynamic_instruction_fraction, 60.0 / 110.0);
+        assert_eq!(extents[1].start_rva, 0x10);
+        assert_eq!(extents[1].end_rva, 0x1c);
+        assert_eq!(extents[1].block_variants, 2);
     }
 }

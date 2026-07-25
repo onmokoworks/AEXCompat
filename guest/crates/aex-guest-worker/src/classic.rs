@@ -3,7 +3,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::pe::PeImage;
-use crate::x64::{GuestEngine, GuestError};
+use crate::x64::{GuestCensus, GuestEngine, GuestError};
 
 const CMD_GLOBAL_SETUP: u64 = 1;
 const CMD_PARAMS_SETUP: u64 = 4;
@@ -87,6 +87,9 @@ pub struct RenderReport {
     pub parameter_values: Vec<AppliedParameter>,
     pub output_request: [i32; 4],
     pub input_requests: Vec<[i32; 4]>,
+    pub suite_requests: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub census: Option<GuestCensus>,
     pub argb8: Vec<u8>,
 }
 
@@ -304,6 +307,24 @@ impl ClassicHost {
             input_argb8,
             parameter_values,
             [0, 0, width as i32, height as i32],
+            false,
+        )
+    }
+
+    pub fn render_argb8_census(
+        &mut self,
+        width: u32,
+        height: u32,
+        input_argb8: &[u8],
+        parameter_values: &[ParameterValue],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_argb8_with_request(
+            width,
+            height,
+            input_argb8,
+            parameter_values,
+            [0, 0, width as i32, height as i32],
+            true,
         )
     }
 
@@ -315,7 +336,14 @@ impl ClassicHost {
         parameter_values: &[ParameterValue],
         output_request: [i32; 4],
     ) -> Result<RenderReport, ClassicError> {
-        self.render_argb8_with_request(width, height, input_argb8, parameter_values, output_request)
+        self.render_argb8_with_request(
+            width,
+            height,
+            input_argb8,
+            parameter_values,
+            output_request,
+            false,
+        )
     }
 
     fn render_argb8_with_request(
@@ -325,6 +353,7 @@ impl ClassicHost {
         input_argb8: &[u8],
         parameter_values: &[ParameterValue],
         output_request: [i32; 4],
+        census_enabled: bool,
     ) -> Result<RenderReport, ClassicError> {
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
             return Err(ClassicError::Input(format!(
@@ -356,6 +385,12 @@ impl ClassicHost {
             )));
         }
         let setup = self.setup()?;
+        let smart_render = setup.out_flags2 & (1 << 10) != 0;
+        if census_enabled && !smart_render {
+            return Err(ClassicError::Input(
+                "guest census currently requires Smart Render support".into(),
+            ));
+        }
         let captured_params = self.engine.parameters().to_vec();
         let mut applied_values = Vec::with_capacity(parameter_values.len());
         let input_param = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
@@ -471,8 +506,7 @@ impl ClassicHost {
         let frame_data = self.read_output_pointer(abi::OUT_FRAME_DATA_OFFSET)?;
         self.write_input_pointer(abi::IN_FRAME_DATA_OFFSET, frame_data)?;
 
-        let smart_render = setup.out_flags2 & (1 << 10) != 0;
-        let mut render_error = if smart_render {
+        let (mut render_error, census) = if smart_render {
             self.render_smart(
                 params,
                 input_param,
@@ -481,6 +515,7 @@ impl ClassicHost {
                 height,
                 rowbytes,
                 output_request,
+                census_enabled,
             )?
         } else {
             if output_request != [0, 0, width as i32, height as i32] {
@@ -488,10 +523,13 @@ impl ClassicHost {
                     "region rendering requires Smart Render support".into(),
                 ));
             }
-            self.engine.call_win64(
-                self.entry,
-                [CMD_RENDER, self.input, self.output, params, output_world, 0],
-            )? as i32
+            (
+                self.engine.call_win64(
+                    self.entry,
+                    [CMD_RENDER, self.input, self.output, params, output_world, 0],
+                )? as i32,
+                None,
+            )
         };
         let frame_setdown_error = self.engine.call_win64(
             self.entry,
@@ -537,6 +575,8 @@ impl ClassicHost {
             parameter_values: applied_values,
             output_request,
             input_requests: self.engine.pre_checkout_requests().to_vec(),
+            suite_requests: self.engine.suite_requests().to_vec(),
+            census,
             argb8,
         })
     }
@@ -555,7 +595,8 @@ impl ClassicHost {
         height: u32,
         _rowbytes: u32,
         output_request: [i32; 4],
-    ) -> Result<i32, ClassicError> {
+        census_enabled: bool,
+    ) -> Result<(i32, Option<GuestCensus>), ClassicError> {
         let input_world = input_param + abi::PARAM_U_OFFSET as u64;
         self.engine
             .configure_smart_render(input_world, output_world, width, height);
@@ -658,7 +699,10 @@ impl ClassicHost {
             smart_callbacks,
         );
         self.engine.write(smart_extra, &smart_extra_bytes)?;
-        let render_error = self.engine.call_win64(
+        if census_enabled {
+            self.engine.begin_block_census()?;
+        }
+        let render_result = self.engine.call_win64(
             self.entry,
             [
                 CMD_SMART_RENDER,
@@ -668,7 +712,16 @@ impl ClassicHost {
                 0,
                 smart_extra,
             ],
-        )? as i32;
+        );
+        let census = if census_enabled {
+            Some(
+                self.engine
+                    .finish_block_census(u64::from(width) * u64::from(height))?,
+            )
+        } else {
+            None
+        };
+        let render_error = render_result? as i32;
         if render_error != 0 {
             let callbacks = self.engine.smart_callback_counts();
             let result_rect = [
@@ -683,7 +736,7 @@ impl ClassicHost {
                 self.engine.handle_allocations()
             )));
         }
-        Ok(render_error)
+        Ok((render_error, census))
     }
 
     fn read_guest_u64(&mut self, address: u64) -> Result<u64, GuestError> {
