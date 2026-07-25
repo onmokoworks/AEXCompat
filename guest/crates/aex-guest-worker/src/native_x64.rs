@@ -21,6 +21,7 @@ use std::marker::PhantomData;
 use std::ptr;
 use thiserror::Error;
 
+use crate::native_aegp_memory::NativeAegpMemory;
 use crate::pe::PeImage;
 pub use crate::x64::{
     ExecutionTrace, GuestCensus, GuestParam, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
@@ -29,7 +30,6 @@ use crate::x64::{record_suite_request, record_unsupported_suite_call, utility_su
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
 const MAX_HANDLE_SIZE: u64 = 128 * 1024 * 1024;
-const MAX_AEGP_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_AEGP_MEMORY_HANDLES: usize = 256;
 const PROT_READ: c_int = 0x1;
 const PROT_WRITE: c_int = 0x2;
@@ -92,20 +92,6 @@ struct NativeHandle {
     locks: u32,
 }
 
-#[derive(Clone, Debug)]
-struct NativeAegpMemoryHandle {
-    data: u64,
-    size: u64,
-    locks: u32,
-    end: u64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct NativeAegpMemoryBlock {
-    data: u64,
-    end: u64,
-}
-
 #[derive(Default)]
 struct NativeState {
     params: Vec<GuestParam>,
@@ -125,9 +111,7 @@ struct NativeState {
     checkout_output_calls: u32,
     parameter_definitions: Vec<u64>,
     handles: HashMap<u64, NativeHandle>,
-    aegp_memory_handles: HashMap<u64, NativeAegpMemoryHandle>,
-    aegp_memory_free: Vec<NativeAegpMemoryBlock>,
-    next_aegp_memory_handle: u64,
+    aegp_memory: NativeAegpMemory,
     handle_allocations: Vec<u64>,
     arena_next: u64,
     arena_end: u64,
@@ -1380,81 +1364,6 @@ unsafe extern "win64" fn resize_handle(
     .unwrap_or(4)
 }
 
-fn valid_aegp_memory_size(size: u64) -> Option<u64> {
-    (size <= i32::MAX as u64 && size <= MAX_AEGP_MEMORY_BYTES).then_some(size)
-}
-
-fn aegp_memory_capacity(size: u64) -> Option<u64> {
-    size.max(1).checked_add(15).map(|size| size & !15)
-}
-
-fn select_aegp_memory_block(
-    state: &NativeState,
-    size: u64,
-) -> Option<(
-    NativeAegpMemoryBlock,
-    Option<usize>,
-    Option<NativeAegpMemoryBlock>,
-)> {
-    let capacity = aegp_memory_capacity(size)?;
-    if let Some((index, block)) = state
-        .aegp_memory_free
-        .iter()
-        .copied()
-        .enumerate()
-        .find(|(_, block)| block.end - block.data >= capacity)
-    {
-        let end = block.data.checked_add(capacity)?;
-        let remainder = (end < block.end).then_some(NativeAegpMemoryBlock {
-            data: end,
-            end: block.end,
-        });
-        return Some((
-            NativeAegpMemoryBlock {
-                data: block.data,
-                end,
-            },
-            Some(index),
-            remainder,
-        ));
-    }
-    let data = (state.arena_next + 15) & !15;
-    let end = data.checked_add(capacity)?;
-    (end <= state.arena_end).then_some((NativeAegpMemoryBlock { data, end }, None, None))
-}
-
-fn commit_aegp_memory_block(
-    state: &mut NativeState,
-    block: NativeAegpMemoryBlock,
-    free_index: Option<usize>,
-    remainder: Option<NativeAegpMemoryBlock>,
-) {
-    if let Some(index) = free_index {
-        state.aegp_memory_free.remove(index);
-        if let Some(remainder) = remainder {
-            state.aegp_memory_free.push(remainder);
-        }
-    } else {
-        state.arena_next = block.end;
-    }
-}
-
-fn reclaim_aegp_memory_block(state: &mut NativeState, block: NativeAegpMemoryBlock) {
-    state.aegp_memory_free.push(block);
-    state.aegp_memory_free.sort_by_key(|block| block.data);
-    let mut merged: Vec<NativeAegpMemoryBlock> = Vec::with_capacity(state.aegp_memory_free.len());
-    for block in state.aegp_memory_free.drain(..) {
-        if let Some(last) = merged.last_mut()
-            && block.data <= last.end
-        {
-            last.end = last.end.max(block.end);
-        } else {
-            merged.push(block);
-        }
-    }
-    state.aegp_memory_free = merged;
-}
-
 unsafe extern "win64" fn new_aegp_mem_handle(
     plugin_id: u64,
     what: u64,
@@ -1463,47 +1372,16 @@ unsafe extern "win64" fn new_aegp_mem_handle(
     output: u64,
     _: u64,
 ) -> u64 {
-    with_state(|state| {
-        if output != 0 {
-            unsafe {
-                *(output as *mut u64) = 0;
-            }
-        }
-        let Some(size) = valid_aegp_memory_size(size) else {
-            return 4;
-        };
-        if plugin_id != 1
-            || what == 0
-            || output == 0
-            || flags > u32::MAX as u64
-            || flags & !3 != 0
-            || state.aegp_memory_handles.len() >= MAX_AEGP_MEMORY_HANDLES
-        {
-            return 4;
-        }
-        let handle = state.next_aegp_memory_handle.max(8);
-        let Some(next_handle) = handle.checked_add(8).filter(|next| *next != 0) else {
-            return 4;
-        };
-        let Some((block, free_index, remainder)) = select_aegp_memory_block(state, size) else {
-            return 4;
-        };
-        unsafe {
-            ptr::write_bytes(block.data as *mut u8, 0, size as usize);
-            *(output as *mut u64) = handle;
-        }
-        commit_aegp_memory_block(state, block, free_index, remainder);
-        state.next_aegp_memory_handle = next_handle;
-        state.aegp_memory_handles.insert(
-            handle,
-            NativeAegpMemoryHandle {
-                data: block.data,
-                size,
-                locks: 0,
-                end: block.end,
-            },
-        );
-        0
+    with_state(|state| unsafe {
+        state.aegp_memory.new_handle(
+            &mut state.arena_next,
+            state.arena_end,
+            plugin_id,
+            what,
+            size,
+            flags,
+            output,
+        )
     })
     .unwrap_or(4)
 }
@@ -1516,29 +1394,7 @@ unsafe extern "win64" fn free_aegp_mem_handle(
     _: u64,
     _: u64,
 ) -> u64 {
-    with_state(|state| {
-        if state
-            .aegp_memory_handles
-            .get(&handle)
-            .is_some_and(|record| record.locks == 0)
-        {
-            let record = state
-                .aegp_memory_handles
-                .remove(&handle)
-                .expect("checked handle exists");
-            reclaim_aegp_memory_block(
-                state,
-                NativeAegpMemoryBlock {
-                    data: record.data,
-                    end: record.end,
-                },
-            );
-            0
-        } else {
-            4
-        }
-    })
-    .unwrap_or(4)
+    with_state(|state| state.aegp_memory.free_handle(handle)).unwrap_or(4)
 }
 
 unsafe extern "win64" fn lock_aegp_mem_handle(
@@ -1549,23 +1405,7 @@ unsafe extern "win64" fn lock_aegp_mem_handle(
     _: u64,
     _: u64,
 ) -> u64 {
-    with_state(|state| {
-        if output == 0 {
-            return 4;
-        }
-        let Some(record) = state.aegp_memory_handles.get_mut(&handle) else {
-            return 4;
-        };
-        if record.locks == u32::MAX {
-            return 4;
-        }
-        unsafe {
-            *(output as *mut u64) = record.data;
-        }
-        record.locks += 1;
-        0
-    })
-    .unwrap_or(4)
+    with_state(|state| unsafe { state.aegp_memory.lock_handle(handle, output) }).unwrap_or(4)
 }
 
 unsafe extern "win64" fn unlock_aegp_mem_handle(
@@ -1576,17 +1416,7 @@ unsafe extern "win64" fn unlock_aegp_mem_handle(
     _: u64,
     _: u64,
 ) -> u64 {
-    with_state(|state| {
-        let Some(record) = state.aegp_memory_handles.get_mut(&handle) else {
-            return 4;
-        };
-        if record.locks == 0 {
-            return 4;
-        }
-        record.locks -= 1;
-        0
-    })
-    .unwrap_or(4)
+    with_state(|state| state.aegp_memory.unlock_handle(handle)).unwrap_or(4)
 }
 
 unsafe extern "win64" fn get_aegp_mem_handle_size(
@@ -1597,19 +1427,7 @@ unsafe extern "win64" fn get_aegp_mem_handle_size(
     _: u64,
     _: u64,
 ) -> u64 {
-    with_state(|state| {
-        if output == 0 {
-            return 4;
-        }
-        let Some(record) = state.aegp_memory_handles.get(&handle) else {
-            return 4;
-        };
-        unsafe {
-            *(output as *mut u32) = record.size as u32;
-        }
-        0
-    })
-    .unwrap_or(4)
+    with_state(|state| unsafe { state.aegp_memory.handle_size(handle, output) }).unwrap_or(4)
 }
 
 unsafe extern "win64" fn resize_aegp_mem_handle(
@@ -1620,76 +1438,10 @@ unsafe extern "win64" fn resize_aegp_mem_handle(
     _: u64,
     _: u64,
 ) -> u64 {
-    with_state(|state| {
-        let Some(size) = valid_aegp_memory_size(size) else {
-            return 4;
-        };
-        if what == 0 {
-            return 4;
-        }
-        let Some(old) = state.aegp_memory_handles.get(&handle).cloned() else {
-            return 4;
-        };
-        if old.locks != 0 {
-            return 4;
-        }
-        let old_capacity = old.end - old.data;
-        let Some(new_capacity) = aegp_memory_capacity(size) else {
-            return 4;
-        };
-        if new_capacity <= old_capacity {
-            unsafe {
-                if size > old.size {
-                    ptr::write_bytes(
-                        (old.data + old.size) as *mut u8,
-                        0,
-                        (size - old.size) as usize,
-                    );
-                }
-            }
-            let new_end = old.data + new_capacity;
-            let Some(record) = state.aegp_memory_handles.get_mut(&handle) else {
-                return 4;
-            };
-            record.size = size;
-            record.end = new_end;
-            if new_end < old.end {
-                reclaim_aegp_memory_block(
-                    state,
-                    NativeAegpMemoryBlock {
-                        data: new_end,
-                        end: old.end,
-                    },
-                );
-            }
-            return 0;
-        }
-        let Some((block, free_index, remainder)) = select_aegp_memory_block(state, size) else {
-            return 4;
-        };
-        unsafe {
-            ptr::write_bytes(block.data as *mut u8, 0, size as usize);
-            ptr::copy_nonoverlapping(
-                old.data as *const u8,
-                block.data as *mut u8,
-                old.size.min(size) as usize,
-            );
-        }
-        commit_aegp_memory_block(state, block, free_index, remainder);
-        let Some(record) = state.aegp_memory_handles.get_mut(&handle) else {
-            return 4;
-        };
-        record.data = block.data;
-        record.size = size;
-        record.end = block.end;
-        reclaim_aegp_memory_block(
-            state,
-            NativeAegpMemoryBlock {
-                data: old.data,
-                end: old.end,
-            },
-        );
-        0
+    with_state(|state| unsafe {
+        state
+            .aegp_memory
+            .resize_handle(&mut state.arena_next, state.arena_end, what, size, handle)
     })
     .unwrap_or(4)
 }
