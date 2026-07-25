@@ -28,7 +28,9 @@ pub use crate::x64::{
 use crate::x64::{record_suite_request, record_unsupported_suite_call, utility_suite_layout};
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
-const MAX_HANDLE_SIZE: u64 = 128 * 1024 * 1024;
+const PAGE_SIZE: usize = 4096;
+const MAX_PF_HANDLE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_PF_HANDLE_COUNT: usize = 1024;
 const PROT_READ: c_int = 0x1;
 const PROT_WRITE: c_int = 0x2;
 const PROT_EXEC: c_int = 0x4;
@@ -102,6 +104,7 @@ struct NativeHandle {
     data: u64,
     size: u64,
     locks: u32,
+    data_mapping_size: usize,
 }
 
 #[repr(C)]
@@ -201,6 +204,17 @@ pub struct GuestEngine<'a> {
     arena: Mapping,
     state: NativeState,
     lifetime: PhantomData<&'a ()>,
+}
+
+impl Drop for GuestEngine<'_> {
+    fn drop(&mut self) {
+        for (handle, record) in self.state.handles.drain() {
+            unsafe {
+                munmap(record.data as *mut c_void, record.data_mapping_size);
+                munmap(handle as *mut c_void, PAGE_SIZE);
+            }
+        }
+    }
 }
 
 type Win64Function = unsafe extern "win64" fn(u64, u64, u64, u64, u64, u64) -> u64;
@@ -1385,21 +1399,63 @@ unsafe extern "win64" fn checkout_param(
 unsafe extern "win64" fn new_handle(size: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
     with_state(|state| {
         state.handle_allocations.push(size);
-        if size > MAX_HANDLE_SIZE {
+        let live_bytes = state.handles.values().map(|record| record.size).sum::<u64>();
+        if size > MAX_PF_HANDLE_SIZE
+            || state.handles.len() >= MAX_PF_HANDLE_COUNT
+            || live_bytes > MAX_PF_HANDLE_SIZE - size
+        {
+            state.callback_error = Some(format!(
+                "PF Handle allocation exceeds live budget: size={size}, live_bytes={live_bytes}, live_count={}",
+                state.handles.len()
+            ));
             return 0;
         }
-        let handle = (state.arena_next + 7) & !7;
-        let data = (handle + 8 + 15) & !15;
-        let Some(end) = data.checked_add(size.max(1)) else {
+        let Some(data_mapping_size) = usize::try_from(size.max(1))
+            .ok()
+            .and_then(|size| size.checked_add(PAGE_SIZE - 1))
+            .map(|size| size & !(PAGE_SIZE - 1))
+        else {
+            state.callback_error = Some(format!("PF Handle allocation size overflow: {size}"));
             return 0;
         };
-        if end > state.arena_end {
+        let handle = unsafe {
+            mmap(
+                ptr::null_mut(),
+                PAGE_SIZE,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if handle as isize == -1 {
+            state.callback_error = Some(format!(
+                "PF Handle header allocation failed for {size} bytes"
+            ));
             return 0;
         }
-        state.arena_next = end;
+        let data = unsafe {
+            mmap(
+                ptr::null_mut(),
+                data_mapping_size,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if data as isize == -1 {
+            unsafe {
+                munmap(handle, PAGE_SIZE);
+            }
+            state.callback_error =
+                Some(format!("PF Handle data allocation failed for {size} bytes"));
+            return 0;
+        }
+        let handle = handle as u64;
+        let data = data as u64;
         unsafe {
             *(handle as *mut u64) = data;
-            ptr::write_bytes(data as *mut u8, 0, size as usize);
         }
         state.handles.insert(
             handle,
@@ -1407,6 +1463,7 @@ unsafe extern "win64" fn new_handle(size: u64, _: u64, _: u64, _: u64, _: u64, _
                 data,
                 size,
                 locks: 0,
+                data_mapping_size,
             },
         );
         handle
@@ -1416,18 +1473,26 @@ unsafe extern "win64" fn new_handle(size: u64, _: u64, _: u64, _: u64, _: u64, _
 
 unsafe extern "win64" fn lock_handle(handle: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
     with_state(|state| {
-        state.handles.get_mut(&handle).map_or(0, |record| {
+        if let Some(record) = state.handles.get_mut(&handle) {
             record.locks = record.locks.saturating_add(1);
             record.data
-        })
+        } else {
+            state.callback_error = Some(format!(
+                "PF Handle lock received unknown handle {handle:#x}"
+            ));
+            0
+        }
     })
     .unwrap_or(0)
 }
 
 unsafe extern "win64" fn unlock_handle(handle: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
-    with_state(|state| {
-        if let Some(record) = state.handles.get_mut(&handle) {
-            record.locks = record.locks.saturating_sub(1);
+    with_state(|state| match state.handles.get_mut(&handle) {
+        Some(record) if record.locks != 0 => record.locks -= 1,
+        _ => {
+            state.callback_error = Some(format!(
+                "PF Handle unlock received stale or unlocked handle {handle:#x}"
+            ));
         }
     });
     0
@@ -1442,13 +1507,39 @@ unsafe extern "win64" fn dispose_handle(
     _: u64,
 ) -> u64 {
     with_state(|state| {
+        let Some(record) = state.handles.get(&handle).cloned() else {
+            state.callback_error = Some(format!(
+                "PF Handle dispose received stale handle {handle:#x}"
+            ));
+            return;
+        };
+        if record.locks != 0 {
+            state.callback_error = Some(format!(
+                "PF Handle dispose received locked handle {handle:#x}"
+            ));
+            return;
+        }
         state.handles.remove(&handle);
+        unsafe {
+            munmap(record.data as *mut c_void, record.data_mapping_size);
+            munmap(handle as *mut c_void, PAGE_SIZE);
+        }
     });
     0
 }
 
 unsafe extern "win64" fn handle_size(handle: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
-    with_state(|state| state.handles.get(&handle).map_or(0, |record| record.size)).unwrap_or(0)
+    with_state(|state| {
+        if let Some(record) = state.handles.get(&handle) {
+            record.size
+        } else {
+            state.callback_error = Some(format!(
+                "PF Handle size received unknown handle {handle:#x}"
+            ));
+            0
+        }
+    })
+    .unwrap_or(0)
 }
 
 unsafe extern "win64" fn resize_handle(
@@ -1460,7 +1551,7 @@ unsafe extern "win64" fn resize_handle(
     _: u64,
 ) -> u64 {
     with_state(|state| {
-        if size > MAX_HANDLE_SIZE || handle_pointer == 0 {
+        if size > MAX_PF_HANDLE_SIZE || handle_pointer == 0 {
             return 4;
         }
         let handle = unsafe { *(handle_pointer as *const u64) };
@@ -1470,26 +1561,54 @@ unsafe extern "win64" fn resize_handle(
         if old.locks != 0 {
             return 4;
         }
-        let data = (state.arena_next + 15) & !15;
-        let Some(end) = data.checked_add(size.max(1)) else {
-            return 4;
-        };
-        if end > state.arena_end {
+        let live_bytes = state
+            .handles
+            .values()
+            .map(|record| record.size)
+            .sum::<u64>();
+        if live_bytes - old.size > MAX_PF_HANDLE_SIZE - size {
+            state.callback_error = Some(format!(
+                "PF Handle resize exceeds live budget: size={size}, live_bytes={live_bytes}"
+            ));
             return 4;
         }
-        state.arena_next = end;
+        let Some(data_mapping_size) = usize::try_from(size.max(1))
+            .ok()
+            .and_then(|size| size.checked_add(PAGE_SIZE - 1))
+            .map(|size| size & !(PAGE_SIZE - 1))
+        else {
+            return 4;
+        };
+        let data = unsafe {
+            mmap(
+                ptr::null_mut(),
+                data_mapping_size,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if data as isize == -1 {
+            state.callback_error = Some(format!(
+                "PF Handle resize allocation failed for {size} bytes"
+            ));
+            return 1;
+        }
+        let data = data as u64;
         unsafe {
-            ptr::write_bytes(data as *mut u8, 0, size as usize);
             ptr::copy_nonoverlapping(
                 old.data as *const u8,
                 data as *mut u8,
                 old.size.min(size) as usize,
             );
             *(handle as *mut u64) = data;
+            munmap(old.data as *mut c_void, old.data_mapping_size);
         }
         if let Some(record) = state.handles.get_mut(&handle) {
             record.data = data;
             record.size = size;
+            record.data_mapping_size = data_mapping_size;
         }
         0
     })
@@ -1693,6 +1812,74 @@ mod tests {
         assert_eq!(
             unsafe { point_param_value(HOST_EFFECT_REF, definition.as_ptr() as u64, 0, 0, 0, 0,) },
             4
+        );
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
+
+    #[test]
+    fn pf_handles_map_large_storage_and_preserve_resize_bytes() {
+        let mut state = NativeState::default();
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+        let size = 333_294_848;
+        let handle = unsafe { new_handle(size, 0, 0, 0, 0, 0) };
+        assert_ne!(handle, 0);
+        let data = unsafe { lock_handle(handle, 0, 0, 0, 0, 0) };
+        assert_ne!(data, 0);
+        unsafe {
+            *((data + size - 1) as *mut u8) = 0x5a;
+        }
+        assert_eq!(unsafe { handle_size(handle, 0, 0, 0, 0, 0) }, size);
+        unsafe {
+            unlock_handle(handle, 0, 0, 0, 0, 0);
+            dispose_handle(handle, 0, 0, 0, 0, 0);
+        }
+
+        let handle = unsafe { new_handle(16, 0, 0, 0, 0, 0) };
+        let data = unsafe { lock_handle(handle, 0, 0, 0, 0, 0) };
+        unsafe {
+            *(data as *mut u32) = 0x0403_0201;
+            unlock_handle(handle, 0, 0, 0, 0, 0);
+        }
+        let mut handle_pointer = handle;
+        assert_eq!(
+            unsafe { resize_handle(8192, (&mut handle_pointer as *mut u64) as u64, 0, 0, 0, 0,) },
+            0
+        );
+        assert_eq!(handle_pointer, handle);
+        let resized = unsafe { lock_handle(handle, 0, 0, 0, 0, 0) };
+        assert_eq!(unsafe { *(resized as *const u32) }, 0x0403_0201);
+        unsafe {
+            unlock_handle(handle, 0, 0, 0, 0, 0);
+            dispose_handle(handle, 0, 0, 0, 0, 0);
+        }
+        assert!(state.handles.is_empty());
+        assert!(state.callback_error.is_none());
+
+        let budget_handle = unsafe { new_handle(MAX_PF_HANDLE_SIZE, 0, 0, 0, 0, 0) };
+        assert_ne!(budget_handle, 0);
+        assert_eq!(unsafe { new_handle(1, 0, 0, 0, 0, 0) }, 0);
+        assert!(
+            state
+                .callback_error
+                .as_deref()
+                .is_some_and(|message| message.contains("live budget"))
+        );
+        state.callback_error = None;
+        unsafe {
+            dispose_handle(budget_handle, 0, 0, 0, 0, 0);
+        }
+        let released_budget_handle = unsafe { new_handle(1, 0, 0, 0, 0, 0) };
+        assert_ne!(released_budget_handle, 0);
+        unsafe {
+            dispose_handle(released_budget_handle, 0, 0, 0, 0, 0);
+        }
+
+        assert_eq!(unsafe { lock_handle(0xdead_beef, 0, 0, 0, 0, 0) }, 0);
+        assert!(
+            state
+                .callback_error
+                .as_deref()
+                .is_some_and(|message| message.contains("unknown handle"))
         );
         ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
     }

@@ -221,6 +221,17 @@ target_include_directories(worker_classic_runtime_selftest PRIVATE src)
 target_link_libraries(worker_classic_runtime_selftest PRIVATE
   bcrypt aexcompat_trace_writer)
 
+add_executable(worker_handle_runtime_selftest
+  ../tests/native/worker_handle_runtime_selftest.cpp
+  src/worker_handle_runtime.cpp
+)
+target_compile_features(worker_handle_runtime_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_handle_runtime_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_handle_runtime_selftest PRIVATE src)
+target_link_libraries(worker_handle_runtime_selftest PRIVATE
+  aexcompat_trace_writer)
+
 add_executable(worker_aegp_init_runtime_selftest
   ../tests/native/worker_aegp_init_runtime_selftest.cpp
   src/worker_aegp_init_runtime.cpp

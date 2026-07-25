@@ -7,11 +7,15 @@ MAIN = source_owners.L2_MAIN.read_text(encoding="utf-8")
 HEADER = (ROOT / "minihost/src/worker_handle_runtime.hpp").read_text(encoding="utf-8")
 SOURCE = (ROOT / "minihost/src/worker_handle_runtime.cpp").read_text(encoding="utf-8")
 CMAKE = (ROOT / "minihost/CMakeLists.txt").read_text(encoding="utf-8")
+SELFTEST = (ROOT / "tests/native/worker_handle_runtime_selftest.cpp").read_text(
+    encoding="utf-8"
+)
 
 
 def test_pf_handle_ownership_is_bounded_and_hidden_behind_snapshots():
     for marker in (
-        "kMaxHandleBytes = 256ULL * 1024ULL * 1024ULL",
+        "kMaxHandleBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL",
+        "kObservedLargeHandleBytes = 333294848ULL",
         "kMaxHandleCount = 1024",
         "Statistics statistics()",
         "bool host_handle_is_live(const void* handle)",
@@ -23,10 +27,25 @@ def test_pf_handle_ownership_is_bounded_and_hidden_behind_snapshots():
         "record->lock_count != 0",
         "g_statistics.live_bytes > kMaxHandleBytes - size",
         "g_statistics.locks == g_statistics.unlocks",
+        "callback:new_handle_failed reason=budget",
+        "callback:resize_handle_failed reason=data",
     ):
         assert marker in SOURCE
     assert "g_handle_mutex" not in MAIN
     assert "g_handles.count" not in MAIN
+    for marker in (
+        "worker_handle_runtime_selftest",
+        "tests/native/worker_handle_runtime_selftest.cpp",
+    ):
+        assert marker in CMAKE
+    for marker in (
+        "new_handle(kObservedLargeHandleBytes)",
+        "large_data[kObservedLargeHandleBytes - 1]",
+        "resized != stable_handle",
+        "replacement[31] != 0x78",
+        "handle_lifetimes_balanced()",
+    ):
+        assert marker in SELFTEST
 
 
 def test_aegp_memory_handle_family_keeps_suite_abi_and_fail_closed_limits():

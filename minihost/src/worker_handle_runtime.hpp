@@ -6,7 +6,9 @@
 
 namespace aexcompat::worker_runtime::handles {
 
-constexpr std::uint64_t kMaxHandleBytes = 256ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kMaxHandleBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kObservedLargeHandleBytes = 333294848ULL;
+static_assert(kMaxHandleBytes >= kObservedLargeHandleBytes);
 constexpr std::size_t kMaxHandleCount = 1024;
 
 struct Statistics {
