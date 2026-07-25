@@ -1,4 +1,6 @@
-use crate::classic::{ClassicError, ClassicHost, ParameterValue, SetupReport};
+use crate::classic::{
+    ClassicError, ClassicHost, ParameterValue, ResidentFailureDiagnostic, SetupReport,
+};
 use crate::pe::PeImage;
 use serde::Serialize;
 use serde_json::Value;
@@ -77,6 +79,8 @@ struct SessionProbed {
     status: &'static str,
     guards_intact: bool,
     render_error: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure: Option<ResidentFailureDiagnostic>,
 }
 
 #[derive(Serialize)]
@@ -154,13 +158,16 @@ pub fn run_resident_session(
                                 status: "ok",
                                 guards_intact: report.guards_intact,
                                 render_error: 0,
+                                failure: None,
                             },
                         )?,
                         Err(error) => {
-                            let render_error = match error {
-                                ClassicError::Selector { error, .. } => error,
+                            let render_error = match &error {
+                                ClassicError::Selector { error, .. } => *error,
                                 _ => -40,
                             };
+                            let failure =
+                                host.resident_failure_diagnostic("admission_probe", &error);
                             write_message(
                                 &mut response,
                                 &SessionProbed {
@@ -170,6 +177,7 @@ pub fn run_resident_session(
                                     status: "error",
                                     guards_intact: false,
                                     render_error,
+                                    failure: Some(failure),
                                 },
                             )?;
                             return Err(SessionError::Classic(error));
@@ -489,6 +497,89 @@ fn write_message(writer: &mut impl Write, value: &impl Serialize) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classic::{MAX_FAILURE_SUITE_REQUEST_BYTES, MAX_FAILURE_TEXT_BYTES};
+
+    #[test]
+    fn probe_failure_response_carries_bounded_structured_diagnostics() {
+        let diagnostic = ResidentFailureDiagnostic {
+            schema_version: 1,
+            stage: "admission_probe",
+            execution_backend: "fixture",
+            category: "callback",
+            selector: Some("RENDER"),
+            error_code: None,
+            message: "guest callback failed".into(),
+            crash_reason: None,
+            suite_requests: vec!["PF Iterate8 Suite v1".into()],
+            dropped_suite_requests: 0,
+            unsupported_suite_calls: Vec::new(),
+            dropped_unsupported_suite_calls: 0,
+        };
+        let mut framed = Vec::new();
+        write_message(
+            &mut framed,
+            &SessionProbed {
+                v: 1,
+                kind: "session_probed",
+                worker_pid: 42,
+                status: "error",
+                guards_intact: false,
+                render_error: -40,
+                failure: Some(diagnostic),
+            },
+        )
+        .unwrap();
+        let length = u32::from_le_bytes(framed[..4].try_into().unwrap()) as usize;
+        assert_eq!(length, framed.len() - 4);
+        assert!(length <= MAX_CONTROL_MESSAGE_BYTES);
+        let value: Value = serde_json::from_slice(&framed[4..]).unwrap();
+        assert_eq!(value["failure"]["stage"], "admission_probe");
+        assert_eq!(value["failure"]["category"], "callback");
+        assert_eq!(value["failure"]["selector"], "RENDER");
+        assert_eq!(value["failure"]["message"], "guest callback failed");
+        assert!(value["failure"]["crash_reason"].is_null());
+    }
+
+    #[test]
+    fn maximal_failure_diagnostic_fits_control_message_bound() {
+        let diagnostic = ResidentFailureDiagnostic {
+            schema_version: 1,
+            stage: "admission_probe",
+            execution_backend: "unicorn-x86_64",
+            category: "callback",
+            selector: Some("SMART_RENDER"),
+            error_code: Some(-40),
+            message: "m".repeat(MAX_FAILURE_TEXT_BYTES),
+            crash_reason: Some("c".repeat(MAX_FAILURE_TEXT_BYTES)),
+            suite_requests: vec!["s".repeat(MAX_FAILURE_SUITE_REQUEST_BYTES); 64],
+            dropped_suite_requests: u64::MAX,
+            unsupported_suite_calls: vec![
+                crate::x64::UnsupportedSuiteCall {
+                    name: "AEGP Utility Suite",
+                    version: u32::MAX,
+                    slot: usize::MAX,
+                    call_count: u64::MAX,
+                };
+                64
+            ],
+            dropped_unsupported_suite_calls: u64::MAX,
+        };
+        let mut framed = Vec::new();
+        write_message(
+            &mut framed,
+            &SessionProbed {
+                v: 1,
+                kind: "session_probed",
+                worker_pid: u32::MAX,
+                status: "error",
+                guards_intact: false,
+                render_error: -40,
+                failure: Some(diagnostic),
+            },
+        )
+        .unwrap();
+        assert!(framed.len() - 4 <= MAX_CONTROL_MESSAGE_BYTES);
+    }
 
     #[test]
     fn numeric_parameter_payload_uses_declared_slots_and_rejects_duplicates() {

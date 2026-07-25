@@ -29,6 +29,10 @@ const ANGLE_DEFAULT_OFFSET: usize = 4;
 const CLEANUP_GUEST_ERROR: i32 = -40;
 const OUTPUT_GUARD_BYTES: usize = 64;
 const OUTPUT_GUARD_PATTERN: u8 = 0xa5;
+pub(crate) const MAX_FAILURE_TEXT_BYTES: usize = 1024;
+pub(crate) const MAX_FAILURE_SUITE_REQUEST_BYTES: usize = 256;
+const MAX_FAILURE_SUITE_REQUESTS: usize = 64;
+const MAX_FAILURE_UNSUPPORTED_SUITE_CALLS: usize = 64;
 pub const MAX_RENDER_WIDTH: u32 = 1920;
 pub const MAX_RENDER_HEIGHT: u32 = 1080;
 
@@ -95,6 +99,22 @@ pub struct FailureReport {
     pub execution_backend: &'static str,
     pub error: String,
     pub suite_requests: Vec<String>,
+    pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
+    pub dropped_unsupported_suite_calls: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResidentFailureDiagnostic {
+    pub schema_version: u32,
+    pub stage: &'static str,
+    pub execution_backend: &'static str,
+    pub category: &'static str,
+    pub selector: Option<&'static str>,
+    pub error_code: Option<i32>,
+    pub message: String,
+    pub crash_reason: Option<String>,
+    pub suite_requests: Vec<String>,
+    pub dropped_suite_requests: u64,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     pub dropped_unsupported_suite_calls: u64,
 }
@@ -518,6 +538,72 @@ impl ClassicHost {
         }
     }
 
+    pub fn resident_failure_diagnostic(
+        &self,
+        stage: &'static str,
+        error: &ClassicError,
+    ) -> ResidentFailureDiagnostic {
+        let (category, selector, error_code, message, crash_reason) = match error {
+            ClassicError::Guest(source) => (
+                source.diagnostic_category(),
+                None,
+                None,
+                source.diagnostic_message(),
+                source.crash_reason().map(str::to_owned),
+            ),
+            ClassicError::SelectorGuest { selector, source } => (
+                source.diagnostic_category(),
+                Some(*selector),
+                None,
+                source.diagnostic_message(),
+                source.crash_reason().map(str::to_owned),
+            ),
+            ClassicError::Selector { selector, error } => (
+                "selector",
+                Some(*selector),
+                Some(*error),
+                format!("selector {selector} returned {error}"),
+                None,
+            ),
+            ClassicError::Input(message) => ("input", None, None, message.clone(), None),
+        };
+        let suite_requests = self.engine.suite_requests();
+        let unsupported_suite_calls = self.engine.unsupported_suite_calls();
+        ResidentFailureDiagnostic {
+            schema_version: 1,
+            stage,
+            execution_backend: self.engine.backend_name(),
+            category,
+            selector,
+            error_code,
+            message: bounded_failure_text(&message),
+            crash_reason: crash_reason.map(|reason| bounded_failure_text(&reason)),
+            suite_requests: suite_requests
+                .iter()
+                .take(MAX_FAILURE_SUITE_REQUESTS)
+                .map(|request| bounded_text(request, MAX_FAILURE_SUITE_REQUEST_BYTES))
+                .collect(),
+            dropped_suite_requests: suite_requests
+                .len()
+                .saturating_sub(MAX_FAILURE_SUITE_REQUESTS)
+                as u64,
+            unsupported_suite_calls: unsupported_suite_calls
+                .iter()
+                .take(MAX_FAILURE_UNSUPPORTED_SUITE_CALLS)
+                .cloned()
+                .collect(),
+            dropped_unsupported_suite_calls: self
+                .engine
+                .dropped_unsupported_suite_calls()
+                .saturating_add(
+                    unsupported_suite_calls
+                        .len()
+                        .saturating_sub(MAX_FAILURE_UNSUPPORTED_SUITE_CALLS)
+                        as u64,
+                ),
+        }
+    }
+
     pub fn trace_setup_selector(
         &mut self,
         selector_name: &str,
@@ -930,25 +1016,28 @@ impl ClassicHost {
             ],
             trace_enabled,
         );
-        let mut frame_setdown_error = match frame_setdown {
+        let (mut frame_setdown_error, mut frame_setdown_failure) = match frame_setdown {
             Ok((result, trace)) => {
                 traces.extend(trace);
-                result as i32
+                let error = result as i32;
+                (error, selector_failure("FRAME_SETDOWN", error))
             }
-            Err(_) => CLEANUP_GUEST_ERROR,
+            Err(error) => (CLEANUP_GUEST_ERROR, Some(error)),
         };
-        if self
-            .write_input_pointer(abi::IN_FRAME_DATA_OFFSET, 0)
-            .is_err()
-            && frame_setdown_error == 0
-        {
-            frame_setdown_error = CLEANUP_GUEST_ERROR;
+        if let Err(source) = self.write_input_pointer(abi::IN_FRAME_DATA_OFFSET, 0) {
+            if frame_setdown_failure.is_none() {
+                frame_setdown_error = CLEANUP_GUEST_ERROR;
+                frame_setdown_failure = Some(ClassicError::SelectorGuest {
+                    selector: "FRAME_SETDOWN",
+                    source,
+                });
+            }
         }
         if persistent_sequence && self.resident_frame_setdown_error == 0 && frame_setdown_error != 0
         {
             self.resident_frame_setdown_error = frame_setdown_error;
         }
-        let (mut render_error, census, render_traces) = match frame_execution {
+        let (render_error, census, render_traces) = match frame_execution {
             Ok(result) => result,
             Err(error) => {
                 if !persistent_sequence {
@@ -958,28 +1047,36 @@ impl ClassicHost {
             }
         };
         traces.extend(render_traces);
-        if render_error == 0 {
-            render_error = frame_setdown_error;
-        }
+        let mut failure = selector_failure("RENDER", render_error).or(frame_setdown_failure);
         if !persistent_sequence {
-            let (sequence_setdown_result, trace) = self.call_with_optional_trace(
+            let sequence_setdown = self.call_with_optional_trace(
                 "SEQUENCE_SETDOWN",
                 [CMD_SEQUENCE_SETDOWN, self.input, self.output, 0, 0, 0],
                 trace_enabled,
-            )?;
-            traces.extend(trace);
-            let sequence_setdown_error = sequence_setdown_result as i32;
-            if render_error == 0 {
-                render_error = sequence_setdown_error;
+            );
+            match sequence_setdown {
+                Ok((result, trace)) => {
+                    traces.extend(trace);
+                    let error = result as i32;
+                    if failure.is_none() {
+                        failure = selector_failure("SEQUENCE_SETDOWN", error);
+                    }
+                }
+                Err(error) if failure.is_none() => failure = Some(error),
+                Err(_) => {}
             }
             self.sequence_active = false;
-            self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, 0)?;
+            if let Err(source) = self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, 0) {
+                if failure.is_none() {
+                    failure = Some(ClassicError::SelectorGuest {
+                        selector: "SEQUENCE_SETDOWN",
+                        source,
+                    });
+                }
+            }
         }
-        if render_error != 0 {
-            return Err(ClassicError::Selector {
-                selector: "RENDER",
-                error: render_error,
-            });
+        if let Some(error) = failure {
+            return Err(error);
         }
         let mut leading_guard = vec![0u8; OUTPUT_GUARD_BYTES];
         let mut trailing_guard = vec![0u8; OUTPUT_GUARD_BYTES];
@@ -1143,7 +1240,7 @@ impl ClassicHost {
 
     fn call_with_optional_trace(
         &mut self,
-        selector_name: &str,
+        selector_name: &'static str,
         args: [u64; 6],
         trace_enabled: bool,
     ) -> Result<(u64, Option<ExecutionTrace>), ClassicError> {
@@ -1154,7 +1251,12 @@ impl ClassicHost {
             self.engine
                 .begin_execution_trace(selector_name, self.entry)?;
         }
-        let return_value = self.engine.call_win64(self.entry, args)?;
+        let return_value = self.engine.call_win64(self.entry, args).map_err(|source| {
+            ClassicError::SelectorGuest {
+                selector: selector_name,
+                source,
+            }
+        })?;
         let after = trace_enabled
             .then(|| self.trace_state_snapshot())
             .transpose()?;
@@ -1621,9 +1723,50 @@ fn cleanup_error_code(result: Result<i32, ClassicError>) -> i32 {
     result.unwrap_or(CLEANUP_GUEST_ERROR)
 }
 
+fn selector_failure(selector: &'static str, error: i32) -> Option<ClassicError> {
+    (error != 0).then_some(ClassicError::Selector { selector, error })
+}
+
+fn bounded_failure_text(value: &str) -> String {
+    bounded_text(value, MAX_FAILURE_TEXT_BYTES)
+}
+
+fn bounded_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_text_is_utf8_safe_and_bounded() {
+        let text = "界".repeat(MAX_FAILURE_TEXT_BYTES);
+        let bounded = bounded_failure_text(&text);
+        assert!(bounded.len() <= MAX_FAILURE_TEXT_BYTES);
+        assert!(bounded.is_char_boundary(bounded.len()));
+        assert_eq!(bounded, "界".repeat(MAX_FAILURE_TEXT_BYTES / 3));
+    }
+
+    #[test]
+    fn cleanup_selector_failure_preserves_its_selector() {
+        let failure = selector_failure("FRAME_SETDOWN", -40).unwrap();
+        assert!(matches!(
+            failure,
+            ClassicError::Selector {
+                selector: "FRAME_SETDOWN",
+                error: -40
+            }
+        ));
+        assert!(selector_failure("FRAME_SETDOWN", 0).is_none());
+    }
 
     #[test]
     fn materializes_supported_parameter_defaults() {
