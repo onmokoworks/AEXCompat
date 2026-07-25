@@ -1332,7 +1332,7 @@ unsafe extern "win64" fn point_param_value(
     _: u64,
 ) -> u64 {
     if definition == 0 || output == 0 {
-        return PF_BAD_CALLBACK_PARAM;
+        return 4;
     }
     let x = unsafe { ptr::read_unaligned((definition + abi::PARAM_U_OFFSET as u64) as *const i32) }
         as f64
@@ -1688,11 +1688,11 @@ mod tests {
         assert_eq!(output, [1.5, -2.25]);
         assert_eq!(
             unsafe { point_param_value(HOST_EFFECT_REF, 0, output.as_mut_ptr() as u64, 0, 0, 0) },
-            PF_BAD_CALLBACK_PARAM
+            4
         );
         assert_eq!(
             unsafe { point_param_value(HOST_EFFECT_REF, definition.as_ptr() as u64, 0, 0, 0, 0,) },
-            PF_BAD_CALLBACK_PARAM
+            4
         );
         ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
     }
