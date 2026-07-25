@@ -57,6 +57,12 @@ themselves little-endian. `AE_Effect_Version` packs
 `vers<<19 | subvers<<15 | bugvers<<11 | stage<<9 | build` (verified against
 Paramarama `1081345` = 2.1).
 
+One bounded compatibility exception is recognized for shipping Boris Continuum
+PiPLs: an exact terminal public `AE_Reserved` record (`8BIM` / `aeRD`, property
+ID 0, length 4, value 0) may follow the declared property count. The worker
+accepts only that complete 20-byte record. A different key or value, a partial
+record, multiple records, or any other trailing bytes remain invalid.
+
 SDK anchors: `Examples/Resources/AE_General.r` (`AEEffect = 'eFKT'`,
 `AEGP = 'AEgx'`, property keys) and `Examples/Headers/SP/SPPiPL.h`.
 

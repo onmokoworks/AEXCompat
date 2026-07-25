@@ -132,6 +132,18 @@ def _valid_export_symbol(data: bytes) -> str | None:
     return symbol.decode("ascii")
 
 
+def _terminal_zero_ae_reserved_property(data: bytes) -> bool:
+    """Recognize the exact public AE_Reserved zero tail used by shipping BCC PiPLs."""
+    return (
+        len(data) == 20
+        and data[0:4] == VENDOR_ADOBE
+        and data[4:8] == b"DRea"  # serialized little-endian ``aeRD``
+        and _u32(data, 8) == 0
+        and _u32(data, 12) == 4
+        and _u32(data, 16) == 0
+    )
+
+
 def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
     """Decode one PiPL resource payload into an identity record.
 
@@ -242,8 +254,11 @@ def parse_pipl_payload(payload: bytes | None) -> dict[str, Any]:
         offset += padded
 
     if offset != size:
-        record["reason"] = "trailing_bytes_after_properties"
-        return record
+        if not _terminal_zero_ae_reserved_property(payload[offset:]):
+            record["reason"] = "trailing_bytes_after_properties"
+            return record
+        keys.append("aeRD")
+        offset = size
     # Worker requires exactly one Kind, and an Effect Kind requires its Win64
     # entrypoint; both are Invalid otherwise.
     if kind_count == 0:

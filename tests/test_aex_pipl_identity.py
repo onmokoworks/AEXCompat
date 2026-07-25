@@ -128,6 +128,28 @@ def test_nonzero_padding_is_invalid():
     assert record["reason"] == "nonzero_property_padding"
 
 
+def test_exact_terminal_zero_ae_reserved_outside_declared_count_is_accepted():
+    payload = _effect_payload() + _property("aeRD", struct.pack("<I", 0))
+    record = ident.parse_pipl_payload(payload)
+    assert record["parse_state"] == "parsed"
+    assert record["dispatchable_effect"] is True
+    assert record["entrypoint_win64"] == "EffectMain"
+    assert record["property_count_declared"] == 6
+    assert record["property_keys"][-1] == "aeRD"
+
+
+def test_terminal_ae_reserved_compatibility_is_exact_and_fail_closed():
+    base = _effect_payload()
+    nonzero = base + _property("aeRD", struct.pack("<I", 1))
+    duplicate = base + _property("aeRD", struct.pack("<I", 0)) * 2
+    unrelated = base + _property("name", struct.pack("<I", 0))
+
+    for payload in (nonzero, duplicate, unrelated):
+        record = ident.parse_pipl_payload(payload)
+        assert record["parse_state"] == "invalid"
+        assert record["reason"] == "trailing_bytes_after_properties"
+
+
 def test_short_payload_is_invalid():
     assert ident.parse_pipl_payload(b"")["reason"] == "payload_shorter_than_header"
     assert ident.parse_pipl_payload(None)["reason"] == "no_payload"

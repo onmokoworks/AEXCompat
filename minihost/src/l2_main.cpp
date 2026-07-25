@@ -467,6 +467,17 @@ bool pipl_tag(const unsigned char* bytes, const char (&tag)[5]) {
   return std::memcmp(bytes, tag, 4) == 0;
 }
 
+bool terminal_zero_ae_reserved_property(const unsigned char* bytes,
+                                        std::size_t size) {
+  // Some shipping Boris Continuum PiPLs append the public AE_Reserved
+  // (8BIM/aeRD) zero property without including it in PIPropertyList::count.
+  // Accept only that exact, complete 20-byte record; all other trailing data
+  // remains invalid and fail-closed.
+  return bytes && size == 20 && pipl_tag(bytes, "MIB8") &&
+      pipl_tag(bytes + 4, "DRea") && read_pipl_u32(bytes + 8) == 0 &&
+      read_pipl_u32(bytes + 12) == 4 && read_pipl_u32(bytes + 16) == 0;
+}
+
 bool valid_export_symbol(const unsigned char* bytes, std::size_t size,
                          std::string& symbol) {
   if (size == 0 || size > 256) return false;
@@ -550,7 +561,14 @@ PiplEntrypoint parse_pipl_entrypoint(const unsigned char* bytes, std::size_t siz
       }
     offset += padded_length;
   }
-  if (offset != size || !saw_kind) {
+  if (offset != size) {
+    if (!terminal_zero_ae_reserved_property(bytes + offset, size - offset)) {
+      result.kind = PiplPluginKind::Invalid;
+      return result;
+    }
+    offset = size;
+  }
+  if (!saw_kind) {
     result.kind = PiplPluginKind::Invalid;
     return result;
   }
@@ -1171,6 +1189,27 @@ bool verify_pipl_entrypoint_parser() {
   auto hostile_length = effect;
   std::fill(hostile_length.begin() + 22, hostile_length.begin() + 26, 0xff);
   if (parse_pipl_entrypoint(hostile_length.data(), hostile_length.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto terminal_reserved = effect;
+  append_pipl_property(terminal_reserved, "DRea", {0, 0, 0, 0});
+  const auto reserved_parsed =
+      parse_pipl_entrypoint(terminal_reserved.data(), terminal_reserved.size());
+  if (reserved_parsed.kind != PiplPluginKind::Effect ||
+      reserved_parsed.symbol != "entryPointFunc") return false;
+  auto nonzero_terminal_reserved = terminal_reserved;
+  nonzero_terminal_reserved.back() = 1;
+  if (parse_pipl_entrypoint(nonzero_terminal_reserved.data(),
+                            nonzero_terminal_reserved.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto duplicate_terminal_reserved = terminal_reserved;
+  append_pipl_property(duplicate_terminal_reserved, "DRea", {0, 0, 0, 0});
+  if (parse_pipl_entrypoint(duplicate_terminal_reserved.data(),
+                            duplicate_terminal_reserved.size()).kind !=
+      PiplPluginKind::Invalid) return false;
+  auto unrelated_terminal_property = effect;
+  append_pipl_property(unrelated_terminal_property, "eman", {0, 0, 0, 0});
+  if (parse_pipl_entrypoint(unrelated_terminal_property.data(),
+                            unrelated_terminal_property.size()).kind !=
       PiplPluginKind::Invalid) return false;
   auto vendor_private_duplicate = effect;
   vendor_private_duplicate[6] = 3;
