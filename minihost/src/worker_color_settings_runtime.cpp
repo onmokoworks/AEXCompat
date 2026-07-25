@@ -649,32 +649,40 @@ int32_t __cdecl color_set_working_color_space(int32_t plugin_id, void* comp, voi
   } catch (...) { return 4; }
   return 0;
 }
+// The OCIO query family accepts plugin_id 0 in addition to the registered id
+// 1: the bundled OCIO effects pass a hardcoded 0 (verified by tracing
+// OCIOColorSpaceTransform's IsOCIOColorManagementUsed call, issue #362), so
+// real AE treats 0 as a valid querier for these read-only host-state getters.
+bool ocio_query_id_accepted(int32_t plugin_id) {
+  return plugin_id == 0 || plugin_id == 1;
+}
+
 int32_t __cdecl color_is_ocio_used(int32_t plugin_id, uint8_t* used) {
   if (!used) return 4;
   *used = 0;
-  if (plugin_id != 1) return 4;
+  if (!ocio_query_id_accepted(plugin_id)) return 4;
   return 0;
 }
 int32_t __cdecl color_get_ocio_configuration_file(int32_t plugin_id, void** config_handle) {
   if (config_handle) *config_handle = nullptr;
-  if (plugin_id != 1 || !config_handle) return 4;
+  if (!ocio_query_id_accepted(plugin_id) || !config_handle) return 4;
   return color_settings_init_empty_utf16_handle(config_handle);
 }
 int32_t __cdecl color_get_ocio_configuration_file_path(int32_t plugin_id, void** path_handle) {
   if (path_handle) *path_handle = nullptr;
-  if (plugin_id != 1 || !path_handle) return 4;
+  if (!ocio_query_id_accepted(plugin_id) || !path_handle) return 4;
   return color_settings_init_empty_utf16_handle(path_handle);
 }
 int32_t __cdecl color_get_ocio_working_colorspace(int32_t plugin_id, void** working_handle) {
   if (working_handle) *working_handle = nullptr;
-  if (plugin_id != 1 || !working_handle) return 4;
+  if (!ocio_query_id_accepted(plugin_id) || !working_handle) return 4;
   return color_settings_init_empty_utf16_handle(working_handle);
 }
 int32_t __cdecl color_get_ocio_display_colorspace(int32_t plugin_id, void** display_handle,
                                                   void** view_handle) {
   if (display_handle) *display_handle = nullptr;
   if (view_handle) *view_handle = nullptr;
-  if (plugin_id != 1 || !display_handle || !view_handle) return 4;
+  if (!ocio_query_id_accepted(plugin_id) || !display_handle || !view_handle) return 4;
   if (color_settings_init_empty_utf16_handle(display_handle) != 0) return 4;
   return color_settings_init_empty_utf16_handle(view_handle);
 }

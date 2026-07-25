@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HARNESS_SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS_SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 BROKER_SOURCE = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "target" / "release" / "aexcompat-harness.exe"
 FIXTURE = ROOT / "target" / "sdk-fixtures" / "shifter" / "Shifter.aex"

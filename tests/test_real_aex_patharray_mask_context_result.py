@@ -5,7 +5,7 @@ import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_PATHARRAY_MASK_CONTEXT_RESULT_2026-07-15.json"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 WORKER = source_owners.L2_MAIN
 REQUEST_PARSER = ROOT / "minihost" / "src" / "worker_request_parser.cpp"

@@ -393,3 +393,58 @@ nullptr)` による終端 teardown) とクラスタセッションの共存契�
   により 0 または 1) を含め、audit/epoch と併せて BIB 終了回数を検証
   可能にする。BIB teardown 失敗 (owned だが token 不一致等) は fail-closed
   で exit 25 (swap/BIB-teardown 失敗系統) とする。
+
+## 11. 遅延解放 (deferred release、issue #474、2026-07-24 追記)
+
+### 11.1 背景: mid-process unload 由来の atexit クラッシュ
+
+#405 時点の構造では、closure を pin で保持したまま swap ごとにプラグイン
+だけを先に `FreeLibrary` していた。この構造では process 終了時
+(pins.release / CRT teardown) に closure 側の CRT atexit が先に
+アンマップされたプラグインイメージへ到達して 0xC0000005 で落ちることが
+実測で確認された (2 系統):
+
+- `dvacore!ProcessBeginEndNotificationRegistry` の atexit が、解放済み
+  プラグインが登録したコールバックを呼ぶ (ダングリング)。
+- BIB.dll の CRT atexit が NULL な critical section に進入する
+  (mid-process unload 時、バックグラウンドスレッド生存中の競合)。
+
+one-shot が落ちないのは、プラグインと closure が finish で **1 回の
+loader 順 graph unload** として処理され、closure の atexit 実行時に
+プラグインイメージがまだマップされているからである。
+
+### 11.2 モデル変更
+
+プラグインイメージおよび pin の FreeLibrary を **process exit まで遅延**
+する:
+
+- swap は GLOBAL_SETDOWN までの**論理 teardown** とし、HMODULE は保持
+  (retire) したまま次プラグインをロードする。解放しないため DllMain の
+  detach は走らず、closure に登録されたコールバックは全て有効なまま。
+- close 時もプラグイン・pin を解放しない。sealed root の AddDllDirectory
+  cookie も process 寿命とする。全モジュールは process exit で loader 順に
+  1 pass で unload され、closure の atexit はプラグインイメージが
+  マップされた状態で実行される (one-shot の finish と同型)。
+- 保持コストはプラグインイメージ分 (宣言集合 = manifest plugins で
+  bounded、≤ 256) で、closure の再 staging・再認証・再ロード (本 Issue の
+  主目的) には影響しない。
+- BIB teardown は従来どおり terminal で 1 回 (session-global、P1-1 契約)。
+
+### 11.3 epoch audit の再定義
+
+- epoch N の `pre_unload` は「plugins[N] の **GLOBAL_SETDOWN 直後**
+  (論理 teardown 後) の snapshot」と再定義する。遅延解放では退場
+  プラグインは以後の snapshot にも残り続ける (実際にアンマップされるのは
+  process exit)。
+- `post_load` は従来どおり plugins[N+1] ロード直後。新旧両プラグインが
+  含まれるが、いずれも manifest 宣言済みであり宣言集合 narrow
+  (`plugin` ⊆ plugins ∪ dependencies) はそのまま成立する。
+- `observed_union` は従来どおり全 snapshot の単調増加 union で、
+  post_load ⊆ union / pre_unload ⊆ union の構造検証は変わらない。
+- snapshot の総 module 数は `module_bound` (declared + headroom) 以下に
+  収まる。遅延で増えるのは宣言済みプラグイン分だけで、worker 側の
+  EnumProcessModulesEx 容量 (manifest module_bound) と broker validator の
+  count 検査の双方に収まる。
+- exit 契約は不変: quiesce / GLOBAL_SETDOWN 失敗 / audit 不一致 /
+  認証・ロード失敗は従来どおりセッション無効化 + 専用 exit code 25。
+  「FreeLibrary 失敗」は遅延解放により発生しなくなった。

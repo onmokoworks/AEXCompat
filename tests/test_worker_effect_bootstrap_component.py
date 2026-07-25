@@ -6,25 +6,33 @@ HEADER = (ROOT / "minihost" / "src" / "worker_effect_bootstrap.hpp").read_text(
     encoding="utf-8")
 SOURCE = (ROOT / "minihost" / "src" / "worker_effect_bootstrap.cpp").read_text(
     encoding="utf-8")
+CONTRACT = (
+    ROOT / "minihost" / "src" / "generated" / "aex_abi_contract.hpp"
+).read_text(encoding="utf-8")
 
 
 def test_bootstrap_owns_stable_abi_buffers_and_callback_offsets():
-    assert "alignas(8) std::array<std::byte, 408> input" in HEADER
-    assert "alignas(8) std::array<std::byte, 552> utils" in HEADER
-    assert "kInputCallbackOffsets" in SOURCE
-    assert "kUtilityCallbackOffsets" in SOURCE
-    assert "kUtilityColorCallbacksOffset + 64 == kUtilityPlatformDataOffset" in SOURCE
-    assert "write<void*>(state.input, 176, state.utils.data())" in SOURCE
+    assert "abi::x86_64_windows::PF_IN_DATA_SIZE> input" in HEADER
+    assert "abi::x86_64_windows::PF_UTIL_CALLBACKS_SIZE> utils" in HEADER
+    assert "contract::INPUT_CALLBACK_OFFSETS" in SOURCE
+    assert "contract::UTILITY_CALLBACK_OFFSETS" in SOURCE
+    assert "contract::UTILS_COLOR_CALLBACKS_OFFSET" in SOURCE
+    assert "contract::IN_UTILS_OFFSET, state.utils.data()" in SOURCE
 
 
 def test_utility_table_wires_handle_callbacks_at_sdk_offsets():
     # in_data->utils must expose host_new_handle/lock/unlock/dispose/get_size/
     # resize, not only the PF Handle Suite (issue #220). The offsets are the
     # PF_UtilCallbacks member offsets pinned to the SDK by abi-layout-probe.
-    assert "std::array<std::size_t, 31> kUtilityCallbackOffsets" in SOURCE
-    assert "std::array<void*, 31> utility_callbacks" in HEADER
-    for offset in ("160", "168", "176", "184", "440", "464"):
-        assert offset in SOURCE
+    # Slot 200 additionally wires the legacy `app` callback for PIN-era
+    # effects (issue #362 selector families); like every other offset it is
+    # generated into UTILITY_CALLBACK_OFFSETS from the ABI observation.
+    assert "contract::UTILITY_CALLBACK_OFFSETS" in SOURCE
+    assert "std::array<void*, 32> utility_callbacks" in HEADER
+    assert "std::array<std::size_t, 32> UTILITY_CALLBACK_OFFSETS" in CONTRACT
+    for offset in ("160", "168", "176", "184", "440", "464", "200"):
+        assert offset in CONTRACT
+    assert "UTILS_APP_OFFSET = 200" in CONTRACT
     # The wiring is shared with run() through an extracted installer so a
     # behavioral self-test can drive the exact production write path.
     assert "void install_callback_tables(State& state, const AbiHooks& abi)" in SOURCE
@@ -53,7 +61,8 @@ def test_global_data_flags_depth_audio_and_parameter_contract_are_owned():
         "smart_render_supported",
         "update_params_ui_advertised",
         "query_dynamic_flags_advertised",
-        "write(state.input, 312, read<void*>(state.output, 40))",
+        "contract::IN_GLOBAL_DATA_OFFSET",
+        "contract::OUT_GLOBAL_DATA_OFFSET",
         "parameter_count_contract_valid",
     ):
         assert marker in SOURCE

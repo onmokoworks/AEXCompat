@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_RENDER_PATH_NEGOTIATION_RESULT_2026-07-15.json"
 MINIHOST = source_owners.L2_MAIN
 RENDER_REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def test_classic_only_sdk_effects_are_capability_gated_before_smart_dispatch():

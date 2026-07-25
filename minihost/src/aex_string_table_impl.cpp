@@ -45,55 +45,69 @@ bool ascii_text(std::string_view text) {
 // this form; the LStr form carries explicit digit ids).
 constexpr std::size_t kMaxKeyPathBytes = 256;
 
-bool parse_candidate(std::string_view candidate, int32_t& id,
-                     std::string& value, bool& is_lstr_candidate,
-                     int32_t& next_ordinal) {
+// Entry values are free-form text: bundled effects ship empty values
+// ($$$/AE/Colorama/Res/4154/LStr/0069=), embedded newlines
+// ($$$/MediaCore/AEFilters/AELumetri/InvalidLUT/Message), and UTF-8 text
+// ($$$/AE/Effect/Name/OCIOColorSpaceTransform/License/AgreementName), all of
+// which the real host serves verbatim. Only the key path stays structural.
+struct Candidate {
+  bool accepted = false;
+  bool lstr = false;
+  int32_t id = 0;
+  std::string group;
+  std::string value;
+};
+
+Candidate parse_candidate(std::string_view candidate, int32_t next_ordinal) {
   constexpr std::string_view prefix = "$$$/";
   constexpr std::string_view marker = "/LStr/";
-  is_lstr_candidate = false;
+  Candidate result;
   if (candidate.size() < prefix.size() ||
       candidate.substr(0, prefix.size()) != prefix)
-    return true;
+    return result;
   const std::size_t marker_offset = candidate.find(marker, prefix.size());
   if (marker_offset == std::string_view::npos) {
     // Non-LStr form ($$$/path/key=value, issue #362): the entry's id is its
     // ordinal position among all $$$ entries in the file, matching the
     // numbering the plug-in's lookup calls use (the digit-suffixed entries
-    // such as .../0000= sit at the ordinal their digits name).
+    // such as .../0000= sit at the ordinal their digits name). Entries
+    // without '=' (foreign record fragments such as a lone
+    // "$$$/LocalizedFileNames/") are skipped without consuming an ordinal.
     const std::size_t equals = candidate.find('=', prefix.size());
     if (equals == std::string_view::npos || equals == prefix.size() ||
         equals - prefix.size() > kMaxKeyPathBytes)
-      return true;
+      return result;
     if (!ascii_text(candidate.substr(prefix.size(), equals - prefix.size())))
-      return false;
-    if (!ascii_text(candidate.substr(equals + 1))) return false;
-    is_lstr_candidate = true;
-    id = next_ordinal;
-    value.assign(candidate.substr(equals + 1));
-    return true;
+      return result;
+    result.accepted = true;
+    result.lstr = false;
+    result.id = next_ordinal;
+    result.value.assign(candidate.substr(equals + 1));
+    return result;
   }
-  is_lstr_candidate = true;
 
   const std::size_t digits_begin = marker_offset + marker.size();
   const std::size_t equals = candidate.find('=', digits_begin);
   if (equals == std::string_view::npos || equals == digits_begin ||
       equals - digits_begin > kMaxKeyDigits ||
       marker_offset == prefix.size())
-    return false;
+    return result;
   if (!ascii_text(candidate.substr(prefix.size(), marker_offset - prefix.size())))
-    return false;
+    return result;
 
   int64_t parsed = 0;
   for (std::size_t index = digits_begin; index < equals; ++index) {
     const unsigned char byte = static_cast<unsigned char>(candidate[index]);
-    if (byte < '0' || byte > '9') return false;
+    if (byte < '0' || byte > '9') return result;
     parsed = parsed * 10 + static_cast<int64_t>(byte - '0');
-    if (parsed > std::numeric_limits<int32_t>::max()) return false;
+    if (parsed > std::numeric_limits<int32_t>::max()) return result;
   }
-  if (!ascii_text(candidate.substr(equals + 1))) return false;
-  id = static_cast<int32_t>(parsed);
-  value.assign(candidate.substr(equals + 1));
-  return true;
+  result.accepted = true;
+  result.lstr = true;
+  result.id = static_cast<int32_t>(parsed);
+  result.group.assign(candidate.substr(prefix.size(), marker_offset - prefix.size()));
+  result.value.assign(candidate.substr(equals + 1));
+  return result;
 }
 
 StringTable invalid_table() {
@@ -101,6 +115,22 @@ StringTable invalid_table() {
   result.status = ParseStatus::Invalid;
   result.values.clear();
   return result;
+}
+
+// LStr tables coexist in one image: the effect's own about+params group
+// (whose id 0 is the about string "<Name>, v%..."), the match-name/category
+// group (id 0 is the bare display name), shared-library groups (CAMLIGHT,
+// SOUP), and sibling effects sharing the binary ($$$/AE/Levels next to
+// $$$/AE/Levels2). The lookup protocol carries only a bare integer id, so
+// the host must serve the group the calling effect was built against: the
+// unique group whose id 0 carries the ", v%" about-version pattern. This was
+// verified against bundled effects (Card Dance wants Res/4147 "Rows &
+// Columns" for id 1, not the match-name group's "Simulation").
+bool has_about_version_id0(
+    const std::map<int32_t, std::string>& group_values) {
+  const auto id0 = group_values.find(0);
+  return id0 != group_values.end() &&
+         id0->second.find(", v%") != std::string::npos;
 }
 
 }  // namespace
@@ -136,7 +166,11 @@ StringTable parse_readonly_pe_strings(const unsigned char* bytes,
     return invalid_table();
 
   const unsigned char* section = optional + optional_size;
-  StringTable result;
+  // LStr entries are grouped by their directory path so the about-version
+  // group can be selected after the whole image is scanned; non-LStr
+  // entries keep their flat ordinal ids.
+  std::map<std::string, std::map<int32_t, std::string>> lstr_groups;
+  std::map<int32_t, std::string> ordinal_values;
   // Ordinal id source for non-LStr $$$ entries (issue #362), counted across
   // all accepted entries in file order.
   int32_t next_ordinal = 0;
@@ -158,22 +192,51 @@ StringTable parse_readonly_pe_strings(const unsigned char* bytes,
       std::size_t end = offset + 4;
       while (end < raw_size && raw[end] != 0) ++end;
       if (end == raw_size) return invalid_table();
-      int32_t id = 0;
-      std::string value;
-      bool is_lstr_candidate = false;
-      if (!parse_candidate(
-              std::string_view(reinterpret_cast<const char*>(raw + offset),
-                               end - offset),
-              id, value, is_lstr_candidate, next_ordinal))
-        return invalid_table();
-      if (!is_lstr_candidate) continue;
-      if (!result.values.emplace(id, std::move(value)).second)
-        return invalid_table();
+      const Candidate candidate = parse_candidate(
+          std::string_view(reinterpret_cast<const char*>(raw + offset),
+                           end - offset),
+          next_ordinal);
+      if (!candidate.accepted) continue;
+      if (candidate.lstr) {
+        if (!lstr_groups[candidate.group]
+                 .emplace(candidate.id, candidate.value)
+                 .second)
+          return invalid_table();
+      } else {
+        if (!ordinal_values.emplace(candidate.id, candidate.value).second)
+          return invalid_table();
+      }
       ++next_ordinal;
-      result.status = ParseStatus::Valid;
       offset = end;
     }
   }
+
+  StringTable result;
+  // Select the serving LStr group: a single group serves as-is; with
+  // several, exactly one must carry the about-version id 0 (see
+  // has_about_version_id0). Anything else is ambiguous and stays fail-closed.
+  if (lstr_groups.size() == 1) {
+    result.values = std::move(lstr_groups.begin()->second);
+  } else if (lstr_groups.size() > 1) {
+    const std::string* primary = nullptr;
+    for (const auto& [group, values] : lstr_groups) {
+      if (!has_about_version_id0(values)) continue;
+      if (primary) return invalid_table();
+      primary = &group;
+    }
+    if (!primary) return invalid_table();
+    result.values = std::move(lstr_groups[*primary]);
+  }
+  // Mixed images (LStr groups plus match-name/category/error path entries)
+  // serve only the LStr group: the path entries belong to the registration
+  // layer and share the small integer id space, so merging them would
+  // collide with the runtime lookup ids the effect actually uses.
+  if (lstr_groups.empty()) {
+    for (const auto& [id, value] : ordinal_values) {
+      if (!result.values.emplace(id, value).second) return invalid_table();
+    }
+  }
+  if (!result.values.empty()) result.status = ParseStatus::Valid;
   return result;
 }
 

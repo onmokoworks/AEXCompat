@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "main.rs"
+HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def test_harness_exposes_machine_readable_agent_cli_contract():

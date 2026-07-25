@@ -24,7 +24,7 @@ def test_effect_matrix_covers_six_paths_and_continues_after_failures():
 
 
 def test_matrix_uses_fresh_render_calls_and_bounded_failure_summaries():
-    source = (ROOT / "broker" / "crates" / "harness" / "src" / "main.rs").read_text(encoding="utf-8")
+    source = (ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs").read_text(encoding="utf-8")
     matrix = source[source.index("fn run_effect_matrix") : source.index("fn json_after_marker")]
     assert "for smart in [false, true]" in matrix
     assert "for (pixel_format, format_name) in formats" in matrix

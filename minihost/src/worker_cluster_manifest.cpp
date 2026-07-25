@@ -237,7 +237,9 @@ std::vector<std::string> declared_basenames(const Manifest& manifest) {
   return declared;
 }
 
-ClosurePins::~ClosurePins() { release(); }
+ClosurePins::~ClosurePins() {
+  if (release_on_destroy_) release();
+}
 
 bool ClosurePins::pin(const Manifest& manifest, FileSha256 hash_file) {
   if (!pins_.empty()) return false;
