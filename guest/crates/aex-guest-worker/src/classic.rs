@@ -23,6 +23,7 @@ const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
 const PARAM_ANGLE: i32 = 3;
 const PARAM_CHECKBOX: i32 = 4;
+pub(crate) const PARAM_COLOR: i32 = 5;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
 const ANGLE_DEFAULT_OFFSET: usize = 4;
@@ -63,19 +64,28 @@ pub struct ParameterReport {
     pub slider_min: Option<f64>,
     pub slider_max: Option<f64>,
     pub precision: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_color: Option<[u8; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_color: Option<[u8; 4]>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ParameterValue {
     pub slot: Option<usize>,
     pub name: String,
-    pub value: f64,
+    pub value: Option<f64>,
+    pub color: Option<[u8; 4]>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct AppliedParameter {
+    pub slot: usize,
     pub name: String,
-    pub value: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 4]>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -350,6 +360,8 @@ impl ClassicHost {
             .map(|(offset, param)| {
                 let (default_value, valid_min, valid_max, slider_min, slider_max, precision) =
                     numeric_descriptor(&param.bytes, param.param_type);
+                let (current_color, default_color) =
+                    color_descriptor(&param.bytes, param.param_type);
                 ParameterReport {
                     slot: offset + 1,
                     index: param.index,
@@ -361,6 +373,8 @@ impl ClassicHost {
                     slider_min,
                     slider_max,
                     precision,
+                    current_color,
+                    default_color,
                 }
             })
             .collect();
@@ -892,11 +906,13 @@ impl ClassicHost {
                                 .map_or(requested.name == captured.name, |slot| slot == index + 1)
                     })
             {
-                apply_parameter_value(&mut definition, captured.param_type, requested.value)?;
+                apply_parameter_value(&mut definition, captured.param_type, requested)?;
                 applied_requests.insert(request_index);
                 applied_values.push(AppliedParameter {
+                    slot: index + 1,
                     name: captured.name.clone(),
                     value: requested.value,
+                    color: requested.color,
                 });
             }
             let parameter = resources.parameter_definitions[index];
@@ -905,7 +921,7 @@ impl ClassicHost {
                 .write_u64(params + ((index + 1) * 8) as u64, parameter)?;
         }
         self.engine
-            .configure_parameter_definitions(resources.parameter_definitions);
+            .configure_parameter_definitions(resources.parameter_definitions)?;
         if applied_requests.len() != parameter_values.len() {
             let missing = parameter_values
                 .iter()
@@ -1587,6 +1603,12 @@ fn materialize_default(definition: &mut [u8], param_type: i32) {
             let value = definition[union + abi::CHECKBOX_DEFAULT_OFFSET] as u32;
             definition[union..union + 4].copy_from_slice(&value.to_le_bytes());
         }
+        PARAM_COLOR => {
+            definition.copy_within(
+                union + abi::PF_PIXEL_SIZE..union + abi::PF_PIXEL_SIZE * 2,
+                union,
+            );
+        }
         PARAM_POPUP => {
             let value = i16::from_le_bytes(
                 definition[union + abi::POPUP_DEFAULT_OFFSET
@@ -1612,8 +1634,31 @@ fn materialize_default(definition: &mut [u8], param_type: i32) {
 fn apply_parameter_value(
     definition: &mut [u8],
     param_type: i32,
-    value: f64,
+    requested: &ParameterValue,
 ) -> Result<(), ClassicError> {
+    if param_type == PARAM_COLOR {
+        let color = requested.color.ok_or_else(|| {
+            ClassicError::Input("color parameter requires four ARGB8 components".into())
+        })?;
+        if requested.value.is_some() {
+            return Err(ClassicError::Input(
+                "color parameter accepts only ARGB8 components".into(),
+            ));
+        }
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE]
+            .copy_from_slice(&color);
+        return Ok(());
+    }
+    if requested.color.is_some() {
+        return Err(ClassicError::Input(format!(
+            "parameter type {param_type} does not accept an ARGB8 color value"
+        )));
+    }
+    let value = requested.value.ok_or_else(|| {
+        ClassicError::Input(format!(
+            "parameter type {param_type} requires a numeric value"
+        ))
+    })?;
     if !value.is_finite() {
         return Err(ClassicError::Input(
             "parameter values must be finite".into(),
@@ -1647,6 +1692,19 @@ fn apply_parameter_value(
         }
     }
     Ok(())
+}
+
+fn color_descriptor(definition: &[u8], param_type: i32) -> (Option<[u8; 4]>, Option<[u8; 4]>) {
+    if param_type != PARAM_COLOR {
+        return (None, None);
+    }
+    let union = abi::PARAM_U_OFFSET;
+    let default = definition[union + abi::PF_PIXEL_SIZE..union + abi::PF_PIXEL_SIZE * 2]
+        .try_into()
+        .expect("PF color default is four bytes");
+    // AE materializes `dephault` into `value` before the first render. Report
+    // that effective initial state rather than the add-param scratch bytes.
+    (Some(default), Some(default))
 }
 
 fn numeric_descriptor(
@@ -1789,6 +1847,15 @@ mod tests {
             &float_slider[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8],
             &5.0f64.to_le_bytes()
         );
+
+        let mut color = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        color[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8]
+            .copy_from_slice(&[1, 2, 3, 4, 255, 64, 128, 192]);
+        materialize_default(&mut color, PARAM_COLOR);
+        assert_eq!(
+            &color[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4],
+            &[255, 64, 128, 192]
+        );
     }
 
     #[test]
@@ -1796,19 +1863,25 @@ mod tests {
         let union = abi::PARAM_U_OFFSET;
 
         let mut fixed = vec![0u8; abi::PF_PARAM_DEF_SIZE];
-        apply_parameter_value(&mut fixed, PARAM_FIXED_SLIDER, 12.5).unwrap();
+        let scalar = |value| ParameterValue {
+            slot: None,
+            name: "fixture".into(),
+            value: Some(value),
+            color: None,
+        };
+        apply_parameter_value(&mut fixed, PARAM_FIXED_SLIDER, &scalar(12.5)).unwrap();
         assert_eq!(read_i32(&fixed, union), 12 * 65536 + 32768);
 
         let mut checkbox = vec![0u8; abi::PF_PARAM_DEF_SIZE];
-        apply_parameter_value(&mut checkbox, PARAM_CHECKBOX, 1.0).unwrap();
+        apply_parameter_value(&mut checkbox, PARAM_CHECKBOX, &scalar(1.0)).unwrap();
         assert_eq!(read_i32(&checkbox, union), 1);
 
         let mut popup = vec![0u8; abi::PF_PARAM_DEF_SIZE];
-        apply_parameter_value(&mut popup, PARAM_POPUP, 2.0).unwrap();
+        apply_parameter_value(&mut popup, PARAM_POPUP, &scalar(2.0)).unwrap();
         assert_eq!(read_i32(&popup, union), 2);
 
         let mut float_slider = vec![0u8; abi::PF_PARAM_DEF_SIZE];
-        apply_parameter_value(&mut float_slider, PARAM_FLOAT_SLIDER, 42.25).unwrap();
+        apply_parameter_value(&mut float_slider, PARAM_FLOAT_SLIDER, &scalar(42.25)).unwrap();
         assert_eq!(
             f64::from_le_bytes(
                 float_slider[union..union + 8]
@@ -1817,6 +1890,59 @@ mod tests {
             ),
             42.25
         );
+    }
+
+    #[test]
+    fn reports_and_applies_argb8_color_values() {
+        let union = abi::PARAM_U_OFFSET;
+        let mut definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        definition[union..union + 8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            color_descriptor(&definition, PARAM_COLOR),
+            (Some([5, 6, 7, 8]), Some([5, 6, 7, 8]))
+        );
+
+        apply_parameter_value(
+            &mut definition,
+            PARAM_COLOR,
+            &ParameterValue {
+                slot: Some(2),
+                name: "Key Color".into(),
+                value: None,
+                color: Some([255, 64, 128, 192]),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            &definition[union..union + abi::PF_PIXEL_SIZE],
+            &[255, 64, 128, 192]
+        );
+        let applied = serde_json::to_value(AppliedParameter {
+            slot: 2,
+            name: "Color".into(),
+            value: None,
+            color: Some([255, 64, 128, 192]),
+        })
+        .unwrap();
+        assert_eq!(applied["slot"], 2);
+        assert_eq!(applied["color"], serde_json::json!([255, 64, 128, 192]));
+    }
+
+    #[test]
+    fn rejects_color_payload_for_numeric_parameter() {
+        let mut definition = [0u8; abi::PF_PARAM_DEF_SIZE];
+        let error = apply_parameter_value(
+            &mut definition,
+            PARAM_SLIDER,
+            &ParameterValue {
+                slot: None,
+                name: "Amount".into(),
+                value: None,
+                color: Some([255, 1, 2, 3]),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not accept an ARGB8 color"));
     }
 
     #[test]

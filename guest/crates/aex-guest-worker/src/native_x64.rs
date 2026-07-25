@@ -34,6 +34,11 @@ const PROT_WRITE: c_int = 0x2;
 const PROT_EXEC: c_int = 0x4;
 const MAP_PRIVATE: c_int = 0x0002;
 const MAP_ANON: c_int = 0x1000;
+const PF_INVALID_INDEX: u64 = 513;
+const PF_UNRECOGNIZED_PARAM_TYPE: u64 = 514;
+const PF_BAD_CALLBACK_PARAM: u64 = 516;
+const PARAM_TYPE_COLOR: i32 = 5;
+const HOST_EFFECT_REF: u64 = 1;
 
 macro_rules! callback_address {
     ($callback:expr) => {
@@ -97,6 +102,15 @@ struct NativeHandle {
     locks: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ColorParamPixelFloat {
+    alpha: f32,
+    red: f32,
+    green: f32,
+    blue: f32,
+}
+
 #[derive(Default)]
 struct NativeState {
     params: Vec<GuestParam>,
@@ -120,6 +134,7 @@ struct NativeState {
     arena_next: u64,
     arena_end: u64,
     handle_suite: u64,
+    color_param_suite: u64,
 }
 
 thread_local! {
@@ -244,6 +259,9 @@ impl GuestEngine<'static> {
             engine.write_u64(iterate8_suite + (slot * 8) as u64, callback)?;
         }
         engine.state.iterate8_suite = iterate8_suite;
+        let color_param_suite = engine.allocate(8, 8)?;
+        engine.write_u64(color_param_suite, callback_address!(color_param_value))?;
+        engine.state.color_param_suite = color_param_suite;
         for version in [3u32, 7, 11, 13] {
             let callbacks =
                 native_utility_callbacks(version).expect("known AEGP Utility Suite version");
@@ -408,8 +426,29 @@ impl GuestEngine<'static> {
 
     pub fn add_trace_watch(&mut self, _: TraceWatchSpec) {}
 
-    pub fn configure_parameter_definitions(&mut self, definitions: Vec<u64>) {
+    pub fn configure_parameter_definitions(
+        &mut self,
+        definitions: Vec<u64>,
+    ) -> Result<(), GuestError> {
+        if definitions.len() != self.state.params.len() {
+            return Err(GuestError::Callback(
+                "active parameter definition count differs from setup".into(),
+            ));
+        }
+        for (definition, parameter) in definitions
+            .iter()
+            .copied()
+            .zip(self.state.params.iter_mut())
+        {
+            if parameter.param_type == PARAM_TYPE_COLOR {
+                let color =
+                    unsafe { copy_from_pointer(definition + abi::PARAM_U_OFFSET as u64, 4) };
+                parameter.bytes[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE]
+                    .copy_from_slice(&color);
+            }
+        }
         self.state.parameter_definitions = definitions;
+        Ok(())
     }
 
     pub fn configure_smart_render(
@@ -1190,6 +1229,11 @@ unsafe extern "win64" fn acquire_suite(
                 *(output as *mut u64) = state.iterate8_suite;
             }
             0
+        } else if name == "PF ColorParamSuite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.color_param_suite;
+            }
+            0
         } else if name == "AEGP Utility Suite" && output != 0 {
             let Some(table) = u32::try_from(version)
                 .ok()
@@ -1207,6 +1251,65 @@ unsafe extern "win64" fn acquire_suite(
         }
     })
     .unwrap_or(u32::MAX as u64)
+}
+
+unsafe extern "win64" fn color_param_value(
+    effect_ref: u64,
+    definition: u64,
+    output: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    if effect_ref != HOST_EFFECT_REF || definition == 0 || output == 0 {
+        return PF_BAD_CALLBACK_PARAM;
+    }
+    with_state(|state| {
+        let disk_id = unsafe { ptr::read_unaligned(definition as *const i32) };
+        let param_type = unsafe {
+            ptr::read_unaligned((definition + abi::PARAM_PARAM_TYPE_OFFSET as u64) as *const i32)
+        };
+        let Some(source) = state.params.iter().find(|parameter| {
+            parameter
+                .bytes
+                .get(..4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(i32::from_le_bytes)
+                == Some(disk_id)
+        }) else {
+            return PF_INVALID_INDEX;
+        };
+        if param_type != PARAM_TYPE_COLOR || source.param_type != PARAM_TYPE_COLOR {
+            return PF_UNRECOGNIZED_PARAM_TYPE;
+        }
+        let argb: [u8; 4] = unsafe {
+            copy_from_pointer(definition + abi::PARAM_U_OFFSET as u64, abi::PF_PIXEL_SIZE)
+        }
+        .try_into()
+        .expect("PF_Pixel is four bytes");
+        let current: [u8; 4] = source.bytes
+            [abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE]
+            .try_into()
+            .expect("PF_Pixel is four bytes");
+        let default: [u8; 4] = source.bytes[abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE
+            ..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE * 2]
+            .try_into()
+            .expect("PF color default is four bytes");
+        if argb != current && argb != default {
+            return PF_BAD_CALLBACK_PARAM;
+        }
+        let pixel = ColorParamPixelFloat {
+            alpha: f32::from(argb[0]) / 255.0,
+            red: f32::from(argb[1]) / 255.0,
+            green: f32::from(argb[2]) / 255.0,
+            blue: f32::from(argb[3]) / 255.0,
+        };
+        unsafe {
+            ptr::write_unaligned(output as *mut ColorParamPixelFloat, pixel);
+        }
+        0
+    })
+    .unwrap_or(PF_BAD_CALLBACK_PARAM)
 }
 
 unsafe extern "win64" fn checkout_param(
@@ -1360,6 +1463,146 @@ unsafe extern "win64" fn resize_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_param_suite_v1_is_stateful_and_fails_closed() {
+        let mut definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        definition[..4].copy_from_slice(&101i32.to_le_bytes());
+        definition[abi::PARAM_PARAM_TYPE_OFFSET..abi::PARAM_PARAM_TYPE_OFFSET + 4]
+            .copy_from_slice(&PARAM_TYPE_COLOR.to_le_bytes());
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8]
+            .copy_from_slice(&[255, 64, 128, 192, 255, 1, 2, 3]);
+        let mut state = NativeState::default();
+        state.color_param_suite = 0x1234;
+        state.params.push(GuestParam {
+            index: 1,
+            param_type: PARAM_TYPE_COLOR,
+            name: "Key Color".into(),
+            bytes: definition.clone(),
+        });
+        state.parameter_definitions.push(definition.as_ptr() as u64);
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+        let name = b"PF ColorParamSuite\0";
+        let mut suite = 0u64;
+        assert_eq!(
+            unsafe {
+                acquire_suite(
+                    name.as_ptr() as u64,
+                    1,
+                    (&mut suite as *mut u64) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(suite, state.color_param_suite);
+
+        let mut output = ColorParamPixelFloat {
+            alpha: -1.0,
+            red: -1.0,
+            green: -1.0,
+            blue: -1.0,
+        };
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            output,
+            ColorParamPixelFloat {
+                alpha: 1.0,
+                red: 64.0 / 255.0,
+                green: 128.0 / 255.0,
+                blue: 192.0 / 255.0,
+            }
+        );
+
+        let sentinel = output;
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4].copy_from_slice(&[9, 9, 9, 9]);
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            PF_BAD_CALLBACK_PARAM
+        );
+        assert_eq!(output, sentinel);
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4].copy_from_slice(&[255, 1, 2, 3]);
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        definition[..4].copy_from_slice(&999i32.to_le_bytes());
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            PF_INVALID_INDEX
+        );
+        definition[..4].copy_from_slice(&101i32.to_le_bytes());
+        definition[abi::PARAM_PARAM_TYPE_OFFSET..abi::PARAM_PARAM_TYPE_OFFSET + 4]
+            .copy_from_slice(&6i32.to_le_bytes());
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            PF_UNRECOGNIZED_PARAM_TYPE
+        );
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    0,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            PF_BAD_CALLBACK_PARAM
+        );
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
 
     #[test]
     fn utility_v7_v13_callbacks_match_unicorn_contract() {
