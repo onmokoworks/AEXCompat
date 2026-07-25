@@ -45,6 +45,8 @@ const HANDLE_DATA_END: u64 = DATA_BASE + DATA_SIZE;
 const MAX_INSTRUCTIONS: usize = 0;
 const TIMEOUT_MICROSECONDS: u64 = 600_000_000;
 const MAX_TRACE_EVENTS: usize = 50_000;
+const MAX_TRACE_BASIC_BLOCKS: usize = 50_000;
+const MAX_TRACE_BRANCH_EDGES: usize = 100_000;
 const TRACE_STACK_ARGUMENTS: usize = 4;
 const TRACE_FIRST_SAMPLES: usize = 3;
 const TRACE_LAST_SAMPLES: usize = 3;
@@ -1266,6 +1268,8 @@ struct TraceCapture {
     dropped_witnesses: u64,
     basic_blocks: HashMap<(u64, u32), u64>,
     branch_edges: HashMap<(u64, u64), u64>,
+    dropped_basic_blocks: u64,
+    dropped_branch_edges: u64,
     previous_block: Option<u64>,
     event_index: HashMap<TraceEventKey, usize>,
     event_fingerprints: HashMap<usize, HashSet<u64>>,
@@ -1319,6 +1323,8 @@ pub struct TraceModule {
 #[derive(Clone, Debug, Serialize)]
 pub struct TraceConfiguration {
     pub max_events: usize,
+    pub max_basic_blocks: usize,
+    pub max_branch_edges: usize,
     pub max_witnesses: usize,
     pub max_watch_bytes: usize,
     pub max_distinct_fingerprints_per_event: usize,
@@ -2035,6 +2041,8 @@ impl GuestEngine<'static> {
             dropped_witnesses: 0,
             basic_blocks: HashMap::new(),
             branch_edges: HashMap::new(),
+            dropped_basic_blocks: 0,
+            dropped_branch_edges: 0,
             previous_block: None,
             event_index: HashMap::new(),
             event_fingerprints: HashMap::new(),
@@ -2076,9 +2084,23 @@ impl GuestEngine<'static> {
                 image_end - 1,
                 move |unicorn, address, size| {
                     if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
-                        *capture.basic_blocks.entry((address, size)).or_default() += 1;
+                        let block_key = (address, size);
+                        if let Some(observed) = capture.basic_blocks.get_mut(&block_key) {
+                            *observed += 1;
+                        } else if capture.basic_blocks.len() < MAX_TRACE_BASIC_BLOCKS {
+                            capture.basic_blocks.insert(block_key, 1);
+                        } else {
+                            capture.dropped_basic_blocks += 1;
+                        }
                         if let Some(previous) = capture.previous_block.replace(address) {
-                            *capture.branch_edges.entry((previous, address)).or_default() += 1;
+                            let edge_key = (previous, address);
+                            if let Some(observed) = capture.branch_edges.get_mut(&edge_key) {
+                                *observed += 1;
+                            } else if capture.branch_edges.len() < MAX_TRACE_BRANCH_EDGES {
+                                capture.branch_edges.insert(edge_key, 1);
+                            } else {
+                                capture.dropped_branch_edges += 1;
+                            }
                         }
                     }
                 },
@@ -2205,6 +2227,20 @@ impl GuestEngine<'static> {
                 dropped: capture.dropped_witnesses,
             });
         }
+        if capture.dropped_basic_blocks > 0 {
+            truncation.push(TraceTruncation {
+                category: "basic_blocks",
+                reason: "distinct_block_budget",
+                dropped: capture.dropped_basic_blocks,
+            });
+        }
+        if capture.dropped_branch_edges > 0 {
+            truncation.push(TraceTruncation {
+                category: "branch_edges",
+                reason: "distinct_edge_budget",
+                dropped: capture.dropped_branch_edges,
+            });
+        }
         let untracked_fingerprints = capture
             .events
             .iter()
@@ -2219,11 +2255,33 @@ impl GuestEngine<'static> {
         }
         let trace_configuration = TraceConfiguration {
             max_events: MAX_TRACE_EVENTS,
+            max_basic_blocks: MAX_TRACE_BASIC_BLOCKS,
+            max_branch_edges: MAX_TRACE_BRANCH_EDGES,
             max_witnesses: MAX_TRACE_WITNESSES,
             max_watch_bytes: MAX_TRACE_WATCH_BYTES,
             max_distinct_fingerprints_per_event: TRACE_DISTINCT_FINGERPRINTS,
             watches: capture.watch_specs.clone(),
         };
+        let mut basic_blocks = capture
+            .basic_blocks
+            .into_iter()
+            .map(|((address, size), observed_count)| TraceBasicBlock {
+                rva: address.saturating_sub(self.image_base),
+                size,
+                observed_count,
+            })
+            .collect::<Vec<_>>();
+        basic_blocks.sort_by_key(|block| (block.rva, block.size));
+        let mut branch_edges = capture
+            .branch_edges
+            .into_iter()
+            .map(|((from, to), observed_count)| TraceBranchEdge {
+                from_rva: from.saturating_sub(self.image_base),
+                to_rva: to.saturating_sub(self.image_base),
+                observed_count,
+            })
+            .collect::<Vec<_>>();
+        branch_edges.sort_by_key(|edge| (edge.from_rva, edge.to_rva));
         Ok(ExecutionTrace {
             schema: "aexcompat.aex-execution-trace",
             schema_version: 1,
@@ -2232,8 +2290,9 @@ impl GuestEngine<'static> {
             preferred_image_base: self.image_base,
             entry_export: self.entry_export.clone(),
             worker_build_identity: format!(
-                "aex-guest-worker/{} ({}/{})",
+                "aex-guest-worker/{} rev={} ({}/{})",
                 env!("CARGO_PKG_VERSION"),
+                env!("AEXCOMPAT_BUILD_REVISION"),
                 std::env::consts::OS,
                 std::env::consts::ARCH
             ),
@@ -2248,24 +2307,8 @@ impl GuestEngine<'static> {
             state_changes: Vec::new(),
             memory_witnesses: capture.witnesses,
             dropped_memory_witnesses: capture.dropped_witnesses,
-            basic_blocks: capture
-                .basic_blocks
-                .into_iter()
-                .map(|((address, size), observed_count)| TraceBasicBlock {
-                    rva: address.saturating_sub(self.image_base),
-                    size,
-                    observed_count,
-                })
-                .collect(),
-            branch_edges: capture
-                .branch_edges
-                .into_iter()
-                .map(|((from, to), observed_count)| TraceBranchEdge {
-                    from_rva: from.saturating_sub(self.image_base),
-                    to_rva: to.saturating_sub(self.image_base),
-                    observed_count,
-                })
-                .collect(),
+            basic_blocks,
+            branch_edges,
             truncation,
             timeline,
         })
@@ -3991,6 +4034,8 @@ mod tests {
             dropped_witnesses: 0,
             basic_blocks: HashMap::new(),
             branch_edges: HashMap::new(),
+            dropped_basic_blocks: 0,
+            dropped_branch_edges: 0,
             previous_block: None,
             event_index: HashMap::new(),
             event_fingerprints: HashMap::new(),

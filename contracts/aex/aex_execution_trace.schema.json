@@ -496,6 +496,8 @@
       "additionalProperties": false,
       "required": [
         "max_events",
+        "max_basic_blocks",
+        "max_branch_edges",
         "max_witnesses",
         "max_watch_bytes",
         "max_distinct_fingerprints_per_event",
@@ -503,6 +505,8 @@
       ],
       "properties": {
         "max_events": { "type": "integer", "minimum": 1 },
+        "max_basic_blocks": { "type": "integer", "minimum": 1 },
+        "max_branch_edges": { "type": "integer", "minimum": 1 },
         "max_witnesses": { "type": "integer", "minimum": 1 },
         "max_watch_bytes": { "type": "integer", "minimum": 1 },
         "max_distinct_fingerprints_per_event": {
