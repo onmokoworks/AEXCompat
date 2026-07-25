@@ -30,6 +30,7 @@ use crate::x64::{record_suite_request, record_unsupported_suite_call, utility_su
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
 const PAGE_SIZE: usize = 4096;
 const MAX_PF_HANDLE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_PF_HANDLE_COUNT: usize = 1024;
 const PROT_READ: c_int = 0x1;
 const PROT_WRITE: c_int = 0x2;
 const PROT_EXEC: c_int = 0x4;
@@ -1398,9 +1399,14 @@ unsafe extern "win64" fn checkout_param(
 unsafe extern "win64" fn new_handle(size: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
     with_state(|state| {
         state.handle_allocations.push(size);
-        if size > MAX_PF_HANDLE_SIZE {
+        let live_bytes = state.handles.values().map(|record| record.size).sum::<u64>();
+        if size > MAX_PF_HANDLE_SIZE
+            || state.handles.len() >= MAX_PF_HANDLE_COUNT
+            || live_bytes > MAX_PF_HANDLE_SIZE - size
+        {
             state.callback_error = Some(format!(
-                "PF Handle allocation exceeds {MAX_PF_HANDLE_SIZE} bytes: {size}"
+                "PF Handle allocation exceeds live budget: size={size}, live_bytes={live_bytes}, live_count={}",
+                state.handles.len()
             ));
             return 0;
         }
@@ -1553,6 +1559,17 @@ unsafe extern "win64" fn resize_handle(
             return 4;
         };
         if old.locks != 0 {
+            return 4;
+        }
+        let live_bytes = state
+            .handles
+            .values()
+            .map(|record| record.size)
+            .sum::<u64>();
+        if live_bytes - old.size > MAX_PF_HANDLE_SIZE - size {
+            state.callback_error = Some(format!(
+                "PF Handle resize exceeds live budget: size={size}, live_bytes={live_bytes}"
+            ));
             return 4;
         }
         let Some(data_mapping_size) = usize::try_from(size.max(1))
@@ -1837,6 +1854,25 @@ mod tests {
         }
         assert!(state.handles.is_empty());
         assert!(state.callback_error.is_none());
+
+        let budget_handle = unsafe { new_handle(MAX_PF_HANDLE_SIZE, 0, 0, 0, 0, 0) };
+        assert_ne!(budget_handle, 0);
+        assert_eq!(unsafe { new_handle(1, 0, 0, 0, 0, 0) }, 0);
+        assert!(
+            state
+                .callback_error
+                .as_deref()
+                .is_some_and(|message| message.contains("live budget"))
+        );
+        state.callback_error = None;
+        unsafe {
+            dispose_handle(budget_handle, 0, 0, 0, 0, 0);
+        }
+        let released_budget_handle = unsafe { new_handle(1, 0, 0, 0, 0, 0) };
+        assert_ne!(released_budget_handle, 0);
+        unsafe {
+            dispose_handle(released_budget_handle, 0, 0, 0, 0, 0);
+        }
 
         assert_eq!(unsafe { lock_handle(0xdead_beef, 0, 0, 0, 0, 0) }, 0);
         assert!(
