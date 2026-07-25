@@ -45,9 +45,11 @@ const HOST_DISPOSE_WORLD: u64 = STUB_BASE + 0x80220;
 const HOST_GET_WORLD_PIXEL_FORMAT: u64 = STUB_BASE + 0x80230;
 const HOST_AEGP_REGISTER: u64 = STUB_BASE + 0x80120;
 const HOST_AEGP_GET_MAIN_WINDOW: u64 = STUB_BASE + 0x80130;
+const HOST_POINT_PARAM_VALUE: u64 = STUB_BASE + 0x80200;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81100;
 const HOST_WORLD_SUITE: u64 = STUB_BASE + 0x81300;
+const HOST_POINT_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
 const DATA_BASE: u64 = 0x0000_0000_4000_0000;
@@ -1963,6 +1965,7 @@ impl GuestEngine<'static> {
             ),
             ("write AEGP register callback", HOST_AEGP_REGISTER),
             ("write AEGP main-window callback", HOST_AEGP_GET_MAIN_WINDOW),
+            ("write point-param callback", HOST_POINT_PARAM_VALUE),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -2040,6 +2043,14 @@ impl GuestEngine<'static> {
                 HOST_AEGP_GET_MAIN_WINDOW,
                 HOST_AEGP_GET_MAIN_WINDOW,
                 emulate_aegp_get_main_window,
+            ),
+        )?;
+        uc(
+            "install point-param callback",
+            unicorn.add_code_hook(
+                HOST_POINT_PARAM_VALUE,
+                HOST_POINT_PARAM_VALUE,
+                emulate_point_param_value,
             ),
         )?;
         uc(
@@ -2188,6 +2199,13 @@ impl GuestEngine<'static> {
             "write PF Handle Suite",
             unicorn.mem_write(HOST_HANDLE_SUITE, &handle_suite),
         )?;
+        uc(
+            "write PF PointParamSuite",
+            unicorn.mem_write(
+                HOST_POINT_PARAM_SUITE,
+                &HOST_POINT_PARAM_VALUE.to_le_bytes(),
+            ),
+        )?;
         install_aegp_utility_suites(&mut unicorn)?;
         for (address, name) in [
             (HOST_ADD_PARAM, "add_param"),
@@ -2213,6 +2231,7 @@ impl GuestEngine<'static> {
             (HOST_NEW_WORLD, "new_world"),
             (HOST_DISPOSE_WORLD, "dispose_world"),
             (HOST_GET_WORLD_PIXEL_FORMAT, "get_world_pixel_format"),
+            (HOST_POINT_PARAM_VALUE, "point_param_value"),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -3563,6 +3582,16 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         return;
     }
+    if name == "PF PointParamSuite"
+        && version == 1
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_POINT_PARAM_SUITE.to_le_bytes())
+            .is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
     if name == "AEGP Utility Suite"
         && output != 0
         && let Some(table) = u32::try_from(version)
@@ -3592,6 +3621,34 @@ fn emulate_aegp_get_main_window(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _
     } else {
         let _ = unicorn.reg_write(RegisterX86::RAX, 4);
     }
+}
+
+fn emulate_point_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let definition = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    if definition == 0 || output == 0 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+        return;
+    }
+    let mut fixed = [0u8; 8];
+    if unicorn
+        .mem_read(definition + abi::PARAM_U_OFFSET as u64, &mut fixed)
+        .is_err()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+        return;
+    }
+    let x = i32::from_le_bytes(fixed[..4].try_into().unwrap()) as f64 / 65536.0;
+    let y = i32::from_le_bytes(fixed[4..].try_into().unwrap()) as f64 / 65536.0;
+    let mut values = [0u8; 16];
+    values[..8].copy_from_slice(&x.to_le_bytes());
+    values[8..].copy_from_slice(&y.to_le_bytes());
+    let result = if unicorn.mem_write(output, &values).is_ok() {
+        0
+    } else {
+        4
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, result);
 }
 
 fn emulate_checkout_param(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
@@ -4235,6 +4292,7 @@ mod tests {
             HOST_NEW_WORLD,
             HOST_DISPOSE_WORLD,
             HOST_GET_WORLD_PIXEL_FORMAT,
+            HOST_POINT_PARAM_VALUE,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -4314,6 +4372,19 @@ mod tests {
         }
         unicorn.mem_write(HOST_WORLD_SUITE, &world_suite).unwrap();
         unicorn.get_data_mut().next_handle_data = DATA_BASE + PAGE_SIZE / 2;
+        unicorn
+            .add_code_hook(
+                HOST_POINT_PARAM_VALUE,
+                HOST_POINT_PARAM_VALUE,
+                emulate_point_param_value,
+            )
+            .unwrap();
+        unicorn
+            .mem_write(
+                HOST_POINT_PARAM_SUITE,
+                &HOST_POINT_PARAM_VALUE.to_le_bytes(),
+            )
+            .unwrap();
         install_aegp_utility_suites(&mut unicorn).unwrap();
         let mut trace_points = Vec::new();
         let mut decoder = Decoder::with_ip(64, code, CODE, DecoderOptions::NONE);
@@ -4366,11 +4437,10 @@ mod tests {
                 .unwrap(),
             0
         );
-
         let arena_before_failure = engine.unicorn.get_data().next_handle_data;
         assert_eq!(
             engine
-                .call_win64(HOST_AEGP_NEW_MEM_HANDLE, [1, 1, 32, 0, 0xdead_beef, 0],)
+                .call_win64(HOST_AEGP_NEW_MEM_HANDLE, [1, 1, 32, 0, 0xdead_beef, 0])
                 .unwrap(),
             4
         );
@@ -4379,29 +4449,26 @@ mod tests {
             engine.unicorn.get_data().next_handle_data,
             arena_before_failure
         );
-
         let handle_output = engine.allocate(8, 8).unwrap();
         assert_eq!(
             engine
-                .call_win64(HOST_AEGP_NEW_MEM_HANDLE, [1, 1, 32, 0, handle_output, 0],)
+                .call_win64(HOST_AEGP_NEW_MEM_HANDLE, [1, 1, 32, 0, handle_output, 0])
                 .unwrap(),
             0
         );
         let mut handle_bytes = [0u8; 8];
         engine.read(handle_output, &mut handle_bytes).unwrap();
         let handle = u64::from_le_bytes(handle_bytes);
-
         assert_eq!(
             engine
-                .call_win64(HOST_AEGP_LOCK_MEM_HANDLE, [handle, 0xdead_beef, 0, 0, 0, 0],)
+                .call_win64(HOST_AEGP_LOCK_MEM_HANDLE, [handle, 0xdead_beef, 0, 0, 0, 0])
                 .unwrap(),
             4
         );
-
         let data_output = engine.allocate(8, 8).unwrap();
         assert_eq!(
             engine
-                .call_win64(HOST_AEGP_LOCK_MEM_HANDLE, [handle, data_output, 0, 0, 0, 0],)
+                .call_win64(HOST_AEGP_LOCK_MEM_HANDLE, [handle, data_output, 0, 0, 0, 0])
                 .unwrap(),
             0
         );
@@ -4420,7 +4487,7 @@ mod tests {
         );
         assert_eq!(
             engine
-                .call_win64(HOST_AEGP_UNLOCK_MEM_HANDLE, [handle, 0, 0, 0, 0, 0],)
+                .call_win64(HOST_AEGP_UNLOCK_MEM_HANDLE, [handle, 0, 0, 0, 0, 0])
                 .unwrap(),
             0
         );
@@ -4447,11 +4514,10 @@ mod tests {
         let mut pointer = [0u8; 8];
         engine.read(suite_output, &mut pointer).unwrap();
         assert_eq!(u64::from_le_bytes(pointer), HOST_WORLD_SUITE);
-
         let arena_before_failure = engine.unicorn.get_data().next_handle_data;
         assert_eq!(
             engine
-                .call_win64(HOST_NEW_WORLD, [1, 3, 2, 1, 0x3631_6561, 0xdead_beef],)
+                .call_win64(HOST_NEW_WORLD, [1, 3, 2, 1, 0x3631_6561, 0xdead_beef])
                 .unwrap(),
             4
         );
@@ -4460,11 +4526,10 @@ mod tests {
             engine.unicorn.get_data().next_handle_data,
             arena_before_failure
         );
-
         let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
         assert_eq!(
             engine
-                .call_win64(HOST_NEW_WORLD, [1, 3, 2, 1, 0x3631_6561, world],)
+                .call_win64(HOST_NEW_WORLD, [1, 3, 2, 1, 0x3631_6561, world])
                 .unwrap(),
             0
         );
@@ -4486,7 +4551,6 @@ mod tests {
             ),
             3
         );
-
         let format_output = engine.allocate(4, 4).unwrap();
         assert_eq!(
             engine
@@ -4500,7 +4564,6 @@ mod tests {
         let mut format = [0u8; 4];
         engine.read(format_output, &mut format).unwrap();
         assert_eq!(u32::from_le_bytes(format), 0x3631_6561);
-
         assert_eq!(
             engine
                 .call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0])
@@ -4513,7 +4576,6 @@ mod tests {
                 .unwrap(),
             4
         );
-
         let unmapped_world = 0xdead_beef;
         engine.unicorn.get_data_mut().worlds.insert(
             unmapped_world,
@@ -4523,7 +4585,7 @@ mod tests {
         );
         assert_eq!(
             engine
-                .call_win64(HOST_DISPOSE_WORLD, [1, unmapped_world, 0, 0, 0, 0],)
+                .call_win64(HOST_DISPOSE_WORLD, [1, unmapped_world, 0, 0, 0, 0])
                 .unwrap(),
             4
         );
@@ -4534,6 +4596,55 @@ mod tests {
                 .worlds
                 .contains_key(&unmapped_world)
         );
+    }
+
+    #[test]
+    fn point_param_suite_returns_signed_fixed_values_as_doubles() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[0xc3]);
+        let name = engine.allocate(32, 1).unwrap();
+        engine.write(name, b"PF PointParamSuite\0").unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [name, 1, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut pointer = [0u8; 8];
+        engine.read(suite_output, &mut pointer).unwrap();
+        let suite = u64::from_le_bytes(pointer);
+        assert_eq!(suite, HOST_POINT_PARAM_SUITE);
+        engine.read(suite, &mut pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(pointer), HOST_POINT_PARAM_VALUE);
+        let definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+        engine
+            .write(
+                definition + abi::PARAM_U_OFFSET as u64,
+                &[98304i32.to_le_bytes(), (-147456i32).to_le_bytes()].concat(),
+            )
+            .unwrap();
+        let point_output = engine.allocate(16, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_POINT_PARAM_VALUE,
+                    [0, definition, point_output, 0, 0, 0],
+                )
+                .unwrap(),
+            0
+        );
+        let mut values = [0u8; 16];
+        engine.read(point_output, &mut values).unwrap();
+        assert_eq!(f64::from_le_bytes(values[..8].try_into().unwrap()), 1.5);
+        assert_eq!(f64::from_le_bytes(values[8..].try_into().unwrap()), -2.25);
+        assert_eq!(
+            engine
+                .call_win64(HOST_POINT_PARAM_VALUE, [0, 0, point_output, 0, 0, 0])
+                .unwrap(),
+            4
+        );
+        assert_eq!(engine.image_base, CODE);
     }
 
     #[test]
