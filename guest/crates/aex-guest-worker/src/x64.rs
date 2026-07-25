@@ -2253,6 +2253,7 @@ impl GuestEngine<'static> {
                 dropped: untracked_fingerprints,
             });
         }
+        let trace_truncated = !truncation.is_empty();
         let trace_configuration = TraceConfiguration {
             max_events: MAX_TRACE_EVENTS,
             max_basic_blocks: MAX_TRACE_BASIC_BLOCKS,
@@ -2301,7 +2302,7 @@ impl GuestEngine<'static> {
             selector: capture.selector,
             entry_rva: capture.entry_rva,
             return_value,
-            truncated: capture.truncated,
+            truncated: trace_truncated,
             events: capture.events,
             functions,
             state_changes: Vec::new(),
@@ -3877,6 +3878,7 @@ mod tests {
                 && item.reason == "fingerprint_budget"
                 && item.dropped == 4
         }));
+        assert!(trace.truncated);
     }
 
     #[test]
