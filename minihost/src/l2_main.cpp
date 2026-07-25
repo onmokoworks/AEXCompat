@@ -254,6 +254,9 @@ using aexcompat::worker_runtime::configure_runtime_module_hash;
 using aexcompat::worker_runtime::capture_module_audit;
 using aexcompat::worker_runtime::capture_module_audit_phase;
 using aexcompat::worker_runtime::effect_selector_name;
+using aexcompat::worker_runtime::ExtendedLookupOutcome;
+using aexcompat::worker_runtime::ExtendedLookupOpaqueTableClassification;
+using aexcompat::worker_runtime::ExtendedLookupStringTableState;
 using aexcompat::worker_runtime::guarded_effect_call;
 using aexcompat::worker_runtime::HostCallbackClassification;
 using aexcompat::worker_runtime::invoke_entry_seh;
@@ -261,6 +264,7 @@ using aexcompat::worker_runtime::invoke_smart_pre_render_cleanup_seh;
 using aexcompat::worker_runtime::module_audit_json;
 using aexcompat::worker_runtime::observe_extended_allocation;
 using aexcompat::worker_runtime::observe_extended_free;
+using aexcompat::worker_runtime::record_extended_lookup_diagnostic;
 using aexcompat::worker_runtime::record_host_callback_invocation;
 using aexcompat::worker_runtime::module_audit_failure_json;
 using aexcompat::worker_runtime::module_audit_passed;
@@ -1025,6 +1029,7 @@ int32_t __cdecl host_extended_free(void** ptr) {
 constexpr std::uintmax_t kMaxAexStringTableFileBytes = 256u * 1024u * 1024u;
 thread_local const aexcompat::aex_strings::StringTable*
     g_active_aex_string_table = nullptr;
+thread_local HMODULE g_active_effect_module = nullptr;
 
 bool load_aex_string_table(
     HMODULE module, aexcompat::aex_strings::StringTable& table) {
@@ -1061,12 +1066,62 @@ bool load_aex_string_table(
   return table.status != aexcompat::aex_strings::ParseStatus::Invalid;
 }
 
-const char* __cdecl host_extended_lookup(void*, int32_t id, void*, void*) {
+ExtendedLookupStringTableState extended_lookup_table_state(
+    aexcompat::aex_strings::ParseStatus status) noexcept {
+  return status == aexcompat::aex_strings::ParseStatus::Valid
+             ? ExtendedLookupStringTableState::valid
+         : status == aexcompat::aex_strings::ParseStatus::NoEntries
+             ? ExtendedLookupStringTableState::none
+             : ExtendedLookupStringTableState::invalid;
+}
+
+ExtendedLookupOpaqueTableClassification classify_other_lookup_module(
+    void* module) noexcept {
+  switch (aexcompat::worker_runtime::classify_loaded_module_provenance(
+      module)) {
+    case aexcompat::worker_runtime::LoadedModuleProvenance::sealed:
+      return ExtendedLookupOpaqueTableClassification::
+          other_loaded_sealed_module;
+    case aexcompat::worker_runtime::LoadedModuleProvenance::system:
+      return ExtendedLookupOpaqueTableClassification::
+          other_loaded_system_module;
+    case aexcompat::worker_runtime::LoadedModuleProvenance::unrecognized:
+      return ExtendedLookupOpaqueTableClassification::unrecognized;
+  }
+  return ExtendedLookupOpaqueTableClassification::unrecognized;
+}
+
+const char* __cdecl host_extended_lookup(void* table, int32_t id, void*,
+                                         void*) {
+  // `table` is opaque and is never dereferenced. The diagnostics use only
+  // VirtualQuery/GetModuleHandleEx containment plus authenticated module
+  // provenance; resource ownership and lookup behavior remain unchanged.
+  const ExtendedLookupOpaqueTableClassification table_classification =
+      aexcompat::worker_runtime::classify_extended_lookup_table(
+          table, g_active_effect_module, nullptr,
+          &classify_other_lookup_module);
   const char* result = g_active_aex_string_table
       ? g_active_aex_string_table->lookup(id)
       : nullptr;
+  const ExtendedLookupStringTableState raw_private_table_state =
+      extended_lookup_table_state(
+          g_active_aex_string_table
+              ? g_active_aex_string_table->status
+              : aexcompat::aex_strings::ParseStatus::NoEntries);
+  const ExtendedLookupStringTableState windows_resource_source_state =
+      ExtendedLookupStringTableState::none;
+  const int32_t return_code = result ? 0 : 4;
+  const ExtendedLookupOutcome outcome =
+      result ? ExtendedLookupOutcome::found
+             : raw_private_table_state ==
+                       ExtendedLookupStringTableState::invalid
+                   ? ExtendedLookupOutcome::invalid
+                   : ExtendedLookupOutcome::missing;
+  record_extended_lookup_diagnostic(
+      table_classification, raw_private_table_state,
+      windows_resource_source_state, id, outcome, return_code);
   record_host_callback_invocation(
-      "inter.extended_lookup", result ? 0 : 4,
+      "inter.extended_lookup", return_code,
       HostCallbackClassification::fallback);
   return result;
 }
@@ -2415,6 +2470,7 @@ void activate_plugin_string_table(HMODULE module,
               ? "none"
               : "invalid";
   std::cerr << "string_table_status:" << status << "\n" << std::flush;
+  g_active_effect_module = module;
   g_active_aex_string_table = &table;
 }
 
@@ -3170,6 +3226,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
               ? "none"
               : "invalid";
   std::cerr << "string_table_status:" << string_table_status << "\n" << std::flush;
+  g_active_effect_module = module;
   g_active_aex_string_table = &aex_string_table;
   aexcompat::worker_runtime::effect_bootstrap::State effect_state{};
   auto& input = effect_state.input;
@@ -3198,6 +3255,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   };
   const auto bootstrap = run_bootstrap(entry);
   g_active_aex_string_table = nullptr;
+  g_active_effect_module = nullptr;
   const int32_t global_error = bootstrap.global_error;
   const int32_t about_error = bootstrap.about_error;
   const int32_t params_error = bootstrap.params_error;

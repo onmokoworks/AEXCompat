@@ -35,6 +35,7 @@ thread_local bool g_has_global_setup_spec_version_entry{};
 thread_local uint32_t g_global_setup_spec_version_entry{};
 thread_local const char* g_host_callback_selector = "HOST";
 HostCallbackTimelineTelemetry g_host_callback_timeline;
+ExtendedLookupTimelineTelemetry g_extended_lookup_timeline;
 
 struct TrackedExtendedAllocation {
   uintptr_t pointer{};
@@ -568,6 +569,44 @@ const char* callback_classification_name(
   return "unsupported";
 }
 
+const char* extended_lookup_string_table_state_name(
+    ExtendedLookupStringTableState state) noexcept {
+  switch (state) {
+    case ExtendedLookupStringTableState::valid: return "valid";
+    case ExtendedLookupStringTableState::none: return "none";
+    case ExtendedLookupStringTableState::invalid: return "invalid";
+  }
+  return "invalid";
+}
+
+const char* extended_lookup_opaque_table_classification_name(
+    ExtendedLookupOpaqueTableClassification classification) noexcept {
+  switch (classification) {
+    case ExtendedLookupOpaqueTableClassification::null: return "null";
+    case ExtendedLookupOpaqueTableClassification::active_effect_module:
+      return "active_effect_module";
+    case ExtendedLookupOpaqueTableClassification::active_resource_module:
+      return "active_resource_module";
+    case ExtendedLookupOpaqueTableClassification::other_loaded_sealed_module:
+      return "other_loaded_sealed_module";
+    case ExtendedLookupOpaqueTableClassification::other_loaded_system_module:
+      return "other_loaded_system_module";
+    case ExtendedLookupOpaqueTableClassification::unrecognized:
+      return "unrecognized";
+  }
+  return "unrecognized";
+}
+
+const char* extended_lookup_outcome_name(
+    ExtendedLookupOutcome outcome) noexcept {
+  switch (outcome) {
+    case ExtendedLookupOutcome::found: return "found";
+    case ExtendedLookupOutcome::missing: return "missing";
+    case ExtendedLookupOutcome::invalid: return "invalid";
+  }
+  return "invalid";
+}
+
 void record_extended_allocation_boundary(
     const char* selector, bool entry) noexcept {
   std::size_t selector_length{};
@@ -675,6 +714,90 @@ void record_host_callback_invocation(
         g_host_callback_selector, 1, success, return_code, classification});
   } catch (...) {
     g_host_callback_timeline.truncated = true;
+  }
+}
+
+ExtendedLookupTimelineTelemetry&
+extended_lookup_timeline_telemetry() noexcept {
+  return g_extended_lookup_timeline;
+}
+
+void reset_extended_lookup_diagnostics() noexcept {
+  g_extended_lookup_timeline = {};
+}
+
+ExtendedLookupOpaqueTableClassification classify_extended_lookup_table(
+    const void* table, void* active_effect_module,
+    void* active_resource_module,
+    ExtendedLookupOtherModuleClassifier classify_other_module) noexcept {
+  if (!table) return ExtendedLookupOpaqueTableClassification::null;
+  MEMORY_BASIC_INFORMATION memory{};
+  if (VirtualQuery(table, &memory, sizeof(memory)) != sizeof(memory) ||
+      memory.State != MEM_COMMIT || memory.Type != MEM_IMAGE ||
+      !memory.AllocationBase)
+    return ExtendedLookupOpaqueTableClassification::unrecognized;
+  HMODULE module{};
+  if (!GetModuleHandleExW(
+          GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+          reinterpret_cast<LPCWSTR>(table), &module) ||
+      module != static_cast<HMODULE>(memory.AllocationBase))
+    return ExtendedLookupOpaqueTableClassification::unrecognized;
+  if (module == static_cast<HMODULE>(active_effect_module))
+    return ExtendedLookupOpaqueTableClassification::active_effect_module;
+  if (module == static_cast<HMODULE>(active_resource_module))
+    return ExtendedLookupOpaqueTableClassification::active_resource_module;
+  if (!classify_other_module)
+    return ExtendedLookupOpaqueTableClassification::unrecognized;
+  const ExtendedLookupOpaqueTableClassification classification =
+      classify_other_module(module);
+  return classification ==
+                 ExtendedLookupOpaqueTableClassification::
+                     other_loaded_sealed_module ||
+             classification ==
+                 ExtendedLookupOpaqueTableClassification::
+                     other_loaded_system_module
+         ? classification
+         : ExtendedLookupOpaqueTableClassification::unrecognized;
+}
+
+void record_extended_lookup_diagnostic(
+    ExtendedLookupOpaqueTableClassification opaque_table_classification,
+    ExtendedLookupStringTableState raw_private_table_state,
+    ExtendedLookupStringTableState windows_resource_source_state,
+    int32_t lookup_id,
+    ExtendedLookupOutcome outcome, int32_t return_code) noexcept {
+  if (!callback_timeline_selector(g_host_callback_selector)) return;
+  const uint32_t sequence = g_extended_lookup_timeline.next_sequence++;
+  if (!g_extended_lookup_timeline.records.empty()) {
+    auto& previous = g_extended_lookup_timeline.records.back();
+    if (previous.selector == g_host_callback_selector &&
+        previous.opaque_table_classification ==
+            opaque_table_classification &&
+        previous.raw_private_table_state == raw_private_table_state &&
+        previous.windows_resource_source_state ==
+            windows_resource_source_state &&
+        previous.lookup_id == lookup_id && previous.outcome == outcome &&
+        previous.return_code == return_code) {
+      if (previous.call_count != UINT32_MAX)
+        ++previous.call_count;
+      else
+        g_extended_lookup_timeline.truncated = true;
+      return;
+    }
+  }
+  if (g_extended_lookup_timeline.records.size() >=
+      kMaxExtendedLookupTimelineRecords) {
+    g_extended_lookup_timeline.truncated = true;
+    return;
+  }
+  try {
+    g_extended_lookup_timeline.records.push_back(
+        {sequence, g_host_callback_selector, 1, opaque_table_classification,
+         raw_private_table_state, windows_resource_source_state, lookup_id,
+         outcome, return_code});
+  } catch (...) {
+    g_extended_lookup_timeline.truncated = true;
   }
 }
 
@@ -941,6 +1064,32 @@ std::string selector_invocations_report_json() {
   }
   output << "],\"truncated\":"
          << (g_host_callback_timeline.truncated ? "true" : "false") << '}';
+  output << ",\"extended_lookup_timeline\":{\"maximum_records\":"
+         << kMaxExtendedLookupTimelineRecords << ",\"records\":[";
+  for (std::size_t index = 0;
+       index < g_extended_lookup_timeline.records.size(); ++index) {
+    if (index) output << ',';
+    const auto& record = g_extended_lookup_timeline.records[index];
+    output << "{\"sequence\":" << record.sequence << ",\"selector\":";
+    json_string(output, record.selector, 32);
+    output << ",\"call_count\":" << record.call_count
+           << ",\"opaque_table_classification\":\""
+           << extended_lookup_opaque_table_classification_name(
+                  record.opaque_table_classification)
+           << "\",\"raw_private_table_state\":\""
+           << extended_lookup_string_table_state_name(
+                  record.raw_private_table_state)
+           << "\",\"windows_resource_source_state\":\""
+           << extended_lookup_string_table_state_name(
+                  record.windows_resource_source_state)
+           << "\",\"lookup_id\":" << record.lookup_id
+           << ",\"outcome\":\""
+           << extended_lookup_outcome_name(record.outcome)
+           << "\",\"return_code\":" << record.return_code << '}';
+  }
+  output << "],\"truncated\":"
+         << (g_extended_lookup_timeline.truncated ? "true" : "false")
+         << '}';
   output << ",\"extended_allocation_timeline\":{\"maximum_records\":"
          << kMaxExtendedAllocationTimelineRecords << ",\"records\":[";
   for (std::size_t index = 0;
@@ -1021,6 +1170,7 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
   const char* previous_suite_selector = set_suite_timeline_selector(selector);
   if (command == 1) {
     reset_host_callback_timeline();
+    reset_extended_lookup_diagnostics();
     reset_extended_allocation_diagnostics();
   }
   const char* previous_callback_selector =

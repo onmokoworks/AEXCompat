@@ -41,6 +41,12 @@ struct ModuleAuditReport {
   std::vector<ModuleAuditEpoch> epochs;
 };
 
+enum class LoadedModuleProvenance {
+  sealed,
+  system,
+  unrecognized,
+};
+
 void configure_runtime_module_hash(FileSha256 hash) noexcept;
 bool parse_runtime_module_authorization(const std::filesystem::path& plugin_path,
                                         const std::filesystem::path& manifest_name);
@@ -54,6 +60,11 @@ std::string module_audit_json();
 // Bounded failure-only diagnostics. Canonical paths stay private; each
 // rejection carries only a basename, a canonical path token, and a path class.
 std::string module_audit_failure_json();
+// Classifies an already loaded HMODULE using the same authenticated sealed-root
+// and Windows-owned path policy as the module audit. No path or basename leaves
+// this boundary, and an unavailable or ambiguous provenance fails closed.
+LoadedModuleProvenance classify_loaded_module_provenance(
+    void* module) noexcept;
 
 // Cluster-session audit mode (design §5): replaces the fixed
 // kMaxAuditedModules enumeration/accumulation bound with the launch-time

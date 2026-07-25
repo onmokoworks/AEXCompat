@@ -16,6 +16,7 @@ using SelectorDispatchTrace = void(*)(const char* selector);
 constexpr std::size_t kMaxSelectorInvocationDiagnostics = 64;
 constexpr std::size_t kMaxSelectorStackValues = 6;
 constexpr std::size_t kMaxHostCallbackTimelineRecords = 128;
+constexpr std::size_t kMaxExtendedLookupTimelineRecords = 128;
 constexpr std::size_t kMaxExtendedAllocationTimelineRecords = 128;
 
 enum class HostCallbackClassification : uint8_t {
@@ -38,6 +39,51 @@ struct HostCallbackTimelineRecord {
 struct HostCallbackTimelineTelemetry {
   uint32_t next_sequence{};
   std::vector<HostCallbackTimelineRecord> records;
+  bool truncated{};
+};
+
+enum class ExtendedLookupStringTableState : uint8_t {
+  valid,
+  none,
+  invalid,
+};
+
+enum class ExtendedLookupOpaqueTableClassification : uint8_t {
+  null,
+  active_effect_module,
+  active_resource_module,
+  other_loaded_sealed_module,
+  other_loaded_system_module,
+  unrecognized,
+};
+
+using ExtendedLookupOtherModuleClassifier =
+    ExtendedLookupOpaqueTableClassification(*)(void* module) noexcept;
+
+enum class ExtendedLookupOutcome : uint8_t {
+  found,
+  missing,
+  invalid,
+};
+
+struct ExtendedLookupTimelineRecord {
+  uint32_t sequence{};
+  std::string selector;
+  uint32_t call_count{};
+  ExtendedLookupOpaqueTableClassification opaque_table_classification{
+      ExtendedLookupOpaqueTableClassification::unrecognized};
+  ExtendedLookupStringTableState raw_private_table_state{
+      ExtendedLookupStringTableState::none};
+  ExtendedLookupStringTableState windows_resource_source_state{
+      ExtendedLookupStringTableState::none};
+  int32_t lookup_id{};
+  ExtendedLookupOutcome outcome{ExtendedLookupOutcome::missing};
+  int32_t return_code{};
+};
+
+struct ExtendedLookupTimelineTelemetry {
+  uint32_t next_sequence{};
+  std::vector<ExtendedLookupTimelineRecord> records;
   bool truncated{};
 };
 
@@ -144,6 +190,19 @@ const char* set_host_callback_timeline_selector(
 void record_host_callback_invocation(
     const char* callback, int32_t return_code,
     HostCallbackClassification classification) noexcept;
+ExtendedLookupTimelineTelemetry&
+extended_lookup_timeline_telemetry() noexcept;
+void reset_extended_lookup_diagnostics() noexcept;
+ExtendedLookupOpaqueTableClassification classify_extended_lookup_table(
+    const void* table, void* active_effect_module,
+    void* active_resource_module,
+    ExtendedLookupOtherModuleClassifier classify_other_module) noexcept;
+void record_extended_lookup_diagnostic(
+    ExtendedLookupOpaqueTableClassification opaque_table_classification,
+    ExtendedLookupStringTableState raw_private_table_state,
+    ExtendedLookupStringTableState windows_resource_source_state,
+    int32_t lookup_id,
+    ExtendedLookupOutcome outcome, int32_t return_code) noexcept;
 void reset_extended_allocation_diagnostics() noexcept;
 void observe_extended_allocation(void* allocation) noexcept;
 void observe_extended_free(void* allocation) noexcept;

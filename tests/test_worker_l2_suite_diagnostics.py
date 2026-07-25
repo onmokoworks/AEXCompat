@@ -116,6 +116,41 @@ def test_selector_invocation_distinguishes_normal_return_from_seh_containment():
     assert '"classification\\":\\\""' in SELECTOR
     assert "record_host_callback_invocation" in SELECTOR
     assert "fn propagate_host_callback_timeline(" in BROKER
+    assert "kMaxExtendedLookupTimelineRecords = 128" in (
+        ROOT / "minihost" / "src" / "worker_selector_dispatch.hpp"
+    ).read_text(encoding="utf-8")
+    assert '"extended_lookup_timeline\\":{' in SELECTOR
+    assert '"opaque_table_classification\\":\\\""' in SELECTOR
+    assert '"raw_private_table_state\\":\\\""' in SELECTOR
+    assert '"windows_resource_source_state\\":\\\""' in SELECTOR
+    assert '"lookup_id\\":' in SELECTOR
+    assert '"outcome\\":\\\""' in SELECTOR
+    assert "record_extended_lookup_diagnostic" in L2
+    assert "ExtendedLookupStringTableState::valid" in L2
+    assert "ExtendedLookupStringTableState::none" in L2
+    assert "ExtendedLookupStringTableState::invalid" in L2
+    assert "classify_extended_lookup_table" in L2
+    assert "classify_loaded_module_provenance" in L2
+    assert "VirtualQuery(table" in SELECTOR
+    assert "GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS" in SELECTOR
+    for classification in (
+        "null",
+        "active_effect_module",
+        "active_resource_module",
+        "other_loaded_sealed_module",
+        "other_loaded_system_module",
+        "unrecognized",
+    ):
+        assert classification in SELECTOR
+    assert "fn propagate_extended_lookup_timeline(" in BROKER
+    assert (
+        "propagate_extended_lookup_timeline(&mut diagnostics, report);"
+        in BROKER
+    )
+    assert (
+        "propagate_extended_lookup_timeline(&mut diagnostics, &final_report);"
+        in BROKER
+    )
     assert "kMaxExtendedAllocationTimelineRecords = 128" in (
         ROOT / "minihost" / "src" / "worker_selector_dispatch.hpp"
     ).read_text(encoding="utf-8")

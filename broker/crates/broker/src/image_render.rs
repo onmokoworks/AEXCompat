@@ -34,6 +34,7 @@ const MAX_SUITE_NAME_LEN: usize = 64;
 const MAX_SUITE_TIMELINE_EVENTS: usize = 512;
 const MAX_SELECTOR_INVOCATIONS: usize = 64;
 const MAX_HOST_CALLBACK_TIMELINE_RECORDS: usize = 128;
+const MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS: usize = 128;
 const MAX_EXTENDED_ALLOCATION_TIMELINE_RECORDS: usize = 128;
 const MAX_SUITE_VERSION: i64 = u16::MAX as i64;
 const MAX_UNSUPPORTED_SUITE_SLOT: u64 = 1023;
@@ -1644,6 +1645,179 @@ fn propagate_host_callback_timeline(diagnostics: &mut Value, worker_report: &Val
     }
     diagnostics["host_callback_timeline"] = json!({
         "maximum_records": MAX_HOST_CALLBACK_TIMELINE_RECORDS,
+        "records": records,
+        "truncated": truncated,
+    });
+}
+
+fn fail_closed_extended_lookup_timeline(diagnostics: &mut Value) {
+    diagnostics["extended_lookup_timeline"] = json!({
+        "maximum_records": MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS,
+        "records": [],
+        "truncated": true,
+    });
+}
+
+fn propagate_extended_lookup_timeline(diagnostics: &mut Value, worker_report: &Value) {
+    let Some(reported_container) = worker_report.get("extended_lookup_timeline") else {
+        return;
+    };
+    let Some(container) = reported_container.as_object().filter(|container| {
+        container.len() == 3
+            && container.contains_key("maximum_records")
+            && container.contains_key("records")
+            && container.contains_key("truncated")
+    }) else {
+        fail_closed_extended_lookup_timeline(diagnostics);
+        return;
+    };
+    if container.get("maximum_records").and_then(Value::as_u64)
+        != Some(MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS as u64)
+    {
+        fail_closed_extended_lookup_timeline(diagnostics);
+        return;
+    }
+    let Some(reported) = container.get("records").and_then(Value::as_array) else {
+        fail_closed_extended_lookup_timeline(diagnostics);
+        return;
+    };
+    let Some(reported_truncated) = container.get("truncated").and_then(Value::as_bool) else {
+        fail_closed_extended_lookup_timeline(diagnostics);
+        return;
+    };
+    let mut records = Vec::new();
+    let mut truncated = reported_truncated || reported.len() > MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS;
+    let mut previous_sequence = None;
+    for record in reported.iter().take(MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS) {
+        let Some(record) = record.as_object().filter(|record| {
+            record.len() == 9
+                && record.contains_key("sequence")
+                && record.contains_key("selector")
+                && record.contains_key("call_count")
+                && record.contains_key("opaque_table_classification")
+                && record.contains_key("raw_private_table_state")
+                && record.contains_key("windows_resource_source_state")
+                && record.contains_key("lookup_id")
+                && record.contains_key("outcome")
+                && record.contains_key("return_code")
+        }) else {
+            truncated = true;
+            continue;
+        };
+        let Some(sequence) = record
+            .get("sequence")
+            .and_then(Value::as_u64)
+            .filter(|sequence| *sequence <= u32::MAX as u64)
+            .filter(|sequence| previous_sequence.is_none_or(|previous| *sequence > previous))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(selector) = record
+            .get("selector")
+            .and_then(Value::as_str)
+            .filter(|selector| matches!(*selector, "GLOBAL_SETUP" | "PARAMS_SETUP"))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(call_count) = record
+            .get("call_count")
+            .and_then(Value::as_u64)
+            .filter(|count| *count > 0 && *count <= u32::MAX as u64)
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(opaque_table_classification) = record
+            .get("opaque_table_classification")
+            .and_then(Value::as_str)
+            .filter(|classification| {
+                matches!(
+                    *classification,
+                    "null"
+                        | "active_effect_module"
+                        | "active_resource_module"
+                        | "other_loaded_sealed_module"
+                        | "other_loaded_system_module"
+                        | "unrecognized"
+                )
+            })
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(raw_private_table_state) = record
+            .get("raw_private_table_state")
+            .and_then(Value::as_str)
+            .filter(|state| matches!(*state, "valid" | "none" | "invalid"))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(windows_resource_source_state) = record
+            .get("windows_resource_source_state")
+            .and_then(Value::as_str)
+            .filter(|state| matches!(*state, "valid" | "none" | "invalid"))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(lookup_id) = record
+            .get("lookup_id")
+            .and_then(Value::as_i64)
+            .filter(|id| *id >= i32::MIN as i64 && *id <= i32::MAX as i64)
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(outcome) = record
+            .get("outcome")
+            .and_then(Value::as_str)
+            .filter(|outcome| matches!(*outcome, "found" | "missing" | "invalid"))
+        else {
+            truncated = true;
+            continue;
+        };
+        let Some(return_code) = record
+            .get("return_code")
+            .and_then(Value::as_i64)
+            .filter(|code| *code >= i32::MIN as i64 && *code <= i32::MAX as i64)
+        else {
+            truncated = true;
+            continue;
+        };
+        let has_valid_source =
+            raw_private_table_state == "valid" || windows_resource_source_state == "valid";
+        let invariant_valid = match (outcome, return_code) {
+            ("found", 0) => has_valid_source,
+            ("missing", 4) => {
+                has_valid_source
+                    || (raw_private_table_state == "none"
+                        && windows_resource_source_state == "none")
+            }
+            ("invalid", 4) => true,
+            _ => false,
+        };
+        if !invariant_valid {
+            truncated = true;
+            continue;
+        }
+        previous_sequence = Some(sequence);
+        records.push(json!({
+            "sequence": sequence,
+            "selector": selector,
+            "call_count": call_count,
+            "opaque_table_classification": opaque_table_classification,
+            "raw_private_table_state": raw_private_table_state,
+            "windows_resource_source_state": windows_resource_source_state,
+            "lookup_id": lookup_id,
+            "outcome": outcome,
+            "return_code": return_code,
+        }));
+    }
+    diagnostics["extended_lookup_timeline"] = json!({
+        "maximum_records": MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS,
         "records": records,
         "truncated": truncated,
     });
@@ -4420,6 +4594,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         propagate_suite_call_slot_probe(&mut diagnostics, report);
         propagate_selector_invocations(&mut diagnostics, report);
         propagate_host_callback_timeline(&mut diagnostics, report);
+        propagate_extended_lookup_timeline(&mut diagnostics, report);
         propagate_extended_allocation_timeline(&mut diagnostics, report);
         propagate_suite_timeline(&mut diagnostics, report);
         let selector_phase = diagnostics
@@ -6523,6 +6698,7 @@ fn render_classic_via_length_one_session(
     propagate_suite_call_slot_probe(&mut diagnostics, &final_report);
     propagate_selector_invocations(&mut diagnostics, &final_report);
     propagate_host_callback_timeline(&mut diagnostics, &final_report);
+    propagate_extended_lookup_timeline(&mut diagnostics, &final_report);
     propagate_extended_allocation_timeline(&mut diagnostics, &final_report);
     propagate_suite_timeline(&mut diagnostics, &final_report);
     // Name the stage when the worker itself rejected its output pixels. The
@@ -8941,6 +9117,181 @@ mod tests {
             !diagnostics["host_callback_timeline"]
                 .to_string()
                 .contains("0x1234")
+        );
+    }
+
+    #[test]
+    fn extended_lookup_timeline_validates_states_ids_and_bounds_fail_closed() {
+        let report = json!({
+            "extended_lookup_timeline": {
+                "maximum_records": 128,
+                "records": [
+                    {
+                        "sequence": 0,
+                        "selector": "GLOBAL_SETUP",
+                        "call_count": 2,
+                        "opaque_table_classification": "null",
+                        "raw_private_table_state": "valid",
+                        "windows_resource_source_state": "valid",
+                        "lookup_id": 7,
+                        "outcome": "found",
+                        "return_code": 0
+                    },
+                    {
+                        "sequence": 2,
+                        "selector": "PARAMS_SETUP",
+                        "call_count": 1,
+                        "opaque_table_classification": "active_effect_module",
+                        "raw_private_table_state": "valid",
+                        "windows_resource_source_state": "none",
+                        "lookup_id": 8,
+                        "outcome": "missing",
+                        "return_code": 4
+                    },
+                    {
+                        "sequence": 3,
+                        "selector": "PARAMS_SETUP",
+                        "call_count": 1,
+                        "opaque_table_classification": "other_loaded_sealed_module",
+                        "raw_private_table_state": "none",
+                        "windows_resource_source_state": "none",
+                        "lookup_id": -1,
+                        "outcome": "missing",
+                        "return_code": 4
+                    },
+                    {
+                        "sequence": 4,
+                        "selector": "PARAMS_SETUP",
+                        "call_count": 1,
+                        "opaque_table_classification": "unrecognized",
+                        "raw_private_table_state": "invalid",
+                        "windows_resource_source_state": "none",
+                        "lookup_id": 2147483647,
+                        "outcome": "invalid",
+                        "return_code": 4
+                    }
+                ],
+                "truncated": false
+            }
+        });
+        let mut diagnostics = json!({});
+        propagate_extended_lookup_timeline(&mut diagnostics, &report);
+        let records = diagnostics["extended_lookup_timeline"]["records"]
+            .as_array()
+            .unwrap();
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[0]["call_count"], 2);
+        assert_eq!(records[2]["lookup_id"], -1);
+        assert_eq!(records[3]["lookup_id"], 2147483647_i64);
+        assert_eq!(diagnostics["extended_lookup_timeline"]["truncated"], false);
+
+        let near_miss_key = json!({
+            "extended_lookup_timeline_extra": {
+                "maximum_records": 128,
+                "records": [],
+                "truncated": false
+            }
+        });
+        let mut near_miss_diagnostics = json!({});
+        propagate_extended_lookup_timeline(&mut near_miss_diagnostics, &near_miss_key);
+        assert!(
+            near_miss_diagnostics
+                .get("extended_lookup_timeline")
+                .is_none()
+        );
+
+        let invalid_record = json!({
+            "extended_lookup_timeline": {
+                "maximum_records": 128,
+                "records": [{
+                    "sequence": 0,
+                    "selector": "PARAMS_SETUP",
+                    "call_count": 1,
+                    "opaque_table_classification": "active_resource_module",
+                    "raw_private_table_state": "valid",
+                    "windows_resource_source_state": "none",
+                    "lookup_id": 2147483648_i64,
+                    "outcome": "found",
+                    "return_code": 4,
+                    "value": "must-not-propagate"
+                }],
+                "truncated": false
+            }
+        });
+        let mut invalid_record_diagnostics = json!({});
+        propagate_extended_lookup_timeline(&mut invalid_record_diagnostics, &invalid_record);
+        assert_eq!(
+            invalid_record_diagnostics["extended_lookup_timeline"]["records"],
+            json!([])
+        );
+        assert_eq!(
+            invalid_record_diagnostics["extended_lookup_timeline"]["truncated"],
+            true
+        );
+        assert!(
+            !invalid_record_diagnostics["extended_lookup_timeline"]
+                .to_string()
+                .contains("must-not-propagate")
+        );
+
+        let malformed = json!({
+            "extended_lookup_timeline": {
+                "maximum_records": 128,
+                "records": [],
+                "truncated": false,
+                "absolute_path": "C:\\private\\plugin.aex"
+            }
+        });
+        let mut malformed_diagnostics = json!({});
+        propagate_extended_lookup_timeline(&mut malformed_diagnostics, &malformed);
+        assert_eq!(
+            malformed_diagnostics["extended_lookup_timeline"]["records"],
+            json!([])
+        );
+        assert_eq!(
+            malformed_diagnostics["extended_lookup_timeline"]["truncated"],
+            true
+        );
+        assert!(
+            !malformed_diagnostics["extended_lookup_timeline"]
+                .to_string()
+                .contains("private")
+        );
+
+        let overflow_records = (0..=MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS)
+            .map(|sequence| {
+                json!({
+                    "sequence": sequence,
+                    "selector": "PARAMS_SETUP",
+                    "call_count": 1,
+                    "opaque_table_classification": "other_loaded_system_module",
+                    "raw_private_table_state": "valid",
+                    "windows_resource_source_state": "none",
+                    "lookup_id": sequence,
+                    "outcome": "missing",
+                    "return_code": 4
+                })
+            })
+            .collect::<Vec<_>>();
+        let overflow = json!({
+            "extended_lookup_timeline": {
+                "maximum_records": 128,
+                "records": overflow_records,
+                "truncated": false
+            }
+        });
+        let mut overflow_diagnostics = json!({});
+        propagate_extended_lookup_timeline(&mut overflow_diagnostics, &overflow);
+        assert_eq!(
+            overflow_diagnostics["extended_lookup_timeline"]["records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS
+        );
+        assert_eq!(
+            overflow_diagnostics["extended_lookup_timeline"]["truncated"],
+            true
         );
     }
 

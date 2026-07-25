@@ -7,6 +7,7 @@
 #include <array>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace {
@@ -26,6 +27,21 @@ constexpr std::size_t kSyntheticInApplicationIdOffset = 204;
 
 void capture_audit() {}
 bool audit_passed() { return true; }
+
+using OpaqueTableClassification =
+    aexcompat::worker_runtime::ExtendedLookupOpaqueTableClassification;
+
+OpaqueTableClassification classify_as_sealed(void*) noexcept {
+  return OpaqueTableClassification::other_loaded_sealed_module;
+}
+
+OpaqueTableClassification classify_as_system(void*) noexcept {
+  return OpaqueTableClassification::other_loaded_system_module;
+}
+
+OpaqueTableClassification classify_as_invalid_active(void*) noexcept {
+  return OpaqueTableClassification::active_effect_module;
+}
 
 void write_global_data(std::array<std::byte, 408>& buffer,
                        std::size_t offset, void* value) {
@@ -426,6 +442,191 @@ bool verify_host_callback_timeline_diagnostics() {
   return classifications_valid && truncation_valid;
 }
 
+bool verify_extended_lookup_timeline_diagnostics() {
+  using namespace aexcompat::worker_runtime;
+  reset_extended_lookup_diagnostics();
+  const char* previous =
+      set_host_callback_timeline_selector("GLOBAL_SETUP");
+  record_extended_lookup_diagnostic(
+      ExtendedLookupOpaqueTableClassification::null,
+      ExtendedLookupStringTableState::valid,
+      ExtendedLookupStringTableState::valid, 7,
+      ExtendedLookupOutcome::found, 0);
+  record_extended_lookup_diagnostic(
+      ExtendedLookupOpaqueTableClassification::null,
+      ExtendedLookupStringTableState::valid,
+      ExtendedLookupStringTableState::valid, 7,
+      ExtendedLookupOutcome::found, 0);
+  set_host_callback_timeline_selector("PARAMS_SETUP");
+  record_extended_lookup_diagnostic(
+      ExtendedLookupOpaqueTableClassification::active_effect_module,
+      ExtendedLookupStringTableState::valid,
+      ExtendedLookupStringTableState::none, 8,
+      ExtendedLookupOutcome::missing, 4);
+  record_extended_lookup_diagnostic(
+      ExtendedLookupOpaqueTableClassification::active_resource_module,
+      ExtendedLookupStringTableState::none,
+      ExtendedLookupStringTableState::valid, 9,
+      ExtendedLookupOutcome::found, 0);
+  record_extended_lookup_diagnostic(
+      ExtendedLookupOpaqueTableClassification::other_loaded_sealed_module,
+      ExtendedLookupStringTableState::none,
+      ExtendedLookupStringTableState::none, -1,
+      ExtendedLookupOutcome::missing, 4);
+  record_extended_lookup_diagnostic(
+      ExtendedLookupOpaqueTableClassification::other_loaded_system_module,
+      ExtendedLookupStringTableState::invalid,
+      ExtendedLookupStringTableState::none,
+      std::numeric_limits<int32_t>::max(),
+      ExtendedLookupOutcome::invalid, 4);
+  record_extended_lookup_diagnostic(
+      ExtendedLookupOpaqueTableClassification::unrecognized,
+      ExtendedLookupStringTableState::none,
+      ExtendedLookupStringTableState::invalid,
+      std::numeric_limits<int32_t>::min(),
+      ExtendedLookupOutcome::invalid, 4);
+  auto& telemetry = extended_lookup_timeline_telemetry();
+  const std::string report = selector_invocations_report_json();
+  const std::size_t lookup_begin =
+      report.find("\"extended_lookup_timeline\":{");
+  const std::size_t lookup_end =
+      report.find(",\"extended_allocation_timeline\":", lookup_begin);
+  const std::string lookup_report =
+      lookup_begin != std::string::npos && lookup_end != std::string::npos
+          ? report.substr(lookup_begin, lookup_end - lookup_begin)
+          : std::string{};
+  const bool states_valid =
+      telemetry.records.size() == 6 &&
+      telemetry.records[0].selector == "GLOBAL_SETUP" &&
+      telemetry.records[0].call_count == 2 &&
+      telemetry.records[0].opaque_table_classification ==
+          ExtendedLookupOpaqueTableClassification::null &&
+      telemetry.records[0].raw_private_table_state ==
+          ExtendedLookupStringTableState::valid &&
+      telemetry.records[0].windows_resource_source_state ==
+          ExtendedLookupStringTableState::valid &&
+      telemetry.records[0].outcome == ExtendedLookupOutcome::found &&
+      telemetry.records[0].return_code == 0 &&
+      telemetry.records[1].selector == "PARAMS_SETUP" &&
+      telemetry.records[1].lookup_id == 8 &&
+      telemetry.records[1].opaque_table_classification ==
+          ExtendedLookupOpaqueTableClassification::active_effect_module &&
+      telemetry.records[1].outcome == ExtendedLookupOutcome::missing &&
+      telemetry.records[1].return_code == 4 &&
+      telemetry.records[2].lookup_id == 9 &&
+      telemetry.records[2].opaque_table_classification ==
+          ExtendedLookupOpaqueTableClassification::active_resource_module &&
+      telemetry.records[2].windows_resource_source_state ==
+          ExtendedLookupStringTableState::valid &&
+      telemetry.records[2].outcome == ExtendedLookupOutcome::found &&
+      telemetry.records[3].lookup_id == -1 &&
+      telemetry.records[3].opaque_table_classification ==
+          ExtendedLookupOpaqueTableClassification::
+              other_loaded_sealed_module &&
+      telemetry.records[3].raw_private_table_state ==
+          ExtendedLookupStringTableState::none &&
+      telemetry.records[3].outcome == ExtendedLookupOutcome::missing &&
+      telemetry.records[4].lookup_id ==
+          std::numeric_limits<int32_t>::max() &&
+      telemetry.records[4].opaque_table_classification ==
+          ExtendedLookupOpaqueTableClassification::
+              other_loaded_system_module &&
+      telemetry.records[4].raw_private_table_state ==
+          ExtendedLookupStringTableState::invalid &&
+      telemetry.records[4].outcome == ExtendedLookupOutcome::invalid &&
+      telemetry.records[5].lookup_id ==
+          std::numeric_limits<int32_t>::min() &&
+      telemetry.records[5].opaque_table_classification ==
+          ExtendedLookupOpaqueTableClassification::unrecognized &&
+      telemetry.records[5].windows_resource_source_state ==
+          ExtendedLookupStringTableState::invalid &&
+      lookup_report.find("\"maximum_records\":128") != std::string::npos &&
+      lookup_report.find("\"selector\":\"GLOBAL_SETUP\"") !=
+          std::string::npos &&
+      lookup_report.find("\"selector\":\"PARAMS_SETUP\"") !=
+          std::string::npos &&
+      lookup_report.find("\"opaque_table_classification\":\"null\"") !=
+          std::string::npos &&
+      lookup_report.find(
+          "\"opaque_table_classification\":\"active_effect_module\"") !=
+          std::string::npos &&
+      lookup_report.find(
+          "\"opaque_table_classification\":\"active_resource_module\"") !=
+          std::string::npos &&
+      lookup_report.find(
+          "\"opaque_table_classification\":\"other_loaded_sealed_module\"") !=
+          std::string::npos &&
+      lookup_report.find(
+          "\"opaque_table_classification\":\"other_loaded_system_module\"") !=
+          std::string::npos &&
+      lookup_report.find(
+          "\"opaque_table_classification\":\"unrecognized\"") !=
+          std::string::npos &&
+      lookup_report.find("\"raw_private_table_state\":\"valid\"") !=
+          std::string::npos &&
+      lookup_report.find("\"windows_resource_source_state\":\"valid\"") !=
+          std::string::npos &&
+      lookup_report.find("\"lookup_id\":-1") != std::string::npos &&
+      lookup_report.find("\"lookup_id\":2147483647") != std::string::npos &&
+      lookup_report.find("\"outcome\":\"invalid\"") != std::string::npos &&
+      lookup_report.find("\"call_count\":2") != std::string::npos &&
+      lookup_report.find("\"value\"") == std::string::npos &&
+      lookup_report.find("\"address\"") == std::string::npos &&
+      lookup_report.find("\"path\"") == std::string::npos &&
+      lookup_report.find("0x") == std::string::npos &&
+      lookup_report.find(":\\") == std::string::npos;
+
+  reset_extended_lookup_diagnostics();
+  for (std::size_t index = 0;
+       index < kMaxExtendedLookupTimelineRecords + 1; ++index) {
+    record_extended_lookup_diagnostic(
+        ExtendedLookupOpaqueTableClassification::unrecognized,
+        ExtendedLookupStringTableState::valid,
+        ExtendedLookupStringTableState::none,
+        static_cast<int32_t>(index), ExtendedLookupOutcome::missing, 4);
+  }
+  const bool truncation_valid =
+      telemetry.records.size() == kMaxExtendedLookupTimelineRecords &&
+      telemetry.truncated;
+  set_host_callback_timeline_selector(previous);
+  reset_extended_lookup_diagnostics();
+  return states_valid && truncation_valid;
+}
+
+bool verify_extended_lookup_table_classification() {
+  using namespace aexcompat::worker_runtime;
+  HMODULE executable = GetModuleHandleW(nullptr);
+  HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+  FARPROC function = kernel32
+      ? GetProcAddress(kernel32, "GetCurrentProcessId") : nullptr;
+  std::byte private_memory{};
+  if (!executable || !kernel32 || !function) return false;
+  const void* image_address = reinterpret_cast<const void*>(function);
+  return classify_extended_lookup_table(
+             nullptr, executable, kernel32, &classify_as_sealed) ==
+             ExtendedLookupOpaqueTableClassification::null &&
+      classify_extended_lookup_table(
+          image_address, kernel32, nullptr, &classify_as_system) ==
+          ExtendedLookupOpaqueTableClassification::active_effect_module &&
+      classify_extended_lookup_table(
+          image_address, executable, kernel32, &classify_as_system) ==
+          ExtendedLookupOpaqueTableClassification::active_resource_module &&
+      classify_extended_lookup_table(
+          image_address, executable, nullptr, &classify_as_sealed) ==
+          ExtendedLookupOpaqueTableClassification::
+              other_loaded_sealed_module &&
+      classify_extended_lookup_table(
+          image_address, executable, nullptr, &classify_as_system) ==
+          ExtendedLookupOpaqueTableClassification::
+              other_loaded_system_module &&
+      classify_extended_lookup_table(
+          &private_memory, executable, kernel32, &classify_as_sealed) ==
+          ExtendedLookupOpaqueTableClassification::unrecognized &&
+      classify_extended_lookup_table(
+          image_address, executable, nullptr, &classify_as_invalid_active) ==
+          ExtendedLookupOpaqueTableClassification::unrecognized;
+}
+
 bool verify_extended_allocation_timeline_diagnostics() {
   using namespace aexcompat::worker_runtime;
   std::byte first_allocation{};
@@ -514,6 +715,10 @@ int main() {
       verify_spec_version_entry_diagnostics();
   const bool callback_timeline_diagnostics_passed =
       verify_host_callback_timeline_diagnostics();
+  const bool extended_lookup_timeline_diagnostics_passed =
+      verify_extended_lookup_timeline_diagnostics();
+  const bool extended_lookup_table_classification_passed =
+      verify_extended_lookup_table_classification();
   const bool allocation_timeline_diagnostics_passed =
       verify_extended_allocation_timeline_diagnostics();
   selector_telemetry.invocations.clear();
@@ -543,6 +748,8 @@ int main() {
       application_id_diagnostics_passed &&
       spec_version_diagnostics_passed &&
       callback_timeline_diagnostics_passed &&
+      extended_lookup_timeline_diagnostics_passed &&
+      extended_lookup_table_classification_passed &&
       allocation_timeline_diagnostics_passed &&
       normal_result == 512 && normal_exception == 0 &&
       null_result == 512 && null_exception == EXCEPTION_ACCESS_VIOLATION &&
