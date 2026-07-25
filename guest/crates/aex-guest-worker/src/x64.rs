@@ -43,12 +43,14 @@ const HOST_AEGP_RESIZE_MEM_HANDLE: u64 = STUB_BASE + 0x80190;
 const HOST_NEW_WORLD: u64 = STUB_BASE + 0x80210;
 const HOST_DISPOSE_WORLD: u64 = STUB_BASE + 0x80220;
 const HOST_GET_WORLD_PIXEL_FORMAT: u64 = STUB_BASE + 0x80230;
+const HOST_COLOR_PARAM_VALUE: u64 = STUB_BASE + 0x80240;
 const HOST_AEGP_REGISTER: u64 = STUB_BASE + 0x80120;
 const HOST_AEGP_GET_MAIN_WINDOW: u64 = STUB_BASE + 0x80130;
 const HOST_POINT_PARAM_VALUE: u64 = STUB_BASE + 0x80200;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81100;
 const HOST_WORLD_SUITE: u64 = STUB_BASE + 0x81300;
+const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81400;
 const HOST_POINT_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
@@ -1985,6 +1987,7 @@ impl GuestEngine<'static> {
             ("write AEGP register callback", HOST_AEGP_REGISTER),
             ("write AEGP main-window callback", HOST_AEGP_GET_MAIN_WINDOW),
             ("write point-param callback", HOST_POINT_PARAM_VALUE),
+            ("write color-param callback", HOST_COLOR_PARAM_VALUE),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -2070,6 +2073,14 @@ impl GuestEngine<'static> {
                 HOST_POINT_PARAM_VALUE,
                 HOST_POINT_PARAM_VALUE,
                 emulate_point_param_value,
+            ),
+        )?;
+        uc(
+            "install color-param callback",
+            unicorn.add_code_hook(
+                HOST_COLOR_PARAM_VALUE,
+                HOST_COLOR_PARAM_VALUE,
+                emulate_color_param_value,
             ),
         )?;
         uc(
@@ -2225,6 +2236,13 @@ impl GuestEngine<'static> {
                 &HOST_POINT_PARAM_VALUE.to_le_bytes(),
             ),
         )?;
+        uc(
+            "write PF ColorParamSuite",
+            unicorn.mem_write(
+                HOST_COLOR_PARAM_SUITE,
+                &HOST_COLOR_PARAM_VALUE.to_le_bytes(),
+            ),
+        )?;
         install_aegp_utility_suites(&mut unicorn)?;
         for (address, name) in [
             (HOST_ADD_PARAM, "add_param"),
@@ -2251,6 +2269,7 @@ impl GuestEngine<'static> {
             (HOST_DISPOSE_WORLD, "dispose_world"),
             (HOST_GET_WORLD_PIXEL_FORMAT, "get_world_pixel_format"),
             (HOST_POINT_PARAM_VALUE, "point_param_value"),
+            (HOST_COLOR_PARAM_VALUE, "color_param_value"),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -3631,6 +3650,16 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         return;
     }
+    if name == "PF ColorParamSuite"
+        && version == 1
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_COLOR_PARAM_SUITE.to_le_bytes())
+            .is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
     if name == "AEGP Utility Suite"
         && output != 0
         && let Some(table) = u32::try_from(version)
@@ -3688,6 +3717,51 @@ fn emulate_point_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u
         4
     };
     let _ = unicorn.reg_write(RegisterX86::RAX, result);
+}
+
+fn emulate_color_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let effect_ref = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let definition = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let result = (|| {
+        if effect_ref != 1 || definition == 0 || output == 0 {
+            return Err("invalid PF ColorParamSuite arguments".to_string());
+        }
+        let mut param_type = [0u8; 4];
+        unicorn
+            .mem_read(
+                definition + abi::PARAM_PARAM_TYPE_OFFSET as u64,
+                &mut param_type,
+            )
+            .map_err(|error| format!("color-param type read: {error}"))?;
+        if i32::from_le_bytes(param_type) != 5 {
+            return Err("PF ColorParamSuite definition is not PARAM_COLOR".to_string());
+        }
+        let mut argb = [0u8; abi::PF_PIXEL_SIZE];
+        unicorn
+            .mem_read(definition + abi::PARAM_U_OFFSET as u64, &mut argb)
+            .map_err(|error| format!("color-param value read: {error}"))?;
+        let mut pixel_float = [0u8; abi::PF_PIXEL_FLOAT_SIZE];
+        for (index, channel) in argb.into_iter().enumerate() {
+            let value = (f32::from(channel) / 255.0).to_le_bytes();
+            let offset = index * 4;
+            pixel_float[offset..offset + 4].copy_from_slice(&value);
+        }
+        unicorn
+            .mem_write(output, &pixel_float)
+            .map_err(|error| format!("color-param output write: {error}"))?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().callback_error = Some(error);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 516);
+            let _ = unicorn.emu_stop();
+        }
+    }
 }
 
 fn emulate_checkout_param(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
@@ -4365,6 +4439,7 @@ mod tests {
             HOST_DISPOSE_WORLD,
             HOST_GET_WORLD_PIXEL_FORMAT,
             HOST_POINT_PARAM_VALUE,
+            HOST_COLOR_PARAM_VALUE,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -4466,9 +4541,22 @@ mod tests {
             )
             .unwrap();
         unicorn
+            .add_code_hook(
+                HOST_COLOR_PARAM_VALUE,
+                HOST_COLOR_PARAM_VALUE,
+                emulate_color_param_value,
+            )
+            .unwrap();
+        unicorn
             .mem_write(
                 HOST_POINT_PARAM_SUITE,
                 &HOST_POINT_PARAM_VALUE.to_le_bytes(),
+            )
+            .unwrap();
+        unicorn
+            .mem_write(
+                HOST_COLOR_PARAM_SUITE,
+                &HOST_COLOR_PARAM_VALUE.to_le_bytes(),
             )
             .unwrap();
         install_aegp_utility_suites(&mut unicorn).unwrap();
@@ -4771,6 +4859,53 @@ mod tests {
             4
         );
         assert_eq!(engine.image_base, CODE);
+    }
+
+    #[test]
+    fn color_param_suite_returns_argb8_as_pixel_float() {
+        let mut engine = test_engine(&[0xc3]);
+        let name = engine.allocate(32, 1).unwrap();
+        engine.write(name, b"PF ColorParamSuite\0").unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [name, 1, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut pointer = [0u8; 8];
+        engine.read(suite_output, &mut pointer).unwrap();
+        let suite = u64::from_le_bytes(pointer);
+        assert_eq!(suite, HOST_COLOR_PARAM_SUITE);
+        engine.read(suite, &mut pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(pointer), HOST_COLOR_PARAM_VALUE);
+
+        let definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+        engine
+            .write(
+                definition + abi::PARAM_PARAM_TYPE_OFFSET as u64,
+                &5i32.to_le_bytes(),
+            )
+            .unwrap();
+        engine
+            .write(definition + abi::PARAM_U_OFFSET as u64, &[255, 128, 64, 32])
+            .unwrap();
+        let output = engine.allocate(abi::PF_PIXEL_FLOAT_SIZE, 4).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [1, definition, output, 0, 0, 0],)
+                .unwrap(),
+            0
+        );
+        let mut values = [0u8; abi::PF_PIXEL_FLOAT_SIZE];
+        engine.read(output, &mut values).unwrap();
+        let channels = (0..4)
+            .map(|index| f32::from_le_bytes(values[index * 4..index * 4 + 4].try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(channels[0], 1.0);
+        assert_eq!(channels[1], 128.0 / 255.0);
+        assert_eq!(channels[2], 64.0 / 255.0);
+        assert_eq!(channels[3], 32.0 / 255.0);
     }
 
     #[test]

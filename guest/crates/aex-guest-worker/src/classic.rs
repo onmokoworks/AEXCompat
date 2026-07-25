@@ -22,6 +22,7 @@ const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
 const PARAM_ANGLE: i32 = 3;
 const PARAM_CHECKBOX: i32 = 4;
+const PARAM_COLOR: i32 = 5;
 const PARAM_POINT: i32 = 6;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
@@ -66,6 +67,7 @@ pub struct ParameterValue {
     pub slot: Option<usize>,
     pub value: Option<f64>,
     pub point: Option<[f64; 2]>,
+    pub color: Option<[u8; 4]>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +78,8 @@ pub struct AppliedParameter {
     pub value: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub point: Option<[f64; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 4]>,
 }
 
 #[derive(Debug, Serialize)]
@@ -589,6 +593,7 @@ impl ClassicHost {
                     name: captured.name.clone(),
                     value: requested.value,
                     point: requested.point,
+                    color: requested.color,
                 });
             }
             let parameter = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
@@ -1137,6 +1142,26 @@ fn apply_parameter_value(
     param_type: i32,
     requested: &ParameterValue,
 ) -> Result<(), ClassicError> {
+    if param_type == PARAM_COLOR {
+        let color = requested.color.ok_or_else(|| {
+            ClassicError::Input(
+                "color parameter requires four comma-separated ARGB8 components".into(),
+            )
+        })?;
+        if requested.value.is_some() || requested.point.is_some() {
+            return Err(ClassicError::Input(
+                "color parameter accepts only four ARGB8 components".into(),
+            ));
+        }
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE]
+            .copy_from_slice(&color);
+        return Ok(());
+    }
+    if requested.color.is_some() {
+        return Err(ClassicError::Input(format!(
+            "parameter type {param_type} does not accept an ARGB8 color value"
+        )));
+    }
     if param_type == PARAM_POINT {
         let [x, y] = requested.point.ok_or_else(|| {
             ClassicError::Input("point parameter requires two comma-separated values".into())
@@ -1330,6 +1355,7 @@ mod tests {
                 slot: None,
                 value: Some(12.5),
                 point: None,
+                color: None,
             },
         )
         .unwrap();
@@ -1344,6 +1370,7 @@ mod tests {
                 slot: None,
                 value: Some(1.0),
                 point: None,
+                color: None,
             },
         )
         .unwrap();
@@ -1358,6 +1385,7 @@ mod tests {
                 slot: None,
                 value: Some(-7.25),
                 point: None,
+                color: None,
             },
         )
         .unwrap();
@@ -1372,6 +1400,7 @@ mod tests {
                 slot: None,
                 value: Some(2.0),
                 point: None,
+                color: None,
             },
         )
         .unwrap();
@@ -1386,6 +1415,7 @@ mod tests {
                 slot: None,
                 value: Some(42.25),
                 point: None,
+                color: None,
             },
         )
         .unwrap();
@@ -1407,6 +1437,7 @@ mod tests {
                 slot: None,
                 value: None,
                 point: Some([42.5, -7.25]),
+                color: None,
             },
         )
         .unwrap();
@@ -1418,5 +1449,44 @@ mod tests {
             read_i32(&point, abi::PARAM_U_OFFSET + 4),
             (-7.25 * 65536.0) as i32
         );
+    }
+
+    #[test]
+    fn applies_argb8_color_at_param_union_start() {
+        let mut color = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        apply_parameter_value(
+            &mut color,
+            PARAM_COLOR,
+            &ParameterValue {
+                name: "color".into(),
+                slot: Some(5),
+                value: None,
+                point: None,
+                color: Some([255, 1, 2, 3]),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            &color[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE],
+            &[255, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn rejects_argb8_color_for_non_color_parameter() {
+        let mut slider = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        let error = apply_parameter_value(
+            &mut slider,
+            PARAM_SLIDER,
+            &ParameterValue {
+                name: "slider".into(),
+                slot: None,
+                value: None,
+                point: None,
+                color: Some([255, 1, 2, 3]),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not accept an ARGB8 color"));
     }
 }

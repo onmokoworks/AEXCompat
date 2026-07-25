@@ -198,7 +198,7 @@ fn usage() {
     eprintln!("usage: aex-guest-worker <inspect|setup|render> <x64.aex>");
     eprintln!("       aex-guest-worker trace-selector <x64.aex> <GLOBAL_SETUP|PARAMS_SETUP>");
     eprintln!(
-        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [name=value ...]"
+        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [name=value | Name@slot=a,r,g,b ...]"
     );
     eprintln!(
         "       aex-guest-worker render-trace-png <x64.aex> <input.png> <output.png> [--watch <spec>] [--watch-output-pixel x,y] [name=value ...]"
@@ -447,13 +447,14 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
             return Err(format!("duplicate parameter assignment: {name:?}"));
         }
         let components = raw_value.split(',').collect::<Vec<_>>();
-        let (scalar, point) = match components.as_slice() {
+        let (scalar, point, color) = match components.as_slice() {
             [number] => (
                 Some(
                     number
                         .parse()
                         .map_err(|error| format!("invalid value for {name:?}: {error}"))?,
                 ),
+                None,
                 None,
             ),
             [x, y] => (
@@ -464,10 +465,26 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
                     y.parse()
                         .map_err(|error| format!("invalid point y for {name:?}: {error}"))?,
                 ]),
+                None,
             ),
+            [alpha, red, green, blue] => {
+                let mut channels = [0u8; 4];
+                for (channel, component) in channels.iter_mut().zip([alpha, red, green, blue]) {
+                    let value = component.parse::<u16>().map_err(|error| {
+                        format!("invalid ARGB8 component for {name:?}: {error}")
+                    })?;
+                    if value > u16::from(u8::MAX) {
+                        return Err(format!(
+                            "ARGB8 component for {name:?} must be between 0 and 255: {value}"
+                        ));
+                    }
+                    *channel = value as u8;
+                }
+                (None, None, Some(channels))
+            }
             _ => {
                 return Err(format!(
-                    "parameter assignment must contain one scalar or two point components: {value:?}"
+                    "parameter assignment must contain one scalar, two point components, or four ARGB8 components: {value:?}"
                 ));
             }
         };
@@ -476,6 +493,7 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
             slot,
             value: scalar,
             point,
+            color,
         });
     }
     Ok(parsed)
@@ -507,6 +525,21 @@ mod tests {
         assert_eq!(values[1].point, Some([42.0, -7.25]));
         assert_eq!(values[2].slot, Some(4));
         assert_eq!(values[2].value, Some(100.0));
+    }
+
+    #[test]
+    fn parameter_parser_accepts_strict_argb8_assignments() {
+        let values = parse_parameter_values(&[OsString::from("Tint@5=255,1,2,3")]).unwrap();
+        assert_eq!(values[0].slot, Some(5));
+        assert_eq!(values[0].value, None);
+        assert_eq!(values[0].point, None);
+        assert_eq!(values[0].color, Some([255, 1, 2, 3]));
+    }
+
+    #[test]
+    fn parameter_parser_rejects_out_of_range_argb8_components() {
+        let error = parse_parameter_values(&[OsString::from("Tint@5=256,1,2,3")]).unwrap_err();
+        assert!(error.contains("between 0 and 255"));
     }
 
     #[test]
