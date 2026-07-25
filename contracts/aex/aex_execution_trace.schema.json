@@ -57,6 +57,20 @@
       "type": "array",
       "items": { "$ref": "#/$defs/state_change" }
     },
+    "memory_witnesses": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/memory_witness" }
+    },
+    "dropped_memory_witnesses": { "type": "integer", "minimum": 0 },
+    "basic_blocks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/basic_block" }
+    },
+    "branch_edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/branch_edge" }
+    },
     "timeline": {
       "type": "array",
       "items": { "type": "string" }
@@ -71,6 +85,7 @@
         "sequence": { "type": "integer", "minimum": 0 },
         "observed_count": { "type": "integer", "minimum": 1 },
         "depth": { "type": "integer", "minimum": 0 },
+        "call_id": { "type": "integer", "minimum": 1 },
         "function_rva": { "type": "integer", "minimum": 0 },
         "kind": {
           "enum": [
@@ -79,13 +94,15 @@
             "guest_call",
             "guest_return",
             "import_call",
-            "host_callback"
+            "host_callback",
+            "tail_call",
+            "rip_constant"
           ]
         },
         "pc_rva": { "type": "integer", "minimum": 0 },
         "target_rva": { "type": "integer", "minimum": 0 },
         "name": { "type": "string" },
-        "call_kind": { "enum": ["direct", "indirect"] },
+        "call_kind": { "enum": ["direct", "indirect", "runtime_jmp"] },
         "instruction_bytes": {
           "type": "string",
           "pattern": "^(?:[a-f0-9]{2})+$"
@@ -223,6 +240,7 @@
       "properties": {
         "observation": { "type": "integer", "minimum": 1 },
         "fingerprint": { "type": "string", "pattern": "^[a-f0-9]{16}$" },
+        "call_id": { "type": "integer", "minimum": 1 },
         "arguments": {
           "type": "array",
           "items": { "$ref": "#/$defs/argument" }
@@ -294,6 +312,137 @@
         "name": { "type": "string", "minLength": 1 },
         "before": { "type": "string" },
         "after": { "type": "string" }
+      }
+    },
+    "memory_witness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "watch_id",
+        "call_id",
+        "register",
+        "before",
+        "after",
+        "changed_ranges"
+      ],
+      "properties": {
+        "watch_id": { "type": "string", "minLength": 1 },
+        "call_id": { "type": "integer", "minimum": 1 },
+        "function_rva": { "type": "integer", "minimum": 0 },
+        "pc_rva": { "type": "integer", "minimum": 0 },
+        "register": {
+          "enum": [
+            "rax",
+            "rcx",
+            "rdx",
+            "r8",
+            "r9",
+            "stack5",
+            "stack6",
+            "stack7",
+            "stack8"
+          ]
+        },
+        "before": { "$ref": "#/$defs/memory_snapshot" },
+        "after": { "$ref": "#/$defs/memory_snapshot" },
+        "changed_ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["offset", "size"],
+            "properties": {
+              "offset": { "type": "integer", "minimum": 0 },
+              "size": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "memory_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "address", "size", "classification"],
+      "properties": {
+        "status": { "enum": ["captured", "unmapped", "oversized"] },
+        "address": { "type": "integer", "minimum": 0 },
+        "size": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "classification": {
+          "enum": ["scalar", "image", "guest_data", "guest_stack", "host_stub"]
+        },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "hex": { "type": "string", "pattern": "^(?:[a-f0-9]{2})*$" },
+        "u8_values": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+        },
+        "u16_values": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "integer", "minimum": 0, "maximum": 65535 }
+        },
+        "u32_values": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+        },
+        "u64_values": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "f32_values": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "type": ["number", "null"] }
+        },
+        "f64_values": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "type": ["number", "null"] }
+        },
+        "pointer_chain": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["address", "classification"],
+            "properties": {
+              "address": { "type": "integer", "minimum": 0 },
+              "classification": {
+                "enum": [
+                  "scalar",
+                  "image",
+                  "guest_data",
+                  "guest_stack",
+                  "host_stub"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "basic_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rva", "size", "observed_count"],
+      "properties": {
+        "rva": { "type": "integer", "minimum": 0 },
+        "size": { "type": "integer", "minimum": 1 },
+        "observed_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "branch_edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_rva", "to_rva", "observed_count"],
+      "properties": {
+        "from_rva": { "type": "integer", "minimum": 0 },
+        "to_rva": { "type": "integer", "minimum": 0 },
+        "observed_count": { "type": "integer", "minimum": 1 }
       }
     }
   }

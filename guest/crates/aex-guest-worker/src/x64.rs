@@ -1,6 +1,7 @@
 use aex_abi::x86_64_windows as abi;
 use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use thiserror::Error;
@@ -49,6 +50,8 @@ const TRACE_STACK_ARGUMENTS: usize = 4;
 const TRACE_FIRST_SAMPLES: usize = 3;
 const TRACE_LAST_SAMPLES: usize = 3;
 const TRACE_DISTINCT_SAMPLES: usize = 16;
+const MAX_TRACE_WATCH_BYTES: usize = 4096;
+const MAX_TRACE_WITNESSES: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum GuestError {
@@ -155,6 +158,7 @@ fn trace_observation(event: &TraceEvent, observation: u64) -> Option<TraceObserv
     Some(TraceObservation {
         observation,
         fingerprint: format!("{fingerprint:016x}"),
+        call_id: event.call_id,
         arguments: event.arguments.clone(),
         xmm_arguments: event.xmm_arguments.clone(),
         stack_arguments: event.stack_arguments.clone(),
@@ -242,6 +246,8 @@ fn trace_instruction(
             .is_some_and(|caller_rsp| rsp >= *caller_rsp)
         {
             capture.call_rsp_stack.pop();
+            let call_id = capture.call_id_stack.pop();
+            capture.watch_stack.pop();
             let target = capture.return_stack.pop();
             let function_rva = capture.function_stack.pop().flatten();
             push_trace_event(
@@ -251,6 +257,7 @@ fn trace_instruction(
                     observed_count: 1,
                     depth: capture.return_stack.len(),
                     kind: "guest_return",
+                    call_id,
                     function_rva,
                     pc_rva: None,
                     target_rva: target
@@ -286,6 +293,7 @@ fn trace_instruction(
                     TraceLabelKind::Import => "import_call",
                     TraceLabelKind::HostCallback => "host_callback",
                 },
+                call_id: capture.call_id_stack.last().copied(),
                 function_rva: capture
                     .function_stack
                     .iter()
@@ -316,14 +324,78 @@ fn trace_instruction(
         return;
     }
     let mnemonic = instruction.mnemonic();
+    if instruction.is_ip_rel_memory_operand() && !matches!(mnemonic, Mnemonic::Call | Mnemonic::Jmp)
+    {
+        let memory_address = instruction.ip_rel_memory_address();
+        let mut raw = [0; 8];
+        let value = unicorn
+            .mem_read(memory_address, &mut raw)
+            .is_ok()
+            .then(|| u64::from_le_bytes(raw));
+        if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+            push_trace_event(
+                capture,
+                TraceEvent {
+                    sequence: 0,
+                    observed_count: 1,
+                    depth: capture.return_stack.len(),
+                    kind: "rip_constant",
+                    call_id: capture.call_id_stack.last().copied(),
+                    function_rva: capture
+                        .function_stack
+                        .iter()
+                        .rev()
+                        .flatten()
+                        .copied()
+                        .next(),
+                    pc_rva: Some(address.saturating_sub(image_base)),
+                    target_rva: (image_base..image_end)
+                        .contains(&memory_address)
+                        .then(|| memory_address - image_base),
+                    name: value
+                        .map(|value| format!("address={memory_address:#x} value={value:#x}")),
+                    arguments: Vec::new(),
+                    xmm_arguments: Vec::new(),
+                    stack_arguments: Vec::new(),
+                    return_value: None,
+                    exemplars: TraceExemplars::default(),
+                    call_kind: None,
+                    instruction_bytes: Some(bytes_to_hex(
+                        &bytes[..instruction.len().min(bytes.len())],
+                    )),
+                },
+            );
+        }
+    }
     if mnemonic == Mnemonic::Call {
         let target = resolve_runtime_target(unicorn, &instruction);
         let target_rva = (image_base..image_end)
             .contains(&target.unwrap_or(0))
             .then(|| target.expect("range-checked target") - image_base);
         let return_address = address.saturating_add(instruction.len() as u64);
+        let pc_rva = (image_base..image_end)
+            .contains(&address)
+            .then(|| address - image_base);
+        let matching_watches = unicorn
+            .get_data()
+            .trace
+            .as_ref()
+            .map(|capture| {
+                capture
+                    .watch_specs
+                    .iter()
+                    .filter(|spec| {
+                        spec.function_rva.is_some_and(|rva| Some(rva) == target_rva)
+                            || spec.instruction_rva.is_some_and(|rva| Some(rva) == pc_rva)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
             let depth = capture.return_stack.len();
+            let call_id = capture.next_call_id;
+            capture.next_call_id += 1;
             let function_rva = capture
                 .function_stack
                 .iter()
@@ -338,10 +410,9 @@ fn trace_instruction(
                     observed_count: 1,
                     depth,
                     kind: "guest_call",
+                    call_id: Some(call_id),
                     function_rva,
-                    pc_rva: (image_base..image_end)
-                        .contains(&address)
-                        .then(|| address - image_base),
+                    pc_rva,
                     target_rva,
                     name: None,
                     arguments,
@@ -367,16 +438,112 @@ fn trace_instruction(
             capture.return_stack.push(return_address);
             capture.function_stack.push(target_rva);
             capture.call_rsp_stack.push(rsp);
+            capture.call_id_stack.push(call_id);
+        }
+        let pending = matching_watches
+            .into_iter()
+            .map(|spec| {
+                let address = trace_register_value(unicorn, spec.register).unwrap_or(0);
+                PendingTraceWatch {
+                    spec_id: spec.id,
+                    register: spec.register,
+                    call_id: unicorn
+                        .get_data()
+                        .trace
+                        .as_ref()
+                        .and_then(|capture| capture.call_id_stack.last().copied())
+                        .unwrap_or(0),
+                    function_rva: target_rva,
+                    pc_rva,
+                    address,
+                    before: trace_memory_snapshot(
+                        unicorn, address, spec.size, image_base, image_end,
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+            capture.watch_stack.push(pending);
+        }
+    } else if mnemonic == Mnemonic::Jmp {
+        let target = resolve_runtime_target(unicorn, &instruction);
+        if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+            push_trace_event(
+                capture,
+                TraceEvent {
+                    sequence: 0,
+                    observed_count: 1,
+                    depth: capture.return_stack.len(),
+                    kind: "tail_call",
+                    call_id: capture.call_id_stack.last().copied(),
+                    function_rva: capture
+                        .function_stack
+                        .iter()
+                        .rev()
+                        .flatten()
+                        .copied()
+                        .next(),
+                    pc_rva: Some(address.saturating_sub(image_base)),
+                    target_rva: target
+                        .filter(|target| (image_base..image_end).contains(target))
+                        .map(|target| target - image_base),
+                    name: target.map(|target| format!("runtime_target={target:#x}")),
+                    arguments,
+                    xmm_arguments,
+                    stack_arguments: call_stack_arguments,
+                    return_value: None,
+                    exemplars: TraceExemplars::default(),
+                    call_kind: Some("runtime_jmp"),
+                    instruction_bytes: Some(bytes_to_hex(
+                        &bytes[..instruction.len().min(bytes.len())],
+                    )),
+                },
+            );
         }
     } else if matches!(
         mnemonic,
         Mnemonic::Ret | Mnemonic::Retf | Mnemonic::Iret | Mnemonic::Iretd | Mnemonic::Iretq
-    ) && let Some(capture) = unicorn.get_data_mut().trace.as_mut()
-    {
+    ) {
+        let pending = unicorn
+            .get_data()
+            .trace
+            .as_ref()
+            .and_then(|capture| capture.watch_stack.last().cloned())
+            .unwrap_or_default();
+        let completed = pending
+            .into_iter()
+            .map(|pending| {
+                let size = pending.before.size;
+                let after =
+                    trace_memory_snapshot(unicorn, pending.address, size, image_base, image_end);
+                TraceMemoryWitness {
+                    watch_id: pending.spec_id,
+                    call_id: pending.call_id,
+                    function_rva: pending.function_rva,
+                    pc_rva: pending.pc_rva,
+                    register: pending.register,
+                    changed_ranges: trace_changed_ranges(&pending.before, &after),
+                    before: pending.before,
+                    after,
+                }
+            })
+            .collect::<Vec<_>>();
+        let Some(capture) = unicorn.get_data_mut().trace.as_mut() else {
+            return;
+        };
         let depth = capture.return_stack.len().saturating_sub(1);
         let target = capture.return_stack.pop();
         let function_rva = capture.function_stack.pop().flatten();
         capture.call_rsp_stack.pop();
+        let call_id = capture.call_id_stack.pop();
+        capture.watch_stack.pop();
+        for witness in completed {
+            if capture.witnesses.len() < MAX_TRACE_WITNESSES {
+                capture.witnesses.push(witness);
+            } else {
+                capture.dropped_witnesses += 1;
+            }
+        }
         push_trace_event(
             capture,
             TraceEvent {
@@ -384,6 +551,7 @@ fn trace_instruction(
                 observed_count: 1,
                 depth,
                 kind: "guest_return",
+                call_id,
                 function_rva,
                 pc_rva: (image_base..image_end)
                     .contains(&address)
@@ -506,6 +674,169 @@ fn trace_return_value(
     }
 }
 
+fn trace_register_value(unicorn: &Unicorn<'_, GuestState>, register: &str) -> Option<u64> {
+    if let Some(index) = register
+        .strip_prefix("stack")
+        .and_then(|index| index.parse::<u64>().ok())
+        && (5..=8).contains(&index)
+    {
+        let rsp = unicorn.reg_read(RegisterX86::RSP).ok()?;
+        let mut bytes = [0; 8];
+        unicorn
+            .mem_read(rsp + 0x20 + (index - 5) * 8, &mut bytes)
+            .ok()?;
+        return Some(u64::from_le_bytes(bytes));
+    }
+    let register = match register {
+        "rcx" => RegisterX86::RCX,
+        "rdx" => RegisterX86::RDX,
+        "r8" => RegisterX86::R8,
+        "r9" => RegisterX86::R9,
+        "rax" => RegisterX86::RAX,
+        _ => return None,
+    };
+    unicorn.reg_read(register).ok()
+}
+
+fn trace_memory_snapshot(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    size: usize,
+    image_base: u64,
+    image_end: u64,
+) -> TraceMemorySnapshot {
+    let classification = classify_trace_value(address, image_base, image_end).classification;
+    if size == 0 || size > MAX_TRACE_WATCH_BYTES {
+        return TraceMemorySnapshot {
+            status: "oversized",
+            address,
+            size,
+            classification,
+            sha256: None,
+            hex: None,
+            u8_values: Vec::new(),
+            u16_values: Vec::new(),
+            u32_values: Vec::new(),
+            u64_values: Vec::new(),
+            f32_values: Vec::new(),
+            f64_values: Vec::new(),
+            pointer_chain: Vec::new(),
+        };
+    }
+    let mut bytes = vec![0; size];
+    if unicorn.mem_read(address, &mut bytes).is_err() {
+        return TraceMemorySnapshot {
+            status: "unmapped",
+            address,
+            size,
+            classification,
+            sha256: None,
+            hex: None,
+            u8_values: Vec::new(),
+            u16_values: Vec::new(),
+            u32_values: Vec::new(),
+            u64_values: Vec::new(),
+            f32_values: Vec::new(),
+            f64_values: Vec::new(),
+            pointer_chain: Vec::new(),
+        };
+    }
+    let u16_values = bytes
+        .chunks_exact(2)
+        .take(32)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+    let f32_values = bytes
+        .chunks_exact(4)
+        .take(16)
+        .map(|chunk| {
+            let value = f32::from_le_bytes(chunk.try_into().expect("four-byte chunk"));
+            value.is_finite().then_some(value)
+        })
+        .collect();
+    let u32_values = bytes
+        .chunks_exact(4)
+        .take(16)
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+        .collect();
+    let u64_values = bytes
+        .chunks_exact(8)
+        .take(8)
+        .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("eight-byte chunk")))
+        .collect();
+    let f64_values = bytes
+        .chunks_exact(8)
+        .take(8)
+        .map(|chunk| {
+            let value = f64::from_le_bytes(chunk.try_into().expect("eight-byte chunk"));
+            value.is_finite().then_some(value)
+        })
+        .collect();
+    let mut pointer_chain = Vec::new();
+    let mut pointer = address;
+    for _ in 0..3 {
+        let mut raw = [0; 8];
+        if unicorn.mem_read(pointer, &mut raw).is_err() {
+            break;
+        }
+        let next = u64::from_le_bytes(raw);
+        if next == 0
+            || pointer_chain
+                .iter()
+                .any(|hop: &TracePointerHop| hop.address == next)
+        {
+            break;
+        }
+        pointer_chain.push(TracePointerHop {
+            address: next,
+            classification: classify_trace_value(next, image_base, image_end).classification,
+        });
+        pointer = next;
+    }
+    TraceMemorySnapshot {
+        status: "captured",
+        address,
+        size,
+        classification,
+        sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
+        hex: Some(bytes_to_hex(&bytes)),
+        u8_values: bytes.iter().copied().take(64).collect(),
+        u16_values,
+        u32_values,
+        u64_values,
+        f32_values,
+        f64_values,
+        pointer_chain,
+    }
+}
+
+fn trace_changed_ranges(
+    before: &TraceMemorySnapshot,
+    after: &TraceMemorySnapshot,
+) -> Vec<TraceChangedRange> {
+    let (Some(before), Some(after)) = (&before.hex, &after.hex) else {
+        return Vec::new();
+    };
+    let before = before.as_bytes().chunks_exact(2);
+    let after = after.as_bytes().chunks_exact(2);
+    let changed = before
+        .zip(after)
+        .enumerate()
+        .filter_map(|(index, (left, right))| (left != right).then_some(index))
+        .collect::<Vec<_>>();
+    let mut ranges = Vec::<TraceChangedRange>::new();
+    for offset in changed {
+        if let Some(last) = ranges.last_mut()
+            && last.offset + last.size == offset
+        {
+            last.size += 1;
+        } else {
+            ranges.push(TraceChangedRange { offset, size: 1 });
+        }
+    }
+    ranges
+}
+
 fn resolve_runtime_target(
     unicorn: &Unicorn<'_, GuestState>,
     instruction: &iced_x86::Instruction,
@@ -607,6 +938,8 @@ fn discover_trace_points(image: &PeImage) -> Vec<u64> {
                 continue;
             }
             if instruction.mnemonic() == Mnemonic::Call
+                || instruction.mnemonic() == Mnemonic::Jmp
+                || instruction.is_ip_rel_memory_operand()
                 || matches!(
                     instruction.mnemonic(),
                     Mnemonic::Ret
@@ -737,6 +1070,7 @@ struct GuestState {
     census_blocks: HashMap<(u64, u32), u64>,
     trace: Option<TraceCapture>,
     trace_labels: HashMap<u64, TraceLabel>,
+    trace_watches: Vec<TraceWatchSpec>,
 }
 
 #[derive(Clone, Debug)]
@@ -778,9 +1112,104 @@ struct TraceCapture {
     return_stack: Vec<u64>,
     function_stack: Vec<Option<u64>>,
     call_rsp_stack: Vec<u64>,
+    call_id_stack: Vec<u64>,
+    next_call_id: u64,
+    watch_specs: Vec<TraceWatchSpec>,
+    watch_stack: Vec<Vec<PendingTraceWatch>>,
+    witnesses: Vec<TraceMemoryWitness>,
+    dropped_witnesses: u64,
+    basic_blocks: HashMap<(u64, u32), u64>,
+    branch_edges: HashMap<(u64, u64), u64>,
+    previous_block: Option<u64>,
     event_index: HashMap<TraceEventKey, usize>,
     event_fingerprints: HashMap<usize, HashSet<u64>>,
     truncated: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingTraceWatch {
+    spec_id: String,
+    register: &'static str,
+    call_id: u64,
+    function_rva: Option<u64>,
+    pc_rva: Option<u64>,
+    address: u64,
+    before: TraceMemorySnapshot,
+}
+
+#[derive(Clone, Debug)]
+pub struct TraceWatchSpec {
+    pub id: String,
+    pub function_rva: Option<u64>,
+    pub instruction_rva: Option<u64>,
+    pub register: &'static str,
+    pub size: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceMemorySnapshot {
+    pub status: &'static str,
+    pub address: u64,
+    pub size: usize,
+    pub classification: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hex: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub u8_values: Vec<u8>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub u16_values: Vec<u16>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub u32_values: Vec<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub u64_values: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub f32_values: Vec<Option<f32>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub f64_values: Vec<Option<f64>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pointer_chain: Vec<TracePointerHop>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TracePointerHop {
+    pub address: u64,
+    pub classification: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceChangedRange {
+    pub offset: usize,
+    pub size: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceMemoryWitness {
+    pub watch_id: String,
+    pub call_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_rva: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pc_rva: Option<u64>,
+    pub register: &'static str,
+    pub before: TraceMemorySnapshot,
+    pub after: TraceMemorySnapshot,
+    pub changed_ranges: Vec<TraceChangedRange>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceBasicBlock {
+    pub rva: u64,
+    pub size: u32,
+    pub observed_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceBranchEdge {
+    pub from_rva: u64,
+    pub to_rva: u64,
+    pub observed_count: u64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -835,6 +1264,8 @@ pub struct TraceReturnValue {
 pub struct TraceObservation {
     pub observation: u64,
     pub fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<u64>,
     pub arguments: Vec<TraceArgument>,
     pub xmm_arguments: Vec<TraceXmmValue>,
     pub stack_arguments: Vec<TraceStackArgument>,
@@ -865,6 +1296,8 @@ pub struct TraceEvent {
     pub observed_count: u64,
     pub depth: usize,
     pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_rva: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -921,6 +1354,10 @@ pub struct ExecutionTrace {
     pub events: Vec<TraceEvent>,
     pub functions: Vec<TraceFunction>,
     pub state_changes: Vec<TraceStateValue>,
+    pub memory_witnesses: Vec<TraceMemoryWitness>,
+    pub dropped_memory_witnesses: u64,
+    pub basic_blocks: Vec<TraceBasicBlock>,
+    pub branch_edges: Vec<TraceBranchEdge>,
     pub timeline: Vec<String>,
 }
 
@@ -1302,6 +1739,7 @@ impl GuestEngine<'static> {
                 "guest execution trace is already active".into(),
             ));
         }
+        let watch_specs = self.unicorn.get_data().trace_watches.clone();
         self.unicorn.get_data_mut().trace = Some(TraceCapture {
             selector: selector.to_string(),
             entry_rva: entry_address.saturating_sub(self.image_base),
@@ -1310,6 +1748,7 @@ impl GuestEngine<'static> {
                 observed_count: 1,
                 depth: 0,
                 kind: "selector_enter",
+                call_id: None,
                 function_rva: Some(entry_address.saturating_sub(self.image_base)),
                 pc_rva: Some(entry_address.saturating_sub(self.image_base)),
                 target_rva: None,
@@ -1325,6 +1764,15 @@ impl GuestEngine<'static> {
             return_stack: Vec::new(),
             function_stack: vec![Some(entry_address.saturating_sub(self.image_base))],
             call_rsp_stack: Vec::new(),
+            call_id_stack: Vec::new(),
+            next_call_id: 1,
+            watch_specs,
+            watch_stack: Vec::new(),
+            witnesses: Vec::new(),
+            dropped_witnesses: 0,
+            basic_blocks: HashMap::new(),
+            branch_edges: HashMap::new(),
+            previous_block: None,
             event_index: HashMap::new(),
             event_fingerprints: HashMap::new(),
             truncated: false,
@@ -1356,6 +1804,22 @@ impl GuestEngine<'static> {
         }
         hook_points.sort_unstable();
         hook_points.dedup();
+        let block_hook = uc(
+            "install guest trace block hook",
+            self.unicorn.add_block_hook(
+                image_base,
+                image_end - 1,
+                move |unicorn, address, size| {
+                    if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+                        *capture.basic_blocks.entry((address, size)).or_default() += 1;
+                        if let Some(previous) = capture.previous_block.replace(address) {
+                            *capture.branch_edges.entry((previous, address)).or_default() += 1;
+                        }
+                    }
+                },
+            ),
+        )?;
+        self.trace_hooks.push(block_hook);
         for point in hook_points {
             let hook = uc(
                 "install guest execution trace point",
@@ -1395,6 +1859,7 @@ impl GuestEngine<'static> {
                 observed_count: 1,
                 depth: 0,
                 kind: "selector_exit",
+                call_id: None,
                 function_rva: Some(entry_rva),
                 pc_rva: Some(entry_rva),
                 target_rva: None,
@@ -1434,8 +1899,32 @@ impl GuestEngine<'static> {
             events: capture.events,
             functions,
             state_changes: Vec::new(),
+            memory_witnesses: capture.witnesses,
+            dropped_memory_witnesses: capture.dropped_witnesses,
+            basic_blocks: capture
+                .basic_blocks
+                .into_iter()
+                .map(|((address, size), observed_count)| TraceBasicBlock {
+                    rva: address.saturating_sub(self.image_base),
+                    size,
+                    observed_count,
+                })
+                .collect(),
+            branch_edges: capture
+                .branch_edges
+                .into_iter()
+                .map(|((from, to), observed_count)| TraceBranchEdge {
+                    from_rva: from.saturating_sub(self.image_base),
+                    to_rva: to.saturating_sub(self.image_base),
+                    observed_count,
+                })
+                .collect(),
             timeline,
         })
+    }
+
+    pub fn configure_trace_watches(&mut self, watches: Vec<TraceWatchSpec>) {
+        self.unicorn.get_data_mut().trace_watches = watches;
     }
 
     pub fn begin_block_census(&mut self) -> Result<(), GuestError> {
@@ -2527,6 +3016,9 @@ mod tests {
         let mut unicorn =
             Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()).unwrap();
         unicorn.mem_map(CODE, PAGE_SIZE, Prot::ALL).unwrap();
+        unicorn
+            .mem_map(DATA_BASE, PAGE_SIZE, Prot::READ | Prot::WRITE)
+            .unwrap();
         unicorn.mem_map(STUB_BASE, STUB_SIZE, Prot::ALL).unwrap();
         unicorn
             .mem_map(STACK_BASE, STACK_SIZE, Prot::READ | Prot::WRITE)
@@ -2538,6 +3030,8 @@ mod tests {
         while decoder.can_decode() {
             let instruction = decoder.decode();
             if instruction.mnemonic() == Mnemonic::Call
+                || instruction.mnemonic() == Mnemonic::Jmp
+                || instruction.is_ip_rel_memory_operand()
                 || matches!(instruction.mnemonic(), Mnemonic::Ret | Mnemonic::Retf)
             {
                 trace_points.push(instruction.ip());
@@ -2657,6 +3151,32 @@ mod tests {
     }
 
     #[test]
+    fn execution_trace_records_runtime_jump_and_taken_block_edges() {
+        const CODE: u64 = 0x1000_0000;
+        // jmp +1; int3; mov eax, 42; ret
+        let mut engine = test_engine(&[0xeb, 0x01, 0xcc, 0xb8, 42, 0, 0, 0, 0xc3]);
+        engine.begin_execution_trace("GLOBAL_SETUP", CODE).unwrap();
+        let result = engine.call_win64(CODE, [0; 6]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        assert_eq!(result, 42);
+        let jump = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "tail_call")
+            .unwrap();
+        assert_eq!(jump.pc_rva, Some(0));
+        assert_eq!(jump.target_rva, Some(3));
+        assert!(
+            trace
+                .branch_edges
+                .iter()
+                .any(|edge| edge.from_rva == 0 && edge.to_rva == 3)
+        );
+        assert!(trace.basic_blocks.iter().any(|block| block.rva == 3));
+    }
+
+    #[test]
     fn execution_trace_folds_repeated_call_sites_without_losing_count() {
         const CODE: u64 = 0x1000_0000;
         // mov ecx,2; loop: call return; dec ecx; jnz loop; return: ret
@@ -2686,6 +3206,44 @@ mod tests {
             .unwrap();
         assert_eq!((rcx.minimum, rcx.maximum), (1.0, 2.0));
         assert!(trace.timeline.iter().any(|line| line.contains("×2")));
+    }
+
+    #[test]
+    fn execution_trace_witnesses_memory_before_and_after_a_call() {
+        const CODE: u64 = 0x1000_0000;
+        // call +1; ret; mov byte ptr [rcx], 0x2a; ret
+        let mut engine = test_engine(&[0xe8, 0x01, 0, 0, 0, 0xc3, 0xc6, 0x01, 0x2a, 0xc3]);
+        let buffer = engine.allocate(4, 1).unwrap();
+        engine.write(buffer, &[1, 2, 3, 4]).unwrap();
+        engine.configure_trace_watches(vec![TraceWatchSpec {
+            id: "target-buffer".into(),
+            function_rva: Some(6),
+            instruction_rva: None,
+            register: "rcx",
+            size: 4,
+        }]);
+        engine.begin_execution_trace("RENDER", CODE).unwrap();
+        let result = engine.call_win64(CODE, [buffer, 0, 0, 0, 0, 0]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        let call = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "guest_call")
+            .unwrap();
+        let returned = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "guest_return" && event.function_rva == Some(6))
+            .unwrap();
+        assert_eq!(call.call_id, returned.call_id);
+        let witness = trace.memory_witnesses.first().unwrap();
+        assert_eq!(witness.call_id, call.call_id.unwrap());
+        assert_eq!(witness.before.u8_values, [1, 2, 3, 4]);
+        assert_eq!(witness.after.u8_values, [42, 2, 3, 4]);
+        assert_eq!(witness.changed_ranges.len(), 1);
+        assert_eq!(witness.changed_ranges[0].offset, 0);
+        assert_eq!(witness.changed_ranges[0].size, 1);
     }
 
     #[test]
@@ -2735,6 +3293,15 @@ mod tests {
             return_stack: Vec::new(),
             function_stack: Vec::new(),
             call_rsp_stack: Vec::new(),
+            call_id_stack: Vec::new(),
+            next_call_id: 1,
+            watch_specs: Vec::new(),
+            watch_stack: Vec::new(),
+            witnesses: Vec::new(),
+            dropped_witnesses: 0,
+            basic_blocks: HashMap::new(),
+            branch_edges: HashMap::new(),
+            previous_block: None,
             event_index: HashMap::new(),
             event_fingerprints: HashMap::new(),
             truncated: false,
@@ -2747,6 +3314,7 @@ mod tests {
                     observed_count: 1,
                     depth: 0,
                     kind: "guest_call",
+                    call_id: Some(index as u64 + 1),
                     function_rva: None,
                     pc_rva: Some(index as u64),
                     target_rva: None,

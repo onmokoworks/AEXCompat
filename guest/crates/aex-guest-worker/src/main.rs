@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use aex_guest_worker::backend::TraceWatchSpec;
 use aex_guest_worker::classic::{ClassicHost, ParameterValue};
 use aex_guest_worker::pe::PeImage;
 
@@ -46,6 +47,17 @@ fn main() -> ExitCode {
     } else {
         None
     };
+    let watches = match parse_trace_watches(&mut trailing_args) {
+        Ok(watches) => watches,
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    if command != "render-trace-png" && !watches.is_empty() {
+        eprintln!("aex_guest_error: --watch is only valid with render-trace-png");
+        return ExitCode::from(2);
+    }
     if ((command == "render-png"
         || command == "render-trace-png"
         || command == "render-region-png"
@@ -117,6 +129,7 @@ fn main() -> ExitCode {
                 region,
                 false,
                 false,
+                &[],
             ),
             Some("render-trace-png") => render_png(
                 &image,
@@ -126,6 +139,7 @@ fn main() -> ExitCode {
                 None,
                 false,
                 true,
+                &watches,
             ),
             Some("render-region-png") => render_png(
                 &image,
@@ -135,6 +149,7 @@ fn main() -> ExitCode {
                 region,
                 false,
                 false,
+                &[],
             ),
             Some("census-png") => render_png(
                 &image,
@@ -144,6 +159,7 @@ fn main() -> ExitCode {
                 None,
                 true,
                 false,
+                &[],
             ),
             _ => Err(
                 "command must be inspect, setup, trace-selector, render, render-png, render-trace-png, render-region-png, or census-png".to_string(),
@@ -196,6 +212,7 @@ fn render_png(
     region: Option<[i32; 4]>,
     census: bool,
     trace: bool,
+    watches: &[TraceWatchSpec],
 ) -> Result<String, String> {
     let rgba = image::open(input)
         .map_err(|error| format!("decode input PNG: {error}"))?
@@ -208,7 +225,13 @@ fn render_png(
     let (report, execution_traces) = ClassicHost::new(image)
         .and_then(|mut host| {
             if trace {
-                host.render_argb8_trace(width, height, &argb8, parameter_values)
+                host.render_argb8_trace_with_watches(
+                    width,
+                    height,
+                    &argb8,
+                    parameter_values,
+                    watches.to_vec(),
+                )
             } else {
                 match (region, census) {
                     (None, true) => host
@@ -247,6 +270,101 @@ fn render_png(
     serde_json::to_string_pretty(&report_json).map_err(|error| error.to_string())
 }
 
+fn parse_trace_watches(
+    values: &mut Vec<std::ffi::OsString>,
+) -> Result<Vec<TraceWatchSpec>, String> {
+    let mut watches = Vec::new();
+    let mut parameters = Vec::new();
+    let mut arguments = values.drain(..).peekable();
+    while let Some(value) = arguments.next() {
+        let Some(text) = value.to_str() else {
+            return Err("trace watch or parameter assignment must be UTF-8".into());
+        };
+        let specification = if text == "--watch" {
+            arguments
+                .next()
+                .ok_or_else(|| "--watch requires a specification".to_string())?
+                .into_string()
+                .map_err(|_| "trace watch specification must be UTF-8".to_string())?
+        } else if let Some(specification) = text.strip_prefix("--watch=") {
+            specification.to_string()
+        } else {
+            parameters.push(value);
+            continue;
+        };
+        let mut function_rva = None;
+        let mut instruction_rva = None;
+        let mut register = None;
+        let mut size = None;
+        for field in specification.split(',') {
+            let (key, value) = field
+                .split_once('=')
+                .ok_or_else(|| format!("invalid watch field: {field:?}"))?;
+            match key {
+                "function" => function_rva = Some(parse_watch_number(value)?),
+                "rva" => instruction_rva = Some(parse_watch_number(value)?),
+                "arg" | "register" => {
+                    register = Some(match value.to_ascii_lowercase().as_str() {
+                        "rcx" => "rcx",
+                        "rdx" => "rdx",
+                        "r8" => "r8",
+                        "r9" => "r9",
+                        "rax" => "rax",
+                        "5" | "stack5" => "stack5",
+                        "6" | "stack6" => "stack6",
+                        "7" | "stack7" => "stack7",
+                        "8" | "stack8" => "stack8",
+                        _ => return Err(format!("unsupported watch register: {value:?}")),
+                    })
+                }
+                "size" => {
+                    size = Some(
+                        value
+                            .parse::<usize>()
+                            .map_err(|error| format!("invalid watch size: {error}"))?,
+                    )
+                }
+                "when" => {
+                    if value != "entry+return" && value != "both" {
+                        return Err("watch when must be entry+return or both".into());
+                    }
+                }
+                _ => return Err(format!("unknown watch field: {key:?}")),
+            }
+        }
+        if function_rva.is_some() == instruction_rva.is_some() {
+            return Err(
+                "watch requires exactly one of function=<rva> or rva=<call-site-rva>".into(),
+            );
+        }
+        let register = register.ok_or_else(|| "watch requires arg=<register>".to_string())?;
+        let size = size.ok_or_else(|| "watch requires size=<bytes>".to_string())?;
+        if size == 0 || size > 4096 {
+            return Err("watch size must be between 1 and 4096 bytes".into());
+        }
+        watches.push(TraceWatchSpec {
+            id: format!("watch-{}", watches.len() + 1),
+            function_rva,
+            instruction_rva,
+            register,
+            size,
+        });
+    }
+    drop(arguments);
+    *values = parameters;
+    Ok(watches)
+}
+
+fn parse_watch_number(value: &str) -> Result<u64, String> {
+    if let Some(hex) = value.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).map_err(|error| format!("invalid watch RVA: {error}"))
+    } else {
+        value
+            .parse()
+            .map_err(|error| format!("invalid watch RVA: {error}"))
+    }
+}
+
 fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<ParameterValue>, String> {
     let mut parsed = Vec::with_capacity(values.len());
     for value in values {
@@ -277,12 +395,29 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
 
 #[cfg(test)]
 mod tests {
-    use super::selector_error;
+    use super::{parse_trace_watches, selector_error};
+    use std::ffi::OsString;
 
     #[test]
     fn traced_selector_nonzero_result_is_a_process_error() {
         assert_eq!(selector_error(0), None);
         assert_eq!(selector_error(7), Some(7));
         assert_eq!(selector_error(u64::MAX), Some(-1));
+    }
+
+    #[test]
+    fn trace_watches_are_separated_from_parameter_assignments() {
+        let mut values = vec![
+            OsString::from("--watch=function=0xcce0,arg=rcx,size=16,when=entry+return"),
+            OsString::from("Amount=2.5"),
+            OsString::from("--watch"),
+            OsString::from("rva=0x350b,register=r9,size=64"),
+        ];
+        let watches = parse_trace_watches(&mut values).unwrap();
+        assert_eq!(watches.len(), 2);
+        assert_eq!(watches[0].function_rva, Some(0xcce0));
+        assert_eq!(watches[0].register, "rcx");
+        assert_eq!(watches[1].instruction_rva, Some(0x350b));
+        assert_eq!(values, [OsString::from("Amount=2.5")]);
     }
 }

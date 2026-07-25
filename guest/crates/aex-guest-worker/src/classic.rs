@@ -3,7 +3,9 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
-use crate::backend::{ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue};
+use crate::backend::{
+    ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue, TraceWatchSpec,
+};
 use crate::pe::PeImage;
 
 const CMD_GLOBAL_SETUP: u64 = 1;
@@ -414,6 +416,18 @@ impl ClassicHost {
             true,
         )?;
         Ok((report, traces))
+    }
+
+    pub fn render_argb8_trace_with_watches(
+        &mut self,
+        width: u32,
+        height: u32,
+        input_argb8: &[u8],
+        parameter_values: &[ParameterValue],
+        watches: Vec<TraceWatchSpec>,
+    ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        self.engine.configure_trace_watches(watches);
+        self.render_argb8_trace(width, height, input_argb8, parameter_values)
     }
 
     fn render_argb8_with_request(

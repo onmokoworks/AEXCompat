@@ -22,7 +22,7 @@ use std::ptr;
 use thiserror::Error;
 
 use crate::pe::PeImage;
-pub use crate::x64::{ExecutionTrace, GuestCensus, GuestParam};
+pub use crate::x64::{ExecutionTrace, GuestCensus, GuestParam, TraceWatchSpec};
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
 const MAX_HANDLE_SIZE: u64 = 128 * 1024 * 1024;
@@ -353,6 +353,8 @@ impl GuestEngine<'static> {
     pub fn finish_execution_trace(&mut self, _: u64) -> Result<ExecutionTrace, GuestError> {
         Err(GuestError::TraceUnavailable)
     }
+
+    pub fn configure_trace_watches(&mut self, _: Vec<TraceWatchSpec>) {}
 
     pub fn configure_parameter_definitions(&mut self, definitions: Vec<u64>) {
         self.state.parameter_definitions = definitions;
