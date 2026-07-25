@@ -341,6 +341,29 @@ def spawn_worker(
     )
 
 
+def signal_worker_group(process: subprocess.Popen[bytes], signal_number: int) -> None:
+    try:
+        os.killpg(process.pid, signal_number)
+    except ProcessLookupError:
+        pass
+
+
+def read_stderr_bounded(process: subprocess.Popen[bytes]) -> str:
+    if process.stderr is None:
+        return ""
+    descriptor = process.stderr.fileno()
+    chunks = bytearray()
+    while len(chunks) <= MAX_ERROR_BYTES:
+        readable, _, _ = select.select([descriptor], [], [], 0)
+        if not readable:
+            break
+        chunk = os.read(descriptor, min(4096, MAX_ERROR_BYTES + 1 - len(chunks)))
+        if not chunk:
+            break
+        chunks.extend(chunk)
+    return bytes(chunks[:MAX_ERROR_BYTES]).decode("utf-8", errors="replace")
+
+
 def terminate_worker(process: subprocess.Popen[bytes]) -> str:
     if process.stdin:
         try:
@@ -348,17 +371,16 @@ def terminate_worker(process: subprocess.Popen[bytes]) -> str:
         except (BrokenPipeError, OSError, ValueError):
             pass
     if process.poll() is None:
-        os.killpg(process.pid, signal.SIGTERM)
+        signal_worker_group(process, signal.SIGTERM)
         try:
             process.wait(timeout=CLOSE_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+            signal_worker_group(process, signal.SIGKILL)
             try:
                 process.wait(timeout=CLOSE_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 return "worker process group did not exit after SIGKILL"
-    stderr = process.stderr.read(MAX_ERROR_BYTES + 1) if process.stderr else b""
-    return stderr[:MAX_ERROR_BYTES].decode("utf-8", errors="replace")
+    return read_stderr_bounded(process)
 
 
 def close_worker(process: subprocess.Popen[bytes], expected_frames: int) -> dict[str, object]:
@@ -371,14 +393,12 @@ def close_worker(process: subprocess.Popen[bytes], expected_frames: int) -> dict
     try:
         returncode = process.wait(timeout=CLOSE_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as error:
-        process.kill()
-        process.wait(timeout=CLOSE_TIMEOUT_SECONDS)
-        raise SweepError("worker exceeded close deadline") from error
-    stderr = process.stderr.read(MAX_ERROR_BYTES + 1) if process.stderr else b""
+        cleanup = terminate_worker(process)
+        detail = f"; {cleanup}" if cleanup else ""
+        raise SweepError(f"worker exceeded close deadline{detail}") from error
+    stderr = read_stderr_bounded(process)
     if returncode != 0 or stderr:
-        raise SweepError(
-            f"worker close exit={returncode} stderr={stderr[:MAX_ERROR_BYTES].decode('utf-8', errors='replace')}"
-        )
+        raise SweepError(f"worker close exit={returncode} stderr={stderr}")
     return response
 
 
