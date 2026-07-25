@@ -33,8 +33,11 @@ under the top level and one dossier per render-lifecycle selector under
   binary and make every RVA reproducible in a disassembler.
 - `events` preserves first-observed order. Repeated visits retain bounded
   first/last/distinct exemplars, numeric ranges, and explicit dropped counts.
+  Distinct fingerprint tracking is also capped per event; saturation is marked
+  as approximate with an untracked-observation count.
 - `function_rva`, `pc_rva`, `target_rva`, `call_kind`, and
-  `instruction_bytes` locate direct, indirect, and runtime jump targets.
+  `instruction_bytes` locate direct, indirect, and tail jumps to known function
+  entries. Ordinary intra-function jumps remain only in `branch_edges`.
 - `arguments` captures the Win64 register arguments `rcx`, `rdx`, `r8`, and
   `r9`; `xmm_arguments` and `stack_arguments` retain floating-point and
   fifth-through-eighth arguments. `call_id` connects each call to its return,

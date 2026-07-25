@@ -49,6 +49,7 @@ const TRACE_STACK_ARGUMENTS: usize = 4;
 const TRACE_FIRST_SAMPLES: usize = 3;
 const TRACE_LAST_SAMPLES: usize = 3;
 const TRACE_DISTINCT_SAMPLES: usize = 16;
+const TRACE_DISTINCT_FINGERPRINTS: usize = 4096;
 const MAX_TRACE_WATCH_BYTES: usize = 4096;
 const MAX_TRACE_WITNESSES: usize = 256;
 
@@ -187,13 +188,19 @@ fn update_exemplars(
     }
     let fingerprint = u64::from_str_radix(&observation.fingerprint, 16)
         .expect("trace fingerprint is hexadecimal");
-    if fingerprints.insert(fingerprint) {
+    if fingerprints.contains(&fingerprint) {
+        // Already represented by the bounded set.
+    } else if fingerprints.len() < TRACE_DISTINCT_FINGERPRINTS {
+        fingerprints.insert(fingerprint);
         exemplars.distinct_fingerprints += 1;
         if exemplars.distinct.len() < TRACE_DISTINCT_SAMPLES {
             exemplars.distinct.push(observation.clone());
         } else {
             exemplars.dropped_distinct_fingerprints += 1;
         }
+    } else {
+        exemplars.fingerprint_tracking_truncated = true;
+        exemplars.untracked_fingerprint_observations += 1;
     }
     update_numeric_ranges(exemplars, &observation);
 }
@@ -452,6 +459,9 @@ fn trace_instruction(
             );
             capture.return_stack.push(return_address);
             capture.function_stack.push(target_rva);
+            if let Some(target_rva) = target_rva {
+                capture.known_function_entries.insert(target_rva);
+            }
             capture.call_rsp_stack.push(rsp);
             capture.call_id_stack.push(call_id);
         }
@@ -484,7 +494,14 @@ fn trace_instruction(
         }
     } else if mnemonic == Mnemonic::Jmp {
         let target = resolve_runtime_target(unicorn, &instruction);
-        if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+        let target_rva = target
+            .filter(|target| (image_base..image_end).contains(target))
+            .map(|target| target - image_base);
+        let is_tail_target = target.is_some_and(|_| target_rva.is_none())
+            || unicorn.get_data().trace.as_ref().is_some_and(|capture| {
+                target_rva.is_some_and(|rva| capture.known_function_entries.contains(&rva))
+            });
+        if is_tail_target && let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
             push_trace_event(
                 capture,
                 TraceEvent {
@@ -501,9 +518,7 @@ fn trace_instruction(
                         .copied()
                         .next(),
                     pc_rva: Some(address.saturating_sub(image_base)),
-                    target_rva: target
-                        .filter(|target| (image_base..image_end).contains(target))
-                        .map(|target| target - image_base),
+                    target_rva,
                     name: target.map(|target| format!("runtime_target={target:#x}")),
                     arguments,
                     xmm_arguments,
@@ -1152,6 +1167,7 @@ struct TraceCapture {
     previous_block: Option<u64>,
     event_index: HashMap<TraceEventKey, usize>,
     event_fingerprints: HashMap<usize, HashSet<u64>>,
+    known_function_entries: HashSet<u64>,
     truncated: bool,
     dropped_events: u64,
 }
@@ -1203,6 +1219,7 @@ pub struct TraceConfiguration {
     pub max_events: usize,
     pub max_witnesses: usize,
     pub max_watch_bytes: usize,
+    pub max_distinct_fingerprints_per_event: usize,
     pub watches: Vec<TraceWatchSpec>,
 }
 
@@ -1378,6 +1395,8 @@ pub struct TraceNumericRange {
 pub struct TraceExemplars {
     pub distinct_fingerprints: u64,
     pub dropped_distinct_fingerprints: u64,
+    pub fingerprint_tracking_truncated: bool,
+    pub untracked_fingerprint_observations: u64,
     pub first: Vec<TraceObservation>,
     pub last: Vec<TraceObservation>,
     pub distinct: Vec<TraceObservation>,
@@ -1917,6 +1936,7 @@ impl GuestEngine<'static> {
             previous_block: None,
             event_index: HashMap::new(),
             event_fingerprints: HashMap::new(),
+            known_function_entries: HashSet::from([entry_address.saturating_sub(self.image_base)]),
             truncated: false,
             dropped_events: 0,
         });
@@ -2083,10 +2103,23 @@ impl GuestEngine<'static> {
                 dropped: capture.dropped_witnesses,
             });
         }
+        let untracked_fingerprints = capture
+            .events
+            .iter()
+            .map(|event| event.exemplars.untracked_fingerprint_observations)
+            .sum();
+        if untracked_fingerprints > 0 {
+            truncation.push(TraceTruncation {
+                category: "exemplar_fingerprints",
+                reason: "fingerprint_budget",
+                dropped: untracked_fingerprints,
+            });
+        }
         let trace_configuration = TraceConfiguration {
             max_events: MAX_TRACE_EVENTS,
             max_witnesses: MAX_TRACE_WITNESSES,
             max_watch_bytes: MAX_TRACE_WATCH_BYTES,
+            max_distinct_fingerprints_per_event: TRACE_DISTINCT_FINGERPRINTS,
             watches: capture.watch_specs.clone(),
         };
         Ok(ExecutionTrace {
@@ -3476,7 +3509,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_trace_records_runtime_jump_and_taken_block_edges() {
+    fn execution_trace_keeps_ordinary_jump_as_taken_block_edge() {
         const CODE: u64 = 0x1000_0000;
         // jmp +1; int3; mov eax, 42; ret
         let mut engine = test_engine(&[0xeb, 0x01, 0xcc, 0xb8, 42, 0, 0, 0, 0xc3]);
@@ -3485,13 +3518,7 @@ mod tests {
         let trace = engine.finish_execution_trace(result).unwrap();
 
         assert_eq!(result, 42);
-        let jump = trace
-            .events
-            .iter()
-            .find(|event| event.kind == "tail_call")
-            .unwrap();
-        assert_eq!(jump.pc_rva, Some(0));
-        assert_eq!(jump.target_rva, Some(3));
+        assert!(!trace.events.iter().any(|event| event.kind == "tail_call"));
         assert!(
             trace
                 .branch_edges
@@ -3499,6 +3526,28 @@ mod tests {
                 .any(|edge| edge.from_rva == 0 && edge.to_rva == 3)
         );
         assert!(trace.basic_blocks.iter().any(|block| block.rva == 3));
+    }
+
+    #[test]
+    fn execution_trace_records_jump_to_known_function_as_tail_call() {
+        const CODE: u64 = 0x1000_0000;
+        // call target; jmp target; padding; target: mov eax,42; ret
+        let mut engine = test_engine(&[
+            0xe8, 0x06, 0, 0, 0, 0xeb, 0x04, 0x90, 0x90, 0x90, 0x90, 0xb8, 42, 0, 0, 0, 0xc3,
+        ]);
+        engine.begin_execution_trace("GLOBAL_SETUP", CODE).unwrap();
+        let result = engine.call_win64(CODE, [0; 6]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        assert_eq!(result, 42);
+        let tail = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "tail_call")
+            .unwrap();
+        assert_eq!(tail.pc_rva, Some(5));
+        assert_eq!(tail.target_rva, Some(11));
+        assert_eq!(tail.call_kind, Some("runtime_jmp"));
     }
 
     #[test]
@@ -3554,6 +3603,62 @@ mod tests {
             .unwrap();
         assert_eq!((rcx.minimum, rcx.maximum), (1.0, 2.0));
         assert!(trace.timeline.iter().any(|line| line.contains("×2")));
+    }
+
+    #[test]
+    fn exemplar_fingerprint_tracking_is_bounded_and_explicitly_truncated() {
+        let mut exemplars = TraceExemplars::default();
+        let mut fingerprints = HashSet::new();
+        for index in 0..TRACE_DISTINCT_FINGERPRINTS + 3 {
+            update_exemplars(
+                &mut exemplars,
+                &mut fingerprints,
+                TraceObservation {
+                    observation: index as u64 + 1,
+                    fingerprint: format!("{index:016x}"),
+                    call_id: None,
+                    arguments: Vec::new(),
+                    xmm_arguments: Vec::new(),
+                    stack_arguments: Vec::new(),
+                    return_value: None,
+                },
+            );
+        }
+
+        assert_eq!(fingerprints.len(), TRACE_DISTINCT_FINGERPRINTS);
+        assert_eq!(
+            exemplars.distinct_fingerprints,
+            TRACE_DISTINCT_FINGERPRINTS as u64
+        );
+        assert!(exemplars.fingerprint_tracking_truncated);
+        assert_eq!(exemplars.untracked_fingerprint_observations, 3);
+    }
+
+    #[test]
+    fn execution_trace_reports_fingerprint_budget_truncation() {
+        const CODE: u64 = 0x1000_0000;
+        let iterations = TRACE_DISTINCT_FINGERPRINTS as u32 + 4;
+        let mut code = vec![0xb9];
+        code.extend_from_slice(&iterations.to_le_bytes());
+        code.extend_from_slice(&[0xe8, 0x04, 0, 0, 0, 0xff, 0xc9, 0x75, 0xf7, 0xc3]);
+        let mut engine = test_engine(&code);
+        engine.begin_execution_trace("RENDER", CODE).unwrap();
+        let result = engine.call_win64(CODE, [0; 6]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        let call = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "guest_call")
+            .unwrap();
+        assert_eq!(call.observed_count, iterations as u64);
+        assert!(call.exemplars.fingerprint_tracking_truncated);
+        assert_eq!(call.exemplars.untracked_fingerprint_observations, 4);
+        assert!(trace.truncation.iter().any(|item| {
+            item.category == "exemplar_fingerprints"
+                && item.reason == "fingerprint_budget"
+                && item.dropped == 4
+        }));
     }
 
     #[test]
@@ -3676,6 +3781,7 @@ mod tests {
             previous_block: None,
             event_index: HashMap::new(),
             event_fingerprints: HashMap::new(),
+            known_function_entries: HashSet::new(),
             truncated: false,
             dropped_events: 0,
         };
