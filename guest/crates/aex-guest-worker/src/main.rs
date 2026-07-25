@@ -69,7 +69,7 @@ fn main() -> ExitCode {
                 .and_then(|report| {
                     serde_json::to_string_pretty(&report).map_err(|error| {
                         aex_guest_worker::classic::ClassicError::Guest(
-                            aex_guest_worker::x64::GuestError::Callback(error.to_string()),
+                            aex_guest_worker::backend::GuestError::Callback(error.to_string()),
                         )
                     })
                 })
@@ -79,7 +79,7 @@ fn main() -> ExitCode {
                 .and_then(|report| {
                     serde_json::to_string_pretty(&report).map_err(|error| {
                         aex_guest_worker::classic::ClassicError::Guest(
-                            aex_guest_worker::x64::GuestError::Callback(error.to_string()),
+                            aex_guest_worker::backend::GuestError::Callback(error.to_string()),
                         )
                     })
                 })

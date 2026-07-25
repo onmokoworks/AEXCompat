@@ -168,6 +168,10 @@ pub struct GuestCensus {
 }
 
 impl GuestEngine<'static> {
+    pub fn backend_name(&self) -> &'static str {
+        "unicorn-x86_64"
+    }
+
     pub fn load(image: &PeImage) -> Result<Self, GuestError> {
         let mut unicorn = uc(
             "create x86_64 engine",
@@ -222,7 +226,7 @@ impl GuestEngine<'static> {
                 }
                 // Temporary import behavior for the first controlled fixture:
                 // return zero inside the guest. Typed import traps replace these
-                // entries before OLM execution; no native host address is exposed.
+                // entries before guest execution; no native host address is exposed.
                 uc(
                     "write import stub",
                     unicorn.mem_write(stub, &[0x31, 0xc0, 0xc3]),

@@ -2,8 +2,8 @@ use aex_abi::x86_64_windows as abi;
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::backend::{GuestCensus, GuestEngine, GuestError};
 use crate::pe::PeImage;
-use crate::x64::{GuestCensus, GuestEngine, GuestError};
 
 const CMD_GLOBAL_SETUP: u64 = 1;
 const CMD_PARAMS_SETUP: u64 = 4;
@@ -68,6 +68,7 @@ pub struct AppliedParameter {
 #[derive(Debug, Serialize)]
 pub struct SetupReport {
     pub schema_version: u32,
+    pub execution_backend: &'static str,
     pub global_setup_error: i32,
     pub params_setup_error: i32,
     pub advertised_num_params: i32,
@@ -274,6 +275,7 @@ impl ClassicHost {
             .collect();
         Ok(SetupReport {
             schema_version: 1,
+            execution_backend: self.engine.backend_name(),
             global_setup_error,
             params_setup_error,
             advertised_num_params,

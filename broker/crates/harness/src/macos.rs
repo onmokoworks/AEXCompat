@@ -1,12 +1,14 @@
 use eframe::egui::{self, Color32, RichText};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_WIDTH: u32 = 1920;
 const MAX_HEIGHT: u32 = 1080;
+const NATIVE_SETUP_DEADLINE: Duration = Duration::from_secs(2);
+const NATIVE_RENDER_DEADLINE: Duration = Duration::from_secs(5);
 
 struct RenderResult {
     report: String,
@@ -130,8 +132,8 @@ impl MacHarnessApp {
         let (Some(aex), Some(input)) = (self.aex.clone(), self.input.clone()) else {
             return;
         };
-        let worker = match guest_worker_path(&self.repository) {
-            Ok(path) => path,
+        let workers = match guest_worker_candidates(&self.repository) {
+            Ok(paths) => paths,
             Err(error) => {
                 self.status = "Guest worker is not built.".into();
                 self.report = error;
@@ -156,27 +158,24 @@ impl MacHarnessApp {
             .collect::<Vec<_>>();
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let mut command = Command::new(&worker);
-            command.arg("render-png").arg(&aex).arg(&input).arg(&output);
-            for (name, value) in parameters {
-                command.arg(format!("{name}={value}"));
-            }
-            let result = command
-                .output()
-                .map_err(|error| format!("start guest worker: {error}"))
-                .and_then(|process| {
-                    if process.status.success() {
-                        String::from_utf8(process.stdout)
-                            .map_err(|error| format!("worker report is not UTF-8: {error}"))
-                            .map(|report| RenderResult { report, output })
-                    } else {
-                        Err(format!(
-                            "guest worker exited {}: {}",
-                            process.status,
-                            String::from_utf8_lossy(&process.stderr).trim()
-                        ))
-                    }
-                });
+            let mut arguments = vec![
+                "render-png".to_string(),
+                aex.to_string_lossy().into_owned(),
+                input.to_string_lossy().into_owned(),
+                output.to_string_lossy().into_owned(),
+            ];
+            arguments.extend(
+                parameters
+                    .into_iter()
+                    .map(|(name, value)| format!("{name}={value}")),
+            );
+            let result = run_guest_workers(&workers, &arguments, NATIVE_RENDER_DEADLINE).and_then(
+                |process| {
+                    String::from_utf8(process.stdout)
+                        .map_err(|error| format!("worker report is not UTF-8: {error}"))
+                        .map(|report| RenderResult { report, output })
+                },
+            );
             let _ = sender.send(result);
         });
         self.receiver = Some(receiver);
@@ -401,19 +400,12 @@ fn discover_parameters(
     repository: &Path,
     aex: &Path,
 ) -> Result<(Vec<GuiParameter>, String), String> {
-    let worker = guest_worker_path(repository)?;
-    let process = Command::new(worker)
-        .arg("setup")
-        .arg(aex)
-        .output()
-        .map_err(|error| format!("start guest worker setup: {error}"))?;
-    if !process.status.success() {
-        return Err(format!(
-            "guest worker setup exited {}: {}",
-            process.status,
-            String::from_utf8_lossy(&process.stderr).trim()
-        ));
-    }
+    let workers = guest_worker_candidates(repository)?;
+    let process = run_guest_workers(
+        &workers,
+        &["setup".to_string(), aex.to_string_lossy().into_owned()],
+        NATIVE_SETUP_DEADLINE,
+    )?;
     let report = String::from_utf8(process.stdout)
         .map_err(|error| format!("worker setup report is not UTF-8: {error}"))?;
     let value: serde_json::Value =
@@ -461,29 +453,119 @@ fn discover_parameters(
     Ok((parameters, report))
 }
 
-fn guest_worker_path(repository: &Path) -> Result<PathBuf, String> {
+#[derive(Clone, Debug)]
+struct GuestWorkerCandidate {
+    path: PathBuf,
+    native: bool,
+}
+
+fn guest_worker_candidates(repository: &Path) -> Result<Vec<GuestWorkerCandidate>, String> {
     if let Some(path) = std::env::var_os("AEXCOMPAT_GUEST_WORKER").map(PathBuf::from) {
         if path.is_file() {
-            return Ok(path);
+            return Ok(vec![GuestWorkerCandidate {
+                path,
+                native: false,
+            }]);
         }
         return Err(format!(
             "AEXCOMPAT_GUEST_WORKER does not identify a file: {}",
             path.display()
         ));
     }
-    let candidates = [
-        repository.join("guest/target/release/aex-guest-worker"),
-        repository.join("guest/target/debug/aex-guest-worker"),
-    ];
-    candidates
+    let mut candidates = Vec::new();
+    if std::env::var_os("AEXCOMPAT_NATIVE_CARRIER").is_some_and(|value| value == "1") {
+        candidates.push(GuestWorkerCandidate {
+            path: repository.join("guest/target/x86_64-apple-darwin/release/aex-guest-worker"),
+            native: true,
+        });
+    }
+    candidates.extend([
+        GuestWorkerCandidate {
+            path: repository.join("guest/target/release/aex-guest-worker"),
+            native: false,
+        },
+        GuestWorkerCandidate {
+            path: repository.join("guest/target/debug/aex-guest-worker"),
+            native: false,
+        },
+    ]);
+    let existing = candidates
         .into_iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| {
+        .filter(|candidate| candidate.path.is_file())
+        .collect::<Vec<_>>();
+    if existing.is_empty() {
+        Err({
             format!(
-                "Build it first with: cargo build --release --manifest-path {}/guest/Cargo.toml -p aex-guest-worker",
+                "Build a guest worker first. Native: cargo build --release --target x86_64-apple-darwin --features native-carrier --manifest-path {}/guest/Cargo.toml -p aex-guest-worker; Unicorn fallback: cargo build --release --manifest-path {}/guest/Cargo.toml -p aex-guest-worker",
+                repository.display(),
                 repository.display()
             )
         })
+    } else {
+        Ok(existing)
+    }
+}
+
+fn run_guest_workers(
+    candidates: &[GuestWorkerCandidate],
+    arguments: &[String],
+    native_deadline: Duration,
+) -> Result<Output, String> {
+    let mut failures = Vec::new();
+    for candidate in candidates {
+        let deadline = candidate.native.then_some(native_deadline);
+        match run_worker(&candidate.path, arguments, deadline) {
+            Ok(output) if output.status.success() => return Ok(output),
+            Ok(output) => failures.push(format!(
+                "{} exited {}: {}",
+                candidate.path.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(error) => failures.push(format!("{}: {error}", candidate.path.display())),
+        }
+    }
+    Err(format!(
+        "all guest workers failed: {}",
+        failures.join(" | ")
+    ))
+}
+
+fn run_worker(
+    worker: &Path,
+    arguments: &[String],
+    deadline: Option<Duration>,
+) -> Result<Output, String> {
+    let mut child = Command::new(worker)
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("start guest worker: {error}"))?;
+    if let Some(deadline) = deadline {
+        let started = Instant::now();
+        loop {
+            match child
+                .try_wait()
+                .map_err(|error| format!("poll guest worker: {error}"))?
+            {
+                Some(_) => break,
+                None if started.elapsed() < deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                None => {
+                    let _ = child.kill();
+                    return Err(format!(
+                        "native worker exceeded {} ms and was terminated",
+                        deadline.as_millis()
+                    ));
+                }
+            }
+        }
+    }
+    child
+        .wait_with_output()
+        .map_err(|error| format!("collect guest worker output: {error}"))
 }
 
 fn repository_root() -> Option<PathBuf> {
@@ -524,7 +606,42 @@ mod tests {
             .join("guest/target/debug/aex-guest-worker")
             .is_file()
         {
-            assert!(guest_worker_path(&repository).is_ok());
+            assert!(guest_worker_candidates(&repository).is_ok());
         }
+    }
+
+    #[test]
+    fn failed_native_candidate_falls_back_to_the_next_worker() {
+        let workers = [
+            GuestWorkerCandidate {
+                path: PathBuf::from("/usr/bin/false"),
+                native: true,
+            },
+            GuestWorkerCandidate {
+                path: PathBuf::from("/usr/bin/true"),
+                native: false,
+            },
+        ];
+        let output = run_guest_workers(&workers, &[], Duration::from_millis(100)).unwrap();
+        assert!(output.status.success());
+    }
+
+    #[test]
+    fn timed_out_native_candidate_falls_back_without_waiting_for_its_deadline_twice() {
+        let workers = [
+            GuestWorkerCandidate {
+                path: PathBuf::from("/bin/sleep"),
+                native: true,
+            },
+            GuestWorkerCandidate {
+                path: PathBuf::from("/usr/bin/true"),
+                native: false,
+            },
+        ];
+        let started = Instant::now();
+        let output =
+            run_guest_workers(&workers, &["1".to_string()], Duration::from_millis(20)).unwrap();
+        assert!(output.status.success());
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 }
