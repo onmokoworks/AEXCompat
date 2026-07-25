@@ -516,7 +516,7 @@ def schema_valid_suite_timeline(timeline: Any) -> list[dict[str, Any]] | None:
     # bundle. A non-list (or absent) timeline stays null.
     if not isinstance(timeline, list):
         return None
-    return [event for event in timeline if _valid_suite_event(event)][:65536]
+    return [event for event in timeline if _valid_suite_event(event)][:512]
 
 
 def normalize_structured_failure(

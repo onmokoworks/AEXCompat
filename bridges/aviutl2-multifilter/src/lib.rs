@@ -39,6 +39,7 @@ use aexcompat_broker::render_session::{
 };
 use aexcompat_broker::sealed_load_tree::SealedResourceEntry;
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
+use aexcompat_broker::worker_module_audit::MAX_AUDITED_MODULES as ONESHOT_AUDIT_MODULE_LIMIT;
 use aviutl2_sys::filter2::{
     FILTER_ITEM_CHECKBOX, FILTER_ITEM_COLOR, FILTER_ITEM_COLOR_VALUE, FILTER_ITEM_SELECT,
     FILTER_ITEM_SELECT_ITEM, FILTER_ITEM_TRACK, FILTER_PLUGIN_TABLE, FILTER_PROC_VIDEO,
@@ -95,7 +96,6 @@ const CLUSTER_MODULE_HEADROOM: usize = 256;
 /// cannot fit it is exactly the case the cluster session's declared-set
 /// audit exists for (issue #362), so discovery routes it to a one-member
 /// cluster session instead of the one-shot inspect.
-const ONESHOT_AUDIT_MODULE_LIMIT: usize = 128;
 /// Estimated non-declared modules in a one-shot audit snapshot (the worker
 /// image plus the System32/WinSxS tail), measured ~65 for built-in AE
 /// effects. A singleton with `deps + SYSTEM_TAIL_ESTIMATE` over the one-shot
@@ -283,11 +283,7 @@ pub extern "C" fn UninitializePlugin() {
         .lock()
         .ok()
         .and_then(|mut pool| pool.take())
-        .map(|pool| {
-            pool.into_values()
-                .map(|entry| entry.session)
-                .collect()
-        })
+        .map(|pool| pool.into_values().map(|entry| entry.session).collect())
         .unwrap_or_default();
     drop(drained);
 }
@@ -2460,7 +2456,11 @@ fn prepare_discovery(
 /// AEX and folds the outcome into its cache entry. This is the legacy
 /// discovery path, kept for singleton identities and as the fail-closed
 /// fallback for cluster members (issue #405, design §6).
-fn finish_one_shot(repository: &Path, plugin: &Path, mut prepared: PreparedDiscovery) -> CacheEntry {
+fn finish_one_shot(
+    repository: &Path,
+    plugin: &Path,
+    mut prepared: PreparedDiscovery,
+) -> CacheEntry {
     let Some(closure) = prepared.closure.take() else {
         return prepared.entry;
     };
@@ -2507,7 +2507,11 @@ fn discover_one(
     dependency: &DependencyConfig,
     build: BuildFingerprint,
 ) -> CacheEntry {
-    finish_one_shot(repository, plugin, prepare_discovery(plugin, dependency, build))
+    finish_one_shot(
+        repository,
+        plugin,
+        prepare_discovery(plugin, dependency, build),
+    )
 }
 
 /// Parses the parameter rows of an `--l2-params-only`-shape report (what a
@@ -2691,7 +2695,7 @@ struct PlannedMember {
 /// with 2..=MAX_CLUSTER_PLUGINS members form one cluster task; singletons
 /// whose closure would exceed the one-shot module-audit cap form a
 /// one-member cluster task (issue #362: the cluster session's declared-set
-/// audit replaces the fixed 128-module cap with the launch-authenticated
+/// audit replaces the fixed 512-module cap with the launch-authenticated
 /// module bound); everything else — small singletons, failed resolutions (no
 /// identity), oversized clusters — stays on the per-plugin path
 /// (fail-closed, design §6). Deterministic: clusters in first-seen identity
@@ -2727,7 +2731,7 @@ fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
         // A singleton whose closure would trip the one-shot audit cap takes a
         // one-member cluster session (issue #362): same launch trust, but the
         // audit is validated against the declared module bound instead of the
-        // fixed 128-module one-shot cap.
+        // fixed 512-module one-shot cap.
         if member.identity.is_some()
             && member.dependency_count + SYSTEM_TAIL_ESTIMATE > ONESHOT_AUDIT_MODULE_LIMIT
         {
@@ -2873,10 +2877,11 @@ fn discover_cluster(
     let mut invalidated: Option<(u32, String)> = None;
     for (index, (path, prepared)) in members.into_iter().enumerate() {
         if let Some((at_member, reason)) = &invalidated {
-            let (path, entry) = fallback_members(repository, vec![(path, prepared)], *at_member, reason)
-                .into_iter()
-                .next()
-                .expect("one member yields one entry");
+            let (path, entry) =
+                fallback_members(repository, vec![(path, prepared)], *at_member, reason)
+                    .into_iter()
+                    .next()
+                    .expect("one member yields one entry");
             results.push((path, entry));
             continue;
         }
@@ -2920,9 +2925,7 @@ fn discover_cluster(
         }
     }
     let close = session.close();
-    if invalidated.is_none()
-        && close.get("session_clean") != Some(&serde_json::Value::Bool(true))
-    {
+    if invalidated.is_none() && close.get("session_clean") != Some(&serde_json::Value::Bool(true)) {
         // The exchanges completed but close-time validation (the declared-set
         // module audit, design §5) rejected the session: results produced
         // inside it cannot be trusted, so every session-inspected member is
@@ -3040,7 +3043,9 @@ fn discover_all(
             });
         }
     });
-    let slots = slots.into_inner().unwrap_or_else(|poison| poison.into_inner());
+    let slots = slots
+        .into_inner()
+        .unwrap_or_else(|poison| poison.into_inner());
     let planned: Vec<PlannedMember> = slots
         .iter()
         .map(|slot| {
@@ -3089,10 +3094,11 @@ fn discover_all(
                             let Some((plugin, prepared)) = taken else {
                                 continue;
                             };
-                            let entry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                || finish_one_shot(repository, &plugin, prepared),
-                            ))
-                            .unwrap_or_else(|_| negative_entry(&plugin, build));
+                            let entry =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    finish_one_shot(repository, &plugin, prepared)
+                                }))
+                                .unwrap_or_else(|_| negative_entry(&plugin, build));
                             if let Ok(mut results) = results.lock() {
                                 results.push((plugin, entry));
                             }
@@ -3117,12 +3123,11 @@ fn discover_all(
                             // to the session below.
                             if members.len() == 1 && indices.len() > 1 {
                                 let (plugin, prepared) = members.pop().expect("one member");
-                                let entry = std::panic::catch_unwind(
-                                    std::panic::AssertUnwindSafe(|| {
+                                let entry =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         finish_one_shot(repository, &plugin, prepared)
-                                    }),
-                                )
-                                .unwrap_or_else(|_| negative_entry(&plugin, build));
+                                    }))
+                                    .unwrap_or_else(|_| negative_entry(&plugin, build));
                                 if let Ok(mut results) = results.lock() {
                                     results.push((plugin, entry));
                                 }
@@ -3130,17 +3135,16 @@ fn discover_all(
                             }
                             let member_paths: Vec<PathBuf> =
                                 members.iter().map(|(path, _)| path.clone()).collect();
-                            let cluster_results = std::panic::catch_unwind(
-                                std::panic::AssertUnwindSafe(|| {
+                            let cluster_results =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     discover_cluster(repository, dependency, build, members)
-                                }),
-                            )
-                            .unwrap_or_else(|_| {
-                                member_paths
-                                    .into_iter()
-                                    .map(|path| (path.clone(), negative_entry(&path, build)))
-                                    .collect()
-                            });
+                                }))
+                                .unwrap_or_else(|_| {
+                                    member_paths
+                                        .into_iter()
+                                        .map(|path| (path.clone(), negative_entry(&path, build)))
+                                        .collect()
+                                });
                             if let Ok(mut results) = results.lock() {
                                 results.extend(cluster_results);
                             }
@@ -3560,7 +3564,9 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
             // Drop this exact instance so the next frame reopens, without
             // disturbing a healthy session a concurrent reopen may have installed.
             match route {
-                SessionRoute::PerEffect(_, serial) => remove_session(&ctx.sessions, effect_id, serial),
+                SessionRoute::PerEffect(_, serial) => {
+                    remove_session(&ctx.sessions, effect_id, serial)
+                }
                 SessionRoute::Pooled(_, serial, _, key) => pool_remove(&key, serial),
             }
             true
@@ -3581,7 +3587,11 @@ enum SessionRoute {
 /// whenever this AEX shares its closure identity with at least one other
 /// registered AEX of the same smart flavor (design §8); singleton and
 /// structurally oversized clusters keep the per-effect path (fail-closed).
-fn route_session(ctx: &FilterCtx, effect_id: i64, identity: &GeomIdentity) -> Result<SessionRoute, ()> {
+fn route_session(
+    ctx: &FilterCtx,
+    effect_id: i64,
+    identity: &GeomIdentity,
+) -> Result<SessionRoute, ()> {
     if let Some(closure_identity) = &ctx.closure_identity {
         let key = PoolKey {
             closure_identity: closure_identity.clone(),
@@ -3828,8 +3838,9 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         ) {
                             Ok(session) => (session, cluster.plugins.len() as u32),
                             Err(error) => {
-                                let _ = open_tx
-                                    .send(Err(format!("RenderSession::open_cluster failed: {error}")));
+                                let _ = open_tx.send(Err(format!(
+                                    "RenderSession::open_cluster failed: {error}"
+                                )));
                                 return;
                             }
                         }
@@ -6192,20 +6203,24 @@ mod tests {
             .map(|_| planned(Some("huge"), 2))
             .collect();
         let tasks = plan_tasks(&members);
-        assert!(tasks.iter().all(|task| matches!(task, DiscoveryTask::Single(_))));
+        assert!(
+            tasks
+                .iter()
+                .all(|task| matches!(task, DiscoveryTask::Single(_)))
+        );
         assert_eq!(tasks.len(), MAX_CLUSTER_PLUGINS + 1);
     }
 
     #[test]
     fn plan_tasks_routes_oversized_singleton_closures_to_a_one_member_cluster() {
         // The threshold: deps + the measured system tail past the one-shot
-        // 128-module audit cap. 62 deps still fits (62 + 66 = 128, not over);
-        // 63 does not (issue #362).
+        // 512-module audit cap. 446 deps still fits (446 + 66 = 512, not
+        // over); 447 does not (issue #362/#478).
         let members = vec![
-            planned(Some("small"), 62),
-            planned(Some("large"), 63),
-            planned(Some("larger"), 300),
-            planned(None, 300),
+            planned(Some("small"), 446),
+            planned(Some("large"), 447),
+            planned(Some("larger"), 700),
+            planned(None, 700),
             planned(Some("tiny"), 0),
         ];
         let tasks = plan_tasks(&members);
@@ -6215,7 +6230,7 @@ mod tests {
         };
         match &tasks[0] {
             DiscoveryTask::Single(index) => assert_eq!(*index, 0),
-            _ => panic!("62 deps stays on the one-shot path"),
+            _ => panic!("446 deps stays on the one-shot path"),
         }
         assert_eq!(cluster_of(1), vec![1]);
         assert_eq!(cluster_of(2), vec![2]);
@@ -6340,7 +6355,9 @@ mod tests {
 
         #[test]
         fn cluster_discovery_sweeps_same_closure_plugins_in_one_session() {
-            let _guard = BEHAVIOR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let _guard = BEHAVIOR_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             unsafe {
                 std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
             }
@@ -6366,7 +6383,9 @@ mod tests {
 
         #[test]
         fn cluster_discovery_falls_back_structurally_when_the_session_dies() {
-            let _guard = BEHAVIOR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let _guard = BEHAVIOR_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             unsafe {
                 std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", "crash_on_inspect");
             }
@@ -6405,7 +6424,9 @@ mod tests {
 
         #[test]
         fn render_close_audit_failure_is_recorded_not_rounded_to_success() {
-            let _guard = BEHAVIOR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let _guard = BEHAVIOR_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             unsafe {
                 std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", "audit_undeclared_module");
             }
@@ -6443,7 +6464,10 @@ mod tests {
             // only afterwards (the fixture injects an undeclared module into
             // the final report's observed union).
             let reply = render_on(&tx, 0, 0, vec![7u8; 8 * 4 * 4], None);
-            assert!(matches!(reply, FrameReply::Rendered(_)), "the frame renders");
+            assert!(
+                matches!(reply, FrameReply::Rendered(_)),
+                "the frame renders"
+            );
             // The session thread's recv loop ends only when every sender is
             // gone, so the reply clone goes first; dropping the handle then
             // drives RenderSession::close on the session thread, and the
@@ -6462,10 +6486,7 @@ mod tests {
                 .iter()
                 .find(|failure| failure.plugin == one)
                 .expect("the close-time audit failure is recorded");
-            assert!(
-                failure.close_reason.contains("module_audit"),
-                "{failure:?}"
-            );
+            assert!(failure.close_reason.contains("module_audit"), "{failure:?}");
             assert!(failure.clustered);
             assert!(!failure.smart);
             assert_eq!(failure.frames_ok, 1, "{failure:?}");

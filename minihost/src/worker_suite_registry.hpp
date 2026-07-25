@@ -99,6 +99,9 @@ class SuiteRegistry final {
 
  private:
   static std::string safe_missing_name(const char* name);
+  void record_suite_timeline(bool acquire, const char* name,
+                             std::size_t name_length, bool valid_name,
+                             int32_t version, int32_t result);
   void record_missing_suite(const std::string& name, int32_t version);
   int32_t reject_unknown(const char* name, int32_t version,
                          TraceWriter* trace_writer);
@@ -106,6 +109,7 @@ class SuiteRegistry final {
   suite_runtime::SuiteLeaseTracker lease_tracker_;
   mutable std::mutex missing_suites_mutex_;
   std::vector<std::pair<std::string, int32_t>> missing_suites_;
+  bool missing_suites_truncated_{};
   struct UnsupportedSuiteCall {
     UnsupportedSuiteId suite{};
     uint32_t slot{};
@@ -113,6 +117,7 @@ class SuiteRegistry final {
   };
   mutable std::mutex unsupported_suite_calls_mutex_;
   std::vector<UnsupportedSuiteCall> unsupported_suite_calls_;
+  bool unsupported_suite_calls_truncated_{};
   struct SuiteTimelineEvent {
     uint32_t sequence{};
     bool acquire{};
@@ -123,9 +128,11 @@ class SuiteRegistry final {
   };
   mutable std::mutex timeline_mutex_;
   std::vector<SuiteTimelineEvent> suite_timeline_;
+  bool suite_timeline_truncated_{};
 };
 
 SuiteRegistry& suite_registry();
 const char* set_suite_timeline_selector(const char* selector) noexcept;
+const char* current_suite_timeline_selector() noexcept;
 
 }  // namespace aexcompat::worker_runtime

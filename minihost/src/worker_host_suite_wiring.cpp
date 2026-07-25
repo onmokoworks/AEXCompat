@@ -1,12 +1,13 @@
 #include "worker_host_suite_catalog.hpp"
 #include "worker_host_suite_router.hpp"
 #include "worker_extended_diag.hpp"
-#include "worker_compute_cache_suite.hpp"
+#include "worker_suite_call_slot_probe.hpp"
 #include "worker_suite_registry.hpp"
 
 #include "pf_cache_on_load_suite.hpp"
 #include "gpu_memory_world_transport.hpp"
 #include "trace_writer.hpp"
+#include "worker_aegp_compute_cache.hpp"
 #include "worker_aegp_command_suites.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_layer_render_runtime.hpp"
@@ -481,9 +482,6 @@ const void* provide_color_settings7(void*) {
 }
 // Version 6 of "PF Color Settings Suite" is the frozen 14-function prefix of
 // the v7 table (issue #362: the OCIO family acquires exactly v6).
-const void* provide_compute_cache1(void*) {
-  return &aexcompat::compute_cache::suite_table();
-}
 const void* provide_iterate8(void*) {
   g_iterate8_suite2.iterate = reinterpret_cast<void*>(&iterate_world8); return &g_iterate8_suite2;
 }
@@ -662,6 +660,30 @@ bool configure_component_suite_catalog() {
       {"PF Effect UI Suite", 1, nullptr, &provide_effect_ui1},
       {"PF AE Adv App Suite", 1, nullptr, &provide_adv_app1},
       {"PF AE Adv App Suite", 2, nullptr, &provide_adv_app2},
+      {aexcompat::worker_runtime::suite_call_slot_probe::
+           kPrivateEffectSuiteName,
+       aexcompat::worker_runtime::suite_call_slot_probe::
+           kPrivateEffectSuiteVersion3,
+       nullptr,
+       &aexcompat::worker_runtime::suite_call_slot_probe::
+           provide_private_effect_probe3,
+       nullptr,
+       &aexcompat::worker_runtime::suite_call_slot_probe::
+           private_effect_probe3_available},
+      {aexcompat::worker_runtime::suite_call_slot_probe::
+           kPrivateEffectSuiteName,
+       aexcompat::worker_runtime::suite_call_slot_probe::
+           kPrivateEffectSuiteVersion5,
+       nullptr,
+       &aexcompat::worker_runtime::suite_call_slot_probe::
+           provide_private_effect_probe5,
+       nullptr,
+       &aexcompat::worker_runtime::suite_call_slot_probe::
+           private_effect_probe5_available},
+      {aexcompat::worker_runtime::compute_cache::kSuiteName,
+       aexcompat::worker_runtime::compute_cache::kSuiteVersion1,
+       nullptr,
+       &aexcompat::worker_runtime::compute_cache::provide_suite1},
       {"DRAWBOT Draw Suite", 1, nullptr, &provide_drawbot_draw1},
       {"DRAWBOT Supplier Suite", 1, nullptr, &provide_drawbot_supplier1},
       {"DRAWBOT Surface Suite", 2, nullptr, &provide_drawbot_surface2},
@@ -683,7 +705,6 @@ bool configure_component_suite_catalog() {
        &render_worker_suite_provider_available},
       {"PF Color Settings Suite", 6, nullptr, &provide_color_settings7},
       {"PF Color Settings Suite", 7, nullptr, &provide_color_settings7},
-      {"AEGP Compute Cache", 1, nullptr, &provide_compute_cache1},
       {"PF Iterate8 Suite", 1, nullptr, &provide_iterate8},
       {"PF Iterate8 Suite", 2, nullptr, &provide_iterate8},
       {"PF iterate16 Suite", 1, &g_iterate16_suite2},

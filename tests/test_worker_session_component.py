@@ -80,7 +80,8 @@ def test_pre_unload_hook_is_noexcept_one_shot_and_precedes_audit_and_free():
     assert "bool set_pre_unload_hook(PreUnloadHook hook, void* context) noexcept;" in HEADER
     quiesce = SOURCE[SOURCE.index("bool WorkerSession::quiesce_once"):
                      SOURCE.index("bool WorkerSession::capture_terminal_audit")]
-    assert "if (pre_unload_hook_invoked_) return pre_unload_hook_passed_;" in quiesce
+    assert "if (pre_unload_hook_invoked_) {" in quiesce
+    assert "compute_cache::unload_safe()" in quiesce
     assert quiesce.index("pre_unload_hook_invoked_ = true") < quiesce.index("hook(context)")
     assert "pre_unload_hook_ = nullptr;" in quiesce
     assert "pre_unload_context_ = nullptr;" in quiesce
@@ -137,5 +138,6 @@ def test_failed_pre_unload_hook_prevents_unload_and_fails_terminal_lifecycle():
                      SOURCE.index("void WorkerSession::stop_trace")]
     assert "if (!pre_unload_hook_passed_) terminal_audit_passed_ = false;" in quiesce
     assert "if (!quiesce_once()) return;" in unload
+    assert "if (!compute_cache::unload_safe()) {" in unload
     assert "terminal_audit_passed_ = terminal_audit_passed_ && quiesced;" in capture
     assert "return 14" in SOURCE[SOURCE.index("int WorkerSession::finish") :]

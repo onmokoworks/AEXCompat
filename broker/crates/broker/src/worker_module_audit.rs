@@ -4,7 +4,9 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Component, Path};
 
-const MAX_AUDITED_MODULES: usize = 128;
+/// Matches the native worker's fixed `kMaxAuditedModules` enumeration buffer.
+/// Both sides stay bounded and fail closed when a report exceeds this count.
+pub const MAX_AUDITED_MODULES: usize = 512;
 const MIN_REQUIRED_PHASES: u32 = 3;
 const MAX_DIAGNOSTIC_SAMPLES_PER_CATEGORY: usize = 4;
 
@@ -86,12 +88,18 @@ pub fn validate_required_worker_audit(stdout: &str, stdout_truncated: bool) -> i
     require_subset(&audit.post_load.plugin, &audit.observed_union.plugin)?;
     require_subset(&audit.post_load.system32, &audit.observed_union.system32)?;
     require_subset(&audit.post_load.winsxs, &audit.observed_union.winsxs)?;
-    require_subset(&audit.post_load.driverstore, &audit.observed_union.driverstore)?;
+    require_subset(
+        &audit.post_load.driverstore,
+        &audit.observed_union.driverstore,
+    )?;
     require_subset(&audit.pre_unload.worker, &audit.observed_union.worker)?;
     require_subset(&audit.pre_unload.plugin, &audit.observed_union.plugin)?;
     require_subset(&audit.pre_unload.system32, &audit.observed_union.system32)?;
     require_subset(&audit.pre_unload.winsxs, &audit.observed_union.winsxs)?;
-    require_subset(&audit.pre_unload.driverstore, &audit.observed_union.driverstore)?;
+    require_subset(
+        &audit.pre_unload.driverstore,
+        &audit.observed_union.driverstore,
+    )?;
     require_optional_subset(&audit.post_load.policy, &audit.observed_union.policy)?;
     require_optional_subset(&audit.pre_unload.policy, &audit.observed_union.policy)?;
     require_subset(&audit.post_load.unknown, &audit.observed_union.unknown)?;
@@ -158,6 +166,8 @@ fn module_audit_limit_error(
         "reason": format!("secure worker {label} module audit limit exceeded"),
         "limit": limit,
         "total": total,
+        "overflow": true,
+        "truncated": false,
         "category_counts": {
             "worker": snapshot.worker.len(),
             "plugin": snapshot.plugin.len(),
@@ -268,7 +278,7 @@ struct AuditEpoch {
 /// count, duplicate names, unsafe names, subset relations against the
 /// observed union); the only change is that the module-count cap and the
 /// allowed `plugin`-class set come from the launch-authenticated manifest
-/// declaration rather than the fixed 128-module one-shot bound.
+/// declaration rather than the fixed 512-module one-shot bound.
 pub fn validate_cluster_worker_audit(
     stdout: &str,
     stdout_truncated: bool,
@@ -358,11 +368,11 @@ fn validate_cluster_snapshot(
     // Declared-set check (design §5): a plugin-class entry is a module loaded
     // from the sealed root, so it must be one of the manifest's plugins or
     // pinned dependencies. Anything else was never authenticated at launch.
-    if snapshot
-        .plugin
-        .iter()
-        .any(|name| !declaration.declared_basenames.contains(&name.to_ascii_lowercase()))
-    {
+    if snapshot.plugin.iter().any(|name| {
+        !declaration
+            .declared_basenames
+            .contains(&name.to_ascii_lowercase())
+    }) {
         return Err(invalid(
             "secure worker module audit carries an undeclared plugin-class module",
         ));
@@ -468,9 +478,46 @@ mod tests {
         })
     }
 
+    fn report_with_module_total(total: usize) -> String {
+        assert!(total >= 3);
+        let system32: Vec<_> = (0..total - 3)
+            .map(|index| format!("system-{index}.dll"))
+            .collect();
+        let snapshot = json!({
+            "status": "passed",
+            "unknown_count": 0,
+            "worker": ["trusted-worker.exe"],
+            "plugin": ["fixture.plugin"],
+            "system32": system32,
+            "winsxs": ["comctl32.dll"],
+            "unknown": []
+        });
+        json!({
+            "status": "rendered",
+            "module_audit": {
+                "schema": 1,
+                "status": "passed",
+                "post_load": snapshot,
+                "pre_unload": snapshot,
+                "observed_union": snapshot,
+                "phase_count": 7,
+                "unknown_count": 0
+            }
+        })
+        .to_string()
+    }
+
     #[test]
     fn accepts_complete_cumulative_audit() {
         validate_required_worker_audit(&valid_report(), false).unwrap();
+    }
+
+    #[test]
+    fn accepts_observed_176_module_process_and_exact_limit() {
+        validate_required_worker_audit(&report_with_module_total(176), false)
+            .expect("the installed 176-module process fits the bounded audit");
+        validate_required_worker_audit(&report_with_module_total(MAX_AUDITED_MODULES), false)
+            .expect("the exact native producer bound remains valid");
     }
 
     #[test]
@@ -496,8 +543,7 @@ mod tests {
         assert!(validate_required_worker_audit(&duplicate.to_string(), false).is_err());
 
         // The cluster validator counts and accepts the category too.
-        let mut cluster_report: Value =
-            serde_json::from_str(&valid_cluster_report()).unwrap();
+        let mut cluster_report: Value = serde_json::from_str(&valid_cluster_report()).unwrap();
         for snapshot in ["post_load", "pre_unload", "observed_union"] {
             cluster_report["module_audit"][snapshot]["driverstore"] = json!(["nvoglv64.dll"]);
         }
@@ -579,22 +625,20 @@ mod tests {
         assert!(validate_required_worker_audit(&report.to_string(), false).is_err());
 
         let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
-        let names: Vec<_> = (0..126)
+        let names: Vec<_> = (0..509)
             .map(|index| format!("runtime-{index}.dll"))
             .collect();
         report["module_audit"]["observed_union"]["policy"] = json!(names);
         assert!(validate_required_worker_audit(&report.to_string(), false).is_err());
     }
-    #[test]
-    fn classifies_module_audit_limit_with_bounded_counts_and_samples() {
-        let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
-        let names: Vec<_> = (0..129)
-            .map(|index| format!("sealed-{index}.dll"))
-            .collect();
-        report["module_audit"]["observed_union"]["system32"] = json!(names);
 
-        let error = validate_required_worker_audit(&report.to_string(), false)
-            .expect_err("an over-limit audit must fail closed");
+    #[test]
+    fn classifies_limit_plus_one_as_explicit_bounded_overflow() {
+        let error = validate_required_worker_audit(
+            &report_with_module_total(MAX_AUDITED_MODULES + 1),
+            false,
+        )
+        .expect_err("an over-limit audit must fail closed");
         let error_text = error.to_string();
         let diagnostics = error_text
             .split_once("diagnostics=")
@@ -605,8 +649,13 @@ mod tests {
         assert_eq!(diagnostics["classification"], "module_audit_limit_exceeded");
         assert_eq!(diagnostics["failure_stage"], "module_audit_validation");
         assert_eq!(diagnostics["limit"], MAX_AUDITED_MODULES);
-        assert_eq!(diagnostics["total"], 132);
-        assert_eq!(diagnostics["category_counts"]["system32"], 129);
+        assert_eq!(diagnostics["total"], MAX_AUDITED_MODULES + 1);
+        assert_eq!(
+            diagnostics["category_counts"]["system32"],
+            MAX_AUDITED_MODULES - 2
+        );
+        assert_eq!(diagnostics["overflow"], true);
+        assert_eq!(diagnostics["truncated"], false);
         assert_eq!(
             diagnostics["sample_basenames"]["system32"]
                 .as_array()
@@ -615,7 +664,7 @@ mod tests {
             4
         );
         assert!(!error_text.contains("D:\\"));
-        assert!(!error_text.contains("sealed-128.dll"));
+        assert!(!error_text.contains("system-509.dll"));
     }
 
     // ---- Cluster session audit (issue #405) ----
@@ -672,13 +721,9 @@ mod tests {
             .unwrap();
         // A cluster audit may legitimately exceed the fixed one-shot cap as
         // long as it stays within the declared module bound.
-        let declaration = ClusterAuditDeclaration::new(
-            ["alpha.plugin".to_owned()],
-            1,
-            200,
-        )
-        .unwrap();
-        let system32: Vec<String> = (0..150).map(|index| format!("sys-{index}.dll")).collect();
+        let declaration =
+            ClusterAuditDeclaration::new(["alpha.plugin".to_owned()], 1, 700).unwrap();
+        let system32: Vec<String> = (0..600).map(|index| format!("sys-{index}.dll")).collect();
         let mut snapshot = cluster_snapshot(&["alpha.plugin"]);
         snapshot["system32"] = json!(system32);
         let report = json!({
@@ -712,12 +757,7 @@ mod tests {
 
     #[test]
     fn cluster_audit_rejects_snapshots_beyond_the_declared_bound() {
-        let declaration = ClusterAuditDeclaration::new(
-            ["alpha.plugin".to_owned()],
-            1,
-            4,
-        )
-        .unwrap();
+        let declaration = ClusterAuditDeclaration::new(["alpha.plugin".to_owned()], 1, 4).unwrap();
         // worker + plugin + system32 + winsxs = 4 modules passes...
         let report = json!({
             "status": "session_completed",
@@ -738,12 +778,8 @@ mod tests {
         assert!(validate_cluster_worker_audit(&over.to_string(), false, &declaration).is_err());
         // The declaration itself cannot exceed its own bound.
         assert!(
-            ClusterAuditDeclaration::new(
-                ["a.plugin".to_owned(), "b.plugin".to_owned()],
-                1,
-                1,
-            )
-            .is_err()
+            ClusterAuditDeclaration::new(["a.plugin".to_owned(), "b.plugin".to_owned()], 1, 1,)
+                .is_err()
         );
     }
 
@@ -779,8 +815,6 @@ mod tests {
             validate_cluster_worker_audit(&valid_cluster_report(), true, &cluster_declaration())
                 .is_err()
         );
-        assert!(
-            validate_cluster_worker_audit("not-json", false, &cluster_declaration()).is_err()
-        );
+        assert!(validate_cluster_worker_audit("not-json", false, &cluster_declaration()).is_err());
     }
 }

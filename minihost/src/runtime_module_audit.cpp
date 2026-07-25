@@ -20,6 +20,7 @@ namespace {
 #pragma comment(lib, "bcrypt.lib")
 
 constexpr std::size_t kMaxAuditedModules = 512;
+constexpr std::size_t kMaxAuditFailureRejections = 16;
 // Cluster sessions (issue #405) replace the fixed bound with the manifest's
 // launch-time authenticated module_bound (design §5) and narrow the `plugin`
 // classification to the manifest's declared basenames. Zero/empty means the
@@ -521,6 +522,64 @@ ModuleAuditReport& module_audit_report() noexcept {
   return g_module_audit;
 }
 
+LoadedModuleProvenance classify_loaded_module_provenance(
+    void* module_value) noexcept {
+  HMODULE module = static_cast<HMODULE>(module_value);
+  if (!module) return LoadedModuleProvenance::unrecognized;
+  try {
+    std::array<wchar_t, 32768> module_buffer{};
+    const DWORD module_length = GetModuleFileNameExW(
+        GetCurrentProcess(), module, module_buffer.data(),
+        static_cast<DWORD>(module_buffer.size()));
+    std::filesystem::path module_path;
+    if (module_length == 0 || module_length >= module_buffer.size() ||
+        !canonical_path(module_buffer.data(), module_path))
+      return LoadedModuleProvenance::unrecognized;
+
+    std::array<wchar_t, MAX_PATH> system_buffer{};
+    std::array<wchar_t, 32768> windows_buffer{};
+    const UINT system_length = GetSystemDirectoryW(
+        system_buffer.data(), static_cast<UINT>(system_buffer.size()));
+    const UINT windows_length = GetWindowsDirectoryW(
+        windows_buffer.data(), static_cast<UINT>(windows_buffer.size()));
+    std::filesystem::path system32, windows_root, winsxs_root,
+        driverstore_root;
+    if (system_length != 0 && system_length < system_buffer.size() &&
+        windows_length != 0 && windows_length < windows_buffer.size() &&
+        canonical_path(system_buffer.data(), system32) &&
+        canonical_path(windows_buffer.data(), windows_root) &&
+        canonical_path(windows_root / L"WinSxS", winsxs_root)) {
+      const std::filesystem::path driverstore_candidate =
+          system32 / L"DriverStore" / L"FileRepository";
+      if (!canonical_path(driverstore_candidate, driverstore_root))
+        driverstore_root.clear();
+      if (same_path(module_path.parent_path(), system32) ||
+          is_winsxs_module(module_path, winsxs_root) ||
+          is_driverstore_module(module_path, driverstore_root))
+        return LoadedModuleProvenance::system;
+    }
+
+    if (!g_module_audit.required || g_module_audit.plugin_path.empty())
+      return LoadedModuleProvenance::unrecognized;
+    std::filesystem::path plugin_root;
+    if (!canonical_path(g_module_audit.plugin_path.parent_path(),
+                        plugin_root) ||
+        !same_path(module_path.parent_path(), plugin_root))
+      return LoadedModuleProvenance::unrecognized;
+    const std::string basename = audit_basename(module_path);
+    const auto observed = [&](const std::vector<std::string>& modules) {
+      return std::find(modules.begin(), modules.end(), basename) !=
+             modules.end();
+    };
+    if (observed(g_module_audit.post_load.plugin) ||
+        observed(g_module_audit.observed_union.plugin))
+      return LoadedModuleProvenance::sealed;
+  } catch (...) {
+    return LoadedModuleProvenance::unrecognized;
+  }
+  return LoadedModuleProvenance::unrecognized;
+}
+
 ModuleAuditSnapshot capture_module_audit() {
   if (!g_module_audit.required) return {};
   ModuleAuditSnapshot snapshot = audit_loaded_modules(g_module_audit.plugin_path);
@@ -564,6 +623,59 @@ std::string module_audit_json() {
   }
   output << ",\"phase_count\":" << g_module_audit.phase_count
          << ",\"unknown_count\":" << g_module_audit.observed_union.unknown_count
+         << '}';
+  return output.str();
+}
+
+std::string module_audit_failure_json() {
+  if (!g_module_audit.required || module_audit_passed()) return {};
+  const ModuleAuditSnapshot& snapshot = g_module_audit.observed_union;
+  std::filesystem::path plugin_root;
+  const bool plugin_root_available =
+      canonical_path(g_module_audit.plugin_path.parent_path(), plugin_root);
+  auto string_value = [](std::ostringstream& output, const std::string& value) {
+    output << '"';
+    for (char ch : value) {
+      if (ch == '"' || ch == '\\') output << '\\';
+      output << ch;
+    }
+    output << '"';
+  };
+  const std::size_t rejection_count =
+      (std::min)(snapshot.unknown_keys.size(), kMaxAuditFailureRejections);
+  const uint32_t attributed_count = static_cast<uint32_t>(
+      (std::min)(snapshot.unknown_keys.size(),
+                 static_cast<std::size_t>(snapshot.unknown_count)));
+  std::ostringstream output;
+  output << "{\"status\":\"failed\",\"reason\":\""
+         << (snapshot.unknown_keys.empty()
+                 ? "module_enumeration_or_path_resolution_failed"
+                 : "loaded_module_policy_rejection")
+         << "\",\"unknown_count\":" << snapshot.unknown_count
+         << ",\"unattributed_count\":"
+         << (snapshot.unknown_count - attributed_count)
+         << ",\"rejections\":[";
+  for (std::size_t index = 0; index < rejection_count; ++index) {
+    if (index) output << ',';
+    const std::filesystem::path path(snapshot.unknown_keys[index]);
+    const std::string basename = audit_basename(path);
+    const bool sealed_root =
+        plugin_root_available && same_path(path.parent_path(), plugin_root);
+    output << "{\"basename\":";
+    string_value(output, basename);
+    output << ",\"canonical_path_token\":";
+    const std::string token = path_token(path);
+    if (token.empty()) output << "null";
+    else string_value(output, token);
+    output << ",\"path_class\":\""
+           << (sealed_root ? "sealed_root" : "external")
+           << "\",\"reason\":\""
+           << (sealed_root ? "undeclared_sealed_module"
+                           : "outside_allowed_roots_or_unapproved_policy")
+           << "\"}";
+  }
+  output << "],\"rejections_truncated\":"
+         << (snapshot.unknown_keys.size() > rejection_count ? "true" : "false")
          << '}';
   return output.str();
 }

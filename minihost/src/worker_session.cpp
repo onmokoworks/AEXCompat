@@ -2,6 +2,7 @@
 
 #include "runtime_module_audit.hpp"
 #include "trace_writer.hpp"
+#include "worker_aegp_compute_cache.hpp"
 
 #include <iostream>
 #include <utility>
@@ -49,13 +50,19 @@ bool WorkerSession::set_swap_quiesce_hook(PreUnloadHook hook,
 }
 
 bool WorkerSession::quiesce_once() noexcept {
-  if (pre_unload_hook_invoked_) return pre_unload_hook_passed_;
+  if (pre_unload_hook_invoked_) {
+    pre_unload_hook_passed_ =
+        pre_unload_hook_passed_ && compute_cache::unload_safe();
+    if (!pre_unload_hook_passed_) terminal_audit_passed_ = false;
+    return pre_unload_hook_passed_;
+  }
   pre_unload_hook_invoked_ = true;
   const PreUnloadHook hook = pre_unload_hook_;
   void* const context = pre_unload_context_;
   pre_unload_hook_ = nullptr;
   pre_unload_context_ = nullptr;
-  pre_unload_hook_passed_ = !hook || hook(context);
+  pre_unload_hook_passed_ =
+      (!hook || hook(context)) && compute_cache::unload_safe();
   if (!pre_unload_hook_passed_) terminal_audit_passed_ = false;
   return pre_unload_hook_passed_;
 }
@@ -86,6 +93,14 @@ void WorkerSession::stop_trace() noexcept {
 }
 
 void WorkerSession::unload_module() noexcept {
+  // GLOBAL_SETDOWN may discover live Compute Cache work after the terminal
+  // hook was registered. Re-check its process-sticky gate at the actual unload
+  // boundary so neither FreeLibrary nor deferred-release cleanup can discard
+  // a module whose callbacks remain reachable.
+  if (!compute_cache::unload_safe()) {
+    terminal_audit_passed_ = false;
+    return;
+  }
   if (deferred_module_release_) {
     // Deferred release (issue #474): nothing is freed mid-process. The
     // current and retired plug-in images and the sealed-directory cookie all

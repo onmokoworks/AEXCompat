@@ -43,6 +43,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/strict_json.cpp
     src/suite_lease_tracker.cpp
     src/worker_selector_dispatch.cpp
+    src/worker_suite_call_slot_probe.cpp
     src/worker_suite_registry.cpp
     src/worker_runtime_admission.cpp
     src/worker_entry_admission.cpp
@@ -51,6 +52,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_fixed_selftest_routing.cpp
     src/worker_custom_selftest_routing.cpp
     src/worker_host_guard_selftests.cpp
+    src/worker_aegp_compute_cache.cpp
     src/worker_aegp_utility_suite.cpp
     src/worker_pf_pixel_data_suite.cpp
     src/worker_pf_world_suite.cpp
@@ -133,6 +135,12 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_world_registry.cpp
     src/worker_world_safety.cpp)
 
+set_source_files_properties(src/worker_aegp_compute_cache.cpp
+  PROPERTIES COMPILE_OPTIONS "/EHsc")
+set_source_files_properties(
+  ../tests/native/worker_aegp_compute_cache_selftest.cpp
+  PROPERTIES COMPILE_OPTIONS "/EHsc")
+
 add_library(aex_worker_runtime_core OBJECT ${AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES})
 target_compile_features(aex_worker_runtime_core PRIVATE cxx_std_17)
 target_compile_definitions(aex_worker_runtime_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX AEXCOMPAT_COMPILE_AEGP_SCENE_CALLBACKS=1)
@@ -156,13 +164,35 @@ target_link_libraries(aex_smart_worker PRIVATE bcrypt aexcompat_trace_writer)
 add_executable(worker_suite_registry_selftest
   ../tests/native/worker_suite_registry_selftest.cpp
   src/suite_lease_tracker.cpp
+  src/worker_aegp_compute_cache.cpp
+  src/worker_minidump_runtime.cpp
+  src/worker_selector_dispatch.cpp
+  src/worker_suite_call_slot_probe.cpp
   src/worker_suite_registry.cpp
 )
 target_compile_features(worker_suite_registry_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_suite_registry_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_suite_registry_selftest PRIVATE src)
-target_link_libraries(worker_suite_registry_selftest PRIVATE aexcompat_trace_writer)
+target_link_libraries(worker_suite_registry_selftest PRIVATE
+  bcrypt aexcompat_trace_writer)
+
+add_executable(worker_aegp_compute_cache_selftest
+  ../tests/native/worker_aegp_compute_cache_selftest.cpp
+  src/suite_lease_tracker.cpp
+  src/worker_aegp_compute_cache.cpp
+  src/worker_minidump_runtime.cpp
+  src/worker_selector_dispatch.cpp
+  src/worker_suite_call_slot_probe.cpp
+  src/worker_suite_registry.cpp
+)
+target_compile_features(worker_aegp_compute_cache_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_aegp_compute_cache_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(worker_aegp_compute_cache_selftest PRIVATE /UNDEBUG)
+target_include_directories(worker_aegp_compute_cache_selftest PRIVATE src)
+target_link_libraries(worker_aegp_compute_cache_selftest PRIVATE
+  bcrypt aexcompat_trace_writer)
 
 add_executable(aex_string_table_selftest
   ../tests/native/aex_string_table_selftest.cpp

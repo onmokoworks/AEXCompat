@@ -73,7 +73,13 @@ def test_color_settings_suite_v6_is_served_and_ocio_queries_accept_id_zero():
 
 
 def test_compute_cache_suite_is_cataloged_and_purged_on_cluster_reset():
-    assert '{"AEGP Compute Cache", 1, nullptr, &provide_compute_cache1}' in WIRING
+    # #478 already provides the same public six-slot suite with stronger
+    # bounds, owner teardown, and telemetry. Keep one runtime registration
+    # after merging #362 instead of silently shadowing a duplicate provider.
+    assert "compute_cache::kSuiteName" in WIRING
+    assert "compute_cache::kSuiteVersion1" in WIRING
+    assert "compute_cache::provide_suite1" in WIRING
+    assert WIRING.count("compute_cache::provide_suite1") == 1
     assert "aexcompat::compute_cache::purge_registry();" in L2
     assert "kErrNotInCacheOrComputePending = 22" in COMPUTE
     assert "delete_compute_value" in COMPUTE
