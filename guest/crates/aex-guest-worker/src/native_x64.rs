@@ -77,6 +77,11 @@ struct NativeHandle {
     locks: u32,
 }
 
+#[derive(Clone, Debug)]
+struct NativeWorld {
+    pixel_format: i32,
+}
+
 #[derive(Default)]
 struct NativeState {
     params: Vec<GuestParam>,
@@ -95,10 +100,14 @@ struct NativeState {
     checkout_output_calls: u32,
     parameter_definitions: Vec<u64>,
     handles: HashMap<u64, NativeHandle>,
+    aegp_memory_handles: HashMap<u64, NativeHandle>,
+    worlds: HashMap<u64, NativeWorld>,
     handle_allocations: Vec<u64>,
     arena_next: u64,
     arena_end: u64,
     handle_suite: u64,
+    aegp_memory_suite: u64,
+    world_suite: u64,
 }
 
 thread_local! {
@@ -209,6 +218,33 @@ impl GuestEngine<'static> {
             engine.write_u64(handle_suite + (index * 8) as u64, callback)?;
         }
         engine.state.handle_suite = handle_suite;
+        let aegp_memory_suite = engine.allocate(64, 8)?;
+        let memory_callbacks = [
+            callback_address!(new_aegp_mem_handle),
+            callback_address!(free_aegp_mem_handle),
+            callback_address!(lock_aegp_mem_handle),
+            callback_address!(unlock_aegp_mem_handle),
+            callback_address!(get_aegp_mem_handle_size),
+            callback_address!(resize_aegp_mem_handle),
+            callback_address!(unsupported_aegp_memory_slot),
+            callback_address!(unsupported_aegp_memory_slot),
+        ];
+        for (index, callback) in memory_callbacks.into_iter().enumerate() {
+            engine.write_u64(aegp_memory_suite + (index * 8) as u64, callback)?;
+        }
+        engine.state.aegp_memory_suite = aegp_memory_suite;
+        let world_suite = engine.allocate(24, 8)?;
+        for (index, callback) in [
+            callback_address!(new_world),
+            callback_address!(dispose_world),
+            callback_address!(get_world_pixel_format),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            engine.write_u64(world_suite + (index * 8) as u64, callback)?;
+        }
+        engine.state.world_suite = world_suite;
         for version in [3u32, 7, 11, 13] {
             let callbacks =
                 native_utility_callbacks(version).expect("known AEGP Utility Suite version");
@@ -864,6 +900,16 @@ unsafe extern "win64" fn acquire_suite(
                 *(output as *mut u64) = state.handle_suite;
             }
             0
+        } else if name == "AEGP Memory Suite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.aegp_memory_suite;
+            }
+            0
+        } else if name == "PF World Suite" && version == 2 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.world_suite;
+            }
+            0
         } else if name == "AEGP Utility Suite" && output != 0 {
             let Some(table) = u32::try_from(version)
                 .ok()
@@ -881,6 +927,135 @@ unsafe extern "win64" fn acquire_suite(
         }
     })
     .unwrap_or(u32::MAX as u64)
+}
+
+fn native_world_pixel_bytes(pixel_format: i32) -> Option<u64> {
+    match pixel_format as u32 {
+        0x6267_7261 => Some(4),
+        0x3631_6561 => Some(8),
+        0x3233_6561 => Some(16),
+        _ => None,
+    }
+}
+
+unsafe extern "win64" fn new_world(
+    _: u64,
+    width: u64,
+    height: u64,
+    clear: u64,
+    pixel_format: u64,
+    world: u64,
+) -> u64 {
+    let width = width as i32;
+    let height = height as i32;
+    let pixel_format = pixel_format as i32;
+    with_state(|state| {
+        let Some(pixel_bytes) = native_world_pixel_bytes(pixel_format) else {
+            return 4;
+        };
+        if width <= 0 || height <= 0 || world == 0 || state.worlds.contains_key(&world) {
+            return 4;
+        }
+        let Some(rowbytes) = u64::try_from(width)
+            .ok()
+            .and_then(|value| value.checked_mul(pixel_bytes))
+        else {
+            return 4;
+        };
+        let Some(size) = rowbytes.checked_mul(height as u64) else {
+            return 4;
+        };
+        if rowbytes > i32::MAX as u64 || size > 128 * 1024 * 1024 {
+            return 4;
+        }
+        let data = (state.arena_next + 63) & !63;
+        let Some(end) = data.checked_add(size.max(1)) else {
+            return 4;
+        };
+        if end > state.arena_end {
+            return 4;
+        }
+        state.arena_next = end;
+        unsafe {
+            ptr::write_bytes(
+                data as *mut u8,
+                if clear != 0 { 0 } else { 0xcd },
+                size as usize,
+            );
+        }
+        let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        let flags = 2 | i32::from(pixel_format as u32 != 0x6267_7261);
+        definition[abi::LAYER_WORLD_FLAGS_OFFSET..abi::LAYER_WORLD_FLAGS_OFFSET + 4]
+            .copy_from_slice(&flags.to_le_bytes());
+        definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&data.to_le_bytes());
+        definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&(rowbytes as i32).to_le_bytes());
+        definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&width.to_le_bytes());
+        definition[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&height.to_le_bytes());
+        for (offset, value) in [0, 0, width, height].into_iter().enumerate() {
+            let start = abi::LAYER_EXTENT_HINT_OFFSET + offset * 4;
+            definition[start..start + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        definition[88..92].copy_from_slice(&1i32.to_le_bytes());
+        definition[92..96].copy_from_slice(&1u32.to_le_bytes());
+        unsafe {
+            ptr::copy_nonoverlapping(
+                definition.as_ptr(),
+                world as *mut u8,
+                abi::PF_LAYER_DEF_SIZE,
+            );
+        }
+        state.worlds.insert(world, NativeWorld { pixel_format });
+        0
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn dispose_world(_: u64, world: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
+    with_state(|state| {
+        let Some(_record) = state.worlds.remove(&world) else {
+            return 4;
+        };
+        unsafe {
+            ptr::write_bytes(world as *mut u8, 0, abi::PF_LAYER_DEF_SIZE);
+        }
+        0
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn get_world_pixel_format(
+    world: u64,
+    output: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    with_state(|state| {
+        if output == 0 {
+            return 4;
+        }
+        let pixel_format = state
+            .worlds
+            .get(&world)
+            .map(|record| record.pixel_format)
+            .or_else(|| {
+                (world == state.smart_input_world || world == state.smart_output_world)
+                    .then_some(0x6267_7261u32 as i32)
+            });
+        let Some(pixel_format) = pixel_format else {
+            return 4;
+        };
+        unsafe {
+            ptr::write_unaligned(output as *mut i32, pixel_format);
+        }
+        0
+    })
+    .unwrap_or(4)
 }
 
 unsafe extern "win64" fn checkout_param(
@@ -1031,6 +1206,197 @@ unsafe extern "win64" fn resize_handle(
     .unwrap_or(4)
 }
 
+unsafe extern "win64" fn new_aegp_mem_handle(
+    plugin_id: u64,
+    what: u64,
+    size: u64,
+    flags: u64,
+    output: u64,
+    _: u64,
+) -> u64 {
+    with_state(|state| {
+        if plugin_id != 1 || what == 0 || output == 0 || flags & !3 != 0 || size > 16 * 1024 * 1024
+        {
+            return 4;
+        }
+        let handle = (state.arena_next + 7) & !7;
+        let data = (handle + 8 + 15) & !15;
+        let Some(end) = data.checked_add(size.max(1)) else {
+            return 4;
+        };
+        if end > state.arena_end {
+            return 4;
+        }
+        state.arena_next = end;
+        unsafe {
+            *(handle as *mut u64) = data;
+            ptr::write_bytes(data as *mut u8, 0, size as usize);
+            *(output as *mut u64) = handle;
+        }
+        state.aegp_memory_handles.insert(
+            handle,
+            NativeHandle {
+                data,
+                size,
+                locks: 0,
+            },
+        );
+        0
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn free_aegp_mem_handle(
+    handle: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    with_state(|state| {
+        if state
+            .aegp_memory_handles
+            .get(&handle)
+            .is_some_and(|record| record.locks == 0)
+        {
+            state.aegp_memory_handles.remove(&handle);
+            0
+        } else {
+            4
+        }
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn lock_aegp_mem_handle(
+    handle: u64,
+    output: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    with_state(|state| {
+        if output == 0 {
+            return 4;
+        }
+        if let Some(record) = state.aegp_memory_handles.get_mut(&handle) {
+            record.locks += 1;
+            unsafe {
+                *(output as *mut u64) = record.data;
+            }
+            0
+        } else {
+            4
+        }
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn unlock_aegp_mem_handle(
+    handle: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    with_state(|state| {
+        state
+            .aegp_memory_handles
+            .get_mut(&handle)
+            .map_or(4, |record| {
+                if record.locks == 0 {
+                    4
+                } else {
+                    record.locks -= 1;
+                    0
+                }
+            })
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn get_aegp_mem_handle_size(
+    handle: u64,
+    output: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    with_state(|state| {
+        if output == 0 {
+            return 4;
+        }
+        if let Some(record) = state.aegp_memory_handles.get(&handle) {
+            unsafe {
+                *(output as *mut u32) = record.size as u32;
+            }
+            0
+        } else {
+            4
+        }
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn resize_aegp_mem_handle(
+    what: u64,
+    size: u64,
+    handle: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    with_state(|state| {
+        if what == 0 || size > 16 * 1024 * 1024 {
+            return 4;
+        }
+        let Some(old) = state.aegp_memory_handles.get(&handle).cloned() else {
+            return 4;
+        };
+        if old.locks != 0 {
+            return 4;
+        }
+        let data = (state.arena_next + 15) & !15;
+        let Some(end) = data.checked_add(size.max(1)) else {
+            return 4;
+        };
+        if end > state.arena_end {
+            return 4;
+        }
+        state.arena_next = end;
+        unsafe {
+            ptr::write_bytes(data as *mut u8, 0, size as usize);
+            ptr::copy_nonoverlapping(
+                old.data as *const u8,
+                data as *mut u8,
+                old.size.min(size) as usize,
+            );
+            *(handle as *mut u64) = data;
+        }
+        if let Some(record) = state.aegp_memory_handles.get_mut(&handle) {
+            record.data = data;
+            record.size = size;
+        }
+        0
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn unsupported_aegp_memory_slot(
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    4
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1087,5 +1453,65 @@ mod tests {
             ]
         );
         assert_eq!(state.dropped_unsupported_suite_calls, 0);
+    }
+
+    #[test]
+    fn aegp_memory_v1_slots_zero_through_five_roundtrip() {
+        let mut arena = vec![0u8; 0x10000];
+        let mut state = NativeState {
+            arena_next: arena.as_mut_ptr() as u64,
+            arena_end: arena.as_ptr() as u64 + arena.len() as u64,
+            ..NativeState::default()
+        };
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+
+        let label = std::ffi::CString::new("olm_test").unwrap();
+        let mut handle = 0u64;
+        assert_eq!(
+            unsafe {
+                new_aegp_mem_handle(
+                    1,
+                    label.as_ptr() as u64,
+                    4,
+                    0,
+                    (&mut handle as *mut u64) as u64,
+                    0,
+                )
+            },
+            0
+        );
+        assert_ne!(handle, 0);
+
+        let mut data = 0u64;
+        assert_eq!(
+            unsafe { lock_aegp_mem_handle(handle, (&mut data as *mut u64) as u64, 0, 0, 0, 0) },
+            0
+        );
+        assert_ne!(data, 0);
+        unsafe {
+            *(data as *mut u32) = 0x1122_3344;
+        }
+        assert_eq!(unsafe { free_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 4);
+        assert_eq!(unsafe { unlock_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 0);
+
+        let mut size = 0u32;
+        assert_eq!(
+            unsafe { get_aegp_mem_handle_size(handle, (&mut size as *mut u32) as u64, 0, 0, 0, 0) },
+            0
+        );
+        assert_eq!(size, 4);
+        assert_eq!(
+            unsafe { resize_aegp_mem_handle(label.as_ptr() as u64, 8, handle, 0, 0, 0) },
+            0
+        );
+        let resized_data = unsafe { *(handle as *const u64) };
+        assert_eq!(unsafe { *(resized_data as *const u32) }, 0x1122_3344);
+        assert_eq!(unsafe { free_aegp_mem_handle(handle, 0, 0, 0, 0, 0) }, 0);
+        assert_eq!(
+            unsafe { get_aegp_mem_handle_size(handle, (&mut size as *mut u32) as u64, 0, 0, 0, 0) },
+            4
+        );
+
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
     }
 }

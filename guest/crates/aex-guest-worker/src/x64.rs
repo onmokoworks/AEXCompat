@@ -34,9 +34,20 @@ const HOST_UNLOCK_HANDLE: u64 = STUB_BASE + 0x800e0;
 const HOST_DISPOSE_HANDLE: u64 = STUB_BASE + 0x800f0;
 const HOST_HANDLE_SIZE: u64 = STUB_BASE + 0x80100;
 const HOST_RESIZE_HANDLE: u64 = STUB_BASE + 0x80110;
+const HOST_AEGP_NEW_MEM_HANDLE: u64 = STUB_BASE + 0x80140;
+const HOST_AEGP_FREE_MEM_HANDLE: u64 = STUB_BASE + 0x80150;
+const HOST_AEGP_LOCK_MEM_HANDLE: u64 = STUB_BASE + 0x80160;
+const HOST_AEGP_UNLOCK_MEM_HANDLE: u64 = STUB_BASE + 0x80170;
+const HOST_AEGP_MEM_HANDLE_SIZE: u64 = STUB_BASE + 0x80180;
+const HOST_AEGP_RESIZE_MEM_HANDLE: u64 = STUB_BASE + 0x80190;
+const HOST_NEW_WORLD: u64 = STUB_BASE + 0x80210;
+const HOST_DISPOSE_WORLD: u64 = STUB_BASE + 0x80220;
+const HOST_GET_WORLD_PIXEL_FORMAT: u64 = STUB_BASE + 0x80230;
 const HOST_AEGP_REGISTER: u64 = STUB_BASE + 0x80120;
 const HOST_AEGP_GET_MAIN_WINDOW: u64 = STUB_BASE + 0x80130;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
+const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81100;
+const HOST_WORLD_SUITE: u64 = STUB_BASE + 0x81300;
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
 const DATA_BASE: u64 = 0x0000_0000_4000_0000;
@@ -1339,6 +1350,8 @@ struct GuestState {
     parameter_definitions: Vec<u64>,
     next_handle_data: u64,
     handles: HashMap<u64, GuestHandle>,
+    aegp_memory_handles: HashMap<u64, GuestHandle>,
+    worlds: HashMap<u64, GuestWorld>,
     math_calls: Vec<String>,
     handle_allocations: Vec<u64>,
     census_blocks: HashMap<(u64, u32), u64>,
@@ -1352,6 +1365,11 @@ struct GuestHandle {
     data: u64,
     size: u64,
     locks: u32,
+}
+
+#[derive(Clone, Debug)]
+struct GuestWorld {
+    pixel_format: i32,
 }
 
 pub struct GuestEngine<'a> {
@@ -1925,6 +1943,24 @@ impl GuestEngine<'static> {
             ("write dispose-handle callback", HOST_DISPOSE_HANDLE),
             ("write handle-size callback", HOST_HANDLE_SIZE),
             ("write resize-handle callback", HOST_RESIZE_HANDLE),
+            ("write AEGP new-memory callback", HOST_AEGP_NEW_MEM_HANDLE),
+            ("write AEGP free-memory callback", HOST_AEGP_FREE_MEM_HANDLE),
+            ("write AEGP lock-memory callback", HOST_AEGP_LOCK_MEM_HANDLE),
+            (
+                "write AEGP unlock-memory callback",
+                HOST_AEGP_UNLOCK_MEM_HANDLE,
+            ),
+            ("write AEGP memory-size callback", HOST_AEGP_MEM_HANDLE_SIZE),
+            (
+                "write AEGP resize-memory callback",
+                HOST_AEGP_RESIZE_MEM_HANDLE,
+            ),
+            ("write new-world callback", HOST_NEW_WORLD),
+            ("write dispose-world callback", HOST_DISPOSE_WORLD),
+            (
+                "write get-world-pixel-format callback",
+                HOST_GET_WORLD_PIXEL_FORMAT,
+            ),
             ("write AEGP register callback", HOST_AEGP_REGISTER),
             ("write AEGP main-window callback", HOST_AEGP_GET_MAIN_WINDOW),
         ] {
@@ -2051,6 +2087,51 @@ impl GuestEngine<'static> {
                 HOST_RESIZE_HANDLE,
                 emulate_resize_handle,
             ),
+            (
+                "install AEGP new-memory callback",
+                HOST_AEGP_NEW_MEM_HANDLE,
+                emulate_aegp_new_mem_handle,
+            ),
+            (
+                "install AEGP free-memory callback",
+                HOST_AEGP_FREE_MEM_HANDLE,
+                emulate_aegp_free_mem_handle,
+            ),
+            (
+                "install AEGP lock-memory callback",
+                HOST_AEGP_LOCK_MEM_HANDLE,
+                emulate_aegp_lock_mem_handle,
+            ),
+            (
+                "install AEGP unlock-memory callback",
+                HOST_AEGP_UNLOCK_MEM_HANDLE,
+                emulate_aegp_unlock_mem_handle,
+            ),
+            (
+                "install AEGP memory-size callback",
+                HOST_AEGP_MEM_HANDLE_SIZE,
+                emulate_aegp_mem_handle_size,
+            ),
+            (
+                "install AEGP resize-memory callback",
+                HOST_AEGP_RESIZE_MEM_HANDLE,
+                emulate_aegp_resize_mem_handle,
+            ),
+            (
+                "install new-world callback",
+                HOST_NEW_WORLD,
+                emulate_new_world,
+            ),
+            (
+                "install dispose-world callback",
+                HOST_DISPOSE_WORLD,
+                emulate_dispose_world,
+            ),
+            (
+                "install get-world-pixel-format callback",
+                HOST_GET_WORLD_PIXEL_FORMAT,
+                emulate_get_world_pixel_format,
+            ),
         ] {
             uc(operation, unicorn.add_code_hook(address, address, callback))?;
         }
@@ -2068,6 +2149,41 @@ impl GuestEngine<'static> {
         {
             handle_suite[offset * 8..offset * 8 + 8].copy_from_slice(&address.to_le_bytes());
         }
+        let mut aegp_memory_suite = [0u8; 64];
+        for (offset, address) in [
+            HOST_AEGP_NEW_MEM_HANDLE,
+            HOST_AEGP_FREE_MEM_HANDLE,
+            HOST_AEGP_LOCK_MEM_HANDLE,
+            HOST_AEGP_UNLOCK_MEM_HANDLE,
+            HOST_AEGP_MEM_HANDLE_SIZE,
+            HOST_AEGP_RESIZE_MEM_HANDLE,
+            HOST_POISON,
+            HOST_POISON,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            aegp_memory_suite[offset * 8..offset * 8 + 8].copy_from_slice(&address.to_le_bytes());
+        }
+        uc(
+            "write AEGP Memory Suite",
+            unicorn.mem_write(HOST_AEGP_MEMORY_SUITE, &aegp_memory_suite),
+        )?;
+        let mut world_suite = [0u8; 24];
+        for (offset, address) in [
+            HOST_NEW_WORLD,
+            HOST_DISPOSE_WORLD,
+            HOST_GET_WORLD_PIXEL_FORMAT,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            world_suite[offset * 8..offset * 8 + 8].copy_from_slice(&address.to_le_bytes());
+        }
+        uc(
+            "write PF World Suite",
+            unicorn.mem_write(HOST_WORLD_SUITE, &world_suite),
+        )?;
         uc(
             "write PF Handle Suite",
             unicorn.mem_write(HOST_HANDLE_SUITE, &handle_suite),
@@ -2094,6 +2210,9 @@ impl GuestEngine<'static> {
             (HOST_RESIZE_HANDLE, "resize_handle"),
             (HOST_AEGP_REGISTER, "aegp_register_with_aegp"),
             (HOST_AEGP_GET_MAIN_WINDOW, "aegp_get_main_window"),
+            (HOST_NEW_WORLD, "new_world"),
+            (HOST_DISPOSE_WORLD, "dispose_world"),
+            (HOST_GET_WORLD_PIXEL_FORMAT, "get_world_pixel_format"),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -3425,6 +3544,25 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             return;
         }
     }
+    if name == "AEGP Memory Suite" && version == 1 && output != 0 {
+        if unicorn
+            .mem_write(output, &HOST_AEGP_MEMORY_SUITE.to_le_bytes())
+            .is_ok()
+        {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            return;
+        }
+    }
+    if name == "PF World Suite"
+        && version == 2
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_WORLD_SUITE.to_le_bytes())
+            .is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
     if name == "AEGP Utility Suite"
         && output != 0
         && let Some(table) = u32::try_from(version)
@@ -3630,6 +3768,352 @@ fn emulate_resize_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
     let _ = unicorn.reg_write(RegisterX86::RAX, if result.is_ok() { 0 } else { 4 });
 }
 
+fn aegp_stack_arg(unicorn: &Unicorn<'_, GuestState>, offset: u64) -> Result<u64, String> {
+    let rsp = unicorn
+        .reg_read(RegisterX86::RSP)
+        .map_err(|error| format!("AEGP Memory stack pointer: {error}"))?;
+    let mut bytes = [0u8; 8];
+    unicorn
+        .mem_read(rsp + offset, &mut bytes)
+        .map_err(|error| format!("AEGP Memory stack argument: {error}"))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn aegp_memory_error(unicorn: &mut Unicorn<'_, GuestState>) {
+    let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+}
+
+fn emulate_aegp_new_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let plugin_id = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|e| e.to_string())? as u32;
+        let what = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|e| e.to_string())?;
+        let size = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|e| e.to_string())? as u32;
+        let flags = unicorn
+            .reg_read(RegisterX86::R9)
+            .map_err(|e| e.to_string())? as u32;
+        let output = aegp_stack_arg(unicorn, 0x28)?;
+        if plugin_id != 1 || what == 0 || output == 0 || flags & !3 != 0 || size > 16 * 1024 * 1024
+        {
+            return Err("invalid AEGP Memory NewMemHandle request".to_string());
+        }
+        let handle = (unicorn.get_data().next_handle_data + 7) & !7;
+        let data = (handle + 8 + 15) & !15;
+        let end = data
+            .checked_add(u64::from(size.max(1)))
+            .ok_or("memory handle overflow")?;
+        if end > HANDLE_DATA_END {
+            return Err("AEGP memory handle arena exhausted".to_string());
+        }
+        unicorn
+            .mem_write(handle, &data.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        if size != 0 {
+            unicorn
+                .mem_write(data, &vec![0u8; size as usize])
+                .map_err(|e| e.to_string())?;
+        }
+        unicorn
+            .mem_write(output, &handle.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        let state = unicorn.get_data_mut();
+        state.next_handle_data = end;
+        state.aegp_memory_handles.insert(
+            handle,
+            GuestHandle {
+                data,
+                size: u64::from(size),
+                locks: 0,
+            },
+        );
+        Ok(())
+    })();
+    if result.is_ok() {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    } else {
+        aegp_memory_error(unicorn);
+    }
+}
+
+fn emulate_aegp_free_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let can_free = unicorn
+        .get_data()
+        .aegp_memory_handles
+        .get(&handle)
+        .is_some_and(|record| record.locks == 0);
+    let result = if can_free {
+        unicorn.get_data_mut().aegp_memory_handles.remove(&handle);
+        Ok(())
+    } else {
+        Err(())
+    };
+    if result.is_ok() {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    } else {
+        aegp_memory_error(unicorn);
+    }
+}
+
+fn emulate_aegp_lock_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    if output == 0 {
+        aegp_memory_error(unicorn);
+        return;
+    }
+    let data = unicorn
+        .get_data()
+        .aegp_memory_handles
+        .get(&handle)
+        .map(|record| record.data);
+    let Some(data) = data else {
+        aegp_memory_error(unicorn);
+        return;
+    };
+    if unicorn.mem_write(output, &data.to_le_bytes()).is_err() {
+        aegp_memory_error(unicorn);
+        return;
+    }
+    if let Some(record) = unicorn.get_data_mut().aegp_memory_handles.get_mut(&handle) {
+        record.locks = record.locks.saturating_add(1);
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    } else {
+        aegp_memory_error(unicorn);
+    }
+}
+
+fn emulate_aegp_unlock_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let ok = unicorn
+        .get_data_mut()
+        .aegp_memory_handles
+        .get_mut(&handle)
+        .map(|record| {
+            if record.locks == 0 {
+                false
+            } else {
+                record.locks -= 1;
+                true
+            }
+        })
+        .unwrap_or(false);
+    if ok {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    } else {
+        aegp_memory_error(unicorn);
+    }
+}
+
+fn emulate_aegp_mem_handle_size(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let size = unicorn
+        .get_data()
+        .aegp_memory_handles
+        .get(&handle)
+        .map(|record| record.size as u32);
+    if let Some(size) = size
+        && output != 0
+        && unicorn.mem_write(output, &size.to_le_bytes()).is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    } else {
+        aegp_memory_error(unicorn);
+    }
+}
+
+fn emulate_aegp_resize_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let what = unicorn.reg_read(RegisterX86::RCX).map_err(|_| ())?;
+        let size = unicorn.reg_read(RegisterX86::RDX).map_err(|_| ())? as u32;
+        let handle = unicorn.reg_read(RegisterX86::R8).map_err(|_| ())?;
+        if what == 0 || size > 16 * 1024 * 1024 {
+            return Err(());
+        }
+        let old = unicorn
+            .get_data()
+            .aegp_memory_handles
+            .get(&handle)
+            .cloned()
+            .ok_or(())?;
+        if old.locks != 0 {
+            return Err(());
+        }
+        let data = {
+            let state = unicorn.get_data_mut();
+            let data = (state.next_handle_data + 15) & !15;
+            let end = data.checked_add(u64::from(size.max(1))).ok_or(())?;
+            if end > HANDLE_DATA_END {
+                return Err(());
+            }
+            state.next_handle_data = end;
+            data
+        };
+        let mut bytes = vec![0u8; size as usize];
+        let copied = old.size.min(u64::from(size)) as usize;
+        if copied != 0 {
+            unicorn
+                .mem_read(old.data, &mut bytes[..copied])
+                .map_err(|_| ())?;
+        }
+        if size != 0 {
+            unicorn.mem_write(data, &bytes).map_err(|_| ())?;
+        }
+        unicorn
+            .mem_write(handle, &data.to_le_bytes())
+            .map_err(|_| ())?;
+        unicorn
+            .get_data_mut()
+            .aegp_memory_handles
+            .get_mut(&handle)
+            .unwrap()
+            .data = data;
+        unicorn
+            .get_data_mut()
+            .aegp_memory_handles
+            .get_mut(&handle)
+            .unwrap()
+            .size = u64::from(size);
+        Ok(())
+    })();
+    if result.is_ok() {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    } else {
+        aegp_memory_error(unicorn);
+    }
+}
+
+fn world_pixel_bytes(pixel_format: i32) -> Option<u64> {
+    match pixel_format as u32 {
+        0x6267_7261 => Some(4),
+        0x3631_6561 => Some(8),
+        0x3233_6561 => Some(16),
+        _ => None,
+    }
+}
+
+fn emulate_new_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let width = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("new-world width: {error}"))? as i32;
+        let height = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("new-world height: {error}"))? as i32;
+        let clear = unicorn
+            .reg_read(RegisterX86::R9)
+            .map_err(|error| format!("new-world clear flag: {error}"))?
+            != 0;
+        let pixel_format = aegp_stack_arg(unicorn, 0x28)? as i32;
+        let world = aegp_stack_arg(unicorn, 0x30)?;
+        let pixel_bytes = world_pixel_bytes(pixel_format)
+            .ok_or_else(|| format!("unsupported PF pixel format {pixel_format:#x}"))?;
+        if width <= 0 || height <= 0 || world == 0 {
+            return Err("invalid new-world dimensions or destination".to_string());
+        }
+        let rowbytes = u64::try_from(width)
+            .ok()
+            .and_then(|value| value.checked_mul(pixel_bytes))
+            .ok_or_else(|| "new-world rowbytes overflow".to_string())?;
+        let size = rowbytes
+            .checked_mul(height as u64)
+            .ok_or_else(|| "new-world allocation overflow".to_string())?;
+        if rowbytes > i32::MAX as u64 || size > 128 * 1024 * 1024 {
+            return Err("new-world allocation exceeds worker bounds".to_string());
+        }
+        let state = unicorn.get_data();
+        if state.worlds.contains_key(&world) {
+            return Err("new-world destination is already owned".to_string());
+        }
+        let data = (state.next_handle_data + 63) & !63;
+        let end = data
+            .checked_add(size.max(1))
+            .ok_or_else(|| "new-world arena overflow".to_string())?;
+        if end > HANDLE_DATA_END {
+            return Err("new-world arena exhausted".to_string());
+        }
+        if size != 0 {
+            unicorn
+                .mem_write(data, &vec![if clear { 0 } else { 0xcd }; size as usize])
+                .map_err(|error| format!("new-world pixels: {error}"))?;
+        }
+        let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        let flags = 2 | i32::from(pixel_format as u32 != 0x6267_7261);
+        definition[abi::LAYER_WORLD_FLAGS_OFFSET..abi::LAYER_WORLD_FLAGS_OFFSET + 4]
+            .copy_from_slice(&flags.to_le_bytes());
+        definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&data.to_le_bytes());
+        definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&(rowbytes as i32).to_le_bytes());
+        definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&width.to_le_bytes());
+        definition[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&height.to_le_bytes());
+        for (offset, value) in [0, 0, width, height].into_iter().enumerate() {
+            let start = abi::LAYER_EXTENT_HINT_OFFSET + offset * 4;
+            definition[start..start + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        definition[88..92].copy_from_slice(&1i32.to_le_bytes());
+        definition[92..96].copy_from_slice(&1u32.to_le_bytes());
+        unicorn
+            .mem_write(world, &definition)
+            .map_err(|error| format!("new-world definition: {error}"))?;
+        let state = unicorn.get_data_mut();
+        state.next_handle_data = end;
+        state.worlds.insert(world, GuestWorld { pixel_format });
+        Ok(())
+    })();
+    let _ = unicorn.reg_write(RegisterX86::RAX, if result.is_ok() { 0 } else { 4 });
+}
+
+fn emulate_dispose_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let world = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    if world == 0 || !unicorn.get_data().worlds.contains_key(&world) {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+        return;
+    }
+    let zero = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+    let result = if unicorn.mem_write(world, &zero).is_ok() {
+        unicorn.get_data_mut().worlds.remove(&world);
+        0
+    } else {
+        4
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, result);
+}
+
+fn emulate_get_world_pixel_format(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let world = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let pixel_format = unicorn
+        .get_data()
+        .worlds
+        .get(&world)
+        .map(|record| record.pixel_format)
+        .or_else(|| {
+            (world == unicorn.get_data().smart_input_world
+                || world == unicorn.get_data().smart_output_world)
+                .then_some(0x6267_7261u32 as i32)
+        });
+    let result = if let Some(pixel_format) = pixel_format
+        && output != 0
+        && unicorn
+            .mem_write(output, &pixel_format.to_le_bytes())
+            .is_ok()
+    {
+        0
+    } else {
+        4
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, result);
+}
+
 fn finish_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<(), String>) {
     match result {
         Ok(()) => {
@@ -3742,6 +4226,15 @@ mod tests {
             HOST_ACQUIRE_SUITE,
             HOST_AEGP_REGISTER,
             HOST_AEGP_GET_MAIN_WINDOW,
+            HOST_AEGP_NEW_MEM_HANDLE,
+            HOST_AEGP_FREE_MEM_HANDLE,
+            HOST_AEGP_LOCK_MEM_HANDLE,
+            HOST_AEGP_UNLOCK_MEM_HANDLE,
+            HOST_AEGP_MEM_HANDLE_SIZE,
+            HOST_AEGP_RESIZE_MEM_HANDLE,
+            HOST_NEW_WORLD,
+            HOST_DISPOSE_WORLD,
+            HOST_GET_WORLD_PIXEL_FORMAT,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -3766,6 +4259,61 @@ mod tests {
                 emulate_aegp_get_main_window,
             )
             .unwrap();
+        for (address, callback) in [
+            (
+                HOST_NEW_WORLD,
+                emulate_new_world as fn(&mut Unicorn<'_, GuestState>, u64, u32),
+            ),
+            (HOST_DISPOSE_WORLD, emulate_dispose_world),
+            (HOST_GET_WORLD_PIXEL_FORMAT, emulate_get_world_pixel_format),
+        ] {
+            unicorn.add_code_hook(address, address, callback).unwrap();
+        }
+        for (address, callback) in [
+            (
+                HOST_AEGP_NEW_MEM_HANDLE,
+                emulate_aegp_new_mem_handle as fn(&mut Unicorn<'_, GuestState>, u64, u32),
+            ),
+            (HOST_AEGP_FREE_MEM_HANDLE, emulate_aegp_free_mem_handle),
+            (HOST_AEGP_LOCK_MEM_HANDLE, emulate_aegp_lock_mem_handle),
+            (HOST_AEGP_UNLOCK_MEM_HANDLE, emulate_aegp_unlock_mem_handle),
+            (HOST_AEGP_MEM_HANDLE_SIZE, emulate_aegp_mem_handle_size),
+            (HOST_AEGP_RESIZE_MEM_HANDLE, emulate_aegp_resize_mem_handle),
+        ] {
+            unicorn.add_code_hook(address, address, callback).unwrap();
+        }
+        let mut aegp_memory_suite = [0u8; 64];
+        for (slot, callback) in [
+            HOST_AEGP_NEW_MEM_HANDLE,
+            HOST_AEGP_FREE_MEM_HANDLE,
+            HOST_AEGP_LOCK_MEM_HANDLE,
+            HOST_AEGP_UNLOCK_MEM_HANDLE,
+            HOST_AEGP_MEM_HANDLE_SIZE,
+            HOST_AEGP_RESIZE_MEM_HANDLE,
+            HOST_POISON,
+            HOST_POISON,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            aegp_memory_suite[slot * 8..slot * 8 + 8].copy_from_slice(&callback.to_le_bytes());
+        }
+        unicorn
+            .mem_write(HOST_AEGP_MEMORY_SUITE, &aegp_memory_suite)
+            .unwrap();
+        let mut world_suite = [0u8; 24];
+        for (slot, callback) in [
+            HOST_NEW_WORLD,
+            HOST_DISPOSE_WORLD,
+            HOST_GET_WORLD_PIXEL_FORMAT,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            world_suite[slot * 8..slot * 8 + 8].copy_from_slice(&callback.to_le_bytes());
+        }
+        unicorn.mem_write(HOST_WORLD_SUITE, &world_suite).unwrap();
+        unicorn.get_data_mut().next_handle_data = DATA_BASE + PAGE_SIZE / 2;
         install_aegp_utility_suites(&mut unicorn).unwrap();
         let mut trace_points = Vec::new();
         let mut decoder = Decoder::with_ip(64, code, CODE, DecoderOptions::NONE);
@@ -3804,6 +4352,188 @@ mod tests {
         // mov rax, rcx; add rax, rdx; ret
         let mut engine = test_engine(&[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3]);
         assert_eq!(engine.call_win64(CODE, [40, 2, 0, 0, 0, 0]).unwrap(), 42);
+    }
+
+    #[test]
+    fn aegp_memory_suite_preserves_handle_state_after_failed_operations() {
+        let mut engine = test_engine(&[0xc3]);
+        let suite_name = engine.allocate(18, 1).unwrap();
+        engine.write(suite_name, b"AEGP Memory Suite\0").unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [suite_name, 1, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+
+        let arena_before_failure = engine.unicorn.get_data().next_handle_data;
+        assert_eq!(
+            engine
+                .call_win64(HOST_AEGP_NEW_MEM_HANDLE, [1, 1, 32, 0, 0xdead_beef, 0],)
+                .unwrap(),
+            4
+        );
+        assert!(engine.unicorn.get_data().aegp_memory_handles.is_empty());
+        assert_eq!(
+            engine.unicorn.get_data().next_handle_data,
+            arena_before_failure
+        );
+
+        let handle_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_AEGP_NEW_MEM_HANDLE, [1, 1, 32, 0, handle_output, 0],)
+                .unwrap(),
+            0
+        );
+        let mut handle_bytes = [0u8; 8];
+        engine.read(handle_output, &mut handle_bytes).unwrap();
+        let handle = u64::from_le_bytes(handle_bytes);
+
+        assert_eq!(
+            engine
+                .call_win64(HOST_AEGP_LOCK_MEM_HANDLE, [handle, 0xdead_beef, 0, 0, 0, 0],)
+                .unwrap(),
+            4
+        );
+
+        let data_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_AEGP_LOCK_MEM_HANDLE, [handle, data_output, 0, 0, 0, 0],)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_AEGP_FREE_MEM_HANDLE, [handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            4
+        );
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .aegp_memory_handles
+                .contains_key(&handle)
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_AEGP_UNLOCK_MEM_HANDLE, [handle, 0, 0, 0, 0, 0],)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_AEGP_FREE_MEM_HANDLE, [handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn pf_world_suite_v2_creates_formats_and_rejects_double_dispose() {
+        let mut engine = test_engine(&[0xc3]);
+        let suite_name = engine.allocate(19, 1).unwrap();
+        engine.write(suite_name, b"PF World Suite\0").unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [suite_name, 2, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut pointer = [0u8; 8];
+        engine.read(suite_output, &mut pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(pointer), HOST_WORLD_SUITE);
+
+        let arena_before_failure = engine.unicorn.get_data().next_handle_data;
+        assert_eq!(
+            engine
+                .call_win64(HOST_NEW_WORLD, [1, 3, 2, 1, 0x3631_6561, 0xdead_beef],)
+                .unwrap(),
+            4
+        );
+        assert!(engine.unicorn.get_data().worlds.is_empty());
+        assert_eq!(
+            engine.unicorn.get_data().next_handle_data,
+            arena_before_failure
+        );
+
+        let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_NEW_WORLD, [1, 3, 2, 1, 0x3631_6561, world],)
+                .unwrap(),
+            0
+        );
+        let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        engine.read(world, &mut definition).unwrap();
+        assert_eq!(
+            i32::from_le_bytes(
+                definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            24
+        );
+        assert_eq!(
+            i32::from_le_bytes(
+                definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            3
+        );
+
+        let format_output = engine.allocate(4, 4).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_GET_WORLD_PIXEL_FORMAT,
+                    [world, format_output, 0, 0, 0, 0],
+                )
+                .unwrap(),
+            0
+        );
+        let mut format = [0u8; 4];
+        engine.read(format_output, &mut format).unwrap();
+        assert_eq!(u32::from_le_bytes(format), 0x3631_6561);
+
+        assert_eq!(
+            engine
+                .call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0])
+                .unwrap(),
+            4
+        );
+
+        let unmapped_world = 0xdead_beef;
+        engine.unicorn.get_data_mut().worlds.insert(
+            unmapped_world,
+            GuestWorld {
+                pixel_format: 0x6267_7261u32 as i32,
+            },
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_DISPOSE_WORLD, [1, unmapped_world, 0, 0, 0, 0],)
+                .unwrap(),
+            4
+        );
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .worlds
+                .contains_key(&unmapped_world)
+        );
     }
 
     #[test]
