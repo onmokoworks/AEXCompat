@@ -1,5 +1,5 @@
 use aex_abi::x86_64_windows as abi;
-use iced_x86::{Decoder, DecoderOptions, Mnemonic};
+use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use thiserror::Error;
@@ -44,6 +44,7 @@ const HANDLE_DATA_END: u64 = DATA_BASE + DATA_SIZE;
 const MAX_INSTRUCTIONS: usize = 0;
 const TIMEOUT_MICROSECONDS: u64 = 600_000_000;
 const MAX_TRACE_EVENTS: usize = 50_000;
+const TRACE_STACK_ARGUMENTS: usize = 4;
 
 #[derive(Debug, Error)]
 pub enum GuestError {
@@ -115,6 +116,7 @@ fn trace_instruction(
     image_end: u64,
 ) {
     let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or(0);
+    let return_value = trace_return_value(unicorn, image_base, image_end);
     if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
         while capture
             .call_rsp_stack
@@ -138,6 +140,9 @@ fn trace_instruction(
                         .map(|target| target - image_base),
                     name: Some("inferred_from_stack".into()),
                     arguments: Vec::new(),
+                    xmm_arguments: Vec::new(),
+                    stack_arguments: Vec::new(),
+                    return_value: Some(return_value.clone()),
                     call_kind: None,
                     instruction_bytes: None,
                 },
@@ -145,6 +150,9 @@ fn trace_instruction(
         }
     }
     let arguments = trace_arguments(unicorn, image_base, image_end);
+    let xmm_arguments = trace_xmm_arguments(unicorn);
+    let entry_stack_arguments = trace_stack_arguments(unicorn, rsp, 0x28, image_base, image_end);
+    let call_stack_arguments = trace_stack_arguments(unicorn, rsp, 0x20, image_base, image_end);
     let label = unicorn.get_data().trace_labels.get(&address).cloned();
     if let Some(label) = label
         && let Some(capture) = unicorn.get_data_mut().trace.as_mut()
@@ -170,6 +178,9 @@ fn trace_instruction(
                 target_rva: None,
                 name: Some(label.name),
                 arguments: arguments.clone(),
+                xmm_arguments: xmm_arguments.clone(),
+                stack_arguments: entry_stack_arguments,
+                return_value: None,
                 call_kind: None,
                 instruction_bytes: None,
             },
@@ -186,10 +197,10 @@ fn trace_instruction(
     }
     let mnemonic = instruction.mnemonic();
     if mnemonic == Mnemonic::Call {
-        let target = instruction.near_branch_target();
+        let target = resolve_runtime_target(unicorn, &instruction);
         let target_rva = (image_base..image_end)
-            .contains(&target)
-            .then(|| target - image_base);
+            .contains(&target.unwrap_or(0))
+            .then(|| target.expect("range-checked target") - image_base);
         let return_address = address.saturating_add(instruction.len() as u64);
         if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
             let depth = capture.return_stack.len();
@@ -214,11 +225,19 @@ fn trace_instruction(
                     target_rva,
                     name: None,
                     arguments,
-                    call_kind: Some(if target_rva.is_some() {
-                        "direct"
-                    } else {
-                        "indirect"
-                    }),
+                    xmm_arguments,
+                    stack_arguments: call_stack_arguments,
+                    return_value: None,
+                    call_kind: Some(
+                        if matches!(
+                            instruction.op0_kind(),
+                            OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+                        ) {
+                            "direct"
+                        } else {
+                            "indirect"
+                        },
+                    ),
                     instruction_bytes: Some(bytes_to_hex(
                         &bytes[..instruction.len().min(bytes.len())],
                     )),
@@ -253,6 +272,9 @@ fn trace_instruction(
                     .map(|target| target - image_base),
                 name: None,
                 arguments: Vec::new(),
+                xmm_arguments: Vec::new(),
+                stack_arguments: Vec::new(),
+                return_value: Some(return_value),
                 call_kind: None,
                 instruction_bytes: Some(bytes_to_hex(&bytes[..instruction.len().min(bytes.len())])),
             },
@@ -279,6 +301,138 @@ fn trace_arguments(
         })
     })
     .collect()
+}
+
+fn trace_xmm_arguments(unicorn: &Unicorn<'_, GuestState>) -> Vec<TraceXmmValue> {
+    [
+        ("xmm0", RegisterX86::XMM0),
+        ("xmm1", RegisterX86::XMM1),
+        ("xmm2", RegisterX86::XMM2),
+        ("xmm3", RegisterX86::XMM3),
+    ]
+    .into_iter()
+    .filter_map(|(register, id)| read_xmm(unicorn, register, id))
+    .collect()
+}
+
+fn read_xmm(
+    unicorn: &Unicorn<'_, GuestState>,
+    register: &'static str,
+    id: RegisterX86,
+) -> Option<TraceXmmValue> {
+    let bytes = unicorn.reg_read_long(id).ok()?;
+    let f32_lanes = bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let value = f32::from_le_bytes(chunk.try_into().expect("four-byte XMM lane"));
+            value.is_finite().then_some(value)
+        })
+        .collect();
+    let f64_lanes = bytes
+        .chunks_exact(8)
+        .map(|chunk| {
+            let value = f64::from_le_bytes(chunk.try_into().expect("eight-byte XMM lane"));
+            value.is_finite().then_some(value)
+        })
+        .collect();
+    Some(TraceXmmValue {
+        register,
+        raw_hex: bytes_to_hex(&bytes),
+        f32_lanes,
+        f64_lanes,
+    })
+}
+
+fn trace_stack_arguments(
+    unicorn: &Unicorn<'_, GuestState>,
+    rsp: u64,
+    first_offset: u64,
+    image_base: u64,
+    image_end: u64,
+) -> Vec<TraceStackArgument> {
+    (0..TRACE_STACK_ARGUMENTS)
+        .filter_map(|offset| {
+            let stack_offset = first_offset + (offset * 8) as u64;
+            let mut bytes = [0u8; 8];
+            unicorn
+                .mem_read(rsp.checked_add(stack_offset)?, &mut bytes)
+                .ok()?;
+            Some(TraceStackArgument {
+                index: offset + 5,
+                stack_offset,
+                value: classify_trace_value(u64::from_le_bytes(bytes), image_base, image_end),
+            })
+        })
+        .collect()
+}
+
+fn trace_return_value(
+    unicorn: &Unicorn<'_, GuestState>,
+    image_base: u64,
+    image_end: u64,
+) -> TraceReturnValue {
+    let rax = unicorn.reg_read(RegisterX86::RAX).unwrap_or(0);
+    let xmm0 = read_xmm(unicorn, "xmm0", RegisterX86::XMM0).unwrap_or(TraceXmmValue {
+        register: "xmm0",
+        raw_hex: String::new(),
+        f32_lanes: Vec::new(),
+        f64_lanes: Vec::new(),
+    });
+    TraceReturnValue {
+        rax: classify_trace_value(rax, image_base, image_end),
+        xmm0,
+    }
+}
+
+fn resolve_runtime_target(
+    unicorn: &Unicorn<'_, GuestState>,
+    instruction: &iced_x86::Instruction,
+) -> Option<u64> {
+    match instruction.op0_kind() {
+        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
+            Some(instruction.near_branch_target())
+        }
+        OpKind::Register => read_iced_register(unicorn, instruction.op0_register()),
+        OpKind::Memory => {
+            let address = if instruction.is_ip_rel_memory_operand() {
+                instruction.ip_rel_memory_address()
+            } else {
+                let base = read_iced_register(unicorn, instruction.memory_base()).unwrap_or(0);
+                let index = read_iced_register(unicorn, instruction.memory_index()).unwrap_or(0);
+                base.wrapping_add(index.wrapping_mul(instruction.memory_index_scale() as u64))
+                    .wrapping_add(instruction.memory_displacement64())
+            };
+            let mut bytes = [0u8; 8];
+            unicorn.mem_read(address, &mut bytes).ok()?;
+            Some(u64::from_le_bytes(bytes))
+        }
+        _ => None,
+    }
+}
+
+fn read_iced_register(unicorn: &Unicorn<'_, GuestState>, register: Register) -> Option<u64> {
+    let register = match register {
+        Register::RAX => RegisterX86::RAX,
+        Register::RCX => RegisterX86::RCX,
+        Register::RDX => RegisterX86::RDX,
+        Register::RBX => RegisterX86::RBX,
+        Register::RSP => RegisterX86::RSP,
+        Register::RBP => RegisterX86::RBP,
+        Register::RSI => RegisterX86::RSI,
+        Register::RDI => RegisterX86::RDI,
+        Register::R8 => RegisterX86::R8,
+        Register::R9 => RegisterX86::R9,
+        Register::R10 => RegisterX86::R10,
+        Register::R11 => RegisterX86::R11,
+        Register::R12 => RegisterX86::R12,
+        Register::R13 => RegisterX86::R13,
+        Register::R14 => RegisterX86::R14,
+        Register::R15 => RegisterX86::R15,
+        Register::RIP => RegisterX86::RIP,
+        Register::None => return Some(0),
+        _ => return None,
+    };
+    unicorn.reg_read(register).ok()
 }
 
 fn classify_trace_value(raw: u64, image_base: u64, image_end: u64) -> TraceValue {
@@ -533,6 +687,28 @@ pub struct TraceArgument {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct TraceXmmValue {
+    pub register: &'static str,
+    pub raw_hex: String,
+    pub f32_lanes: Vec<Option<f32>>,
+    pub f64_lanes: Vec<Option<f64>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceStackArgument {
+    pub index: usize,
+    pub stack_offset: u64,
+    #[serde(flatten)]
+    pub value: TraceValue,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceReturnValue {
+    pub rax: TraceValue,
+    pub xmm0: TraceXmmValue,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct TraceEvent {
     pub sequence: usize,
     pub observed_count: u64,
@@ -548,6 +724,12 @@ pub struct TraceEvent {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub arguments: Vec<TraceArgument>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub xmm_arguments: Vec<TraceXmmValue>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stack_arguments: Vec<TraceStackArgument>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_value: Option<TraceReturnValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_kind: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -981,6 +1163,9 @@ impl GuestEngine<'static> {
                 target_rva: None,
                 name: Some(selector.to_string()),
                 arguments: Vec::new(),
+                xmm_arguments: Vec::new(),
+                stack_arguments: Vec::new(),
+                return_value: None,
                 call_kind: None,
                 instruction_bytes: None,
             }],
@@ -1061,6 +1246,9 @@ impl GuestEngine<'static> {
                 target_rva: None,
                 name: Some(format!("return={return_value:#x}")),
                 arguments: Vec::new(),
+                xmm_arguments: Vec::new(),
+                stack_arguments: Vec::new(),
+                return_value: None,
                 call_kind: None,
                 instruction_bytes: None,
             },
@@ -2293,6 +2481,27 @@ mod tests {
     }
 
     #[test]
+    fn execution_trace_resolves_register_indirect_guest_target() {
+        const CODE: u64 = 0x1000_0000;
+        let target = CODE + 13;
+        let mut code = vec![0x48, 0xb8];
+        code.extend_from_slice(&target.to_le_bytes());
+        code.extend_from_slice(&[0xff, 0xd0, 0xc3, 0xc3]);
+        let mut engine = test_engine(&code);
+        engine.begin_execution_trace("GLOBAL_SETUP", CODE).unwrap();
+        let result = engine.call_win64(CODE, [0; 6]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        let call = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "guest_call")
+            .unwrap();
+        assert_eq!(call.call_kind, Some("indirect"));
+        assert_eq!(call.target_rva, Some(13));
+    }
+
+    #[test]
     fn execution_trace_folds_repeated_call_sites_without_losing_count() {
         const CODE: u64 = 0x1000_0000;
         // mov ecx,2; loop: call return; dec ecx; jnz loop; return: ret
@@ -2312,6 +2521,44 @@ mod tests {
         assert_eq!(call.pc_rva, Some(5));
         assert_eq!(call.observed_count, 2);
         assert!(trace.timeline.iter().any(|line| line.contains("×2")));
+    }
+
+    #[test]
+    fn call_envelope_decodes_xmm_stack_and_return_values() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[0xc3]);
+        let xmm_bytes = [
+            1.5f32.to_le_bytes(),
+            (-2.25f32).to_le_bytes(),
+            3.0f32.to_le_bytes(),
+            4.5f32.to_le_bytes(),
+        ]
+        .concat();
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM0, &xmm_bytes)
+            .unwrap();
+        let rsp = STACK_BASE + 0x1000;
+        engine.unicorn.reg_write(RegisterX86::RSP, rsp).unwrap();
+        engine
+            .unicorn
+            .mem_write(rsp + 0x20, &0x1122_3344_5566_7788u64.to_le_bytes())
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RAX, 0xaabb_ccdd)
+            .unwrap();
+
+        let xmm = trace_xmm_arguments(&engine.unicorn);
+        assert_eq!(xmm[0].register, "xmm0");
+        assert_eq!(xmm[0].f32_lanes[0], Some(1.5));
+        assert_eq!(xmm[0].f32_lanes[1], Some(-2.25));
+        let stack = trace_stack_arguments(&engine.unicorn, rsp, 0x20, CODE, CODE + PAGE_SIZE);
+        assert_eq!(stack[0].index, 5);
+        assert_eq!(stack[0].value.raw, 0x1122_3344_5566_7788);
+        let returned = trace_return_value(&engine.unicorn, CODE, CODE + PAGE_SIZE);
+        assert_eq!(returned.rax.raw, 0xaabb_ccdd);
+        assert_eq!(returned.xmm0.f32_lanes[2], Some(3.0));
     }
 
     #[test]
@@ -2339,6 +2586,9 @@ mod tests {
                     target_rva: None,
                     name: None,
                     arguments: Vec::new(),
+                    xmm_arguments: Vec::new(),
+                    stack_arguments: Vec::new(),
+                    return_value: None,
                     call_kind: None,
                     instruction_bytes: None,
                 },

@@ -93,6 +93,17 @@
         "arguments": {
           "type": "array",
           "items": { "$ref": "#/$defs/argument" }
+        },
+        "xmm_arguments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/xmm_value" }
+        },
+        "stack_arguments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stack_argument" }
+        },
+        "return_value": {
+          "$ref": "#/$defs/return_value"
         }
       }
     },
@@ -102,6 +113,60 @@
       "required": ["register", "raw", "classification"],
       "properties": {
         "register": { "enum": ["rcx", "rdx", "r8", "r9"] },
+        "raw": { "type": "integer", "minimum": 0 },
+        "classification": {
+          "enum": ["scalar", "image", "guest_data", "guest_stack", "host_stub"]
+        },
+        "offset": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "xmm_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["register", "raw_hex", "f32_lanes", "f64_lanes"],
+      "properties": {
+        "register": { "enum": ["xmm0", "xmm1", "xmm2", "xmm3"] },
+        "raw_hex": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+        "f32_lanes": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "type": ["number", "null"] }
+        },
+        "f64_lanes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": ["number", "null"] }
+        }
+      }
+    },
+    "stack_argument": {
+      "allOf": [
+        { "$ref": "#/$defs/value" },
+        {
+          "type": "object",
+          "required": ["index", "stack_offset"],
+          "properties": {
+            "index": { "type": "integer", "minimum": 5 },
+            "stack_offset": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "return_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rax", "xmm0"],
+      "properties": {
+        "rax": { "$ref": "#/$defs/value" },
+        "xmm0": { "$ref": "#/$defs/xmm_value" }
+      }
+    },
+    "value": {
+      "type": "object",
+      "required": ["raw", "classification"],
+      "properties": {
         "raw": { "type": "integer", "minimum": 0 },
         "classification": {
           "enum": ["scalar", "image", "guest_data", "guest_stack", "host_stub"]
