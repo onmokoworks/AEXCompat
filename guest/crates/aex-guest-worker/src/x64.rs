@@ -227,12 +227,22 @@ fn update_numeric_ranges(exemplars: &mut TraceExemplars, observation: &TraceObse
                 values.push((format!("{}.f32[{lane}]", xmm.register), f64::from(*value)));
             }
         }
+        for (lane, value) in xmm.f64_lanes.iter().enumerate() {
+            if let Some(value) = value {
+                values.push((format!("{}.f64[{lane}]", xmm.register), *value));
+            }
+        }
     }
     if let Some(returned) = &observation.return_value {
         values.push(("rax".into(), returned.rax.raw as f64));
         for (lane, value) in returned.xmm0.f32_lanes.iter().enumerate() {
             if let Some(value) = value {
                 values.push((format!("xmm0.f32[{lane}]"), f64::from(*value)));
+            }
+        }
+        for (lane, value) in returned.xmm0.f64_lanes.iter().enumerate() {
+            if let Some(value) = value {
+                values.push((format!("xmm0.f64[{lane}]"), *value));
             }
         }
     }
@@ -262,6 +272,55 @@ fn trace_instruction(
     image_end: u64,
 ) {
     let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or(0);
+    let entry_rva = address.saturating_sub(image_base);
+    let entry_watches = unicorn
+        .get_data()
+        .trace
+        .as_ref()
+        .filter(|capture| address == image_base + capture.entry_rva)
+        .map(|capture| {
+            capture
+                .watch_specs
+                .iter()
+                .filter(|spec| {
+                    spec.function_rva == Some(entry_rva)
+                        && !capture.selector_watches.iter().any(|pending| {
+                            pending.spec_id == spec.id && pending.function_rva == Some(entry_rva)
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !entry_watches.is_empty() {
+        let pending = entry_watches
+            .into_iter()
+            .map(|spec| {
+                let watch_address = trace_register_value(unicorn, spec.register, 0x28).unwrap_or(0);
+                PendingTraceWatch {
+                    spec_id: spec.id,
+                    register: spec.register,
+                    call_id: None,
+                    function_rva: Some(entry_rva),
+                    pc_rva: Some(entry_rva),
+                    address: watch_address,
+                    before: trace_memory_snapshot(
+                        unicorn,
+                        watch_address,
+                        spec.size,
+                        image_base,
+                        image_end,
+                    ),
+                    image_coordinate: spec.image_coordinate,
+                    image_row_offset: spec.image_row_offset,
+                    image_format: spec.image_format,
+                }
+            })
+            .collect::<Vec<_>>();
+        if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+            capture.selector_watches.extend(pending);
+        }
+    }
     let return_value = trace_return_value(unicorn, image_base, image_end);
     loop {
         let should_infer_return = unicorn
@@ -2055,6 +2114,7 @@ impl GuestEngine<'static> {
         let image_base = self.image_base;
         let image_end = self.image_end;
         let mut hook_points = self.trace_points.clone();
+        hook_points.push(entry_address);
         let label_points = self
             .unicorn
             .get_data()
@@ -2151,9 +2211,9 @@ impl GuestEngine<'static> {
                 );
                 TraceMemoryWitness {
                     watch_id: pending.spec_id,
-                    call_id: None,
-                    function_rva: None,
-                    pc_rva: None,
+                    call_id: pending.call_id,
+                    function_rva: pending.function_rva,
+                    pc_rva: pending.pc_rva,
                     register: pending.register,
                     image_coordinate: pending.image_coordinate,
                     image_row_offset: pending.image_row_offset,
@@ -3772,6 +3832,35 @@ mod tests {
     }
 
     #[test]
+    fn execution_trace_activates_function_watch_at_selector_entry() {
+        const CODE: u64 = 0x1000_0000;
+        // inc byte ptr [rcx]; ret
+        let mut engine = test_engine(&[0xfe, 0x01, 0xc3]);
+        let buffer = engine.allocate(1, 1).unwrap();
+        engine.write(buffer, &[1]).unwrap();
+        engine.configure_trace_watches(vec![TraceWatchSpec {
+            id: "selector-entry".into(),
+            function_rva: Some(0),
+            instruction_rva: None,
+            absolute_address: None,
+            register: "rcx",
+            size: 1,
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
+        }]);
+        engine.begin_execution_trace("GLOBAL_SETUP", CODE).unwrap();
+        let result = engine.call_win64(CODE, [buffer, 0, 0, 0, 0, 0]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        let witness = trace.memory_witnesses.first().unwrap();
+        assert_eq!(witness.watch_id, "selector-entry");
+        assert_eq!(witness.function_rva, Some(0));
+        assert_eq!(witness.before.u8_values, [1]);
+        assert_eq!(witness.after.u8_values, [2]);
+    }
+
+    #[test]
     fn execution_trace_records_rip_relative_constant_access() {
         const CODE: u64 = 0x1000_0000;
         let value = 0x1122_3344_5566_7788u64;
@@ -4018,6 +4107,48 @@ mod tests {
         let returned = trace_return_value(&engine.unicorn, CODE, CODE + PAGE_SIZE);
         assert_eq!(returned.rax.raw, 0xaabb_ccdd);
         assert_eq!(returned.xmm0.f32_lanes[2], Some(3.0));
+    }
+
+    #[test]
+    fn numeric_ranges_include_f64_xmm_lanes() {
+        let xmm = TraceXmmValue {
+            register: "xmm1",
+            raw_hex: String::new(),
+            f32_lanes: Vec::new(),
+            f64_lanes: vec![Some(1.25), Some(-3.5)],
+        };
+        let returned = TraceReturnValue {
+            rax: TraceValue {
+                raw: 0,
+                classification: "integer",
+                offset: None,
+            },
+            xmm0: TraceXmmValue {
+                register: "xmm0",
+                raw_hex: String::new(),
+                f32_lanes: Vec::new(),
+                f64_lanes: vec![Some(9.75)],
+            },
+        };
+        let observation = TraceObservation {
+            observation: 1,
+            fingerprint: "0000000000000001".into(),
+            call_id: None,
+            arguments: Vec::new(),
+            xmm_arguments: vec![xmm],
+            stack_arguments: Vec::new(),
+            return_value: Some(returned),
+        };
+        let mut exemplars = TraceExemplars::default();
+
+        update_numeric_ranges(&mut exemplars, &observation);
+
+        assert!(exemplars.numeric_ranges.iter().any(|range| {
+            range.field == "xmm1.f64[1]" && range.minimum == -3.5 && range.maximum == -3.5
+        }));
+        assert!(exemplars.numeric_ranges.iter().any(|range| {
+            range.field == "xmm0.f64[0]" && range.minimum == 9.75 && range.maximum == 9.75
+        }));
     }
 
     #[test]

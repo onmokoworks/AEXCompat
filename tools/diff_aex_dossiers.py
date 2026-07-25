@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections import Counter
 from pathlib import Path
@@ -42,6 +43,15 @@ def count_events(trace: dict[str, Any]) -> Counter[str]:
     return counts
 
 
+def count_memory_witnesses(trace: dict[str, Any]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for witness in trace.get("memory_witnesses", []):
+        canonical = json.dumps(witness, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        counts[digest] += 1
+    return counts
+
+
 def bounded_counter_delta(
     before: Counter[str], after: Counter[str], limit: int = 256
 ) -> dict[str, Any]:
@@ -69,6 +79,9 @@ def build_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         left = before_traces.get(selector, {})
         right = after_traces.get(selector, {})
         event_delta = bounded_counter_delta(count_events(left), count_events(right))
+        witness_delta = bounded_counter_delta(
+            count_memory_witnesses(left), count_memory_witnesses(right)
+        )
         trace_diffs.append(
             {
                 "selector": selector,
@@ -91,6 +104,12 @@ def build_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
                 "memory_witness_count": {
                     "before": len(left.get("memory_witnesses", [])),
                     "after": len(right.get("memory_witnesses", [])),
+                },
+                "memory_witness_deltas": witness_delta["entries"],
+                "memory_witness_delta_truncation": {
+                    "limit": witness_delta["limit"],
+                    "truncated": witness_delta["truncated"],
+                    "dropped_count": witness_delta["dropped_count"],
                 },
                 "truncation": {
                     "before": left.get("truncation", []),

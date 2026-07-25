@@ -111,3 +111,33 @@ def test_event_delta_reports_bounded_truncation():
     assert result["limit"] == 2
     assert result["truncated"] is True
     assert result["dropped_count"] == 4
+
+
+def test_dossier_diff_reports_changed_memory_witness_contents():
+    before_witness = {
+        "watch_id": "pixel",
+        "changed_ranges": [{"offset": 0, "size": 1}],
+        "before": {"sha256": "a" * 64, "hex": "00"},
+        "after": {"sha256": "b" * 64, "hex": "01"},
+    }
+    after_witness = {
+        **before_witness,
+        "after": {"sha256": "c" * 64, "hex": "02"},
+    }
+    before = {
+        "execution_traces": [
+            {"selector": "SMART_RENDER", "memory_witnesses": [before_witness]}
+        ]
+    }
+    after = {
+        "execution_traces": [
+            {"selector": "SMART_RENDER", "memory_witnesses": [after_witness]}
+        ]
+    }
+
+    result = MODULE.build_diff(before, after)
+    trace_diff = result["trace_diffs"][0]
+
+    assert trace_diff["memory_witness_count"] == {"before": 1, "after": 1}
+    assert len(trace_diff["memory_witness_deltas"]) == 2
+    assert {item["delta"] for item in trace_diff["memory_witness_deltas"]} == {-1, 1}
