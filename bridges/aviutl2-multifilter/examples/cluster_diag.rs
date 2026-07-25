@@ -59,6 +59,7 @@ fn main() {
         repository: &repository,
         plugins: vec![artifact(&plugin1), artifact(&plugin2)],
         dependencies: closure.into_dependencies(),
+        sealed_resources: Vec::new(),
         module_bound,
         inspect_deadline: std::time::Duration::from_secs(300),
     })
