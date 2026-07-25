@@ -82,3 +82,17 @@ def test_execution_trace_contract_accepts_ordered_selector_timeline():
         range(len(report["events"]))
     )
     assert len(report["timeline"]) == len(report["events"])
+
+    for selector in [
+        "GLOBAL_SETUP",
+        "PARAMS_SETUP",
+        "SEQUENCE_SETUP",
+        "FRAME_SETUP",
+        "RENDER",
+        "SMART_PRE_RENDER",
+        "SMART_RENDER",
+        "FRAME_SETDOWN",
+        "SEQUENCE_SETDOWN",
+    ]:
+        report["selector"] = selector
+        Draft202012Validator(SCHEMA).validate(report)

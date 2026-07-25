@@ -27,7 +27,19 @@
     "image_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "preferred_image_base": { "type": "integer", "minimum": 0 },
     "entry_export": { "type": "string", "minLength": 1 },
-    "selector": { "enum": ["GLOBAL_SETUP", "PARAMS_SETUP"] },
+    "selector": {
+      "enum": [
+        "GLOBAL_SETUP",
+        "PARAMS_SETUP",
+        "SEQUENCE_SETUP",
+        "FRAME_SETUP",
+        "RENDER",
+        "SMART_PRE_RENDER",
+        "SMART_RENDER",
+        "FRAME_SETDOWN",
+        "SEQUENCE_SETDOWN"
+      ]
+    },
     "entry_rva": { "type": "integer", "minimum": 0 },
     "return_value": { "type": "integer", "minimum": 0 },
     "truncated": { "type": "boolean" },
