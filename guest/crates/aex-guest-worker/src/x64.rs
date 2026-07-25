@@ -1367,6 +1367,15 @@ struct GuestState {
     trace: Option<TraceCapture>,
     trace_labels: HashMap<u64, TraceLabel>,
     trace_watches: Vec<TraceWatchSpec>,
+    vcomp_dynamic_loop: Option<VcompDynamicLoop>,
+}
+
+#[derive(Clone, Debug)]
+struct VcompDynamicLoop {
+    current: i32,
+    upper: i32,
+    chunk: i32,
+    exhausted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1908,6 +1917,57 @@ impl GuestEngine<'static> {
                         uc(
                             "install omp_get_max_threads import",
                             unicorn.mem_write(stub, &deterministic_i32_stub(value)),
+                        )?;
+                    }
+                    "_vcomp_fork" => {
+                        // The hook marshals captured arguments into the outlined
+                        // worker ABI. Tail-jump so the worker returns directly to
+                        // the original caller.
+                        uc(
+                            "write _vcomp_fork tail jump",
+                            unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                        )?;
+                        uc(
+                            "install _vcomp_fork import",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_vcomp_fork(unicorn);
+                            }),
+                        )?;
+                    }
+                    "_vcomp_for_dynamic_init" => {
+                        uc(
+                            "write _vcomp_for_dynamic_init return",
+                            unicorn.mem_write(stub, &[0xc3]),
+                        )?;
+                        uc(
+                            "install _vcomp_for_dynamic_init import",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_vcomp_for_dynamic_init(unicorn);
+                            }),
+                        )?;
+                    }
+                    "_vcomp_for_dynamic_next" => {
+                        uc(
+                            "write _vcomp_for_dynamic_next return",
+                            unicorn.mem_write(stub, &[0xc3]),
+                        )?;
+                        uc(
+                            "install _vcomp_for_dynamic_next import",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_vcomp_for_dynamic_next(unicorn);
+                            }),
+                        )?;
+                    }
+                    "_vcomp_for_static_simple_init" => {
+                        uc(
+                            "write _vcomp_for_static_simple_init return",
+                            unicorn.mem_write(stub, &[0xc3]),
+                        )?;
+                        uc(
+                            "install _vcomp_for_static_simple_init import",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_vcomp_for_static_simple_init(unicorn);
+                            }),
                         )?;
                     }
                     _ => {}
@@ -3156,6 +3216,199 @@ fn capture_add_param(unicorn: &mut Unicorn<'_, GuestState>) {
             unicorn.get_data_mut().callback_error = Some(error);
             let _ = unicorn.emu_stop();
         }
+    }
+}
+
+fn vcomp_callback_error(unicorn: &mut Unicorn<'_, GuestState>, message: String) {
+    if unicorn.get_data().callback_error.is_none() {
+        unicorn.get_data_mut().callback_error = Some(message);
+    }
+}
+
+fn read_vcomp_register(
+    unicorn: &Unicorn<'_, GuestState>,
+    register: RegisterX86,
+) -> Result<u64, String> {
+    unicorn
+        .reg_read(register)
+        .map_err(|error| format!("VCOMP register read failed: {error}"))
+}
+
+fn read_vcomp_u64(unicorn: &Unicorn<'_, GuestState>, address: u64) -> Result<u64, String> {
+    let bytes = unicorn
+        .mem_read_as_vec(address, 8)
+        .map_err(|error| format!("VCOMP memory read at {address:#x} failed: {error}"))?;
+    Ok(u64::from_le_bytes(bytes.try_into().map_err(|_| {
+        "VCOMP memory read returned the wrong size".to_string()
+    })?))
+}
+
+fn write_vcomp_i32(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    address: u64,
+    value: i32,
+) -> Result<(), String> {
+    if address == 0 {
+        return Err("VCOMP output pointer is null".to_string());
+    }
+    unicorn
+        .mem_write(address, &value.to_le_bytes())
+        .map_err(|error| format!("VCOMP memory write at {address:#x} failed: {error}"))
+}
+
+fn emulate_vcomp_fork(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let argument_count = usize::try_from(read_vcomp_register(unicorn, RegisterX86::RDX)?)
+            .map_err(|_| "VCOMP argument count does not fit usize".to_string())?;
+        if argument_count > 64 {
+            return Err(format!(
+                "VCOMP outlined worker argument count {argument_count} exceeds 64"
+            ));
+        }
+        let worker = read_vcomp_register(unicorn, RegisterX86::R8)?;
+        if worker == 0 {
+            return Err("VCOMP outlined worker pointer is null".to_string());
+        }
+        unicorn
+            .mem_read_as_vec(worker, 1)
+            .map_err(|error| format!("VCOMP outlined worker {worker:#x} is unmapped: {error}"))?;
+
+        let rsp = read_vcomp_register(unicorn, RegisterX86::RSP)?;
+        let mut arguments = Vec::with_capacity(argument_count);
+        if argument_count != 0 {
+            arguments.push(read_vcomp_register(unicorn, RegisterX86::R9)?);
+        }
+        for index in 1..argument_count {
+            let address = rsp
+                .checked_add(0x20)
+                .and_then(|base| base.checked_add((index as u64) * 8))
+                .ok_or_else(|| "VCOMP captured argument address overflow".to_string())?;
+            arguments.push(read_vcomp_u64(unicorn, address)?);
+        }
+
+        for (index, register) in [
+            RegisterX86::RCX,
+            RegisterX86::RDX,
+            RegisterX86::R8,
+            RegisterX86::R9,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            unicorn
+                .reg_write(register, arguments.get(index).copied().unwrap_or(0))
+                .map_err(|error| format!("VCOMP worker register write failed: {error}"))?;
+        }
+        for (index, value) in arguments.iter().copied().enumerate().skip(4) {
+            let address = rsp
+                .checked_add(0x28)
+                .and_then(|base| base.checked_add(((index - 4) as u64) * 8))
+                .ok_or_else(|| "VCOMP worker stack argument address overflow".to_string())?;
+            unicorn
+                .mem_write(address, &value.to_le_bytes())
+                .map_err(|error| format!("VCOMP worker stack write failed: {error}"))?;
+        }
+        unicorn
+            .reg_write(RegisterX86::R11, worker)
+            .map_err(|error| format!("VCOMP worker target write failed: {error}"))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        vcomp_callback_error(unicorn, error);
+        let _ = unicorn.reg_write(RegisterX86::R11, RETURN_ADDRESS);
+    }
+}
+
+fn emulate_vcomp_for_dynamic_init(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let lower = read_vcomp_register(unicorn, RegisterX86::RDX)? as u32 as i32;
+        let upper = read_vcomp_register(unicorn, RegisterX86::R8)? as u32 as i32;
+        let step = read_vcomp_register(unicorn, RegisterX86::R9)? as u32 as i32;
+        let rsp = read_vcomp_register(unicorn, RegisterX86::RSP)?;
+        let chunk = read_vcomp_u64(unicorn, rsp + 0x28)? as u32 as i32;
+        if step != 1 {
+            return Err(format!(
+                "VCOMP dynamic loop step {step} is unsupported; expected 1"
+            ));
+        }
+        if chunk <= 0 {
+            return Err(format!(
+                "VCOMP dynamic loop chunk {chunk} is invalid; expected a positive value"
+            ));
+        }
+        unicorn.get_data_mut().vcomp_dynamic_loop = Some(VcompDynamicLoop {
+            current: lower,
+            upper,
+            chunk,
+            exhausted: false,
+        });
+        Ok(())
+    })();
+    if let Err(error) = result {
+        vcomp_callback_error(unicorn, error);
+    }
+}
+
+fn emulate_vcomp_for_dynamic_next(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let lower_output = read_vcomp_register(unicorn, RegisterX86::RCX)?;
+        let upper_output = read_vcomp_register(unicorn, RegisterX86::RDX)?;
+        let loop_state = unicorn
+            .get_data()
+            .vcomp_dynamic_loop
+            .clone()
+            .ok_or_else(|| "VCOMP dynamic next called before dynamic init".to_string())?;
+        if loop_state.exhausted || loop_state.current > loop_state.upper {
+            unicorn
+                .reg_write(RegisterX86::RAX, 0)
+                .map_err(|error| format!("VCOMP return write failed: {error}"))?;
+            return Ok(());
+        }
+        let chunk_end = loop_state
+            .current
+            .checked_add(loop_state.chunk - 1)
+            .unwrap_or(i32::MAX)
+            .min(loop_state.upper);
+        write_vcomp_i32(unicorn, lower_output, loop_state.current)?;
+        write_vcomp_i32(unicorn, upper_output, chunk_end)?;
+        if let Some(loop_state) = unicorn.get_data_mut().vcomp_dynamic_loop.as_mut() {
+            if chunk_end == loop_state.upper {
+                loop_state.exhausted = true;
+            } else {
+                loop_state.current = chunk_end + 1;
+            }
+        }
+        unicorn
+            .reg_write(RegisterX86::RAX, 1)
+            .map_err(|error| format!("VCOMP return write failed: {error}"))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        vcomp_callback_error(unicorn, error);
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    }
+}
+
+fn emulate_vcomp_for_static_simple_init(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let lower = read_vcomp_register(unicorn, RegisterX86::RCX)? as u32 as i32;
+        let upper = read_vcomp_register(unicorn, RegisterX86::RDX)? as u32 as i32;
+        let step = read_vcomp_register(unicorn, RegisterX86::R8)? as u32 as i32;
+        let increment = read_vcomp_register(unicorn, RegisterX86::R9)? as u32 as i32;
+        if step != 1 || increment != 1 {
+            return Err(format!(
+                "VCOMP static loop step/increment {step}/{increment} is unsupported; expected 1/1"
+            ));
+        }
+        let rsp = read_vcomp_register(unicorn, RegisterX86::RSP)?;
+        let lower_output = read_vcomp_u64(unicorn, rsp + 0x28)?;
+        let upper_output = read_vcomp_u64(unicorn, rsp + 0x30)?;
+        write_vcomp_i32(unicorn, lower_output, lower)?;
+        write_vcomp_i32(unicorn, upper_output, upper)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        vcomp_callback_error(unicorn, error);
     }
 }
 
@@ -4597,6 +4850,126 @@ mod tests {
         // mov rax, rcx; add rax, rdx; ret
         let mut engine = test_engine(&[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3]);
         assert_eq!(engine.call_win64(CODE, [40, 2, 0, 0, 0, 0]).unwrap(), 42);
+    }
+
+    #[test]
+    fn vcomp_fork_tail_calls_outlined_worker_with_captured_arguments() {
+        const CODE: u64 = 0x1000_0000;
+        const VCOMP_FORK: u64 = STUB_BASE + 0x100;
+        let mut engine = test_engine(&[
+            0x48, 0x89, 0xc8, // mov rax, rcx
+            0x48, 0x01, 0xd0, // add rax, rdx
+            0x4c, 0x01, 0xc0, // add rax, r8
+            0xc3, // ret
+        ]);
+        engine
+            .unicorn
+            .mem_write(VCOMP_FORK, &[0x41, 0xff, 0xe3])
+            .unwrap();
+        engine
+            .unicorn
+            .add_code_hook(VCOMP_FORK, VCOMP_FORK, |unicorn, _, _| {
+                emulate_vcomp_fork(unicorn);
+            })
+            .unwrap();
+
+        assert_eq!(
+            engine
+                .call_win64(VCOMP_FORK, [1, 3, CODE, 11, 22, 33])
+                .unwrap(),
+            66
+        );
+    }
+
+    #[test]
+    fn vcomp_dynamic_loop_returns_serial_chunks_until_exhausted() {
+        const VCOMP_INIT: u64 = STUB_BASE + 0x110;
+        const VCOMP_NEXT: u64 = STUB_BASE + 0x120;
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.mem_write(VCOMP_INIT, &[0xc3]).unwrap();
+        engine.unicorn.mem_write(VCOMP_NEXT, &[0xc3]).unwrap();
+        engine
+            .unicorn
+            .add_code_hook(VCOMP_INIT, VCOMP_INIT, |unicorn, _, _| {
+                emulate_vcomp_for_dynamic_init(unicorn);
+            })
+            .unwrap();
+        engine
+            .unicorn
+            .add_code_hook(VCOMP_NEXT, VCOMP_NEXT, |unicorn, _, _| {
+                emulate_vcomp_for_dynamic_next(unicorn);
+            })
+            .unwrap();
+        let lower_output = DATA_BASE;
+        let upper_output = DATA_BASE + 4;
+
+        engine
+            .call_win64(VCOMP_INIT, [0x62, 2, 10, 1, 8, 0])
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(VCOMP_NEXT, [lower_output, upper_output, 0, 0, 0, 0])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(lower_output, 4).unwrap(),
+            2i32.to_le_bytes()
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(upper_output, 4).unwrap(),
+            9i32.to_le_bytes()
+        );
+        assert_eq!(
+            engine
+                .call_win64(VCOMP_NEXT, [lower_output, upper_output, 0, 0, 0, 0])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(lower_output, 4).unwrap(),
+            10i32.to_le_bytes()
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(upper_output, 4).unwrap(),
+            10i32.to_le_bytes()
+        );
+        assert_eq!(
+            engine
+                .call_win64(VCOMP_NEXT, [lower_output, upper_output, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn vcomp_static_loop_writes_single_thread_bounds() {
+        const VCOMP_STATIC_INIT: u64 = STUB_BASE + 0x130;
+        let mut engine = test_engine(&[0xc3]);
+        engine
+            .unicorn
+            .mem_write(VCOMP_STATIC_INIT, &[0xc3])
+            .unwrap();
+        engine
+            .unicorn
+            .add_code_hook(VCOMP_STATIC_INIT, VCOMP_STATIC_INIT, |unicorn, _, _| {
+                emulate_vcomp_for_static_simple_init(unicorn);
+            })
+            .unwrap();
+        let lower_output = DATA_BASE;
+        let upper_output = DATA_BASE + 4;
+
+        engine
+            .call_win64(VCOMP_STATIC_INIT, [2, 9, 1, 1, lower_output, upper_output])
+            .unwrap();
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(lower_output, 4).unwrap(),
+            2i32.to_le_bytes()
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(upper_output, 4).unwrap(),
+            9i32.to_le_bytes()
+        );
     }
 
     #[test]
