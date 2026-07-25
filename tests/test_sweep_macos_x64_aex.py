@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -210,3 +211,18 @@ def test_cleanup_failure_is_not_misclassified_as_suite_gap():
 
 def test_signal_evidence_is_classified_as_crash():
     assert SWEEP.classify_failure("signal=SIGSEGV(11)") == "crash"
+
+
+def test_runner_initiated_termination_is_not_classified_as_guest_crash():
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    evidence = SWEEP.terminate_worker(process)
+
+    assert "terminated_by_runner=SIGTERM" in evidence
+    assert SWEEP.classify_failure(evidence) != "crash"

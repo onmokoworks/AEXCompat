@@ -376,9 +376,16 @@ def read_stderr_bounded(process: subprocess.Popen[bytes]) -> str:
     return bytes(chunks[:MAX_ERROR_BYTES]).decode("utf-8", errors="replace")
 
 
-def process_exit_evidence(process: subprocess.Popen[bytes], stderr: str) -> str:
+def process_exit_evidence(
+    process: subprocess.Popen[bytes], stderr: str, runner_termination: str | None
+) -> str:
     returncode = process.returncode
-    if returncode is None:
+    if runner_termination is not None:
+        status = (
+            f"terminated_by_runner={runner_termination}; "
+            f"final_returncode={returncode}"
+        )
+    elif returncode is None:
         status = "exit_status=unknown"
     elif returncode < 0:
         number = -returncode
@@ -398,17 +405,22 @@ def terminate_worker(process: subprocess.Popen[bytes]) -> str:
             process.stdin.close()
         except (BrokenPipeError, OSError, ValueError):
             pass
+    runner_termination = None
     if process.poll() is None:
+        runner_termination = "SIGTERM"
         signal_worker_group(process, signal.SIGTERM)
         try:
             process.wait(timeout=CLOSE_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
+            runner_termination = "SIGKILL"
             signal_worker_group(process, signal.SIGKILL)
             try:
                 process.wait(timeout=CLOSE_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 return "worker process group did not exit after SIGKILL"
-    return process_exit_evidence(process, read_stderr_bounded(process))
+    return process_exit_evidence(
+        process, read_stderr_bounded(process), runner_termination
+    )
 
 
 def close_worker(process: subprocess.Popen[bytes], expected_frames: int) -> dict[str, object]:
