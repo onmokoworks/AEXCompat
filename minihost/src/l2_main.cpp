@@ -71,6 +71,7 @@
 #include "strict_json.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_runtime_admission.hpp"
+#include "worker_import_overrides.hpp"
 #include "worker_entry_admission.hpp"
 #include "worker_session.hpp"
 #include "worker_selftest_dispatch.hpp"
@@ -2783,6 +2784,16 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   HMODULE module = LoadLibraryExW(path.c_str(), nullptr,
       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
   if (!module) {
+    result.hard_failure = true;
+    return result;
+  }
+  std::string import_override_diagnostic;
+  if (!aexcompat::worker_runtime::imports::
+          install_deterministic_import_overrides(
+              module, import_override_diagnostic)) {
+    std::cerr << "stage:cluster_import_overrides detail="
+              << import_override_diagnostic << '\n' << std::flush;
+    FreeLibrary(module);
     result.hard_failure = true;
     return result;
   }

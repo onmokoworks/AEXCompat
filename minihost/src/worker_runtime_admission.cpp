@@ -1,6 +1,7 @@
 #include "worker_runtime_admission.hpp"
 
 #include "runtime_module_audit.hpp"
+#include "worker_import_overrides.hpp"
 
 #include <cstring>
 #include <iostream>
@@ -138,6 +139,15 @@ int admit_runtime(const RuntimeHostHooks& hooks,
     const DWORD error = GetLastError();
     remove_directory_cookie(sealed_directory_cookie);
     return report_load_failure("load_library", error);
+  }
+  std::string import_override_diagnostic;
+  if (!imports::install_deterministic_import_overrides(
+          module, import_override_diagnostic)) {
+    std::cerr << "stage:load_failure stage=import_overrides detail="
+              << import_override_diagnostic << '\n' << std::flush;
+    FreeLibrary(module);
+    remove_directory_cookie(sealed_directory_cookie);
+    return 11;
   }
 
   ModuleAuditReport& audit = module_audit_report();

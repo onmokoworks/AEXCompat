@@ -314,6 +314,7 @@ impl GuestEngine<'static> {
                     "floorf" => callback_address!(native_floorf),
                     "powf" => callback_address!(native_powf),
                     "pow" => callback_address!(native_pow),
+                    "omp_get_max_threads" => callback_address!(native_omp_get_max_threads),
                     _ => callback_address!(noop_import),
                 };
                 self.write_u64(image.image_base() + symbol.iat_rva as u64, callback)?;
@@ -597,6 +598,17 @@ unsafe fn write_pointer(pointer: u64, bytes: &[u8]) {
 
 unsafe extern "win64" fn noop_import(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
     0
+}
+
+unsafe extern "win64" fn native_omp_get_max_threads(
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    1
 }
 
 unsafe extern "win64" fn poison_callback(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
@@ -1882,6 +1894,11 @@ mod tests {
                 .is_some_and(|message| message.contains("unknown handle"))
         );
         ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
+
+    #[test]
+    fn openmp_thread_count_is_positive_and_deterministic() {
+        assert_eq!(unsafe { native_omp_get_max_threads(0, 0, 0, 0, 0, 0) }, 1);
     }
 
     #[test]

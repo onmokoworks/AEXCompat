@@ -52,6 +52,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_fixed_selftest_routing.cpp
     src/worker_custom_selftest_routing.cpp
     src/worker_host_guard_selftests.cpp
+    src/worker_import_overrides.cpp
     src/worker_aegp_compute_cache.cpp
     src/worker_aegp_utility_suite.cpp
     src/worker_pf_pixel_data_suite.cpp
@@ -231,6 +232,15 @@ target_compile_definitions(worker_handle_runtime_selftest PRIVATE
 target_include_directories(worker_handle_runtime_selftest PRIVATE src)
 target_link_libraries(worker_handle_runtime_selftest PRIVATE
   aexcompat_trace_writer)
+
+add_executable(worker_import_overrides_selftest
+  ../tests/native/worker_import_overrides_selftest.cpp
+  src/worker_import_overrides.cpp
+)
+target_compile_features(worker_import_overrides_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_import_overrides_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_import_overrides_selftest PRIVATE src)
 
 add_executable(worker_aegp_init_runtime_selftest
   ../tests/native/worker_aegp_init_runtime_selftest.cpp
