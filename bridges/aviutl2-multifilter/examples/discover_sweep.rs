@@ -41,8 +41,8 @@ use std::time::Instant;
 
 use aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics;
 use aexcompat_broker::plugin_dependency_closure::{
-    DependencyClosureRequest, DependencyProvenance, resolve_dependency_closure,
-    survey_dependency_closure,
+    DependencyClosureRequest, DependencyProvenance, DependencyResolutionDiagnostic,
+    dependency_diagnostics_report, resolve_dependency_closure, survey_dependency_closure,
 };
 use aexcompat_broker::render_session::{
     DiscoverySession, DiscoverySessionOpenRequest, InspectOutcome,
@@ -250,6 +250,46 @@ fn attach_inspection_diagnostics(extra: &mut Value, diagnostics: &Value) {
     }
 }
 
+fn dependency_report_for_dispatch(
+    diagnostics: &[DependencyResolutionDiagnostic],
+    producer_truncated: bool,
+    dispatch_error: Option<&str>,
+) -> Value {
+    let Some(error) = dispatch_error else {
+        return dependency_diagnostics_report(diagnostics, producer_truncated, None, None);
+    };
+    let Some(worker) = diagnostics_of(error) else {
+        return dependency_diagnostics_report(&[], true, None, None);
+    };
+    if worker.get("exit_code").and_then(Value::as_u64) != Some(11) {
+        return dependency_diagnostics_report(diagnostics, producer_truncated, None, None);
+    }
+    let Some(load_failure) = worker.get("load_failure").and_then(Value::as_object) else {
+        return dependency_diagnostics_report(&[], true, None, None);
+    };
+    if load_failure.len() != 2 {
+        return dependency_diagnostics_report(&[], true, None, None);
+    }
+    let stage = load_failure
+        .get("stage")
+        .and_then(Value::as_str)
+        .filter(|stage| {
+            matches!(
+                *stage,
+                "set_default_dll_directories" | "add_dll_directory" | "load_library"
+            )
+        });
+    let error_code = load_failure
+        .get("win32_error_code")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value != 0);
+    if stage.is_none() || error_code.is_none() {
+        return dependency_diagnostics_report(&[], true, None, None);
+    }
+    dependency_diagnostics_report(diagnostics, producer_truncated, stage, error_code)
+}
+
 fn bucket_of(error: &str) -> String {
     let Some(diagnostics) = diagnostics_of(error) else {
         return "unparsed_error".into();
@@ -379,6 +419,12 @@ fn sweep_plugin(
                         "unresolved": survey.unresolved.len(),
                         "unreadable_images": survey.unreadable_images,
                         "dependency_provenance": provenance_json(&survey.provenance),
+                        "dependency_diagnostics": dependency_diagnostics_report(
+                            &survey.dependency_diagnostics,
+                            survey.dependency_diagnostics_truncated,
+                            None,
+                            None,
+                        ),
                     }),
                 ),
                 bucket: "surveyed".into(),
@@ -411,20 +457,31 @@ fn sweep_plugin(
     // `unresolved` is `null` rather than 0 in the baseline: nothing was
     // resolved there, so reporting a count would read as "nothing was
     // missing" when the honest answer is "not measured".
-    let (dependencies, sealed_bytes, unresolved, dependency_provenance): (
+    let (
+        dependencies,
+        sealed_bytes,
+        unresolved,
+        dependency_provenance,
+        dependency_diagnostics,
+        dependency_diagnostics_truncated,
+    ): (
         Vec<ApprovedImageArtifact>,
         u64,
         Value,
         Value,
+        Vec<DependencyResolutionDiagnostic>,
+        bool,
     ) = match &closure {
         Some(Ok(closure)) => (
             closure.dependencies().to_vec(),
             closure.total_bytes(),
             json!(closure.unresolved().len()),
             provenance_json(closure.provenance()),
+            closure.dependency_diagnostics().to_vec(),
+            closure.dependency_diagnostics_truncated(),
         ),
-        Some(Err(_)) => (Vec::new(), 0, json!(null), json!(null)),
-        None => (Vec::new(), 0, json!(null), json!(null)),
+        Some(Err(_)) => (Vec::new(), 0, json!(null), json!(null), Vec::new(), true),
+        None => (Vec::new(), 0, json!(null), json!(null), Vec::new(), false),
     };
     // A dispatch failure keeps its raw error text in the record: the bucket
     // alone cannot distinguish "worker reported structured diagnostics" from
@@ -447,6 +504,11 @@ fn sweep_plugin(
                         "sealed_bytes": sealed_bytes,
                         "unresolved": unresolved,
                         "dependency_provenance": dependency_provenance,
+                        "dependency_diagnostics": dependency_report_for_dispatch(
+                            &dependency_diagnostics,
+                            dependency_diagnostics_truncated,
+                            None,
+                        ),
                     });
                     attach_inspection_diagnostics(&mut extra, &diagnostics);
                     return SweepOutcome {
@@ -478,6 +540,11 @@ fn sweep_plugin(
                 "sealed_bytes": sealed_bytes,
                 "unresolved": unresolved,
                 "dependency_provenance": dependency_provenance,
+                "dependency_diagnostics": dependency_report_for_dispatch(
+                    &dependency_diagnostics,
+                    dependency_diagnostics_truncated,
+                    dispatch_error.as_deref(),
+                ),
                 "error": dispatch_error,
             }),
         ),
@@ -617,6 +684,8 @@ struct ClusterPrepared {
     sealed_bytes: u64,
     unresolved: usize,
     provenance: Vec<DependencyProvenance>,
+    dependency_diagnostics: Vec<DependencyResolutionDiagnostic>,
+    dependency_diagnostics_truncated: bool,
     identity: String,
 }
 
@@ -706,6 +775,8 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
                 sealed_bytes: closure.total_bytes(),
                 unresolved: closure.unresolved().len(),
                 provenance: closure.provenance().to_vec(),
+                dependency_diagnostics: closure.dependency_diagnostics().to_vec(),
+                dependency_diagnostics_truncated: closure.dependency_diagnostics_truncated(),
             }),
             Err(error) => {
                 let bucket = format!("closure_error: {error}");
@@ -765,6 +836,11 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
                     "sealed_bytes": member.sealed_bytes,
                     "unresolved": member.unresolved,
                     "dependency_provenance": provenance_json(&member.provenance),
+                    "dependency_diagnostics": dependency_report_for_dispatch(
+                        &member.dependency_diagnostics,
+                        member.dependency_diagnostics_truncated,
+                        None,
+                    ),
                     "cluster_identity": member.identity,
                     "cluster_fallback": extra,
                 });
@@ -783,7 +859,8 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
                 )
             }
             Err(error) => {
-                let bucket = bucket_of(&error.to_string());
+                let error = error.to_string();
+                let bucket = bucket_of(&error);
                 (
                     bucket.clone(),
                     plugin_record(
@@ -796,8 +873,14 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
                         json!({
                             "sealed": member.dependencies.len(),
                             "unresolved": member.unresolved,
+                            "dependency_diagnostics": dependency_report_for_dispatch(
+                                &member.dependency_diagnostics,
+                                member.dependency_diagnostics_truncated,
+                                Some(&error),
+                            ),
                             "cluster_identity": member.identity,
                             "cluster_fallback": extra,
+                            "error": error,
                         }),
                     ),
                 )
@@ -876,6 +959,11 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
                             json!({
                                 "parameters": parameters,
                                 "sealed": member.dependencies.len(),
+                                "dependency_diagnostics": dependency_report_for_dispatch(
+                                    &member.dependency_diagnostics,
+                                    member.dependency_diagnostics_truncated,
+                                    None,
+                                ),
                                 "cluster_identity": identity,
                                 "cluster_inspect": true,
                             }),
@@ -894,6 +982,11 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
                             Some(&member.sha),
                             json!({
                                 "sealed": member.dependencies.len(),
+                                "dependency_diagnostics": dependency_report_for_dispatch(
+                                    &member.dependency_diagnostics,
+                                    member.dependency_diagnostics_truncated,
+                                    None,
+                                ),
                                 "cluster_identity": identity,
                                 "cluster_inspect": true,
                             }),
@@ -912,6 +1005,11 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
                             Some(&member.sha),
                             json!({
                                 "sealed": member.dependencies.len(),
+                                "dependency_diagnostics": dependency_report_for_dispatch(
+                                    &member.dependency_diagnostics,
+                                    true,
+                                    None,
+                                ),
                                 "cluster_identity": identity,
                                 "cluster_fallback": format!("{error}"),
                             }),
@@ -1141,6 +1239,39 @@ mod tests {
             bucket_of(r#"worker failed: {"module_audit_failure":{"reason":"unsigned"}}"#),
             "module_audit_failure"
         );
+    }
+
+    #[test]
+    fn dependency_report_propagation_is_exact_bounded_and_fail_closed() {
+        let diagnostic = DependencyResolutionDiagnostic {
+            import_basename: "Shared.DLL".to_owned(),
+            normalized_identity: "shared.dll".to_owned(),
+            import_kind: "delay".to_owned(),
+            requesting_machine: "x64".to_owned(),
+            candidate_machine: "x86".to_owned(),
+            machine_compatible: Some(false),
+            search_classification: "configured_root".to_owned(),
+            candidate_count: 1,
+        };
+        let error = r#"worker failed: {"classification":"nonzero_exit","exit_code":11,"load_failure":{"stage":"load_library","win32_error_code":126}}"#;
+        let report = dependency_report_for_dispatch(&[diagnostic.clone()], false, Some(error));
+        assert_eq!(report["records"][0]["load_stage"], "load_library");
+        assert_eq!(report["records"][0]["win32_load_error_code"], 126);
+        assert_eq!(report["records"][0]["import_basename"], "Shared.DLL");
+        assert_eq!(report["records"][0]["normalized_identity"], "shared.dll");
+        assert_eq!(report["records"][0]["import_kind"], "delay");
+        assert_eq!(
+            report["records"][0]["search_classification"],
+            "configured_root"
+        );
+        assert_eq!(report["records"][0]["machine_compatible"], false);
+        assert_eq!(report["records"][0].as_object().unwrap().len(), 11);
+
+        let malformed = r#"worker failed: {"classification":"nonzero_exit","exit_code":11,"load_failure":{"stage":"load_library","win32_error_code":126,"path":"C:\\private"}}"#;
+        let fail_closed = dependency_report_for_dispatch(&[diagnostic], false, Some(malformed));
+        assert!(fail_closed["records"].as_array().unwrap().is_empty());
+        assert_eq!(fail_closed["truncated"], true);
+        assert!(!fail_closed.to_string().contains("private"));
     }
 
     #[test]

@@ -44,6 +44,7 @@ use crate::session_dependency_manifest::{
 use crate::staging_trust;
 use object::LittleEndian;
 use object::read::pe::{ImageNtHeaders, PeFile32, PeFile64};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -83,6 +84,106 @@ const MAX_RUNTIME_DLL_LITERALS_PER_IMAGE: usize = 4_096;
 /// graph is wide rather than deep. Runtime literals count only after an approved
 /// root is confirmed to provide them.
 const MAX_CLOSURE_IMPORT_NAMES: usize = 16_384;
+
+/// Maximum dependency-resolution decisions exported to one report. The walk
+/// itself remains complete; only this additive diagnostic surface truncates.
+pub const MAX_DEPENDENCY_DIAGNOSTICS: usize = 64;
+
+/// Maximum case-insensitive direct-child candidates counted for one imported
+/// basename. A directory with more candidates is reported at this ceiling and
+/// marks the diagnostic container truncated.
+pub const MAX_DEPENDENCY_CANDIDATES: usize = 64;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DependencyResolutionDiagnostic {
+    pub import_basename: String,
+    pub normalized_identity: String,
+    pub import_kind: String,
+    pub requesting_machine: String,
+    pub candidate_machine: String,
+    pub machine_compatible: Option<bool>,
+    pub search_classification: String,
+    pub candidate_count: usize,
+}
+
+/// Serializes dependency diagnostics through one exact-key, bounded broker
+/// contract. The caller may add the worker-owned Win32 load marker after the
+/// pre-load resolver ran; malformed stage/record state fails closed to an empty
+/// truncated container rather than leaking an unvetted value.
+pub fn dependency_diagnostics_report(
+    diagnostics: &[DependencyResolutionDiagnostic],
+    producer_truncated: bool,
+    load_stage: Option<&str>,
+    win32_load_error_code: Option<u32>,
+) -> Value {
+    let stage = match (load_stage, win32_load_error_code) {
+        (None, None) => "pre_load",
+        (
+            Some(stage @ ("set_default_dll_directories" | "add_dll_directory" | "load_library")),
+            Some(_),
+        ) => stage,
+        _ => {
+            return json!({
+                "maximum_records": MAX_DEPENDENCY_DIAGNOSTICS,
+                "maximum_candidates": MAX_DEPENDENCY_CANDIDATES,
+                "records": [],
+                "truncated": true,
+            });
+        }
+    };
+    let allowed_kind = |value: &str| matches!(value, "normal" | "delay" | "normal_and_delay");
+    let allowed_machine = |value: &str| {
+        matches!(
+            value,
+            "x64" | "x86" | "arm64" | "other" | "invalid" | "none" | "mixed"
+        )
+    };
+    let allowed_classification = |value: &str| {
+        matches!(
+            value,
+            "plugin_dir" | "configured_root" | "system" | "not_found" | "ambiguous"
+        )
+    };
+    let mut truncated = producer_truncated || diagnostics.len() > MAX_DEPENDENCY_DIAGNOSTICS;
+    let mut records = Vec::new();
+    for (sequence, diagnostic) in diagnostics
+        .iter()
+        .take(MAX_DEPENDENCY_DIAGNOSTICS)
+        .enumerate()
+    {
+        if !windows_safe_basename(&diagnostic.import_basename)
+            || diagnostic.normalized_identity != fold(&diagnostic.import_basename)
+            || !allowed_kind(&diagnostic.import_kind)
+            || !allowed_machine(&diagnostic.requesting_machine)
+            || !allowed_machine(&diagnostic.candidate_machine)
+            || !allowed_classification(&diagnostic.search_classification)
+            || diagnostic.candidate_count > MAX_DEPENDENCY_CANDIDATES
+        {
+            truncated = true;
+            records.clear();
+            break;
+        }
+        records.push(json!({
+            "sequence": sequence,
+            "import_basename": diagnostic.import_basename,
+            "normalized_identity": diagnostic.normalized_identity,
+            "import_kind": diagnostic.import_kind,
+            "requesting_machine": diagnostic.requesting_machine,
+            "candidate_machine": diagnostic.candidate_machine,
+            "machine_compatible": diagnostic.machine_compatible,
+            "search_classification": diagnostic.search_classification,
+            "candidate_count": diagnostic.candidate_count,
+            "load_stage": stage,
+            "win32_load_error_code": win32_load_error_code,
+        }));
+    }
+    json!({
+        "maximum_records": MAX_DEPENDENCY_DIAGNOSTICS,
+        "maximum_candidates": MAX_DEPENDENCY_CANDIDATES,
+        "records": records,
+        "truncated": truncated,
+    })
+}
 
 #[derive(Clone, Debug)]
 pub struct DependencyClosureRequest<'a> {
@@ -125,6 +226,8 @@ pub struct ResolvedDependencyClosure {
     dependencies: Vec<ApprovedImageArtifact>,
     provenance: Vec<DependencyProvenance>,
     unresolved: Vec<String>,
+    dependency_diagnostics: Vec<DependencyResolutionDiagnostic>,
+    dependency_diagnostics_truncated: bool,
     rejected_names: usize,
     total_bytes: u64,
 }
@@ -156,6 +259,14 @@ impl ResolvedDependencyClosure {
     /// that is the moment the closure would change. Basenames only, never a path.
     pub fn unresolved(&self) -> &[String] {
         &self.unresolved
+    }
+
+    pub fn dependency_diagnostics(&self) -> &[DependencyResolutionDiagnostic] {
+        &self.dependency_diagnostics
+    }
+
+    pub fn dependency_diagnostics_truncated(&self) -> bool {
+        self.dependency_diagnostics_truncated
     }
 
     /// How many imported names were not even shaped like a DLL basename (a
@@ -260,6 +371,8 @@ pub fn resolve_dependency_closure(
         dependencies: validated.into_approved_image_artifacts(),
         provenance: walk.provenance,
         unresolved: walk.unresolved,
+        dependency_diagnostics: walk.dependency_diagnostics,
+        dependency_diagnostics_truncated: walk.dependency_diagnostics_truncated,
         rejected_names: walk.rejected_names,
         total_bytes: walk.total_bytes,
     })
@@ -275,6 +388,8 @@ pub struct DependencyClosureSurvey {
     pub provenance: Vec<DependencyProvenance>,
     pub total_bytes: u64,
     pub unresolved: Vec<String>,
+    pub dependency_diagnostics: Vec<DependencyResolutionDiagnostic>,
+    pub dependency_diagnostics_truncated: bool,
     pub rejected_names: usize,
     /// Images whose import table could not be read. A survey reports them and
     /// keeps going — it measures, it never feeds a dispatch, and stopping at the
@@ -308,6 +423,8 @@ pub fn survey_dependency_closure(
         provenance: walk.provenance,
         total_bytes: walk.total_bytes,
         unresolved: walk.unresolved,
+        dependency_diagnostics: walk.dependency_diagnostics,
+        dependency_diagnostics_truncated: walk.dependency_diagnostics_truncated,
         rejected_names: walk.rejected_names,
         unreadable_images: walk.unreadable_images,
     })
@@ -330,6 +447,8 @@ struct ImportClosureWalk {
     resolved: Vec<WalkedImage>,
     provenance: Vec<DependencyProvenance>,
     unresolved: Vec<String>,
+    dependency_diagnostics: Vec<DependencyResolutionDiagnostic>,
+    dependency_diagnostics_truncated: bool,
     rejected_names: usize,
     unreadable_images: usize,
     total_bytes: u64,
@@ -337,20 +456,24 @@ struct ImportClosureWalk {
     over_byte_limit: bool,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct CandidateOrigins {
-    import_derived: bool,
+    basename: String,
+    normal_import_derived: bool,
+    delay_import_derived: bool,
     string_derived: bool,
 }
 
 #[derive(Clone, Copy)]
 enum CandidateOrigin {
-    Import,
+    NormalImport,
+    DelayImport,
     StringLiteral,
 }
 
 struct ImageDependencyNames {
-    imports: Vec<String>,
+    normal_imports: Vec<String>,
+    delay_imports: Vec<String>,
     runtime_literals: Vec<String>,
 }
 
@@ -403,6 +526,8 @@ fn walk_import_closure(
         resolved: Vec::new(),
         provenance: Vec::new(),
         unresolved: Vec::new(),
+        dependency_diagnostics: Vec::new(),
+        dependency_diagnostics_truncated: false,
         rejected_names: 0,
         unreadable_images: 0,
         total_bytes: 0,
@@ -430,7 +555,10 @@ fn walk_import_closure(
             // (U+212A KELVIN SIGN onto `k`, say) claim its key and then be
             // rejected, dropping the real import from the closure in silence.
             if !windows_safe_basename(&name) {
-                if matches!(origin, CandidateOrigin::Import) {
+                if matches!(
+                    origin,
+                    CandidateOrigin::NormalImport | CandidateOrigin::DelayImport
+                ) {
                     walk.rejected_names += 1;
                 }
                 continue;
@@ -446,8 +574,12 @@ fn walk_import_closure(
             }
             let key = fold(&name);
             let provenance = origins.entry(key.clone()).or_default();
+            if provenance.basename.is_empty() {
+                provenance.basename = name.clone();
+            }
             match origin {
-                CandidateOrigin::Import => provenance.import_derived = true,
+                CandidateOrigin::NormalImport => provenance.normal_import_derived = true,
+                CandidateOrigin::DelayImport => provenance.delay_import_derived = true,
                 CandidateOrigin::StringLiteral => provenance.string_derived = true,
             }
             if !seen.insert(key) {
@@ -472,8 +604,17 @@ fn walk_import_closure(
                 &mut origins,
                 &mut walk,
                 &roots,
-                names.imports,
-                CandidateOrigin::Import,
+                names.normal_imports,
+                CandidateOrigin::NormalImport,
+            )?;
+            enqueue(
+                &mut queue,
+                &mut seen,
+                &mut origins,
+                &mut walk,
+                &roots,
+                names.delay_imports,
+                CandidateOrigin::DelayImport,
             )?;
             enqueue(
                 &mut queue,
@@ -519,8 +660,17 @@ fn walk_import_closure(
                             &mut origins,
                             &mut walk,
                             &roots,
-                            names.imports,
-                            CandidateOrigin::Import,
+                            names.normal_imports,
+                            CandidateOrigin::NormalImport,
+                        )?;
+                        enqueue(
+                            &mut queue,
+                            &mut seen,
+                            &mut origins,
+                            &mut walk,
+                            &roots,
+                            names.delay_imports,
+                            CandidateOrigin::DelayImport,
                         )?;
                         enqueue(
                             &mut queue,
@@ -552,7 +702,7 @@ fn walk_import_closure(
         .filter(|name| {
             origins
                 .get(name)
-                .is_some_and(|source| source.import_derived)
+                .is_some_and(|source| source.normal_import_derived || source.delay_import_derived)
         })
         .collect();
     walk.unresolved.sort();
@@ -561,15 +711,248 @@ fn walk_import_closure(
         .iter()
         .map(|image| {
             let basename = basename_of(&image.path)?;
-            let source = origins.get(&fold(&basename)).copied().unwrap_or_default();
+            let source = origins.get(&fold(&basename)).cloned().unwrap_or_default();
             Ok(DependencyProvenance {
                 basename,
-                import_derived: source.import_derived,
+                import_derived: source.normal_import_derived || source.delay_import_derived,
                 string_derived: source.string_derived,
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
+    let (diagnostics, diagnostics_truncated) =
+        build_dependency_diagnostics(plugin, &roots, &origins, system_directory().as_deref());
+    walk.dependency_diagnostics = diagnostics;
+    walk.dependency_diagnostics_truncated = diagnostics_truncated;
     Ok(walk)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticMachine {
+    X64,
+    X86,
+    Arm64,
+    Other,
+    Invalid,
+}
+
+impl DiagnosticMachine {
+    fn label(self) -> &'static str {
+        match self {
+            Self::X64 => "x64",
+            Self::X86 => "x86",
+            Self::Arm64 => "arm64",
+            Self::Other => "other",
+            Self::Invalid => "invalid",
+        }
+    }
+}
+
+fn read_diagnostic_machine(path: &Path) -> DiagnosticMachine {
+    const MAX_PE_HEADER_BYTES: u64 = 64 * 1024;
+    let Ok(file) = fs::File::open(path) else {
+        return DiagnosticMachine::Invalid;
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(MAX_PE_HEADER_BYTES)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.get(..2) != Some(b"MZ")
+    {
+        return DiagnosticMachine::Invalid;
+    }
+    let Some(offset_bytes) = bytes.get(0x3c..0x40) else {
+        return DiagnosticMachine::Invalid;
+    };
+    let pe_offset = u32::from_le_bytes(offset_bytes.try_into().unwrap()) as usize;
+    if bytes.get(pe_offset..pe_offset.saturating_add(4)) != Some(b"PE\0\0") {
+        return DiagnosticMachine::Invalid;
+    }
+    let Some(machine_bytes) = bytes.get(pe_offset + 4..pe_offset + 6) else {
+        return DiagnosticMachine::Invalid;
+    };
+    match u16::from_le_bytes(machine_bytes.try_into().unwrap()) {
+        0x8664 => DiagnosticMachine::X64,
+        0x014c => DiagnosticMachine::X86,
+        0xaa64 => DiagnosticMachine::Arm64,
+        _ => DiagnosticMachine::Other,
+    }
+}
+
+fn system_directory() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot").map(PathBuf::from)?;
+        fs::canonicalize(root.join("System32")).ok()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+fn direct_child_candidates(root: &Path, name: &str) -> (Vec<PathBuf>, bool) {
+    let mut matches = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return (matches, true);
+    };
+    for entry in entries.flatten() {
+        let Some(candidate_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !candidate_name.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        if matches.len() == MAX_DEPENDENCY_CANDIDATES {
+            return (matches, true);
+        }
+        matches.push(entry.path());
+    }
+    (matches, false)
+}
+
+fn aggregate_candidate_machine(
+    requesting: DiagnosticMachine,
+    candidates: &[PathBuf],
+) -> (String, Option<bool>) {
+    if candidates.is_empty() {
+        return ("none".to_owned(), None);
+    }
+    let machines: Vec<DiagnosticMachine> = candidates
+        .iter()
+        .map(|candidate| read_diagnostic_machine(candidate))
+        .collect();
+    let first = machines[0];
+    let candidate_machine = if machines.iter().all(|machine| *machine == first) {
+        first.label().to_owned()
+    } else {
+        "mixed".to_owned()
+    };
+    let compatible = !matches!(requesting, DiagnosticMachine::Invalid)
+        && machines
+            .iter()
+            .all(|machine| *machine == requesting && *machine != DiagnosticMachine::Invalid);
+    (candidate_machine, Some(compatible))
+}
+
+fn diagnostic_priority(diagnostic: &DependencyResolutionDiagnostic) -> u8 {
+    if diagnostic.search_classification == "not_found" {
+        0
+    } else if diagnostic.search_classification == "ambiguous"
+        || diagnostic.machine_compatible == Some(false)
+    {
+        1
+    } else if diagnostic.search_classification == "configured_root"
+        || diagnostic.search_classification == "plugin_dir"
+    {
+        2
+    } else {
+        3
+    }
+}
+
+fn build_dependency_diagnostics(
+    plugin: &Path,
+    roots: &[PathBuf],
+    origins: &HashMap<String, CandidateOrigins>,
+    system_root: Option<&Path>,
+) -> (Vec<DependencyResolutionDiagnostic>, bool) {
+    let requesting = read_diagnostic_machine(plugin);
+    let mut diagnostics = Vec::new();
+    let mut truncated = false;
+    for (normalized_identity, origin) in origins {
+        if !origin.normal_import_derived && !origin.delay_import_derived {
+            continue;
+        }
+        let import_kind = match (origin.normal_import_derived, origin.delay_import_derived) {
+            (true, true) => "normal_and_delay",
+            (true, false) => "normal",
+            (false, true) => "delay",
+            (false, false) => continue,
+        };
+        let basename = &origin.basename;
+        if is_api_set_name(basename) {
+            diagnostics.push(DependencyResolutionDiagnostic {
+                import_basename: basename.clone(),
+                normalized_identity: normalized_identity.clone(),
+                import_kind: import_kind.to_owned(),
+                requesting_machine: requesting.label().to_owned(),
+                candidate_machine: "none".to_owned(),
+                machine_compatible: None,
+                search_classification: "system".to_owned(),
+                candidate_count: 0,
+            });
+            continue;
+        }
+
+        let mut root_candidates = Vec::new();
+        let mut first_root_index = None;
+        for (root_index, root) in roots.iter().enumerate() {
+            let (candidates, overflow) = direct_child_candidates(root, basename);
+            truncated |= overflow;
+            if !candidates.is_empty() && first_root_index.is_none() {
+                first_root_index = Some(root_index);
+            }
+            for candidate in candidates {
+                if root_candidates.len() == MAX_DEPENDENCY_CANDIDATES {
+                    truncated = true;
+                    break;
+                }
+                root_candidates.push(candidate);
+            }
+        }
+        let (search_classification, candidates) = if root_candidates.len() > 1 {
+            ("ambiguous", root_candidates)
+        } else if root_candidates.len() == 1 {
+            (
+                if first_root_index == Some(0) {
+                    "plugin_dir"
+                } else {
+                    "configured_root"
+                },
+                root_candidates,
+            )
+        } else if let Some(system_root) = system_root {
+            let (system_candidates, overflow) = direct_child_candidates(system_root, basename);
+            truncated |= overflow;
+            if system_candidates.is_empty() {
+                ("not_found", Vec::new())
+            } else {
+                ("system", system_candidates)
+            }
+        } else {
+            ("not_found", Vec::new())
+        };
+        let candidate_count = candidates.len().min(MAX_DEPENDENCY_CANDIDATES);
+        let (candidate_machine, machine_compatible) =
+            aggregate_candidate_machine(requesting, &candidates);
+        diagnostics.push(DependencyResolutionDiagnostic {
+            import_basename: basename.clone(),
+            normalized_identity: normalized_identity.clone(),
+            import_kind: import_kind.to_owned(),
+            requesting_machine: requesting.label().to_owned(),
+            candidate_machine,
+            machine_compatible,
+            search_classification: search_classification.to_owned(),
+            candidate_count,
+        });
+    }
+    diagnostics.sort_by(|left, right| {
+        diagnostic_priority(left)
+            .cmp(&diagnostic_priority(right))
+            .then_with(|| left.normalized_identity.cmp(&right.normalized_identity))
+    });
+    if diagnostics.len() > MAX_DEPENDENCY_DIAGNOSTICS {
+        diagnostics.truncate(MAX_DEPENDENCY_DIAGNOSTICS);
+        truncated = true;
+    }
+    (diagnostics, truncated)
 }
 
 enum NameResolution {
@@ -685,7 +1068,8 @@ struct TrustedImageCacheEntry {
     size: u64,
     last_write_time: SystemTime,
     sha256: Option<[u8; 32]>,
-    imports: Vec<String>,
+    normal_imports: Vec<String>,
+    delay_imports: Vec<String>,
     runtime_literals: Vec<String>,
 }
 
@@ -733,7 +1117,8 @@ fn read_image_dependencies_trusted(
                     size: bytes.len() as u64,
                     last_write_time: modified,
                     sha256,
-                    imports: names.imports.clone(),
+                    normal_imports: names.normal_imports.clone(),
+                    delay_imports: names.delay_imports.clone(),
                     runtime_literals: names.runtime_literals.clone(),
                 },
             );
@@ -773,7 +1158,8 @@ fn trusted_cached_image(
                 sha256: entry.sha256,
             },
             ImageDependencyNames {
-                imports: entry.imports.clone(),
+                normal_imports: entry.normal_imports.clone(),
+                delay_imports: entry.delay_imports.clone(),
                 runtime_literals: entry.runtime_literals.clone(),
             },
         ))
@@ -781,22 +1167,28 @@ fn trusted_cached_image(
 }
 
 fn dependency_names_from_bytes(bytes: &[u8]) -> io::Result<ImageDependencyNames> {
-    let imports = match PeFile64::parse(bytes) {
+    let (normal_imports, delay_imports) = match PeFile64::parse(bytes) {
         Ok(pe) => import_names_from(&pe)?,
         Err(_) => match PeFile32::parse(bytes) {
             Ok(pe) => import_names_from(&pe)?,
             Err(_) => {
                 return Ok(ImageDependencyNames {
-                    imports: Vec::new(),
+                    normal_imports: Vec::new(),
+                    delay_imports: Vec::new(),
                     runtime_literals: Vec::new(),
                 });
             }
         },
     };
-    let imported: HashSet<String> = imports.iter().map(|name| fold(name)).collect();
+    let imported: HashSet<String> = normal_imports
+        .iter()
+        .chain(&delay_imports)
+        .map(|name| fold(name))
+        .collect();
     let runtime_literals = runtime_dll_literal_names(bytes, &imported)?;
     Ok(ImageDependencyNames {
-        imports,
+        normal_imports,
+        delay_imports,
         runtime_literals,
     })
 }
@@ -872,8 +1264,9 @@ fn runtime_dll_literal_names(bytes: &[u8], imported: &HashSet<String>) -> io::Re
 
 fn import_names_from<Nt: ImageNtHeaders>(
     pe: &object::read::pe::PeFile<'_, Nt>,
-) -> io::Result<Vec<String>> {
-    let mut names = Vec::new();
+) -> io::Result<(Vec<String>, Vec<String>)> {
+    let mut normal_names = Vec::new();
+    let mut delay_names = Vec::new();
     // The ceiling counts descriptors walked, not names kept: a hostile import
     // directory can hold millions of entries, and counting only what survives
     // would let it decide how long this walk runs. Passing the ceiling is an
@@ -913,7 +1306,7 @@ fn import_names_from<Nt: ImageNtHeaders>(
             .map_err(|_| invalid("plug-in import table is unreadable"))?
         {
             step(
-                &mut names,
+                &mut normal_names,
                 &mut walked,
                 name_at(pe, descriptor.name.get(LittleEndian)),
             )?;
@@ -932,13 +1325,13 @@ fn import_names_from<Nt: ImageNtHeaders>(
             .map_err(|_| invalid("plug-in delay-load import table is unreadable"))?
         {
             step(
-                &mut names,
+                &mut delay_names,
                 &mut walked,
                 name_at(pe, descriptor.dll_name_rva.get(LittleEndian)),
             )?;
         }
     }
-    Ok(names)
+    Ok((normal_names, delay_names))
 }
 
 /// The NUL-terminated name at `rva`, resolved against whichever section holds it.
@@ -1032,6 +1425,45 @@ mod tests {
         let path = dir.join(name);
         fs::write(&path, pe64_importing(imports)).unwrap();
         path
+    }
+
+    fn write_pe_with_imports(
+        dir: &Path,
+        name: &str,
+        imports: &[&str],
+        delay_imports: &[&str],
+    ) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(
+            &path,
+            crate::test_pe::pe64_with_imports(imports, delay_imports),
+        )
+        .unwrap();
+        path
+    }
+
+    fn set_pe_machine(path: &Path, machine: u16) {
+        let mut bytes = fs::read(path).unwrap();
+        let pe_offset = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
+        bytes[pe_offset + 4..pe_offset + 6].copy_from_slice(&machine.to_le_bytes());
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn import_origins(names: &[(&str, bool, bool)]) -> HashMap<String, CandidateOrigins> {
+        names
+            .iter()
+            .map(|(name, normal, delay)| {
+                (
+                    fold(name),
+                    CandidateOrigins {
+                        basename: (*name).to_owned(),
+                        normal_import_derived: *normal,
+                        delay_import_derived: *delay,
+                        string_derived: false,
+                    },
+                )
+            })
+            .collect()
     }
 
     fn append_ascii_literal(path: &Path, name: &str, terminated: bool) {
@@ -1521,6 +1953,245 @@ mod tests {
     }
 
     #[test]
+    fn dependency_diagnostic_reports_one_missing_normal_import() {
+        let install = temp_dir("diagnostic-missing");
+        let plugin = write_pe(&install, "effect.aex", &["OnlyMissing.DLL"]);
+        let closure = resolve_dependency_closure(DependencyClosureRequest::new(
+            &plugin,
+            std::slice::from_ref(&install),
+        ))
+        .unwrap();
+
+        let record = closure
+            .dependency_diagnostics()
+            .iter()
+            .find(|record| record.normalized_identity == "onlymissing.dll")
+            .unwrap();
+        assert_eq!(record.import_basename, "OnlyMissing.DLL");
+        assert_eq!(record.import_kind, "normal");
+        assert_eq!(record.requesting_machine, "x64");
+        assert_eq!(record.candidate_machine, "none");
+        assert_eq!(record.machine_compatible, None);
+        assert_eq!(record.search_classification, "not_found");
+        assert_eq!(record.candidate_count, 0);
+        assert!(!closure.dependency_diagnostics_truncated());
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn dependency_diagnostic_distinguishes_ambiguous_and_wrong_machine_candidates() {
+        let plugin_root = temp_dir("diagnostic-plugin-root");
+        let configured_root = temp_dir("diagnostic-configured-root");
+        let plugin = write_pe(
+            &plugin_root,
+            "effect.aex",
+            &["Shared.DLL", "WrongMachine.dll"],
+        );
+        write_pe(&plugin_root, "Shared.DLL", &[]);
+        write_pe(&configured_root, "shared.dll", &[]);
+        let wrong = write_pe(&plugin_root, "WrongMachine.dll", &[]);
+        set_pe_machine(&wrong, 0x014c);
+        let origins = import_origins(&[
+            ("Shared.DLL", true, false),
+            ("WrongMachine.dll", true, false),
+        ]);
+        let (records, truncated) = build_dependency_diagnostics(
+            &plugin,
+            &[plugin_root.clone(), configured_root.clone()],
+            &origins,
+            None,
+        );
+
+        let ambiguous = records
+            .iter()
+            .find(|record| record.normalized_identity == "shared.dll")
+            .unwrap();
+        assert_eq!(ambiguous.search_classification, "ambiguous");
+        assert_eq!(ambiguous.candidate_count, 2);
+        assert_eq!(ambiguous.candidate_machine, "x64");
+        assert_eq!(ambiguous.machine_compatible, Some(true));
+
+        let wrong_machine = records
+            .iter()
+            .find(|record| record.normalized_identity == "wrongmachine.dll")
+            .unwrap();
+        assert_eq!(wrong_machine.search_classification, "plugin_dir");
+        assert_eq!(wrong_machine.candidate_count, 1);
+        assert_eq!(wrong_machine.candidate_machine, "x86");
+        assert_eq!(wrong_machine.machine_compatible, Some(false));
+        assert!(!truncated);
+        fs::remove_dir_all(plugin_root).unwrap();
+        fs::remove_dir_all(configured_root).unwrap();
+    }
+
+    #[test]
+    fn dependency_diagnostic_preserves_delay_and_casefold_identity_once() {
+        let install = temp_dir("diagnostic-delay-casefold");
+        let plugin = write_pe_with_imports(
+            &install,
+            "effect.aex",
+            &["MiXeD.dll", "mixed.DLL"],
+            &["MIXED.DLL", "DelayOnly.dll"],
+        );
+        let closure = resolve_dependency_closure(DependencyClosureRequest::new(
+            &plugin,
+            std::slice::from_ref(&install),
+        ))
+        .unwrap();
+
+        let mixed: Vec<_> = closure
+            .dependency_diagnostics()
+            .iter()
+            .filter(|record| record.normalized_identity == "mixed.dll")
+            .collect();
+        assert_eq!(mixed.len(), 1);
+        assert_eq!(mixed[0].import_basename, "MiXeD.dll");
+        assert_eq!(mixed[0].import_kind, "normal_and_delay");
+        let delay = closure
+            .dependency_diagnostics()
+            .iter()
+            .find(|record| record.normalized_identity == "delayonly.dll")
+            .unwrap();
+        assert_eq!(delay.import_kind, "delay");
+        assert_eq!(delay.search_classification, "not_found");
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn dependency_diagnostic_classifies_system_and_api_set_without_sealing_paths() {
+        let install = temp_dir("diagnostic-system-plugin");
+        let system = temp_dir("diagnostic-system-root");
+        let plugin = write_pe(&install, "effect.aex", &[]);
+        write_pe(&system, "SystemRuntime.dll", &[]);
+        let origins = import_origins(&[
+            ("SystemRuntime.dll", true, false),
+            ("api-ms-win-core-test-l1-1-0.dll", true, false),
+            ("ext-ms-win-test-l1-1-0.dll", false, true),
+        ]);
+        let (records, truncated) =
+            build_dependency_diagnostics(&plugin, &[install.clone()], &origins, Some(&system));
+
+        for identity in [
+            "systemruntime.dll",
+            "api-ms-win-core-test-l1-1-0.dll",
+            "ext-ms-win-test-l1-1-0.dll",
+        ] {
+            let record = records
+                .iter()
+                .find(|record| record.normalized_identity == identity)
+                .unwrap();
+            assert_eq!(record.search_classification, "system");
+        }
+        let runtime = records
+            .iter()
+            .find(|record| record.normalized_identity == "systemruntime.dll")
+            .unwrap();
+        assert_eq!(runtime.candidate_count, 1);
+        assert_eq!(runtime.machine_compatible, Some(true));
+        let api_set = records
+            .iter()
+            .find(|record| record.normalized_identity.starts_with("api-ms-"))
+            .unwrap();
+        assert_eq!(api_set.candidate_count, 0);
+        assert_eq!(api_set.candidate_machine, "none");
+        assert_eq!(api_set.machine_compatible, None);
+        assert!(!truncated);
+
+        let report = dependency_diagnostics_report(&records, truncated, None, None);
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains(install.to_string_lossy().as_ref()));
+        assert!(!serialized.contains(system.to_string_lossy().as_ref()));
+        fs::remove_dir_all(install).unwrap();
+        fs::remove_dir_all(system).unwrap();
+    }
+
+    #[test]
+    fn dependency_diagnostic_bounds_are_exact_at_sixty_four_and_sixty_five() {
+        let install = temp_dir("diagnostic-bound");
+        let plugin = write_pe(&install, "effect.aex", &[]);
+        let names: Vec<String> = (0..65)
+            .map(|index| format!("missing-{index:02}.dll"))
+            .collect();
+        let origins = |count: usize| {
+            names
+                .iter()
+                .take(count)
+                .map(|name| {
+                    (
+                        fold(name),
+                        CandidateOrigins {
+                            basename: name.clone(),
+                            normal_import_derived: true,
+                            ..CandidateOrigins::default()
+                        },
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        };
+
+        let (sixty_four, truncated) =
+            build_dependency_diagnostics(&plugin, &[install.clone()], &origins(64), None);
+        assert_eq!(sixty_four.len(), MAX_DEPENDENCY_DIAGNOSTICS);
+        assert!(!truncated);
+        let (sixty_five, truncated) =
+            build_dependency_diagnostics(&plugin, &[install.clone()], &origins(65), None);
+        assert_eq!(sixty_five.len(), MAX_DEPENDENCY_DIAGNOSTICS);
+        assert!(truncated);
+        let report = dependency_diagnostics_report(&sixty_five, truncated, None, None);
+        assert_eq!(report["maximum_records"], MAX_DEPENDENCY_DIAGNOSTICS);
+        assert_eq!(report["maximum_candidates"], MAX_DEPENDENCY_CANDIDATES);
+        assert_eq!(
+            report["records"].as_array().unwrap().len(),
+            MAX_DEPENDENCY_DIAGNOSTICS
+        );
+        assert_eq!(report["truncated"], true);
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
+    fn dependency_diagnostic_marks_invalid_candidate_pe_and_report_fails_closed() {
+        let install = temp_dir("diagnostic-invalid-pe");
+        let plugin = write_pe(&install, "effect.aex", &[]);
+        fs::write(install.join("Broken.dll"), b"not a PE image").unwrap();
+        let origins = import_origins(&[("Broken.dll", true, false)]);
+        let (records, truncated) =
+            build_dependency_diagnostics(&plugin, &[install.clone()], &origins, None);
+        assert!(!truncated);
+        assert_eq!(records[0].candidate_machine, "invalid");
+        assert_eq!(records[0].machine_compatible, Some(false));
+        assert_eq!(records[0].search_classification, "plugin_dir");
+
+        let report =
+            dependency_diagnostics_report(&records, false, Some("load_library"), Some(126));
+        let container_keys: HashSet<_> = report
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            container_keys,
+            HashSet::from([
+                "maximum_records",
+                "maximum_candidates",
+                "records",
+                "truncated",
+            ])
+        );
+        let record = report["records"][0].as_object().unwrap();
+        assert_eq!(record.len(), 11);
+        assert_eq!(record["load_stage"], "load_library");
+        assert_eq!(record["win32_load_error_code"], 126);
+
+        let mut malformed = records[0].clone();
+        malformed.normalized_identity = "different.dll".to_owned();
+        let fail_closed = dependency_diagnostics_report(&[malformed], false, None, None);
+        assert!(fail_closed["records"].as_array().unwrap().is_empty());
+        assert_eq!(fail_closed["truncated"], true);
+        fs::remove_dir_all(install).unwrap();
+    }
+
+    #[test]
     fn fails_closed_on_an_import_table_over_the_per_image_ceiling() {
         let install = temp_dir("imports");
         let names: Vec<String> = (0..=MAX_IMPORT_NAMES_PER_IMAGE)
@@ -1616,7 +2287,8 @@ mod tests {
 
         for (walked, names) in [&first, &second] {
             assert_eq!(*walked, strict.0);
-            assert_eq!(names.imports, strict.1.imports);
+            assert_eq!(names.normal_imports, strict.1.normal_imports);
+            assert_eq!(names.delay_imports, strict.1.delay_imports);
             assert_eq!(names.runtime_literals, strict.1.runtime_literals);
         }
         fs::remove_dir_all(install).unwrap();
@@ -1628,7 +2300,8 @@ mod tests {
         let install = temp_dir("trusted-stale");
         let image = write_pe(&install, "effect.aex", &["dvacore.dll"]);
         let first = read_image_dependencies(&image, ImageIdentity::Bind).unwrap();
-        assert_eq!(first.1.imports, ["dvacore.dll".to_owned()]);
+        assert_eq!(first.1.normal_imports, ["dvacore.dll".to_owned()]);
+        assert!(first.1.delay_imports.is_empty());
 
         // Different length, so the cache miss cannot hinge on mtime granularity.
         let image = write_pe(&install, "effect.aex", &["much-longer-dependency-name.dll"]);
@@ -1636,9 +2309,10 @@ mod tests {
         crate::staging_trust::set_enabled_override_for_testing(None);
 
         assert_eq!(
-            second.1.imports,
+            second.1.normal_imports,
             ["much-longer-dependency-name.dll".to_owned()]
         );
+        assert!(second.1.delay_imports.is_empty());
         let bytes = fs::read(&image).unwrap();
         assert_eq!(second.0.sha256, Some(Sha256::digest(&bytes).into()));
         assert_eq!(second.0.size, bytes.len() as u64);

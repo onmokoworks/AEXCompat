@@ -630,6 +630,7 @@ fn worker_diagnostics(
     let mut last_completed_stage: Option<String> = None;
     let mut plugin_kind: Option<&str> = None;
     let mut minidump: Option<String> = None;
+    let load_failure = load_failure_marker(stderr, exit_code);
 
     for line in stderr.lines() {
         plugin_kind = plugin_kind.or_else(|| match line.trim() {
@@ -712,6 +713,34 @@ fn worker_diagnostics(
         "suite_timeline_truncated": false,
         "plugin_kind": plugin_kind,
         "minidump": minidump,
+        "load_failure": load_failure,
+    })
+}
+
+fn load_failure_marker(stderr: &str, exit_code: u32) -> Option<Value> {
+    if exit_code != 11 {
+        return None;
+    }
+    stderr.lines().rev().find_map(|line| {
+        let body = line.trim().strip_prefix("stage:load_failure ")?;
+        let mut fields = body.split_whitespace();
+        let stage = fields.next()?.strip_prefix("stage=")?;
+        let error = fields.next()?.strip_prefix("win32_error=")?;
+        if fields.next().is_some()
+            || !matches!(
+                stage,
+                "set_default_dll_directories" | "add_dll_directory" | "load_library"
+            )
+            || error.is_empty()
+            || !error.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let win32_error_code = error.parse::<u32>().ok().filter(|code| *code != 0)?;
+        Some(json!({
+            "stage": stage,
+            "win32_error_code": win32_error_code,
+        }))
     })
 }
 
@@ -9767,6 +9796,54 @@ mod tests {
             MAX_STAGE_EVENTS
         );
         assert_eq!(diagnostics["stderr_truncated"], true);
+    }
+
+    #[test]
+    fn load_failure_marker_accepts_only_path_free_worker_owned_stage_and_error() {
+        let diagnostics = worker_diagnostics(
+            "untrusted C:\\private\\plugin.aex\n\
+             stage:load_failure stage=load_library win32_error=126\n",
+            false,
+            "nonzero_exit",
+            11,
+            4,
+        );
+        assert_eq!(
+            diagnostics["load_failure"],
+            json!({"stage": "load_library", "win32_error_code": 126})
+        );
+        assert!(!diagnostics["load_failure"].to_string().contains("private"));
+
+        for marker in [
+            "stage:load_failure stage=unknown win32_error=126",
+            "stage:load_failure stage=load_library win32_error=0",
+            "stage:load_failure stage=load_library win32_error=-1",
+            "stage:load_failure stage=load_library win32_error=126 path=C:\\private",
+            "stage:load_failure win32_error=126 stage=load_library",
+        ] {
+            assert_eq!(load_failure_marker(marker, 11), None);
+        }
+        assert_eq!(
+            load_failure_marker(
+                "stage:load_failure stage=add_dll_directory win32_error=87",
+                11,
+            ),
+            Some(json!({"stage": "add_dll_directory", "win32_error_code": 87}))
+        );
+        assert_eq!(
+            load_failure_marker(
+                "stage:load_failure stage=set_default_dll_directories win32_error=5",
+                11,
+            ),
+            Some(json!({
+                "stage": "set_default_dll_directories",
+                "win32_error_code": 5,
+            }))
+        );
+        assert_eq!(
+            load_failure_marker("stage:load_failure stage=load_library win32_error=126", 12,),
+            None
+        );
     }
 
     #[test]
