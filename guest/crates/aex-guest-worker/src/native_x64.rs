@@ -25,7 +25,7 @@ use crate::pe::PeImage;
 pub use crate::x64::{
     ExecutionTrace, GuestCensus, GuestParam, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
 };
-use crate::x64::{record_unsupported_suite_call, utility_suite_layout};
+use crate::x64::{record_suite_request, record_unsupported_suite_call, utility_suite_layout};
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
 const MAX_HANDLE_SIZE: u64 = 128 * 1024 * 1024;
@@ -89,6 +89,7 @@ struct NativeState {
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
     utility_suites: HashMap<u32, u64>,
+    iterate8_suite: u64,
     pre_checkout_calls: u32,
     pre_checkout_requests: Vec<[i32; 4]>,
     checkout_pixels_calls: u32,
@@ -209,6 +210,20 @@ impl GuestEngine<'static> {
             engine.write_u64(handle_suite + (index * 8) as u64, callback)?;
         }
         engine.state.handle_suite = handle_suite;
+        let iterate8_suite = engine.allocate(5 * 8, 8)?;
+        for (slot, callback) in [
+            callback_address!(iterate_world8),
+            callback_address!(iterate_origin8),
+            callback_address!(iterate_lut8),
+            callback_address!(iterate_origin_non_clip8),
+            callback_address!(iterate_generic),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            engine.write_u64(iterate8_suite + (slot * 8) as u64, callback)?;
+        }
+        engine.state.iterate8_suite = iterate8_suite;
         for version in [3u32, 7, 11, 13] {
             let callbacks =
                 native_utility_callbacks(version).expect("known AEGP Utility Suite version");
@@ -649,6 +664,292 @@ unsafe extern "win64" fn copy_world(
     0
 }
 
+#[derive(Clone, Copy)]
+struct NativeWorld8 {
+    data: u64,
+    rowbytes: usize,
+    width: i32,
+    height: i32,
+}
+
+fn native_world8(state: &NativeState, world: u64) -> Option<NativeWorld8> {
+    let arena_base = state.arena_end.saturating_sub(ARENA_SIZE as u64);
+    if world < arena_base || world.checked_add(abi::PF_LAYER_DEF_SIZE as u64)? > state.arena_end {
+        return None;
+    }
+    let read_u64 =
+        |offset: usize| unsafe { ptr::read_unaligned((world + offset as u64) as *const u64) };
+    let read_i32 =
+        |offset: usize| unsafe { ptr::read_unaligned((world + offset as u64) as *const i32) };
+    let data = read_u64(abi::LAYER_DATA_OFFSET);
+    let rowbytes = usize::try_from(read_i32(abi::LAYER_ROWBYTES_OFFSET)).ok()?;
+    let width = read_i32(abi::LAYER_WIDTH_OFFSET);
+    let height = read_i32(abi::LAYER_HEIGHT_OFFSET);
+    if data == 0
+        || width <= 0
+        || height <= 0
+        || rowbytes < usize::try_from(width).ok()?.checked_mul(4)?
+        || height > 16_777_216
+    {
+        return None;
+    }
+    let bytes = rowbytes.checked_mul(usize::try_from(height).ok()?)?;
+    let end = data.checked_add(bytes as u64)?;
+    if data < arena_base || end > state.arena_end {
+        return None;
+    }
+    Some(NativeWorld8 {
+        data,
+        rowbytes,
+        width,
+        height,
+    })
+}
+
+fn native_bounds(area: u64, width: i32, height: i32) -> Option<[i32; 4]> {
+    let mut bounds = [0, 0, width, height];
+    if area != 0 {
+        unsafe {
+            ptr::copy_nonoverlapping(area as *const i32, bounds.as_mut_ptr(), 4);
+        }
+        bounds[0] = bounds[0].clamp(0, width);
+        bounds[1] = bounds[1].clamp(0, height);
+        bounds[2] = bounds[2].clamp(bounds[0], width);
+        bounds[3] = bounds[3].clamp(bounds[1], height);
+    }
+    (bounds[0] < bounds[2] && bounds[1] < bounds[3]).then_some(bounds)
+}
+
+type IteratePixel8 = unsafe extern "win64" fn(u64, i32, i32, u64, u64) -> i32;
+type IterateProgress = unsafe extern "win64" fn(u64, i32, i32) -> i32;
+type IterateAbort = unsafe extern "win64" fn(u64) -> i32;
+type IterateGeneric = unsafe extern "win64" fn(u64, i32, i32, i32) -> i32;
+
+unsafe extern "win64" fn iterate_world8(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+) -> u64 {
+    if pixel_function == 0 {
+        return 4;
+    }
+    let Some(Some((destination, source, bounds, effect_ref, abort, progress))) =
+        with_state(|state| {
+            let Some(destination) = native_world8(state, destination_world) else {
+                return None;
+            };
+            let source = if source_world == 0 {
+                None
+            } else {
+                let Some(source) = native_world8(state, source_world) else {
+                    return None;
+                };
+                Some(source)
+            };
+            let width = source.map_or(destination.width, |source| {
+                source.width.min(destination.width)
+            });
+            let height = source.map_or(destination.height, |source| {
+                source.height.min(destination.height)
+            });
+            let bounds = native_bounds(area, width, height)?;
+            let (effect_ref, abort, progress) = if in_data == 0 {
+                (0, 0, 0)
+            } else {
+                unsafe {
+                    (
+                        ptr::read_unaligned(
+                            (in_data + abi::IN_EFFECT_REF_OFFSET as u64) as *const u64,
+                        ),
+                        ptr::read_unaligned(
+                            (in_data + abi::INTER_ABORT_OFFSET as u64) as *const u64,
+                        ),
+                        ptr::read_unaligned(
+                            (in_data + abi::INTER_PROGRESS_OFFSET as u64) as *const u64,
+                        ),
+                    )
+                }
+            };
+            Some((destination, source, bounds, effect_ref, abort, progress))
+        })
+    else {
+        return 4;
+    };
+    let [left, top, right, bottom] = bounds;
+    let pixel: IteratePixel8 = unsafe { std::mem::transmute(pixel_function as usize) };
+    let rows = bottom - top;
+    for y in top..bottom {
+        for x in left..right {
+            let output = destination.data + y as u64 * destination.rowbytes as u64 + x as u64 * 4;
+            let input = source.map_or(output, |source| {
+                source.data + y as u64 * source.rowbytes as u64 + x as u64 * 4
+            });
+            let error = unsafe { pixel(refcon, x, y, input, output) };
+            if error != 0 || with_state(|state| state.callback_error.is_some()).unwrap_or(true) {
+                if error != 0 {
+                    return error as u32 as u64;
+                }
+                return 4;
+            }
+        }
+        let completed = y - top + 1;
+        if progress != 0 {
+            let callback: IterateProgress = unsafe { std::mem::transmute(progress as usize) };
+            let current = progress_base as i64
+                + (progress_final as i64 - progress_base as i64) * completed as i64 / rows as i64;
+            let error = unsafe { callback(effect_ref, current as i32, progress_final) };
+            if error != 0 || with_state(|state| state.callback_error.is_some()).unwrap_or(true) {
+                if error != 0 {
+                    return error as u32 as u64;
+                }
+                return 4;
+            }
+        }
+        if completed < rows && abort != 0 {
+            let callback: IterateAbort = unsafe { std::mem::transmute(abort as usize) };
+            let error = unsafe { callback(effect_ref) };
+            if error != 0 || with_state(|state| state.callback_error.is_some()).unwrap_or(true) {
+                if error != 0 {
+                    return error as u32 as u64;
+                }
+                return 4;
+            }
+        }
+    }
+    0
+}
+
+unsafe extern "win64" fn iterate_origin8(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    origin: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+) -> u64 {
+    // The ordinary iterate contract is identical when origin is zero, which is
+    // the overwhelmingly common AE call. Non-zero origin remains explicit
+    // fail-closed until the shared callback runner carries coordinate offsets.
+    if origin != 0 {
+        let vertical = unsafe { ptr::read_unaligned(origin as *const i32) };
+        let horizontal = unsafe { ptr::read_unaligned((origin + 4) as *const i32) };
+        if vertical != 0 || horizontal != 0 {
+            return 4;
+        }
+    }
+    unsafe {
+        iterate_world8(
+            in_data,
+            progress_base,
+            progress_final,
+            source_world,
+            area,
+            refcon,
+            pixel_function,
+            destination_world,
+        )
+    }
+}
+
+unsafe extern "win64" fn iterate_origin_non_clip8(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    origin: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+) -> u64 {
+    unsafe {
+        iterate_origin8(
+            in_data,
+            progress_base,
+            progress_final,
+            source_world,
+            area,
+            origin,
+            refcon,
+            pixel_function,
+            destination_world,
+        )
+    }
+}
+
+unsafe extern "win64" fn iterate_lut8(
+    _: u64,
+    _: i32,
+    _: i32,
+    source_world: u64,
+    area: u64,
+    alpha_lut: u64,
+    red_lut: u64,
+    green_lut: u64,
+    blue_lut: u64,
+    destination_world: u64,
+) -> u64 {
+    with_state(|state| {
+        let Some(source) = native_world8(state, source_world) else {
+            return 4;
+        };
+        let Some(destination) = native_world8(state, destination_world) else {
+            return 4;
+        };
+        let Some([left, top, right, bottom]) = native_bounds(
+            area,
+            source.width.min(destination.width),
+            source.height.min(destination.height),
+        ) else {
+            return 4;
+        };
+        let tables = [alpha_lut, red_lut, green_lut, blue_lut];
+        for y in top..bottom {
+            for x in left..right {
+                let input = source.data + y as u64 * source.rowbytes as u64 + x as u64 * 4;
+                let output =
+                    destination.data + y as u64 * destination.rowbytes as u64 + x as u64 * 4;
+                for (channel, table) in tables.into_iter().enumerate() {
+                    let value = unsafe { *((input + channel as u64) as *const u8) };
+                    let mapped = if table == 0 {
+                        value
+                    } else {
+                        unsafe { *((table + value as u64) as *const u8) }
+                    };
+                    unsafe {
+                        *((output + channel as u64) as *mut u8) = mapped;
+                    }
+                }
+            }
+        }
+        0
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn iterate_generic(iterations: i32, refcon: u64, callback: u64) -> u64 {
+    if callback == 0 || (iterations != -1 && !(1..=16_777_216).contains(&iterations)) {
+        return 4;
+    }
+    let callback: IterateGeneric = unsafe { std::mem::transmute(callback as usize) };
+    let actual = if iterations == -1 { 1 } else { iterations };
+    for index in 0..actual {
+        let error = unsafe { callback(refcon, 0, index, actual) };
+        if error != 0 {
+            return error as u32 as u64;
+        }
+    }
+    0
+}
+
 unsafe extern "win64" fn pre_checkout_layer(
     _: u64,
     index: u64,
@@ -853,7 +1154,7 @@ unsafe extern "win64" fn acquire_suite(
     }
     let name = String::from_utf8_lossy(&bytes).into_owned();
     with_state(|state| {
-        state.suite_requests.push(format!("{name} v{version}"));
+        record_suite_request(&mut state.suite_requests, format!("{name} v{version}"));
         if output != 0 {
             unsafe {
                 *(output as *mut u64) = 0;
@@ -862,6 +1163,11 @@ unsafe extern "win64" fn acquire_suite(
         if name == "PF Handle Suite" && version == 2 && output != 0 {
             unsafe {
                 *(output as *mut u64) = state.handle_suite;
+            }
+            0
+        } else if name == "PF Iterate8 Suite" && matches!(version, 1 | 2) && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.iterate8_suite;
             }
             0
         } else if name == "AEGP Utility Suite" && output != 0 {

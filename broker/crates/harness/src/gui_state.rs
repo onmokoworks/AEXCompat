@@ -4,6 +4,7 @@ pub(crate) const LIVE_RENDER_DEBOUNCE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct GuiParameter {
+    pub(crate) slot: usize,
     pub(crate) name: String,
     pub(crate) param_type: i64,
     pub(crate) value: f64,
@@ -106,6 +107,7 @@ mod tests {
 
     fn parameter(value: f64, default_value: f64) -> GuiParameter {
         GuiParameter {
+            slot: 1,
             name: "Amount".into(),
             param_type: 1,
             value,

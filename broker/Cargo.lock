@@ -141,6 +141,7 @@ dependencies = [
  "goblin",
  "image",
  "rfd",
+ "serde",
  "serde_json",
  "sha2",
  "tracing",
