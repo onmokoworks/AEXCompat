@@ -1081,7 +1081,7 @@ fn aggregate_trace_functions(entry_rva: u64, events: &[TraceEvent]) -> Vec<Trace
         };
         let function = functions.entry(function_rva).or_default();
         match event.kind {
-            "guest_call" => {
+            "guest_call" | "tail_call" => {
                 function.observed_calls += event.observed_count;
                 if let Some(callee) = event.target_rva {
                     function.callees.insert(callee);
@@ -3598,6 +3598,13 @@ mod tests {
                 && event.pc_rva == Some(16)
                 && event.function_rva == Some(0)
         }));
+        let entry_function = trace
+            .functions
+            .iter()
+            .find(|function| function.entry_rva == 0)
+            .unwrap();
+        assert_eq!(entry_function.observed_calls, 2);
+        assert_eq!(entry_function.callees, vec![11]);
     }
 
     #[test]
