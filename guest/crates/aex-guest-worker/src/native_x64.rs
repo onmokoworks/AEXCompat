@@ -22,7 +22,7 @@ use std::ptr;
 use thiserror::Error;
 
 use crate::pe::PeImage;
-pub use crate::x64::{GuestCensus, GuestParam};
+pub use crate::x64::{ExecutionTrace, GuestCensus, GuestParam};
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
 const MAX_HANDLE_SIZE: u64 = 128 * 1024 * 1024;
@@ -63,6 +63,8 @@ pub enum GuestError {
     DllProcessAttach,
     #[error("guest census is unavailable in the native-speed oracle")]
     CensusUnavailable,
+    #[error("detailed execution tracing is available only in the Unicorn worker")]
+    TraceUnavailable,
 }
 
 #[derive(Clone, Debug)]
@@ -342,6 +344,14 @@ impl GuestEngine<'static> {
 
     pub fn finish_block_census(&mut self, _: u64) -> Result<GuestCensus, GuestError> {
         Err(GuestError::CensusUnavailable)
+    }
+
+    pub fn begin_execution_trace(&mut self, _: &str, _: u64) -> Result<(), GuestError> {
+        Err(GuestError::TraceUnavailable)
+    }
+
+    pub fn finish_execution_trace(&mut self, _: u64) -> Result<ExecutionTrace, GuestError> {
+        Err(GuestError::TraceUnavailable)
     }
 
     pub fn configure_parameter_definitions(&mut self, definitions: Vec<u64>) {

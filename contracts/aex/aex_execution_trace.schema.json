@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onmokoworks.local/aexcompat/aex_execution_trace.schema.json",
+  "title": "AEXCompat x64 AEX execution trace",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "execution_backend",
+    "selector",
+    "entry_rva",
+    "return_value",
+    "truncated",
+    "events",
+    "timeline"
+  ],
+  "properties": {
+    "schema": { "const": "aexcompat.aex-execution-trace" },
+    "schema_version": { "const": 1 },
+    "execution_backend": { "type": "string", "minLength": 1 },
+    "selector": { "enum": ["GLOBAL_SETUP", "PARAMS_SETUP"] },
+    "entry_rva": { "type": "integer", "minimum": 0 },
+    "return_value": { "type": "integer", "minimum": 0 },
+    "truncated": { "type": "boolean" },
+    "events": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 50000,
+      "items": { "$ref": "#/$defs/event" }
+    },
+    "timeline": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "depth", "kind"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 0 },
+        "depth": { "type": "integer", "minimum": 0 },
+        "kind": {
+          "enum": [
+            "selector_enter",
+            "selector_exit",
+            "guest_call",
+            "guest_return",
+            "import_call",
+            "host_callback"
+          ]
+        },
+        "pc_rva": { "type": "integer", "minimum": 0 },
+        "target_rva": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string" }
+      }
+    }
+  }
+}

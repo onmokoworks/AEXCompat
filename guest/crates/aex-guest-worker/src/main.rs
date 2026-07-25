@@ -48,10 +48,13 @@ fn main() -> ExitCode {
     };
     if ((command == "render-png" || command == "render-region-png" || command == "census-png")
         && (input.is_none() || output.is_none()))
+        || (command == "trace-selector" && (input.is_none() || output.is_some()))
         || (command != "render-png"
             && command != "render-region-png"
             && command != "census-png"
+            && command != "trace-selector"
             && (input.is_some() || output.is_some() || !trailing_args.is_empty()))
+        || (command == "trace-selector" && !trailing_args.is_empty())
     {
         usage();
         return ExitCode::from(2);
@@ -74,6 +77,22 @@ fn main() -> ExitCode {
                     })
                 })
                 .map_err(|error| error.to_string()),
+            Some("trace-selector") => {
+                let selector = input
+                    .as_deref()
+                    .and_then(Path::to_str)
+                    .ok_or_else(|| "trace selector must be UTF-8".to_string())?;
+                ClassicHost::new(&image)
+                    .and_then(|mut host| host.trace_setup_selector(selector))
+                    .and_then(|trace| {
+                        serde_json::to_string_pretty(&trace).map_err(|error| {
+                            aex_guest_worker::classic::ClassicError::Guest(
+                                aex_guest_worker::backend::GuestError::Callback(error.to_string()),
+                            )
+                        })
+                    })
+                    .map_err(|error| error.to_string())
+            }
             Some("render") => ClassicHost::new(&image)
                 .and_then(|mut host| host.render_default_2x2())
                 .and_then(|report| {
@@ -109,7 +128,7 @@ fn main() -> ExitCode {
                 true,
             ),
             _ => Err(
-                "command must be inspect, setup, render, render-png, render-region-png, or census-png".to_string(),
+                "command must be inspect, setup, trace-selector, render, render-png, render-region-png, or census-png".to_string(),
             ),
         });
     match result {
@@ -126,6 +145,7 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!("usage: aex-guest-worker <inspect|setup|render> <x64.aex>");
+    eprintln!("       aex-guest-worker trace-selector <x64.aex> <GLOBAL_SETUP|PARAMS_SETUP>");
     eprintln!(
         "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [name=value ...]"
     );

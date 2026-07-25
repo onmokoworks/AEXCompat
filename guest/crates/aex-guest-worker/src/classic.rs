@@ -2,7 +2,7 @@ use aex_abi::x86_64_windows as abi;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::backend::{GuestCensus, GuestEngine, GuestError};
+use crate::backend::{ExecutionTrace, GuestCensus, GuestEngine, GuestError};
 use crate::pe::PeImage;
 
 const CMD_GLOBAL_SETUP: u64 = 1;
@@ -283,6 +283,43 @@ impl ClassicHost {
             out_flags2,
             parameters,
         })
+    }
+
+    pub fn trace_setup_selector(
+        &mut self,
+        selector_name: &str,
+    ) -> Result<ExecutionTrace, ClassicError> {
+        let selector = match selector_name {
+            "GLOBAL_SETUP" => CMD_GLOBAL_SETUP,
+            "PARAMS_SETUP" => {
+                let error = self.invoke(CMD_GLOBAL_SETUP)? as i32;
+                if error != 0 {
+                    return Err(ClassicError::Selector {
+                        selector: "GLOBAL_SETUP",
+                        error,
+                    });
+                }
+                let mut output = vec![0u8; abi::PF_OUT_DATA_SIZE];
+                self.engine.read(self.output, &mut output)?;
+                let global_data = read_u64(&output, abi::OUT_GLOBAL_DATA_OFFSET);
+                let mut input = vec![0u8; abi::PF_IN_DATA_SIZE];
+                self.engine.read(self.input, &mut input)?;
+                write_u64(&mut input, abi::IN_GLOBAL_DATA_OFFSET, global_data);
+                self.engine.write(self.input, &input)?;
+                CMD_PARAMS_SETUP
+            }
+            _ => {
+                return Err(ClassicError::Input(
+                    "trace selector must be GLOBAL_SETUP or PARAMS_SETUP".into(),
+                ));
+            }
+        };
+        self.engine
+            .begin_execution_trace(selector_name, self.entry)?;
+        let return_value = self.invoke(selector)?;
+        self.engine
+            .finish_execution_trace(return_value)
+            .map_err(ClassicError::from)
     }
 
     pub fn render_default_2x2(&mut self) -> Result<RenderReport, ClassicError> {
