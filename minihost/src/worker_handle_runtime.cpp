@@ -61,13 +61,23 @@ void** __cdecl new_handle(std::uint64_t size) {
   std::lock_guard<std::mutex> lock(g_mutex);
   if (size > kMaxHandleBytes || g_handles.size() >= kMaxHandleCount ||
       g_statistics.live_bytes > kMaxHandleBytes - size) {
+    std::cerr << "callback:new_handle_failed reason=budget size=" << size << "\n"
+              << std::flush;
     invalid_operation();
     return nullptr;
   }
   auto* record = new (std::nothrow) HandleRecord;
-  if (!record) return nullptr;
+  if (!record) {
+    std::cerr << "callback:new_handle_failed reason=record size=" << size << "\n"
+              << std::flush;
+    invalid_operation();
+    return nullptr;
+  }
   record->data = ::operator new(static_cast<std::size_t>(size), std::nothrow);
   if (!record->data && size != 0) {
+    std::cerr << "callback:new_handle_failed reason=data size=" << size << "\n"
+              << std::flush;
+    invalid_operation();
     delete record;
     return nullptr;
   }
@@ -143,7 +153,12 @@ std::int32_t __cdecl resize_handle(std::uint64_t size, void*** handle) {
     return 4;
   }
   void* replacement = ::operator new(static_cast<std::size_t>(size), std::nothrow);
-  if (!replacement && size) return 1;
+  if (!replacement && size) {
+    std::cerr << "callback:resize_handle_failed reason=data size=" << size << "\n"
+              << std::flush;
+    invalid_operation();
+    return 1;
+  }
   if (replacement) {
     std::memset(replacement, 0, static_cast<std::size_t>(size));
     std::memcpy(replacement, record->data,
