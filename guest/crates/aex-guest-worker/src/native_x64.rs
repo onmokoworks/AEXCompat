@@ -1859,7 +1859,7 @@ mod tests {
         );
         assert_eq!(unsafe { unsupported_aegp_memory_slot(0, 0, 0, 0, 0, 0) }, 4);
 
-        let mut first_reused_data = 0u64;
+        let mut reuse_high_water = 0u64;
         for cycle in 0..(MAX_AEGP_MEMORY_HANDLES * 2) {
             let mut recycled_handle = 0u64;
             assert_eq!(
@@ -1889,11 +1889,8 @@ mod tests {
                 },
                 0
             );
-            if cycle == 0 {
-                first_reused_data = recycled_data;
-            } else {
-                assert_eq!(recycled_data, first_reused_data);
-            }
+            assert!(recycled_data >= arena.as_ptr() as u64);
+            assert!(recycled_data + 32 <= state.arena_end);
             assert_eq!(
                 unsafe { unlock_aegp_mem_handle(recycled_handle, 0, 0, 0, 0, 0) },
                 0
@@ -1902,6 +1899,11 @@ mod tests {
                 unsafe { free_aegp_mem_handle(recycled_handle, 0, 0, 0, 0, 0) },
                 0
             );
+            if cycle == 0 {
+                reuse_high_water = state.arena_next;
+            } else {
+                assert_eq!(state.arena_next, reuse_high_water);
+            }
         }
         let mut resize_handle = 0u64;
         assert_eq!(
