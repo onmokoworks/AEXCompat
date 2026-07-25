@@ -77,6 +77,8 @@ Environment: the same Apple Silicon Mac and unchanged private fixture used by
   `f0611785e7b14ac4fcfc75f23b8862beb4539eee52d25d472556849535e96e5b`
 - 1920x1080 input SHA-256:
   `9cb64466d3e0891df1b4885cf58c80082afa35794b9a9832d3f884d93c1d0c95`
+- release native worker SHA-256:
+  `e31abe20c7d0e8eabe5ab3da7b6c4db3149ec184eb07e6d3f737b1f6abf54c40`
 - ten fresh worker processes per case;
 - P95 is nearest-rank, therefore the maximum observation at N=10;
 - wall time includes process launch, PNG decode/encode, PE mapping, setup,
@@ -84,12 +86,12 @@ Environment: the same Apple Silicon Mac and unchanged private fixture used by
 
 | Case | Median | P95 | Native output SHA-256 | Unicorn output |
 | --- | ---: | ---: | --- | --- |
-| Default | 0.297 s | **0.820 s** | `9bfc672788beb677ad364b8d74c2be263a5e046a16cb4c7e708f03fc91d07237` | exact match |
-| Blur Amount=50 | 0.640 s | **0.710 s** | `ea1594ad99258d56360737dfdfefab89c3513d8640dc2c56d073b5e388d49a9c` | exact match |
+| Default | 0.303 s | **0.853 s** | `9bfc672788beb677ad364b8d74c2be263a5e046a16cb4c7e708f03fc91d07237` | exact match |
+| Blur Amount=50 | 0.638 s | **0.656 s** | `ea1594ad99258d56360737dfdfefab89c3513d8640dc2c56d073b5e388d49a9c` | exact match |
 
-The default P95 includes a 0.820-second cold first process; its other nine
-observations were 0.288–0.323 seconds. Amount=50 observations were
-0.629–0.710 seconds.
+The default P95 includes a 0.853-second cold first process; its other nine
+observations were 0.294–0.422 seconds. Amount=50 observations were
+0.635–0.656 seconds.
 
 Historical Unicorn P95 from #487 was 13.707 seconds at default and 60.287
 seconds at Amount=50. The native carrier improves the measured P95 by about
@@ -101,8 +103,8 @@ the prior Unicorn PNG SHA-256
 
 Local ignored benchmark reports:
 
-- `target/issue492/final-default/benchmark.json`
-- `target/issue492/final-amount50/benchmark.json`
+- `target/issue492/audit-default/benchmark.json`
+- `target/issue492/audit-amount50/benchmark.json`
 
 ## Reproduction
 
