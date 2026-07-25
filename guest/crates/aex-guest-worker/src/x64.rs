@@ -142,6 +142,34 @@ pub enum GuestError {
     },
 }
 
+impl GuestError {
+    pub fn diagnostic_category(&self) -> &'static str {
+        match self {
+            Self::Unicorn { .. } => "emulation",
+            Self::ImageAlignment => "image",
+            Self::StubCapacity | Self::IatRange => "import",
+            Self::DataCapacity => "memory",
+            Self::Callback(_) => "callback",
+            Self::DllProcessAttach => "dllmain",
+            Self::ExecutionCrash { .. } => "crash",
+        }
+    }
+
+    pub fn diagnostic_message(&self) -> String {
+        match self {
+            Self::ExecutionCrash { reason, .. } => reason.clone(),
+            _ => self.to_string(),
+        }
+    }
+
+    pub fn crash_reason(&self) -> Option<&str> {
+        match self {
+            Self::ExecutionCrash { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 fn uc<T>(
     operation: &'static str,
     result: Result<T, unicorn_engine::unicorn_const::uc_error>,

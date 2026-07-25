@@ -78,6 +78,26 @@ pub enum GuestError {
     TraceUnavailable,
 }
 
+impl GuestError {
+    pub fn diagnostic_category(&self) -> &'static str {
+        match self {
+            Self::Mapping(_) => "mapping",
+            Self::Callback(_) => "callback",
+            Self::DataCapacity => "memory",
+            Self::DllProcessAttach => "dllmain",
+            Self::CensusUnavailable | Self::TraceUnavailable => "capability",
+        }
+    }
+
+    pub fn diagnostic_message(&self) -> String {
+        self.to_string()
+    }
+
+    pub fn crash_reason(&self) -> Option<&str> {
+        None
+    }
+}
+
 #[derive(Clone, Debug)]
 struct NativeHandle {
     data: u64,

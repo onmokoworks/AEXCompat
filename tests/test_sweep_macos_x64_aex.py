@@ -144,6 +144,161 @@ def test_source_pair_requires_summary_to_bind_exact_inventory_sha():
         SWEEP.validate_source_pair(inventory, summary, "b" * 64)
 
 
+def _failure_diagnostic(category="callback", unsupported=None):
+    return {
+        "schema_version": 1,
+        "stage": "admission_probe",
+        "execution_backend": "unicorn-x86_64",
+        "category": category,
+        "selector": "RENDER",
+        "error_code": None,
+        "message": "bounded failure",
+        "crash_reason": None,
+        "suite_requests": [],
+        "dropped_suite_requests": 0,
+        "unsupported_suite_calls": unsupported or [],
+        "dropped_unsupported_suite_calls": 0,
+    }
+
+
+def test_validate_probe_raises_typed_structured_admission_failure():
+    message = {
+        "v": 1,
+        "type": "session_probed",
+        "worker_pid": 42,
+        "status": "error",
+        "guards_intact": False,
+        "render_error": -40,
+        "failure": _failure_diagnostic(),
+    }
+
+    with pytest.raises(SWEEP.AdmissionFailure) as captured:
+        SWEEP.validate_probe(message, 42)
+
+    assert captured.value.diagnostic["category"] == "callback"
+    assert SWEEP.classify_diagnostic(captured.value.diagnostic) == "callback"
+
+
+def test_structured_unsupported_suite_call_takes_classification_priority():
+    diagnostic = _failure_diagnostic(
+        "callback",
+        [
+            {
+                "name": "PF Iterate8 Suite",
+                "version": 1,
+                "slot": 2,
+                "call_count": 1,
+            }
+        ],
+    )
+
+    assert SWEEP.classify_diagnostic(diagnostic) == "Suite"
+
+
+def test_failure_diagnostic_rejects_unbounded_message():
+    diagnostic = _failure_diagnostic()
+    diagnostic["message"] = "x" * 1025
+
+    with pytest.raises(SWEEP.SweepError, match="invalid admission failure"):
+        SWEEP.validate_failure_diagnostic(diagnostic)
+
+
+@pytest.mark.parametrize("field", ["suite_requests", "unsupported_suite_calls"])
+def test_failure_diagnostic_rejects_more_than_64_exemplars(field):
+    diagnostic = _failure_diagnostic()
+    if field == "suite_requests":
+        diagnostic[field] = [f"suite-{index}" for index in range(65)]
+    else:
+        diagnostic[field] = [
+            {
+                "name": "PF Iterate8 Suite",
+                "version": 1,
+                "slot": index,
+                "call_count": 1,
+            }
+            for index in range(65)
+        ]
+
+    with pytest.raises(SWEEP.SweepError, match="bound|invalid admission failure"):
+        SWEEP.validate_failure_diagnostic(diagnostic)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", True),
+        ("error_code", True),
+        ("dropped_suite_requests", True),
+        ("dropped_unsupported_suite_calls", True),
+    ],
+)
+def test_failure_diagnostic_rejects_boolean_integer_fields(field, value):
+    diagnostic = _failure_diagnostic()
+    diagnostic[field] = value
+
+    with pytest.raises(SWEEP.SweepError, match="invalid admission failure"):
+        SWEEP.validate_failure_diagnostic(diagnostic)
+
+
+def test_failure_diagnostic_rejects_unbounded_suite_request():
+    diagnostic = _failure_diagnostic()
+    diagnostic["suite_requests"] = ["あ" * 86]
+
+    with pytest.raises(SWEEP.SweepError, match="invalid admission failure"):
+        SWEEP.validate_failure_diagnostic(diagnostic)
+
+
+def test_failure_diagnostic_rejects_boolean_suite_call_integer():
+    diagnostic = _failure_diagnostic(
+        unsupported=[
+            {
+                "name": "PF Iterate8 Suite",
+                "version": True,
+                "slot": 2,
+                "call_count": 1,
+            }
+        ]
+    )
+
+    with pytest.raises(SWEEP.SweepError, match="invalid unsupported suite call"):
+        SWEEP.validate_failure_diagnostic(diagnostic)
+
+
+def test_durable_error_sanitizes_home_and_omits_crash_snapshot():
+    message = (
+        f"failed at {Path.home()}/private/plugin.aex; "
+        'crash_snapshot={"registers":{"rax":42}}'
+    )
+
+    sanitized = SWEEP.sanitize_error_text(message)
+
+    assert str(Path.home()) not in sanitized
+    assert "<home>/private/plugin.aex" in sanitized
+    assert "rax" not in sanitized
+    assert sanitized.endswith("crash_snapshot=<omitted>")
+    assert len(sanitized.encode("utf-8")) <= SWEEP.MAX_DURABLE_ERROR_BYTES
+
+
+def test_durable_error_sanitizes_known_paths_outside_home():
+    message = (
+        "failed plugin /Volumes/AEX Corpus/OLMBlur.aex; "
+        "output /private/tmp/aex-sweep-runs/0001/output.argb8"
+    )
+
+    sanitized = SWEEP.sanitize_error_text(
+        message,
+        {
+            "/Volumes/AEX Corpus": "<corpus-root:0>",
+            "/private/tmp/aex-sweep-runs": "<run-root>",
+        },
+    )
+
+    assert "/Volumes/AEX Corpus" not in sanitized
+    assert "/private/tmp/aex-sweep-runs" not in sanitized
+    assert "<corpus-root:0>/OLMBlur.aex" in sanitized
+    assert "<run-root>/0001/output.argb8" in sanitized
+
+
 def test_validate_close_accepts_complete_clean_contract():
     SWEEP.validate_close(_close_message(), 42, 1)
 
