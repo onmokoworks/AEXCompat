@@ -13,6 +13,7 @@ from typing import Any
 def event_key(event: dict[str, Any]) -> str:
     parts = (
         event.get("kind"),
+        event.get("depth"),
         event.get("function_rva"),
         event.get("pc_rva"),
         event.get("target_rva"),
@@ -23,19 +24,21 @@ def event_key(event: dict[str, Any]) -> str:
 
 def trace_index(dossier: dict[str, Any]) -> dict[str, dict[str, Any]]:
     traces = dossier.get("execution_traces", [])
-    return {
-        f"{trace.get('selector', 'unknown')}#{index}": trace
-        for index, trace in enumerate(traces)
-    }
+    occurrences: Counter[str] = Counter()
+    indexed = {}
+    for trace in traces:
+        selector = str(trace.get("selector", "unknown"))
+        occurrence = occurrences[selector]
+        occurrences[selector] += 1
+        indexed[f"{selector}#{occurrence}"] = trace
+    return indexed
 
 
 def count_events(trace: dict[str, Any]) -> Counter[str]:
-    return Counter(
-        {
-            event_key(event): int(event.get("observed_count", 1))
-            for event in trace.get("events", [])
-        }
-    )
+    counts: Counter[str] = Counter()
+    for event in trace.get("events", []):
+        counts[event_key(event)] += int(event.get("observed_count", 1))
+    return counts
 
 
 def bounded_counter_delta(

@@ -261,41 +261,55 @@ fn trace_instruction(
 ) {
     let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or(0);
     let return_value = trace_return_value(unicorn, image_base, image_end);
-    if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
-        while capture
-            .call_rsp_stack
-            .last()
-            .is_some_and(|caller_rsp| rsp >= *caller_rsp)
-        {
-            capture.call_rsp_stack.pop();
-            let call_id = capture.call_id_stack.pop();
-            capture.watch_stack.pop();
-            let target = capture.return_stack.pop();
-            let function_rva = capture.function_stack.pop().flatten();
-            push_trace_event(
-                capture,
-                TraceEvent {
-                    sequence: 0,
-                    observed_count: 1,
-                    depth: capture.return_stack.len(),
-                    kind: "guest_return",
-                    call_id,
-                    function_rva,
-                    pc_rva: None,
-                    target_rva: target
-                        .filter(|target| (image_base..image_end).contains(target))
-                        .map(|target| target - image_base),
-                    name: Some("inferred_from_stack".into()),
-                    arguments: Vec::new(),
-                    xmm_arguments: Vec::new(),
-                    stack_arguments: Vec::new(),
-                    return_value: Some(return_value.clone()),
-                    exemplars: TraceExemplars::default(),
-                    call_kind: None,
-                    instruction_bytes: None,
-                },
-            );
+    loop {
+        let should_infer_return = unicorn
+            .get_data()
+            .trace
+            .as_ref()
+            .and_then(|capture| capture.call_rsp_stack.last())
+            .is_some_and(|caller_rsp| rsp >= *caller_rsp);
+        if !should_infer_return {
+            break;
         }
+        let pending = unicorn
+            .get_data()
+            .trace
+            .as_ref()
+            .and_then(|capture| capture.watch_stack.last().cloned())
+            .unwrap_or_default();
+        let completed = complete_trace_watches(unicorn, pending, image_base, image_end);
+        let Some(capture) = unicorn.get_data_mut().trace.as_mut() else {
+            break;
+        };
+        capture.call_rsp_stack.pop();
+        let call_id = capture.call_id_stack.pop();
+        capture.watch_stack.pop();
+        append_trace_witnesses(capture, completed);
+        let target = capture.return_stack.pop();
+        let function_rva = capture.function_stack.pop().flatten();
+        push_trace_event(
+            capture,
+            TraceEvent {
+                sequence: 0,
+                observed_count: 1,
+                depth: capture.return_stack.len(),
+                kind: "guest_return",
+                call_id,
+                function_rva,
+                pc_rva: None,
+                target_rva: target
+                    .filter(|target| (image_base..image_end).contains(target))
+                    .map(|target| target - image_base),
+                name: Some("inferred_from_stack".into()),
+                arguments: Vec::new(),
+                xmm_arguments: Vec::new(),
+                stack_arguments: Vec::new(),
+                return_value: Some(return_value.clone()),
+                exemplars: TraceExemplars::default(),
+                call_kind: None,
+                instruction_bytes: None,
+            },
+        );
     }
     let arguments = trace_arguments(unicorn, image_base, image_end);
     let xmm_arguments = trace_xmm_arguments(unicorn);
@@ -542,27 +556,7 @@ fn trace_instruction(
             .as_ref()
             .and_then(|capture| capture.watch_stack.last().cloned())
             .unwrap_or_default();
-        let completed = pending
-            .into_iter()
-            .map(|pending| {
-                let size = pending.before.size;
-                let after =
-                    trace_memory_snapshot(unicorn, pending.address, size, image_base, image_end);
-                TraceMemoryWitness {
-                    watch_id: pending.spec_id,
-                    call_id: pending.call_id,
-                    function_rva: pending.function_rva,
-                    pc_rva: pending.pc_rva,
-                    register: pending.register,
-                    image_coordinate: pending.image_coordinate,
-                    image_row_offset: pending.image_row_offset,
-                    image_format: pending.image_format,
-                    changed_ranges: trace_changed_ranges(&pending.before, &after),
-                    before: pending.before,
-                    after,
-                }
-            })
-            .collect::<Vec<_>>();
+        let completed = complete_trace_watches(unicorn, pending, image_base, image_end);
         let Some(capture) = unicorn.get_data_mut().trace.as_mut() else {
             return;
         };
@@ -572,13 +566,7 @@ fn trace_instruction(
         capture.call_rsp_stack.pop();
         let call_id = capture.call_id_stack.pop();
         capture.watch_stack.pop();
-        for witness in completed {
-            if capture.witnesses.len() < MAX_TRACE_WITNESSES {
-                capture.witnesses.push(witness);
-            } else {
-                capture.dropped_witnesses += 1;
-            }
-        }
+        append_trace_witnesses(capture, completed);
         push_trace_event(
             capture,
             TraceEvent {
@@ -877,6 +865,52 @@ fn trace_changed_ranges(
         }
     }
     ranges
+}
+
+fn complete_trace_watches(
+    unicorn: &Unicorn<'_, GuestState>,
+    pending: Vec<PendingTraceWatch>,
+    image_base: u64,
+    image_end: u64,
+) -> Vec<TraceMemoryWitness> {
+    pending
+        .into_iter()
+        .map(|pending| {
+            let after = trace_memory_snapshot(
+                unicorn,
+                pending.address,
+                pending.before.size,
+                image_base,
+                image_end,
+            );
+            TraceMemoryWitness {
+                watch_id: pending.spec_id,
+                call_id: pending.call_id,
+                function_rva: pending.function_rva,
+                pc_rva: pending.pc_rva,
+                register: pending.register,
+                image_coordinate: pending.image_coordinate,
+                image_row_offset: pending.image_row_offset,
+                image_format: pending.image_format,
+                changed_ranges: trace_changed_ranges(&pending.before, &after),
+                before: pending.before,
+                after,
+            }
+        })
+        .collect()
+}
+
+fn append_trace_witnesses(
+    capture: &mut TraceCapture,
+    witnesses: impl IntoIterator<Item = TraceMemoryWitness>,
+) {
+    for witness in witnesses {
+        if capture.witnesses.len() < MAX_TRACE_WITNESSES {
+            capture.witnesses.push(witness);
+        } else {
+            capture.dropped_witnesses += 1;
+        }
+    }
 }
 
 fn resolve_runtime_target(
@@ -3701,6 +3735,44 @@ mod tests {
         assert_eq!(witness.changed_ranges.len(), 1);
         assert_eq!(witness.changed_ranges[0].offset, 0);
         assert_eq!(witness.changed_ranges[0].size, 1);
+    }
+
+    #[test]
+    fn inferred_return_path_completes_pending_memory_witness() {
+        const CODE: u64 = 0x1000_0000;
+        // call target_a; call target_b; ret; nop;
+        // target_a: mov byte ptr [rcx],0x2a; ret; target_b: ret
+        let mut engine = test_engine(&[
+            0xe8, 0x07, 0, 0, 0, 0xe8, 0x06, 0, 0, 0, 0xc3, 0x90, 0xc6, 0x01, 0x2a, 0xc3, 0xc3,
+        ]);
+        engine.trace_points = vec![CODE, CODE + 5];
+        let buffer = engine.allocate(4, 1).unwrap();
+        engine.write(buffer, &[1, 2, 3, 4]).unwrap();
+        engine.configure_trace_watches(vec![TraceWatchSpec {
+            id: "inferred-return".into(),
+            function_rva: Some(12),
+            instruction_rva: None,
+            absolute_address: None,
+            register: "rcx",
+            size: 4,
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
+        }]);
+        engine.begin_execution_trace("RENDER", CODE).unwrap();
+        let result = engine.call_win64(CODE, [buffer, 0, 0, 0, 0, 0]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        let witness = trace
+            .memory_witnesses
+            .iter()
+            .find(|witness| witness.watch_id == "inferred-return")
+            .unwrap();
+        assert_eq!(witness.before.u8_values, [1, 2, 3, 4]);
+        assert_eq!(witness.after.u8_values, [42, 2, 3, 4]);
+        assert!(trace.events.iter().any(|event| {
+            event.kind == "guest_return" && event.name.as_deref() == Some("inferred_from_stack")
+        }));
     }
 
     #[test]

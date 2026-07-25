@@ -47,3 +47,42 @@ def test_dossier_diff_reports_parameter_and_observation_changes():
     assert delta["before"] == 2
     assert delta["after"] == 5
     assert delta["delta"] == 3
+
+
+def test_trace_identity_uses_occurrence_within_each_selector():
+    frame = {"selector": "FRAME_SETDOWN", "events": []}
+    before = {"execution_traces": [{"selector": "SEQUENCE_SETUP"}, frame]}
+    after = {
+        "execution_traces": [
+            {"selector": "SEQUENCE_SETUP"},
+            {"selector": "SMART_RENDER"},
+            frame,
+        ]
+    }
+
+    result = MODULE.build_diff(before, after)
+    frame_diff = next(
+        item for item in result["trace_diffs"] if item["selector"] == "FRAME_SETDOWN#0"
+    )
+
+    assert frame_diff["present_before"] is True
+    assert frame_diff["present_after"] is True
+
+
+def test_event_counts_accumulate_duplicate_semantic_keys():
+    event = {
+        "kind": "guest_call",
+        "depth": 2,
+        "pc_rva": 10,
+        "target_rva": 20,
+    }
+    trace = {
+        "events": [
+            {**event, "observed_count": 2},
+            {**event, "observed_count": 3},
+        ]
+    }
+
+    counts = MODULE.count_events(trace)
+
+    assert list(counts.values()) == [5]
