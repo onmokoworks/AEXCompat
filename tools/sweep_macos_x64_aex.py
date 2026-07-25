@@ -23,6 +23,7 @@ from PIL import Image
 SCHEMA_VERSION = 1
 MAX_MESSAGE_BYTES = 64 * 1024
 MAX_ERROR_BYTES = 4096
+MAX_DURABLE_ERROR_BYTES = 1024
 START_TIMEOUT_SECONDS = 10.0
 RENDER_TIMEOUT_SECONDS = 30.0
 CLOSE_TIMEOUT_SECONDS = 2.0
@@ -30,6 +31,39 @@ CLOSE_TIMEOUT_SECONDS = 2.0
 
 class SweepError(RuntimeError):
     pass
+
+
+class AdmissionFailure(SweepError):
+    def __init__(self, diagnostic: dict[str, object], render_error: int):
+        self.diagnostic = diagnostic
+        self.render_error = render_error
+        self.termination_evidence = ""
+        super().__init__(
+            "resident admission probe failed: "
+            f"{diagnostic['category']} {diagnostic['message']}"
+        )
+
+
+def bounded_utf8(value: str, limit: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
+def sanitize_error_text(value: str) -> str:
+    value = value.replace(os.fspath(Path.home()), "<home>")
+    if "crash_snapshot=" in value:
+        value = value.split("crash_snapshot=", 1)[0] + "crash_snapshot=<omitted>"
+    return bounded_utf8(value, MAX_DURABLE_ERROR_BYTES)
+
+
+def sanitize_diagnostic(value: dict[str, object]) -> dict[str, object]:
+    result = dict(value)
+    result["message"] = sanitize_error_text(value["message"])
+    if value["crash_reason"] is not None:
+        result["crash_reason"] = sanitize_error_text(value["crash_reason"])
+    return result
 
 
 def sha256_file(path: Path) -> str:
@@ -242,21 +276,114 @@ def require_backend(
         )
 
 
-def validate_probe(value: dict[str, object], pid: int) -> None:
+def validate_unsupported_suite_calls(value: object) -> None:
+    if not isinstance(value, list):
+        raise SweepError("unsupported_suite_calls is not an array")
+    for call in value:
+        if not isinstance(call, dict):
+            raise SweepError("unsupported suite call is not an object")
+        require_exact_keys(
+            call, {"name", "version", "slot", "call_count"}, "unsupported suite call"
+        )
+        if (
+            not isinstance(call.get("name"), str)
+            or not isinstance(call.get("version"), int)
+            or not isinstance(call.get("slot"), int)
+            or not isinstance(call.get("call_count"), int)
+        ):
+            raise SweepError(f"invalid unsupported suite call: {call}")
+
+
+def validate_failure_diagnostic(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise SweepError("admission failure diagnostic is not an object")
     require_exact_keys(
         value,
-        {"v", "type", "worker_pid", "status", "guards_intact", "render_error"},
-        "session_probed",
+        {
+            "schema_version",
+            "stage",
+            "execution_backend",
+            "category",
+            "selector",
+            "error_code",
+            "message",
+            "crash_reason",
+            "suite_requests",
+            "unsupported_suite_calls",
+            "dropped_unsupported_suite_calls",
+        },
+        "admission failure diagnostic",
     )
+    categories = {
+        "callback",
+        "capability",
+        "crash",
+        "dllmain",
+        "emulation",
+        "image",
+        "import",
+        "input",
+        "mapping",
+        "memory",
+        "selector",
+    }
+    message = value.get("message")
+    crash_reason = value.get("crash_reason")
+    if (
+        value.get("schema_version") != 1
+        or value.get("stage") != "admission_probe"
+        or not isinstance(value.get("execution_backend"), str)
+        or value.get("category") not in categories
+        or (
+            value.get("selector") is not None
+            and not isinstance(value.get("selector"), str)
+        )
+        or (
+            value.get("error_code") is not None
+            and not isinstance(value.get("error_code"), int)
+        )
+        or not isinstance(message, str)
+        or len(message.encode("utf-8")) > 1024
+        or (
+            crash_reason is not None
+            and (
+                not isinstance(crash_reason, str)
+                or len(crash_reason.encode("utf-8")) > 1024
+            )
+        )
+        or not isinstance(value.get("suite_requests"), list)
+        or not all(isinstance(item, str) for item in value["suite_requests"])
+        or not isinstance(value.get("dropped_unsupported_suite_calls"), int)
+    ):
+        raise SweepError(f"invalid admission failure diagnostic: {value}")
+    validate_unsupported_suite_calls(value["unsupported_suite_calls"])
+    return value
+
+
+def validate_probe(value: dict[str, object], pid: int) -> None:
+    common = {"v", "type", "worker_pid", "status", "guards_intact", "render_error"}
+    if value.get("status") == "ok":
+        require_exact_keys(value, common, "session_probed success")
+    elif value.get("status") == "error":
+        require_exact_keys(value, common | {"failure"}, "session_probed failure")
+    else:
+        raise SweepError(f"invalid session_probed status: {value}")
     if (
         value.get("v") != 1
         or value.get("type") != "session_probed"
         or value.get("worker_pid") != pid
-        or value.get("status") != "ok"
-        or value.get("guards_intact") is not True
-        or value.get("render_error") != 0
     ):
-        raise SweepError(f"resident admission probe failed: {value}")
+        raise SweepError(f"invalid session_probed envelope: {value}")
+    if value["status"] == "error":
+        if value.get("guards_intact") is not False or not isinstance(
+            value.get("render_error"), int
+        ):
+            raise SweepError(f"invalid failed session_probed: {value}")
+        raise AdmissionFailure(
+            validate_failure_diagnostic(value["failure"]), value["render_error"]
+        )
+    if value.get("guards_intact") is not True or value.get("render_error") != 0:
+        raise SweepError(f"invalid successful session_probed: {value}")
 
 
 def validate_close(value: dict[str, object], pid: int, expected_frames: int) -> None:
@@ -487,6 +614,9 @@ def run_backend(
         write_message(probe.stdin, {"v": 1, "type": "probe"})
         validate_probe(read_message(probe.stdout, RENDER_TIMEOUT_SECONDS), probe.pid)
         close_worker(probe, 0)
+    except AdmissionFailure as error:
+        error.termination_evidence = terminate_worker(probe)
+        raise
     except Exception as error:
         stderr = terminate_worker(probe)
         if stderr:
@@ -559,6 +689,24 @@ def classify_failure(message: str) -> str:
     return "guest-runtime"
 
 
+def classify_diagnostic(diagnostic: dict[str, object]) -> str:
+    if diagnostic["unsupported_suite_calls"]:
+        return "Suite"
+    return {
+        "callback": "callback",
+        "capability": "capability",
+        "crash": "crash",
+        "dllmain": "DllMain",
+        "emulation": "emulation",
+        "image": "image",
+        "import": "import",
+        "input": "input",
+        "mapping": "mapping",
+        "memory": "memory",
+        "selector": "selector",
+    }[diagnostic["category"]]
+
+
 def validate_source_pair(
     inventory: dict[str, object],
     windows_summary: dict[str, object],
@@ -594,7 +742,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
     validate_source_pair(inventory, windows_summary, inventory_sha)
     mapped = map_corpus(inventory, args.corpus_root)
     width, height, argb8 = png_to_argb8(args.input_png.resolve(strict=True))
-    workers = {
+    available_workers = {
         "native": (
             args.native_worker.resolve(strict=True),
             "native-x86_64-carrier",
@@ -604,6 +752,8 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
             "unicorn-x86_64",
         ),
     }
+    requested_backends = args.backend or ["native", "unicorn"]
+    workers = {name: available_workers[name] for name in requested_backends}
     for name, (worker, _) in workers.items():
         if not worker.is_file():
             raise SweepError(f"{name} worker is not a file: {worker}")
@@ -631,8 +781,21 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
                 )
                 result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
                 counts[f"{backend}:rendered"] += 1
+            except AdmissionFailure as error:
+                diagnostic = sanitize_diagnostic(error.diagnostic)
+                result = {
+                    "status": "failed",
+                    "failure_class": classify_diagnostic(diagnostic),
+                    "render_error": error.render_error,
+                    "diagnostic": diagnostic,
+                    "termination_evidence": sanitize_error_text(
+                        error.termination_evidence
+                    ),
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                }
+                counts[f"{backend}:{result['failure_class']}"] += 1
             except Exception as error:
-                message = str(error)[:MAX_ERROR_BYTES]
+                message = sanitize_error_text(str(error))
                 bucket = classify_failure(message)
                 result = {
                     "status": "failed",
@@ -660,8 +823,8 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
             "mapped_entries": len(mapped),
             "input_png_sha256": sha256_file(args.input_png),
             "input_dimensions": [width, height],
-            "native_worker_sha256": sha256_file(workers["native"][0]),
-            "unicorn_worker_sha256": sha256_file(workers["unicorn"][0]),
+            "native_worker_sha256": sha256_file(available_workers["native"][0]),
+            "unicorn_worker_sha256": sha256_file(available_workers["unicorn"][0]),
         },
         "summary": {
             "entry_count": len(entries),
@@ -685,6 +848,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-png", type=Path, required=True)
     parser.add_argument("--native-worker", type=Path, required=True)
     parser.add_argument("--unicorn-worker", type=Path, required=True)
+    parser.add_argument(
+        "--backend",
+        action="append",
+        choices=("native", "unicorn"),
+        help="backend to run; repeat for both (default: both)",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-inventory-sha256", required=True)
     parser.add_argument("--expected-summary-sha256", required=True)

@@ -29,6 +29,7 @@ const ANGLE_DEFAULT_OFFSET: usize = 4;
 const CLEANUP_GUEST_ERROR: i32 = -40;
 const OUTPUT_GUARD_BYTES: usize = 64;
 const OUTPUT_GUARD_PATTERN: u8 = 0xa5;
+const MAX_FAILURE_TEXT_BYTES: usize = 1024;
 pub const MAX_RENDER_WIDTH: u32 = 1920;
 pub const MAX_RENDER_HEIGHT: u32 = 1080;
 
@@ -94,6 +95,21 @@ pub struct FailureReport {
     pub schema_version: u32,
     pub execution_backend: &'static str,
     pub error: String,
+    pub suite_requests: Vec<String>,
+    pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
+    pub dropped_unsupported_suite_calls: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResidentFailureDiagnostic {
+    pub schema_version: u32,
+    pub stage: &'static str,
+    pub execution_backend: &'static str,
+    pub category: &'static str,
+    pub selector: Option<&'static str>,
+    pub error_code: Option<i32>,
+    pub message: String,
+    pub crash_reason: Option<String>,
     pub suite_requests: Vec<String>,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     pub dropped_unsupported_suite_calls: u64,
@@ -512,6 +528,50 @@ impl ClassicHost {
             schema_version: 1,
             execution_backend: self.engine.backend_name(),
             error: error.to_string(),
+            suite_requests: self.engine.suite_requests().to_vec(),
+            unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
+            dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
+        }
+    }
+
+    pub fn resident_failure_diagnostic(
+        &self,
+        stage: &'static str,
+        error: &ClassicError,
+    ) -> ResidentFailureDiagnostic {
+        let (category, selector, error_code, message, crash_reason) = match error {
+            ClassicError::Guest(source) => (
+                source.diagnostic_category(),
+                None,
+                None,
+                source.diagnostic_message(),
+                source.crash_reason().map(str::to_owned),
+            ),
+            ClassicError::SelectorGuest { selector, source } => (
+                source.diagnostic_category(),
+                Some(*selector),
+                None,
+                source.diagnostic_message(),
+                source.crash_reason().map(str::to_owned),
+            ),
+            ClassicError::Selector { selector, error } => (
+                "selector",
+                Some(*selector),
+                Some(*error),
+                format!("selector {selector} returned {error}"),
+                None,
+            ),
+            ClassicError::Input(message) => ("input", None, None, message.clone(), None),
+        };
+        ResidentFailureDiagnostic {
+            schema_version: 1,
+            stage,
+            execution_backend: self.engine.backend_name(),
+            category,
+            selector,
+            error_code,
+            message: bounded_failure_text(&message),
+            crash_reason: crash_reason.map(|reason| bounded_failure_text(&reason)),
             suite_requests: self.engine.suite_requests().to_vec(),
             unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
             dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
@@ -1143,7 +1203,7 @@ impl ClassicHost {
 
     fn call_with_optional_trace(
         &mut self,
-        selector_name: &str,
+        selector_name: &'static str,
         args: [u64; 6],
         trace_enabled: bool,
     ) -> Result<(u64, Option<ExecutionTrace>), ClassicError> {
@@ -1154,7 +1214,12 @@ impl ClassicHost {
             self.engine
                 .begin_execution_trace(selector_name, self.entry)?;
         }
-        let return_value = self.engine.call_win64(self.entry, args)?;
+        let return_value = self.engine.call_win64(self.entry, args).map_err(|source| {
+            ClassicError::SelectorGuest {
+                selector: selector_name,
+                source,
+            }
+        })?;
         let after = trace_enabled
             .then(|| self.trace_state_snapshot())
             .transpose()?;
@@ -1621,9 +1686,29 @@ fn cleanup_error_code(result: Result<i32, ClassicError>) -> i32 {
     result.unwrap_or(CLEANUP_GUEST_ERROR)
 }
 
+fn bounded_failure_text(value: &str) -> String {
+    if value.len() <= MAX_FAILURE_TEXT_BYTES {
+        return value.to_owned();
+    }
+    let mut end = MAX_FAILURE_TEXT_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_text_is_utf8_safe_and_bounded() {
+        let text = "界".repeat(MAX_FAILURE_TEXT_BYTES);
+        let bounded = bounded_failure_text(&text);
+        assert!(bounded.len() <= MAX_FAILURE_TEXT_BYTES);
+        assert!(bounded.is_char_boundary(bounded.len()));
+        assert_eq!(bounded, "界".repeat(MAX_FAILURE_TEXT_BYTES / 3));
+    }
 
     #[test]
     fn materializes_supported_parameter_defaults() {
