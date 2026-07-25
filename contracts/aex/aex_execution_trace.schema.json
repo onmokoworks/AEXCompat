@@ -390,7 +390,7 @@
       "properties": {
         "status": { "enum": ["captured", "unmapped", "oversized"] },
         "address": { "type": "integer", "minimum": 0 },
-        "size": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "size": { "type": "integer", "minimum": 0 },
         "classification": {
           "enum": ["scalar", "image", "guest_data", "guest_stack", "host_stub"]
         },
