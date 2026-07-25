@@ -16,7 +16,7 @@ def test_pf_handle_ownership_is_bounded_and_hidden_behind_snapshots():
     for marker in (
         "kMaxHandleBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL",
         "kObservedLargeHandleBytes = 333294848ULL",
-        "kMaxHandleCount = 1024",
+        "kMaxHandleCount = 16384",
         "Statistics statistics()",
         "bool host_handle_is_live(const void* handle)",
         "void record_automatic_pre_render_disposal()",

@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace aexcompat::l2_detail {
 aexcompat::TraceWriter* g_trace_writer{};
@@ -41,14 +42,23 @@ int main() {
   unlock_handle(resized);
   dispose_handle(resized);
 
+  std::vector<void**> regression_handles;
+  regression_handles.reserve(1025);
+  for (std::size_t index = 0; index < 1025; ++index) {
+    void** handle = new_handle(0);
+    if (!handle) return 7;
+    regression_handles.push_back(handle);
+  }
+  for (void** handle : regression_handles) dispose_handle(handle);
+
   const Statistics after = statistics();
   return handle_lifetimes_balanced() &&
-          after.created == before.created + 2 &&
-          after.disposed == before.disposed + 2 &&
+          after.created == before.created + 1027 &&
+          after.disposed == before.disposed + 1027 &&
           after.locks == before.locks + 3 &&
           after.unlocks == before.unlocks + 3 &&
           after.invalid_operations == before.invalid_operations &&
           after.live_count == 0 && after.live_bytes == 0
       ? 0
-      : 7;
+      : 8;
 }
