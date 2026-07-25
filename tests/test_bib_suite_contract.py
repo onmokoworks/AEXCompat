@@ -40,6 +40,26 @@ def test_bib_provider_is_fail_closed_and_loads_only_from_the_sealed_dir():
         assert procedure in SOURCE
     assert "if (!state.resolver) return nullptr;" in SOURCE
 
+
+def test_pica_components_init_after_bib_with_bounded_loads_and_seh_guards():
+    # The DVA Bravo initializer registers the PICA component interfaces (ACE
+    # etc.) into BIB; ae_sweetpea hosts the SP-suite plugins. The real host
+    # drives both at process start (issue #362: ProfileToProfile resolves
+    # ACEInterface2 through the resolver; Particle_Playground needs the SP
+    # suite family). Both run once per process, after BIB is up, outside its
+    # mutex, SEH-guarded, and load only from the admitted plug-in directory.
+    assert "ensure_pica_components_initialized" in SOURCE
+    assert 'GetModuleHandleW(L"dvabravoinitializer.dll")' in SOURCE
+    assert 'GetModuleHandleW(L"ae_sweetpea.dll")' in SOURCE
+    assert 'L"dvabravoinitializer.dll"' in SOURCE
+    assert "?SetBIBProcAddress@dvabravoinitializer@@YAXP6APEAXPEBD00@Z@Z" in SOURCE
+    assert "?InitBravoComponents@dvabravoinitializer@@YAP6APEAXPEBD00@ZP6AX0@Z@Z" in SOURCE
+    assert "?SPInit@ae_sweetpea@@YAHPEAUSPHostProcs@@PEBUSPPlatformFileSpecification@@H@Z" in SOURCE
+    assert "?SPStartupPlugins@ae_sweetpea@@YAHXZ" in SOURCE
+    assert "sp_init(nullptr, nullptr, 0)" in SOURCE
+    assert "bravo_init_seh_filter" in SOURCE
+    assert "LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR" in SOURCE
+
 L2_SOURCE = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
 
 
