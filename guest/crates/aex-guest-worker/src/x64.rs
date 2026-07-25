@@ -1,7 +1,7 @@
 use aex_abi::x86_64_windows as abi;
 use iced_x86::{Decoder, DecoderOptions, Mnemonic};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::{RegisterX86, UcHookId, Unicorn};
@@ -77,9 +77,31 @@ fn uc<T>(
 }
 
 fn push_trace_event(capture: &mut TraceCapture, mut event: TraceEvent) {
+    let key = if matches!(event.kind, "selector_enter" | "selector_exit") {
+        None
+    } else {
+        Some(TraceEventKey {
+            depth: event.depth,
+            kind: event.kind,
+            function_rva: event.function_rva,
+            pc_rva: event.pc_rva,
+            target_rva: event.target_rva,
+            name: event.name.clone(),
+            call_kind: event.call_kind,
+        })
+    };
+    if let Some(key) = &key {
+        if let Some(index) = capture.event_index.get(key).copied() {
+            capture.events[index].observed_count += 1;
+            return;
+        }
+    }
     if capture.events.len() >= MAX_TRACE_EVENTS {
         capture.truncated = true;
         return;
+    }
+    if let Some(key) = key {
+        capture.event_index.insert(key, capture.events.len());
     }
     event.sequence = capture.events.len();
     capture.events.push(event);
@@ -92,6 +114,37 @@ fn trace_instruction(
     image_base: u64,
     image_end: u64,
 ) {
+    let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or(0);
+    if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+        while capture
+            .call_rsp_stack
+            .last()
+            .is_some_and(|caller_rsp| rsp >= *caller_rsp)
+        {
+            capture.call_rsp_stack.pop();
+            let target = capture.return_stack.pop();
+            let function_rva = capture.function_stack.pop().flatten();
+            push_trace_event(
+                capture,
+                TraceEvent {
+                    sequence: 0,
+                    observed_count: 1,
+                    depth: capture.return_stack.len(),
+                    kind: "guest_return",
+                    function_rva,
+                    pc_rva: None,
+                    target_rva: target
+                        .filter(|target| (image_base..image_end).contains(target))
+                        .map(|target| target - image_base),
+                    name: Some("inferred_from_stack".into()),
+                    arguments: Vec::new(),
+                    call_kind: None,
+                    instruction_bytes: None,
+                },
+            );
+        }
+    }
+    let arguments = trace_arguments(unicorn, image_base, image_end);
     let label = unicorn.get_data().trace_labels.get(&address).cloned();
     if let Some(label) = label
         && let Some(capture) = unicorn.get_data_mut().trace.as_mut()
@@ -100,14 +153,25 @@ fn trace_instruction(
             capture,
             TraceEvent {
                 sequence: 0,
+                observed_count: 1,
                 depth: capture.return_stack.len(),
                 kind: match label.kind {
                     TraceLabelKind::Import => "import_call",
                     TraceLabelKind::HostCallback => "host_callback",
                 },
+                function_rva: capture
+                    .function_stack
+                    .iter()
+                    .rev()
+                    .flatten()
+                    .copied()
+                    .next(),
                 pc_rva: None,
                 target_rva: None,
                 name: Some(label.name),
+                arguments: arguments.clone(),
+                call_kind: None,
+                instruction_bytes: None,
             },
         );
     }
@@ -129,20 +193,40 @@ fn trace_instruction(
         let return_address = address.saturating_add(instruction.len() as u64);
         if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
             let depth = capture.return_stack.len();
+            let function_rva = capture
+                .function_stack
+                .iter()
+                .rev()
+                .flatten()
+                .copied()
+                .next();
             push_trace_event(
                 capture,
                 TraceEvent {
                     sequence: 0,
+                    observed_count: 1,
                     depth,
                     kind: "guest_call",
+                    function_rva,
                     pc_rva: (image_base..image_end)
                         .contains(&address)
                         .then(|| address - image_base),
                     target_rva,
                     name: None,
+                    arguments,
+                    call_kind: Some(if target_rva.is_some() {
+                        "direct"
+                    } else {
+                        "indirect"
+                    }),
+                    instruction_bytes: Some(bytes_to_hex(
+                        &bytes[..instruction.len().min(bytes.len())],
+                    )),
                 },
             );
             capture.return_stack.push(return_address);
+            capture.function_stack.push(target_rva);
+            capture.call_rsp_stack.push(rsp);
         }
     } else if matches!(
         mnemonic,
@@ -151,12 +235,16 @@ fn trace_instruction(
     {
         let depth = capture.return_stack.len().saturating_sub(1);
         let target = capture.return_stack.pop();
+        let function_rva = capture.function_stack.pop().flatten();
+        capture.call_rsp_stack.pop();
         push_trace_event(
             capture,
             TraceEvent {
                 sequence: 0,
+                observed_count: 1,
                 depth,
                 kind: "guest_return",
+                function_rva,
                 pc_rva: (image_base..image_end)
                     .contains(&address)
                     .then(|| address - image_base),
@@ -164,9 +252,101 @@ fn trace_instruction(
                     .filter(|target| (image_base..image_end).contains(target))
                     .map(|target| target - image_base),
                 name: None,
+                arguments: Vec::new(),
+                call_kind: None,
+                instruction_bytes: Some(bytes_to_hex(&bytes[..instruction.len().min(bytes.len())])),
             },
         );
     }
+}
+
+fn trace_arguments(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    image_base: u64,
+    image_end: u64,
+) -> Vec<TraceArgument> {
+    [
+        ("rcx", RegisterX86::RCX),
+        ("rdx", RegisterX86::RDX),
+        ("r8", RegisterX86::R8),
+        ("r9", RegisterX86::R9),
+    ]
+    .into_iter()
+    .filter_map(|(register, id)| {
+        unicorn.reg_read(id).ok().map(|raw| TraceArgument {
+            register,
+            value: classify_trace_value(raw, image_base, image_end),
+        })
+    })
+    .collect()
+}
+
+fn classify_trace_value(raw: u64, image_base: u64, image_end: u64) -> TraceValue {
+    let (classification, offset) = if (image_base..image_end).contains(&raw) {
+        ("image", Some(raw - image_base))
+    } else if (DATA_BASE..DATA_BASE + DATA_SIZE).contains(&raw) {
+        ("guest_data", Some(raw - DATA_BASE))
+    } else if (STACK_BASE..STACK_BASE + STACK_SIZE).contains(&raw) {
+        ("guest_stack", Some(raw - STACK_BASE))
+    } else if (STUB_BASE..STUB_BASE + STUB_SIZE).contains(&raw) {
+        ("host_stub", Some(raw - STUB_BASE))
+    } else {
+        ("scalar", None)
+    };
+    TraceValue {
+        raw,
+        classification,
+        offset,
+    }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn discover_trace_points(image: &PeImage) -> Vec<u64> {
+    let mut points = Vec::new();
+    for section in image
+        .section_protections()
+        .iter()
+        .filter(|section| section.executable)
+    {
+        let start = section.virtual_address.min(image.mapped_bytes().len());
+        let end = start
+            .saturating_add(section.virtual_size)
+            .min(image.mapped_bytes().len());
+        if start >= end {
+            continue;
+        }
+        let address = image.image_base() + start as u64;
+        let mut decoder = Decoder::with_ip(
+            64,
+            &image.mapped_bytes()[start..end],
+            address,
+            DecoderOptions::NONE,
+        );
+        while decoder.can_decode() {
+            let instruction = decoder.decode();
+            if instruction.is_invalid() {
+                continue;
+            }
+            if instruction.mnemonic() == Mnemonic::Call
+                || matches!(
+                    instruction.mnemonic(),
+                    Mnemonic::Ret
+                        | Mnemonic::Retf
+                        | Mnemonic::Iret
+                        | Mnemonic::Iretd
+                        | Mnemonic::Iretq
+                )
+            {
+                points.push(instruction.ip());
+            }
+        }
+    }
+    points.sort_unstable();
+    points.dedup();
+    points
 }
 
 fn format_trace_event(event: &TraceEvent) -> String {
@@ -184,10 +364,72 @@ fn format_trace_event(event: &TraceEvent) -> String {
         .as_deref()
         .map(|name| format!(" {name}"))
         .unwrap_or_default();
+    let count = (event.observed_count > 1)
+        .then(|| format!(" ×{}", event.observed_count))
+        .unwrap_or_default();
     format!(
-        "{:05} {indent}{}{}{}{}",
-        event.sequence, event.kind, pc, target, name
+        "{:05} {indent}{}{}{}{}{}",
+        event.sequence, event.kind, pc, target, name, count
     )
+}
+
+#[derive(Default)]
+struct FunctionAggregate {
+    observed_calls: u64,
+    observed_returns: u64,
+    callees: BTreeSet<u64>,
+    imports: BTreeSet<String>,
+    host_callbacks: BTreeSet<String>,
+}
+
+fn aggregate_trace_functions(entry_rva: u64, events: &[TraceEvent]) -> Vec<TraceFunction> {
+    let mut functions = BTreeMap::<u64, FunctionAggregate>::new();
+    functions.entry(entry_rva).or_default();
+    for event in events {
+        let Some(function_rva) = event.function_rva else {
+            continue;
+        };
+        let function = functions.entry(function_rva).or_default();
+        match event.kind {
+            "guest_call" => {
+                function.observed_calls += event.observed_count;
+                if let Some(callee) = event.target_rva {
+                    function.callees.insert(callee);
+                    functions.entry(callee).or_default();
+                }
+            }
+            "guest_return" => function.observed_returns += event.observed_count,
+            "import_call" => {
+                if let Some(name) = &event.name {
+                    function.imports.insert(name.clone());
+                }
+            }
+            "host_callback" => {
+                if let Some(name) = &event.name {
+                    function.host_callbacks.insert(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    functions
+        .into_iter()
+        .map(|(entry_rva, aggregate)| TraceFunction {
+            entry_rva,
+            entry_bytes: String::new(),
+            observed_calls: aggregate.observed_calls,
+            observed_returns: aggregate.observed_returns,
+            callees: aggregate.callees.into_iter().collect(),
+            imports: aggregate.imports.into_iter().collect(),
+            host_callbacks: aggregate.host_callbacks.into_iter().collect(),
+        })
+        .collect()
+}
+
+impl ExecutionTrace {
+    pub fn set_state_changes(&mut self, state_changes: Vec<TraceStateValue>) {
+        self.state_changes = state_changes;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -235,6 +477,9 @@ pub struct GuestEngine<'a> {
     image_end: u64,
     census_hook: Option<UcHookId>,
     trace_hooks: Vec<UcHookId>,
+    trace_points: Vec<u64>,
+    image_sha256: String,
+    entry_export: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -255,20 +500,76 @@ struct TraceCapture {
     entry_rva: u64,
     events: Vec<TraceEvent>,
     return_stack: Vec<u64>,
+    function_stack: Vec<Option<u64>>,
+    call_rsp_stack: Vec<u64>,
+    event_index: HashMap<TraceEventKey, usize>,
     truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TraceEventKey {
+    depth: usize,
+    kind: &'static str,
+    function_rva: Option<u64>,
+    pc_rva: Option<u64>,
+    target_rva: Option<u64>,
+    name: Option<String>,
+    call_kind: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceValue {
+    pub raw: u64,
+    pub classification: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceArgument {
+    pub register: &'static str,
+    #[serde(flatten)]
+    pub value: TraceValue,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TraceEvent {
     pub sequence: usize,
+    pub observed_count: u64,
     pub depth: usize,
     pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_rva: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pc_rva: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_rva: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<TraceArgument>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_bytes: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceFunction {
+    pub entry_rva: u64,
+    pub entry_bytes: String,
+    pub observed_calls: u64,
+    pub observed_returns: u64,
+    pub callees: Vec<u64>,
+    pub imports: Vec<String>,
+    pub host_callbacks: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceStateValue {
+    pub name: String,
+    pub before: String,
+    pub after: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -276,11 +577,16 @@ pub struct ExecutionTrace {
     pub schema: &'static str,
     pub schema_version: u32,
     pub execution_backend: &'static str,
+    pub image_sha256: String,
+    pub preferred_image_base: u64,
+    pub entry_export: String,
     pub selector: String,
     pub entry_rva: u64,
     pub return_value: u64,
     pub truncated: bool,
     pub events: Vec<TraceEvent>,
+    pub functions: Vec<TraceFunction>,
+    pub state_changes: Vec<TraceStateValue>,
     pub timeline: Vec<String>,
 }
 
@@ -338,6 +644,8 @@ impl GuestEngine<'static> {
     }
 
     pub fn load(image: &PeImage) -> Result<Self, GuestError> {
+        let trace_points = discover_trace_points(image);
+        let image_report = image.report();
         let mut unicorn = uc(
             "create x86_64 engine",
             Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()),
@@ -637,6 +945,9 @@ impl GuestEngine<'static> {
             image_end: image.image_base() + image_size,
             census_hook: None,
             trace_hooks: Vec::new(),
+            trace_points,
+            image_sha256: image_report.sha256,
+            entry_export: image_report.entry_export,
         };
         if let Some(entry) = image.dll_entry_address() {
             let attached = engine.call_win64(entry, [image.image_base(), 1, 0, 0, 0, 0])?;
@@ -662,35 +973,60 @@ impl GuestEngine<'static> {
             entry_rva: entry_address.saturating_sub(self.image_base),
             events: vec![TraceEvent {
                 sequence: 0,
+                observed_count: 1,
                 depth: 0,
                 kind: "selector_enter",
+                function_rva: Some(entry_address.saturating_sub(self.image_base)),
                 pc_rva: Some(entry_address.saturating_sub(self.image_base)),
                 target_rva: None,
                 name: Some(selector.to_string()),
+                arguments: Vec::new(),
+                call_kind: None,
+                instruction_bytes: None,
             }],
             return_stack: Vec::new(),
+            function_stack: vec![Some(entry_address.saturating_sub(self.image_base))],
+            call_rsp_stack: Vec::new(),
+            event_index: HashMap::new(),
             truncated: false,
         });
         let image_base = self.image_base;
         let image_end = self.image_end;
-        let image_hook = uc(
-            "install guest execution trace image hook",
-            self.unicorn
-                .add_code_hook(image_base, image_end - 1, move |unicorn, address, size| {
-                    trace_instruction(unicorn, address, size, image_base, image_end);
-                }),
-        )?;
-        let stub_hook = uc(
-            "install guest execution trace stub hook",
-            self.unicorn.add_code_hook(
-                STUB_BASE,
-                STUB_BASE + STUB_SIZE - 1,
-                move |unicorn, address, size| {
-                    trace_instruction(unicorn, address, size, image_base, image_end);
-                },
-            ),
-        )?;
-        self.trace_hooks = vec![image_hook, stub_hook];
+        let mut hook_points = self.trace_points.clone();
+        let label_points = self
+            .unicorn
+            .get_data()
+            .trace_labels
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        hook_points.extend(label_points.iter().copied());
+        for point in label_points {
+            let mut bytes = [0u8; STUB_STRIDE as usize];
+            if self.unicorn.mem_read(point, &mut bytes).is_err() {
+                continue;
+            }
+            let mut decoder = Decoder::with_ip(64, &bytes, point, DecoderOptions::NONE);
+            while decoder.can_decode() {
+                let instruction = decoder.decode();
+                if matches!(instruction.mnemonic(), Mnemonic::Ret | Mnemonic::Retf) {
+                    hook_points.push(instruction.ip());
+                    break;
+                }
+            }
+        }
+        hook_points.sort_unstable();
+        hook_points.dedup();
+        for point in hook_points {
+            let hook = uc(
+                "install guest execution trace point",
+                self.unicorn
+                    .add_code_hook(point, point, move |unicorn, address, size| {
+                        trace_instruction(unicorn, address, size, image_base, image_end);
+                    }),
+            )?;
+            self.trace_hooks.push(hook);
+        }
         Ok(())
     }
 
@@ -717,23 +1053,44 @@ impl GuestEngine<'static> {
             &mut capture,
             TraceEvent {
                 sequence: 0,
+                observed_count: 1,
                 depth: 0,
                 kind: "selector_exit",
+                function_rva: Some(entry_rva),
                 pc_rva: Some(entry_rva),
                 target_rva: None,
                 name: Some(format!("return={return_value:#x}")),
+                arguments: Vec::new(),
+                call_kind: None,
+                instruction_bytes: None,
             },
         );
+        let mut functions = aggregate_trace_functions(entry_rva, &capture.events);
+        for function in &mut functions {
+            let mut bytes = [0u8; 16];
+            if self
+                .unicorn
+                .mem_read(self.image_base + function.entry_rva, &mut bytes)
+                .is_ok()
+            {
+                function.entry_bytes = bytes_to_hex(&bytes);
+            }
+        }
         let timeline = capture.events.iter().map(format_trace_event).collect();
         Ok(ExecutionTrace {
             schema: "aexcompat.aex-execution-trace",
             schema_version: 1,
             execution_backend: self.backend_name(),
+            image_sha256: self.image_sha256.clone(),
+            preferred_image_base: self.image_base,
+            entry_export: self.entry_export.clone(),
             selector: capture.selector,
             entry_rva: capture.entry_rva,
             return_value,
             truncated: capture.truncated,
             events: capture.events,
+            functions,
+            state_changes: Vec::new(),
             timeline,
         })
     }
@@ -1833,6 +2190,16 @@ mod tests {
             .unwrap();
         unicorn.mem_write(CODE, code).unwrap();
         unicorn.mem_write(RETURN_ADDRESS, &[0xcc]).unwrap();
+        let mut trace_points = Vec::new();
+        let mut decoder = Decoder::with_ip(64, code, CODE, DecoderOptions::NONE);
+        while decoder.can_decode() {
+            let instruction = decoder.decode();
+            if instruction.mnemonic() == Mnemonic::Call
+                || matches!(instruction.mnemonic(), Mnemonic::Ret | Mnemonic::Retf)
+            {
+                trace_points.push(instruction.ip());
+            }
+        }
         GuestEngine {
             unicorn,
             next_data: DATA_BASE,
@@ -1840,6 +2207,9 @@ mod tests {
             image_end: CODE + PAGE_SIZE,
             census_hook: None,
             trace_hooks: Vec::new(),
+            trace_points,
+            image_sha256: "synthetic".into(),
+            entry_export: "fixture_entry".into(),
         }
     }
 
@@ -1923,24 +2293,54 @@ mod tests {
     }
 
     #[test]
+    fn execution_trace_folds_repeated_call_sites_without_losing_count() {
+        const CODE: u64 = 0x1000_0000;
+        // mov ecx,2; loop: call return; dec ecx; jnz loop; return: ret
+        let mut engine = test_engine(&[
+            0xb9, 0x02, 0x00, 0x00, 0x00, 0xe8, 0x04, 0x00, 0x00, 0x00, 0xff, 0xc9, 0x75, 0xf7,
+            0xc3,
+        ]);
+        engine.begin_execution_trace("GLOBAL_SETUP", CODE).unwrap();
+        let result = engine.call_win64(CODE, [0; 6]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        let call = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "guest_call")
+            .unwrap();
+        assert_eq!(call.pc_rva, Some(5));
+        assert_eq!(call.observed_count, 2);
+        assert!(trace.timeline.iter().any(|line| line.contains("×2")));
+    }
+
+    #[test]
     fn trace_event_limit_marks_capture_as_truncated() {
         let mut capture = TraceCapture {
             selector: "GLOBAL_SETUP".into(),
             entry_rva: 0,
             events: Vec::new(),
             return_stack: Vec::new(),
+            function_stack: Vec::new(),
+            call_rsp_stack: Vec::new(),
+            event_index: HashMap::new(),
             truncated: false,
         };
-        for _ in 0..=MAX_TRACE_EVENTS {
+        for index in 0..=MAX_TRACE_EVENTS {
             push_trace_event(
                 &mut capture,
                 TraceEvent {
                     sequence: 0,
+                    observed_count: 1,
                     depth: 0,
                     kind: "guest_call",
-                    pc_rva: None,
+                    function_rva: None,
+                    pc_rva: Some(index as u64),
                     target_rva: None,
                     name: None,
+                    arguments: Vec::new(),
+                    call_kind: None,
+                    instruction_bytes: None,
                 },
             );
         }
