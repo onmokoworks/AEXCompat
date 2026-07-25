@@ -44,6 +44,9 @@ fn main() -> ExitCode {
         usage();
         return ExitCode::from(2);
     };
+    if command == "session" {
+        return run_session_command(args.collect());
+    }
     let Some(path) = args.next().map(PathBuf::from) else {
         usage();
         return ExitCode::from(2);
@@ -226,6 +229,9 @@ fn selector_error(return_value: u64) -> Option<i32> {
 
 fn usage() {
     eprintln!("usage: aex-guest-worker <inspect|setup|render> <x64.aex>");
+    eprintln!(
+        "       aex-guest-worker session <x64.aex> <input.argb8> <output.argb8> <width> <height> <time-scale>"
+    );
     eprintln!("       aex-guest-worker trace-selector <x64.aex> <GLOBAL_SETUP|PARAMS_SETUP>");
     eprintln!(
         "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [name=value ...]"
@@ -239,6 +245,59 @@ fn usage() {
     eprintln!(
         "       aex-guest-worker census-png <x64.aex> <input.png> <output.png> [name=value ...]"
     );
+}
+
+fn run_session_command(arguments: Vec<std::ffi::OsString>) -> ExitCode {
+    if arguments.len() != 6 {
+        usage();
+        return ExitCode::from(2);
+    }
+    let path = PathBuf::from(&arguments[0]);
+    let input_slot = PathBuf::from(&arguments[1]);
+    let output_slot = PathBuf::from(&arguments[2]);
+    let parse_u32 = |index: usize, name: &str| {
+        arguments[index]
+            .to_str()
+            .ok_or_else(|| format!("{name} must be UTF-8"))?
+            .parse::<u32>()
+            .map_err(|error| format!("invalid {name}: {error}"))
+    };
+    let (width, height, time_scale) = match (
+        parse_u32(3, "width"),
+        parse_u32(4, "height"),
+        parse_u32(5, "time scale"),
+    ) {
+        (Ok(width), Ok(height), Ok(time_scale)) => (width, height, time_scale),
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+            eprintln!("aex_guest_error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let result = fs::read(&path)
+        .map_err(|error| format!("read AEX: {error}"))
+        .and_then(|bytes| PeImage::parse_and_map(&bytes).map_err(|error| error.to_string()))
+        .and_then(|image| {
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            aex_guest_worker::resident::run_resident_session(
+                &image,
+                &input_slot,
+                &output_slot,
+                width,
+                height,
+                time_scale,
+                stdin.lock(),
+                stdout.lock(),
+            )
+            .map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn render_png(
@@ -457,6 +516,7 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
             return Err(format!("duplicate parameter assignment: {name:?}"));
         }
         parsed.push(ParameterValue {
+            slot: None,
             name: name.to_string(),
             value: number
                 .parse()
