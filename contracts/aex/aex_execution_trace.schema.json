@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onmokoworks.local/aexcompat/aex_execution_trace.schema.json",
+  "title": "AEXCompat x64 AEX execution trace",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "execution_backend",
+    "image_sha256",
+    "preferred_image_base",
+    "entry_export",
+    "selector",
+    "entry_rva",
+    "return_value",
+    "truncated",
+    "events",
+    "functions",
+    "state_changes",
+    "timeline"
+  ],
+  "properties": {
+    "schema": { "const": "aexcompat.aex-execution-trace" },
+    "schema_version": { "const": 1 },
+    "execution_backend": { "type": "string", "minLength": 1 },
+    "image_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "preferred_image_base": { "type": "integer", "minimum": 0 },
+    "entry_export": { "type": "string", "minLength": 1 },
+    "selector": {
+      "enum": [
+        "GLOBAL_SETUP",
+        "PARAMS_SETUP",
+        "SEQUENCE_SETUP",
+        "FRAME_SETUP",
+        "RENDER",
+        "SMART_PRE_RENDER",
+        "SMART_RENDER",
+        "FRAME_SETDOWN",
+        "SEQUENCE_SETDOWN"
+      ]
+    },
+    "entry_rva": { "type": "integer", "minimum": 0 },
+    "return_value": { "type": "integer", "minimum": 0 },
+    "truncated": { "type": "boolean" },
+    "events": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 50000,
+      "items": { "$ref": "#/$defs/event" }
+    },
+    "functions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/function" }
+    },
+    "state_changes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/state_change" }
+    },
+    "timeline": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "observed_count", "depth", "kind"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 0 },
+        "observed_count": { "type": "integer", "minimum": 1 },
+        "depth": { "type": "integer", "minimum": 0 },
+        "function_rva": { "type": "integer", "minimum": 0 },
+        "kind": {
+          "enum": [
+            "selector_enter",
+            "selector_exit",
+            "guest_call",
+            "guest_return",
+            "import_call",
+            "host_callback"
+          ]
+        },
+        "pc_rva": { "type": "integer", "minimum": 0 },
+        "target_rva": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string" },
+        "call_kind": { "enum": ["direct", "indirect"] },
+        "instruction_bytes": {
+          "type": "string",
+          "pattern": "^(?:[a-f0-9]{2})+$"
+        },
+        "arguments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/argument" }
+        }
+      }
+    },
+    "argument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["register", "raw", "classification"],
+      "properties": {
+        "register": { "enum": ["rcx", "rdx", "r8", "r9"] },
+        "raw": { "type": "integer", "minimum": 0 },
+        "classification": {
+          "enum": ["scalar", "image", "guest_data", "guest_stack", "host_stub"]
+        },
+        "offset": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "function": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_rva",
+        "entry_bytes",
+        "observed_calls",
+        "observed_returns",
+        "callees",
+        "imports",
+        "host_callbacks"
+      ],
+      "properties": {
+        "entry_rva": { "type": "integer", "minimum": 0 },
+        "entry_bytes": {
+          "type": "string",
+          "pattern": "^(?:[a-f0-9]{2})*$"
+        },
+        "observed_calls": { "type": "integer", "minimum": 0 },
+        "observed_returns": { "type": "integer", "minimum": 0 },
+        "callees": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 },
+          "uniqueItems": true
+        },
+        "imports": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "host_callbacks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "state_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "before", "after"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "before": { "type": "string" },
+        "after": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,8 +1,9 @@
 use aex_abi::x86_64_windows as abi;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
-use crate::backend::{GuestCensus, GuestEngine, GuestError};
+use crate::backend::{ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue};
 use crate::pe::PeImage;
 
 const CMD_GLOBAL_SETUP: u64 = 1;
@@ -285,6 +286,48 @@ impl ClassicHost {
         })
     }
 
+    pub fn trace_setup_selector(
+        &mut self,
+        selector_name: &str,
+    ) -> Result<ExecutionTrace, ClassicError> {
+        let selector = match selector_name {
+            "GLOBAL_SETUP" => CMD_GLOBAL_SETUP,
+            "PARAMS_SETUP" => {
+                let error = self.invoke(CMD_GLOBAL_SETUP)? as i32;
+                if error != 0 {
+                    return Err(ClassicError::Selector {
+                        selector: "GLOBAL_SETUP",
+                        error,
+                    });
+                }
+                let mut output = vec![0u8; abi::PF_OUT_DATA_SIZE];
+                self.engine.read(self.output, &mut output)?;
+                let global_data = read_u64(&output, abi::OUT_GLOBAL_DATA_OFFSET);
+                let mut input = vec![0u8; abi::PF_IN_DATA_SIZE];
+                self.engine.read(self.input, &mut input)?;
+                write_u64(&mut input, abi::IN_GLOBAL_DATA_OFFSET, global_data);
+                self.engine.write(self.input, &input)?;
+                CMD_PARAMS_SETUP
+            }
+            _ => {
+                return Err(ClassicError::Input(
+                    "trace selector must be GLOBAL_SETUP or PARAMS_SETUP".into(),
+                ));
+            }
+        };
+        self.engine
+            .begin_execution_trace(selector_name, self.entry)?;
+        let before = self.trace_state_snapshot()?;
+        let return_value = self.invoke(selector)?;
+        let after = self.trace_state_snapshot()?;
+        let mut trace = self
+            .engine
+            .finish_execution_trace(return_value)
+            .map_err(ClassicError::from)?;
+        trace.set_state_changes(diff_trace_state(before, after));
+        Ok(trace)
+    }
+
     pub fn render_default_2x2(&mut self) -> Result<RenderReport, ClassicError> {
         self.render_argb8(
             2,
@@ -310,7 +353,9 @@ impl ClassicHost {
             parameter_values,
             [0, 0, width as i32, height as i32],
             false,
+            false,
         )
+        .map(|(report, _)| report)
     }
 
     pub fn render_argb8_census(
@@ -327,7 +372,9 @@ impl ClassicHost {
             parameter_values,
             [0, 0, width as i32, height as i32],
             true,
+            false,
         )
+        .map(|(report, _)| report)
     }
 
     pub fn render_argb8_region(
@@ -345,7 +392,28 @@ impl ClassicHost {
             parameter_values,
             output_request,
             false,
+            false,
         )
+        .map(|(report, _)| report)
+    }
+
+    pub fn render_argb8_trace(
+        &mut self,
+        width: u32,
+        height: u32,
+        input_argb8: &[u8],
+        parameter_values: &[ParameterValue],
+    ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        let (report, traces) = self.render_argb8_with_request(
+            width,
+            height,
+            input_argb8,
+            parameter_values,
+            [0, 0, width as i32, height as i32],
+            false,
+            true,
+        )?;
+        Ok((report, traces))
     }
 
     fn render_argb8_with_request(
@@ -356,7 +424,8 @@ impl ClassicHost {
         parameter_values: &[ParameterValue],
         output_request: [i32; 4],
         census_enabled: bool,
-    ) -> Result<RenderReport, ClassicError> {
+        trace_enabled: bool,
+    ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
             return Err(ClassicError::Input(format!(
                 "dimensions must be within 1x1..={MAX_RENDER_WIDTH}x{MAX_RENDER_HEIGHT}, got {width}x{height}"
@@ -472,12 +541,14 @@ impl ClassicHost {
         write_i32(&mut input_data, abi::IN_HEIGHT_OFFSET, height as i32);
         write_rect(&mut input_data, abi::IN_EXTENT_HINT_OFFSET, width, height);
         self.engine.write(self.input, &input_data)?;
-        let sequence_setup_error =
-            self.invoke(CMD_SEQUENCE_SETUP)
-                .map_err(|source| ClassicError::SelectorGuest {
-                    selector: "SEQUENCE_SETUP",
-                    source,
-                })? as i32;
+        let mut traces = Vec::new();
+        let (sequence_setup_result, trace) = self.call_with_optional_trace(
+            "SEQUENCE_SETUP",
+            [CMD_SEQUENCE_SETUP, self.input, self.output, 0, 0, 0],
+            trace_enabled,
+        )?;
+        traces.extend(trace);
+        let sequence_setup_error = sequence_setup_result as i32;
         if sequence_setup_error != 0 {
             return Err(ClassicError::Selector {
                 selector: "SEQUENCE_SETUP",
@@ -487,8 +558,8 @@ impl ClassicHost {
         let sequence_data = self.read_output_pointer(abi::OUT_SEQUENCE_DATA_OFFSET)?;
         self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, sequence_data)?;
 
-        let frame_setup_error = self.engine.call_win64(
-            self.entry,
+        let (frame_setup_result, trace) = self.call_with_optional_trace(
+            "FRAME_SETUP",
             [
                 CMD_FRAME_SETUP,
                 self.input,
@@ -497,7 +568,10 @@ impl ClassicHost {
                 output_world,
                 0,
             ],
-        )? as i32;
+            trace_enabled,
+        )?;
+        traces.extend(trace);
+        let frame_setup_error = frame_setup_result as i32;
         if frame_setup_error != 0 {
             let _ = self.invoke(CMD_SEQUENCE_SETDOWN);
             return Err(ClassicError::Selector {
@@ -508,7 +582,7 @@ impl ClassicHost {
         let frame_data = self.read_output_pointer(abi::OUT_FRAME_DATA_OFFSET)?;
         self.write_input_pointer(abi::IN_FRAME_DATA_OFFSET, frame_data)?;
 
-        let (mut render_error, census) = if smart_render {
+        let (mut render_error, census, render_traces) = if smart_render {
             self.render_smart(
                 params,
                 input_param,
@@ -518,6 +592,7 @@ impl ClassicHost {
                 rowbytes,
                 output_request,
                 census_enabled,
+                trace_enabled,
             )?
         } else {
             if output_request != [0, 0, width as i32, height as i32] {
@@ -525,16 +600,16 @@ impl ClassicHost {
                     "region rendering requires Smart Render support".into(),
                 ));
             }
-            (
-                self.engine.call_win64(
-                    self.entry,
-                    [CMD_RENDER, self.input, self.output, params, output_world, 0],
-                )? as i32,
-                None,
-            )
+            let (return_value, trace) = self.call_with_optional_trace(
+                "RENDER",
+                [CMD_RENDER, self.input, self.output, params, output_world, 0],
+                trace_enabled,
+            )?;
+            (return_value as i32, None, trace.into_iter().collect())
         };
-        let frame_setdown_error = self.engine.call_win64(
-            self.entry,
+        traces.extend(render_traces);
+        let (frame_setdown_result, trace) = self.call_with_optional_trace(
+            "FRAME_SETDOWN",
             [
                 CMD_FRAME_SETDOWN,
                 self.input,
@@ -543,12 +618,21 @@ impl ClassicHost {
                 output_world,
                 0,
             ],
-        )? as i32;
+            trace_enabled,
+        )?;
+        traces.extend(trace);
+        let frame_setdown_error = frame_setdown_result as i32;
         if render_error == 0 {
             render_error = frame_setdown_error;
         }
         self.write_input_pointer(abi::IN_FRAME_DATA_OFFSET, 0)?;
-        let sequence_setdown_error = self.invoke(CMD_SEQUENCE_SETDOWN)? as i32;
+        let (sequence_setdown_result, trace) = self.call_with_optional_trace(
+            "SEQUENCE_SETDOWN",
+            [CMD_SEQUENCE_SETDOWN, self.input, self.output, 0, 0, 0],
+            trace_enabled,
+        )?;
+        traces.extend(trace);
+        let sequence_setdown_error = sequence_setdown_result as i32;
         if render_error == 0 {
             render_error = sequence_setdown_error;
         }
@@ -561,31 +645,64 @@ impl ClassicHost {
         }
         let mut argb8 = vec![0u8; pixel_bytes];
         self.engine.read(output_pixels, &mut argb8)?;
-        Ok(RenderReport {
-            schema_version: 1,
-            setup,
-            render_error,
-            render_mode: if output_request != [0, 0, width as i32, height as i32] {
-                "smart-cpu-region"
-            } else if smart_render {
-                "smart-cpu"
-            } else {
-                "classic"
+        Ok((
+            RenderReport {
+                schema_version: 1,
+                setup,
+                render_error,
+                render_mode: if output_request != [0, 0, width as i32, height as i32] {
+                    "smart-cpu-region"
+                } else if smart_render {
+                    "smart-cpu"
+                } else {
+                    "classic"
+                },
+                width,
+                height,
+                parameter_values: applied_values,
+                output_request,
+                input_requests: self.engine.pre_checkout_requests().to_vec(),
+                suite_requests: self.engine.suite_requests().to_vec(),
+                census,
+                argb8,
             },
-            width,
-            height,
-            parameter_values: applied_values,
-            output_request,
-            input_requests: self.engine.pre_checkout_requests().to_vec(),
-            suite_requests: self.engine.suite_requests().to_vec(),
-            census,
-            argb8,
-        })
+            traces,
+        ))
     }
 
     fn invoke(&mut self, selector: u64) -> Result<u64, GuestError> {
         self.engine
             .call_win64(self.entry, [selector, self.input, self.output, 0, 0, 0])
+    }
+
+    fn call_with_optional_trace(
+        &mut self,
+        selector_name: &str,
+        args: [u64; 6],
+        trace_enabled: bool,
+    ) -> Result<(u64, Option<ExecutionTrace>), ClassicError> {
+        let before = trace_enabled
+            .then(|| self.trace_state_snapshot())
+            .transpose()?;
+        if trace_enabled {
+            self.engine
+                .begin_execution_trace(selector_name, self.entry)?;
+        }
+        let return_value = self.engine.call_win64(self.entry, args)?;
+        let after = trace_enabled
+            .then(|| self.trace_state_snapshot())
+            .transpose()?;
+        let trace = if trace_enabled {
+            let mut trace = self.engine.finish_execution_trace(return_value)?;
+            trace.set_state_changes(diff_trace_state(
+                before.expect("trace snapshot"),
+                after.expect("trace snapshot"),
+            ));
+            Some(trace)
+        } else {
+            None
+        };
+        Ok((return_value, trace))
     }
 
     fn render_smart(
@@ -598,7 +715,9 @@ impl ClassicHost {
         _rowbytes: u32,
         output_request: [i32; 4],
         census_enabled: bool,
-    ) -> Result<(i32, Option<GuestCensus>), ClassicError> {
+        trace_enabled: bool,
+    ) -> Result<(i32, Option<GuestCensus>, Vec<ExecutionTrace>), ClassicError> {
+        let mut traces = Vec::new();
         let input_world = input_param + abi::PARAM_U_OFFSET as u64;
         self.engine
             .configure_smart_render(input_world, output_world, width, height);
@@ -642,8 +761,8 @@ impl ClassicHost {
             pre_callbacks,
         );
         self.engine.write(pre_extra, &pre_extra_bytes)?;
-        let pre_error = self.engine.call_win64(
-            self.entry,
+        let (pre_result, trace) = self.call_with_optional_trace(
+            "SMART_PRE_RENDER",
             [
                 CMD_SMART_PRE_RENDER,
                 self.input,
@@ -652,7 +771,10 @@ impl ClassicHost {
                 0,
                 pre_extra,
             ],
-        )? as i32;
+            trace_enabled,
+        )?;
+        traces.extend(trace);
+        let pre_error = pre_result as i32;
         if pre_error != 0 {
             return Err(ClassicError::Selector {
                 selector: "SMART_PRE_RENDER",
@@ -704,8 +826,8 @@ impl ClassicHost {
         if census_enabled {
             self.engine.begin_block_census()?;
         }
-        let render_result = self.engine.call_win64(
-            self.entry,
+        let render_result = self.call_with_optional_trace(
+            "SMART_RENDER",
             [
                 CMD_SMART_RENDER,
                 self.input,
@@ -714,6 +836,7 @@ impl ClassicHost {
                 0,
                 smart_extra,
             ],
+            trace_enabled,
         );
         let census = if census_enabled {
             Some(
@@ -723,7 +846,9 @@ impl ClassicHost {
         } else {
             None
         };
-        let render_error = render_result? as i32;
+        let (return_value, trace) = render_result?;
+        traces.extend(trace);
+        let render_error = return_value as i32;
         if render_error != 0 {
             let callbacks = self.engine.smart_callback_counts();
             let result_rect = [
@@ -738,13 +863,62 @@ impl ClassicHost {
                 self.engine.handle_allocations()
             )));
         }
-        Ok((render_error, census))
+        Ok((render_error, census, traces))
     }
 
     fn read_guest_u64(&mut self, address: u64) -> Result<u64, GuestError> {
         let mut bytes = [0u8; 8];
         self.engine.read(address, &mut bytes)?;
         Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn trace_state_snapshot(&mut self) -> Result<BTreeMap<String, String>, GuestError> {
+        let mut input = vec![0u8; abi::PF_IN_DATA_SIZE];
+        let mut output = vec![0u8; abi::PF_OUT_DATA_SIZE];
+        self.engine.read(self.input, &mut input)?;
+        self.engine.read(self.output, &mut output)?;
+        Ok(BTreeMap::from([
+            (
+                "input.global_data".into(),
+                format!("{:#x}", read_u64(&input, abi::IN_GLOBAL_DATA_OFFSET)),
+            ),
+            (
+                "input.sequence_data".into(),
+                format!("{:#x}", read_u64(&input, abi::IN_SEQUENCE_DATA_OFFSET)),
+            ),
+            (
+                "input.frame_data".into(),
+                format!("{:#x}", read_u64(&input, abi::IN_FRAME_DATA_OFFSET)),
+            ),
+            (
+                "output.global_data".into(),
+                format!("{:#x}", read_u64(&output, abi::OUT_GLOBAL_DATA_OFFSET)),
+            ),
+            (
+                "output.sequence_data".into(),
+                format!("{:#x}", read_u64(&output, abi::OUT_SEQUENCE_DATA_OFFSET)),
+            ),
+            (
+                "output.frame_data".into(),
+                format!("{:#x}", read_u64(&output, abi::OUT_FRAME_DATA_OFFSET)),
+            ),
+            (
+                "output.num_params".into(),
+                read_i32(&output, abi::OUT_NUM_PARAMS_OFFSET).to_string(),
+            ),
+            (
+                "output.out_flags".into(),
+                format!("{:#x}", read_u32(&output, abi::OUT_OUT_FLAGS_OFFSET)),
+            ),
+            (
+                "output.out_flags2".into(),
+                format!("{:#x}", read_u32(&output, abi::OUT_OUT_FLAGS2_OFFSET)),
+            ),
+            (
+                "host.captured_parameters".into(),
+                self.engine.parameters().len().to_string(),
+            ),
+        ]))
     }
 
     fn read_output_pointer(&mut self, offset: usize) -> Result<u64, GuestError> {
@@ -802,6 +976,23 @@ fn read_f32(bytes: &[u8], offset: usize) -> f32 {
 
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+fn diff_trace_state(
+    before: BTreeMap<String, String>,
+    after: BTreeMap<String, String>,
+) -> Vec<TraceStateValue> {
+    before
+        .into_iter()
+        .filter_map(|(name, before)| {
+            let after = after.get(&name)?.clone();
+            (before != after).then_some(TraceStateValue {
+                name,
+                before,
+                after,
+            })
+        })
+        .collect()
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
