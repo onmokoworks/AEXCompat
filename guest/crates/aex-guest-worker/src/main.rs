@@ -46,10 +46,11 @@ fn main() -> ExitCode {
     } else {
         None
     };
-    if ((command == "render-png" || command == "render-region-png")
+    if ((command == "render-png" || command == "render-region-png" || command == "census-png")
         && (input.is_none() || output.is_none()))
         || (command != "render-png"
             && command != "render-region-png"
+            && command != "census-png"
             && (input.is_some() || output.is_some() || !trailing_args.is_empty()))
     {
         usage();
@@ -89,6 +90,7 @@ fn main() -> ExitCode {
                 output.as_deref().expect("validated output path"),
                 &parse_parameter_values(&trailing_args)?,
                 region,
+                false,
             ),
             Some("render-region-png") => render_png(
                 &image,
@@ -96,10 +98,18 @@ fn main() -> ExitCode {
                 output.as_deref().expect("validated output path"),
                 &parse_parameter_values(&trailing_args)?,
                 region,
+                false,
+            ),
+            Some("census-png") => render_png(
+                &image,
+                input.as_deref().expect("validated input path"),
+                output.as_deref().expect("validated output path"),
+                &parse_parameter_values(&trailing_args)?,
+                None,
+                true,
             ),
             _ => Err(
-                "command must be inspect, setup, render, render-png, or render-region-png"
-                    .to_string(),
+                "command must be inspect, setup, render, render-png, render-region-png, or census-png".to_string(),
             ),
         });
     match result {
@@ -122,6 +132,9 @@ fn usage() {
     eprintln!(
         "       aex-guest-worker render-region-png <x64.aex> <input.png> <output.png> <left> <top> <right> <bottom> [name=value ...]"
     );
+    eprintln!(
+        "       aex-guest-worker census-png <x64.aex> <input.png> <output.png> [name=value ...]"
+    );
 }
 
 fn render_png(
@@ -130,6 +143,7 @@ fn render_png(
     output: &Path,
     parameter_values: &[ParameterValue],
     region: Option<[i32; 4]>,
+    census: bool,
 ) -> Result<String, String> {
     let rgba = image::open(input)
         .map_err(|error| format!("decode input PNG: {error}"))?
@@ -140,11 +154,12 @@ fn render_png(
         argb8.extend_from_slice(&[pixel[3], pixel[0], pixel[1], pixel[2]]);
     }
     let report = ClassicHost::new(image)
-        .and_then(|mut host| match region {
-            Some(region) => {
+        .and_then(|mut host| match (region, census) {
+            (None, true) => host.render_argb8_census(width, height, &argb8, parameter_values),
+            (Some(region), _) => {
                 host.render_argb8_region(width, height, &argb8, parameter_values, region)
             }
-            None => host.render_argb8(width, height, &argb8, parameter_values),
+            (None, false) => host.render_argb8(width, height, &argb8, parameter_values),
         })
         .map_err(|error| error.to_string())?;
     let mut output_rgba = Vec::with_capacity(report.argb8.len());
