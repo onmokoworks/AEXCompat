@@ -620,8 +620,70 @@ mod windows_tests {
 
             assert_eq!(unsafe { callback(&table, 6)(0, 0, 0, 0, 0, 0) }, 4);
             assert_eq!(unsafe { callback(&table, 7)(0, 0, 0, 0, 0, 0) }, 4);
+
+            let outer_arena_next = active_arena_next().unwrap();
+            let mut nested_arena = vec![0u8; 0x100];
+            let mut nested_arena_next = nested_arena.as_mut_ptr() as u64;
+            let nested_arena_end = nested_arena_next + nested_arena.len() as u64;
+            let mut nested_memory = NativeAegpMemory::default();
+            with_native_aegp_memory_context(
+                &mut nested_memory,
+                &mut nested_arena_next,
+                nested_arena_end,
+                || {
+                    let mut nested_handle = 0;
+                    assert_eq!(
+                        unsafe {
+                            new_handle(
+                                1,
+                                label.as_ptr() as u64,
+                                4,
+                                0,
+                                (&mut nested_handle as *mut u64) as u64,
+                                0,
+                            )
+                        },
+                        0
+                    );
+                    assert_eq!(unsafe { free_handle(nested_handle, 0, 0, 0, 0, 0) }, 0);
+                },
+            );
+            assert_eq!(active_arena_next(), Some(outer_arena_next));
+            let mut restored_outer_handle = 0;
+            assert_eq!(
+                unsafe {
+                    new_handle(
+                        1,
+                        label.as_ptr() as u64,
+                        4,
+                        0,
+                        (&mut restored_outer_handle as *mut u64) as u64,
+                        0,
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                unsafe { free_handle(restored_outer_handle, 0, 0, 0, 0, 0) },
+                0
+            );
         });
 
-        assert_eq!(unsafe { free_handle(8, 0, 0, 0, 0, 0) }, 4);
+        assert_eq!(active_arena_next(), None);
+        let mut post_scope_handle = u64::MAX;
+        assert_eq!(
+            unsafe {
+                new_handle(
+                    1,
+                    label.as_ptr() as u64,
+                    4,
+                    0,
+                    (&mut post_scope_handle as *mut u64) as u64,
+                    0,
+                )
+            },
+            4
+        );
+        assert_eq!(post_scope_handle, u64::MAX);
     }
 }
