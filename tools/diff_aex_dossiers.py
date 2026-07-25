@@ -18,6 +18,7 @@ def event_key(event: dict[str, Any]) -> str:
         event.get("pc_rva"),
         event.get("target_rva"),
         event.get("name"),
+        event.get("call_kind"),
     )
     return "|".join("" if part is None else str(part) for part in parts)
 
@@ -43,14 +44,20 @@ def count_events(trace: dict[str, Any]) -> Counter[str]:
 
 def bounded_counter_delta(
     before: Counter[str], after: Counter[str], limit: int = 256
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     changed = []
     for key in sorted(set(before) | set(after)):
         left = before[key]
         right = after[key]
         if left != right:
             changed.append({"key": key, "before": left, "after": right, "delta": right - left})
-    return changed[:limit]
+    entries = changed[:limit]
+    return {
+        "entries": entries,
+        "limit": limit,
+        "truncated": len(changed) > limit,
+        "dropped_count": max(0, len(changed) - len(entries)),
+    }
 
 
 def build_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
@@ -61,6 +68,7 @@ def build_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     for selector in selectors:
         left = before_traces.get(selector, {})
         right = after_traces.get(selector, {})
+        event_delta = bounded_counter_delta(count_events(left), count_events(right))
         trace_diffs.append(
             {
                 "selector": selector,
@@ -74,9 +82,12 @@ def build_diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
                     "before": len(left.get("events", [])),
                     "after": len(right.get("events", [])),
                 },
-                "event_observation_deltas": bounded_counter_delta(
-                    count_events(left), count_events(right)
-                ),
+                "event_observation_deltas": event_delta["entries"],
+                "event_observation_delta_truncation": {
+                    "limit": event_delta["limit"],
+                    "truncated": event_delta["truncated"],
+                    "dropped_count": event_delta["dropped_count"],
+                },
                 "memory_witness_count": {
                     "before": len(left.get("memory_witnesses", [])),
                     "after": len(right.get("memory_witnesses", [])),

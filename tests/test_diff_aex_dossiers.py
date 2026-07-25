@@ -86,3 +86,28 @@ def test_event_counts_accumulate_duplicate_semantic_keys():
     counts = MODULE.count_events(trace)
 
     assert list(counts.values()) == [5]
+
+
+def test_event_key_distinguishes_call_kind():
+    direct = {
+        "kind": "guest_call",
+        "depth": 1,
+        "pc_rva": 10,
+        "target_rva": 20,
+        "call_kind": "direct",
+    }
+    indirect = {**direct, "call_kind": "indirect_register"}
+
+    assert MODULE.event_key(direct) != MODULE.event_key(indirect)
+
+
+def test_event_delta_reports_bounded_truncation():
+    before = MODULE.Counter({f"before-{index}": 1 for index in range(3)})
+    after = MODULE.Counter({f"after-{index}": 1 for index in range(3)})
+
+    result = MODULE.bounded_counter_delta(before, after, limit=2)
+
+    assert len(result["entries"]) == 2
+    assert result["limit"] == 2
+    assert result["truncated"] is True
+    assert result["dropped_count"] == 4
