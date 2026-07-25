@@ -51,18 +51,30 @@ def bounded_utf8(value: str, limit: int) -> str:
     return encoded[:limit].decode("utf-8", errors="ignore")
 
 
-def sanitize_error_text(value: str) -> str:
-    value = value.replace(os.fspath(Path.home()), "<home>")
+def sanitize_error_text(
+    value: str, redactions: dict[str, str] | None = None
+) -> str:
+    replacements = {os.fspath(Path.home()): "<home>"}
+    replacements.update(redactions or {})
+    for private_path, token in sorted(
+        replacements.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        if private_path and private_path != os.path.sep:
+            value = value.replace(private_path, token)
     if "crash_snapshot=" in value:
         value = value.split("crash_snapshot=", 1)[0] + "crash_snapshot=<omitted>"
     return bounded_utf8(value, MAX_DURABLE_ERROR_BYTES)
 
 
-def sanitize_diagnostic(value: dict[str, object]) -> dict[str, object]:
+def sanitize_diagnostic(
+    value: dict[str, object], redactions: dict[str, str] | None = None
+) -> dict[str, object]:
     result = dict(value)
-    result["message"] = sanitize_error_text(value["message"])
+    result["message"] = sanitize_error_text(value["message"], redactions)
     if value["crash_reason"] is not None:
-        result["crash_reason"] = sanitize_error_text(value["crash_reason"])
+        result["crash_reason"] = sanitize_error_text(
+            value["crash_reason"], redactions
+        )
     return result
 
 
@@ -757,8 +769,10 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
     inventory = load_json_strict(inventory_path)
     windows_summary = load_json_strict(summary_path)
     validate_source_pair(inventory, windows_summary, inventory_sha)
-    mapped = map_corpus(inventory, args.corpus_root)
-    width, height, argb8 = png_to_argb8(args.input_png.resolve(strict=True))
+    corpus_roots = [root.resolve(strict=True) for root in args.corpus_root]
+    input_png = args.input_png.resolve(strict=True)
+    mapped = map_corpus(inventory, corpus_roots)
+    width, height, argb8 = png_to_argb8(input_png)
     available_workers = {
         "native": (
             args.native_worker.resolve(strict=True),
@@ -778,6 +792,21 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
     output.parent.mkdir(parents=True, exist_ok=True)
     run_root = output.parent / f"{output.stem}-runs"
     run_root.mkdir(parents=True, exist_ok=True)
+    redactions = {
+        os.fspath(inventory_path): "<inventory>",
+        os.fspath(summary_path): "<windows-summary>",
+        os.fspath(input_png): "<input-png>",
+        os.fspath(output): "<output>",
+        os.fspath(run_root): "<run-root>",
+        **{
+            os.fspath(root): f"<corpus-root:{index}>"
+            for index, root in enumerate(corpus_roots)
+        },
+        **{
+            os.fspath(worker): f"<{name}-worker>"
+            for name, (worker, _) in available_workers.items()
+        },
+    }
     entries = []
     counts: Counter[str] = Counter()
     for index, item in enumerate(mapped):
@@ -799,20 +828,20 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
                 result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
                 counts[f"{backend}:rendered"] += 1
             except AdmissionFailure as error:
-                diagnostic = sanitize_diagnostic(error.diagnostic)
+                diagnostic = sanitize_diagnostic(error.diagnostic, redactions)
                 result = {
                     "status": "failed",
                     "failure_class": classify_diagnostic(diagnostic),
                     "render_error": error.render_error,
                     "diagnostic": diagnostic,
                     "termination_evidence": sanitize_error_text(
-                        error.termination_evidence
+                        error.termination_evidence, redactions
                     ),
                     "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
                 }
                 counts[f"{backend}:{result['failure_class']}"] += 1
             except Exception as error:
-                message = sanitize_error_text(str(error))
+                message = sanitize_error_text(str(error), redactions)
                 bucket = classify_failure(message)
                 result = {
                     "status": "failed",
@@ -838,7 +867,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
             "windows_summary_sha256": summary_sha,
             "windows_inventory_entries": len(inventory["entries"]),
             "mapped_entries": len(mapped),
-            "input_png_sha256": sha256_file(args.input_png),
+            "input_png_sha256": sha256_file(input_png),
             "input_dimensions": [width, height],
             "native_worker_sha256": sha256_file(available_workers["native"][0]),
             "unicorn_worker_sha256": sha256_file(available_workers["unicorn"][0]),

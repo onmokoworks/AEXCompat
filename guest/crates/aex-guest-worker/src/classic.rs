@@ -1016,25 +1016,28 @@ impl ClassicHost {
             ],
             trace_enabled,
         );
-        let mut frame_setdown_error = match frame_setdown {
+        let (mut frame_setdown_error, mut frame_setdown_failure) = match frame_setdown {
             Ok((result, trace)) => {
                 traces.extend(trace);
-                result as i32
+                let error = result as i32;
+                (error, selector_failure("FRAME_SETDOWN", error))
             }
-            Err(_) => CLEANUP_GUEST_ERROR,
+            Err(error) => (CLEANUP_GUEST_ERROR, Some(error)),
         };
-        if self
-            .write_input_pointer(abi::IN_FRAME_DATA_OFFSET, 0)
-            .is_err()
-            && frame_setdown_error == 0
-        {
-            frame_setdown_error = CLEANUP_GUEST_ERROR;
+        if let Err(source) = self.write_input_pointer(abi::IN_FRAME_DATA_OFFSET, 0) {
+            if frame_setdown_failure.is_none() {
+                frame_setdown_error = CLEANUP_GUEST_ERROR;
+                frame_setdown_failure = Some(ClassicError::SelectorGuest {
+                    selector: "FRAME_SETDOWN",
+                    source,
+                });
+            }
         }
         if persistent_sequence && self.resident_frame_setdown_error == 0 && frame_setdown_error != 0
         {
             self.resident_frame_setdown_error = frame_setdown_error;
         }
-        let (mut render_error, census, render_traces) = match frame_execution {
+        let (render_error, census, render_traces) = match frame_execution {
             Ok(result) => result,
             Err(error) => {
                 if !persistent_sequence {
@@ -1044,28 +1047,36 @@ impl ClassicHost {
             }
         };
         traces.extend(render_traces);
-        if render_error == 0 {
-            render_error = frame_setdown_error;
-        }
+        let mut failure = selector_failure("RENDER", render_error).or(frame_setdown_failure);
         if !persistent_sequence {
-            let (sequence_setdown_result, trace) = self.call_with_optional_trace(
+            let sequence_setdown = self.call_with_optional_trace(
                 "SEQUENCE_SETDOWN",
                 [CMD_SEQUENCE_SETDOWN, self.input, self.output, 0, 0, 0],
                 trace_enabled,
-            )?;
-            traces.extend(trace);
-            let sequence_setdown_error = sequence_setdown_result as i32;
-            if render_error == 0 {
-                render_error = sequence_setdown_error;
+            );
+            match sequence_setdown {
+                Ok((result, trace)) => {
+                    traces.extend(trace);
+                    let error = result as i32;
+                    if failure.is_none() {
+                        failure = selector_failure("SEQUENCE_SETDOWN", error);
+                    }
+                }
+                Err(error) if failure.is_none() => failure = Some(error),
+                Err(_) => {}
             }
             self.sequence_active = false;
-            self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, 0)?;
+            if let Err(source) = self.write_input_pointer(abi::IN_SEQUENCE_DATA_OFFSET, 0) {
+                if failure.is_none() {
+                    failure = Some(ClassicError::SelectorGuest {
+                        selector: "SEQUENCE_SETDOWN",
+                        source,
+                    });
+                }
+            }
         }
-        if render_error != 0 {
-            return Err(ClassicError::Selector {
-                selector: "RENDER",
-                error: render_error,
-            });
+        if let Some(error) = failure {
+            return Err(error);
         }
         let mut leading_guard = vec![0u8; OUTPUT_GUARD_BYTES];
         let mut trailing_guard = vec![0u8; OUTPUT_GUARD_BYTES];
@@ -1712,6 +1723,10 @@ fn cleanup_error_code(result: Result<i32, ClassicError>) -> i32 {
     result.unwrap_or(CLEANUP_GUEST_ERROR)
 }
 
+fn selector_failure(selector: &'static str, error: i32) -> Option<ClassicError> {
+    (error != 0).then_some(ClassicError::Selector { selector, error })
+}
+
 fn bounded_failure_text(value: &str) -> String {
     bounded_text(value, MAX_FAILURE_TEXT_BYTES)
 }
@@ -1738,6 +1753,19 @@ mod tests {
         assert!(bounded.len() <= MAX_FAILURE_TEXT_BYTES);
         assert!(bounded.is_char_boundary(bounded.len()));
         assert_eq!(bounded, "界".repeat(MAX_FAILURE_TEXT_BYTES / 3));
+    }
+
+    #[test]
+    fn cleanup_selector_failure_preserves_its_selector() {
+        let failure = selector_failure("FRAME_SETDOWN", -40).unwrap();
+        assert!(matches!(
+            failure,
+            ClassicError::Selector {
+                selector: "FRAME_SETDOWN",
+                error: -40
+            }
+        ));
+        assert!(selector_failure("FRAME_SETDOWN", 0).is_none());
     }
 
     #[test]

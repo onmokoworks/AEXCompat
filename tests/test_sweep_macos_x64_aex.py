@@ -279,6 +279,26 @@ def test_durable_error_sanitizes_home_and_omits_crash_snapshot():
     assert len(sanitized.encode("utf-8")) <= SWEEP.MAX_DURABLE_ERROR_BYTES
 
 
+def test_durable_error_sanitizes_known_paths_outside_home():
+    message = (
+        "failed plugin /Volumes/AEX Corpus/OLMBlur.aex; "
+        "output /private/tmp/aex-sweep-runs/0001/output.argb8"
+    )
+
+    sanitized = SWEEP.sanitize_error_text(
+        message,
+        {
+            "/Volumes/AEX Corpus": "<corpus-root:0>",
+            "/private/tmp/aex-sweep-runs": "<run-root>",
+        },
+    )
+
+    assert "/Volumes/AEX Corpus" not in sanitized
+    assert "/private/tmp/aex-sweep-runs" not in sanitized
+    assert "<corpus-root:0>/OLMBlur.aex" in sanitized
+    assert "<run-root>/0001/output.argb8" in sanitized
+
+
 def test_validate_close_accepts_complete_clean_contract():
     SWEEP.validate_close(_close_message(), 42, 1)
 
