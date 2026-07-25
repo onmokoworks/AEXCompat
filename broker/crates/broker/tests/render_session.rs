@@ -2568,6 +2568,7 @@ mod windows_e2e {
                 .map(|(path, _)| approved_artifact(path))
                 .collect(),
             dependencies: vec![approved_artifact(&cluster.dependency)],
+            sealed_resources: Vec::new(),
             module_bound: 64,
             inspect_deadline: Duration::from_secs(30),
         })

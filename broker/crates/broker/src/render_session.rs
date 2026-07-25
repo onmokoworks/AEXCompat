@@ -1267,6 +1267,9 @@ impl RenderSession {
                 },
                 plugins: cluster.plugins,
                 dependencies,
+                // Render cluster sessions carry no data resources yet (issue
+                // #362 scopes resources to discovery for now).
+                sealed_resources: Vec::new(),
                 positional_plugin: true,
                 swap_payloads: Some(&cluster.swap_payloads),
                 module_bound: cluster.module_bound,
@@ -3726,6 +3729,10 @@ pub struct DiscoverySessionOpenRequest<'a> {
     pub plugins: Vec<ApprovedImageArtifact>,
     /// The shared closure, authenticated and staged with the plugins.
     pub dependencies: Vec<ApprovedImageArtifact>,
+    /// Authenticated data resources staged into `<root>/<subdir>/` (issue
+    /// #362, docs/SEALED_DATA_RESOURCE_POLICY_2026-07-25.md); empty for
+    /// clusters whose members need no data files.
+    pub sealed_resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
     /// The declared module bound the session's module audit is validated
     /// against at close (design §5).
     pub module_bound: u32,
@@ -3827,6 +3834,7 @@ impl DiscoverySession {
             worker_kind: WorkerKind::Render,
             plugins: request.plugins,
             dependencies: request.dependencies,
+            sealed_resources: request.sealed_resources,
             positional_plugin: false,
             // Discovery manifests carry no payloads (design §2.1).
             swap_payloads: None,

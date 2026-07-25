@@ -39,7 +39,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics;
+use aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_resources;
 use aexcompat_broker::plugin_dependency_closure::{
     DependencyClosureRequest, DependencyProvenance, DependencyResolutionDiagnostic,
     dependency_diagnostics_report, resolve_dependency_closure, survey_dependency_closure,
@@ -47,10 +47,69 @@ use aexcompat_broker::plugin_dependency_closure::{
 use aexcompat_broker::render_session::{
     DiscoverySession, DiscoverySessionOpenRequest, InspectOutcome,
 };
+use aexcompat_broker::sealed_load_tree::SealedResourceEntry;
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
 use aexcompat_broker::worker_module_audit::MAX_AUDITED_MODULES as ONESHOT_AUDIT_MODULE_LIMIT;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+
+/// Extra sealed inputs (issue #362, mirrors the bridge lib): when the
+/// closure never links BIB.dll statically, the host facility DLL beside the
+/// plug-in or in a dependency root is appended as one authenticated
+/// dependency; `Film Stocks` data files beside the plug-in become sealed
+/// data resources staged into `<sealed root>/Film Stocks/`.
+fn extra_sealed_inputs(
+    plugin: &Path,
+    dependencies: &mut Vec<ApprovedImageArtifact>,
+    roots: &[PathBuf],
+) -> Vec<SealedResourceEntry> {
+    let has_bib = dependencies.iter().any(|dependency| {
+        dependency
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("bib.dll"))
+    });
+    if !has_bib {
+        let mut candidates: Vec<PathBuf> = plugin
+            .parent()
+            .map(|parent| parent.join("BIB.dll"))
+            .into_iter()
+            .collect();
+        candidates.extend(roots.iter().map(|root| root.join("BIB.dll")));
+        if let Some(bib) = candidates.into_iter().find(|path| path.is_file()) {
+            let bytes = std::fs::read(&bib).expect("read BIB.dll");
+            dependencies.push(ApprovedImageArtifact {
+                path: bib,
+                expected_sha256: Sha256::digest(&bytes).into(),
+                expected_size: bytes.len() as u64,
+            });
+        }
+    }
+    let mut resources = Vec::new();
+    let film_stocks = plugin
+        .parent()
+        .map(|parent| parent.join("Film Stocks"))
+        .filter(|dir| dir.is_dir());
+    if let Some(dir) = film_stocks {
+        for entry in std::fs::read_dir(&dir).expect("read Film Stocks") {
+            let path = entry.expect("Film Stocks entry").path();
+            let metadata = std::fs::symlink_metadata(&path).expect("Film Stocks metadata");
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let bytes = std::fs::read(&path).expect("read grain file");
+            resources.push(SealedResourceEntry {
+                source: path,
+                relative_path: format!("Film Stocks/{name}"),
+                expected_sha256: Sha256::digest(&bytes).into(),
+                expected_size: bytes.len() as u64,
+            });
+        }
+    }
+    resources
+}
 
 /// Cluster session bounds (issue #405, mirror of the bridge lib).
 const MAX_CLUSTER_PLUGINS: usize = 256;
@@ -488,14 +547,21 @@ fn sweep_plugin(
     // an environment failure like a full TEMP volume (os error 112), and a
     // sweep that hides the message makes the latter look like the former.
     let mut dispatch_error: Option<String> = None;
+    let mut dependencies = dependencies;
+    let resources = if options.seal {
+        extra_sealed_inputs(plugin, &mut dependencies, &roots)
+    } else {
+        Vec::new()
+    };
     let bucket = match &closure {
         Some(Err(error)) => format!("closure_error: {error}"),
         Some(Ok(_)) | None => {
-            match inspect_experimental_with_approved_dependencies_and_diagnostics(
+            match inspect_experimental_with_approved_dependencies_and_resources(
                 repository,
                 plugin,
                 sha,
                 dependencies.clone(),
+                resources.clone(),
             ) {
                 Ok((parameters, diagnostics)) => {
                     let mut extra = json!({
@@ -687,6 +753,7 @@ struct ClusterPrepared {
     dependency_diagnostics: Vec<DependencyResolutionDiagnostic>,
     dependency_diagnostics_truncated: bool,
     identity: String,
+    sealed_resources: Vec<SealedResourceEntry>,
 }
 
 /// The closure identity (issue #405): a normalized hash of the sorted
@@ -766,18 +833,26 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
             }
         }
         match resolve_dependency_closure(DependencyClosureRequest::new(plugin, &roots)) {
-            Ok(closure) => prepared.push(ClusterPrepared {
-                plugin: plugin.clone(),
-                sha,
-                size_bytes: size_bytes.unwrap_or(0),
-                identity: closure_identity_of(closure.dependencies()),
-                dependencies: closure.dependencies().to_vec(),
-                sealed_bytes: closure.total_bytes(),
-                unresolved: closure.unresolved().len(),
-                provenance: closure.provenance().to_vec(),
-                dependency_diagnostics: closure.dependency_diagnostics().to_vec(),
-                dependency_diagnostics_truncated: closure.dependency_diagnostics_truncated(),
-            }),
+            Ok(closure) => {
+                // Extra sealed inputs (issue #362): BIB.dll for BIB-less
+                // closures and Film Stocks data files; the identity covers
+                // everything sealed into the tree.
+                let mut dependencies = closure.dependencies().to_vec();
+                let sealed_resources = extra_sealed_inputs(plugin, &mut dependencies, &roots);
+                prepared.push(ClusterPrepared {
+                    plugin: plugin.clone(),
+                    sha,
+                    size_bytes: size_bytes.unwrap_or(0),
+                    identity: closure_identity_of(&dependencies),
+                    dependencies,
+                    sealed_bytes: closure.total_bytes(),
+                    unresolved: closure.unresolved().len(),
+                    provenance: closure.provenance().to_vec(),
+                    dependency_diagnostics: closure.dependency_diagnostics().to_vec(),
+                    dependency_diagnostics_truncated: closure.dependency_diagnostics_truncated(),
+                    sealed_resources,
+                });
+            }
             Err(error) => {
                 let bucket = format!("closure_error: {error}");
                 let record = plugin_record(
@@ -823,11 +898,12 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
     }
 
     let one_shot = |member: &ClusterPrepared, started: Instant, extra: Value| -> (String, Value) {
-        match inspect_experimental_with_approved_dependencies_and_diagnostics(
+        match inspect_experimental_with_approved_dependencies_and_resources(
             repository,
             &member.plugin,
             &member.sha,
             member.dependencies.clone(),
+            member.sealed_resources.clone(),
         ) {
             Ok((parameters, diagnostics)) => {
                 let mut loaded_extra = json!({
@@ -894,7 +970,32 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
             indices.iter().map(|index| &prepared[*index]).collect();
         let identity = members[0].identity.clone();
         let declared = members.len() + members[0].dependencies.len();
-        let infeasible = declared + CLUSTER_MODULE_HEADROOM > MAX_CLUSTER_MODULE_BOUND;
+        // Data resources merge across members: identical entries (same path,
+        // same bytes — siblings share one Film Stocks folder) stage once; the
+        // same path with different bytes cannot coexist in one flat tree and
+        // falls the whole cluster back per-plugin (fail-closed).
+        let mut merged_resources: Vec<SealedResourceEntry> = Vec::new();
+        let mut resource_collision = false;
+        'members: for member in &members {
+            for resource in &member.sealed_resources {
+                let key = resource.relative_path.to_lowercase();
+                match merged_resources
+                    .iter()
+                    .find(|existing| existing.relative_path.to_lowercase() == key)
+                {
+                    None => merged_resources.push(resource.clone()),
+                    Some(existing)
+                        if existing.expected_sha256 == resource.expected_sha256
+                            && existing.expected_size == resource.expected_size => {}
+                    Some(_) => {
+                        resource_collision = true;
+                        break 'members;
+                    }
+                }
+            }
+        }
+        let infeasible =
+            resource_collision || declared + CLUSTER_MODULE_HEADROOM > MAX_CLUSTER_MODULE_BOUND;
         let mut open_ms = 0u128;
         let mut fallback_note = Value::Null;
         let session = if infeasible {
@@ -923,6 +1024,7 @@ fn run_cluster_sweep(options: &Options, repository: &Path, plugins: &[PathBuf]) 
                 repository,
                 plugins: plugins_artifacts,
                 dependencies: members[0].dependencies.clone(),
+                sealed_resources: merged_resources.clone(),
                 module_bound: (declared + CLUSTER_MODULE_HEADROOM) as u32,
                 inspect_deadline: CLUSTER_INSPECT_DEADLINE,
             }) {

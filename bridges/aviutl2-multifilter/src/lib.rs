@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use aexcompat_broker::image_render::{
     InteractiveParameter, RenderGpuBackend, RenderPixelFormat, encode_interactive_payload,
-    inspect_experimental_with_approved_dependencies_and_diagnostics,
+    inspect_experimental_with_approved_dependencies_and_resources,
 };
 use aexcompat_broker::plugin_dependency_closure::{
     DependencyClosureRequest, DependencyProvenance, ResolvedDependencyClosure,
@@ -37,6 +37,7 @@ use aexcompat_broker::render_session::{
     ClusterRenderPlugins, DiscoverySession, DiscoverySessionOpenRequest, FrameStatus,
     InspectOutcome, RenderSession, SessionOpenRequest, SwapOutcome,
 };
+use aexcompat_broker::sealed_load_tree::SealedResourceEntry;
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
 use aexcompat_broker::worker_module_audit::MAX_AUDITED_MODULES as ONESHOT_AUDIT_MODULE_LIMIT;
 use aviutl2_sys::filter2::{
@@ -2233,6 +2234,111 @@ struct PreparedDiscovery {
     entry: CacheEntry,
     closure: Option<ResolvedDependencyClosure>,
     identity: Option<String>,
+    /// Extra authenticated inputs beyond the import closure (issue #362):
+    /// host facility DLLs the plug-in loads lazily (BIB.dll).
+    extra_dependencies: Vec<ApprovedImageArtifact>,
+    /// Authenticated data resources staged into `<sealed root>/<subdir>/`
+    /// (issue #362: `Film Stocks`-type data files).
+    sealed_resources: Vec<SealedResourceEntry>,
+}
+
+/// Bounds for one plug-in's sealed data resources (issue #362, design
+/// docs/SEALED_DATA_RESOURCE_POLICY_2026-07-25.md §4): exceeding either is a
+/// fail-closed discovery failure, never a partial staging.
+const MAX_SEALED_RESOURCES: usize = 256;
+const MAX_SEALED_RESOURCE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Extra authenticated inputs beyond the import closure: host facility DLLs
+/// (BIB.dll, lazily loaded by the #485 bounded path) and data resources the
+/// plug-in reads from `<its dir>/<subdir>/`.
+struct ExtraSealedInputs {
+    dependencies: Vec<ApprovedImageArtifact>,
+    resources: Vec<SealedResourceEntry>,
+}
+
+/// Gathers the extra sealed inputs for one plug-in (issue #362):
+///
+/// - BIB.dll: closures that never link BIB statically (Scribble) leave the
+///   bounded #485 load with nothing to find in the sealed root. When the
+///   closure lacks BIB.dll, the copy beside the plug-in or in a dependency
+///   search root is added as one authenticated dependency.
+/// - `Film Stocks`: when the plug-in's own directory holds a `Film Stocks`
+///   subdirectory, every plain file directly inside it becomes a data
+///   resource (`Film Stocks/<basename>`), count/size-bounded; a symlink or
+///   reparse entry fails closed.
+fn gather_extra_sealed_inputs(
+    plugin: &Path,
+    closure_dependencies: &[ApprovedImageArtifact],
+    roots: &[PathBuf],
+) -> Result<ExtraSealedInputs, String> {
+    let mut dependencies = Vec::new();
+    let has_bib = closure_dependencies.iter().any(|dependency| {
+        dependency
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("bib.dll"))
+    });
+    if !has_bib {
+        let mut candidates: Vec<PathBuf> = plugin
+            .parent()
+            .map(|parent| parent.join("BIB.dll"))
+            .into_iter()
+            .collect();
+        candidates.extend(roots.iter().map(|root| root.join("BIB.dll")));
+        if let Some(bib) = candidates.into_iter().find(|path| path.is_file()) {
+            let bytes =
+                std::fs::read(&bib).map_err(|error| format!("BIB.dll is unreadable: {error}"))?;
+            dependencies.push(ApprovedImageArtifact {
+                path: bib,
+                expected_sha256: Sha256::digest(&bytes).into(),
+                expected_size: bytes.len() as u64,
+            });
+        }
+    }
+
+    let mut resources = Vec::new();
+    let film_stocks = plugin
+        .parent()
+        .map(|parent| parent.join("Film Stocks"))
+        .filter(|dir| dir.is_dir());
+    if let Some(dir) = film_stocks {
+        let mut total_bytes = 0u64;
+        for entry in std::fs::read_dir(&dir).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(format!(
+                    "sealed resource entry is not a plain file: {}",
+                    path.display()
+                ));
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| "sealed resource has a non-UTF-8 name".to_owned())?
+                .to_owned();
+            let bytes =
+                std::fs::read(&path).map_err(|error| format!("sealed resource unreadable: {error}"))?;
+            total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+            if resources.len() >= MAX_SEALED_RESOURCES || total_bytes > MAX_SEALED_RESOURCE_BYTES {
+                return Err("sealed resource limit exceeded".to_owned());
+            }
+            resources.push(SealedResourceEntry {
+                source: path,
+                relative_path: format!("Film Stocks/{name}"),
+                expected_sha256: Sha256::digest(&bytes).into(),
+                expected_size: bytes.len() as u64,
+            });
+        }
+        resources.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    }
+    Ok(ExtraSealedInputs {
+        dependencies,
+        resources,
+    })
 }
 
 /// The pre-inspect half of discovery (the legacy `discover_one` up to the
@@ -2250,6 +2356,8 @@ fn prepare_discovery(
             entry,
             closure: None,
             identity: None,
+            extra_dependencies: Vec::new(),
+            sealed_resources: Vec::new(),
         };
     };
     entry.sha = hex_lower(&Sha256::digest(&bytes));
@@ -2291,6 +2399,8 @@ fn prepare_discovery(
             entry,
             closure: None,
             identity: None,
+            extra_dependencies: Vec::new(),
+            sealed_resources: Vec::new(),
         };
     };
     let sealed_paths: Vec<PathBuf> = closure
@@ -2305,17 +2415,40 @@ fn prepare_discovery(
     missing.sort();
     missing.dedup();
     entry.closure = CachedClosure {
-        roots: recorded_roots,
+        roots: recorded_roots.clone(),
         sealed,
         missing,
         provenance,
     };
-    let identity = closure_identity_of(closure.dependencies());
+    // Extra sealed inputs beyond the import closure (issue #362): the lazily
+    // loaded host facility DLL and `Film Stocks`-type data resources. A
+    // gathering failure is a fail-closed discovery failure, not a partial
+    // staging that would leave the plug-in to fail opaquely inside the worker.
+    let extra = match gather_extra_sealed_inputs(plugin, closure.dependencies(), &roots) {
+        Ok(extra) => extra,
+        Err(reason) => {
+            entry.failure_classification = Some(format!("sealed_resource_limit:{reason}"));
+            return PreparedDiscovery {
+                entry,
+                closure: None,
+                identity: None,
+                extra_dependencies: Vec::new(),
+                sealed_resources: Vec::new(),
+            };
+        }
+    };
+    // The identity covers everything sealed into the tree, extras included,
+    // so two plug-ins cluster only when every sealed input matches.
+    let mut identity_artifacts: Vec<ApprovedImageArtifact> = closure.dependencies().to_vec();
+    identity_artifacts.extend(extra.dependencies.iter().cloned());
+    let identity = closure_identity_of(&identity_artifacts);
     entry.closure_identity = Some(identity.clone());
     PreparedDiscovery {
         entry,
         closure: Some(closure),
         identity: Some(identity),
+        extra_dependencies: extra.dependencies,
+        sealed_resources: extra.resources,
     }
 }
 
@@ -2332,11 +2465,16 @@ fn finish_one_shot(
         return prepared.entry;
     };
     let mut entry = prepared.entry;
-    match inspect_experimental_with_approved_dependencies_and_diagnostics(
+    // Extra sealed inputs (issue #362): the lazily loaded host facility DLL
+    // rides the dependency list; data resources stage into `<root>/<subdir>/`.
+    let mut dependencies = closure.into_dependencies();
+    dependencies.extend(prepared.extra_dependencies);
+    match inspect_experimental_with_approved_dependencies_and_resources(
         repository,
         plugin,
         &entry.sha,
-        closure.into_dependencies(),
+        dependencies,
+        prepared.sealed_resources,
     ) {
         Ok((params, diagnostics)) => {
             // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
@@ -2661,12 +2799,36 @@ fn discover_cluster(
 ) -> Vec<(PathBuf, CacheEntry)> {
     let member_count = members.len();
     // Every member's closure resolved to the same identity, so the first
-    // member's dependency set stands for the whole cluster.
-    let shared_dependencies = members[0]
-        .1
-        .closure
-        .as_ref()
-        .map(|closure| closure.dependencies().to_vec());
+    // member's dependency set (plus the shared extra inputs — issue #362:
+    // the identity covers them, so they are identical across members) stands
+    // for the whole cluster.
+    let shared_dependencies = members[0].1.closure.as_ref().map(|closure| {
+        let mut dependencies = closure.dependencies().to_vec();
+        dependencies.extend(members[0].1.extra_dependencies.iter().cloned());
+        dependencies
+    });
+    // Data resources merge across members: an identical entry (same path,
+    // same bytes — the Film Stocks siblings share one folder) stages once;
+    // the same path with different bytes cannot coexist in one flat tree, so
+    // the whole cluster falls back per-plugin (fail-closed).
+    let mut sealed_resources: Vec<SealedResourceEntry> = Vec::new();
+    for (_, prepared) in &members {
+        for resource in &prepared.sealed_resources {
+            let key = resource.relative_path.to_lowercase();
+            match sealed_resources
+                .iter()
+                .find(|existing| existing.relative_path.to_lowercase() == key)
+            {
+                None => sealed_resources.push(resource.clone()),
+                Some(existing)
+                    if existing.expected_sha256 == resource.expected_sha256
+                        && existing.expected_size == resource.expected_size => {}
+                Some(_) => {
+                    return fallback_members(repository, members, 0, "cluster data resource collision");
+                }
+            }
+        }
+    }
     let mut plugins = Vec::with_capacity(member_count);
     for (path, prepared) in &members {
         let Some(expected_sha256) = decode_sha256_hex(&prepared.entry.sha) else {
@@ -2693,6 +2855,7 @@ fn discover_cluster(
         repository,
         plugins,
         dependencies: shared_dependencies,
+        sealed_resources,
         module_bound: (declared + CLUSTER_MODULE_HEADROOM) as u32,
         inspect_deadline: CLUSTER_INSPECT_DEADLINE,
     }) {
@@ -2870,6 +3033,8 @@ fn discover_all(
                         entry: negative_entry(plugin, build),
                         closure: None,
                         identity: None,
+                        extra_dependencies: Vec::new(),
+                        sealed_resources: Vec::new(),
                     });
                     if let Ok(mut slots) = slots.lock() {
                         slots[index] = Some((plugin.clone(), prepared));
@@ -5915,6 +6080,73 @@ mod tests {
             expected_sha256: [sha_byte; 32],
             expected_size: 64,
         }
+    }
+
+    fn temp_source() -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "aexcompat-mf-resources-{}-{nonce:032x}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn extra_inputs_add_bib_only_when_the_closure_lacks_it() {
+        let root = temp_source();
+        let plugin = root.join("effect.aex");
+        std::fs::write(&plugin, b"effect").unwrap();
+        std::fs::write(root.join("BIB.dll"), b"bib").unwrap();
+
+        // No BIB in the closure: the host facility DLL is sealed as an extra.
+        let extra = gather_extra_sealed_inputs(&plugin, &[], std::slice::from_ref(&root)).unwrap();
+        assert_eq!(extra.dependencies.len(), 1);
+        assert_eq!(
+            extra.dependencies[0].path.file_name().and_then(|name| name.to_str()),
+            Some("BIB.dll")
+        );
+        assert_eq!(extra.dependencies[0].expected_size, 3);
+
+        // BIB already in the closure: nothing is added (a duplicate basename
+        // would fail the sealed tree closed).
+        let with_bib = vec![artifact("bib.dll", 7)];
+        let extra = gather_extra_sealed_inputs(&plugin, &with_bib, &[root.clone()]).unwrap();
+        assert!(extra.dependencies.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extra_inputs_gather_film_stocks_and_reject_links_and_caps() {
+        let root = temp_source();
+        let plugin = root.join("effect.aex");
+        std::fs::write(&plugin, b"effect").unwrap();
+        let stocks = root.join("Film Stocks");
+        std::fs::create_dir(&stocks).unwrap();
+        std::fs::write(stocks.join("100T.grain"), b"grain-a").unwrap();
+        std::fs::write(stocks.join("500T.grain"), b"grain-b").unwrap();
+
+        let extra = gather_extra_sealed_inputs(&plugin, &[], &[]).unwrap();
+        assert_eq!(extra.resources.len(), 2);
+        assert_eq!(extra.resources[0].relative_path, "Film Stocks/100T.grain");
+        assert_eq!(extra.resources[1].relative_path, "Film Stocks/500T.grain");
+        assert_eq!(extra.resources[0].expected_size, 7);
+
+        // A non-plain entry (here a nested directory) fails closed.
+        std::fs::create_dir(stocks.join("nested")).unwrap();
+        assert!(gather_extra_sealed_inputs(&plugin, &[], &[]).is_err());
+        std::fs::remove_dir(stocks.join("nested")).unwrap();
+
+        // Beyond the count cap the gather fails closed instead of staging a
+        // partial set the plug-in would silently misread.
+        for index in 0..=MAX_SEALED_RESOURCES {
+            std::fs::write(stocks.join(format!("filler-{index:04}.grain")), b"x").unwrap();
+        }
+        assert!(gather_extra_sealed_inputs(&plugin, &[], &[]).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

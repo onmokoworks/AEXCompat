@@ -1165,6 +1165,26 @@ const char* effect_selector_name(int32_t command) noexcept {
   }
 }
 
+int32_t invoke_audited_effect_call_seh(
+    EffectEntry entry, int32_t command, void* input, void* output,
+    void** params, void* world, void* extra,
+    bool* invocation_completed_normally, int32_t* raw_return_code,
+    uint32_t* out_exception_code, const char* selector) {
+  int32_t result = 0;
+  __try {
+    result = audited_effect_call(
+        entry, command, input, output, params, world, extra,
+        invocation_completed_normally, raw_return_code);
+  } __except(capture_seh_exception(GetExceptionInformation())) {
+    *out_exception_code = GetExceptionCode();
+    g_telemetry.selector = selector;
+    g_telemetry.error = kAuditFailure;
+    if (g_capture_audit) g_capture_audit();
+    result = kAuditFailure;
+  }
+  return result;
+}
+
 int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
                          void* output, void** params, void* world, void* extra,
                          uint32_t* out_exception_code) {
@@ -1260,18 +1280,10 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
   g_current_access_violation = {};
   bool invocation_completed_normally = false;
   int32_t raw_return_code = 0;
-  int32_t result = 0;
-  __try {
-    result = audited_effect_call(
-        entry, command, input, output, params, world, extra,
-        &invocation_completed_normally, &raw_return_code);
-  } __except(capture_seh_exception(GetExceptionInformation())) {
-    *out_exception_code = GetExceptionCode();
-    g_telemetry.selector = selector;
-    g_telemetry.error = kAuditFailure;
-    if (g_capture_audit) g_capture_audit();
-    result = kAuditFailure;
-  }
+  const int32_t result = invoke_audited_effect_call_seh(
+      entry, command, input, output, params, world, extra,
+      &invocation_completed_normally, &raw_return_code, out_exception_code,
+      selector);
   record_extended_allocation_selector_exit(selector);
   const CapturedGlobalDataState output_global_data =
       capture_global_data_state(output, kOutGlobalDataOffset);

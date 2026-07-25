@@ -192,6 +192,10 @@ pub struct SecureClusterImageDispatch<'a> {
     pub plugins: Vec<ApprovedImageArtifact>,
     /// The shared closure, authenticated and staged once with the plugins.
     pub dependencies: Vec<ApprovedImageArtifact>,
+    /// Authenticated data resources staged into `<root>/<subdir>/` (issue
+    /// #362); not modules, so they ride no manifest entry and no audit
+    /// declared set — the sealed tree stages them with the same strength.
+    pub sealed_resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
     /// Whether the positional argv image slot carries plugins[0]. Render
     /// sessions pass `true` (the positional contract names plugins[0]);
     /// discovery sessions pass `false` and no plugin path rides argv at all.
@@ -316,7 +320,12 @@ fn dispatch_secure_cluster_image_session_with_policy(
     // The manifest rides the tree as a non-plugin entry: staged, hashed, and
     // ACL'd with the closure, but never resolvable as a plugin path.
     dependencies.push(manifest_entry);
-    let tree = SealedLoadTree::create_cluster(plugin_entries, dependencies)?;
+    let tree = SealedLoadTree::create_cluster_with_resources(
+        plugin_entries,
+        dependencies,
+        input.sealed_resources,
+    )?
+    .0;
     drop(staging_source);
     let staged_manifest = tree
         .root()
@@ -347,6 +356,16 @@ fn dispatch_secure_cluster_image_session_with_policy(
 }
 
 pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<SecureLaunchResult> {
+    dispatch_secure_image_with_resources(input, Vec::new())
+}
+
+/// Resource-carrying variant of `dispatch_secure_image` (issue #362): the
+/// sealed tree also stages authenticated data resources into
+/// `<root>/<subdir>/` (docs/SEALED_DATA_RESOURCE_POLICY_2026-07-25.md).
+pub fn dispatch_secure_image_with_resources(
+    input: SecureImageDispatch<'_>,
+    resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
+) -> io::Result<SecureLaunchResult> {
     crate::trace_policy::validate_broker_trace_directory(input.repository)?;
     let worker_program = input
         .repository
@@ -358,7 +377,7 @@ pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<Secur
         .into_iter()
         .map(load_entry)
         .collect::<io::Result<Vec<_>>>()?;
-    let tree = SealedLoadTree::create(main, dependencies)?;
+    let tree = SealedLoadTree::create_with_resources(main, dependencies, resources)?;
     let (worker_sha256, worker_size) = admit_local_worker(&worker_program)?;
     let request = SecureLaunchRequest {
         worker_program: &worker_program,
