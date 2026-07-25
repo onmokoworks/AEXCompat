@@ -27,6 +27,8 @@ const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
 const ANGLE_DEFAULT_OFFSET: usize = 4;
 const CLEANUP_GUEST_ERROR: i32 = -40;
+const OUTPUT_GUARD_BYTES: usize = 64;
+const OUTPUT_GUARD_PATTERN: u8 = 0xa5;
 pub const MAX_RENDER_WIDTH: u32 = 1920;
 pub const MAX_RENDER_HEIGHT: u32 = 1080;
 
@@ -119,6 +121,7 @@ pub struct RenderReport {
     pub render_mode: &'static str,
     pub width: u32,
     pub height: u32,
+    pub guards_intact: bool,
     pub parameter_values: Vec<AppliedParameter>,
     pub output_request: [i32; 4],
     pub input_requests: Vec<[i32; 4]>,
@@ -153,6 +156,7 @@ struct FrameResources {
     params: u64,
     output_world: u64,
     input_pixels: u64,
+    output_guard_base: u64,
     output_pixels: u64,
     parameter_definitions: Vec<u64>,
 }
@@ -428,6 +432,38 @@ impl ClassicHost {
         input_argb8: &[u8],
         parameter_values: &[ParameterValue],
     ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_argb8_mode(
+            width,
+            height,
+            current_time,
+            time_scale,
+            input_argb8,
+            parameter_values,
+            true,
+        )
+    }
+
+    pub fn probe_resident_argb8(
+        &mut self,
+        width: u32,
+        height: u32,
+        time_scale: u32,
+        input_argb8: &[u8],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_argb8_mode(width, height, 0, time_scale, input_argb8, &[], false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_resident_argb8_mode(
+        &mut self,
+        width: u32,
+        height: u32,
+        current_time: i32,
+        time_scale: u32,
+        input_argb8: &[u8],
+        parameter_values: &[ParameterValue],
+        count_frame: bool,
+    ) -> Result<RenderReport, ClassicError> {
         if !self.sequence_active {
             return Err(ClassicError::Input(
                 "resident session has not been opened".into(),
@@ -446,7 +482,9 @@ impl ClassicHost {
                 true,
             )?
             .0;
-        self.resident_frames += 1;
+        if count_frame {
+            self.resident_frames += 1;
+        }
         Ok(report)
     }
 
@@ -745,6 +783,11 @@ impl ClassicHost {
             .copy_from_slice(&input_world);
         self.engine.write(input_param, &input_definition)?;
         self.engine.write(input_pixels, input_argb8)?;
+        let output_guard = vec![OUTPUT_GUARD_PATTERN; OUTPUT_GUARD_BYTES];
+        self.engine
+            .write(resources.output_guard_base, &output_guard)?;
+        self.engine
+            .write(output_pixels + pixel_bytes as u64, &output_guard)?;
         // A resident frame must not inherit pixels the previous frame left in
         // a partially written result region.
         self.engine.write(output_pixels, &vec![0u8; pixel_bytes])?;
@@ -938,6 +981,21 @@ impl ClassicHost {
                 error: render_error,
             });
         }
+        let mut leading_guard = vec![0u8; OUTPUT_GUARD_BYTES];
+        let mut trailing_guard = vec![0u8; OUTPUT_GUARD_BYTES];
+        self.engine
+            .read(resources.output_guard_base, &mut leading_guard)?;
+        self.engine
+            .read(output_pixels + pixel_bytes as u64, &mut trailing_guard)?;
+        if leading_guard
+            .iter()
+            .chain(&trailing_guard)
+            .any(|byte| *byte != OUTPUT_GUARD_PATTERN)
+        {
+            return Err(ClassicError::Input(
+                "guest render corrupted an output pixel guard".into(),
+            ));
+        }
         let mut argb8 = vec![0u8; pixel_bytes];
         self.engine.read(output_pixels, &mut argb8)?;
         Ok((
@@ -954,6 +1012,7 @@ impl ClassicHost {
                 },
                 width,
                 height,
+                guards_intact: true,
                 parameter_values: applied_values,
                 output_request,
                 input_requests: self.engine.pre_checkout_requests().to_vec(),
@@ -990,7 +1049,11 @@ impl ClassicHost {
         let params = self.engine.allocate((parameter_count + 1) * 8, 8)?;
         let output_world = self.engine.allocate(abi::PF_LAYER_DEF_SIZE, 8)?;
         let input_pixels = self.engine.allocate(pixel_bytes, 64)?;
-        let output_pixels = self.engine.allocate(pixel_bytes, 64)?;
+        let guarded_output_bytes = pixel_bytes
+            .checked_add(OUTPUT_GUARD_BYTES * 2)
+            .ok_or_else(|| ClassicError::Input("guarded output size overflow".into()))?;
+        let output_guard_base = self.engine.allocate(guarded_output_bytes, 64)?;
+        let output_pixels = output_guard_base + OUTPUT_GUARD_BYTES as u64;
         let mut parameter_definitions = Vec::with_capacity(parameter_count);
         for _ in 0..parameter_count {
             parameter_definitions.push(self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?);
@@ -1003,6 +1066,7 @@ impl ClassicHost {
             params,
             output_world,
             input_pixels,
+            output_guard_base,
             output_pixels,
             parameter_definitions,
         };

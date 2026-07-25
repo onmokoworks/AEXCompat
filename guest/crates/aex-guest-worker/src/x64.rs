@@ -3448,8 +3448,11 @@ fn schedule_iterate8_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), 
         .as_ref()
         .cloned()
         .ok_or_else(|| "Iterate8 continuation has no pending call".to_string())?;
-    let input =
-        pending.source_data + pending.y as u64 * pending.source_rowbytes + pending.x as u64 * 4;
+    let input = if pending.source_data == 0 {
+        0
+    } else {
+        pending.source_data + pending.y as u64 * pending.source_rowbytes + pending.x as u64 * 4
+    };
     let output = pending.destination_data
         + pending.y as u64 * pending.destination_rowbytes
         + pending.x as u64 * 4;
@@ -3540,12 +3543,7 @@ fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
             "Iterate8 destination height",
         )?;
         let (source_data, source_rowbytes, width, height) = if source_world == 0 {
-            (
-                destination_data,
-                destination_rowbytes,
-                destination_width,
-                destination_height,
-            )
+            (0, 0, destination_width, destination_height)
         } else {
             let data = read_guest_u64(
                 unicorn,
@@ -3574,9 +3572,9 @@ fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
                 source_height.min(destination_height),
             )
         };
-        if source_data == 0
-            || destination_data == 0
-            || source_rowbytes < width.saturating_mul(4)
+        if destination_data == 0
+            || source_world != 0 && source_data == 0
+            || source_world != 0 && source_rowbytes < width.saturating_mul(4)
             || destination_rowbytes < width.saturating_mul(4)
             || width <= 0
             || height <= 0
@@ -4211,6 +4209,42 @@ mod tests {
         let mut output = [0u8; 8];
         engine.read(destination_pixels, &mut output).unwrap();
         assert_eq!(output, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn iterate8_preserves_null_source_pixel_for_generators() {
+        const CODE: u64 = 0x1000_0000;
+        // mov rax,[rsp+0x28]; xor edx,edx; test r9,r9; setne dl;
+        // mov [rax],edx; xor eax,eax; ret
+        let mut engine = test_engine(&[
+            0x48, 0x8b, 0x44, 0x24, 0x28, 0x31, 0xd2, 0x4d, 0x85, 0xc9, 0x0f, 0x95, 0xc2, 0x89,
+            0x10, 0x31, 0xc0, 0xc3,
+        ]);
+        let destination_pixels = engine.allocate(4, 4).unwrap();
+        let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let mut world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        world[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&destination_pixels.to_le_bytes());
+        world[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&4i32.to_le_bytes());
+        world[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&1i32.to_le_bytes());
+        world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&1i32.to_le_bytes());
+        engine.write(destination_world, &world).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_ITERATE8,
+                    &[0, 0, 1, 0, 0, 0, CODE, destination_world],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        let mut output = [0xffu8; 4];
+        engine.read(destination_pixels, &mut output).unwrap();
+        assert_eq!(output, [0; 4]);
     }
 
     #[test]

@@ -786,7 +786,7 @@ unsafe extern "win64" fn iterate_world8(
     for y in top..bottom {
         for x in left..right {
             let output = destination.data + y as u64 * destination.rowbytes as u64 + x as u64 * 4;
-            let input = source.map_or(output, |source| {
+            let input = source.map_or(0, |source| {
                 source.data + y as u64 * source.rowbytes as u64 + x as u64 * 4
             });
             let error = unsafe { pixel(refcon, x, y, input, output) };

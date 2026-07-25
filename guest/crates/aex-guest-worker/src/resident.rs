@@ -60,6 +60,26 @@ struct FrameDone {
 }
 
 #[derive(Serialize)]
+struct SessionReady<'a> {
+    v: u32,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    worker_pid: u32,
+    setup: &'a SetupReport,
+}
+
+#[derive(Serialize)]
+struct SessionProbed {
+    v: u32,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    worker_pid: u32,
+    status: &'static str,
+    guards_intact: bool,
+    render_error: i32,
+}
+
+#[derive(Serialize)]
 struct SessionClosed<'a> {
     v: u32,
     #[serde(rename = "type")]
@@ -86,6 +106,15 @@ pub fn run_resident_session(
         .ok_or_else(|| SessionError::Protocol("resident pixel size overflow".into()))?;
     let mut host = ClassicHost::new(image)?;
     let setup = host.begin_resident_session(width, height, time_scale)?;
+    write_message(
+        &mut response,
+        &SessionReady {
+            v: 1,
+            kind: "session_ready",
+            worker_pid: std::process::id(),
+            setup: &setup,
+        },
+    )?;
     let mut generation = 0u64;
     let processing = (|| -> Result<(), SessionError> {
         loop {
@@ -99,6 +128,54 @@ pub fn run_resident_session(
                 .as_object()
                 .ok_or_else(|| SessionError::Protocol("request must be a JSON object".into()))?;
             match object.get("type").and_then(Value::as_str) {
+                Some("probe") => {
+                    require_exact_keys(object.keys().map(String::as_str), &["type", "v"])?;
+                    if object.get("v").and_then(Value::as_u64) != Some(1) {
+                        return Err(SessionError::Protocol(
+                            "probe requires protocol version 1".into(),
+                        ));
+                    }
+                    let input = fs::read(input_slot).map_err(|error| {
+                        SessionError::Io(format!("read resident probe input slot: {error}"))
+                    })?;
+                    if input.len() != pixel_bytes {
+                        return Err(SessionError::Protocol(format!(
+                            "resident probe input slot has {} bytes, expected {pixel_bytes}",
+                            input.len()
+                        )));
+                    }
+                    match host.probe_resident_argb8(width, height, time_scale, &input) {
+                        Ok(report) => write_message(
+                            &mut response,
+                            &SessionProbed {
+                                v: 1,
+                                kind: "session_probed",
+                                worker_pid: std::process::id(),
+                                status: "ok",
+                                guards_intact: report.guards_intact,
+                                render_error: 0,
+                            },
+                        )?,
+                        Err(error) => {
+                            let render_error = match error {
+                                ClassicError::Selector { error, .. } => error,
+                                _ => -40,
+                            };
+                            write_message(
+                                &mut response,
+                                &SessionProbed {
+                                    v: 1,
+                                    kind: "session_probed",
+                                    worker_pid: std::process::id(),
+                                    status: "error",
+                                    guards_intact: false,
+                                    render_error,
+                                },
+                            )?;
+                            return Err(SessionError::Classic(error));
+                        }
+                    }
+                }
                 Some("close") => {
                     require_exact_keys(object.keys().map(String::as_str), &["type", "v"])?;
                     if object.get("v").and_then(Value::as_u64) != Some(1) {
@@ -258,7 +335,7 @@ fn parse_render_frame(
                         rowbytes: width * 4,
                         pixel_format: "argb8",
                         checksum: format!("{:x}", Sha256::digest(&report.argb8)),
-                        guards_intact: true,
+                        guards_intact: report.guards_intact,
                     }),
                     render_error: 0,
                     generation: Some(*generation),

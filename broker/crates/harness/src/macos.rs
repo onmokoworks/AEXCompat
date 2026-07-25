@@ -14,6 +14,7 @@ use crate::gui_state::{GuiParameter, LiveRenderState, ViewerMode, reset_all};
 const MAX_WIDTH: u32 = 1920;
 const MAX_HEIGHT: u32 = 1080;
 const NATIVE_SETUP_DEADLINE: Duration = Duration::from_secs(2);
+const RESIDENT_START_DEADLINE: Duration = Duration::from_secs(10);
 const RESIDENT_RENDER_DEADLINE: Duration = Duration::from_secs(30);
 const RESIDENT_CLOSE_DEADLINE: Duration = Duration::from_secs(2);
 
@@ -103,6 +104,45 @@ fn validate_resident_close(value: &Value, worker_pid: u32) -> Result<(), String>
         || close.get("global_setdown_error").and_then(Value::as_i64) != Some(0)
     {
         return Err(format!("resident cleanup was not clean: {value}"));
+    }
+    Ok(())
+}
+
+fn validate_resident_ready(value: &Value, worker_pid: u32) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "resident ready response is not an object".to_string())?;
+    if object.len() != 4
+        || value["v"].as_u64() != Some(1)
+        || value["type"].as_str() != Some("session_ready")
+        || value["worker_pid"].as_u64() != Some(worker_pid as u64)
+        || !value["setup"].is_object()
+    {
+        return Err(format!("resident ready envelope is invalid: {value}"));
+    }
+    Ok(())
+}
+
+fn validate_resident_probe(
+    value: &Value,
+    worker_pid: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "resident probe response is not an object".to_string())?;
+    if object.len() != 6
+        || value["v"].as_u64() != Some(1)
+        || value["type"].as_str() != Some("session_probed")
+        || value["worker_pid"].as_u64() != Some(worker_pid as u64)
+        || value["status"].as_str() != Some("ok")
+        || value["guards_intact"].as_bool() != Some(true)
+        || value["render_error"].as_i64() != Some(0)
+    {
+        return Err(format!(
+            "resident {width}x{height} probe failed invariants: {value}"
+        ));
     }
     Ok(())
 }
@@ -800,25 +840,133 @@ fn save_argb8_slot(slot: &Path, output: &Path, width: u32, height: u32) -> Resul
     Ok(format!("{:x}", Sha256::digest(&argb)))
 }
 
-fn spawn_resident_worker(
+struct StartedResidentWorker {
+    child: Child,
+    stdin: ChildStdin,
+    response_receiver: Receiver<Result<Option<Value>, String>>,
+    stderr_receiver: Receiver<String>,
+    worker_pid: u32,
+}
+
+fn start_resident_worker(
     candidates: &[GuestWorkerCandidate],
     arguments: &[String],
-) -> Result<Child, String> {
+    width: u32,
+    height: u32,
+) -> Result<StartedResidentWorker, String> {
     let mut failures = Vec::new();
     for candidate in candidates {
-        match Command::new(&candidate.path)
+        let mut child = match Command::new(&candidate.path)
             .args(arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
         {
-            Ok(child) => return Ok(child),
-            Err(error) => failures.push(format!("{}: {error}", candidate.path.display())),
+            Ok(child) => child,
+            Err(error) => {
+                failures.push(format!("{}: {error}", candidate.path.display()));
+                continue;
+            }
+        };
+        let worker_pid = child.id();
+        let Some(mut stdin) = child.stdin.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            failures.push(format!(
+                "{}: stdin is unavailable",
+                candidate.path.display()
+            ));
+            continue;
+        };
+        let Some(mut stdout) = child.stdout.take() else {
+            drop(stdin);
+            let _ = child.kill();
+            let _ = child.wait();
+            failures.push(format!(
+                "{}: stdout is unavailable",
+                candidate.path.display()
+            ));
+            continue;
+        };
+        let Some(mut stderr) = child.stderr.take() else {
+            drop(stdin);
+            let _ = child.kill();
+            let _ = child.wait();
+            failures.push(format!(
+                "{}: stderr is unavailable",
+                candidate.path.display()
+            ));
+            continue;
+        };
+        let (response_sender, response_receiver) = mpsc::channel();
+        let (stderr_sender, stderr_receiver) = mpsc::channel();
+        thread::spawn(move || {
+            loop {
+                let response = read_control_message(&mut stdout);
+                let terminal = !matches!(response, Ok(Some(_)));
+                if response_sender.send(response).is_err() || terminal {
+                    break;
+                }
+            }
+        });
+        thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            let _ = stderr_sender.send(text);
+        });
+        let readiness = response_receiver
+            .recv_timeout(RESIDENT_START_DEADLINE)
+            .map_err(|error| format!("ready response timeout: {error}"))
+            .and_then(|response| {
+                response.map_err(|error| format!("ready response reader: {error}"))
+            })
+            .and_then(|response| {
+                response.ok_or_else(|| "worker closed before session_ready".to_string())
+            })
+            .and_then(|response| validate_resident_ready(&response, worker_pid));
+        let admission = readiness.and_then(|()| {
+            write_control_message(&mut stdin, &json!({"v": 1, "type": "probe"}))?;
+            let response = response_receiver
+                .recv_timeout(RESIDENT_RENDER_DEADLINE)
+                .map_err(|error| format!("probe response timeout: {error}"))?
+                .map_err(|error| format!("probe response reader: {error}"))?
+                .ok_or_else(|| "worker closed before session_probed".to_string())?;
+            validate_resident_probe(&response, worker_pid, width, height)
+        });
+        if admission.is_ok() {
+            return Ok(StartedResidentWorker {
+                child,
+                stdin,
+                response_receiver,
+                stderr_receiver,
+                worker_pid,
+            });
         }
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        let stderr = stderr_receiver
+            .recv_timeout(Duration::from_millis(200))
+            .unwrap_or_default();
+        failures.push(format!(
+            "{} ({}): {}{}",
+            candidate.path.display(),
+            if candidate.native {
+                "native"
+            } else {
+                "fallback"
+            },
+            admission.unwrap_err(),
+            if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!("; stderr: {}", stderr.trim())
+            }
+        ));
     }
     Err(format!(
-        "all resident guest workers failed to start: {}",
+        "all resident guest workers failed readiness: {}",
         failures.join(" | ")
     ))
 }
@@ -876,38 +1024,21 @@ fn start_resident_session(
         height.to_string(),
         "30".to_string(),
     ];
-    let mut child = spawn_resident_worker(candidates, &arguments)?;
-    let worker_pid = child.id();
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "resident worker stdin is unavailable".to_string())?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "resident worker stdout is unavailable".to_string())?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "resident worker stderr is unavailable".to_string())?;
+    let started = match start_resident_worker(candidates, &arguments, width, height) {
+        Ok(started) => started,
+        Err(error) => {
+            let _ = std::fs::remove_file(&input_slot);
+            let _ = std::fs::remove_file(&output_slot);
+            return Err(error);
+        }
+    };
+    let mut child = started.child;
+    let worker_pid = started.worker_pid;
+    let mut stdin = started.stdin;
+    let response_receiver = started.response_receiver;
+    let stderr_receiver = started.stderr_receiver;
     let (command_sender, command_receiver) = mpsc::channel();
     let (result_sender, result_receiver) = mpsc::channel();
-    let (response_sender, response_receiver) = mpsc::channel();
-    let (stderr_sender, stderr_receiver) = mpsc::channel();
-    let _response_join = thread::spawn(move || {
-        loop {
-            let response = read_control_message(&mut stdout);
-            let terminal = !matches!(response, Ok(Some(_)));
-            if response_sender.send(response).is_err() || terminal {
-                break;
-            }
-        }
-    });
-    thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        let _ = stderr_sender.send(text);
-    });
     let join = thread::spawn(move || {
         let mut running = true;
         let mut close_reply = None;
@@ -1360,6 +1491,37 @@ mod tests {
     }
 
     #[test]
+    fn resident_ready_response_is_strict_and_pid_bound() {
+        let ready = json!({
+            "v": 1,
+            "type": "session_ready",
+            "worker_pid": 42,
+            "setup": {},
+        });
+        assert!(validate_resident_ready(&ready, 42).is_ok());
+        assert!(validate_resident_ready(&ready, 41).is_err());
+        let mut unknown = ready;
+        unknown["unexpected"] = json!(true);
+        assert!(validate_resident_ready(&unknown, 42).is_err());
+    }
+
+    #[test]
+    fn resident_probe_response_requires_success_and_guards() {
+        let probe = json!({
+            "v": 1,
+            "type": "session_probed",
+            "worker_pid": 42,
+            "status": "ok",
+            "guards_intact": true,
+            "render_error": 0,
+        });
+        assert!(validate_resident_probe(&probe, 42, 2, 1).is_ok());
+        let mut corrupted = probe;
+        corrupted["guards_intact"] = json!(false);
+        assert!(validate_resident_probe(&corrupted, 42, 2, 1).is_err());
+    }
+
+    #[test]
     fn resident_close_timeout_terminates_the_worker() {
         let mut child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
         let started = Instant::now();
@@ -1379,7 +1541,14 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&output_directory).unwrap();
-        let workers = guest_worker_candidates(&repository).unwrap();
+        let mut workers = guest_worker_candidates(&repository).unwrap();
+        workers.insert(
+            0,
+            GuestWorkerCandidate {
+                path: PathBuf::from("/usr/bin/false"),
+                native: true,
+            },
+        );
         let mut session =
             start_resident_session(&workers, &aex, &input, &output_directory).unwrap();
         let parameter = |value| GuiParameter {
