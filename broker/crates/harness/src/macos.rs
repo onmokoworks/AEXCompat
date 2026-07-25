@@ -856,108 +856,134 @@ fn start_resident_worker(
 ) -> Result<StartedResidentWorker, String> {
     let mut failures = Vec::new();
     for candidate in candidates {
-        let mut child = match Command::new(&candidate.path)
-            .args(arguments)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
+        let mut probe_worker = match launch_resident_candidate(candidate, arguments) {
+            Ok(worker) => worker,
             Err(error) => {
-                failures.push(format!("{}: {error}", candidate.path.display()));
+                failures.push(format!(
+                    "{} ({}): {error}",
+                    candidate.path.display(),
+                    if candidate.native {
+                        "native"
+                    } else {
+                        "fallback"
+                    },
+                ));
                 continue;
             }
         };
-        let worker_pid = child.id();
-        let Some(mut stdin) = child.stdin.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
+        let admission =
+            write_control_message(&mut probe_worker.stdin, &json!({"v": 1, "type": "probe"}))
+                .and_then(|()| {
+                    let response = probe_worker
+                        .response_receiver
+                        .recv_timeout(RESIDENT_RENDER_DEADLINE)
+                        .map_err(|error| format!("probe response timeout: {error}"))?
+                        .map_err(|error| format!("probe response reader: {error}"))?
+                        .ok_or_else(|| "worker closed before session_probed".to_string())?;
+                    validate_resident_probe(&response, probe_worker.worker_pid, width, height)
+                });
+        if let Err(error) = admission {
+            let stderr = terminate_resident_worker(probe_worker);
             failures.push(format!(
-                "{}: stdin is unavailable",
-                candidate.path.display()
+                "{} ({}): {error}{}",
+                candidate.path.display(),
+                if candidate.native {
+                    "native"
+                } else {
+                    "fallback"
+                },
+                stderr
+                    .filter(|stderr| !stderr.trim().is_empty())
+                    .map(|stderr| format!("; stderr: {}", stderr.trim()))
+                    .unwrap_or_default(),
             ));
             continue;
-        };
-        let Some(mut stdout) = child.stdout.take() else {
-            drop(stdin);
-            let _ = child.kill();
-            let _ = child.wait();
-            failures.push(format!(
-                "{}: stdout is unavailable",
-                candidate.path.display()
-            ));
-            continue;
-        };
-        let Some(mut stderr) = child.stderr.take() else {
-            drop(stdin);
-            let _ = child.kill();
-            let _ = child.wait();
-            failures.push(format!(
-                "{}: stderr is unavailable",
-                candidate.path.display()
-            ));
-            continue;
-        };
-        let (response_sender, response_receiver) = mpsc::channel();
-        let (stderr_sender, stderr_receiver) = mpsc::channel();
-        thread::spawn(move || {
-            loop {
-                let response = read_control_message(&mut stdout);
-                let terminal = !matches!(response, Ok(Some(_)));
-                if response_sender.send(response).is_err() || terminal {
-                    break;
-                }
-            }
-        });
-        thread::spawn(move || {
-            let mut text = String::new();
-            let _ = stderr.read_to_string(&mut text);
-            let _ = stderr_sender.send(text);
-        });
-        let readiness = response_receiver
-            .recv_timeout(RESIDENT_START_DEADLINE)
-            .map_err(|error| format!("ready response timeout: {error}"))
-            .and_then(|response| {
-                response.map_err(|error| format!("ready response reader: {error}"))
-            })
-            .and_then(|response| {
-                response.ok_or_else(|| "worker closed before session_ready".to_string())
-            })
-            .and_then(|response| validate_resident_ready(&response, worker_pid));
-        let admission = readiness.and_then(|()| {
-            write_control_message(&mut stdin, &json!({"v": 1, "type": "probe"}))?;
-            let response = response_receiver
-                .recv_timeout(RESIDENT_RENDER_DEADLINE)
-                .map_err(|error| format!("probe response timeout: {error}"))?
-                .map_err(|error| format!("probe response reader: {error}"))?
-                .ok_or_else(|| "worker closed before session_probed".to_string())?;
-            validate_resident_probe(&response, worker_pid, width, height)
-        });
-        if admission.is_ok() {
-            return Ok(StartedResidentWorker {
-                child,
-                stdin,
-                response_receiver,
-                stderr_receiver,
-                worker_pid,
-            });
         }
+        if let Err(error) = close_probe_worker(probe_worker) {
+            failures.push(format!(
+                "{} ({}): probe cleanup failed: {error}",
+                candidate.path.display(),
+                if candidate.native {
+                    "native"
+                } else {
+                    "fallback"
+                },
+            ));
+            continue;
+        }
+        match launch_resident_candidate(candidate, arguments) {
+            Ok(fresh_worker) => return Ok(fresh_worker),
+            Err(error) => {
+                failures.push(format!(
+                    "{} ({}): fresh session after probe failed: {error}",
+                    candidate.path.display(),
+                    if candidate.native {
+                        "native"
+                    } else {
+                        "fallback"
+                    },
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "all resident guest workers failed readiness: {}",
+        failures.join(" | ")
+    ))
+}
+
+fn launch_resident_candidate(
+    candidate: &GuestWorkerCandidate,
+    arguments: &[String],
+) -> Result<StartedResidentWorker, String> {
+    let mut child = Command::new(&candidate.path)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("spawn: {error}"))?;
+    let worker_pid = child.id();
+    let (Some(stdin), Some(mut stdout), Some(mut stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("one or more resident worker pipes are unavailable".into());
+    };
+    let (response_sender, response_receiver) = mpsc::channel();
+    let (stderr_sender, stderr_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            let response = read_control_message(&mut stdout);
+            let terminal = !matches!(response, Ok(Some(_)));
+            if response_sender.send(response).is_err() || terminal {
+                break;
+            }
+        }
+    });
+    thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        let _ = stderr_sender.send(text);
+    });
+    let ready = response_receiver
+        .recv_timeout(RESIDENT_START_DEADLINE)
+        .map_err(|error| format!("ready response timeout: {error}"))
+        .and_then(|response| response.map_err(|error| format!("ready response reader: {error}")))
+        .and_then(|response| {
+            response.ok_or_else(|| "worker closed before session_ready".to_string())
+        })
+        .and_then(|response| validate_resident_ready(&response, worker_pid));
+    if let Err(error) = ready {
         drop(stdin);
         let _ = child.kill();
         let _ = child.wait();
         let stderr = stderr_receiver
             .recv_timeout(Duration::from_millis(200))
             .unwrap_or_default();
-        failures.push(format!(
-            "{} ({}): {}{}",
-            candidate.path.display(),
-            if candidate.native {
-                "native"
-            } else {
-                "fallback"
-            },
-            admission.unwrap_err(),
+        return Err(format!(
+            "{error}{}",
             if stderr.trim().is_empty() {
                 String::new()
             } else {
@@ -965,10 +991,60 @@ fn start_resident_worker(
             }
         ));
     }
-    Err(format!(
-        "all resident guest workers failed readiness: {}",
-        failures.join(" | ")
-    ))
+    Ok(StartedResidentWorker {
+        child,
+        stdin,
+        response_receiver,
+        stderr_receiver,
+        worker_pid,
+    })
+}
+
+fn terminate_resident_worker(mut worker: StartedResidentWorker) -> Option<String> {
+    drop(worker.stdin);
+    let _ = worker.child.kill();
+    let _ = worker.child.wait();
+    worker
+        .stderr_receiver
+        .recv_timeout(Duration::from_millis(200))
+        .ok()
+}
+
+fn close_probe_worker(mut worker: StartedResidentWorker) -> Result<(), String> {
+    let mut errors = Vec::new();
+    let close_request = write_control_message(&mut worker.stdin, &json!({"v": 1, "type": "close"}));
+    drop(worker.stdin);
+    match close_request {
+        Ok(()) => match worker
+            .response_receiver
+            .recv_timeout(RESIDENT_CLOSE_DEADLINE)
+        {
+            Ok(Ok(Some(response))) => {
+                if let Err(error) = validate_resident_close(&response, worker.worker_pid) {
+                    errors.push(error);
+                }
+            }
+            Ok(Ok(None)) => errors.push("probe worker closed before session_closed".into()),
+            Ok(Err(error)) => errors.push(format!("probe close response reader: {error}")),
+            Err(error) => errors.push(format!("probe close response timeout: {error}")),
+        },
+        Err(error) => errors.push(error),
+    }
+    if let Err(error) = wait_or_kill_resident_child(&mut worker.child, RESIDENT_CLOSE_DEADLINE) {
+        errors.push(error);
+    }
+    let stderr = worker
+        .stderr_receiver
+        .recv_timeout(RESIDENT_CLOSE_DEADLINE)
+        .unwrap_or_else(|error| format!("probe stderr collection failed: {error}"));
+    if !stderr.trim().is_empty() {
+        errors.push(format!("probe worker stderr: {}", stderr.trim()));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join(" | "))
+    }
 }
 
 fn wait_or_kill_resident_child(

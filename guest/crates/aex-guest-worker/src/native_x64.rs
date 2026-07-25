@@ -839,9 +839,9 @@ unsafe extern "win64" fn iterate_origin8(
     // the overwhelmingly common AE call. Non-zero origin remains explicit
     // fail-closed until the shared callback runner carries coordinate offsets.
     if origin != 0 {
-        let vertical = unsafe { ptr::read_unaligned(origin as *const i32) };
-        let horizontal = unsafe { ptr::read_unaligned((origin + 4) as *const i32) };
-        if vertical != 0 || horizontal != 0 {
+        let origin_x = unsafe { ptr::read_unaligned(origin as *const i16) };
+        let origin_y = unsafe { ptr::read_unaligned((origin + 2) as *const i16) };
+        if origin_x != 0 || origin_y != 0 {
             return 4;
         }
     }
