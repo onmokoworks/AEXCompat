@@ -1970,6 +1970,14 @@ impl GuestEngine<'static> {
                     "floorf" => install_float_import(&mut unicorn, stub, "floorf", f32::floor)?,
                     "powf" => install_float_binary_import(&mut unicorn, stub, "powf", f32::powf)?,
                     "pow" => install_double_binary_import(&mut unicorn, stub, "pow", f64::powf)?,
+                    "omp_get_max_threads" => {
+                        let value = deterministic_import_i32("omp_get_max_threads")
+                            .expect("known deterministic import");
+                        uc(
+                            "install omp_get_max_threads import",
+                            unicorn.mem_write(stub, &deterministic_i32_stub(value)),
+                        )?;
+                    }
                     _ => {}
                 }
                 unicorn.get_data_mut().trace_labels.insert(
@@ -3198,6 +3206,21 @@ fn install_float_import(
         }),
     )
     .map(|_| ())
+}
+
+fn deterministic_import_i32(name: &str) -> Option<i32> {
+    match name {
+        // The emulator is deliberately single-threaded. Returning one keeps
+        // OpenMP-aware kernels deterministic while preserving the API's
+        // required positive thread-count contract.
+        "omp_get_max_threads" => Some(1),
+        _ => None,
+    }
+}
+
+fn deterministic_i32_stub(value: i32) -> [u8; 6] {
+    let bytes = value.to_le_bytes();
+    [0xb8, bytes[0], bytes[1], bytes[2], bytes[3], 0xc3]
 }
 
 fn install_float_binary_import(
@@ -4630,6 +4653,13 @@ mod tests {
         // mov rax, rcx; add rax, rdx; ret
         let mut engine = test_engine(&[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3]);
         assert_eq!(engine.call_win64(CODE, [40, 2, 0, 0, 0, 0]).unwrap(), 42);
+    }
+
+    #[test]
+    fn openmp_thread_count_is_positive_and_deterministic() {
+        assert_eq!(deterministic_import_i32("omp_get_max_threads"), Some(1));
+        assert_eq!(deterministic_import_i32("unknown_import"), None);
+        assert_eq!(deterministic_i32_stub(1), [0xb8, 1, 0, 0, 0, 0xc3]);
     }
 
     #[test]
