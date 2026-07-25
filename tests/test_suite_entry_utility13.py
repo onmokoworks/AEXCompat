@@ -10,6 +10,33 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
+UTILITY_HEADER = (ROOT / "minihost/src/worker_aegp_utility_suite.hpp").read_text(encoding="utf-8")
+UTILITY_SOURCE = (ROOT / "minihost/src/worker_aegp_utility_suite.cpp").read_text(encoding="utf-8")
+REGISTRY_HEADER = (ROOT / "minihost/src/worker_suite_registry.hpp").read_text(encoding="utf-8")
+REGISTRY_SOURCE = (ROOT / "minihost/src/worker_suite_registry.cpp").read_text(encoding="utf-8")
+
+
+def test_v7_v13_utility_slots_use_structured_fail_closed_callbacks() -> None:
+    assert "UnsupportedSuiteId::aegp_utility_7" in UTILITY_SOURCE
+    assert "UnsupportedSuiteId::aegp_utility_13" in UTILITY_SOURCE
+    assert "populate_unsupported_slots" in UTILITY_SOURCE
+    assert "utility->unsupported[0] != nullptr" in UTILITY_SOURCE
+    assert "utility3->unsupported[0] != nullptr" in UTILITY_SOURCE
+    assert "utility->unsupported_tail[0]" in UTILITY_SOURCE
+    assert "utility3->unsupported_tail[0]" in UTILITY_SOURCE
+    assert "unsupported_suite_calls_report_json()" in UTILITY_SOURCE
+    for version, slots in ((13, (0, 11)), (7, (0, 9))):
+        for slot in slots:
+            assert (
+                f'{{\\"name\\":\\"AEGP Utility Suite\\",\\"version\\":{version},'
+                f'\\"slot\\":{slot},\\"call_count\\":1}}'
+            ) in UTILITY_SOURCE
+    assert "aegp_utility_7" in REGISTRY_HEADER
+    assert "aegp_utility_13" in REGISTRY_HEADER
+    assert '{"AEGP Utility Suite", 7}' in REGISTRY_SOURCE
+    assert '{"AEGP Utility Suite", 13}' in REGISTRY_SOURCE
+    assert "version/slot record" in UTILITY_HEADER
+    assert "UtilitySuiteSelftestResult" in UTILITY_HEADER
 
 
 def _msvc_vcvars() -> Path:
@@ -82,7 +109,8 @@ def test_suite_entry_guards_and_utility13_native_contract(canonical_release_work
     )
     assert json.loads(result.stdout) == {
         "suite_entry_utility13": "passed",
-        "null_fail_closed": True,
+        "utility_v7_acquired": True,
+        "unsupported_slots_diagnosed": True,
         "normal_effect_available": True,
         "versions_12_14_rejected": True,
         "mask_callbacks_exposed": False,
