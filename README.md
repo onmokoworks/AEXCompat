@@ -3,7 +3,7 @@
 **After Effects Effect AEXを、AEの外で読み込み・描画・デバッグする互換ホスト。**<br>
 **A compatibility host for loading, rendering, and debugging After Effects Effect AEX plug-ins outside AE.**
 
-[日本語](#日本語) | [English](#english) | [互換性ステータス](docs/COMPATIBILITY_STATUS_2026-07-16.md) | [プロジェクト方針](docs/PROJECT_DIRECTION.md)
+[日本語](#日本語) | [English](#english) | [AEX移植解析ガイド](docs/aex-porting-dossier.md) | [互換性ステータス](docs/COMPATIBILITY_STATUS_2026-07-16.md) | [プロジェクト方針](docs/PROJECT_DIRECTION.md)
 
 > [!WARNING]
 > 開発中の実験的ソフトウェアです。未知のAEXはネイティブコードとして実行されます。隔離機構はありますが、完全なsecurity sandboxではありません。
