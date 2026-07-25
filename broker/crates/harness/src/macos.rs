@@ -5,6 +5,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::gui_state::{GuiParameter, LiveRenderState, ViewerMode, reset_all};
+
 const MAX_WIDTH: u32 = 1920;
 const MAX_HEIGHT: u32 = 1080;
 const NATIVE_SETUP_DEADLINE: Duration = Duration::from_secs(2);
@@ -13,16 +15,6 @@ const NATIVE_RENDER_DEADLINE: Duration = Duration::from_secs(5);
 struct RenderResult {
     report: String,
     output: PathBuf,
-}
-
-#[derive(Clone)]
-struct GuiParameter {
-    name: String,
-    param_type: i64,
-    value: f64,
-    minimum: f64,
-    maximum: f64,
-    precision: usize,
 }
 
 pub fn run() -> eframe::Result<()> {
@@ -51,6 +43,10 @@ struct MacHarnessApp {
     status: String,
     report: String,
     parameters: Vec<GuiParameter>,
+    live_render: LiveRenderState,
+    viewer_mode: ViewerMode,
+    viewer_zoom: f32,
+    viewer_pan: egui::Vec2,
     busy: bool,
     receiver: Option<Receiver<Result<RenderResult, String>>>,
 }
@@ -67,6 +63,10 @@ impl MacHarnessApp {
             status: "Select an x64 AEX and a PNG image.".into(),
             report: String::new(),
             parameters: Vec::new(),
+            live_render: LiveRenderState::default(),
+            viewer_mode: ViewerMode::Input,
+            viewer_zoom: 1.0,
+            viewer_pan: egui::Vec2::ZERO,
             busy: false,
             receiver: None,
         }
@@ -87,6 +87,7 @@ impl MacHarnessApp {
                     self.report = report;
                     self.parameters = parameters;
                     self.aex = Some(path);
+                    self.viewer_mode = ViewerMode::Input;
                 }
                 Err(error) => {
                     self.status = "Could not inspect AEX parameters.".into();
@@ -113,6 +114,7 @@ impl MacHarnessApp {
                 self.input_texture = Some(texture);
                 self.output = None;
                 self.output_texture = None;
+                self.viewer_mode = ViewerMode::Input;
                 self.status = format!("Input ready: {width}x{height}");
             }
             Ok((_, width, height)) => {
@@ -151,11 +153,7 @@ impl MacHarnessApp {
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
         let output = output_directory.join(format!("mac-aex-{nonce}.png"));
-        let parameters = self
-            .parameters
-            .iter()
-            .map(|parameter| (parameter.name.clone(), parameter.value))
-            .collect::<Vec<_>>();
+        let parameter_arguments = render_parameter_arguments(&self.parameters);
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let mut arguments = vec![
@@ -164,11 +162,7 @@ impl MacHarnessApp {
                 input.to_string_lossy().into_owned(),
                 output.to_string_lossy().into_owned(),
             ];
-            arguments.extend(
-                parameters
-                    .into_iter()
-                    .map(|(name, value)| format!("{name}={value}")),
-            );
+            arguments.extend(parameter_arguments);
             let result = run_guest_workers(&workers, &arguments, NATIVE_RENDER_DEADLINE).and_then(
                 |process| {
                     String::from_utf8(process.stdout)
@@ -182,6 +176,23 @@ impl MacHarnessApp {
         self.busy = true;
         self.status = "Rendering AEX in the x64 guest worker...".into();
         self.report.clear();
+    }
+
+    fn parameter_changed(&mut self) {
+        self.live_render.parameter_changed(Instant::now());
+    }
+
+    fn dispatch_live_render(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        let ready = self.aex.is_some() && self.input.is_some();
+        if self.live_render.take_due(now, self.busy, ready) {
+            self.render();
+        } else if ready
+            && !self.busy
+            && let Some(remaining) = self.live_render.remaining(now)
+        {
+            ctx.request_repaint_after(remaining.min(Duration::from_millis(60)));
+        }
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
@@ -202,6 +213,7 @@ impl MacHarnessApp {
                 Ok((texture, width, height)) => {
                     self.output = Some(result.output);
                     self.output_texture = Some(texture);
+                    self.viewer_mode = ViewerMode::Output;
                     self.status = format!("Completed: {width}x{height} ARGB8 output");
                     self.report = result.report;
                 }
@@ -222,11 +234,12 @@ impl eframe::App for MacHarnessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.set_visuals(egui::Visuals::dark());
         self.poll(ctx);
+        self.dispatch_live_render(ctx);
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("AEXCompat").size(22.0));
-                ui.weak("APPLE SILICON · X64 AEX CPU GUEST");
+                ui.weak("EFFECT LAB · APPLE SILICON X64 GUEST");
                 ui.separator();
                 if ui
                     .add_enabled(!self.busy, egui::Button::new("AEX..."))
@@ -244,6 +257,11 @@ impl eframe::App for MacHarnessApp {
                 if ui.add_enabled(ready, egui::Button::new("Render")).clicked() {
                     self.render();
                 }
+                ui.separator();
+                let mut live_render = self.live_render.enabled();
+                if ui.checkbox(&mut live_render, "Auto Update").changed() {
+                    self.live_render.set_enabled(live_render);
+                }
                 if self.busy {
                     ui.spinner();
                 }
@@ -252,102 +270,33 @@ impl eframe::App for MacHarnessApp {
             ui.add_space(6.0);
         });
 
-        egui::TopBottomPanel::top("parameters").show(ctx, |ui| {
-            if self.parameters.is_empty() {
-                ui.weak("AEX parameters appear here after selection.");
-                return;
-            }
-            egui::Grid::new("mac-aex-parameters")
-                .num_columns(2)
-                .spacing([16.0, 4.0])
-                .show(ui, |ui| {
-                    for parameter in &mut self.parameters {
-                        ui.label(&parameter.name);
-                        match parameter.param_type {
-                            4 => {
-                                let mut checked = parameter.value != 0.0;
-                                if ui
-                                    .add_enabled(!self.busy, egui::Checkbox::new(&mut checked, ""))
-                                    .changed()
-                                {
-                                    parameter.value = if checked { 1.0 } else { 0.0 };
-                                }
-                            }
-                            7 => {
-                                ui.add_enabled_ui(!self.busy, |ui| {
-                                    egui::ComboBox::from_id_salt(&parameter.name)
-                                        .selected_text(format!(
-                                            "{}",
-                                            parameter.value.round() as i64
-                                        ))
-                                        .show_ui(ui, |ui| {
-                                            for choice in
-                                                parameter.minimum as i64..=parameter.maximum as i64
-                                            {
-                                                ui.selectable_value(
-                                                    &mut parameter.value,
-                                                    choice as f64,
-                                                    choice.to_string(),
-                                                );
-                                            }
-                                        });
-                                });
-                            }
-                            _ => {
-                                ui.add_enabled(
-                                    !self.busy,
-                                    egui::Slider::new(
-                                        &mut parameter.value,
-                                        parameter.minimum..=parameter.maximum,
-                                    )
-                                    .fixed_decimals(parameter.precision),
-                                );
-                            }
-                        }
-                        ui.end_row();
-                    }
-                });
-        });
+        egui::SidePanel::left("effect_controls")
+            .default_width(340.0)
+            .min_width(260.0)
+            .max_width(460.0)
+            .resizable(true)
+            .show(ctx, |ui| self.show_effect_controls(ui));
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.columns(2, |columns| {
-                show_texture(&mut columns[0], "Input PNG", self.input_texture.as_ref());
-                show_texture(&mut columns[1], "AEX output", self.output_texture.as_ref());
-            });
+            self.show_workspace_viewer(ui);
             ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("AEX").strong());
-                ui.monospace(
-                    self.aex
-                        .as_deref()
-                        .map(Path::display)
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "not selected".into()),
-                );
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("PNG").strong());
-                ui.monospace(
-                    self.input
-                        .as_deref()
-                        .map(Path::display)
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "not selected".into()),
-                );
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Output").strong());
-                ui.monospace(
-                    self.output
-                        .as_deref()
-                        .map(Path::display)
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "not rendered".into()),
-                );
-            });
-            egui::CollapsingHeader::new("Worker report")
-                .default_open(true)
+            egui::CollapsingHeader::new("Paths and worker report")
+                .default_open(false)
                 .show(ui, |ui| {
+                    for (label, path) in [
+                        ("AEX", self.aex.as_deref()),
+                        ("Input", self.input.as_deref()),
+                        ("Output", self.output.as_deref()),
+                    ] {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(label).strong());
+                            ui.monospace(
+                                path.map(Path::display)
+                                    .map(|value| value.to_string())
+                                    .unwrap_or_else(|| "not available".into()),
+                            );
+                        });
+                    }
                     ui.add(
                         egui::TextEdit::multiline(&mut self.report)
                             .font(egui::TextStyle::Monospace)
@@ -359,21 +308,203 @@ impl eframe::App for MacHarnessApp {
     }
 }
 
-fn show_texture(ui: &mut egui::Ui, label: &str, texture: Option<&egui::TextureHandle>) {
-    ui.label(RichText::new(label).strong());
+impl MacHarnessApp {
+    fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.heading(RichText::new("Effect Controls").size(20.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        !self.busy
+                            && self
+                                .parameters
+                                .iter()
+                                .any(|parameter| !parameter.is_default()),
+                        egui::Button::new("Reset All"),
+                    )
+                    .clicked()
+                {
+                    changed |= reset_all(&mut self.parameters);
+                }
+            });
+        });
+        ui.label(
+            self.aex
+                .as_deref()
+                .and_then(Path::file_stem)
+                .and_then(|name| name.to_str())
+                .unwrap_or("Select an AEX to load its parameters."),
+        );
+        ui.separator();
+        if self.parameters.is_empty() {
+            ui.weak("This effect exposed no supported editable parameters.");
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for parameter in &mut self.parameters {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&parameter.name).small());
+                        if ui
+                            .add_enabled(
+                                !self.busy && !parameter.is_default(),
+                                egui::Button::new("Reset").small(),
+                            )
+                            .clicked()
+                        {
+                            changed |= parameter.reset();
+                        }
+                    });
+                    let previous = parameter.value;
+                    ui.add_enabled_ui(!self.busy, |ui| match parameter.param_type {
+                        4 => {
+                            let mut checked = parameter.value != 0.0;
+                            if ui.checkbox(&mut checked, "Enabled").changed() {
+                                parameter.value = f64::from(checked);
+                            }
+                        }
+                        7 => {
+                            egui::ComboBox::from_id_salt(("mac-effect-control", &parameter.name))
+                                .selected_text(format!("{}", parameter.value.round() as i64))
+                                .show_ui(ui, |ui| {
+                                    for choice in
+                                        parameter.minimum as i64..=parameter.maximum as i64
+                                    {
+                                        ui.selectable_value(
+                                            &mut parameter.value,
+                                            choice as f64,
+                                            choice.to_string(),
+                                        );
+                                    }
+                                });
+                        }
+                        _ => {
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut parameter.value,
+                                    parameter.minimum..=parameter.maximum,
+                                )
+                                .fixed_decimals(parameter.precision)
+                                .show_value(true),
+                            );
+                        }
+                    });
+                    changed |= parameter.value != previous;
+                    ui.add_space(6.0);
+                }
+            });
+        if changed {
+            self.parameter_changed();
+        }
+    }
+
+    fn show_workspace_viewer(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.viewer_mode, ViewerMode::Input, "INPUT");
+            ui.selectable_value(&mut self.viewer_mode, ViewerMode::Output, "AEX OUTPUT");
+            ui.selectable_value(&mut self.viewer_mode, ViewerMode::Compare, "COMPARE");
+            ui.separator();
+            ui.weak("FHD workspace / aspect fit");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Fit").clicked() {
+                    self.viewer_zoom = 1.0;
+                    self.viewer_pan = egui::Vec2::ZERO;
+                }
+                ui.monospace(format!("{:.0}%", self.viewer_zoom * 100.0));
+                if self.busy {
+                    ui.spinner();
+                    ui.weak("Rendering...");
+                }
+            });
+        });
+        ui.separator();
+        let viewer_height = (ui.available_height() * 0.68).clamp(300.0, 860.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), viewer_height),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| match self.viewer_mode {
+                ViewerMode::Input => show_viewer_texture(
+                    ui,
+                    "Input",
+                    self.input_texture.as_ref(),
+                    &mut self.viewer_zoom,
+                    &mut self.viewer_pan,
+                ),
+                ViewerMode::Output => show_viewer_texture(
+                    ui,
+                    "AEX output",
+                    self.output_texture.as_ref(),
+                    &mut self.viewer_zoom,
+                    &mut self.viewer_pan,
+                ),
+                ViewerMode::Compare => ui.columns(2, |columns| {
+                    show_viewer_texture(
+                        &mut columns[0],
+                        "Input",
+                        self.input_texture.as_ref(),
+                        &mut self.viewer_zoom,
+                        &mut self.viewer_pan,
+                    );
+                    show_viewer_texture(
+                        &mut columns[1],
+                        "AEX output",
+                        self.output_texture.as_ref(),
+                        &mut self.viewer_zoom,
+                        &mut self.viewer_pan,
+                    );
+                }),
+            },
+        );
+    }
+}
+
+fn show_viewer_texture(
+    ui: &mut egui::Ui,
+    label: &str,
+    texture: Option<&egui::TextureHandle>,
+    zoom: &mut f32,
+    pan: &mut egui::Vec2,
+) {
     let Some(texture) = texture else {
         ui.centered_and_justified(|ui| {
-            ui.colored_label(Color32::GRAY, "Not available");
+            ui.colored_label(Color32::GRAY, format!("{label} is not available"));
         });
         return;
     };
-    ui.label(format!("{} × {}", texture.size()[0], texture.size()[1]));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).strong());
+        ui.monospace(format!("{} x {}", texture.size()[0], texture.size()[1]));
+        ui.weak("Wheel to zoom / drag to pan");
+    });
     let available = ui.available_size().max(egui::vec2(1.0, 1.0));
     let source = egui::vec2(texture.size()[0] as f32, texture.size()[1] as f32);
-    let scale = (available.x / source.x)
-        .min((available.y.min(600.0) / source.y).max(0.01))
-        .min(1.0);
-    ui.image((texture.id(), source * scale));
+    let (viewport, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+    if response.hovered() {
+        let scroll = ui.input(|input| input.raw_scroll_delta.y);
+        if scroll != 0.0 {
+            let previous_zoom = *zoom;
+            *zoom = (*zoom * (scroll * 0.0025).exp()).clamp(0.25, 8.0);
+            if let Some(pointer) = response.hover_pos() {
+                let pointer_from_center = pointer - viewport.center();
+                *pan = pointer_from_center - (pointer_from_center - *pan) * (*zoom / previous_zoom);
+            }
+        }
+    }
+    if response.dragged_by(egui::PointerButton::Primary)
+        || response.dragged_by(egui::PointerButton::Middle)
+    {
+        *pan += response.drag_delta();
+    }
+    let fit_scale = (available.x / source.x).min(available.y / source.y);
+    let display = source * fit_scale * *zoom;
+    let image_rect = egui::Rect::from_center_size(viewport.center() + *pan, display);
+    ui.painter().with_clip_rect(viewport).image(
+        texture.id(),
+        image_rect,
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
 }
 
 fn load_texture(
@@ -445,12 +576,20 @@ fn discover_parameters(
             name,
             param_type,
             value: value.clamp(minimum, maximum),
+            default_value: value.clamp(minimum, maximum),
             minimum,
             maximum,
             precision: parameter["precision"].as_u64().unwrap_or(0).min(8) as usize,
         });
     }
     Ok((parameters, report))
+}
+
+fn render_parameter_arguments(parameters: &[GuiParameter]) -> Vec<String> {
+    parameters
+        .iter()
+        .map(|parameter| format!("{}={}", parameter.name, parameter.value))
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -643,5 +782,33 @@ mod tests {
             run_guest_workers(&workers, &["1".to_string()], Duration::from_millis(20)).unwrap();
         assert!(output.status.success());
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn render_arguments_preserve_discovered_parameter_names_and_values() {
+        let parameters = [
+            GuiParameter {
+                name: "Amount".into(),
+                param_type: 10,
+                value: 50.25,
+                default_value: 5.0,
+                minimum: 0.0,
+                maximum: 100.0,
+                precision: 2,
+            },
+            GuiParameter {
+                name: "Legacy".into(),
+                param_type: 4,
+                value: 1.0,
+                default_value: 0.0,
+                minimum: 0.0,
+                maximum: 1.0,
+                precision: 0,
+            },
+        ];
+        assert_eq!(
+            render_parameter_arguments(&parameters),
+            ["Amount=50.25", "Legacy=1"]
+        );
     }
 }
