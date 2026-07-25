@@ -38,6 +38,7 @@ const PF_INVALID_INDEX: u64 = 513;
 const PF_UNRECOGNIZED_PARAM_TYPE: u64 = 514;
 const PF_BAD_CALLBACK_PARAM: u64 = 516;
 const PARAM_TYPE_COLOR: i32 = 5;
+const PARAM_TYPE_POINT: i32 = 6;
 const HOST_EFFECT_REF: u64 = 1;
 
 macro_rules! callback_address {
@@ -135,6 +136,7 @@ struct NativeState {
     arena_end: u64,
     handle_suite: u64,
     color_param_suite: u64,
+    point_param_suite: u64,
 }
 
 thread_local! {
@@ -262,6 +264,9 @@ impl GuestEngine<'static> {
         let color_param_suite = engine.allocate(8, 8)?;
         engine.write_u64(color_param_suite, callback_address!(color_param_value))?;
         engine.state.color_param_suite = color_param_suite;
+        let point_param_suite = engine.allocate(8, 8)?;
+        engine.write_u64(point_param_suite, callback_address!(point_param_value))?;
+        engine.state.point_param_suite = point_param_suite;
         for version in [3u32, 7, 11, 13] {
             let callbacks =
                 native_utility_callbacks(version).expect("known AEGP Utility Suite version");
@@ -1234,6 +1239,11 @@ unsafe extern "win64" fn acquire_suite(
                 *(output as *mut u64) = state.color_param_suite;
             }
             0
+        } else if name == "PF PointParamSuite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.point_param_suite;
+            }
+            0
         } else if name == "AEGP Utility Suite" && output != 0 {
             let Some(table) = u32::try_from(version)
                 .ok()
@@ -1310,6 +1320,31 @@ unsafe extern "win64" fn color_param_value(
         0
     })
     .unwrap_or(PF_BAD_CALLBACK_PARAM)
+}
+
+unsafe extern "win64" fn point_param_value(
+    _: u64,
+    definition: u64,
+    output: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    if definition == 0 || output == 0 {
+        return PF_BAD_CALLBACK_PARAM;
+    }
+    let x = unsafe { ptr::read_unaligned((definition + abi::PARAM_U_OFFSET as u64) as *const i32) }
+        as f64
+        / 65536.0;
+    let y =
+        unsafe { ptr::read_unaligned((definition + abi::PARAM_U_OFFSET as u64 + 4) as *const i32) }
+            as f64
+            / 65536.0;
+    unsafe {
+        ptr::write_unaligned(output as *mut f64, x);
+        ptr::write_unaligned((output + 8) as *mut f64, y);
+    }
+    0
 }
 
 unsafe extern "win64" fn checkout_param(
@@ -1599,6 +1634,63 @@ mod tests {
                     0,
                 )
             },
+            PF_BAD_CALLBACK_PARAM
+        );
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
+
+    #[test]
+    fn point_param_suite_v1_returns_signed_fixed_values_and_rejects_nulls() {
+        let mut state = NativeState {
+            point_param_suite: 0x5678,
+            ..NativeState::default()
+        };
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+        let name = b"PF PointParamSuite\0";
+        let mut suite = 0u64;
+        assert_eq!(
+            unsafe {
+                acquire_suite(
+                    name.as_ptr() as u64,
+                    1,
+                    (&mut suite as *mut u64) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(suite, state.point_param_suite);
+
+        let mut definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        definition[abi::PARAM_PARAM_TYPE_OFFSET..abi::PARAM_PARAM_TYPE_OFFSET + 4]
+            .copy_from_slice(&PARAM_TYPE_POINT.to_le_bytes());
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4]
+            .copy_from_slice(&98304i32.to_le_bytes());
+        definition[abi::PARAM_U_OFFSET + 4..abi::PARAM_U_OFFSET + 8]
+            .copy_from_slice(&(-147456i32).to_le_bytes());
+        let mut output = [0.0f64; 2];
+        assert_eq!(
+            unsafe {
+                point_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    output.as_mut_ptr() as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(output, [1.5, -2.25]);
+        assert_eq!(
+            unsafe { point_param_value(HOST_EFFECT_REF, 0, output.as_mut_ptr() as u64, 0, 0, 0) },
+            PF_BAD_CALLBACK_PARAM
+        );
+        assert_eq!(
+            unsafe { point_param_value(HOST_EFFECT_REF, definition.as_ptr() as u64, 0, 0, 0, 0,) },
             PF_BAD_CALLBACK_PARAM
         );
         ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));

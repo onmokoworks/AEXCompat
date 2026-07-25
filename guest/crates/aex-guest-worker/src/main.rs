@@ -532,13 +532,24 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
             return Err(format!("duplicate parameter assignment: {identity:?}"));
         }
         let components = encoded.split(',').collect::<Vec<_>>();
-        let (numeric, color) = match components.as_slice() {
+        let (numeric, point, color) = match components.as_slice() {
             [number] => (
                 Some(
                     number
                         .parse()
                         .map_err(|error| format!("invalid value for {name:?}: {error}"))?,
                 ),
+                None,
+                None,
+            ),
+            [x, y] => (
+                None,
+                Some([
+                    x.parse()
+                        .map_err(|error| format!("invalid point x for {name:?}: {error}"))?,
+                    y.parse()
+                        .map_err(|error| format!("invalid point y for {name:?}: {error}"))?,
+                ]),
                 None,
             ),
             [alpha, red, green, blue] => {
@@ -548,11 +559,11 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
                         format!("ARGB8 component for {name:?} must be an integer from 0 to 255")
                     })?;
                 }
-                (None, Some(color))
+                (None, None, Some(color))
             }
             _ => {
                 return Err(format!(
-                    "parameter assignment must contain one scalar or four ARGB8 components: {encoded:?}"
+                    "parameter assignment must contain one scalar, two point components, or four ARGB8 components: {encoded:?}"
                 ));
             }
         };
@@ -561,6 +572,7 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
             name: name.to_string(),
             value: numeric,
             color,
+            point,
         });
     }
     Ok(parsed)
@@ -586,6 +598,7 @@ mod tests {
         assert_eq!(values[0].slot, Some(2));
         assert_eq!(values[0].value, None);
         assert_eq!(values[0].color, Some([255, 64, 128, 192]));
+        assert_eq!(values[0].point, None);
     }
 
     #[test]
@@ -598,6 +611,24 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn parameter_parser_accepts_scalar_and_point_assignments() {
+        let values = parse_parameter_values(&[
+            OsString::from("Amount=12.5"),
+            OsString::from("Center=42,-7.25"),
+            OsString::from("Strength@4=100"),
+        ])
+        .unwrap();
+        assert_eq!(values[0].value, Some(12.5));
+        assert_eq!(values[0].point, None);
+        assert_eq!(values[0].color, None);
+        assert_eq!(values[1].value, None);
+        assert_eq!(values[1].point, Some([42.0, -7.25]));
+        assert_eq!(values[1].color, None);
+        assert_eq!(values[2].slot, Some(4));
+        assert_eq!(values[2].value, Some(100.0));
     }
 
     #[test]
