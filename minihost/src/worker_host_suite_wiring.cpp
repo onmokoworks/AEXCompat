@@ -36,6 +36,7 @@
 #include "worker_world_registry.hpp"
 
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <iterator>
 #include <mutex>
@@ -132,7 +133,7 @@ BibSuiteState& bib_suite_state() {
 
 const void* bib_resolver_entry() noexcept;
 
-const void* provide_bib_suite(void*) {
+const void* provide_bib_suite_locked() {
   auto& state = bib_suite_state();
   std::lock_guard<std::mutex> lock(state.mutex);
   if (state.attempted) return state.resolver ? state.suite.data() : nullptr;
@@ -198,6 +199,201 @@ const void* provide_bib_suite(void*) {
   return state.suite.data();
 }
 
+
+// Diagnostics (issue #362, PP gs=11): with AEXCOMPAT_EXTENDED_DIAG=1,
+// probe the BIB memory interface the plug-ins use next: resolve
+// Alloc/Free and round-trip one small block, logging the outcome. The
+// fallback BIBInitialize4 passes null host callbacks; if the BIB
+// allocator needs them, this probe fails exactly where the plug-in
+// would.
+typedef void*(__cdecl* BibMemAlloc)(size_t);
+typedef void(__cdecl* BibMemFree)(void*);
+int bib_mem_probe_seh_filter(EXCEPTION_POINTERS*) {
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+int bib_mem_probe(BibMemAlloc alloc_fn, BibMemFree free_fn) {
+  __try {
+    void* block = alloc_fn(64);
+    if (!block) return 1;
+    free_fn(block);
+    return 0;
+  } __except (bib_mem_probe_seh_filter(GetExceptionInformation())) {
+    return -1;
+  }
+}
+
+void run_bib_memory_probe() {
+  if (!aexcompat::l2_detail::extended_diag_enabled()) return;
+  auto& state = bib_suite_state();
+  if (!state.resolver) return;
+  const auto alloc_fn = reinterpret_cast<BibMemAlloc>(
+      state.resolver("BIBMemoryInterface", "Alloc", "BIBMemAllocProc"));
+  const auto free_fn = reinterpret_cast<BibMemFree>(
+      state.resolver("BIBMemoryInterface", "Free", "BIBMemFreeProc"));
+  std::cerr << "extended_diag:bib_mem_probe alloc=" << (void*)alloc_fn
+            << " free=" << (void*)free_fn;
+  if (alloc_fn && free_fn)
+    std::cerr << " roundtrip=" << bib_mem_probe(alloc_fn, free_fn);
+  std::cerr << "\n" << std::flush;
+}
+// PICA component DLLs register their BIB interfaces through the DVA Bravo
+// initializer, which the real host drives at process start (issue #362:
+// ProfileToProfile resolves ACEInterface2 through the BIB resolver, and a
+// bare ACEInitialize call crashes inside ACE on host-provided tables that
+// only the Bravo init sequence populates). Mirror the host: hand the
+// initializer the BIB resolver, then run InitBravoComponents with an
+// error-report callback, once per process, after BIB is up and outside
+// its mutex. Loads stay bounded to the admitted plug-in directory set.
+// ae_sweetpea is the SP-suite plugin host (issue #362, Particle_Playground
+// gs=11): the plug-in acquires "SP Adapters Suite" v3 / "SP Plug-ins Suite"
+// v4 through U.dll's U_SP_GetSPBasicSuite, and those suites only exist
+// after ae_sweetpea's SPInit + SPStartupPlugins, which the real host runs
+// at process start. SPInit(nullptr, nullptr, 0) installs ae_sweetpea's own
+// default host procs for every null slot (verified in its disassembly).
+int bravo_init_seh_filter(EXCEPTION_POINTERS*);
+typedef int(__cdecl* SPInitFn)(void*, void*, int32_t);
+typedef int(__cdecl* SPStartupPluginsFn)();
+int sweetpea_init_guarded(SPInitFn sp_init, SPStartupPluginsFn sp_startup) {
+  __try {
+    const int init_result = sp_init(nullptr, nullptr, 0);
+    if (init_result != 0) return init_result;
+    return sp_startup();
+  } __except (bravo_init_seh_filter(GetExceptionInformation())) {
+    return -1;
+  }
+}
+
+int bravo_init_seh_filter(EXCEPTION_POINTERS*) {
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void __cdecl bravo_error_report(const char*, ...) {}
+
+typedef void*(__cdecl* BravoResolver)(const char*, const char*, const char*);
+typedef void(__cdecl* BravoErrorReport)(const char*, ...);
+typedef void(__cdecl* BravoSetBibProcAddress)(BravoResolver);
+typedef BravoResolver(__cdecl* BravoInitComponents)(BravoErrorReport);
+
+int bravo_call_guarded(HMODULE module, const char* export_name,
+                       BravoResolver resolver, BravoResolver* out) {
+  __try {
+    if (resolver == nullptr) {
+      const auto set_address = reinterpret_cast<BravoSetBibProcAddress>(
+          GetProcAddress(module, export_name));
+      if (!set_address) return -1;
+      set_address(out ? *out : nullptr);
+      return 0;
+    }
+    const auto init = reinterpret_cast<BravoInitComponents>(
+        GetProcAddress(module, export_name));
+    if (!init) return -1;
+    const BravoResolver initialized = init(&bravo_error_report);
+    if (out) *out = initialized;
+    return initialized ? 0 : 1;
+  } __except (bravo_init_seh_filter(GetExceptionInformation())) {
+    return -1;
+  }
+}
+
+// Reverse-order teardown for the PICA components (issue #362): dvacore
+// fast-fails during LdrShutdownProcess when the Bravo/sweetpea-initialized
+// subsystems were never torn down through the host path. Registering this
+// after their init makes it run first in the EXE atexit chain (LIFO),
+// before the DLL detach handlers that would otherwise fatal.
+void teardown_pica_components() {
+  // Flush the report before any subsystem teardown runs: the CRT flush
+  // handlers are registered earlier and therefore run later (LIFO), and
+  // the component teardown must not outrun them (issue #362).
+  std::cout.flush();
+  std::fflush(stdout);
+  __try {
+    if (HMODULE sweetpea = GetModuleHandleW(L"ae_sweetpea.dll")) {
+      const auto sp_shutdown = reinterpret_cast<int(__cdecl*)()>(
+          GetProcAddress(sweetpea, "?SPShutdownPlugins@ae_sweetpea@@YAHXZ"));
+      const auto sp_term = reinterpret_cast<int(__cdecl*)()>(
+          GetProcAddress(sweetpea, "?SPTerm@ae_sweetpea@@YAHXZ"));
+      if (sp_shutdown) sp_shutdown();
+      if (sp_term) sp_term();
+    }
+    if (HMODULE bravo = GetModuleHandleW(L"dvabravoinitializer.dll")) {
+      const auto terminate = reinterpret_cast<bool(__cdecl*)(bool)>(
+          GetProcAddress(
+              bravo, "?TerminateBravoComponents@dvabravoinitializer@@YA_N_N@Z"));
+      if (terminate) terminate(false);
+    }
+  } __except (bravo_init_seh_filter(GetExceptionInformation())) {
+  }
+}
+
+void ensure_pica_components_initialized() {
+  auto& state = bib_suite_state();
+  static bool attempted = false;
+  if (attempted) return;
+  attempted = true;
+  HMODULE bravo = GetModuleHandleW(L"dvabravoinitializer.dll");
+  if (!bravo && !g_plugin_file_path.empty()) {
+    const std::filesystem::path sealed_bravo =
+        std::filesystem::path(g_plugin_file_path).parent_path() /
+        L"dvabravoinitializer.dll";
+    bravo = LoadLibraryExW(sealed_bravo.c_str(), nullptr,
+                           LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                               LOAD_LIBRARY_SEARCH_SYSTEM32);
+  }
+  if (!bravo) {
+    if (aexcompat::l2_detail::extended_diag_enabled())
+      std::cerr << "extended_diag:pica_component dll=dvabravoinitializer.dll status=absent"
+                "\n" << std::flush;
+    return;
+  }
+  BravoResolver current = state.resolver;
+  int result = bravo_call_guarded(
+      bravo, "?SetBIBProcAddress@dvabravoinitializer@@YAXP6APEAXPEBD00@Z@Z",
+      nullptr, &current);
+  const BravoResolver before = current;
+  result = bravo_call_guarded(
+      bravo, "?InitBravoComponents@dvabravoinitializer@@YAP6APEAXPEBD00@ZP6AX0@Z@Z",
+      current, &current) == 0
+         ? 0 : result;
+  if (current && current != before) {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.resolver = current;
+  }
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:pica_component dll=dvabravoinitializer.dll status=called result="
+              << result << "\n" << std::flush;
+  HMODULE sweetpea = GetModuleHandleW(L"ae_sweetpea.dll");
+  if (!sweetpea && !g_plugin_file_path.empty()) {
+    const std::filesystem::path sealed_sp =
+        std::filesystem::path(g_plugin_file_path).parent_path() /
+        L"ae_sweetpea.dll";
+    sweetpea = LoadLibraryExW(sealed_sp.c_str(), nullptr,
+                              LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                  LOAD_LIBRARY_SEARCH_SYSTEM32);
+  }
+  if (sweetpea) {
+    const auto sp_init = reinterpret_cast<SPInitFn>(GetProcAddress(
+        sweetpea,
+        "?SPInit@ae_sweetpea@@YAHPEAUSPHostProcs@@PEBUSPPlatformFileSpecification@@H@Z"));
+    const auto sp_startup = reinterpret_cast<SPStartupPluginsFn>(
+        GetProcAddress(sweetpea, "?SPStartupPlugins@ae_sweetpea@@YAHXZ"));
+    const int sp_result = (sp_init && sp_startup)
+        ? sweetpea_init_guarded(sp_init, sp_startup) : -1;
+    if (aexcompat::l2_detail::extended_diag_enabled())
+      std::cerr << "extended_diag:pica_component dll=ae_sweetpea.dll status=called result="
+                << sp_result << "\n" << std::flush;
+  }
+  std::atexit(&teardown_pica_components);
+}
+
+const void* provide_bib_suite(void*) {
+  const void* suite = provide_bib_suite_locked();
+  if (suite) {
+    ensure_pica_components_initialized();
+    run_bib_memory_probe();
+  }
+  return suite;
+}
+
 // The "AEFX Text BIB Suite" entry is arg-agnostic, exactly like the exported
 // BIBGetGetProcAddress: plug-ins (e.g. the VR family, issue #362) call it
 // with arbitrary register state to obtain the current resolver, then drive
@@ -205,9 +401,31 @@ const void* provide_bib_suite(void*) {
 // in the slot makes that call enter the resolver with garbage arguments and
 // crash inside BIB; after teardown the slot naturally yields nullptr, again
 // matching BIBGetGetProcAddress on an uninitialized BIB.
+// Diagnostics (issue #362 BIB resolver tracing): with
+// AEXCOMPAT_EXTENDED_DIAG=1 the suite hands out a proxy that logs every
+// (interface, procedure, signature) triple a plug-in resolves and the
+// resolver's answer, then forwards unchanged. With the variable unset
+// the raw resolver is returned, byte-identical to the production path.
+void* __cdecl bib_resolver_trace_proxy(const char* interface_name,
+                                       const char* procedure_name,
+                                       const char* signature) {
+  auto& state = bib_suite_state();
+  void* result = state.resolver
+      ? state.resolver(interface_name, procedure_name, signature)
+      : nullptr;
+  std::cerr << "extended_diag:bib_resolve";
+  aexcompat::l2_detail::diag_probe_arg("if", interface_name);
+  aexcompat::l2_detail::diag_probe_arg("proc", procedure_name);
+  aexcompat::l2_detail::diag_probe_arg("sig", signature);
+  std::cerr << " -> " << result << "\n" << std::flush;
+  return result;
+}
+
 const void* bib_resolver_entry() noexcept {
   auto& state = bib_suite_state();
   std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.resolver && aexcompat::l2_detail::extended_diag_enabled())
+    return reinterpret_cast<const void*>(&bib_resolver_trace_proxy);
   return state.resolver;
 }
 
