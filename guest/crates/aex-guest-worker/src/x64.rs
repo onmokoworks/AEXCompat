@@ -2023,11 +2023,11 @@ impl GuestEngine<'static> {
                 GuestError::Callback("guest execution trace is not active".into())
             })?;
         for witness in selector_witnesses {
-            if capture.witnesses.len() < MAX_TRACE_WITNESSES {
-                capture.witnesses.push(witness);
-            } else {
+            if capture.witnesses.len() >= MAX_TRACE_WITNESSES {
+                capture.witnesses.pop();
                 capture.dropped_witnesses += 1;
             }
+            capture.witnesses.push(witness);
         }
         if capture.events.len() >= MAX_TRACE_EVENTS {
             capture.events.pop();
