@@ -545,6 +545,11 @@ fn trace_instruction(
                     )),
                 },
             );
+            if let Some(target_rva) = target_rva
+                && let Some(active_function) = capture.function_stack.last_mut()
+            {
+                *active_function = Some(target_rva);
+            }
         }
     } else if matches!(
         mnemonic,
@@ -3582,6 +3587,17 @@ mod tests {
         assert_eq!(tail.pc_rva, Some(5));
         assert_eq!(tail.target_rva, Some(11));
         assert_eq!(tail.call_kind, Some("runtime_jmp"));
+        assert!(trace.events.iter().any(|event| {
+            event.kind == "guest_return"
+                && event.pc_rva == Some(16)
+                && event.target_rva.is_none()
+                && event.function_rva == Some(11)
+        }));
+        assert!(!trace.events.iter().any(|event| {
+            event.kind == "guest_return"
+                && event.pc_rva == Some(16)
+                && event.function_rva == Some(0)
+        }));
     }
 
     #[test]
