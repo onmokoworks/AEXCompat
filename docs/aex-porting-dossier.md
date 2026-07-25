@@ -148,20 +148,6 @@ python3 tools/diff_aex_dossiers.py \
 truncationの差を報告します。差分自体もboundedであり、上限を超えた場合は
 `*_truncation.truncated`と`dropped_count`へ明示されます。
 
-## OLM移植での最短ループ
-
-1. まずwatchなしで、小さな実画像と既定パラメーターをrenderする。
-2. `timeline`と`functions`から、render中に反復する関数とhost callbackを探す。
-3. 同じ画像でAmountなど一つのパラメーターだけを変え、dossierを比較する。
-4. 観測回数またはnumeric rangeが変わった関数へ`--watch`を追加する。
-5. 入出力bufferの`changed_ranges`とfloat値をGhidraのdecompile結果へ対応させる。
-6. 移植実装後、同じ入力・パラメーターで再実行し、まずselector成功、call経路、
-   buffer更新の順に確認する。初期段階からpixel完全一致を完了条件にしない。
-
-分岐の多いeffectでは、複数の代表画像とパラメーターを使ってください。一回の
-dossierに現れない経路は「存在しない」のではなく「その条件では通らなかった」
-だけです。
-
 ## English summary
 
 The Unicorn worker can record an opt-in, module-relative execution dossier for
