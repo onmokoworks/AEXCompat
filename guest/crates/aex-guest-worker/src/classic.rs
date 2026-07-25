@@ -29,7 +29,10 @@ const ANGLE_DEFAULT_OFFSET: usize = 4;
 const CLEANUP_GUEST_ERROR: i32 = -40;
 const OUTPUT_GUARD_BYTES: usize = 64;
 const OUTPUT_GUARD_PATTERN: u8 = 0xa5;
-const MAX_FAILURE_TEXT_BYTES: usize = 1024;
+pub(crate) const MAX_FAILURE_TEXT_BYTES: usize = 1024;
+pub(crate) const MAX_FAILURE_SUITE_REQUEST_BYTES: usize = 256;
+const MAX_FAILURE_SUITE_REQUESTS: usize = 64;
+const MAX_FAILURE_UNSUPPORTED_SUITE_CALLS: usize = 64;
 pub const MAX_RENDER_WIDTH: u32 = 1920;
 pub const MAX_RENDER_HEIGHT: u32 = 1080;
 
@@ -111,6 +114,7 @@ pub struct ResidentFailureDiagnostic {
     pub message: String,
     pub crash_reason: Option<String>,
     pub suite_requests: Vec<String>,
+    pub dropped_suite_requests: u64,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     pub dropped_unsupported_suite_calls: u64,
 }
@@ -563,6 +567,8 @@ impl ClassicHost {
             ),
             ClassicError::Input(message) => ("input", None, None, message.clone(), None),
         };
+        let suite_requests = self.engine.suite_requests();
+        let unsupported_suite_calls = self.engine.unsupported_suite_calls();
         ResidentFailureDiagnostic {
             schema_version: 1,
             stage,
@@ -572,9 +578,24 @@ impl ClassicHost {
             error_code,
             message: bounded_failure_text(&message),
             crash_reason: crash_reason.map(|reason| bounded_failure_text(&reason)),
-            suite_requests: self.engine.suite_requests().to_vec(),
-            unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
-            dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
+            suite_requests: suite_requests
+                .iter()
+                .take(MAX_FAILURE_SUITE_REQUESTS)
+                .map(|request| bounded_text(request, MAX_FAILURE_SUITE_REQUEST_BYTES))
+                .collect(),
+            dropped_suite_requests: suite_requests
+                .len()
+                .saturating_sub(MAX_FAILURE_SUITE_REQUESTS)
+                as u64,
+            unsupported_suite_calls: unsupported_suite_calls
+                .iter()
+                .take(MAX_FAILURE_UNSUPPORTED_SUITE_CALLS)
+                .cloned()
+                .collect(),
+            dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls()
+                + unsupported_suite_calls
+                    .len()
+                    .saturating_sub(MAX_FAILURE_UNSUPPORTED_SUITE_CALLS) as u64,
         }
     }
 
@@ -1687,10 +1708,14 @@ fn cleanup_error_code(result: Result<i32, ClassicError>) -> i32 {
 }
 
 fn bounded_failure_text(value: &str) -> String {
-    if value.len() <= MAX_FAILURE_TEXT_BYTES {
+    bounded_text(value, MAX_FAILURE_TEXT_BYTES)
+}
+
+fn bounded_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
         return value.to_owned();
     }
-    let mut end = MAX_FAILURE_TEXT_BYTES;
+    let mut end = max_bytes;
     while !value.is_char_boundary(end) {
         end -= 1;
     }

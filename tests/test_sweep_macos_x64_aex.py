@@ -155,6 +155,7 @@ def _failure_diagnostic(category="callback", unsupported=None):
         "message": "bounded failure",
         "crash_reason": None,
         "suite_requests": [],
+        "dropped_suite_requests": 0,
         "unsupported_suite_calls": unsupported or [],
         "dropped_unsupported_suite_calls": 0,
     }
@@ -199,6 +200,67 @@ def test_failure_diagnostic_rejects_unbounded_message():
     diagnostic["message"] = "x" * 1025
 
     with pytest.raises(SWEEP.SweepError, match="invalid admission failure"):
+        SWEEP.validate_failure_diagnostic(diagnostic)
+
+
+@pytest.mark.parametrize("field", ["suite_requests", "unsupported_suite_calls"])
+def test_failure_diagnostic_rejects_more_than_64_exemplars(field):
+    diagnostic = _failure_diagnostic()
+    if field == "suite_requests":
+        diagnostic[field] = [f"suite-{index}" for index in range(65)]
+    else:
+        diagnostic[field] = [
+            {
+                "name": "PF Iterate8 Suite",
+                "version": 1,
+                "slot": index,
+                "call_count": 1,
+            }
+            for index in range(65)
+        ]
+
+    with pytest.raises(SWEEP.SweepError, match="bound|invalid admission failure"):
+        SWEEP.validate_failure_diagnostic(diagnostic)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", True),
+        ("error_code", True),
+        ("dropped_suite_requests", True),
+        ("dropped_unsupported_suite_calls", True),
+    ],
+)
+def test_failure_diagnostic_rejects_boolean_integer_fields(field, value):
+    diagnostic = _failure_diagnostic()
+    diagnostic[field] = value
+
+    with pytest.raises(SWEEP.SweepError, match="invalid admission failure"):
+        SWEEP.validate_failure_diagnostic(diagnostic)
+
+
+def test_failure_diagnostic_rejects_unbounded_suite_request():
+    diagnostic = _failure_diagnostic()
+    diagnostic["suite_requests"] = ["あ" * 86]
+
+    with pytest.raises(SWEEP.SweepError, match="invalid admission failure"):
+        SWEEP.validate_failure_diagnostic(diagnostic)
+
+
+def test_failure_diagnostic_rejects_boolean_suite_call_integer():
+    diagnostic = _failure_diagnostic(
+        unsupported=[
+            {
+                "name": "PF Iterate8 Suite",
+                "version": True,
+                "slot": 2,
+                "call_count": 1,
+            }
+        ]
+    )
+
+    with pytest.raises(SWEEP.SweepError, match="invalid unsupported suite call"):
         SWEEP.validate_failure_diagnostic(diagnostic)
 
 

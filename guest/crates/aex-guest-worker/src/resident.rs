@@ -497,6 +497,7 @@ fn write_message(writer: &mut impl Write, value: &impl Serialize) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classic::{MAX_FAILURE_SUITE_REQUEST_BYTES, MAX_FAILURE_TEXT_BYTES};
 
     #[test]
     fn probe_failure_response_carries_bounded_structured_diagnostics() {
@@ -510,6 +511,7 @@ mod tests {
             message: "guest callback failed".into(),
             crash_reason: None,
             suite_requests: vec!["PF Iterate8 Suite v1".into()],
+            dropped_suite_requests: 0,
             unsupported_suite_calls: Vec::new(),
             dropped_unsupported_suite_calls: 0,
         };
@@ -536,6 +538,47 @@ mod tests {
         assert_eq!(value["failure"]["selector"], "RENDER");
         assert_eq!(value["failure"]["message"], "guest callback failed");
         assert!(value["failure"]["crash_reason"].is_null());
+    }
+
+    #[test]
+    fn maximal_failure_diagnostic_fits_control_message_bound() {
+        let diagnostic = ResidentFailureDiagnostic {
+            schema_version: 1,
+            stage: "admission_probe",
+            execution_backend: "unicorn-x86_64",
+            category: "callback",
+            selector: Some("SMART_RENDER"),
+            error_code: Some(-40),
+            message: "m".repeat(MAX_FAILURE_TEXT_BYTES),
+            crash_reason: Some("c".repeat(MAX_FAILURE_TEXT_BYTES)),
+            suite_requests: vec!["s".repeat(MAX_FAILURE_SUITE_REQUEST_BYTES); 64],
+            dropped_suite_requests: u64::MAX,
+            unsupported_suite_calls: vec![
+                crate::x64::UnsupportedSuiteCall {
+                    name: "AEGP Utility Suite",
+                    version: u32::MAX,
+                    slot: usize::MAX,
+                    call_count: u64::MAX,
+                };
+                64
+            ],
+            dropped_unsupported_suite_calls: u64::MAX,
+        };
+        let mut framed = Vec::new();
+        write_message(
+            &mut framed,
+            &SessionProbed {
+                v: 1,
+                kind: "session_probed",
+                worker_pid: u32::MAX,
+                status: "error",
+                guards_intact: false,
+                render_error: -40,
+                failure: Some(diagnostic),
+            },
+        )
+        .unwrap();
+        assert!(framed.len() - 4 <= MAX_CONTROL_MESSAGE_BYTES);
     }
 
     #[test]

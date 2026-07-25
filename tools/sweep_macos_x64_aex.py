@@ -279,6 +279,8 @@ def require_backend(
 def validate_unsupported_suite_calls(value: object) -> None:
     if not isinstance(value, list):
         raise SweepError("unsupported_suite_calls is not an array")
+    if len(value) > 64:
+        raise SweepError("unsupported_suite_calls exceeds the diagnostic bound")
     for call in value:
         if not isinstance(call, dict):
             raise SweepError("unsupported suite call is not an object")
@@ -287,9 +289,12 @@ def validate_unsupported_suite_calls(value: object) -> None:
         )
         if (
             not isinstance(call.get("name"), str)
-            or not isinstance(call.get("version"), int)
-            or not isinstance(call.get("slot"), int)
-            or not isinstance(call.get("call_count"), int)
+            or type(call.get("version")) is not int
+            or type(call.get("slot")) is not int
+            or type(call.get("call_count")) is not int
+            or call["version"] < 0
+            or call["slot"] < 0
+            or call["call_count"] < 1
         ):
             raise SweepError(f"invalid unsupported suite call: {call}")
 
@@ -309,6 +314,7 @@ def validate_failure_diagnostic(value: object) -> dict[str, object]:
             "message",
             "crash_reason",
             "suite_requests",
+            "dropped_suite_requests",
             "unsupported_suite_calls",
             "dropped_unsupported_suite_calls",
         },
@@ -329,8 +335,12 @@ def validate_failure_diagnostic(value: object) -> dict[str, object]:
     }
     message = value.get("message")
     crash_reason = value.get("crash_reason")
+    suite_requests = value.get("suite_requests")
+    dropped_suite_requests = value.get("dropped_suite_requests")
+    dropped_unsupported_suite_calls = value.get("dropped_unsupported_suite_calls")
     if (
-        value.get("schema_version") != 1
+        type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
         or value.get("stage") != "admission_probe"
         or not isinstance(value.get("execution_backend"), str)
         or value.get("category") not in categories
@@ -340,7 +350,7 @@ def validate_failure_diagnostic(value: object) -> dict[str, object]:
         )
         or (
             value.get("error_code") is not None
-            and not isinstance(value.get("error_code"), int)
+            and type(value.get("error_code")) is not int
         )
         or not isinstance(message, str)
         or len(message.encode("utf-8")) > 1024
@@ -351,9 +361,16 @@ def validate_failure_diagnostic(value: object) -> dict[str, object]:
                 or len(crash_reason.encode("utf-8")) > 1024
             )
         )
-        or not isinstance(value.get("suite_requests"), list)
-        or not all(isinstance(item, str) for item in value["suite_requests"])
-        or not isinstance(value.get("dropped_unsupported_suite_calls"), int)
+        or not isinstance(suite_requests, list)
+        or len(suite_requests) > 64
+        or not all(
+            isinstance(item, str) and len(item.encode("utf-8")) <= 256
+            for item in suite_requests
+        )
+        or type(dropped_suite_requests) is not int
+        or dropped_suite_requests < 0
+        or type(dropped_unsupported_suite_calls) is not int
+        or dropped_unsupported_suite_calls < 0
     ):
         raise SweepError(f"invalid admission failure diagnostic: {value}")
     validate_unsupported_suite_calls(value["unsupported_suite_calls"])
