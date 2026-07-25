@@ -38,8 +38,10 @@ const HOST_AEGP_REGISTER: u64 = STUB_BASE + 0x80120;
 const HOST_AEGP_GET_MAIN_WINDOW: u64 = STUB_BASE + 0x80130;
 const HOST_ITERATE8: u64 = STUB_BASE + 0x80140;
 const HOST_ITERATE8_CONTINUE: u64 = STUB_BASE + 0x80150;
+const HOST_COLOR_PARAM_VALUE: u64 = STUB_BASE + 0x80160;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
+const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
 const HOST_ITERATE8_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x88000;
@@ -2004,6 +2006,7 @@ impl GuestEngine<'static> {
             ("write AEGP main-window callback", HOST_AEGP_GET_MAIN_WINDOW),
             ("write Iterate8 callback", HOST_ITERATE8),
             ("write Iterate8 continuation", HOST_ITERATE8_CONTINUE),
+            ("write color-param callback", HOST_COLOR_PARAM_VALUE),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -2096,6 +2099,14 @@ impl GuestEngine<'static> {
             ),
         )?;
         uc(
+            "install color-param callback",
+            unicorn.add_code_hook(
+                HOST_COLOR_PARAM_VALUE,
+                HOST_COLOR_PARAM_VALUE,
+                emulate_color_param_value,
+            ),
+        )?;
+        uc(
             "install checkout-param callback",
             unicorn.add_code_hook(
                 HOST_CHECKOUT_PARAM,
@@ -2162,6 +2173,13 @@ impl GuestEngine<'static> {
             unicorn.mem_write(HOST_HANDLE_SUITE, &handle_suite),
         )?;
         install_iterate8_suites(&mut unicorn)?;
+        uc(
+            "write PF ColorParamSuite",
+            unicorn.mem_write(
+                HOST_COLOR_PARAM_SUITE,
+                &HOST_COLOR_PARAM_VALUE.to_le_bytes(),
+            ),
+        )?;
         install_aegp_utility_suites(&mut unicorn)?;
         for (address, name) in [
             (HOST_ADD_PARAM, "add_param"),
@@ -2186,6 +2204,7 @@ impl GuestEngine<'static> {
             (HOST_AEGP_GET_MAIN_WINDOW, "aegp_get_main_window"),
             (HOST_ITERATE8, "iterate8"),
             (HOST_ITERATE8_CONTINUE, "iterate8_continue"),
+            (HOST_COLOR_PARAM_VALUE, "color_param_value"),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -2939,8 +2958,43 @@ impl GuestEngine<'static> {
         HOST_CHECKIN_PARAM
     }
 
-    pub fn configure_parameter_definitions(&mut self, definitions: Vec<u64>) {
-        self.unicorn.get_data_mut().parameter_definitions = definitions;
+    pub fn configure_parameter_definitions(
+        &mut self,
+        definitions: Vec<u64>,
+    ) -> Result<(), GuestError> {
+        if definitions.len() != self.unicorn.get_data().params.len() {
+            return Err(GuestError::Callback(
+                "active parameter definition count differs from setup".into(),
+            ));
+        }
+        let mut active_colors = Vec::with_capacity(definitions.len());
+        for (definition, parameter) in definitions
+            .iter()
+            .copied()
+            .zip(self.unicorn.get_data().params.iter())
+        {
+            let mut color = [0u8; abi::PF_PIXEL_SIZE];
+            if parameter.param_type == 5 {
+                self.unicorn
+                    .mem_read(definition + abi::PARAM_U_OFFSET as u64, &mut color)
+                    .map_err(|error| GuestError::Unicorn {
+                        operation: "read active color parameter",
+                        detail: error.to_string(),
+                    })?;
+                active_colors.push(Some(color));
+            } else {
+                active_colors.push(None);
+            }
+        }
+        let state = self.unicorn.get_data_mut();
+        for (parameter, active) in state.params.iter_mut().zip(active_colors) {
+            if let Some(color) = active {
+                parameter.bytes[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE]
+                    .copy_from_slice(&color);
+            }
+        }
+        state.parameter_definitions = definitions;
+        Ok(())
     }
 
     pub fn suite_requests(&self) -> &[String] {
@@ -3801,6 +3855,16 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         return;
     }
+    if name == "PF ColorParamSuite"
+        && version == 1
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_COLOR_PARAM_SUITE.to_le_bytes())
+            .is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
     if name == "AEGP Utility Suite"
         && output != 0
         && let Some(table) = u32::try_from(version)
@@ -3812,6 +3876,82 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         return;
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+}
+
+fn emulate_color_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    const PF_INVALID_INDEX: u64 = 513;
+    const PF_UNRECOGNIZED_PARAM_TYPE: u64 = 514;
+    const PF_BAD_CALLBACK_PARAM: u64 = 516;
+    let effect_ref = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let definition = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    if effect_ref != 1 || definition == 0 || output == 0 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, PF_BAD_CALLBACK_PARAM);
+        return;
+    }
+    let result = (|| {
+        let mut disk_id = [0u8; 4];
+        let mut param_type = [0u8; 4];
+        let mut argb = [0u8; abi::PF_PIXEL_SIZE];
+        unicorn
+            .mem_read(definition, &mut disk_id)
+            .map_err(|error| format!("color-param disk id read: {error}"))?;
+        unicorn
+            .mem_read(
+                definition + abi::PARAM_PARAM_TYPE_OFFSET as u64,
+                &mut param_type,
+            )
+            .map_err(|error| format!("color-param type read: {error}"))?;
+        unicorn
+            .mem_read(definition + abi::PARAM_U_OFFSET as u64, &mut argb)
+            .map_err(|error| format!("color-param value read: {error}"))?;
+        let disk_id = i32::from_le_bytes(disk_id);
+        let param_type = i32::from_le_bytes(param_type);
+        let Some(source) = unicorn.get_data().params.iter().find(|parameter| {
+            parameter
+                .bytes
+                .get(..4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(i32::from_le_bytes)
+                == Some(disk_id)
+        }) else {
+            return Ok(PF_INVALID_INDEX);
+        };
+        if param_type != 5 || source.param_type != 5 {
+            return Ok(PF_UNRECOGNIZED_PARAM_TYPE);
+        }
+        let current: [u8; 4] = source.bytes
+            [abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE]
+            .try_into()
+            .expect("PF_Pixel is four bytes");
+        let default: [u8; 4] = source.bytes[abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE
+            ..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE * 2]
+            .try_into()
+            .expect("PF color default is four bytes");
+        if argb != current && argb != default {
+            return Ok(PF_BAD_CALLBACK_PARAM);
+        }
+        let mut pixel_float = [0u8; abi::PF_PIXEL_FLOAT_SIZE];
+        for (index, channel) in argb.into_iter().enumerate() {
+            let offset = index * 4;
+            pixel_float[offset..offset + 4]
+                .copy_from_slice(&(f32::from(channel) / 255.0).to_le_bytes());
+        }
+        unicorn
+            .mem_write(output, &pixel_float)
+            .map_err(|error| format!("color-param output write: {error}"))?;
+        Ok(0)
+    })();
+    match result {
+        Ok(error) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, error);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().callback_error = Some(error);
+            let _ = unicorn.reg_write(RegisterX86::RAX, PF_BAD_CALLBACK_PARAM);
+            let _ = unicorn.emu_stop();
+        }
+    }
 }
 
 fn emulate_aegp_register(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
@@ -4120,6 +4260,7 @@ mod tests {
             HOST_AEGP_GET_MAIN_WINDOW,
             HOST_ITERATE8,
             HOST_ITERATE8_CONTINUE,
+            HOST_COLOR_PARAM_VALUE,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -4154,7 +4295,20 @@ mod tests {
                 continue_iterate8,
             )
             .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_COLOR_PARAM_VALUE,
+                HOST_COLOR_PARAM_VALUE,
+                emulate_color_param_value,
+            )
+            .unwrap();
         install_iterate8_suites(&mut unicorn).unwrap();
+        unicorn
+            .mem_write(
+                HOST_COLOR_PARAM_SUITE,
+                &HOST_COLOR_PARAM_VALUE.to_le_bytes(),
+            )
+            .unwrap();
         install_aegp_utility_suites(&mut unicorn).unwrap();
         let mut trace_points = Vec::new();
         let mut decoder = Decoder::with_ip(64, code, CODE, DecoderOptions::NONE);
@@ -4193,6 +4347,102 @@ mod tests {
         // mov rax, rcx; add rax, rdx; ret
         let mut engine = test_engine(&[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3]);
         assert_eq!(engine.call_win64(CODE, [40, 2, 0, 0, 0, 0]).unwrap(), 42);
+    }
+
+    #[test]
+    fn color_param_suite_is_stateful_and_fails_closed() {
+        let mut engine = test_engine(&[0xc3]);
+        let name = engine.allocate(32, 1).unwrap();
+        engine.write(name, b"PF ColorParamSuite\0").unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [name, 1, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut pointer = [0u8; 8];
+        engine.read(suite_output, &mut pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(pointer), HOST_COLOR_PARAM_SUITE);
+
+        let mut captured = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        captured[..4].copy_from_slice(&101i32.to_le_bytes());
+        captured[abi::PARAM_PARAM_TYPE_OFFSET..abi::PARAM_PARAM_TYPE_OFFSET + 4]
+            .copy_from_slice(&5i32.to_le_bytes());
+        captured[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8]
+            .copy_from_slice(&[255, 10, 20, 30, 255, 1, 2, 3]);
+        engine.unicorn.get_data_mut().params.push(GuestParam {
+            index: 1,
+            param_type: 5,
+            name: "Key Color".into(),
+            bytes: captured.clone(),
+        });
+        let definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+        engine.write(definition, &captured).unwrap();
+        engine
+            .configure_parameter_definitions(vec![definition])
+            .unwrap();
+        let definition_copy = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+        engine.write(definition_copy, &captured).unwrap();
+        let definition = definition_copy;
+        let output = engine.allocate(abi::PF_PIXEL_FLOAT_SIZE, 4).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [1, definition, output, 0, 0, 0],)
+                .unwrap(),
+            0
+        );
+        let mut values = [0u8; abi::PF_PIXEL_FLOAT_SIZE];
+        engine.read(output, &mut values).unwrap();
+        let channels = (0..4)
+            .map(|index| f32::from_le_bytes(values[index * 4..index * 4 + 4].try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(channels, [1.0, 10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0]);
+
+        engine
+            .write(definition + abi::PARAM_U_OFFSET as u64, &[255, 1, 2, 3])
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [1, definition, output, 0, 0, 0],)
+                .unwrap(),
+            0
+        );
+        engine
+            .write(definition + abi::PARAM_U_OFFSET as u64, &[9, 9, 9, 9])
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [1, definition, output, 0, 0, 0],)
+                .unwrap(),
+            516
+        );
+        engine.write(definition, &999i32.to_le_bytes()).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [1, definition, output, 0, 0, 0],)
+                .unwrap(),
+            513
+        );
+        engine.write(definition, &101i32.to_le_bytes()).unwrap();
+        engine
+            .write(
+                definition + abi::PARAM_PARAM_TYPE_OFFSET as u64,
+                &6i32.to_le_bytes(),
+            )
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [1, definition, output, 0, 0, 0],)
+                .unwrap(),
+            514
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [0, definition, output, 0, 0, 0])
+                .unwrap(),
+            516
+        );
     }
 
     #[test]

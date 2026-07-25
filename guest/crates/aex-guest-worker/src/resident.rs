@@ -1,5 +1,5 @@
 use crate::classic::{
-    ClassicError, ClassicHost, ParameterValue, ResidentFailureDiagnostic, SetupReport,
+    ClassicError, ClassicHost, PARAM_COLOR, ParameterValue, ResidentFailureDiagnostic, SetupReport,
 };
 use crate::pe::PeImage;
 use serde::Serialize;
@@ -419,23 +419,56 @@ fn parse_parameter_payload(
             .iter()
             .find(|parameter| parameter.slot == slot)
             .ok_or_else(|| SessionError::Protocol(format!("unknown parameter slot {slot}")))?;
-        let value = encoded
-            .parse::<f64>()
-            .map_err(|_| SessionError::Protocol("parameter value is invalid".into()))?;
-        if !value.is_finite() || kind == "i32" && value.fract() != 0.0 {
-            return Err(SessionError::Protocol(
-                "parameter value shape is invalid".into(),
-            ));
-        }
-        if kind != "i32" && kind != "f64" {
-            return Err(SessionError::Protocol(format!(
-                "unsupported numeric parameter kind {kind:?}"
-            )));
-        }
+        let (value, color) = match kind {
+            "argb8" => {
+                if parameter.param_type != PARAM_COLOR {
+                    return Err(SessionError::Protocol(format!(
+                        "parameter slot {slot} is not a color parameter"
+                    )));
+                }
+                let components = encoded.split(',').collect::<Vec<_>>();
+                if components.len() != 4 {
+                    return Err(SessionError::Protocol(
+                        "ARGB8 parameter requires four components".into(),
+                    ));
+                }
+                let mut color = [0u8; 4];
+                for (destination, component) in color.iter_mut().zip(components) {
+                    *destination = component.parse::<u8>().map_err(|_| {
+                        SessionError::Protocol(
+                            "ARGB8 components must be integers from 0 to 255".into(),
+                        )
+                    })?;
+                }
+                (None, Some(color))
+            }
+            "i32" | "f64" => {
+                if parameter.param_type == PARAM_COLOR {
+                    return Err(SessionError::Protocol(format!(
+                        "color parameter slot {slot} requires argb8"
+                    )));
+                }
+                let value = encoded
+                    .parse::<f64>()
+                    .map_err(|_| SessionError::Protocol("parameter value is invalid".into()))?;
+                if !value.is_finite() || kind == "i32" && value.fract() != 0.0 {
+                    return Err(SessionError::Protocol(
+                        "parameter value shape is invalid".into(),
+                    ));
+                }
+                (Some(value), None)
+            }
+            _ => {
+                return Err(SessionError::Protocol(format!(
+                    "unsupported parameter kind {kind:?}"
+                )));
+            }
+        };
         values.push(ParameterValue {
             slot: Some(slot),
             name: parameter.name.clone(),
             value,
+            color,
         });
     }
     Ok(values)
@@ -602,6 +635,8 @@ mod tests {
                 slider_min: Some(0.0),
                 slider_max: Some(100.0),
                 precision: Some(2),
+                current_color: None,
+                default_color: None,
             }],
             suite_requests: Vec::new(),
             unsupported_suite_calls: Vec::new(),
@@ -610,8 +645,46 @@ mod tests {
         let parsed = parse_parameter_payload("v2|param_1@1:f64=12.5", &setup).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "Amount");
-        assert_eq!(parsed[0].value, 12.5);
+        assert_eq!(parsed[0].value, Some(12.5));
         assert!(parse_parameter_payload("v2|param_1@1:f64=12.5;param_1@1:f64=20", &setup).is_err());
+    }
+
+    #[test]
+    fn color_parameter_payload_is_slot_qualified_and_typed() {
+        let mut setup = SetupReport {
+            schema_version: 1,
+            execution_backend: "fixture",
+            global_setup_error: 0,
+            params_setup_error: 0,
+            advertised_num_params: 2,
+            out_flags: 0,
+            out_flags2: 0,
+            parameters: vec![crate::classic::ParameterReport {
+                slot: 1,
+                index: 1,
+                param_type: PARAM_COLOR,
+                name: "Key Color".into(),
+                default_value: None,
+                valid_min: None,
+                valid_max: None,
+                slider_min: None,
+                slider_max: None,
+                precision: None,
+                current_color: Some([0, 0, 0, 0]),
+                default_color: Some([255, 1, 2, 3]),
+            }],
+            suite_requests: Vec::new(),
+            unsupported_suite_calls: Vec::new(),
+            dropped_unsupported_suite_calls: 0,
+        };
+        let parsed = parse_parameter_payload("v2|param_1@1:argb8=255,64,128,192", &setup).unwrap();
+        assert_eq!(parsed[0].value, None);
+        assert_eq!(parsed[0].color, Some([255, 64, 128, 192]));
+        assert!(parse_parameter_payload("v2|param_1@1:f64=1", &setup).is_err());
+        assert!(parse_parameter_payload("v2|param_1@1:argb8=256,1,2,3", &setup).is_err());
+
+        setup.parameters[0].param_type = 1;
+        assert!(parse_parameter_payload("v2|param_1@1:argb8=255,1,2,3", &setup).is_err());
     }
 
     #[test]
