@@ -15,6 +15,7 @@ struct PathInfo {
   bool open{};
   bool inverted{};
   int32_t mode{};
+  double opacity{100.0};
 };
 
 struct WorldView {
@@ -37,6 +38,7 @@ struct Snapshot {
   uint32_t checkout_calls{};
   uint32_t checkin_calls{};
   uint32_t mask_calls{};
+  uint32_t composition_calls{};
   uint32_t invalid_operations{};
   uint32_t preps_created{};
   uint32_t preps_disposed{};
@@ -78,5 +80,7 @@ int32_t __cdecl path_get_mask_mode(void*, int32_t, int32_t*);
 int32_t __cdecl path_get_name(void*, int32_t, char*);
 int32_t __cdecl mask_world_with_path(void*, void**, double, double, int32_t, double,
                                       int32_t, void*, LegacyRect*);
+int32_t __cdecl mask_world_with_scene(void*, double, double, int32_t, void*,
+                                       LegacyRect*);
 
 }  // namespace aexcompat::pf_path_runtime

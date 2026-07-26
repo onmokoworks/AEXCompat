@@ -1330,7 +1330,7 @@ std::vector<aexcompat::pf_path_runtime::PathInfo> enumerate_pf_paths() {
   std::vector<aexcompat::pf_path_runtime::PathInfo> result;
   for (auto* mask : ordered_active_masks())
     result.push_back({mask, mask->id, mask->dynamic_order, mask->open,
-                      mask->invert, mask->mode});
+                      mask->invert, mask->mode, mask->opacity});
   return result;
 }
 

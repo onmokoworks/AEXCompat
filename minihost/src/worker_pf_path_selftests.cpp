@@ -1,11 +1,15 @@
 #include "worker_pf_path_selftests.hpp"
+#include "worker_mask_runtime_internal.hpp"
 #include "worker_pf_path_runtime.hpp"
 #include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
 
 #include <cstddef>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <initializer_list>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -207,6 +211,265 @@ bool verify_pf_path_data_hardening(aexcompat::pf_path_runtime::HostHooks path_ho
     }
   }
   if (!checkin_render_path()) return false;
+  return aexcompat::pf_path_runtime::lifetimes_balanced();
+}
+
+bool verify_pf_mask_composition(aexcompat::pf_path_runtime::HostHooks path_hooks,
+    aexcompat::mask_runtime::HostContext mask_hooks) {
+  aexcompat::mask_runtime::configure_host_context(mask_hooks);
+  aexcompat::pf_path_runtime::configure(path_hooks);
+  aexcompat::pf_path_runtime::reset();
+
+  constexpr int32_t kWidth = 8;
+  constexpr int32_t kHeight = 8;
+
+  const auto rect = [](double left, double top, double right, double bottom) {
+    const CurveVertex a{left, top, 0, 0, 0, 0};
+    const CurveVertex b{right, top, 0, 0, 0, 0};
+    const CurveVertex c{right, bottom, 0, 0, 0, 0};
+    const CurveVertex d{left, bottom, 0, 0, 0, 0};
+    return std::vector<CurveVertex>{a, b, c, d, a};
+  };
+  const auto in_rect = [](double left, double top, double right, double bottom) {
+    return [=](int32_t x, int32_t y) {
+      return x + .5 > left && x + .5 < right && y + .5 > top && y + .5 < bottom;
+    };
+  };
+  const auto in_inner = in_rect(2, 2, 6, 6);
+  const auto in_left = in_rect(0, 0, 6, 6);
+  const auto in_right = in_rect(2, 2, 8, 8);
+
+  // Self-test-only seeding helper: the production synthetic-scene hook keeps
+  // HostMask defaults (ADD, not inverted, 100% opacity), so the style fields
+  // the composition engine reads are set directly on the installed scene.
+  struct Style { int32_t order; int32_t mode; bool invert; double opacity; };
+  const auto install_styled = [](std::vector<CurveSnapshot> curves,
+                                 const std::vector<Style>& styles) {
+    if (!install_scene(std::move(curves)) || g_mask_scene.size() != styles.size())
+      return false;
+    for (size_t index = 0; index < styles.size(); ++index) {
+      g_mask_scene[index].dynamic_order = styles[index].order;
+      g_mask_scene[index].mode = styles[index].mode;
+      g_mask_scene[index].invert = styles[index].invert;
+      g_mask_scene[index].opacity = styles[index].opacity;
+    }
+    return true;
+  };
+  const auto checkout_paths = [](std::initializer_list<int32_t> ids,
+                                 std::vector<void*>& handles) {
+    handles.clear();
+    for (const int32_t id : ids) {
+      void* handle = nullptr;
+      if (aexcompat::pf_path_runtime::checkout_path(effect_ref(), id, 0, 1, 1,
+                                                    &handle) != 0)
+        return false;
+      handles.push_back(handle);
+    }
+    return true;
+  };
+  const auto checkin_paths = [](std::initializer_list<int32_t> ids,
+                                const std::vector<void*>& handles) {
+    size_t index = 0;
+    for (const int32_t id : ids)
+      if (aexcompat::pf_path_runtime::checkin_path(effect_ref(), id, 0,
+                                                   handles[index++]) != 0)
+        return false;
+    return true;
+  };
+  const auto expect_argb8 = [&](const auto& expected) {
+    std::vector<std::byte> pixels(kWidth * kHeight * 4, std::byte{0});
+    for (int32_t p = 0; p < kWidth * kHeight; ++p) pixels[p * 4] = std::byte{0xff};
+    aexcompat::world_safety::LocalEffectWorld world{};
+    world.world_flags = 2;
+    world.data = pixels.data();
+    world.rowbytes = kWidth * 4;
+    world.width = kWidth;
+    world.height = kHeight;
+    world.extent_hint = {0, 0, kWidth, kHeight};
+    aexcompat::world_safety::DispatchWorldFormatScope scope;
+    aexcompat::pf_path_runtime::LegacyRect bounds{0, 0, kWidth, kHeight};
+    if (!scope.register_world(&world, aexcompat::world_registry::kPixelFormatArgb32) ||
+        aexcompat::pf_path_runtime::mask_world_with_scene(
+            effect_ref(), 0, 0, 0, &world, &bounds) != 0)
+      return false;
+    for (int32_t y = 0; y < kHeight; ++y)
+      for (int32_t x = 0; x < kWidth; ++x)
+        if (std::to_integer<int>(pixels[(y * kWidth + x) * 4]) != expected(x, y))
+          return false;
+    return true;
+  };
+  const auto expect_rejected_unchanged = [&] {
+    std::vector<std::byte> pixels(kWidth * kHeight * 4, std::byte{0x5a});
+    aexcompat::world_safety::LocalEffectWorld world{};
+    world.world_flags = 2;
+    world.data = pixels.data();
+    world.rowbytes = kWidth * 4;
+    world.width = kWidth;
+    world.height = kHeight;
+    world.extent_hint = {0, 0, kWidth, kHeight};
+    aexcompat::world_safety::DispatchWorldFormatScope scope;
+    aexcompat::pf_path_runtime::LegacyRect bounds{0, 0, kWidth, kHeight};
+    if (!scope.register_world(&world, aexcompat::world_registry::kPixelFormatArgb32) ||
+        aexcompat::pf_path_runtime::mask_world_with_scene(
+            effect_ref(), 0, 0, 0, &world, &bounds) == 0)
+      return false;
+    return std::all_of(pixels.begin(), pixels.end(),
+                       [](std::byte value) { return value == std::byte{0x5a}; });
+  };
+  const auto run_scene = [&](std::vector<CurveSnapshot> curves,
+                             const std::vector<Style>& styles,
+                             std::initializer_list<int32_t> ids,
+                             const auto& expected) {
+    std::vector<void*> handles;
+    return install_styled(std::move(curves), styles) &&
+        checkout_paths(ids, handles) && expect_argb8(expected) &&
+        checkin_paths(ids, handles);
+  };
+
+  // Two overlapping ADD masks at 50% opacity combine with max: the overlap
+  // must keep either mask's own coverage instead of accumulating.
+  if (!run_scene({{1, false, rect(0, 0, 6, 6)}, {2, false, rect(2, 2, 8, 8)}},
+                 {{0, 1, false, 50}, {1, 1, false, 50}}, {1, 2},
+                 [&](int32_t x, int32_t y) {
+                   return in_left(x, y) || in_right(x, y) ? 128 : 0;
+                 }) ||
+      // ADD then SUBTRACT punches a hole through the first mask.
+      !run_scene({{1, false, rect(0, 0, 8, 8)}, {2, false, rect(2, 2, 6, 6)}},
+                 {{0, 1, false, 100}, {1, 2, false, 100}}, {1, 2},
+                 [&](int32_t x, int32_t y) { return in_inner(x, y) ? 0 : 255; }) ||
+      // ADD then INTERSECT clips the result to the second mask.
+      !run_scene({{1, false, rect(0, 0, 8, 8)}, {2, false, rect(2, 2, 6, 6)}},
+                 {{0, 1, false, 100}, {1, 3, false, 100}}, {1, 2},
+                 [&](int32_t x, int32_t y) { return in_inner(x, y) ? 255 : 0; }) ||
+      // A SUBTRACT-only scene starts from the base=1 documented policy.
+      !run_scene({{1, false, rect(2, 2, 6, 6)}}, {{0, 2, false, 100}}, {1},
+                 [&](int32_t x, int32_t y) { return in_inner(x, y) ? 0 : 255; }) ||
+      // An inverted ADD mask keeps everything except its own shape.
+      !run_scene({{1, false, rect(2, 2, 6, 6)}}, {{0, 1, true, 100}}, {1},
+                 [&](int32_t x, int32_t y) { return in_inner(x, y) ? 0 : 255; }) ||
+      // Opacity scales the mask coverage before combination.
+      !run_scene({{1, false, rect(2, 2, 6, 6)}}, {{0, 1, false, 50}}, {1},
+                 [&](int32_t x, int32_t y) { return in_inner(x, y) ? 128 : 0; }) ||
+      // NONE masks do nothing: no coverage contribution and no checkout
+      // required, and a NONE-only scene leaves the base=1 layer intact.
+      !run_scene({{1, false, rect(2, 2, 6, 6)}, {2, false, rect(0, 0, 8, 8)}},
+                 {{0, 1, false, 100}, {1, 0, false, 100}}, {1},
+                 [&](int32_t x, int32_t y) { return in_inner(x, y) ? 255 : 0; }) ||
+      !run_scene({{1, false, rect(0, 0, 8, 8)}}, {{0, 0, false, 100}}, {},
+                 [&](int32_t, int32_t) { return 255; }))
+    return false;
+
+  // Unobserved modes (LIGHTEN/DARKEN/DIFFERENCE/ACCUM) and out-of-range
+  // values fail closed and leave the world unchanged.
+  for (const int32_t mode : {4, 7, 9})
+    if (!install_styled({{1, false, rect(2, 2, 6, 6)}}, {{0, mode, false, 100}}) ||
+        !expect_rejected_unchanged())
+      return false;
+  std::vector<void*> handles;
+  // An open path is not a mask and is rejected; the checkout still balances.
+  if (!install_styled({{1, true, {{0, 0, 0, 0, 0, 0}, {8, 0, 0, 0, 0, 0},
+                                  {8, 8, 0, 0, 0, 0}}}},
+                      {{0, 1, false, 100}}) ||
+      !checkout_paths({1}, handles) || !expect_rejected_unchanged() ||
+      !checkin_paths({1}, handles))
+    return false;
+  // Vertex counts above the flatten limit are rejected.
+  std::vector<CurveVertex> ring;
+  for (int i = 0; i < 65; ++i) {
+    const double angle = i * 6.283185307179586 / 65;
+    ring.push_back({4 + 3 * std::cos(angle), 4 + 3 * std::sin(angle), 0, 0, 0, 0});
+  }
+  ring.push_back(ring.front());
+  if (!install_styled({{1, false, std::move(ring)}}, {{0, 1, false, 100}}) ||
+      !checkout_paths({1}, handles) || !expect_rejected_unchanged() ||
+      !checkin_paths({1}, handles))
+    return false;
+  // A participating mask that was never checked out is rejected.
+  if (!install_styled({{1, false, rect(2, 2, 6, 6)}}, {{0, 1, false, 100}}) ||
+      !expect_rejected_unchanged())
+    return false;
+
+  // The composed coverage multiplies the first channel in the 16-bit and
+  // 32-bit-float depths as well; a half-coverage full-frame ADD mask is the
+  // depth oracle.
+  const auto expect_half_depth = [&](int32_t pixel_format, int32_t pixel_bytes) {
+    if (!install_styled({{1, false, rect(0, 0, 8, 8)}}, {{0, 1, false, 50}}) ||
+        !checkout_paths({1}, handles))
+      return false;
+    const int32_t rowbytes = kWidth * pixel_bytes;
+    std::vector<std::byte> pixels(static_cast<size_t>(rowbytes) * kHeight,
+                                  std::byte{0});
+    for (int32_t p = 0; p < kWidth * kHeight; ++p) {
+      auto* pixel = pixels.data() + static_cast<size_t>(p) * pixel_bytes;
+      if (pixel_format == aexcompat::world_registry::kPixelFormatArgb64) {
+        const uint16_t value = 0xffff;
+        std::memcpy(pixel, &value, sizeof(value));
+      } else {
+        const float value = 1.0f;
+        std::memcpy(pixel, &value, sizeof(value));
+      }
+    }
+    aexcompat::world_safety::LocalEffectWorld world{};
+    world.world_flags = 2 | 1;
+    world.data = pixels.data();
+    world.rowbytes = rowbytes;
+    world.width = kWidth;
+    world.height = kHeight;
+    world.extent_hint = {0, 0, kWidth, kHeight};
+    aexcompat::world_safety::DispatchWorldFormatScope scope;
+    aexcompat::pf_path_runtime::LegacyRect bounds{0, 0, kWidth, kHeight};
+    if (!scope.register_world(&world, pixel_format) ||
+        aexcompat::pf_path_runtime::mask_world_with_scene(
+            effect_ref(), 0, 0, 0, &world, &bounds) != 0 ||
+        !checkin_paths({1}, handles))
+      return false;
+    for (int32_t p = 0; p < kWidth * kHeight; ++p) {
+      const auto* pixel = pixels.data() + static_cast<size_t>(p) * pixel_bytes;
+      if (pixel_format == aexcompat::world_registry::kPixelFormatArgb64) {
+        uint16_t value{};
+        std::memcpy(&value, pixel, sizeof(value));
+        if (value != 32768) return false;
+      } else {
+        float value{};
+        std::memcpy(&value, pixel, sizeof(value));
+        if (std::abs(value - .5f) > 1e-6f) return false;
+      }
+    }
+    return true;
+  };
+  if (!expect_half_depth(aexcompat::world_registry::kPixelFormatArgb64, 8) ||
+      !expect_half_depth(aexcompat::world_registry::kPixelFormatArgb128, 16))
+    return false;
+  // A non-finite 32F pixel anywhere in the area fails closed before writing.
+  {
+    if (!install_styled({{1, false, rect(0, 0, 8, 8)}}, {{0, 1, false, 100}}) ||
+        !checkout_paths({1}, handles))
+      return false;
+    constexpr int32_t pixel_bytes = 16;
+    std::vector<std::byte> pixels(kWidth * kHeight * pixel_bytes, std::byte{0});
+    for (int32_t p = 0; p < kWidth * kHeight; ++p) {
+      const float value = 1.0f;
+      std::memcpy(pixels.data() + static_cast<size_t>(p) * pixel_bytes, &value,
+                  sizeof(value));
+    }
+    const float not_a_number = std::numeric_limits<float>::quiet_NaN();
+    std::memcpy(pixels.data(), &not_a_number, sizeof(not_a_number));
+    const auto original = pixels;
+    aexcompat::world_safety::LocalEffectWorld world{};
+    world.world_flags = 2 | 1;
+    world.data = pixels.data();
+    world.rowbytes = kWidth * pixel_bytes;
+    world.width = kWidth;
+    world.height = kHeight;
+    world.extent_hint = {0, 0, kWidth, kHeight};
+    aexcompat::world_safety::DispatchWorldFormatScope scope;
+    aexcompat::pf_path_runtime::LegacyRect bounds{0, 0, kWidth, kHeight};
+    if (!scope.register_world(&world, aexcompat::world_registry::kPixelFormatArgb128) ||
+        aexcompat::pf_path_runtime::mask_world_with_scene(
+            effect_ref(), 0, 0, 0, &world, &bounds) == 0 ||
+        !checkin_paths({1}, handles) || pixels != original)
+      return false;
+  }
   return aexcompat::pf_path_runtime::lifetimes_balanced();
 }
 

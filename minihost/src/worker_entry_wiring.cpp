@@ -415,6 +415,13 @@ bool run_pf_path_data_hardening_selftest() {
        &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
 }
 
+bool run_pf_mask_composition_selftest() {
+  return verify_pf_mask_composition(
+      {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world},
+      {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
+       &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
+}
+
 // Component hook wiring for the worker entry (issue #171). Every hooks
 // struct the entry used to assemble inline is registered here, keeping
 // worker_main_impl to admission, invocation resolution, mode execution,
@@ -598,6 +605,7 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
       aexcompat::worker_runtime::custom_selftests::dispatch(
           {argc, argv},
           {&run_pf_path_data_hardening_selftest,
+           &run_pf_mask_composition_selftest,
            &verify_world_double_dispose_rejected,
            &verify_world_allocation_limit_rejected,
            &verify_owned_world_snapshot_is_atomic,

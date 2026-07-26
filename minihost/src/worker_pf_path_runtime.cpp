@@ -243,4 +243,155 @@ int32_t __cdecl mask_world_with_path(void* effect, void** path, double fx,
   g_report.reject_reason = 0;
   return 0;
 }
+int32_t __cdecl mask_world_with_scene(void* effect, double fx, double fy,
+    int32_t quality, void* world, LegacyRect* bounds) {
+  // Deterministic host composition policy for all active masks of one layer.
+  // The base value, the per-mode combination rules, and the invert-then-
+  // opacity application order are a documented host policy that has NOT been
+  // verified against an After Effects oracle yet. reject_reason values reuse
+  // the mask_world_with_path codes where the failing contract is the same;
+  // 11 = unsupported or out-of-range mask mode, 12 = invalid mask opacity.
+  std::lock_guard lock(g_mutex);
+  g_report.last_feather_x = fx;
+  g_report.last_feather_y = fy;
+  g_report.last_quality = quality;
+  g_report.reject_reason = !effect || !world ? 1 :
+      (!std::isfinite(fx) || !std::isfinite(fy) || fx < 0 || fy < 0 ||
+       fx > 32768 || fy > 32768 ? 3 : ((quality != 0 && quality != 1) ? 5 : 0));
+  if (g_report.reject_reason) {
+    ++g_report.invalid_operations;
+    return 4;
+  }
+  WorldView view;
+  if (!g_hooks.bounded_world || !g_hooks.bounded_world(world, view) ||
+      !supported_world_view(view)) {
+    g_report.reject_reason = 6;
+    ++g_report.invalid_operations;
+    return 4;
+  }
+  LegacyRect area{0, 0, view.width, view.height};
+  if (bounds) {
+    std::memcpy(g_report.last_bounds.data(), bounds, sizeof(*bounds));
+    area = *bounds;
+  }
+  if (area.left < 0 || area.top < 0 || area.right < area.left ||
+      area.bottom < area.top || area.right > view.width ||
+      area.bottom > view.height) {
+    g_report.reject_reason = 7;
+    ++g_report.invalid_operations;
+    return 4;
+  }
+  struct Participant {
+    std::vector<RasterPoint> points;
+    int32_t mode{};
+    bool inverted{};
+    double opacity_scale{};
+  };
+  // Enumeration order is the host's dynamic_order ascending. Every rule is
+  // validated before any pixel is touched so rejection leaves the world
+  // unchanged (fail-closed).
+  const auto scene = paths();
+  std::vector<Participant> participants;
+  bool has_add = false;
+  try {
+    for (const auto& path : scene) {
+      if (path.mode < 0 || path.mode > 7 || path.mode >= 4) {
+        // Defense in depth on the 0..7 range (set_mask_mode already bounds
+        // it); LIGHTEN/DARKEN/DIFFERENCE/ACCUM (4..7) are unobserved, so they
+        // fail closed instead of silently compositing a guess.
+        g_report.reject_reason = 11;
+        ++g_report.invalid_operations;
+        return 4;
+      }
+      if (path.mode == 0) continue;  // PF_MaskMode_NONE: shape does nothing
+      mask_runtime::CurveSnapshot curve;
+      // Open paths do not participate in masking; like mask_world_with_path
+      // this contract rejects them (and stale or missing checkouts) closed.
+      if (path.open || !checked(path.handle, curve)) {
+        g_report.reject_reason = 2;
+        ++g_report.invalid_operations;
+        return 4;
+      }
+      if (!std::isfinite(path.opacity) || path.opacity < 0 ||
+          path.opacity > 100) {
+        g_report.reject_reason = 12;
+        ++g_report.invalid_operations;
+        return 4;
+      }
+      Participant participant;
+      participant.mode = path.mode;
+      participant.inverted = path.inverted;
+      participant.opacity_scale = path.opacity / 100;
+      if (!flatten(curve, quality, participant.points)) {
+        g_report.reject_reason = 8;
+        ++g_report.invalid_operations;
+        return 4;
+      }
+      has_add = has_add || path.mode == 1;
+      participants.push_back(std::move(participant));
+    }
+    if (view.pixel_format == aexcompat::world_registry::kPixelFormatArgb128) {
+      for (int y = area.top; y < area.bottom; ++y)
+        for (int x = area.left; x < area.right; ++x) {
+          const auto* pixel = view.pixels + static_cast<size_t>(y) * view.rowbytes +
+              static_cast<size_t>(x) * view.pixel_bytes;
+          if (!std::isfinite(reinterpret_cast<const float*>(pixel)[0])) {
+            g_report.reject_reason = 10;
+            ++g_report.invalid_operations;
+            return 4;
+          }
+        }
+    }
+    // Base policy: without any ADD mask the layer alpha starts fully covered,
+    // mirroring AE's documented "no ADD mask keeps the whole layer" behaviour.
+    std::vector<double> coverage(
+        static_cast<size_t>(area.right - area.left) * (area.bottom - area.top),
+        has_add ? 0.0 : 1.0);
+    const auto index = [&area](int x, int y) {
+      return static_cast<size_t>(y - area.top) * (area.right - area.left) +
+          (x - area.left);
+    };
+    for (const auto& participant : participants)
+      for (int y = area.top; y < area.bottom; ++y)
+        for (int x = area.left; x < area.right; ++x) {
+          const bool in = inside(participant.points, x + .5, y + .5);
+          double c = in ? 1 : 0;
+          if (fx > 0 || fy > 0) {
+            const double distance = edge_distance(participant.points, x + .5,
+                                                  y + .5, fx, fy);
+            c = std::clamp(.5 + (in ? distance : -distance), 0.0, 1.0);
+          }
+          if (participant.inverted) c = 1 - c;
+          c *= participant.opacity_scale;
+          double& a = coverage[index(x, y)];
+          if (participant.mode == 1) {
+            a = std::max(a, c);        // ADD
+          } else if (participant.mode == 2) {
+            a = a * (1 - c);           // SUBTRACT
+          } else {
+            a = std::min(a, c);        // INTERSECT
+          }
+        }
+    for (int y = area.top; y < area.bottom; ++y)
+      for (int x = area.left; x < area.right; ++x) {
+        auto* pixel = view.pixels + static_cast<size_t>(y) * view.rowbytes +
+            static_cast<size_t>(x) * view.pixel_bytes;
+        const double factor = coverage[index(x, y)];
+        if (view.pixel_format == aexcompat::world_registry::kPixelFormatArgb32) {
+          pixel[0] = static_cast<uint8_t>(std::lround(pixel[0] * factor));
+        } else if (view.pixel_format == aexcompat::world_registry::kPixelFormatArgb64) {
+          auto* channel = reinterpret_cast<uint16_t*>(pixel);
+          *channel = static_cast<uint16_t>(std::lround(*channel * factor));
+        } else {
+          auto* channel = reinterpret_cast<float*>(pixel);
+          *channel = std::clamp(*channel * static_cast<float>(factor), 0.0f, 1.0f);
+        }
+      }
+  } catch (const std::bad_alloc&) {
+    return kOom;
+  }
+  ++g_report.composition_calls;
+  g_report.reject_reason = 0;
+  return 0;
+}
 } // namespace aexcompat::pf_path_runtime

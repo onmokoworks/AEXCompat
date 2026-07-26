@@ -54,6 +54,16 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << "}\n";
     return {true, passed ? 0 : 1, out.str()};
   }
+  if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-mask-composition") {
+    const bool passed = hooks.run_pf_mask_composition();
+    const auto path_report = aexcompat::pf_path_runtime::snapshot();
+    std::ostringstream out;
+    out << "{\"pf_mask_composition\":\"" << passed_or_failed(passed)
+        << "\",\"composition_calls\":" << path_report.composition_calls
+        << ",\"balanced\":" << json_bool(aexcompat::pf_path_runtime::lifetimes_balanced())
+        << "}\n";
+    return {true, passed ? 0 : 1, out.str()};
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-world-registry") {
     const bool double_dispose = hooks.verify_world_double_dispose_rejected();
     const bool allocation_limit = hooks.verify_world_allocation_limit_rejected();
