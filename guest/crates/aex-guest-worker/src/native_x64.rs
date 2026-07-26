@@ -705,6 +705,12 @@ impl GuestEngine<'static> {
     pub fn fill8_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
+    pub fn subpixel_sample8_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn area_sample8_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
     pub fn new_world8_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }

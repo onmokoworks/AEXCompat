@@ -84,6 +84,8 @@ const HOST_FILL8: u64 = STUB_BASE + 0x803c0;
 const HOST_NEW_WORLD8: u64 = STUB_BASE + 0x803d0;
 const HOST_GET_CALLBACK_ADDR: u64 = STUB_BASE + 0x803e0;
 const HOST_ZERO_PIXEL: u64 = STUB_BASE + 0x803f0;
+const HOST_SUBPIXEL_SAMPLE8: u64 = STUB_BASE + 0x80400;
+const HOST_AREA_SAMPLE8: u64 = STUB_BASE + 0x80410;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
 const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
@@ -111,6 +113,7 @@ const CRT_HEAP_BASE: u64 = 0x0000_0010_0000_0000;
 const CRT_HEAP_END: u64 = CRT_HEAP_BASE + MAX_CRT_HEAP_BYTES;
 const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_WORLD_COUNT: usize = 256;
+const MAX_WORLD_DIMENSION: i32 = 32_768;
 // A nonzero Unicorn instruction limit enables instruction counting across the
 // whole run, which is prohibitively expensive for image kernels. The wall-clock
 // timeout and return-sentinel check still bound and validate guest execution.
@@ -2634,6 +2637,8 @@ impl GuestEngine<'static> {
                 "write get-callback-address callback",
                 HOST_GET_CALLBACK_ADDR,
             ),
+            ("write SubpixelSample8 callback", HOST_SUBPIXEL_SAMPLE8),
+            ("write AreaSample8 callback", HOST_AREA_SAMPLE8),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -2732,6 +2737,18 @@ impl GuestEngine<'static> {
         uc(
             "install Fill8 callback",
             unicorn.add_code_hook(HOST_FILL8, HOST_FILL8, emulate_fill8),
+        )?;
+        uc(
+            "install SubpixelSample8 callback",
+            unicorn.add_code_hook(
+                HOST_SUBPIXEL_SAMPLE8,
+                HOST_SUBPIXEL_SAMPLE8,
+                emulate_subpixel_sample8,
+            ),
+        )?;
+        uc(
+            "install AreaSample8 callback",
+            unicorn.add_code_hook(HOST_AREA_SAMPLE8, HOST_AREA_SAMPLE8, emulate_area_sample8),
         )?;
         uc(
             "install legacy new-world callback",
@@ -3901,6 +3918,14 @@ impl GuestEngine<'static> {
         HOST_FILL8
     }
 
+    pub fn subpixel_sample8_callback_address(&self) -> u64 {
+        HOST_SUBPIXEL_SAMPLE8
+    }
+
+    pub fn area_sample8_callback_address(&self) -> u64 {
+        HOST_AREA_SAMPLE8
+    }
+
     pub fn new_world8_callback_address(&self) -> u64 {
         HOST_NEW_WORLD8
     }
@@ -5020,6 +5045,256 @@ fn emulate_fill8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct Argb8World {
+    data: u64,
+    rowbytes: u64,
+    width: i32,
+    height: i32,
+}
+
+fn read_argb8_world(
+    unicorn: &Unicorn<'_, GuestState>,
+    world: u64,
+    callback: &str,
+) -> Result<Option<Argb8World>, String> {
+    if world == 0 {
+        return Ok(None);
+    }
+    let data = read_guest_u64(
+        unicorn,
+        world + abi::LAYER_DATA_OFFSET as u64,
+        &format!("{callback} world data"),
+    )?;
+    let rowbytes = read_guest_i32(
+        unicorn,
+        world + abi::LAYER_ROWBYTES_OFFSET as u64,
+        &format!("{callback} world rowbytes"),
+    )?;
+    let width = read_guest_i32(
+        unicorn,
+        world + abi::LAYER_WIDTH_OFFSET as u64,
+        &format!("{callback} world width"),
+    )?;
+    let height = read_guest_i32(
+        unicorn,
+        world + abi::LAYER_HEIGHT_OFFSET as u64,
+        &format!("{callback} world height"),
+    )?;
+    if data == 0
+        || width <= 0
+        || height <= 0
+        || width > MAX_WORLD_DIMENSION
+        || height > MAX_WORLD_DIMENSION
+        || rowbytes < width.saturating_mul(abi::PF_PIXEL_SIZE as i32)
+    {
+        return Ok(None);
+    }
+    Ok(Some(Argb8World {
+        data,
+        rowbytes: rowbytes as u64,
+        width,
+        height,
+    }))
+}
+
+fn read_argb8_pixel(
+    unicorn: &Unicorn<'_, GuestState>,
+    world: Argb8World,
+    x: i32,
+    y: i32,
+    callback: &str,
+) -> Result<[u8; 4], String> {
+    if x < 0 || x >= world.width || y < 0 || y >= world.height {
+        return Ok([0; 4]);
+    }
+    let address = (y as u64)
+        .checked_mul(world.rowbytes)
+        .and_then(|offset| offset.checked_add((x as u64) * abi::PF_PIXEL_SIZE as u64))
+        .and_then(|offset| world.data.checked_add(offset))
+        .ok_or_else(|| format!("{callback} pixel address overflow"))?;
+    let mut pixel = [0u8; 4];
+    unicorn
+        .mem_read(address, &mut pixel)
+        .map_err(|error| format!("{callback} source pixel: {error}"))?;
+    Ok(pixel)
+}
+
+fn legacy_sample_arguments(
+    unicorn: &Unicorn<'_, GuestState>,
+    callback: &str,
+) -> Result<Option<(i32, i32, u64, u64)>, String> {
+    let effect_ref = unicorn
+        .reg_read(RegisterX86::RCX)
+        .map_err(|error| format!("{callback} effect ref: {error}"))?;
+    let fixed_x = unicorn
+        .reg_read(RegisterX86::RDX)
+        .map_err(|error| format!("{callback} x: {error}"))? as u32 as i32;
+    let fixed_y = unicorn
+        .reg_read(RegisterX86::R8)
+        .map_err(|error| format!("{callback} y: {error}"))? as u32 as i32;
+    let params = unicorn
+        .reg_read(RegisterX86::R9)
+        .map_err(|error| format!("{callback} params: {error}"))?;
+    let destination = aegp_stack_arg(unicorn, 0x28)?;
+    Ok(
+        (effect_ref != 0 && params != 0 && destination != 0).then_some((
+            fixed_x,
+            fixed_y,
+            params,
+            destination,
+        )),
+    )
+}
+
+fn finish_legacy_sample(unicorn: &mut Unicorn<'_, GuestState>, result: Result<bool, String>) {
+    match result {
+        Ok(valid) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, if valid { 0 } else { 4 });
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_subpixel_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let Some((fixed_x, fixed_y, params, destination)) =
+            legacy_sample_arguments(unicorn, "SubpixelSample8")?
+        else {
+            return Ok(false);
+        };
+        let source_world = read_guest_u64(unicorn, params + 16, "SubpixelSample8 source world")?;
+        let Some(world) = read_argb8_world(unicorn, source_world, "SubpixelSample8")? else {
+            return Ok(false);
+        };
+        let x = fixed_x as f64 / 65536.0;
+        let y = fixed_y as f64 / 65536.0;
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+        let fraction_x = x - x0 as f64;
+        let fraction_y = y - y0 as f64;
+        let mut samples = [[0u8; 4]; 4];
+        for dy in 0..2 {
+            for dx in 0..2 {
+                samples[dy * 2 + dx] = read_argb8_pixel(
+                    unicorn,
+                    world,
+                    x0 + dx as i32,
+                    y0 + dy as i32,
+                    "SubpixelSample8",
+                )?;
+            }
+        }
+        let mut output = [0u8; 4];
+        for channel in 0..4 {
+            let mut value = 0.0;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let weight = (if dx == 0 {
+                        1.0 - fraction_x
+                    } else {
+                        fraction_x
+                    }) * (if dy == 0 {
+                        1.0 - fraction_y
+                    } else {
+                        fraction_y
+                    });
+                    value += f64::from(samples[dy * 2 + dx][channel]) * weight;
+                }
+            }
+            output[channel] = value.round().clamp(0.0, 255.0) as u8;
+        }
+        unicorn
+            .mem_write(destination, &output)
+            .map_err(|error| format!("SubpixelSample8 destination pixel: {error}"))?;
+        Ok(true)
+    })();
+    finish_legacy_sample(unicorn, result);
+}
+
+fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let Some((fixed_x, fixed_y, params, destination)) =
+            legacy_sample_arguments(unicorn, "AreaSample8")?
+        else {
+            return Ok(false);
+        };
+        let fixed_radius_x = read_guest_i32(unicorn, params, "AreaSample8 radius x")?;
+        let fixed_radius_y = read_guest_i32(unicorn, params + 4, "AreaSample8 radius y")?;
+        let fixed_area = read_guest_i32(unicorn, params + 8, "AreaSample8 area")?;
+        let source_world = read_guest_u64(unicorn, params + 16, "AreaSample8 source world")?;
+        let edge_behavior =
+            read_guest_i32(unicorn, params + 24, "AreaSample8 edge behavior")? as u32;
+        let radius_x = fixed_radius_x as f64 / 65536.0;
+        let radius_y = fixed_radius_y as f64 / 65536.0;
+        if fixed_area <= 0
+            || edge_behavior != 0
+            || radius_x <= 0.0
+            || radius_y <= 0.0
+            || radius_x >= 128.0
+            || radius_y >= 128.0
+        {
+            return Ok(false);
+        }
+        let Some(world) = read_argb8_world(unicorn, source_world, "AreaSample8")? else {
+            return Ok(false);
+        };
+        let center_x = fixed_x as f64 / 65536.0;
+        let center_y = fixed_y as f64 / 65536.0;
+        let left = center_x - radius_x;
+        let right = center_x + radius_x;
+        let top = center_y - radius_y;
+        let bottom = center_y + radius_y;
+        let footprint = (right - left) * (bottom - top);
+        let first_x = 0.max((left - 0.5).floor() as i32);
+        let last_x = (world.width - 1).min((right + 0.5).ceil() as i32);
+        let first_y = 0.max((top - 0.5).floor() as i32);
+        let last_y = (world.height - 1).min((bottom + 0.5).ceil() as i32);
+        let mut weighted_alpha = 0.0;
+        let mut weighted_color = [0.0; 3];
+        for y in first_y..=last_y {
+            let overlap_y = 0.0f64.max(bottom.min(y as f64 + 0.5) - top.max(y as f64 - 0.5));
+            for x in first_x..=last_x {
+                let overlap_x = 0.0f64.max(right.min(x as f64 + 0.5) - left.max(x as f64 - 0.5));
+                let weight = overlap_x * overlap_y;
+                if weight == 0.0 {
+                    continue;
+                }
+                let pixel = read_argb8_pixel(unicorn, world, x, y, "AreaSample8")?;
+                let alpha = f64::from(pixel[0]) / 255.0;
+                weighted_alpha += weight * alpha;
+                for channel in 0..3 {
+                    weighted_color[channel] += weight * alpha * f64::from(pixel[channel + 1]);
+                }
+            }
+        }
+        let mut output = [0u8; 4];
+        output[0] = (weighted_alpha / footprint * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        for channel in 0..3 {
+            output[channel + 1] = (if weighted_alpha > 0.0 {
+                weighted_color[channel] / weighted_alpha
+            } else {
+                0.0
+            })
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        }
+        unicorn
+            .mem_write(destination, &output)
+            .map_err(|error| format!("AreaSample8 destination pixel: {error}"))?;
+        Ok(true)
+    })();
+    finish_legacy_sample(unicorn, result);
 }
 
 fn emulate_get_callback_addr(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
@@ -7296,6 +7571,18 @@ mod tests {
         unicorn
             .add_code_hook(HOST_FILL8, HOST_FILL8, emulate_fill8)
             .unwrap();
+        unicorn.mem_write(HOST_SUBPIXEL_SAMPLE8, &[0xc3]).unwrap();
+        unicorn.mem_write(HOST_AREA_SAMPLE8, &[0xc3]).unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_SUBPIXEL_SAMPLE8,
+                HOST_SUBPIXEL_SAMPLE8,
+                emulate_subpixel_sample8,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(HOST_AREA_SAMPLE8, HOST_AREA_SAMPLE8, emulate_area_sample8)
+            .unwrap();
         unicorn
             .add_code_hook(HOST_NEW_WORLD8, HOST_NEW_WORLD8, emulate_new_world8)
             .unwrap();
@@ -7468,6 +7755,108 @@ mod tests {
                 .call_win64(HOST_EXTENDED_LOOKUP, [0, 999, 0, 0, 0, 0])
                 .unwrap(),
             0
+        );
+    }
+
+    fn argb8_sampling_fixture(engine: &mut GuestEngine<'static>) -> (u64, u64, u64) {
+        let pixels = engine.allocate(16, 8).unwrap();
+        engine
+            .write(
+                pixels,
+                &[
+                    255, 0, 0, 0, 255, 100, 0, 0, 255, 0, 100, 0, 255, 100, 100, 0,
+                ],
+            )
+            .unwrap();
+        let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&pixels.to_le_bytes());
+        definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&8i32.to_le_bytes());
+        definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&2i32.to_le_bytes());
+        definition[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&2i32.to_le_bytes());
+        engine.write(world, &definition).unwrap();
+        let params = engine.allocate(32, 8).unwrap();
+        let mut sampling = [0u8; 32];
+        sampling[16..24].copy_from_slice(&world.to_le_bytes());
+        engine.write(params, &sampling).unwrap();
+        let destination = engine.allocate(4, 4).unwrap();
+        (params, destination, world)
+    }
+
+    #[test]
+    fn legacy_subpixel_sample8_bilinearly_samples_argb8_and_transparent_edges() {
+        let mut engine = test_engine(&[0xc3]);
+        let (params, destination, _) = argb8_sampling_fixture(&mut engine);
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_SUBPIXEL_SAMPLE8,
+                    [1, 0x8000, 0x8000, params, destination, 0],
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 4).unwrap(),
+            [255, 50, 50, 0]
+        );
+
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_SUBPIXEL_SAMPLE8,
+                    [1, (-0x8000i32) as u32 as u64, 0, params, destination, 0],
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 4).unwrap(),
+            [128, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn legacy_area_sample8_matches_common_runtime_and_rejects_unsupported_edges() {
+        let mut engine = test_engine(&[0xc3]);
+        let (params, destination, _) = argb8_sampling_fixture(&mut engine);
+        engine.write(params, &0x8000i32.to_le_bytes()).unwrap();
+        engine.write(params + 4, &0x8000i32.to_le_bytes()).unwrap();
+        engine
+            .write(params + 8, &0x1_0000i32.to_le_bytes())
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_AREA_SAMPLE8,
+                    [1, 0x8000, 0x8000, params, destination, 0],
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 4).unwrap(),
+            [255, 50, 50, 0]
+        );
+
+        engine.write(destination, &[7, 7, 7, 7]).unwrap();
+        engine.write(params + 24, &1u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_AREA_SAMPLE8,
+                    [1, 0x8000, 0x8000, params, destination, 0],
+                )
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 4).unwrap(),
+            [7, 7, 7, 7]
         );
     }
 
