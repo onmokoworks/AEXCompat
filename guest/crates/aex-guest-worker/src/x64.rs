@@ -3937,6 +3937,14 @@ impl GuestEngine<'static> {
         HOST_PF_ANSI_SQRT
     }
 
+    pub fn ansi_asin_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_ASIN
+    }
+
+    pub fn ansi_acos_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_ACOS
+    }
+
     pub fn configure_parameter_definitions(
         &mut self,
         definitions: Vec<u64>,

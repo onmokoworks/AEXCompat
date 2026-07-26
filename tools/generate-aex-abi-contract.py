@@ -172,6 +172,8 @@ REQUIRED_FIELDS.add("utils.iterate_origin")
 REQUIRED_FIELDS.add("utils.get_callback_addr")
 REQUIRED_FIELDS.add("utils.ansi_cos")
 REQUIRED_FIELDS.add("utils.ansi_sqrt")
+REQUIRED_FIELDS.add("utils.ansi_asin")
+REQUIRED_FIELDS.add("utils.ansi_acos")
 
 
 class ContractError(ValueError):
