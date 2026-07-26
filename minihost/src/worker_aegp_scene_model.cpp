@@ -172,6 +172,68 @@ bool Registry::project_identity(uint64_t project_id,
   return false;
 }
 
+bool Registry::project_by_index(std::size_t requested,
+                                ObjectSnapshot& output) const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::size_t observed = 0;
+  for (std::size_t index = 0; index < object_count_; ++index) {
+    const auto& record = objects_[index];
+    if (!record.live ||
+        record.snapshot.identity.kind != ObjectKind::project)
+      continue;
+    if (observed++ == requested) {
+      output = record.snapshot;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Registry::first_project_item(Identity project,
+                                  ObjectSnapshot& output) const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto* project_record = find_locked(project);
+  if (!project_record ||
+      project_record->snapshot.identity.kind != ObjectKind::project)
+    return false;
+  for (std::size_t index = 0; index < object_count_; ++index) {
+    const auto& record = objects_[index];
+    if (record.live && is_item_kind(record.snapshot.identity.kind) &&
+        record.snapshot.identity.project_id == project.project_id) {
+      output = record.snapshot;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Registry::next_project_item(Identity project, Identity item,
+                                 ObjectSnapshot& output) const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto* project_record = find_locked(project);
+  const auto* item_record = find_locked(item);
+  if (!project_record || !item_record ||
+      project_record->snapshot.identity.kind != ObjectKind::project ||
+      !is_item_kind(item_record->snapshot.identity.kind) ||
+      project.project_id != item.project_id)
+    return false;
+  bool seen = false;
+  for (std::size_t index = 0; index < object_count_; ++index) {
+    const auto& record = objects_[index];
+    if (!record.live) continue;
+    if (record.snapshot.identity == item) {
+      seen = true;
+      continue;
+    }
+    if (seen && is_item_kind(record.snapshot.identity.kind) &&
+        record.snapshot.identity.project_id == project.project_id) {
+      output = record.snapshot;
+      return true;
+    }
+  }
+  return false;
+}
+
 bool Registry::scheduler_key(Identity identity, void*& output) const noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto* record = find_locked(identity);
@@ -351,6 +413,36 @@ bool Registry::update_local_index(Identity identity,
   auto* record = find_locked(identity);
   if (!record) return false;
   record->snapshot.local_index = local_index;
+  return true;
+}
+
+bool Registry::set_parent_layer(Identity layer, Identity parent) noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto* layer_record = find_locked(layer);
+  if (!layer_record ||
+      layer_record->snapshot.identity.kind != ObjectKind::layer)
+    return false;
+  if (parent.kind == ObjectKind::none) {
+    layer_record->snapshot.parent_layer = {};
+    return true;
+  }
+  const auto* parent_record = find_locked(parent);
+  if (!parent_record ||
+      parent_record->snapshot.identity.kind != ObjectKind::layer ||
+      parent.project_id != layer.project_id ||
+      parent_record->snapshot.owner != layer_record->snapshot.owner ||
+      parent == layer)
+    return false;
+  Identity cursor = parent;
+  for (std::size_t depth = 0; depth < kObjectCapacity; ++depth) {
+    if (cursor == layer) return false;
+    const auto* cursor_record = find_locked(cursor);
+    if (!cursor_record ||
+        cursor_record->snapshot.parent_layer.kind == ObjectKind::none)
+      break;
+    cursor = cursor_record->snapshot.parent_layer;
+  }
+  layer_record->snapshot.parent_layer = parent;
   return true;
 }
 
@@ -802,6 +894,71 @@ bool Registry::invalidate(Identity identity, Identity& replacement) noexcept {
   if (active_item_ == identity) active_item_ = replacement;
   if (active_project_ == identity) active_project_ = replacement;
   return true;
+}
+
+uint64_t Registry::handle_table_fingerprint_locked() const noexcept {
+  uint64_t hash = 0x4f8b91c2d3e4a507ull;
+  hash = mix(hash, issued_token_count_);
+  hash = mix(hash, next_lease_identity_);
+  hash = mix(hash, lease_identity_exhausted_);
+  for (std::size_t index = 0; index < borrowed_tokens_.size(); ++index) {
+    const auto& token = borrowed_tokens_[index];
+    const auto& lease = borrowed_leases_[index];
+    hash = mix(hash, token.lease_identity);
+    hash = mix(hash, lease.issued);
+    hash = mix(hash, lease.live);
+    hash = mix(hash, lease.lease_identity);
+    hash = mix(hash, static_cast<uint32_t>(lease.possession_id));
+    hash = mix(hash, lease.target.project_id);
+    hash = mix(hash, lease.target.object_id);
+    hash = mix(hash, lease.target.generation);
+    hash = mix(hash, static_cast<uint8_t>(lease.target.kind));
+  }
+  return hash;
+}
+
+bool Registry::capture_mutation_checkpoint(
+    MutationCheckpoint& output) const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  output = {};
+  output.object_count = object_count_;
+  output.project_count = project_count_;
+  output.next_dynamic_object_id = next_dynamic_object_id_;
+  output.active_project = active_project_;
+  output.active_item = active_item_;
+  output.handle_table_fingerprint = handle_table_fingerprint_locked();
+  for (std::size_t index = 0; index < object_count_; ++index) {
+    output.snapshots[index] = objects_[index].snapshot;
+    output.live[index] = objects_[index].live;
+  }
+  output.valid = true;
+  return true;
+}
+
+bool Registry::restore_mutation_checkpoint(
+    const MutationCheckpoint& checkpoint) noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!checkpoint.valid ||
+      handle_table_fingerprint_locked() !=
+          checkpoint.handle_table_fingerprint ||
+      checkpoint.object_count > objects_.size())
+    return false;
+  for (auto& record : objects_) record = {};
+  object_count_ = checkpoint.object_count;
+  project_count_ = checkpoint.project_count;
+  next_dynamic_object_id_ = checkpoint.next_dynamic_object_id;
+  active_project_ = checkpoint.active_project;
+  active_item_ = checkpoint.active_item;
+  for (std::size_t index = 0; index < object_count_; ++index) {
+    objects_[index].snapshot = checkpoint.snapshots[index];
+    objects_[index].live = checkpoint.live[index];
+  }
+  return true;
+}
+
+uint64_t Registry::handle_table_fingerprint() const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return handle_table_fingerprint_locked();
 }
 
 uint64_t Registry::fingerprint() const noexcept {

@@ -1,4 +1,5 @@
 #include "worker_aegp_init_orchestration.hpp"
+#include "worker_suite_registry.hpp"
 
 namespace aexcompat::worker_runtime::aegp_init {
 namespace {
@@ -13,8 +14,16 @@ OrchestrationResult run_orchestration(
     const OrchestrationRequest& request,
     const RoundtripValidationHooks& validation) {
   OrchestrationResult result;
-  result.init_error = request.entry(
-      request.basic_suite, 24, 0, 1, &result.global_refcon);
+  const auto entry_result = aegp_entry_guard::invoke(
+      request.entry, request.basic_suite, 24, 0, 1,
+      &result.global_refcon);
+  result.init_error = entry_result.error;
+  result.entry_fault = entry_result.fault;
+  result.entry_exception_code = entry_result.seh_code;
+  result.entry_invoked = entry_result.invoked;
+  if (result.entry_fault != aegp_entry_guard::FaultKind::none)
+    result.forced_suite_releases =
+        worker_runtime::suite_registry().force_release_all();
 
   if (result.init_error == 0) {
     const bool command_ready = request.inserted_commands &&

@@ -13,6 +13,11 @@
     var comp = app.project.items.addComp(
         "Issue26 Scene Probe", 640, 360, 1.0, 10.0, 30.0);
     comp.parentFolder = folder;
+    var childComp = app.project.items.addComp(
+        "Issue26 Child Comp", 320, 180, 1.0, 5.0, 30.0);
+    childComp.parentFolder = folder;
+    childComp.layers.addSolid(
+        [0.8, 0.3, 0.2], "Issue26 Child Footage", 320, 180, 1.0, 5.0);
 
     var solid = comp.layers.addSolid(
         [0.2, 0.4, 0.8], "Issue26 Footage", 640, 360, 1.0, 10.0);
@@ -39,6 +44,14 @@
     var camera = comp.layers.addCamera("Issue26 Camera", [320, 180]);
     camera.property("ADBE Transform Group").property("ADBE Position")
         .setValue([320, 180, -800]);
+    var zoom = camera.property("ADBE Camera Options Group")
+        .property("ADBE Camera Zoom");
+    zoom.setValueAtTime(0.0, 700);
+    zoom.setValueAtTime(1.0, 900);
+    zoom.setInterpolationTypeAtKey(
+        1, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER);
+    zoom.setTemporalEaseAtKey(
+        1, [new KeyframeEase(0, 33)], [new KeyframeEase(0, 33)]);
 
     solid.Effects.addProperty("ADBE Slider Control");
     solid.Effects.addProperty("ADBE Easy Levels");
@@ -68,13 +81,14 @@
                 fixture: "issue26-scene-probe",
                 project_count: 1,
                 folder_count: 1,
-                footage_count: 1,
-                comp_count: 1,
-                layer_count: 3,
+                footage_count: 2,
+                comp_count: 2,
+                layer_count: 4,
                 effect_count: 2,
                 mask_count: 1,
                 position_keyframes: 2,
-                mask_keyframes: 2
+                mask_keyframes: 2,
+                camera_zoom_keyframes: 2
             }));
             file.close();
         }

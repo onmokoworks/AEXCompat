@@ -22,6 +22,29 @@ foreach ($required in @($vcvars, $msbuild, $pipTool)) {
     }
 }
 
+function Get-SourceTreeHash {
+    param([System.IO.FileInfo[]]$Files)
+    $normalizedSdkRoot = [System.IO.Path]::GetFullPath($SdkRoot).TrimEnd('\')
+    $lines = foreach ($file in ($Files | Sort-Object FullName)) {
+        $fullName = [System.IO.Path]::GetFullPath($file.FullName)
+        if (-not $fullName.StartsWith(
+                $normalizedSdkRoot + '\',
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "SDK source escaped reviewed root: $fullName"
+        }
+        $relative = $fullName.Substring($normalizedSdkRoot.Length + 1).Replace('\', '/')
+        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$relative`0$hash"
+    }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+}
+
 function Build-Sample {
     param(
         [string]$Name,
@@ -57,6 +80,7 @@ function Build-Sample {
     foreach ($file in $sourceFiles) {
         $before[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
     }
+    $sourceTreeHashBefore = Get-SourceTreeHash $sourceFiles
 
     $targetMsBuild = ($target -replace '\\', '/') + '/'
     $intermediateMsBuild = ($intermediate -replace '\\', '/') + '/'
@@ -86,6 +110,10 @@ function Build-Sample {
             throw "SDK source changed during $Name build: $($entry.Key)"
         }
     }
+    $sourceTreeHashAfter = Get-SourceTreeHash $sourceFiles
+    if ($sourceTreeHashAfter -ne $sourceTreeHashBefore) {
+        throw "SDK source tree hash changed during $Name build"
+    }
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         throw "$Name build did not produce $artifact"
     }
@@ -97,6 +125,8 @@ function Build-Sample {
         artifact = $artifact
         artifact_size = (Get-Item -LiteralPath $artifact).Length
         artifact_sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+        source_tree_sha256_before = $sourceTreeHashBefore
+        source_tree_sha256_after = $sourceTreeHashAfter
         sdk_source_unchanged = $true
     }
 }

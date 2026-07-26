@@ -11,6 +11,8 @@ std::atomic<uint64_t> g_staged{};
 std::atomic<uint64_t> g_validated{};
 std::atomic<uint64_t> g_committed{};
 std::atomic<uint64_t> g_cancelled{};
+std::atomic<uint64_t> g_rolled_back{};
+std::atomic<uint64_t> g_rollback_failures{};
 std::atomic<GenerationInvalidator> g_generation_invalidator{};
 
 }  // namespace
@@ -29,10 +31,15 @@ void record_stage() noexcept { ++g_staged; }
 void record_validate() noexcept { ++g_validated; }
 void record_commit() noexcept { ++g_committed; }
 void record_cancel() noexcept { ++g_cancelled; }
+void record_rollback(bool restored) noexcept {
+  ++g_rolled_back;
+  if (!restored) ++g_rollback_failures;
+}
 
 Diagnostics diagnostics() noexcept {
   return {g_begun.load(), g_staged.load(), g_validated.load(),
-          g_committed.load(), g_cancelled.load()};
+          g_committed.load(), g_cancelled.load(), g_rolled_back.load(),
+          g_rollback_failures.load()};
 }
 
 }  // namespace aexcompat::scene_transaction

@@ -3,6 +3,7 @@
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_aegp_external_render_runtime.hpp"
+#include "worker_aegp_scene.hpp"
 #include "worker_aegp_scene_model.hpp"
 #include "worker_aegp_scene_transaction.hpp"
 #include "worker_handle_runtime.hpp"
@@ -33,11 +34,17 @@ uint32_t g_invalid_outline_operations{}, g_outline_mutations{}, g_mask_mutations
     g_invalid_dynamic_stream_operations{}, g_layer_dynamic_flags{},
     g_mask_parade_dynamic_flags{};
 int32_t g_next_mask_id{1}, g_next_stream_id{1};
+int32_t g_keyframe_apply_failure_after{-1};
 std::list<AddKeyframesTransaction> g_add_keyframe_transactions;
+
+bool is_primary_mask_layer(void* layer) {
+  return layer == aexcompat::mask_runtime::host_context().layer ||
+      aegp_layer_index(layer) == 0;
+}
 
 int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
   const auto host = aexcompat::mask_runtime::host_context();
-  if (layer != host.layer || !count) return 4;
+  if (!is_primary_mask_layer(layer) || !count) return 4;
   if (aexcompat::mask_runtime::fault() == aexcompat::mask_runtime::Fault::CountCrash) {
     if (host.raise_access_violation) host.raise_access_violation();
     return 4;
@@ -49,7 +56,7 @@ int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
 }
 
 int32_t __cdecl get_layer_mask_by_index(void* layer, int32_t index, void** mask) {
-  if (layer != aexcompat::mask_runtime::host_context().layer || index < 0 || !mask) return 4;
+  if (!is_primary_mask_layer(layer) || index < 0 || !mask) return 4;
   const auto masks = ordered_active_masks();
   if (static_cast<std::size_t>(index) >= masks.size()) return 4;
   auto& record = *masks[static_cast<std::size_t>(index)];
@@ -110,7 +117,7 @@ int32_t __cdecl get_mask_id(void* handle, int32_t* value) {
   *value = mask->id; return 0;
 }
 int32_t __cdecl create_new_mask(void* layer, void** handle, int32_t* index) {
-  if (layer != aexcompat::mask_runtime::host_context().layer || !handle ||
+  if (!is_primary_mask_layer(layer) || !handle ||
       g_mask_scene.size() >= kMaxHostMasks) {
     ++g_invalid_mask_operations; return 4;
   }
@@ -808,6 +815,96 @@ int32_t __cdecl insert_keyframe(void* stream, int16_t time_mode, const HostTime*
       []() noexcept { bump_render_project_timestamp(); });
   return committed ? 0 : 4;
 }
+void inject_keyframe_apply_failure_after(int32_t applied_count) noexcept {
+  g_keyframe_apply_failure_after = applied_count > 0 ? applied_count : -1;
+}
+uint64_t mask_scene_fingerprint() noexcept {
+  uint64_t hash = UINT64_C(14695981039346656037);
+  const auto mix = [&hash](const auto& value) {
+    const auto* bytes =
+        reinterpret_cast<const unsigned char*>(&value);
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+      hash ^= bytes[index];
+      hash *= UINT64_C(1099511628211);
+    }
+  };
+  const auto mix_outline = [&](const OutlineData& outline) {
+    mix(outline.open);
+    const auto vertex_count = outline.vertices.size();
+    const auto feather_count = outline.feathers.size();
+    mix(vertex_count);
+    mix(feather_count);
+    for (const auto& vertex : outline.vertices) {
+      mix(vertex.x);
+      mix(vertex.y);
+      mix(vertex.tangent_in_x);
+      mix(vertex.tangent_in_y);
+      mix(vertex.tangent_out_x);
+      mix(vertex.tangent_out_y);
+    }
+    for (const auto& feather : outline.feathers) {
+      mix(feather.segment);
+      mix(feather.segment_s);
+      mix(feather.radius);
+      mix(feather.ui_corner_angle);
+      mix(feather.tension);
+      mix(feather.interp);
+      mix(feather.type);
+    }
+  };
+  const auto mask_count = g_mask_scene.size();
+  mix(mask_count);
+  for (const auto& mask : g_mask_scene) {
+    mix_outline(mask);
+    mix(mask.mask_live);
+    mix(mask.stream_live);
+    mix(mask.value_live);
+    mix(mask.deleted);
+    mix(mask.invert);
+    mix(mask.locked);
+    mix(mask.roto_bezier);
+    mix(mask.motion_blur);
+    mix(mask.feather_falloff);
+    mix(mask.mode);
+    mix(mask.id);
+    mix(mask.opacity);
+    for (const auto value : mask.feather) mix(value);
+    mix(mask.expansion);
+    for (const auto character : mask.dynamic_name) mix(character);
+    for (const auto value : mask.dynamic_flags) mix(value);
+    mix(mask.dynamic_modified);
+    for (const auto& expression : mask.expressions)
+      for (const auto character : expression) mix(character);
+    for (const auto value : mask.expression_enabled) mix(value);
+    for (const auto value : mask.color) mix(value);
+    const auto key_count = mask.keyframes.size();
+    mix(key_count);
+    for (const auto& key : mask.keyframes) {
+      mix_outline(key);
+      mix(key.time.value);
+      mix(key.time.scale);
+      mix(key.flags);
+      mix(key.in_interpolation);
+      mix(key.out_interpolation);
+      mix(key.label);
+      mix_outline(key.spatial_in);
+      mix_outline(key.spatial_out);
+      for (const auto& ease : key.temporal_in) {
+        mix(ease.speed);
+        mix(ease.influence);
+      }
+      for (const auto& ease : key.temporal_out) {
+        mix(ease.speed);
+        mix(ease.influence);
+      }
+      mix(key.identity.project_id);
+      mix(key.identity.object_id);
+      mix(key.identity.generation);
+      mix(key.identity.kind);
+    }
+  }
+  return hash;
+}
 int32_t __cdecl delete_keyframe(void* stream, int32_t index) {
   HostStreamRef* record = find_stream(stream);
   HostKeyframe* key = keyframe_at(record, index);
@@ -1179,6 +1276,15 @@ int32_t __cdecl end_add_keyframes(uint8_t add, void* handle) {
       ++g_invalid_keyframe_operations;
       return 4;
     }
+    aexcompat::scene_model::Registry::MutationCheckpoint
+        registry_checkpoint{};
+    if (!registry.capture_mutation_checkpoint(registry_checkpoint)) {
+      ++g_invalid_keyframe_operations;
+      return 4;
+    }
+    auto keyframes_before_apply = stream->mask->keyframes;
+    const uint32_t mutations_before_apply = g_keyframe_mutations;
+    std::size_t applied_count = 0;
     if (!atomic.commit(
             generation,
             [&]() noexcept {
@@ -1204,8 +1310,21 @@ int32_t __cdecl end_add_keyframes(uint8_t add, void* handle) {
                 stream->mask->keyframes.insert(
                     position, std::move(candidate));
                 ++g_keyframe_mutations;
+                ++applied_count;
+                if (g_keyframe_apply_failure_after > 0 &&
+                    applied_count >= static_cast<std::size_t>(
+                        g_keyframe_apply_failure_after)) {
+                  g_keyframe_apply_failure_after = -1;
+                  return false;
+                }
               }
               return true;
+            },
+            [&]() noexcept {
+              stream->mask->keyframes.swap(keyframes_before_apply);
+              g_keyframe_mutations = mutations_before_apply;
+              return registry.restore_mutation_checkpoint(
+                  registry_checkpoint);
             },
             []() noexcept { bump_render_project_timestamp(); })) {
       ++g_invalid_keyframe_operations;

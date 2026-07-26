@@ -101,6 +101,12 @@ def host_summary(stdout: str) -> dict[str, Any] | None:
                 "event_requested",
                 "init_error",
                 "event_error",
+                "entry_invoked",
+                "entry_fault",
+                "entry_exception_code",
+                "forced_suite_releases",
+                "boundary_regression_mode",
+                "boundary_regression_passed",
                 "effect_lifetimes_balanced",
                 "stream_lifetimes_balanced",
                 "suite_leases_balanced",
@@ -141,18 +147,186 @@ def common_record(
         "execution": {
             "command": command,
             "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
             "stdout_sha256": output_hash(stdout),
             "stderr_sha256": output_hash(stderr),
             "blocker": blocker,
         },
         "environment": environment(args),
-        "artifacts": artifacts(args, sample),
+        "artifacts": {
+            **artifacts(args, sample),
+            "build_receipt": None,
+            "fixture_metadata": None,
+        },
         "probe_report": None,
         "host_report": None,
+        "fixture_report": None,
         "sample_report": None,
         "unsupported_slots": [],
         "cleanup": None,
     }
+
+
+def coverage_complete(report: dict[str, Any]) -> bool:
+    coverage = report["coverage"]
+    return all(
+        (
+            coverage["identity_enumeration"],
+            coverage["effect_order"]["observed"],
+            coverage["effect_order"]["total"],
+            coverage["stream_metadata"],
+            coverage["parent_camera_zoom"]["parent"],
+            coverage["parent_camera_zoom"]["camera"],
+            coverage["parent_camera_zoom"]["zoom"],
+            coverage["keyframes"]["interpolation"],
+            coverage["keyframes"]["ease"],
+            coverage["keyframes"]["spatial_tangents"],
+            coverage["transaction"]["cancel_observed"],
+            coverage["transaction"]["cancel_unchanged"],
+            coverage["transaction"]["commit_observed"],
+            coverage["transaction"]["commit_incremented"],
+            coverage["generation"]["stale_owner_rejected"],
+        )
+    )
+
+
+def readiness_errors(record: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    execution = record["execution"]
+    if output_hash(execution["stdout"]) != execution["stdout_sha256"]:
+        errors.append("stdout hash mismatch")
+    if output_hash(execution["stderr"]) != execution["stderr_sha256"]:
+        errors.append("stderr hash mismatch")
+    if record["status"] != "passed":
+        errors.append(f"status={record['status']}")
+        return errors
+    if execution["exit_code"] != 0:
+        errors.append(f"passed record exit_code={execution['exit_code']}")
+    if execution["blocker"] is not None:
+        errors.append("passed record has blocker")
+    target = record["target"]
+    if target in {"aexcompat", "after_effects"}:
+        report = record["probe_report"]
+        cleanup = record["cleanup"]
+        if report is None or report["status"] != "passed":
+            errors.append("passed probe record lacks passed probe_report")
+        elif not coverage_complete(report):
+            errors.append("required public probe coverage incomplete")
+        if target == "aexcompat":
+            host = record["host_report"]
+            if (
+                host is None
+                or host["status"] not in {"event_completed", "initialized"}
+            ):
+                errors.append(
+                    "passed AEXCompat record lacks successful host_report"
+                )
+        elif record["fixture_report"] is None:
+            errors.append("passed real-AE record lacks fixture_report")
+        if cleanup is None or not cleanup["balanced"]:
+            errors.append("cleanup is not balanced")
+        if record["unsupported_slots"]:
+            errors.append("required public operation is unsupported")
+    else:
+        sample = record["sample_report"]
+        if sample is None or sample["status"] != "passed":
+            errors.append("passed sample record lacks passed sample_report")
+        elif sample["classification"] != classify_sample(
+            sample["sample"],
+            execution["exit_code"],
+            execution["stdout"],
+            execution["stderr"],
+            record["host_report"],
+        ):
+            errors.append("sample classification is not derived from output")
+        if target == "sdk_projector_aexcompat":
+            host = record["host_report"]
+            if (
+                host is None
+                or host["status"] != "initialization_failed"
+                or not host["boundary_regression_passed"]
+                or host["entry_fault"] not in {"cpp_exception", "seh_exception"}
+                or not host["effect_lifetimes_balanced"]
+                or not host["stream_lifetimes_balanced"]
+                or not host["suite_leases_balanced"]
+            ):
+                errors.append("Projector guarded-boundary proof is incomplete")
+        if not sample or not sample["sdk_source_unchanged"]:
+            errors.append("SDK source unchanged proof is absent")
+    return errors
+
+
+def verify_record_environment_and_artifacts(
+    path: Path, record: dict[str, Any]
+) -> None:
+    sdk_root = Path(record["environment"]["sdk"]["root"])
+    if not sdk_root.is_dir():
+        raise ValueError(f"{path}: SDK root missing: {sdk_root}")
+    for group in (
+        record["environment"]["after_effects"],
+        record["environment"]["sdk"],
+    ):
+        for value in group.values():
+            if not isinstance(value, dict) or "path" not in value:
+                continue
+            candidate = Path(value["path"])
+            if not candidate.is_file() or artifact(candidate) != value:
+                raise ValueError(
+                    f"{path}: environment artifact mismatch: {candidate}"
+                )
+    for identity in record["artifacts"].values():
+        if identity is None:
+            continue
+        candidate = Path(identity["path"])
+        if not candidate.is_file() or artifact(candidate) != identity:
+            raise ValueError(f"{path}: artifact mismatch: {candidate}")
+    sample_report = record["sample_report"]
+    if sample_report is not None:
+        receipt_identity = record["artifacts"]["build_receipt"]
+        sample_identity = record["artifacts"]["sample"]
+        if receipt_identity is None or sample_identity is None:
+            raise ValueError(f"{path}: sample provenance artifacts are absent")
+        receipt = load_json(Path(receipt_identity["path"]))
+        matches = [
+            value
+            for value in receipt.get("samples", [])
+            if value.get("sample") == sample_report["sample"]
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"{path}: build receipt sample provenance is ambiguous"
+            )
+        receipt_sample = matches[0]
+        if (
+            sample_report["build_receipt_sha256"]
+            != receipt_identity["sha256"]
+            or receipt_sample["artifact_sha256"] != sample_identity["sha256"]
+            or receipt_sample["artifact_size"] != sample_identity["size_bytes"]
+            or Path(receipt_sample["artifact"]).resolve(strict=True)
+            != Path(sample_identity["path"]).resolve(strict=True)
+            or not receipt_sample["sdk_source_unchanged"]
+            or receipt_sample["source_tree_sha256_before"]
+            != receipt_sample["source_tree_sha256_after"]
+            or sample_report["source_tree_sha256"]
+            != receipt_sample["source_tree_sha256_after"]
+            or sample_report["sdk_source_unchanged"]
+            != receipt_sample["sdk_source_unchanged"]
+        ):
+            raise ValueError(
+                f"{path}: sample provenance does not match build receipt"
+            )
+    fixture_report = record["fixture_report"]
+    fixture_identity = record["artifacts"]["fixture_metadata"]
+    if fixture_report is None:
+        if fixture_identity is not None:
+            raise ValueError(f"{path}: fixture metadata is not derived")
+    else:
+        if fixture_identity is None:
+            raise ValueError(f"{path}: fixture metadata artifact is absent")
+        derived_fixture = load_json(Path(fixture_identity["path"]))
+        if fixture_report != derived_fixture:
+            raise ValueError(f"{path}: fixture_report is not derived")
 
 
 def command_probe(args: argparse.Namespace) -> int:
@@ -219,27 +393,45 @@ def command_probe(args: argparse.Namespace) -> int:
     print(completed.stdout, end="")
     if completed.stderr:
         print(completed.stderr, end="", file=os.sys.stderr)
-    return 0 if status in {"passed", "partial"} else 1
+    return 0 if not readiness_errors(record) else 1
 
 
 def command_wrap_real(args: argparse.Namespace) -> int:
     command = args.command_part
     report = load_json(Path(args.raw_report))
+    fixture_path = Path(args.fixture_metadata).resolve(strict=True)
+    fixture_report = load_json(fixture_path)
+    stdout = Path(args.stdout_file).read_text(
+        encoding="utf-8", errors="replace"
+    )
+    stderr = Path(args.stderr_file).read_text(
+        encoding="utf-8", errors="replace"
+    )
+    status = report["status"] if args.exit_code == 0 else "failed"
+    blocker = None
+    if args.exit_code != 0:
+        blocker = {
+            "code": "real_ae_execution_failed",
+            "message": "After Effects exited nonzero during the public probe.",
+            "details": [f"exit_code={args.exit_code}"],
+        }
     record = common_record(
         args,
         target="after_effects",
-        status=report["status"],
+        status=status,
         command=command,
         exit_code=args.exit_code,
-        stdout="",
-        stderr="",
-        blocker=None,
+        stdout=stdout,
+        stderr=stderr,
+        blocker=blocker,
     )
+    record["artifacts"]["fixture_metadata"] = artifact(fixture_path)
     record["probe_report"] = report
+    record["fixture_report"] = fixture_report
     record["unsupported_slots"] = report["unsupported_slots"]
     record["cleanup"] = report["cleanup"]
     write_record(record, Path(args.output))
-    return 0
+    return 0 if not readiness_errors(record) else 1
 
 
 def command_blocker(args: argparse.Namespace) -> int:
@@ -260,13 +452,35 @@ def command_blocker(args: argparse.Namespace) -> int:
         },
     )
     write_record(record, Path(args.output))
-    return 0
+    return 1
 
 
-def classify_sample(sample: str, returncode: int, stdout: str, stderr: str) -> str:
+def classify_sample(
+    sample: str,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    host: dict[str, Any] | None,
+) -> str:
+    combined = (stdout + "\n" + stderr).lower()
+    if (
+        sample == "Projector"
+        and returncode == 0
+        and host is not None
+        and host["status"] == "initialization_failed"
+        and host["boundary_regression_passed"]
+        and host["entry_fault"] in {"cpp_exception", "seh_exception"}
+        and (
+            "suite_acquire_failed" in combined
+            or (
+                "suite" in combined
+                and ("missing" in combined or "unsupported" in combined)
+            )
+        )
+    ):
+        return "guarded_initialization_failure"
     if returncode == 0:
         return "completed"
-    combined = (stdout + "\n" + stderr).lower()
     if (
         "suite_acquire_failed" in combined
         or ("suite" in combined and ("missing" in combined or "unsupported" in combined))
@@ -280,8 +494,36 @@ def classify_sample(sample: str, returncode: int, stdout: str, stderr: str) -> s
 def command_sample(args: argparse.Namespace) -> int:
     sample = Path(args.sample_artifact).resolve(strict=True)
     worker = Path(args.worker).resolve(strict=True)
-    route = "--aegp-init" if args.sample == "Projector" else "--l2-params-only"
-    command = [str(worker), route, str(sample), artifact(sample)["sha256"]]
+    receipt_path = Path(args.build_receipt).resolve(strict=True)
+    receipt = load_json(receipt_path)
+    matches = [
+        value
+        for value in receipt.get("samples", [])
+        if value.get("sample") == args.sample
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"build receipt must contain exactly one {args.sample} entry"
+        )
+    receipt_sample = matches[0]
+    sample_identity = artifact(sample)
+    if (
+        Path(receipt_sample["artifact"]).resolve(strict=True) != sample
+        or receipt_sample["artifact_sha256"] != sample_identity["sha256"]
+        or receipt_sample["artifact_size"] != sample_identity["size_bytes"]
+        or not receipt_sample["sdk_source_unchanged"]
+        or receipt_sample["source_tree_sha256_before"]
+        != receipt_sample["source_tree_sha256_after"]
+    ):
+        raise ValueError(
+            "sample artifact/source provenance does not match build receipt"
+        )
+    route = (
+        "--aegp-init-boundary-test"
+        if args.sample == "Projector"
+        else "--l2-params-only"
+    )
+    command = [str(worker), route, str(sample), sample_identity["sha256"]]
     completed = subprocess.run(
         command,
         cwd=ROOT,
@@ -292,8 +534,18 @@ def command_sample(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         check=False,
     )
+    summary = host_summary(completed.stdout)
     classification = classify_sample(
-        args.sample, completed.returncode, completed.stdout, completed.stderr
+        args.sample,
+        completed.returncode,
+        completed.stdout,
+        completed.stderr,
+        summary,
+    )
+    expected = (
+        classification == "guarded_initialization_failure"
+        if args.sample == "Projector"
+        else classification == "completed"
     )
     record = common_record(
         args,
@@ -302,7 +554,7 @@ def command_sample(args: argparse.Namespace) -> int:
             if args.sample == "Projector"
             else "sdk_resizer_aexcompat"
         ),
-        status="passed" if completed.returncode == 0 else "partial",
+        status="passed" if expected else "failed",
         command=command,
         exit_code=completed.returncode,
         stdout=completed.stdout,
@@ -310,23 +562,33 @@ def command_sample(args: argparse.Namespace) -> int:
         blocker=None,
         sample=sample,
     )
+    record["artifacts"]["build_receipt"] = artifact(receipt_path)
+    record["host_report"] = summary
     record["sample_report"] = {
         "sample": args.sample,
-        "route": "aegp_init" if args.sample == "Projector" else "l2_params_only",
+        "status": "passed" if expected else "failed",
+        "route": (
+            "aegp_init_boundary_test"
+            if args.sample == "Projector"
+            else "l2_params_only"
+        ),
         "classification": classification,
-        "sdk_source_unchanged": True,
+        "sdk_source_unchanged": receipt_sample["sdk_source_unchanged"],
+        "build_receipt_sha256": record["artifacts"]["build_receipt"]["sha256"],
+        "source_tree_sha256": receipt_sample["source_tree_sha256_after"],
     }
     write_record(record, Path(args.output))
     print(completed.stdout, end="")
     if completed.stderr:
         print(completed.stderr, end="", file=os.sys.stderr)
-    return 0
+    return 0 if not readiness_errors(record) else 1
 
 
 def command_validate(args: argparse.Namespace) -> int:
     schema = load_json(SCHEMA_PATH)
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema)
+    incomplete: list[str] = []
     for value in args.records:
         path = Path(value)
         record = load_json(path)
@@ -337,14 +599,15 @@ def command_validate(args: argparse.Namespace) -> int:
                 raise ValueError(f"{path}: unsupported_slots is not derived")
             if record["cleanup"] != report["cleanup"]:
                 raise ValueError(f"{path}: cleanup is not derived")
-        if args.verify_existing_artifacts:
-            for identity in record["artifacts"].values():
-                if identity is None:
-                    continue
-                candidate = Path(identity["path"])
-                if candidate.is_file() and artifact(candidate) != identity:
-                    raise ValueError(f"{path}: artifact hash mismatch: {candidate}")
+        verify_record_environment_and_artifacts(path, record)
+        errors = readiness_errors(record)
+        if errors:
+            incomplete.append(f"{path}: {', '.join(errors)}")
     print(f"validated {len(args.records)} Issue #26 evidence record(s)")
+    if incomplete:
+        for value in incomplete:
+            print(value, file=os.sys.stderr)
+        return 1
     return 0
 
 
@@ -373,6 +636,9 @@ def main() -> int:
     real = subparsers.add_parser("wrap-real")
     add_environment_arguments(real)
     real.add_argument("--raw-report", required=True)
+    real.add_argument("--fixture-metadata", required=True)
+    real.add_argument("--stdout-file", required=True)
+    real.add_argument("--stderr-file", required=True)
     real.add_argument("--command-part", action="append", required=True)
     real.add_argument("--exit-code", required=True, type=int)
     real.set_defaults(handler=command_wrap_real)
@@ -389,6 +655,7 @@ def main() -> int:
     add_environment_arguments(sample)
     sample.add_argument("--sample", choices=("Projector", "Resizer"), required=True)
     sample.add_argument("--sample-artifact", required=True)
+    sample.add_argument("--build-receipt", required=True)
     sample.add_argument("--timeout", type=int, default=60)
     sample.set_defaults(handler=command_sample)
 

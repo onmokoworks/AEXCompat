@@ -209,6 +209,7 @@ std::string serialize(const Report& report) {
       report.camera_observed && report.zoom_observed &&
       report.keyframe_interpolation_observed &&
       report.keyframe_ease_observed &&
+      report.keyframe_tangents_observed &&
       report.transaction_cancel_observed &&
       report.transaction_cancel_unchanged &&
       report.transaction_commit_observed &&
@@ -448,6 +449,8 @@ void inspect_effects(Report& report, AEGP_LayerH layer, A_long layer_id,
       note(report, kAEGPStreamSuite, kAEGPStreamSuiteVersion6, 4,
            "AEGP_GetEffectNumParamStreams", streams_error);
     } else {
+      bool metadata_complete = stream_count > 0;
+      A_long streams_observed = 0;
       for (A_long stream_index = 0;
            stream_index < stream_count && stream_index < kMaxStreams;
            ++stream_index) {
@@ -472,11 +475,29 @@ void inspect_effects(Report& report, AEGP_LayerH layer, A_long layer_id,
         report.streams.push_back(
             {token_for(stream), effect_token, stream_index,
              static_cast<A_long>(type), key_count});
-        report.stream_metadata_observed =
-            report.stream_metadata_observed || !type_error;
+        metadata_complete = metadata_complete && !type_error;
+        if (!type_error && stream_index == 0) {
+          const A_Time zero_time{0, 30};
+          AEGP_StreamValue2 input_value{};
+          const A_Err value_error = streams->AEGP_GetNewStreamValue(
+              g_plugin_id, stream, AEGP_LTimeMode_CompTime, &zero_time,
+              TRUE, &input_value);
+          metadata_complete = metadata_complete &&
+              type == AEGP_StreamType_LAYER_ID && !value_error &&
+              input_value.val.layer_id == layer_id;
+          if (!value_error)
+            streams->AEGP_DisposeStreamValue(&input_value);
+          if (value_error)
+            note(report, kAEGPStreamSuite, kAEGPStreamSuiteVersion6, 13,
+                 "AEGP_GetNewStreamValue(input layer)", value_error);
+        }
+        ++streams_observed;
         if (!streams->AEGP_DisposeStream(stream))
           ++report.stream_releases;
       }
+      report.stream_metadata_observed =
+          report.stream_metadata_observed ||
+          (metadata_complete && streams_observed == stream_count);
     }
     if (!first_effect) {
       first_effect = effect;
@@ -569,7 +590,7 @@ void exercise_missing_parent_fixture(
       !candidates[0] || !candidates[1])
     return;
   const A_Err set_error =
-      layers->AEGP_SetLayerParent(candidates[0], candidates[1]);
+      layers->AEGP_SetLayerParent(candidates[1], candidates[0]);
   if (set_error) {
     note(report, kAEGPLayerSuite, kAEGPLayerSuiteVersion9, 42,
          "AEGP_SetLayerParent(fixture)", set_error);
@@ -577,10 +598,10 @@ void exercise_missing_parent_fixture(
   }
   AEGP_LayerH observed = nullptr;
   const A_Err get_error =
-      layers->AEGP_GetLayerParent(candidates[0], &observed);
-  report.parent_observed = !get_error && observed == candidates[1];
+      layers->AEGP_GetLayerParent(candidates[1], &observed);
+  report.parent_observed = !get_error && observed == candidates[0];
   const A_Err reset_error =
-      layers->AEGP_SetLayerParent(candidates[0], nullptr);
+      layers->AEGP_SetLayerParent(candidates[1], nullptr);
   if (get_error)
     note(report, kAEGPLayerSuite, kAEGPLayerSuiteVersion9, 41,
          "AEGP_GetLayerParent(fixture)", get_error);
@@ -645,11 +666,13 @@ Report observe(A_long driver_major, A_long driver_minor) {
   SuiteLease<AEGP_CompSuite11> comps;
   SuiteLease<AEGP_LayerSuite9> layers;
   SuiteLease<AEGP_EffectSuite4> effects;
+  SuiteLease<AEGP_MaskSuite6> masks;
   SuiteLease<AEGP_StreamSuite6> streams;
   SuiteLease<AEGP_KeyframeSuite5> keyframes;
   const auto release_suites = [&] {
     keyframes.release();
     streams.release();
+    masks.release();
     effects.release();
     layers.release();
     comps.release();
@@ -665,6 +688,7 @@ Report observe(A_long driver_major, A_long driver_minor) {
   comps.acquire(kAEGPCompSuite, kAEGPCompSuiteVersion11, report);
   layers.acquire(kAEGPLayerSuite, kAEGPLayerSuiteVersion9, report);
   effects.acquire(kAEGPEffectSuite, kAEGPEffectSuiteVersion4, report);
+  masks.acquire(kAEGPMaskSuite, kAEGPMaskSuiteVersion6, report);
   streams.acquire(kAEGPStreamSuite, kAEGPStreamSuiteVersion6, report);
   keyframes.acquire(kAEGPKeyframeSuite, kAEGPKeyframeSuiteVersion5, report);
 
@@ -752,6 +776,7 @@ Report observe(A_long driver_major, A_long driver_minor) {
 
   AEGP_EffectRefH first_effect = nullptr;
   AEGP_StreamRefH transaction_stream = nullptr;
+  AEGP_MaskRefH transaction_mask = nullptr;
   bool applied_effect_fixture = false;
   AEGP_LayerH effect_fixture_layer = nullptr;
   A_long effect_fixture_layer_id = -1;
@@ -856,27 +881,36 @@ Report observe(A_long driver_major, A_long driver_minor) {
                       effects.suite, streams.suite, keyframes.suite,
                       first_effect);
   }
-  if (streams.suite && transaction_layer) {
-    const A_Err position_error = streams.suite->AEGP_GetNewLayerStream(
-        g_plugin_id, transaction_layer, AEGP_LayerStream_POSITION,
-        &transaction_stream);
-    if (!position_error && transaction_stream) {
+  if (masks.suite && streams.suite && transaction_layer) {
+    A_long mask_count = 0;
+    A_Err mask_error =
+        masks.suite->AEGP_GetLayerNumMasks(transaction_layer, &mask_count);
+    if (!mask_error && mask_count > 0)
+      mask_error = masks.suite->AEGP_GetLayerMaskByIndex(
+          transaction_layer, 0, &transaction_mask);
+    if (!mask_error && transaction_mask)
+      mask_error = streams.suite->AEGP_GetNewMaskStream(
+          g_plugin_id, transaction_mask, AEGP_MaskStream_OUTLINE,
+          &transaction_stream);
+    if (!mask_error && transaction_stream) {
       ++report.stream_acquires;
-      inspect_keyframes(report, streams.suite, keyframes.suite,
-                        transaction_stream);
     } else {
-      note(report, kAEGPStreamSuite, kAEGPStreamSuiteVersion6, 3,
-           "AEGP_GetNewLayerStream(POSITION)", position_error);
+      note(report, kAEGPStreamSuite, kAEGPStreamSuiteVersion6, 6,
+           "AEGP_GetNewMaskStream(OUTLINE)", mask_error);
     }
   }
 
   exercise_transactions(report, streams.suite, keyframes.suite,
                         transaction_stream);
+  inspect_keyframes(report, streams.suite, keyframes.suite,
+                    transaction_stream);
   if (transaction_stream &&
       !streams.suite->AEGP_DisposeStream(transaction_stream)) {
     ++report.stream_releases;
     transaction_stream = nullptr;
   }
+  if (transaction_mask && !masks.suite->AEGP_DisposeMask(transaction_mask))
+    transaction_mask = nullptr;
   exercise_stale_owner(report, effects.suite, streams.suite, first_effect);
   if (first_effect) {
     bool deleted = false;

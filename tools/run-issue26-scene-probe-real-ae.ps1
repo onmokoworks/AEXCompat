@@ -54,7 +54,10 @@ if (Test-Path -LiteralPath $pluginDirectory) {
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 $rawReport = Join-Path $OutputRoot 'probe-report.json'
 $fixtureMetadata = Join-Path $OutputRoot 'fixture-metadata.json'
-foreach ($output in @($rawReport, $fixtureMetadata)) {
+$standardOutput = Join-Path $OutputRoot 'after-effects.stdout.txt'
+$standardError = Join-Path $OutputRoot 'after-effects.stderr.txt'
+foreach ($output in @(
+        $rawReport, $fixtureMetadata, $standardOutput, $standardError)) {
     if (Test-Path -LiteralPath $output) {
         Remove-Item -LiteralPath $output
     }
@@ -74,6 +77,8 @@ try {
     $env:ISSUE26_SCENE_FIXTURE_METADATA = $fixtureMetadata
     $process = Start-Process -FilePath $AfterEffectsPath `
         -ArgumentList @('-r', "`"$FixturePath`"") `
+        -RedirectStandardOutput $standardOutput `
+        -RedirectStandardError $standardError `
         -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
@@ -96,6 +101,8 @@ try {
         installed_probe_sha256 = $installedHash
         raw_report = $rawReport
         fixture_metadata = $fixtureMetadata
+        stdout = $standardOutput
+        stderr = $standardError
     } | ConvertTo-Json -Compress)
 }
 finally {

@@ -135,3 +135,27 @@ def test_scene_model_evidence_all_production_workers() -> None:
         assert report["order"]["failure_receipt_unchanged"] is True
         reports.append(report)
     assert len(reports) == 3
+
+
+def test_scene_transaction_mid_apply_rollback_all_production_workers() -> None:
+    for name in WORKERS:
+        completed = subprocess.run(
+            [
+                str(worker_path(name)),
+                "--self-test-aegp-scene-mutation-transactions",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr or completed.stdout
+        report = json.loads(
+            completed.stdout, object_pairs_hook=reject_duplicate_keys
+        )
+        assert report["aegp_scene_mutation_transactions"] == "passed"
+        assert report["mid_apply_rollback_observed"] is True
+        assert report["rollback_failures"] == 0
+        assert report["transaction_failure_byte_invariant"] is True
+        assert report["generation_increment_once"] is True

@@ -15,6 +15,7 @@
     "artifacts",
     "probe_report",
     "host_report",
+    "fixture_report",
     "sample_report",
     "unsupported_slots",
     "cleanup"
@@ -50,6 +51,12 @@
         {"$ref": "#/$defs/host_report"}
       ]
     },
+    "fixture_report": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/fixture_report"}
+      ]
+    },
     "sample_report": {
       "oneOf": [
         {"type": "null"},
@@ -71,8 +78,46 @@
   "allOf": [
     {
       "if": {
+        "properties": {"status": {"const": "passed"}},
+        "required": ["status"]
+      },
+      "then": {
         "properties": {
-          "target": {"enum": ["aexcompat", "after_effects"]}
+          "execution": {
+            "properties": {
+              "exit_code": {"const": 0},
+              "blocker": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "target": {"const": "aexcompat"}
+        }
+      },
+      "then": {
+        "properties": {
+          "fixture_report": {"type": "null"},
+          "sample_report": {"type": "null"},
+          "artifacts": {
+            "properties": {
+              "probe": {"$ref": "#/$defs/artifact"},
+              "fixture": {"$ref": "#/$defs/artifact"},
+              "worker": {"$ref": "#/$defs/artifact"},
+              "sample": {"type": "null"},
+              "fixture_metadata": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "target": {"const": "after_effects"}
         }
       },
       "then": {
@@ -92,6 +137,25 @@
     {
       "if": {
         "properties": {
+          "target": {"const": "after_effects"},
+          "status": {"const": "passed"}
+        },
+        "required": ["target", "status"]
+      },
+      "then": {
+        "properties": {
+          "fixture_report": {"$ref": "#/$defs/fixture_report"},
+          "artifacts": {
+            "properties": {
+              "fixture_metadata": {"$ref": "#/$defs/artifact"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
           "target": {
             "enum": [
               "sdk_projector_aexcompat",
@@ -103,7 +167,13 @@
       "then": {
         "properties": {
           "probe_report": {"type": "null"},
-          "host_report": {"type": "null"},
+          "fixture_report": {"type": "null"},
+          "host_report": {
+            "oneOf": [
+              {"type": "null"},
+              {"$ref": "#/$defs/host_report"}
+            ]
+          },
           "unsupported_slots": {"maxItems": 0},
           "cleanup": {"type": "null"},
           "sample_report": {"$ref": "#/$defs/sample_report"},
@@ -112,7 +182,9 @@
               "probe": {"$ref": "#/$defs/artifact"},
               "fixture": {"$ref": "#/$defs/artifact"},
               "worker": {"$ref": "#/$defs/artifact"},
-              "sample": {"$ref": "#/$defs/artifact"}
+              "sample": {"$ref": "#/$defs/artifact"},
+              "build_receipt": {"$ref": "#/$defs/artifact"},
+              "fixture_metadata": {"type": "null"}
             }
           }
         }
@@ -146,6 +218,8 @@
       "required": [
         "command",
         "exit_code",
+        "stdout",
+        "stderr",
         "stdout_sha256",
         "stderr_sha256",
         "blocker"
@@ -158,6 +232,8 @@
           "items": {"type": "string"}
         },
         "exit_code": {"type": ["integer", "null"]},
+        "stdout": {"type": "string", "maxLength": 1048576},
+        "stderr": {"type": "string", "maxLength": 1048576},
         "stdout_sha256": {"$ref": "#/$defs/sha256"},
         "stderr_sha256": {"$ref": "#/$defs/sha256"},
         "blocker": {
@@ -217,12 +293,53 @@
     "artifacts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["probe", "fixture", "worker", "sample"],
+      "required": [
+        "probe",
+        "fixture",
+        "worker",
+        "sample",
+        "build_receipt",
+        "fixture_metadata"
+      ],
       "properties": {
         "probe": {"$ref": "#/$defs/nullable_artifact"},
         "fixture": {"$ref": "#/$defs/nullable_artifact"},
         "worker": {"$ref": "#/$defs/nullable_artifact"},
-        "sample": {"$ref": "#/$defs/nullable_artifact"}
+        "sample": {"$ref": "#/$defs/nullable_artifact"},
+        "build_receipt": {"$ref": "#/$defs/nullable_artifact"},
+        "fixture_metadata": {"$ref": "#/$defs/nullable_artifact"}
+      }
+    },
+    "fixture_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "fixture",
+        "project_count",
+        "folder_count",
+        "footage_count",
+        "comp_count",
+        "layer_count",
+        "effect_count",
+        "mask_count",
+        "position_keyframes",
+        "mask_keyframes",
+        "camera_zoom_keyframes"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "fixture": {"const": "issue26-scene-probe"},
+        "project_count": {"type": "integer", "minimum": 1},
+        "folder_count": {"type": "integer", "minimum": 1},
+        "footage_count": {"type": "integer", "minimum": 2},
+        "comp_count": {"type": "integer", "minimum": 2},
+        "layer_count": {"type": "integer", "minimum": 4},
+        "effect_count": {"type": "integer", "minimum": 2},
+        "mask_count": {"type": "integer", "minimum": 1},
+        "position_keyframes": {"type": "integer", "minimum": 2},
+        "mask_keyframes": {"type": "integer", "minimum": 2},
+        "camera_zoom_keyframes": {"type": "integer", "minimum": 2}
       }
     },
     "identity": {
@@ -446,6 +563,12 @@
         "event_requested",
         "init_error",
         "event_error",
+        "entry_invoked",
+        "entry_fault",
+        "entry_exception_code",
+        "forced_suite_releases",
+        "boundary_regression_mode",
+        "boundary_regression_passed",
         "effect_lifetimes_balanced",
         "stream_lifetimes_balanced",
         "suite_leases_balanced"
@@ -457,6 +580,14 @@
         "event_requested": {"type": "string"},
         "init_error": {"type": "integer"},
         "event_error": {"type": "integer"},
+        "entry_invoked": {"type": "boolean"},
+        "entry_fault": {
+          "enum": ["none", "invalid_request", "cpp_exception", "seh_exception"]
+        },
+        "entry_exception_code": {"type": "integer", "minimum": 0},
+        "forced_suite_releases": {"type": "integer", "minimum": 0},
+        "boundary_regression_mode": {"type": "boolean"},
+        "boundary_regression_passed": {"type": "boolean"},
         "effect_lifetimes_balanced": {"type": "boolean"},
         "stream_lifetimes_balanced": {"type": "boolean"},
         "suite_leases_balanced": {"type": "boolean"}
@@ -467,22 +598,29 @@
       "additionalProperties": false,
       "required": [
         "sample",
+        "status",
         "route",
         "classification",
-        "sdk_source_unchanged"
+        "sdk_source_unchanged",
+        "build_receipt_sha256",
+        "source_tree_sha256"
       ],
       "properties": {
         "sample": {"enum": ["Projector", "Resizer"]},
-        "route": {"enum": ["aegp_init", "l2_params_only"]},
+        "status": {"enum": ["passed", "failed"]},
+        "route": {"enum": ["aegp_init_boundary_test", "l2_params_only"]},
         "classification": {
           "enum": [
             "completed",
+            "guarded_initialization_failure",
             "unsupported_suite",
             "nonzero_exit",
             "load_failure"
           ]
         },
-        "sdk_source_unchanged": {"const": true}
+        "sdk_source_unchanged": {"const": true},
+        "build_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "source_tree_sha256": {"$ref": "#/$defs/sha256"}
       }
     }
   }

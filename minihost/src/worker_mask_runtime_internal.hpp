@@ -84,6 +84,7 @@ extern uint32_t g_invalid_outline_operations, g_outline_mutations, g_mask_mutati
     g_dynamic_stream_queries, g_dynamic_stream_mutations, g_invalid_dynamic_stream_operations,
     g_layer_dynamic_flags, g_mask_parade_dynamic_flags;
 extern int32_t g_next_mask_id, g_next_stream_id;
+extern int32_t g_keyframe_apply_failure_after;
 inline constexpr std::size_t kMaxHostMasks = 8, kMaxOutlineVertices = 64,
     kMaxOutlineFeathers = 64, kMaxKeyframesPerStream = 64, kMaxCheckedStreamValues = 256;
 extern std::list<AddKeyframesTransaction> g_add_keyframe_transactions;
@@ -102,6 +103,8 @@ int32_t create_stream_ref(HostMask*, DynamicNodeKind, int32_t, void**);
 HostKeyframe* keyframe_at(HostStreamRef*, int32_t);
 bool ensure_keyframe_identity(HostStreamRef*, HostKeyframe*, int32_t);
 AddKeyframesTransaction* find_add_transaction(void*);
+void inject_keyframe_apply_failure_after(int32_t applied_count) noexcept;
+uint64_t mask_scene_fingerprint() noexcept;
 bool valid_time_mode(int16_t mode);
 bool valid_stream_plugin(int32_t plugin_id);
 int32_t __cdecl get_mask_outline_vertex_info(void*, int32_t, MaskVertex*);

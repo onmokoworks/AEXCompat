@@ -109,6 +109,18 @@ inline constexpr std::size_t kBorrowedHandleCapacity = 128;
 
 class Registry {
  public:
+  struct MutationCheckpoint {
+    std::array<ObjectSnapshot, kObjectCapacity> snapshots{};
+    std::array<bool, kObjectCapacity> live{};
+    std::size_t object_count{};
+    std::size_t project_count{};
+    uint64_t next_dynamic_object_id{};
+    Identity active_project{};
+    Identity active_item{};
+    uint64_t handle_table_fingerprint{};
+    bool valid{};
+  };
+
   Registry() noexcept;
 
   bool initialize_fixture(void* primary_item, void* primary_comp,
@@ -120,6 +132,10 @@ class Registry {
   Identity active_project() const noexcept;
   Identity active_item() const noexcept;
   bool project_identity(uint64_t project_id, Identity& output) const noexcept;
+  bool project_by_index(std::size_t index, ObjectSnapshot& output) const noexcept;
+  bool first_project_item(Identity project, ObjectSnapshot& output) const noexcept;
+  bool next_project_item(Identity project, Identity item,
+                         ObjectSnapshot& output) const noexcept;
   bool scheduler_key(Identity identity, void*& output) const noexcept;
 
   bool snapshot(Identity identity, ObjectSnapshot& output) const noexcept;
@@ -146,6 +162,7 @@ class Registry {
                              std::u16string_view name, int32_t possession_id,
                              Identity& output, void*& handle) noexcept;
   bool update_local_index(Identity identity, int32_t local_index) noexcept;
+  bool set_parent_layer(Identity layer, Identity parent) noexcept;
   bool initialize_stream_state(Identity identity,
                                const StreamState& state) noexcept;
   bool initialize_keyframe_state(Identity identity,
@@ -187,6 +204,10 @@ class Registry {
                       ObjectSnapshot& output) const noexcept;
 
   bool invalidate(Identity identity, Identity& replacement) noexcept;
+  bool capture_mutation_checkpoint(MutationCheckpoint& output) const noexcept;
+  bool restore_mutation_checkpoint(
+      const MutationCheckpoint& checkpoint) noexcept;
+  uint64_t handle_table_fingerprint() const noexcept;
   uint64_t fingerprint() const noexcept;
 
  private:
@@ -220,6 +241,7 @@ class Registry {
                       uint64_t required_project_id,
                       bool require_possession = false,
                       int32_t possession_id = 0) const noexcept;
+  uint64_t handle_table_fingerprint_locked() const noexcept;
 
   mutable std::mutex mutex_;
   std::array<ObjectRecord, kObjectCapacity> objects_{};

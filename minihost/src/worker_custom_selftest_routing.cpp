@@ -79,6 +79,9 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << ",\"batch_add_wrong_kind_rejected\":true"
         << ",\"paired_tangent_acquisition_atomic\":true"
         << ",\"end_add_terminal_cleanup\":true"
+        << ",\"mid_apply_rollback_observed\":"
+        << json_bool(transactions.rolled_back > 0)
+        << ",\"rollback_failures\":" << transactions.rollback_failures
         << ",\"committed\":" << transactions.committed
         << ",\"cancelled\":" << transactions.cancelled << "}\n";
     return {true, passed ? 0 : 1, out.str()};

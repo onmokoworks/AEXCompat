@@ -1,5 +1,7 @@
 #pragma once
 
+#include "worker_aegp_entry_guard.hpp"
+
 #include <cstdint>
 
 namespace aexcompat::l2_detail {
@@ -25,6 +27,12 @@ struct AegpInitAckProbeSnapshot {
 
 struct AegpInitCompletionInputs {
   int32_t init_error{};
+  worker_runtime::aegp_entry_guard::FaultKind entry_fault{
+      worker_runtime::aegp_entry_guard::FaultKind::none};
+  uint32_t entry_exception_code{};
+  bool entry_invoked{};
+  uint32_t forced_suite_releases{};
+  bool boundary_regression_mode{};
   int32_t event_error{};
   int32_t death_error{};
   bool global_refcon_nonnull{};

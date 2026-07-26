@@ -220,6 +220,7 @@ def test_common_scene_transaction_has_explicit_atomic_lifecycle() -> None:
     scene = read(SCENE_SOURCE)
     mask = read(ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp")
     native = read(NATIVE_SELFTEST)
+    compat = read(COMPAT_SELFTEST)
     for marker in (
         "class AtomicSceneTransaction",
         "bool stage() noexcept",
@@ -229,12 +230,58 @@ def test_common_scene_transaction_has_explicit_atomic_lifecycle() -> None:
         "registry_.fingerprint() != baseline_fingerprint_",
         "record_commit",
         "record_cancel",
+        "record_rollback",
+        "rollback_failures",
+        "capture_mutation_checkpoint",
+        "restore_mutation_checkpoint",
+        "handle_table_fingerprint",
+        "inject_keyframe_apply_failure_after(1)",
+        "mask_scene_fingerprint() == scene_before_rollback",
+        "registry.handle_table_fingerprint() == handles_before_rollback",
         "transaction_cancel_byte_invariant",
         "transaction_commit_generation_once",
         "std::memcmp(",
         "bump_render_project_timestamp()",
     ):
-        assert marker in header or marker in source or marker in scene or marker in mask or marker in native
+        assert (
+            marker in header
+            or marker in source
+            or marker in scene
+            or marker in mask
+            or marker in native
+            or marker in compat
+        )
+
+
+def test_external_aegp_entry_boundary_contains_faults_and_reclaims_leases() -> None:
+    guard = read(
+        ROOT / "minihost" / "src" / "worker_aegp_entry_guard.cpp"
+    )
+    orchestration = read(
+        ROOT / "minihost" / "src" / "worker_aegp_init_orchestration.cpp"
+    )
+    report = read(
+        ROOT / "minihost" / "src" / "worker_aegp_init_report.cpp"
+    )
+    routing = read(
+        ROOT / "minihost" / "src" / "worker_invocation_orchestration.cpp"
+    )
+    for marker in (
+        "__try",
+        "__except",
+        "catch (...)",
+        "FaultKind::seh_exception",
+        "force_release_all()",
+        "forced_suite_releases",
+        "boundary_regression_passed",
+        'L"--aegp-init-boundary-test"',
+    ):
+        assert (
+            marker in guard
+            or marker in orchestration
+            or marker in report
+            or marker in routing
+        )
 
 
 def test_published_worker_suites_cover_phase_3_to_5_mutations() -> None:

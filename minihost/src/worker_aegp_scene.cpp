@@ -5,6 +5,7 @@
 #include "worker_aegp_external_render_runtime.hpp"
 #include "worker_aegp_scene_model.hpp"
 #include "worker_aegp_scene_transaction.hpp"
+#include "worker_mask_runtime_internal.hpp"
 #include "worker_suite_registry.hpp"
 
 #include <algorithm>
@@ -381,6 +382,11 @@ bool resolve_scene_comp(void* handle, ObjectSnapshot& output,
       handle, ObjectKind::composition, output, required_project_id);
 }
 
+bool resolve_scene_project(void* handle, ObjectSnapshot& output) noexcept {
+  return scene_registry().resolve(
+      handle, ObjectKind::project, output);
+}
+
 bool resolve_scene_layer(void* handle, ObjectSnapshot& output,
                          uint64_t required_project_id = 0) noexcept {
   if (handle == &g_layer)
@@ -668,6 +674,69 @@ int32_t __cdecl aegp_get_active_item(void** item) {
   *item = borrowed;
   return 0;
 }
+int32_t __cdecl aegp_get_num_projects(int32_t* count) {
+  if (!count || scene_registry().project_count() >
+                    static_cast<std::size_t>(INT32_MAX))
+    return 4;
+  *count = static_cast<int32_t>(scene_registry().project_count());
+  return 0;
+}
+int32_t __cdecl aegp_get_project_by_index(int32_t index, void** project) {
+  ObjectSnapshot resolved{};
+  if (!project || index < 0 ||
+      !scene_registry().project_by_index(
+          static_cast<std::size_t>(index), resolved))
+    return 4;
+  void* borrowed = borrow_scene_object(resolved.identity);
+  if (!borrowed) return 4;
+  *project = borrowed;
+  return 0;
+}
+int32_t __cdecl aegp_get_project_root_folder(void* project, void** folder) {
+  ObjectSnapshot resolved_project{};
+  ObjectSnapshot resolved_folder{};
+  if (!folder || !resolve_scene_project(project, resolved_project) ||
+      !scene_registry().first_child(
+          resolved_project.identity, resolved_folder) ||
+      resolved_folder.identity.kind != ObjectKind::folder)
+    return 4;
+  void* borrowed = borrow_scene_object(resolved_folder.identity);
+  if (!borrowed) return 4;
+  *folder = borrowed;
+  return 0;
+}
+int32_t __cdecl aegp_get_first_project_item(void* project, void** item) {
+  ObjectSnapshot resolved_project{};
+  ObjectSnapshot resolved_item{};
+  if (!item || !resolve_scene_project(project, resolved_project))
+    return 4;
+  *item = nullptr;
+  if (!scene_registry().first_project_item(
+          resolved_project.identity, resolved_item))
+    return 0;
+  void* borrowed = borrow_scene_object(resolved_item.identity);
+  if (!borrowed) return 4;
+  *item = borrowed;
+  return 0;
+}
+int32_t __cdecl aegp_get_next_project_item(
+    void* project, void* item, void** next_item) {
+  ObjectSnapshot resolved_project{};
+  ObjectSnapshot resolved_item{};
+  ObjectSnapshot resolved_next{};
+  if (!next_item || !resolve_scene_project(project, resolved_project) ||
+      !resolve_scene_item(
+          item, resolved_item, resolved_project.identity.project_id))
+    return 4;
+  *next_item = nullptr;
+  if (!scene_registry().next_project_item(
+          resolved_project.identity, resolved_item.identity, resolved_next))
+    return 0;
+  void* borrowed = borrow_scene_object(resolved_next.identity);
+  if (!borrowed) return 4;
+  *next_item = borrowed;
+  return 0;
+}
 int32_t __cdecl aegp_get_item_type(void* item, int16_t* item_type);
 AegpItemSuite g_aegp_item_suite{};
 
@@ -678,7 +747,7 @@ int32_t __cdecl aegp_get_item_type(void* item, int16_t* item_type) {
   switch (resolved.item_kind) {
     case ItemKind::folder: result = 1; break;
     case ItemKind::composition: result = 2; break;
-    case ItemKind::footage: result = 3; break;
+    case ItemKind::footage: result = 4; break;
     default: return 4;
   }
   ++g_aegp_item_type_calls;
@@ -801,8 +870,12 @@ int32_t __cdecl aegp_get_comp_layer_by_index(void* comp, int32_t index, void** l
 int32_t aegp_layer_index(void* layer) {
   if (layer == &g_layer) return 0;
   ObjectSnapshot resolved{};
-  return resolve_scene_layer(layer, resolved)
-      ? primary_layer_index(resolved) : -1;
+  if (!resolve_scene_layer(layer, resolved)) return -1;
+  const int32_t primary = primary_layer_index(resolved);
+  if (primary >= 0) return primary;
+  return state().dynamic_camera_live &&
+      resolved.identity == state().dynamic_camera_identity
+      ? resolved.local_index : -1;
 }
 int32_t __cdecl aegp_get_layer_to_world_xform(
     void* layer, const AegpTime* comp_time, AegpMatrix4* transform) {
@@ -958,6 +1031,124 @@ int32_t __cdecl aegp_get_layer_parent(void* layer, void** parent) {
   *parent = borrowed;
   return 0;
 }
+int32_t __cdecl aegp_set_layer_parent(void* layer, void* parent) {
+  ObjectSnapshot resolved_layer{};
+  ObjectSnapshot resolved_parent{};
+  if (!resolve_scene_layer(layer, resolved_layer) ||
+      (parent &&
+       !resolve_scene_layer(
+           parent, resolved_parent, resolved_layer.identity.project_id)))
+    return 4;
+  const int32_t layer_index = primary_layer_index(resolved_layer);
+  const int32_t parent_index = parent
+      ? primary_layer_index(resolved_parent) : -1;
+  if (layer_index < 0 || (parent && parent_index < 0))
+    return 4;
+  auto candidate = g_aegp_layer_parent_indices;
+  candidate[static_cast<std::size_t>(layer_index)] = parent_index;
+  int32_t cursor = parent_index;
+  for (std::size_t depth = 0; cursor >= 0 &&
+       depth <= candidate.size(); ++depth) {
+    if (cursor == layer_index) return 4;
+    if (static_cast<std::size_t>(cursor) >= candidate.size()) return 4;
+    cursor = candidate[static_cast<std::size_t>(cursor)];
+  }
+  if (cursor >= 0) return 4;
+  auto& registry = scene_registry();
+  aexcompat::scene_model::Registry::MutationCheckpoint checkpoint{};
+  if (!registry.capture_mutation_checkpoint(checkpoint)) return 4;
+  const auto parents_before = g_aegp_layer_parent_indices;
+  const uint32_t generation =
+      aexcompat::aegp_external_render_runtime::project_generation();
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      registry, resolved_layer.identity.project_id, generation);
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      generation,
+      [&]() noexcept {
+        if (!registry.set_parent_layer(
+                resolved_layer.identity,
+                parent ? resolved_parent.identity : Identity{}))
+          return false;
+        g_aegp_layer_parent_indices = candidate;
+        return true;
+      },
+      [&]() noexcept {
+        g_aegp_layer_parent_indices = parents_before;
+        return registry.restore_mutation_checkpoint(checkpoint);
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
+}
+int32_t __cdecl aegp_create_camera_in_comp(
+    const char16_t* name, AegpFloatPoint center, void* comp_handle,
+    void** camera) {
+  ObjectSnapshot resolved_comp{};
+  if (!name || !camera || !std::isfinite(center.x) ||
+      !std::isfinite(center.y) ||
+      !resolve_scene_comp(comp_handle, resolved_comp) ||
+      state().dynamic_camera_live ||
+      resolved_comp.identity.project_id != 1 ||
+      !scene_registry().can_create_children(resolved_comp.identity, 1, 1))
+    return 4;
+  std::size_t name_length = 0;
+  while (name_length < 47 && name[name_length] != 0) ++name_length;
+  if (name_length == 0 || name_length >= 47) return 4;
+  const std::u16string_view camera_name{name, name_length};
+  Identity camera_identity{};
+  void* published = nullptr;
+  const uint32_t generation =
+      aexcompat::aegp_external_render_runtime::project_generation();
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), resolved_comp.identity.project_id, generation);
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  if (!transaction.commit(
+          generation,
+          [&]() noexcept {
+            if (!scene_registry().create_child(
+                    ObjectKind::layer, resolved_comp.identity,
+                    static_cast<int32_t>(
+                        scene_registry().layer_count(resolved_comp.identity)),
+                    &state().dynamic_camera, camera_name,
+                    camera_identity))
+              return false;
+            published = borrow_scene_object(camera_identity);
+            if (!published) {
+              scene_registry().erase_tree(camera_identity);
+              return false;
+            }
+            state().dynamic_camera_live = true;
+            state().dynamic_camera_identity = camera_identity;
+            state().dynamic_camera_zoom = 800.0;
+            return true;
+          },
+          []() noexcept { bump_render_project_timestamp(); }))
+    return 4;
+  *camera = published;
+  return 0;
+}
+int32_t __cdecl aegp_delete_layer(void* layer) {
+  ObjectSnapshot resolved{};
+  if (!resolve_scene_layer(layer, resolved) ||
+      !state().dynamic_camera_live ||
+      resolved.identity != state().dynamic_camera_identity ||
+      (g_aegp_transform_stream.live &&
+       g_aegp_transform_stream.layer == layer))
+    return 4;
+  const uint32_t generation =
+      aexcompat::aegp_external_render_runtime::project_generation();
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), resolved.identity.project_id, generation);
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      generation,
+      [&]() noexcept {
+        if (!scene_registry().erase_tree(resolved.identity)) return false;
+        state().dynamic_camera_live = false;
+        state().dynamic_camera_identity = {};
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
+}
 int32_t __cdecl aegp_get_layer_from_id(void* comp, int32_t id, void** layer) {
   ObjectSnapshot resolved_comp{};
   ObjectSnapshot resolved_layer{};
@@ -1049,8 +1240,10 @@ int32_t __cdecl aegp_get_layer_transfer_mode(
   return 0;
 }
 int32_t __cdecl aegp_get_layer_object_type(void* layer, int32_t* type) {
-  if (aegp_layer_index(layer) < 0 || !type) return 4;
-  *type = 0;
+  ObjectSnapshot resolved{};
+  if (!type || !resolve_scene_layer(layer, resolved)) return 4;
+  *type = state().dynamic_camera_live &&
+      resolved.identity == state().dynamic_camera_identity ? 2 : 0;
   ++g_aegp_layer_attribute_calls;
   return 0;
 }
@@ -1572,9 +1765,16 @@ bool resolve_transform_stream(void* handle, ObjectSnapshot& resolved,
 int32_t __cdecl aegp_get_new_layer_stream(
     int32_t plugin_id, void* layer, int32_t selector, void** stream) {
   ObjectSnapshot layer_identity{};
+  const bool dynamic_camera =
+      resolve_scene_layer(layer, layer_identity) &&
+      state().dynamic_camera_live &&
+      layer_identity.identity == state().dynamic_camera_identity;
   if (plugin_id <= 0 || !resolve_scene_layer(layer, layer_identity) || !stream ||
       layer_identity.identity.project_id != 1 ||
-      !supported_transform_stream(selector) || g_aegp_transform_stream.live) return 4;
+      (!(dynamic_camera && selector == 11) &&
+       !supported_transform_stream(selector)) ||
+      g_aegp_transform_stream.live)
+    return 4;
   AegpTransformStream candidate{};
   candidate.selector = selector;
   candidate.layer = layer;
@@ -1582,7 +1782,8 @@ int32_t __cdecl aegp_get_new_layer_stream(
   candidate.live = true;
   candidate.value_live = false;
   candidate.owner_plugin_id = plugin_id;
-  const int32_t type = selector <= 2 ? 3 : 5;
+  const int32_t type = selector == 11 ? 5 :
+      (selector <= 2 ? 3 : 5);
   return publish_transform_stream(
       candidate, layer_identity.identity, plugin_id, type, false, stream)
       ? 0 : 4;
@@ -1592,7 +1793,7 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index(
   std::size_t instance_index = 0;
   const auto* instance = resolve_effect_instance(effect, plugin_id, &instance_index);
   if (plugin_id <= 0 || !instance ||
-      index < 1 || index > 4 || !stream || g_aegp_transform_stream.live) return 4;
+      index < 0 || index > 4 || !stream || g_aegp_transform_stream.live) return 4;
   ObjectSnapshot effect_identity{};
   if (!scene_registry().resolve_possessed(
           effect, ObjectKind::effect, plugin_id, effect_identity))
@@ -1606,8 +1807,8 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index(
   candidate.effect_instance_index = static_cast<uint32_t>(instance_index);
   candidate.effect_instance_generation = instance->generation;
   candidate.owner_plugin_id = plugin_id;
-  const int32_t type = index == 1 ? 5 :
-      (index == 2 ? 4 : (index == 3 ? 2 : 6));
+  const int32_t type = index == 0 ? 9 : (index == 1 ? 5 :
+      (index == 2 ? 4 : (index == 3 ? 2 : 6)));
   const bool keyframed = index == 1 && instance_index == 0;
   return publish_transform_stream(
       candidate, effect_identity.identity, plugin_id, type, keyframed,
@@ -1628,11 +1829,14 @@ bool effect_stream_parent_live() {
       instance.generation == g_aegp_transform_stream.effect_instance_generation;
 }
 int32_t __cdecl aegp_get_stream_type(void* stream, int32_t* type) {
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_stream_type(stream, type);
   ObjectSnapshot resolved{};
   if (!type || !resolve_transform_stream(stream, resolved))
     return 4;
   if (g_aegp_transform_stream.effect_param) {
     switch (g_aegp_transform_stream.selector) {
+      case 0: *type = 9; break;
       case 1: *type = 5; break;
       case 2: *type = 4; break;
       case 3: *type = 2; break;
@@ -1640,11 +1844,14 @@ int32_t __cdecl aegp_get_stream_type(void* stream, int32_t* type) {
       default: return 4;
     }
   } else {
-    *type = g_aegp_transform_stream.selector <= 2 ? 3 : 5;
+    *type = g_aegp_transform_stream.selector == 11 ? 5 :
+        (g_aegp_transform_stream.selector <= 2 ? 3 : 5);
   }
   return 0;
 }
 int32_t __cdecl aegp_get_stream_num_keyframes(void* stream, int32_t* count) {
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_stream_num_keyframes(stream, count);
   ObjectSnapshot resolved{};
   if (!count || !resolve_transform_stream(stream, resolved))
     return 4;
@@ -1669,6 +1876,10 @@ bool valid_amount_keyframe(void* stream, int32_t index) {
 }
 int32_t __cdecl aegp_get_keyframe_time(
     void* stream, int32_t index, int32_t time_mode, AegpTime* time) {
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_keyframe_time(
+        stream, index, static_cast<int16_t>(time_mode),
+        reinterpret_cast<aexcompat::l2_detail::HostTime*>(time));
   if (!valid_amount_keyframe(stream, index) || time_mode != 1 || !time) return 4;
   ObjectSnapshot key{};
   if (!scene_registry().snapshot(
@@ -1682,6 +1893,10 @@ int32_t __cdecl aegp_get_keyframe_time(
 }
 int32_t __cdecl aegp_get_new_keyframe_value(
     int32_t plugin_id, void* stream, int32_t index, AegpStreamValue* value) {
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_new_keyframe_value(
+        plugin_id, stream, index,
+        reinterpret_cast<aexcompat::l2_detail::StreamValue*>(value));
   if (plugin_id <= 0 || !valid_amount_keyframe(stream, index) || !value ||
       g_aegp_transform_stream.value_live) return 4;
   ObjectSnapshot stream_identity{};
@@ -1704,6 +1919,9 @@ int32_t __cdecl aegp_get_new_keyframe_value(
 }
 int32_t __cdecl aegp_get_keyframe_interpolation(
     void* stream, int32_t index, int32_t* in_type, int32_t* out_type) {
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_keyframe_interpolation(
+        stream, index, in_type, out_type);
   if (!valid_amount_keyframe(stream, index) || !in_type || !out_type) return 4;
   ObjectSnapshot key{};
   if (!scene_registry().snapshot(
@@ -1719,12 +1937,21 @@ int32_t __cdecl aegp_get_keyframe_interpolation(
 int32_t __cdecl aegp_get_new_stream_value(
     int32_t plugin_id, void* stream, int32_t, const AegpTime* time,
     uint8_t, AegpStreamValue* value) {
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_new_stream_value(
+        plugin_id, stream, 0,
+        reinterpret_cast<const aexcompat::l2_detail::HostTime*>(time), 0,
+        reinterpret_cast<aexcompat::l2_detail::StreamValue*>(value));
   ObjectSnapshot stream_identity{};
   if (plugin_id <= 0 ||
       !resolve_transform_stream(stream, stream_identity, plugin_id) ||
       g_aegp_transform_stream.value_live || !time ||
       time->scale == 0 || !value) return 4;
   Identity value_identity{};
+  if (g_aegp_transform_stream.effect_param &&
+      (g_aegp_transform_stream.selector < 0 ||
+       g_aegp_transform_stream.selector > 4))
+    return 4;
   if (!scene_registry().create_child(
           ObjectKind::value, stream_identity.identity, 0, value,
           u"Stream Value", value_identity))
@@ -1734,16 +1961,32 @@ int32_t __cdecl aegp_get_new_stream_value(
   double components[2]{};
   if (g_aegp_transform_stream.effect_param) {
     const int32_t selector = g_aegp_transform_stream.selector;
-    if (selector < 1 || selector > 4) return 4;
     const auto& instance =
         g_aegp_effect_instances[g_aegp_transform_stream.effect_instance_index];
-    std::memcpy(value->value.data(), instance.parameter_values[selector - 1].data(),
-                sizeof(instance.parameter_values[selector - 1]));
+    if (selector == 0) {
+      ObjectSnapshot input_layer{};
+      int32_t layer_id = 0;
+      if (!resolve_scene_layer(instance.layer, input_layer) ||
+          input_layer.identity.object_id > INT32_MAX) {
+        scene_registry().erase_tree(value_identity);
+        return 4;
+      }
+      layer_id = static_cast<int32_t>(input_layer.identity.object_id);
+      std::memcpy(
+          value->value.data(), &layer_id, sizeof(layer_id));
+    } else {
+      std::memcpy(
+          value->value.data(), instance.parameter_values[selector - 1].data(),
+          sizeof(instance.parameter_values[selector - 1]));
+    }
     ++g_aegp_effect_param_value_calls;
   } else switch (g_aegp_transform_stream.selector) {
     case 1: components[0] = 320.0; components[1] = 180.0; break;
     case 2: components[0] = 100.0; components[1] = 100.0; break;
     case 4: components[0] = 100.0; break;
+    case 11:
+      components[0] = state().dynamic_camera_zoom;
+      break;
     default: break;
   }
   if (!g_aegp_transform_stream.effect_param)
@@ -1765,6 +2008,7 @@ int32_t __cdecl aegp_get_stream_name(
   *name_handle = nullptr;
   std::u16string name;
   switch (g_aegp_transform_stream.selector) {
+    case 0: name = u"Input"; break;
     case 1: name = u"Amount"; break;
     case 2: name = u"Center"; break;
     case 3: name = u"Vector"; break;
@@ -1806,6 +2050,9 @@ int32_t __cdecl aegp_set_effect_stream_value(
       []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
 int32_t __cdecl aegp_dispose_stream_value(AegpStreamValue* value) {
+  if (value && aexcompat::l2_detail::find_stream(value->stream))
+    return aexcompat::l2_detail::dispose_stream_value(
+        reinterpret_cast<aexcompat::l2_detail::StreamValue*>(value));
   ObjectSnapshot stream_identity{};
   ObjectSnapshot value_identity{};
   ObjectSnapshot value_owner{};
@@ -1830,6 +2077,8 @@ int32_t __cdecl aegp_dispose_stream_value(AegpStreamValue* value) {
   return 0;
 }
 int32_t __cdecl aegp_dispose_stream(void* stream) {
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::dispose_stream(stream);
   ObjectSnapshot resolved{};
   if (!resolve_transform_stream(stream, resolved) ||
       g_aegp_transform_stream.value_live ||
@@ -1841,6 +2090,7 @@ int32_t __cdecl aegp_dispose_stream(void* stream) {
   return 0;
 }
 
+std::array<void*, 14> g_aegp_project_suite6{};
 std::array<void*, 41> g_aegp_comp_suite10{};
 std::array<void*, 28> g_aegp_comp_suite4{};
 std::array<void*, 44> g_aegp_comp_suite11{};
@@ -1854,6 +2104,7 @@ std::array<void*, 22> g_aegp_effect_suite4{};
 std::array<void*, 22> g_aegp_stream_suite2{};
 std::array<void*, 23> g_aegp_stream_suite6{};
 std::array<void*, 22> g_aegp_keyframe_suite5{};
+static_assert(sizeof(g_aegp_project_suite6) == 14 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite10) == 41 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite4) == 28 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite11) == 352);
@@ -1877,10 +2128,27 @@ SceneSuiteAcquireResult scene_acquire_suite(
   };
   const auto& factory = scene_context()->hooks.suite_factory;
 
+  if (named("AEGP Proj Suite") && version == 9 &&
+      state().comp_idle_roundtrip_mode) {
+    g_aegp_project_suite6 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_proj_9, 14>();
+    g_aegp_project_suite6[0] =
+        reinterpret_cast<void*>(&aegp_get_num_projects);
+    g_aegp_project_suite6[1] =
+        reinterpret_cast<void*>(&aegp_get_project_by_index);
+    g_aegp_project_suite6[4] =
+        reinterpret_cast<void*>(&aegp_get_project_root_folder);
+    *suite = g_aegp_project_suite6.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
   if (named("AEGP Item Suite") && version == 14 &&
       (state().active_idle_roundtrip_mode || state().comp_idle_roundtrip_mode)) {
     std::copy_n(unsupported_suite_slots<UnsupportedSuiteId::aegp_item_14, 26>().data(),
                 26, reinterpret_cast<void**>(&g_aegp_item_suite));
+    reinterpret_cast<void**>(&g_aegp_item_suite)[0] =
+        reinterpret_cast<void*>(&aegp_get_first_project_item);
+    reinterpret_cast<void**>(&g_aegp_item_suite)[1] =
+        reinterpret_cast<void*>(&aegp_get_next_project_item);
     g_aegp_item_suite.get_active_item = &aegp_get_active_item;
     g_aegp_item_suite.get_item_type = &aegp_get_item_type;
     g_aegp_item_suite.after_get_item_type[1] = reinterpret_cast<void*>(&aegp_get_item_name);
@@ -1911,6 +2179,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
         unsupported_suite_slots<UnsupportedSuiteId::aegp_comp_25, 44>();
     g_aegp_comp_suite11[0] = reinterpret_cast<void*>(&aegp_get_comp_from_item);
     g_aegp_comp_suite11[11] = reinterpret_cast<void*>(&aegp_get_comp_framerate);
+    g_aegp_comp_suite11[23] =
+        reinterpret_cast<void*>(&aegp_create_camera_in_comp);
     g_aegp_comp_suite11[26] = reinterpret_cast<void*>(&aegp_get_comp_selection);
     g_aegp_comp_suite11[37] = reinterpret_cast<void*>(&aegp_get_comp_frame_duration);
     *suite = g_aegp_comp_suite11.data();
@@ -1960,6 +2230,10 @@ SceneSuiteAcquireResult scene_acquire_suite(
         g_aegp_layer_suite9[28] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
         g_aegp_layer_suite9[37] = reinterpret_cast<void*>(&aegp_get_layer_id);
         g_aegp_layer_suite9[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
+        g_aegp_layer_suite9[42] =
+            reinterpret_cast<void*>(&aegp_set_layer_parent);
+        g_aegp_layer_suite9[43] =
+            reinterpret_cast<void*>(&aegp_delete_layer);
         g_aegp_layer_suite9[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
       }
       *suite = g_aegp_layer_suite9.data();
@@ -2066,6 +2340,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_stream_suite6[3] = reinterpret_cast<void*>(&aegp_get_new_layer_stream);
     g_aegp_stream_suite6[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v6);
     g_aegp_stream_suite6[5] = reinterpret_cast<void*>(&aegp_get_new_effect_stream_by_index);
+    g_aegp_stream_suite6[6] =
+        reinterpret_cast<void*>(&aexcompat::l2_detail::get_new_mask_stream);
     g_aegp_stream_suite6[7] = reinterpret_cast<void*>(&aegp_dispose_stream);
     g_aegp_stream_suite6[8] = reinterpret_cast<void*>(&aegp_get_stream_name);
     g_aegp_stream_suite6[12] = reinterpret_cast<void*>(&aegp_get_stream_type);

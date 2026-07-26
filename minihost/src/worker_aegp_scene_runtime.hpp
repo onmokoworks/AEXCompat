@@ -139,6 +139,10 @@ struct SceneRuntimeState {
   AegpSceneObject composition{0x434f4d50};
   std::array<AegpSceneObject, 3> layers{{
       {0x4c415930}, {0x4c415931}, {0x4c415932}}};
+  AegpSceneObject dynamic_camera{0x43414d52};
+  bool dynamic_camera_live{};
+  scene_model::Identity dynamic_camera_identity{};
+  double dynamic_camera_zoom{800.0};
   AegpSceneObject effect{0x45464643};
   int32_t scene_frame{1};
   bool effect_live{};

@@ -96,6 +96,7 @@ struct UnsupportedSuiteDescriptor {
 UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     UnsupportedSuiteId suite) noexcept {
   switch (suite) {
+    case UnsupportedSuiteId::aegp_proj_9: return {"AEGP Proj Suite", 9};
     case UnsupportedSuiteId::aegp_item_14: return {"AEGP Item Suite", 14};
     case UnsupportedSuiteId::aegp_item_10: return {"AEGP Item Suite", 10};
     case UnsupportedSuiteId::aegp_comp_25: return {"AEGP Comp Suite", 25};
@@ -273,6 +274,9 @@ std::string SuiteRegistry::live_summary() const {
 }
 suite_runtime::SuiteLeaseSnapshot SuiteRegistry::snapshot() const {
   return lease_tracker_.snapshot();
+}
+uint32_t SuiteRegistry::force_release_all() noexcept {
+  return lease_tracker_.force_release_all();
 }
 
 std::string SuiteRegistry::missing_suites_report_json() const {

@@ -6,10 +6,13 @@ AEXCompat. It contains no host detection. The host-independent input is the
 
 The probe enumerates public project/item/comp/layer/effect/stream identities,
 records effect and stream order, observes parent/camera/zoom and keyframe
-metadata, attempts public batch-keyframe cancel/commit, and verifies that a
-stream borrowed from a duplicated effect is rejected after that owner is
-deleted. Every unavailable suite or operation is emitted with suite, version,
-slot, operation, and error. Pixel equality is deliberately outside the oracle.
+metadata including spatial tangents, exercises public batch-keyframe
+cancel/commit, and verifies that a stream borrowed from a duplicated effect is
+rejected after that owner is deleted. Effect parameter stream index zero is
+verified as the public input-layer stream and matched to the layer ID. Every
+unavailable suite or operation is emitted with suite, version, slot, operation,
+and error. Pixel equality is deliberately outside the oracle.
 
-`fixture.jsx` authors the real-AE scene. It uses only ExtendScript project APIs
-and does not alter the probe behavior.
+`fixture.jsx` authors multiple compositions, parented 3D layers, masks, effects,
+and an animated camera zoom for real-AE execution. It uses only ExtendScript
+project APIs and does not alter the probe behavior.

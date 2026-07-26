@@ -2,18 +2,20 @@
   "schema_version": 1,
   "evidence_kind": "issue26-public-aegp-scene",
   "target": "aexcompat",
-  "recorded_utc": "2026-07-26T21:32:02.000439Z",
-  "status": "partial",
+  "recorded_utc": "2026-07-26T22:32:41.508892Z",
+  "status": "passed",
   "execution": {
     "command": [
       "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
       "--aegp-comp-idle-roundtrip",
       "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-scene-probe-build\\Release\\issue26_scene_probe.aex",
-      "3d69ca85ffda16c1f87443bb8d5491f7cac09166cc958b583fcd40b772ed0e57"
+      "578ef417db7ad4ed589dbf2c46a2d132abe9e5c69c1783abe272ecd735476437"
     ],
     "exit_code": 0,
-    "stdout_sha256": "0e7544a93a48427e32f9a317804cbacd2a2e4e78110865dcd94f4d0e766f9e38",
-    "stderr_sha256": "fd221db12eb650ce891ee48f61fb798ce3d1f6bc238e44a93ec51ddd96f81842",
+    "stdout": "{\"schema_version\":1,\"stage\":\"aegp_init\",\"status\":\"event_completed\",\"identity_verified\":true,\"entrypoint\":\"EntryPointFunc\",\"driver_major_version\":24,\"driver_minor_version\":0,\"plugin_id\":1,\"init_error\":0,\"entry_invoked\":true,\"entry_fault\":\"none\",\"entry_exception_code\":0,\"forced_suite_releases\":0,\"boundary_regression_mode\":false,\"boundary_regression_passed\":false,\"global_refcon_nonnull\":true,\"commands_created\":1,\"menu_commands_inserted\":1,\"command_hooks_registered\":1,\"update_menu_hooks_registered\":1,\"idle_hooks_registered\":1,\"death_hooks_registered\":1,\"death_hooks_invoked\":1,\"death_error\":0,\"event_requested\":\"comp_idle_roundtrip\",\"event_error\":0,\"hooks_invoked\":3,\"menu_hooks_invoked\":4,\"scene_first_observed_frame\":-1,\"scene_last_observed_frame\":-1,\"scene_current_frame\":3,\"scene_layer_count\":3,\"scene_selected_layer_count\":2,\"idle_max_sleep\":0,\"command_hooks_invoked\":2,\"command_handled_count\":2,\"command_enable_calls\":0,\"command_check_calls\":0,\"command_checked_true_calls\":0,\"command_checked_false_calls\":0,\"item_current_time_calls\":0,\"item_set_current_time_calls\":0,\"item_last_set_time_value\":-1,\"item_last_set_time_scale\":0,\"item_name_calls\":0,\"item_duration_calls\":0,\"comp_from_item_calls\":1,\"comp_framerate_calls\":0,\"layer_count_calls\":1,\"layer_by_index_calls\":3,\"layer_source_item_calls\":3,\"layer_id_calls\":3,\"layer_attribute_calls\":4,\"layer_trim_set_calls\":0,\"layer_flag_set_calls\":0,\"layer_1_flags\":5,\"layer_2_flags\":5,\"layer_3_flags\":5,\"layer_1_in_point_value\":0,\"layer_1_in_point_scale\":30,\"layer_1_duration_value\":300,\"layer_1_duration_scale\":30,\"layer_name_calls\":0,\"effect_count_calls\":5,\"effect_acquires\":3,\"effect_disposes\":3,\"effect_metadata_calls\":3,\"effect_lifetimes_balanced\":true,\"stream_acquires\":7,\"stream_disposes\":7,\"stream_value_acquires\":1,\"stream_value_disposes\":1,\"stream_sampled_selector_mask\":0,\"stream_lifetimes_balanced\":true,\"effect_param_name_calls\":0,\"effect_param_value_calls\":1,\"effect_param_union_calls\":0,\"keyframe_count_calls\":5,\"keyframed_stream_reports\":0,\"keyframe_time_calls\":0,\"keyframe_value_calls\":0,\"keyframe_interpolation_calls\":0,\"keyframe_pipe_connected\":false,\"keyframe_pipe_request_sent\":false,\"keyframe_pipe_response_received\":false,\"keyframe_pipe_response_valid\":false,\"keyframe_pipe_response_bytes\":0,\"seek_pipe_connected\":false,\"seek_pipe_request_sent\":false,\"seek_pipe_ack_received\":false,\"seek_pipe_ack_valid\":false,\"trim_pipe_connected\":false,\"trim_pipe_request_sent\":false,\"trim_pipe_ack_received\":false,\"trim_pipe_ack_valid\":false,\"switch_pipe_connected\":false,\"switch_pipe_request_sent\":false,\"switch_pipe_ack_received\":false,\"switch_pipe_ack_valid\":false,\"collection_creates\":0,\"collection_disposes\":0,\"collection_item_reads\":0,\"collection_lifetimes_balanced\":true,\"aegp_memory_created\":0,\"aegp_memory_freed\":0,\"aegp_memory_lifetimes_balanced\":true,\"suite_acquires\":10,\"suite_releases\":10,\"live_suite_reference_count\":0,\"live_suite_leases\":\"\",\"suite_cache_reclaimed_at_process_exit\":false,\"suite_leases_balanced\":true,\"receipts_created\":0,\"receipts_checked_in\":0,\"live_receipts\":0,\"render_performed\":false,\"module_audit\":{\"schema\":1,\"status\":\"not_required\",\"post_load\":{\"status\":\"not_required\",\"unknown_count\":0,\"worker\":[],\"plugin\":[],\"system32\":[],\"winsxs\":[],\"driverstore\":[],\"policy\":[],\"unknown\":[]},\"pre_unload\":{\"status\":\"not_required\",\"unknown_count\":0,\"worker\":[],\"plugin\":[],\"system32\":[],\"winsxs\":[],\"driverstore\":[],\"policy\":[],\"unknown\":[]},\"observed_union\":{\"status\":\"not_required\",\"unknown_count\":0,\"worker\":[],\"plugin\":[],\"system32\":[],\"winsxs\":[],\"driverstore\":[],\"policy\":[],\"unknown\":[]},\"phase_count\":0,\"unknown_count\":0}}\n",
+    "stderr": "",
+    "stdout_sha256": "9ed150e8256338dcd1ff431c8c84388dd5bfa1bb35ec8c1879f73a0c432fc1ea",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "blocker": null
   },
   "environment": {
@@ -38,25 +40,27 @@
   "artifacts": {
     "probe": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-scene-probe-build\\Release\\issue26_scene_probe.aex",
-      "sha256": "3d69ca85ffda16c1f87443bb8d5491f7cac09166cc958b583fcd40b772ed0e57",
-      "size_bytes": 55296
+      "sha256": "578ef417db7ad4ed589dbf2c46a2d132abe9e5c69c1783abe272ecd735476437",
+      "size_bytes": 55808
     },
     "fixture": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\instruments\\aex\\issue26-scene-probe\\fixture.jsx",
-      "sha256": "f06e418317d8fa4ce39b506b1fa72261d787deb6acb309b05ae84886c8939b7f",
-      "size_bytes": 3117
+      "sha256": "6bc8c7cea2c0950cc916f8f68d6dc4dd0261477d39430d709be0b41f7b64286b",
+      "size_bytes": 3784
     },
     "worker": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
-      "sha256": "c46eb83acce7a26df614172dfdab9c0d0c0e3642262c32e9eebf955b60ddf940",
-      "size_bytes": 1807360
+      "sha256": "a027772e8951c477228a4ac60d245c96900e8f69a94be8889096f3ae04057486",
+      "size_bytes": 1838592
     },
-    "sample": null
+    "sample": null,
+    "build_receipt": null,
+    "fixture_metadata": null
   },
   "probe_report": {
     "schema_version": 1,
     "probe": "issue26-public-aegp-scene",
-    "status": "partial",
+    "status": "passed",
     "host_input": {
       "driver_major": 24,
       "driver_minor": 0
@@ -65,64 +69,104 @@
     "pixel_equality_required": false,
     "identities": [
       {
-        "kind": "comp",
-        "token": "48c88b1869433e12",
-        "stable_id": 1001,
+        "kind": "project",
+        "token": "2abec82d70623a9e",
+        "stable_id": 0,
         "owner_id": -1,
         "ordinal": 0,
+        "subtype": 0
+      },
+      {
+        "kind": "folder",
+        "token": "782594bd73d1a666",
+        "stable_id": 100,
+        "owner_id": 0,
+        "ordinal": 0,
+        "subtype": 1
+      },
+      {
+        "kind": "folder",
+        "token": "b101e07b5f0fee8e",
+        "stable_id": 101,
+        "owner_id": 0,
+        "ordinal": 1,
+        "subtype": 1
+      },
+      {
+        "kind": "footage",
+        "token": "b3a55107bd4ae116",
+        "stable_id": 200,
+        "owner_id": 0,
+        "ordinal": 2,
+        "subtype": 4
+      },
+      {
+        "kind": "comp",
+        "token": "722adadc1a5c257e",
+        "stable_id": 1001,
+        "owner_id": 0,
+        "ordinal": 3,
+        "subtype": 2
+      },
+      {
+        "kind": "comp",
+        "token": "b20c0cdaefebcbc6",
+        "stable_id": 1002,
+        "owner_id": 0,
+        "ordinal": 4,
+        "subtype": 2
+      },
+      {
+        "kind": "project",
+        "token": "f86df32a0909d96e",
+        "stable_id": 1,
+        "owner_id": -1,
+        "ordinal": 1,
+        "subtype": 0
+      },
+      {
+        "kind": "folder",
+        "token": "63fdd660e3dff3f6",
+        "stable_id": 1100,
+        "owner_id": 1,
+        "ordinal": 0,
+        "subtype": 1
+      },
+      {
+        "kind": "comp",
+        "token": "f8d354ab90ebde",
+        "stable_id": 1101,
+        "owner_id": 1,
+        "ordinal": 1,
         "subtype": 2
       },
       {
         "kind": "layer",
-        "token": "84c6e96651a90d62",
+        "token": "5d7f518365c9bcce",
         "stable_id": 2001,
         "owner_id": 1001,
         "ordinal": 0,
         "subtype": 0
       },
       {
-        "kind": "comp",
-        "token": "2c349d5b16345b8a",
-        "stable_id": 1002,
-        "owner_id": 1001,
-        "ordinal": 0,
-        "subtype": 2
-      },
-      {
         "kind": "layer",
-        "token": "90349dc7133d28f2",
+        "token": "20438f1cea3fcb56",
         "stable_id": 2002,
         "owner_id": 1001,
         "ordinal": 1,
         "subtype": 0
       },
       {
-        "kind": "item",
-        "token": "ccf93d85418ef89a",
-        "stable_id": 200,
-        "owner_id": 1001,
-        "ordinal": 1,
-        "subtype": 3
-      },
-      {
         "kind": "layer",
-        "token": "2799d42e4a5e5ac2",
+        "token": "4864e603558ad6be",
         "stable_id": 2003,
         "owner_id": 1001,
         "ordinal": 2,
         "subtype": 0
       },
       {
-        "kind": "item",
-        "token": "ccf93d85418ef89a",
-        "stable_id": 200,
-        "owner_id": 1001,
-        "ordinal": 2,
-        "subtype": 3
-      },
-      {
         "kind": "effect",
-        "token": "bbe02dbfe73d6cd2",
+        "token": "c6a221b2bfda31e",
         "stable_id": 3001,
         "owner_id": 2001,
         "ordinal": 0,
@@ -131,114 +175,78 @@
     ],
     "streams": [
       {
-        "token": "e233e5256cc6ef7a",
-        "owner": "bbe02dbfe73d6cd2",
+        "token": "914143daa7805ee6",
+        "owner": "c6a221b2bfda31e",
+        "ordinal": 0,
+        "type": 9,
+        "keyframes": 0
+      },
+      {
+        "token": "bf75a044fe37c90e",
+        "owner": "c6a221b2bfda31e",
         "ordinal": 1,
         "type": 5,
         "keyframes": 0
       },
       {
-        "token": "550205b337fcf522",
-        "owner": "bbe02dbfe73d6cd2",
+        "token": "9550aaf578e64996",
+        "owner": "c6a221b2bfda31e",
         "ordinal": 2,
         "type": 4,
         "keyframes": 0
       },
       {
-        "token": "cc14a5de77bafc4a",
-        "owner": "bbe02dbfe73d6cd2",
+        "token": "a0cb2bab6eb60c5",
+        "owner": "c6a221b2bfda31e",
         "ordinal": 3,
         "type": 2,
         "keyframes": 0
       },
       {
-        "token": "ac4ccabb7d0b87b2",
-        "owner": "bbe02dbfe73d6cd2",
+        "token": "4c151fa3d10de42d",
+        "owner": "c6a221b2bfda31e",
         "ordinal": 4,
         "type": 6,
         "keyframes": 0
       }
     ],
     "coverage": {
-      "identity_enumeration": false,
+      "identity_enumeration": true,
       "effect_order": {
         "observed": true,
         "total": true
       },
       "stream_metadata": true,
       "parent_camera_zoom": {
-        "parent": false,
-        "camera": false,
-        "zoom": false
+        "parent": true,
+        "camera": true,
+        "zoom": true
       },
       "keyframes": {
-        "interpolation": false,
-        "ease": false,
-        "spatial_tangents": false
+        "interpolation": true,
+        "ease": true,
+        "spatial_tangents": true
       },
       "transaction": {
-        "cancel_observed": false,
-        "cancel_unchanged": false,
-        "commit_observed": false,
-        "commit_incremented": false,
+        "cancel_observed": true,
+        "cancel_unchanged": true,
+        "commit_observed": true,
+        "commit_incremented": true,
         "before": 0,
-        "after_cancel": -1,
-        "after_commit": -1
+        "after_cancel": 0,
+        "after_commit": 1
       },
       "generation": {
         "public_project_generation": "not_exposed",
         "stale_owner_rejected": true
       }
     },
-    "unsupported_slots": [
-      {
-        "suite": "AEGP Proj Suite",
-        "version": 9,
-        "slot": -1,
-        "operation": "AcquireSuite",
-        "error": 1
-      },
-      {
-        "suite": "AEGP Layer Suite",
-        "version": 15,
-        "slot": 42,
-        "operation": "AEGP_SetLayerParent(fixture)",
-        "error": 4
-      },
-      {
-        "suite": "AEGP Comp Suite",
-        "version": 25,
-        "slot": 23,
-        "operation": "AEGP_CreateCameraInComp(fixture)",
-        "error": 4
-      },
-      {
-        "suite": "AEGP Stream Suite",
-        "version": 11,
-        "slot": 5,
-        "operation": "AEGP_GetNewEffectStreamByIndex",
-        "error": 4
-      },
-      {
-        "suite": "AEGP Keyframe Suite",
-        "version": 5,
-        "slot": 16,
-        "operation": "batch_cancel",
-        "error": 4
-      },
-      {
-        "suite": "AEGP Keyframe Suite",
-        "version": 5,
-        "slot": 16,
-        "operation": "batch_commit",
-        "error": 4
-      }
-    ],
+    "unsupported_slots": [],
     "cleanup": {
-      "suite_acquires": 6,
-      "suite_releases": 6,
-      "stream_acquires": 6,
-      "stream_releases": 5,
+      "suite_acquires": 8,
+      "suite_releases": 8,
+      "stream_acquires": 8,
+      "stream_releases": 7,
       "effect_acquires": 3,
       "effect_releases": 3,
       "invalidated_children": 1,
@@ -254,60 +262,24 @@
     "event_requested": "comp_idle_roundtrip",
     "init_error": 0,
     "event_error": 0,
+    "entry_invoked": true,
+    "entry_fault": "none",
+    "entry_exception_code": 0,
+    "forced_suite_releases": 0,
+    "boundary_regression_mode": false,
+    "boundary_regression_passed": false,
     "effect_lifetimes_balanced": true,
     "stream_lifetimes_balanced": true,
     "suite_leases_balanced": true
   },
+  "fixture_report": null,
   "sample_report": null,
-  "unsupported_slots": [
-    {
-      "suite": "AEGP Proj Suite",
-      "version": 9,
-      "slot": -1,
-      "operation": "AcquireSuite",
-      "error": 1
-    },
-    {
-      "suite": "AEGP Layer Suite",
-      "version": 15,
-      "slot": 42,
-      "operation": "AEGP_SetLayerParent(fixture)",
-      "error": 4
-    },
-    {
-      "suite": "AEGP Comp Suite",
-      "version": 25,
-      "slot": 23,
-      "operation": "AEGP_CreateCameraInComp(fixture)",
-      "error": 4
-    },
-    {
-      "suite": "AEGP Stream Suite",
-      "version": 11,
-      "slot": 5,
-      "operation": "AEGP_GetNewEffectStreamByIndex",
-      "error": 4
-    },
-    {
-      "suite": "AEGP Keyframe Suite",
-      "version": 5,
-      "slot": 16,
-      "operation": "batch_cancel",
-      "error": 4
-    },
-    {
-      "suite": "AEGP Keyframe Suite",
-      "version": 5,
-      "slot": 16,
-      "operation": "batch_commit",
-      "error": 4
-    }
-  ],
+  "unsupported_slots": [],
   "cleanup": {
-    "suite_acquires": 6,
-    "suite_releases": 6,
-    "stream_acquires": 6,
-    "stream_releases": 5,
+    "suite_acquires": 8,
+    "suite_releases": 8,
+    "stream_acquires": 8,
+    "stream_releases": 7,
     "effect_acquires": 3,
     "effect_releases": 3,
     "invalidated_children": 1,

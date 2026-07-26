@@ -3341,6 +3341,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     g_user_changed_param_requested = invocation.user_changed_param_requested;
     g_user_changed_parameters = std::move(invocation.user_changed_parameters);
   }
+  if (g_aegp_comp_idle_roundtrip_mode) {
+    aexcompat::mask_runtime::set_model_enabled(true);
+    if (!configure_mask_scene("rectangle")) return 4;
+  }
   if (!g_cluster_manifest_path.empty())
     invocation.cluster_manifest_path = g_cluster_manifest_path;
   // Discovery session (closure-session design §4.2): no plug-in is admitted
@@ -3429,7 +3433,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     const bool module_audit_ok = session.shutdown_before_report();
     module = nullptr;
     const bool passed = emit_aegp_init_completion_report(
-        {aegp_init.init_error, aegp_init.event_error, aegp_init.death_error,
+        {aegp_init.init_error, aegp_init.entry_fault,
+         aegp_init.entry_exception_code, aegp_init.entry_invoked,
+         aegp_init.forced_suite_releases,
+         invocation.aegp_boundary_regression_mode,
+         aegp_init.event_error, aegp_init.death_error,
          aegp_init.global_refcon != nullptr, aegp_init.hooks_invoked,
          aegp_init.menu_hooks_invoked, aegp_init.death_hooks_invoked,
          aegp_init.command_hooks_invoked, aegp_init.command_handled_count,

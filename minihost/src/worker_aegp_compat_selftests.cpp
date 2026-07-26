@@ -1601,6 +1601,39 @@ bool verify_aegp_scene_mutation_transactions() {
       aexcompat::aegp_external_render_runtime::project_generation() ==
           generation;
 
+  void* rollback_transaction = nullptr;
+  int32_t rollback_first_index = -1;
+  int32_t rollback_second_index = -1;
+  const HostTime rollback_first_time{61, 30};
+  const HostTime rollback_second_time{62, 30};
+  ok = ok && start_add(dynamic_outline, &rollback_transaction) == 0 &&
+      add_key(rollback_transaction, 1, &rollback_first_time,
+              &rollback_first_index) == 0 &&
+      add_key(rollback_transaction, 1, &rollback_second_time,
+              &rollback_second_index) == 0;
+  const uint64_t scene_before_rollback = mask_scene_fingerprint();
+  const uint64_t registry_before_rollback = registry.fingerprint();
+  const uint64_t handles_before_rollback =
+      registry.handle_table_fingerprint();
+  const auto diagnostics_before_rollback =
+      aexcompat::scene_transaction::diagnostics();
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  inject_keyframe_apply_failure_after(1);
+  ok = ok && end_add(1, rollback_transaction) == 4 &&
+      mask_scene_fingerprint() == scene_before_rollback &&
+      registry.fingerprint() == registry_before_rollback &&
+      registry.handle_table_fingerprint() == handles_before_rollback &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation &&
+      g_add_keyframe_transactions.size() == transactions_before_wrong_kind &&
+      aexcompat::scene_transaction::diagnostics().rolled_back ==
+          diagnostics_before_rollback.rolled_back + 1 &&
+      aexcompat::scene_transaction::diagnostics().rollback_failures ==
+          diagnostics_before_rollback.rollback_failures &&
+      add_key(rollback_transaction, 1, &rollback_first_time,
+              &rollback_first_index) == 4 &&
+      end_add(1, rollback_transaction) == 4;
+
   uint32_t dynamic_flags = 0;
   generation = aexcompat::aegp_external_render_runtime::project_generation();
   const uint64_t dynamic_before_failure = registry.fingerprint();

@@ -1,3 +1,4 @@
+import copy
 import json
 import subprocess
 import sys
@@ -17,6 +18,7 @@ PROBE = (
 )
 FIXTURE = PROBE.with_name("fixture.jsx")
 TOOL = ROOT / "tools" / "issue26_scene_probe_evidence.py"
+REAL_RUNNER = ROOT / "tools" / "run-issue26-scene-probe-real-ae.ps1"
 CORPUS = ROOT / "corpus" / "issue26-scene-probe"
 
 
@@ -43,6 +45,7 @@ def test_issue26_evidence_schema_is_strict_and_valid():
     assert schema["$defs"]["probe_report"]["additionalProperties"] is False
     assert schema["$defs"]["coverage"]["additionalProperties"] is False
     assert schema["$defs"]["cleanup"]["additionalProperties"] is False
+    assert schema["$defs"]["fixture_report"]["additionalProperties"] is False
 
 
 def test_probe_is_host_neutral_and_uses_only_public_aegp_surfaces():
@@ -76,10 +79,14 @@ def test_fixture_authors_required_structural_scene():
     for marker in (
         "items.addFolder",
         "items.addComp",
+        '"Issue26 Child Comp"',
+        '"Issue26 Child Footage"',
         "layers.addSolid",
         "layers.addNull",
         "layers.addCamera",
         "solid.parent = parent",
+        "zoom.setValueAtTime(0.0, 700)",
+        "zoom.setValueAtTime(1.0, 900)",
         '"ADBE Slider Control"',
         '"ADBE Easy Levels"',
         '"ADBE Mask Atom"',
@@ -116,17 +123,31 @@ def test_corpus_is_strict_schema_valid_and_derived():
         "sdk-projector-aexcompat.json",
         "sdk-resizer-aexcompat.json",
     ]
+    non_real_records = [
+        path
+        for path in records
+        if path.name != "after-effects-26.3-blocked.json"
+    ]
     completed = subprocess.run(
-        [sys.executable, str(TOOL), "validate", *map(str, records)],
+        [sys.executable, str(TOOL), "validate", *map(str, non_real_records)],
         cwd=ROOT,
         text=True,
         capture_output=True,
         check=False,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
+    blocked = subprocess.run(
+        [sys.executable, str(TOOL), "validate", *map(str, records)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert blocked.returncode != 0
+    assert "status=blocked" in blocked.stderr
     by_target = {strict_load(path)["target"]: strict_load(path) for path in records}
     aexcompat = by_target["aexcompat"]
-    assert aexcompat["status"] in {"passed", "partial"}
+    assert aexcompat["status"] == "passed"
     assert aexcompat["cleanup"]["balanced"] is True
     assert aexcompat["probe_report"]["coverage"]["effect_order"] == {
         "observed": True,
@@ -139,19 +160,267 @@ def test_corpus_is_strict_schema_valid_and_derived():
         ]
         is True
     )
-    operations = {
-        value["operation"]
-        for value in aexcompat["probe_report"]["unsupported_slots"]
-    }
-    assert "AEGP_SetLayerParent(fixture)" in operations
-    assert "AEGP_CreateCameraInComp(fixture)" in operations
+    assert (
+        aexcompat["probe_report"]["coverage"]["keyframes"][
+            "spatial_tangents"
+        ]
+        is True
+    )
+    assert aexcompat["unsupported_slots"] == []
     assert aexcompat["host_report"]["effect_lifetimes_balanced"] is True
     assert aexcompat["host_report"]["stream_lifetimes_balanced"] is True
     assert aexcompat["host_report"]["suite_leases_balanced"] is True
     real = by_target["after_effects"]
-    assert real["status"] in {"passed", "partial", "blocked"}
-    if real["status"] == "blocked":
-        assert real["execution"]["blocker"] is not None
-        assert real["probe_report"] is None
+    assert real["status"] == "blocked"
+    assert real["execution"]["blocker"] is not None
+    assert real["probe_report"] is None
+    projector = by_target["sdk_projector_aexcompat"]
+    assert projector["sample_report"]["classification"] == (
+        "guarded_initialization_failure"
+    )
+    assert projector["host_report"]["status"] == "initialization_failed"
+    assert projector["host_report"]["boundary_regression_passed"] is True
+    assert projector["host_report"]["forced_suite_releases"] >= 1
+    assert projector["execution"]["exit_code"] == 0
+    assert "0xC0000409" not in (
+        projector["execution"]["stdout"] + projector["execution"]["stderr"]
+    )
+    assert "suite_acquire_failed" in projector["execution"]["stderr"]
     for target in ("sdk_projector_aexcompat", "sdk_resizer_aexcompat"):
-        assert by_target[target]["sample_report"]["sdk_source_unchanged"] is True
+        record = by_target[target]
+        assert record["sample_report"]["sdk_source_unchanged"] is True
+        assert record["sample_report"]["build_receipt_sha256"] == (
+            record["artifacts"]["build_receipt"]["sha256"]
+        )
+        assert record["execution"]["stdout"]
+        assert record["execution"]["stdout_sha256"]
+
+
+def test_readiness_validator_rejects_semantically_incomplete_records(
+    tmp_path: Path,
+):
+    source = strict_load(CORPUS / "aexcompat.json")
+
+    cases = []
+    partial = copy.deepcopy(source)
+    partial["status"] = "partial"
+    cases.append(("partial", partial))
+
+    nonzero = copy.deepcopy(source)
+    nonzero["execution"]["exit_code"] = 1
+    cases.append(("nonzero", nonzero))
+
+    blocked = copy.deepcopy(source)
+    blocked["execution"]["blocker"] = {
+        "code": "test_blocker",
+        "message": "synthetic blocker",
+        "details": [],
+    }
+    cases.append(("blocker", blocked))
+
+    unbalanced = copy.deepcopy(source)
+    unbalanced["cleanup"]["balanced"] = False
+    unbalanced["probe_report"]["cleanup"]["balanced"] = False
+    cases.append(("cleanup", unbalanced))
+
+    no_tangents = copy.deepcopy(source)
+    no_tangents["probe_report"]["coverage"]["keyframes"][
+        "spatial_tangents"
+    ] = False
+    cases.append(("spatial", no_tangents))
+
+    unsupported = copy.deepcopy(source)
+    required_slot = {
+        "operation": "AEGP_GetNewKeyframeSpatialTangents",
+        "suite": "AEGP Keyframe Suite",
+        "version": 5,
+        "slot": 17,
+        "error": 4,
+    }
+    unsupported["unsupported_slots"] = [required_slot]
+    unsupported["probe_report"]["unsupported_slots"] = [required_slot]
+    cases.append(("unsupported", unsupported))
+
+    for name, record in cases:
+        path = tmp_path / f"{name}.json"
+        path.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        completed = subprocess.run(
+            [sys.executable, str(TOOL), "validate", str(path)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode != 0, name
+
+
+def test_readiness_validator_rejects_missing_or_mismatched_provenance(
+    tmp_path: Path,
+):
+    source = strict_load(CORPUS / "aexcompat.json")
+    missing = copy.deepcopy(source)
+    missing["artifacts"]["worker"]["path"] = str(
+        tmp_path / "missing-worker.exe"
+    )
+
+    mismatched = copy.deepcopy(source)
+    mismatched["artifacts"]["worker"]["sha256"] = "0" * 64
+
+    projector = strict_load(CORPUS / "sdk-projector-aexcompat.json")
+    receipt_mismatch = copy.deepcopy(projector)
+    receipt_mismatch["sample_report"]["build_receipt_sha256"] = "0" * 64
+
+    for name, record in (
+        ("missing", missing),
+        ("mismatched", mismatched),
+        ("receipt", receipt_mismatch),
+    ):
+        path = tmp_path / f"{name}.json"
+        path.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        completed = subprocess.run(
+            [sys.executable, str(TOOL), "validate", str(path)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode != 0, name
+
+
+def test_blocked_and_crashed_evidence_generators_return_nonzero(
+    tmp_path: Path,
+):
+    source = strict_load(CORPUS / "aexcompat.json")
+    environment = source["environment"]
+    artifacts = source["artifacts"]
+    common = [
+        "--probe",
+        artifacts["probe"]["path"],
+        "--fixture",
+        artifacts["fixture"]["path"],
+        "--worker",
+        artifacts["worker"]["path"],
+        "--after-effects",
+        environment["after_effects"]["executable"]["path"],
+        "--ae-version",
+        environment["after_effects"]["version"],
+        "--sdk-root",
+        environment["sdk"]["root"],
+        "--sdk-api-version",
+        str(environment["sdk"]["aefx_api_version"]),
+        "--sdk-guide",
+        environment["sdk"]["guide"]["path"],
+    ]
+
+    blocked = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "record-real-blocker",
+            *common,
+            "--output",
+            str(tmp_path / "blocked.json"),
+            "--command-part",
+            "not-run",
+            "--blocker-code",
+            "test_blocker",
+            "--blocker-message",
+            "synthetic blocker",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert blocked.returncode != 0
+
+    raw_report = tmp_path / "raw-report.json"
+    raw_report.write_text(
+        json.dumps(source["probe_report"], ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    fixture_metadata = tmp_path / "fixture-metadata.json"
+    fixture_metadata.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "fixture": "issue26-scene-probe",
+                "project_count": 1,
+                "folder_count": 1,
+                "footage_count": 2,
+                "comp_count": 2,
+                "layer_count": 4,
+                "effect_count": 2,
+                "mask_count": 1,
+                "position_keyframes": 2,
+                "mask_keyframes": 2,
+                "camera_zoom_keyframes": 2,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stdout_file = tmp_path / "real-ae.stdout.txt"
+    stderr_file = tmp_path / "real-ae.stderr.txt"
+    stdout_file.write_text("synthetic stdout\n", encoding="utf-8")
+    stderr_file.write_text("synthetic crash\n", encoding="utf-8")
+    crashed = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "wrap-real",
+            *common,
+            "--output",
+            str(tmp_path / "crashed.json"),
+            "--raw-report",
+            str(raw_report),
+            "--fixture-metadata",
+            str(fixture_metadata),
+            "--stdout-file",
+            str(stdout_file),
+            "--stderr-file",
+            str(stderr_file),
+            "--command-part",
+            "synthetic-real-host",
+            "--exit-code",
+            "3221226505",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert crashed.returncode != 0
+
+
+def test_public_abi_source_contracts_are_exact():
+    scene = (
+        ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
+    ).read_text(encoding="utf-8")
+    registry = (
+        ROOT / "minihost" / "src" / "worker_suite_registry.cpp"
+    ).read_text(encoding="utf-8")
+    probe = PROBE.read_text(encoding="utf-8")
+    assert '{"AEGP Proj Suite", 9}' in registry
+    assert "case ItemKind::footage: result = 4;" in scene
+    assert 'case 0: name = u"Input"; break;' in scene
+    assert "type == AEGP_StreamType_LAYER_ID" in probe
+    assert "input_value.val.layer_id == layer_id" in probe
+
+
+def test_real_runner_retains_outputs_and_fixture_report_inputs():
+    runner = REAL_RUNNER.read_text(encoding="utf-8")
+    tool = TOOL.read_text(encoding="utf-8")
+    assert "-RedirectStandardOutput $standardOutput" in runner
+    assert "-RedirectStandardError $standardError" in runner
+    assert (
+        'record["artifacts"]["fixture_metadata"] = artifact(fixture_path)'
+        in tool
+    )
+    assert 'record["fixture_report"] = fixture_report' in tool

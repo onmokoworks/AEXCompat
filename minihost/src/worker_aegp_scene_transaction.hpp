@@ -14,6 +14,8 @@ struct Diagnostics {
   uint64_t validated{};
   uint64_t committed{};
   uint64_t cancelled{};
+  uint64_t rolled_back{};
+  uint64_t rollback_failures{};
 };
 
 using GenerationInvalidator = void(*)(uint64_t project_id,
@@ -28,6 +30,7 @@ void record_stage() noexcept;
 void record_validate() noexcept;
 void record_commit() noexcept;
 void record_cancel() noexcept;
+void record_rollback(bool restored) noexcept;
 Diagnostics diagnostics() noexcept;
 
 class AtomicSceneTransaction {
@@ -73,6 +76,14 @@ class AtomicSceneTransaction {
   template <typename Apply, typename Bump>
   bool commit(uint32_t current_project_generation,
               Apply&& apply, Bump&& bump) noexcept {
+    return commit(
+        current_project_generation, std::forward<Apply>(apply),
+        []() noexcept { return true; }, std::forward<Bump>(bump));
+  }
+
+  template <typename Apply, typename Rollback, typename Bump>
+  bool commit(uint32_t current_project_generation,
+              Apply&& apply, Rollback&& rollback, Bump&& bump) noexcept {
     if (!active_ || !staged_ || !validated_ ||
         current_project_generation != baseline_project_generation_ ||
         registry_.fingerprint() != baseline_fingerprint_) {
@@ -80,6 +91,9 @@ class AtomicSceneTransaction {
       return false;
     }
     if (!std::forward<Apply>(apply)()) {
+      const bool restored = std::forward<Rollback>(rollback)() &&
+          registry_.fingerprint() == baseline_fingerprint_;
+      record_rollback(restored);
       cancel();
       return false;
     }
