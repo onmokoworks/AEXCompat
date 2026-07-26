@@ -278,6 +278,14 @@ bool configure_scene_context(const SceneContext& context) noexcept {
       !context.smart_height) return false;
   g_scene_context = context;
   g_scene_context_configured = true;
+  auto& runtime = scene_runtime_state();
+  runtime.effect_instances[0].render_ref = context.pf_effect;
+  if (!update_composition_item_render_metadata(
+          context.composition_item, runtime.composition_item_identity,
+          runtime.composition_item_sampling_policy,
+          runtime.composition_item_dependencies.data(),
+          runtime.composition_item_dependency_count))
+    return false;
   return true;
 }
 
@@ -459,20 +467,36 @@ bool snapshot_staged_item_metadata(
   return true;
 }
 uint64_t staged_effect_instance_identity(
-    const AegpLayerRenderOptionsValue& options) noexcept {
+    const AegpLayerRenderOptionsValue& options,
+    uint64_t active_effect_instance) noexcept {
   std::size_t index = 0;
   const AegpEffectInstance* instance = nullptr;
   if (options.effect_boundary == AegpLayerEffectBoundary::all) {
     auto& runtime = scene_runtime_state();
-    index = runtime.active_render_effect_index;
-    if (index >= runtime.effect_instances.size()) return 0;
-    instance = &runtime.effect_instances[index];
-    if (instance->layer != options.layer) return 0;
+    for (; index < runtime.effect_instances.size(); ++index) {
+      const auto& candidate = runtime.effect_instances[index];
+      if (effect_instance_identity(index, candidate) == active_effect_instance) {
+        instance = &candidate;
+        break;
+      }
+    }
+    if (!instance || instance->layer != options.layer) return 0;
   } else {
     instance = resolve_effect_instance(
         options.upstream_effect, options.owner_plugin_id, &index);
   }
   return instance ? effect_instance_identity(index, *instance) : 0;
+}
+uint64_t staged_effect_identity_for_render_ref(
+    void* render_ref) noexcept {
+  if (!render_ref) return 0;
+  auto& runtime = scene_runtime_state();
+  for (std::size_t index = 0; index < runtime.effect_instances.size(); ++index) {
+    const auto& instance = runtime.effect_instances[index];
+    if (instance.render_ref == render_ref)
+      return effect_instance_identity(index, instance);
+  }
+  return 0;
 }
 const AegpInstalledEffectRecord* find_installed_effect(int32_t key);
 const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index);
@@ -890,6 +914,7 @@ int32_t __cdecl aegp_apply_effect(
     instance_slot->generation = generation;
     return 4;
   }
+  instance_slot->render_ref = *effect;
   bump_render_project_timestamp();
   return 0;
 }
@@ -943,6 +968,7 @@ int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
         --value.stack_order;
     return 4;
   }
+  instance_slot->render_ref = *duplicate;
   bump_render_project_timestamp();
   return 0;
 }

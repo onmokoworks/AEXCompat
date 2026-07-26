@@ -30,6 +30,7 @@ struct AegpEffectInstance {
   uint32_t flags{1};
   uint32_t generation{};
   bool occupied{};
+  void* render_ref{};
   std::array<std::array<double, 4>, kAegpEffectParameterCapacity> parameter_values{{
       {{42.5, 0.0, 0.0, 0.0}}, {{160.0, 90.0, 0.0, 0.0}},
       {{1.0, 2.0, 3.0, 0.0}}, {{0.25, 0.5, 0.75, 1.0}}}};
@@ -131,7 +132,6 @@ struct SceneRuntimeState {
   AegpSceneObject effect{0x45464643};
   int32_t scene_frame{1};
   bool effect_live{};
-  std::size_t active_render_effect_index{};
   std::array<AegpEffectInstance, kAegpEffectInstanceCapacity> effect_instances{};
   std::array<AegpEffectLease, kAegpEffectLeaseCapacity> effect_leases{};
   uint32_t effect_lease_generation{};
@@ -204,6 +204,9 @@ struct SceneRuntimeState {
 SceneRuntimeState& scene_runtime_state() noexcept;
 void* composition_item_handle() noexcept;
 void* composition_handle() noexcept;
+bool update_composition_item_render_metadata(
+    void* item, uint64_t stable_identity, AegpItemSamplingPolicy policy,
+    void* const* dependencies, std::size_t dependency_count) noexcept;
 
 extern const std::array<AegpEffectParameterRecord, 5> kAegpProbeParameters;
 extern const std::array<AegpEffectParameterRecord, 7> kAegpLevelsParameters;

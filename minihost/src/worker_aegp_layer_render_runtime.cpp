@@ -131,7 +131,8 @@ int32_t publish_from_context(const Context& context, const LayerValue& options,
            : !aegp_staged_item_runtime::has_item_registration(item)) ||
       !g_hooks.current_effect_instance || !g_hooks.publish_scheduler_stage)
     return 4;
-  const uint64_t effect_instance = g_hooks.current_effect_instance(options);
+  const uint64_t effect_instance =
+      g_hooks.current_effect_instance(context, options);
   if (effect_instance == 0 ||
       !g_hooks.publish_scheduler_stage(item, stage_kind, effect_instance,
           options.time, options.time_step, 1, 0, pixel_format, width, height,

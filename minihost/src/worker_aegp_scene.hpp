@@ -165,7 +165,10 @@ bool layer_effect_boundary_is_live(const AegpLayerRenderOptionsValue& options);
 bool snapshot_staged_item_metadata(
     void* item, AegpStagedItemMetadata& metadata) noexcept;
 uint64_t staged_effect_instance_identity(
-    const AegpLayerRenderOptionsValue& options) noexcept;
+    const AegpLayerRenderOptionsValue& options,
+    uint64_t active_effect_instance = 0) noexcept;
+uint64_t staged_effect_identity_for_render_ref(
+    void* render_ref) noexcept;
 const AegpInstalledEffectRecord* find_installed_effect(int32_t key);
 const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index);
 int32_t aegp_layer_index(void* layer);

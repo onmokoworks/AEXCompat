@@ -11,7 +11,6 @@ SceneRuntimeState::SceneRuntimeState() noexcept {
   composition_item_sampling_policy = AegpItemSamplingPolicy::exact;
   composition_item_dependencies = {};
   composition_item_dependency_count = 0;
-  active_render_effect_index = 0;
   for (auto& transform : layer_transforms)
     transform.scale = {{100.0, 100.0, 100.0}};
   layer_parent_indices = {{-1, -1, -1}};
@@ -29,6 +28,27 @@ void* composition_item_handle() noexcept {
 
 void* composition_handle() noexcept {
   return &scene_runtime_state().composition;
+}
+
+bool update_composition_item_render_metadata(
+    void* item, uint64_t stable_identity, AegpItemSamplingPolicy policy,
+    void* const* dependencies, std::size_t dependency_count) noexcept {
+  auto& state = scene_runtime_state();
+  if (item != &state.composition_item || stable_identity == 0 ||
+      static_cast<uint8_t>(policy) >
+          static_cast<uint8_t>(AegpItemSamplingPolicy::nearest) ||
+      dependency_count > state.composition_item_dependencies.size() ||
+      (dependency_count != 0 && !dependencies))
+    return false;
+  for (std::size_t index = 0; index < dependency_count; ++index)
+    if (!dependencies[index]) return false;
+  state.composition_item_identity = stable_identity;
+  state.composition_item_sampling_policy = policy;
+  state.composition_item_dependencies = {};
+  state.composition_item_dependency_count = dependency_count;
+  for (std::size_t index = 0; index < dependency_count; ++index)
+    state.composition_item_dependencies[index] = dependencies[index];
+  return true;
 }
 
 const std::array<AegpEffectParameterRecord, 5> kAegpProbeParameters{{

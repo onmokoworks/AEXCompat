@@ -1007,12 +1007,23 @@ int32_t __cdecl layer_suite2_async_test_callback(
 bool verify_aegp_layer_render_options_suite2() {
   const bool saved_effect_live = g_aegp_effect_live;
   const auto saved_effect_instances = g_aegp_effect_instances;
+  const auto saved_effect_leases = g_aegp_effect_leases;
   const auto saved_context = aexcompat::aegp_layer_render_runtime::context();
   const uint32_t created_before = layer_created_count();
   const uint32_t disposed_before = layer_disposed_count();
   g_aegp_effect_live = true;
   g_aegp_effect_instances[0] = {
       &g_aegp_layers[0], kAegpInstalledEffects[0].key, 0, 1, 1, true};
+  g_aegp_effect_instances[0].render_ref = scene_context()->pf_effect;
+  for (std::size_t index = 1; index < g_aegp_effect_instances.size(); ++index)
+    g_aegp_effect_instances[index] = {};
+  g_aegp_effect_leases = {};
+  void* second_render_effect = nullptr;
+  if (aegp_apply_effect(1, &g_aegp_layers[0],
+                        kAegpInstalledEffects[0].key,
+                        &second_render_effect) != 0 ||
+      !second_render_effect)
+    return false;
   const auto make_world = [](uint8_t red, uint8_t green, uint8_t blue) {
     std::vector<unsigned char> pixels(4 * 2 * 4);
     for (std::size_t pixel = 0; pixel < pixels.size() / 4; ++pixel) {
@@ -1042,6 +1053,8 @@ bool verify_aegp_layer_render_options_suite2() {
   context.all_effects_height = 2;
   context.all_effects_pixel_bytes = 4;
   context.all_effects_finalized = true;
+  context.active_effect_instance = staged_effect_identity_for_render_ref(
+      second_render_effect);
   aexcompat::aegp_layer_render_runtime::context() = context;
 
   const void* acquired = nullptr;
@@ -1052,7 +1065,8 @@ bool verify_aegp_layer_render_options_suite2() {
       set_layer_render_downsample(upstream, 2, 2) == 0 &&
       set_layer_render_world_type(upstream, 2) == 0 &&
       set_layer_render_matte(upstream, 1) == 0;
-  auto checkout_hash = [&](void* options, std::string& hash) {
+  auto checkout_hash = [&](void* options, std::string& hash,
+                           uint64_t* published_effect = nullptr) {
     void* receipt = nullptr;
     void** world = nullptr;
     int32_t type = 0, width = 0, height = 0;
@@ -1065,16 +1079,30 @@ bool verify_aegp_layer_render_options_suite2() {
         aegp_world_get_base_addr16(world, &pixels) == 0 && pixels;
     if (checked_out) hash = sha256_bytes(static_cast<const unsigned char*>(pixels),
         static_cast<std::size_t>(width) * height * 8);
+    ReceiptSnapshot snapshot{};
+    if (checked_out && published_effect) {
+      if (!aexcompat::render_receipts::snapshot(receipt, snapshot))
+        return false;
+      *published_effect = snapshot.effect_instance;
+    }
     return checked_out && checkin_frame(receipt) == 0;
   };
   std::string upstream_hash, all_hash, downstream_hash, async_hash;
   ok = ok && checkout_hash(upstream, upstream_hash);
 
   void* all = nullptr;
+  uint64_t all_effect_instance = 0;
+  const uint64_t slot0_effect_instance =
+      (static_cast<uint64_t>(g_aegp_effect_instances[0].generation) << 32) | 1;
+  const uint64_t slot1_effect_instance =
+      (static_cast<uint64_t>(g_aegp_effect_instances[1].generation) << 32) | 2;
   ok = ok && new_layer_render_options(1, &g_aegp_layers[0], &all) == 0 && all &&
       set_layer_render_downsample(all, 2, 2) == 0 &&
       set_layer_render_world_type(all, 2) == 0 &&
-      set_layer_render_matte(all, 1) == 0 && checkout_hash(all, all_hash);
+      set_layer_render_matte(all, 1) == 0 &&
+      checkout_hash(all, all_hash, &all_effect_instance) &&
+      all_effect_instance == slot1_effect_instance &&
+      all_effect_instance != slot0_effect_instance;
 
   void* downstream = nullptr;
   ok = ok && new_from_downstream_of_effect(1, &g_aegp_effect, &downstream) == 0 && downstream;
@@ -1121,6 +1149,7 @@ bool verify_aegp_layer_render_options_suite2() {
   clear_staged_item_worlds_for_test();
   g_aegp_effect_live = saved_effect_live;
   g_aegp_effect_instances = saved_effect_instances;
+  g_aegp_effect_leases = saved_effect_leases;
   return ok && async_receipt_lifetimes_balanced() &&
       layer_created_count() == created_before + 3 &&
       layer_disposed_count() == disposed_before + 3;

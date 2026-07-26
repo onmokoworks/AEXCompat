@@ -6,6 +6,7 @@
 #include "render_subsystem.h"
 #include "runtime_module_audit.hpp"
 #include "worker_aegp_layer_render_runtime.hpp"
+#include "worker_aegp_scene.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_classic_execution.hpp"
 #include "worker_classic_runtime.hpp"
@@ -90,6 +91,7 @@ int32_t __cdecl guid_mix_in_ptr(void* effect_ref, uint32_t size, const void* byt
 // Private protocol constants mirrored from worker_main's frozen buffer layout.
 namespace {
 constexpr std::size_t kInSize = 408;
+constexpr std::size_t kInEffectRef = 184;
 constexpr std::size_t kOutSize = 408;
 constexpr std::size_t kParamSize = 176;
 constexpr std::size_t kInQuality = 192;
@@ -344,9 +346,16 @@ struct ClassicRenderDispatchOwner {
       ~LayerContextScope() {
         aexcompat::aegp_layer_render_runtime::replace_context(std::move(previous));
       }
-    } scope({entry, &input, &output, current_time, static_cast<int32_t>(time_scale), case_id,
+    };
+    LayerRenderContext next{
+        entry, &input, &output, current_time, static_cast<int32_t>(time_scale), case_id,
         requested, external_rgba, external_layers, external_width, external_height,
-        time_step, total_time, pixel_bytes, &logical_source, width, height});
+        time_step, total_time, pixel_bytes, &logical_source, width, height};
+    void* render_ref = nullptr;
+    std::memcpy(&render_ref, input.data() + kInEffectRef, sizeof(render_ref));
+    next.active_effect_instance =
+        staged_effect_identity_for_render_ref(render_ref);
+    LayerContextScope scope(std::move(next));
     classic_context.mark_selector_dispatched();
     return entry(kRender, input.data(), output.data(), params.data(), world.data(), nullptr);
   }

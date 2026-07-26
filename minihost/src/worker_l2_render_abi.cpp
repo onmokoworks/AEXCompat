@@ -92,8 +92,10 @@ bool prepare_scene_staged_item(void* item) {
       metadata.effect_instances.data(), metadata.effect_instance_count);
 }
 uint64_t current_scene_effect_instance(
+    const aexcompat::aegp_layer_render_runtime::Context& context,
     const AegpLayerRenderOptionsValue& options) {
-  return staged_effect_instance_identity(options);
+  return staged_effect_instance_identity(
+      options, context.active_effect_instance);
 }
 const bool g_item_render_runtime_configured = [] {
   aexcompat::aegp_item_render_runtime::configure({

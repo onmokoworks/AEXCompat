@@ -137,7 +137,7 @@ def test_effect_boundaries_publish_into_scheduler_and_receipts_keep_evidence():
     assert "publish_scheduler_stage" in layer_header
     assert "prepare_staged_item" in layer_header
     assert "current_effect_instance" in layer_header
-    assert "g_hooks.current_effect_instance(options)" in layer
+    assert "g_hooks.current_effect_instance(context, options)" in layer
     assert "effect_instance == 0" in layer
     for marker in (
         "bool has_stage_evidence",
@@ -170,7 +170,7 @@ def test_shipped_worker_wires_scene_metadata_providers():
         "&prepare_scene_staged_item",
         "&current_scene_effect_instance",
         "snapshot_staged_item_metadata(item, metadata)",
-        "staged_effect_instance_identity(options)",
+        "context.active_effect_instance",
     ):
         assert marker in wiring
     assert "nullptr, nullptr" not in wiring
@@ -178,6 +178,13 @@ def test_shipped_worker_wires_scene_metadata_providers():
     assert "composition_item_identity" in scene
     assert "composition_item_dependency_count" in scene
     assert "composition_item_sampling_policy" in scene
+    assert "staged_effect_identity_for_render_ref(render_ref)" in (
+        ROOT / "minihost/src/worker_classic_render_runtime.cpp"
+    ).read_text(encoding="utf-8")
+    assert "instance_slot->render_ref = *effect" in scene
+    assert "instance_slot->render_ref = *duplicate" in scene
+    assert "update_composition_item_render_metadata(" in scene
+    assert "active_render_effect_index" not in scene
     assert "aegp_layer_render_runtime::configure({" not in selftests
 
 
