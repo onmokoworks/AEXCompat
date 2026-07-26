@@ -71,7 +71,7 @@
 #include "strict_json.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_runtime_admission.hpp"
-#include "worker_import_overrides.hpp"
+#include "worker_openmp_policy.hpp"
 #include "worker_entry_admission.hpp"
 #include "worker_session.hpp"
 #include "worker_selftest_dispatch.hpp"
@@ -2787,16 +2787,6 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
     result.hard_failure = true;
     return result;
   }
-  std::string import_override_diagnostic;
-  if (!aexcompat::worker_runtime::imports::
-          install_deterministic_import_overrides(
-              module, import_override_diagnostic)) {
-    std::cerr << "stage:cluster_import_overrides detail="
-              << import_override_diagnostic << '\n' << std::flush;
-    FreeLibrary(module);
-    result.hard_failure = true;
-    return result;
-  }
   if (!context.session->swap_adopt_module(module, path,
                                           static_cast<uint32_t>(plugin_index))) {
     // The session rejected (and freed) the loaded module; no cleanup here.
@@ -4096,6 +4086,13 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
 }
 
 int aexcompat::worker_target::run(Kind kind, int argc, wchar_t** argv) {
+  std::string openmp_diagnostic;
+  if (!worker_runtime::openmp::install_deterministic_policy(
+          openmp_diagnostic)) {
+    std::cerr << "stage:openmp_policy_failed detail=" << openmp_diagnostic
+              << '\n' << std::flush;
+    return 11;
+  }
   l2_detail::g_worker_target = kind;
   return worker_main_impl(argc, argv);
 }

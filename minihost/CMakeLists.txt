@@ -9,7 +9,10 @@ target_include_directories(aexcompat_trace_writer PUBLIC
   ../instruments/common
 )
 
-add_executable(aex_l1_worker src/main.cpp)
+add_executable(aex_l1_worker
+  src/main.cpp
+  src/worker_openmp_policy.cpp
+)
 target_compile_features(aex_l1_worker PRIVATE cxx_std_17)
 target_compile_definitions(aex_l1_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(aex_l1_worker PRIVATE bcrypt)
@@ -52,7 +55,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_fixed_selftest_routing.cpp
     src/worker_custom_selftest_routing.cpp
     src/worker_host_guard_selftests.cpp
-    src/worker_import_overrides.cpp
+    src/worker_openmp_policy.cpp
     src/worker_aegp_compute_cache.cpp
     src/worker_aegp_utility_suite.cpp
     src/worker_pf_pixel_data_suite.cpp
@@ -233,14 +236,14 @@ target_include_directories(worker_handle_runtime_selftest PRIVATE src)
 target_link_libraries(worker_handle_runtime_selftest PRIVATE
   aexcompat_trace_writer)
 
-add_executable(worker_import_overrides_selftest
-  ../tests/native/worker_import_overrides_selftest.cpp
-  src/worker_import_overrides.cpp
+add_executable(worker_openmp_policy_selftest
+  ../tests/native/worker_openmp_policy_selftest.cpp
+  src/worker_openmp_policy.cpp
 )
-target_compile_features(worker_import_overrides_selftest PRIVATE cxx_std_17)
-target_compile_definitions(worker_import_overrides_selftest PRIVATE
+target_compile_features(worker_openmp_policy_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_openmp_policy_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_include_directories(worker_import_overrides_selftest PRIVATE src)
+target_include_directories(worker_openmp_policy_selftest PRIVATE src)
 
 add_executable(worker_aegp_init_runtime_selftest
   ../tests/native/worker_aegp_init_runtime_selftest.cpp
