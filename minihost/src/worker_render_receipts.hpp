@@ -33,6 +33,18 @@ struct ReceiptDraft {
   render_options::ItemValue render_options{};
   suite_abi::AegpRect rendered_region{};
   uint32_t render_timestamp{};
+  bool has_stage_evidence{};
+  uint64_t stage_identity_hash{};
+  uint64_t item_identity{};
+  uint64_t effect_instance{};
+  uint64_t trace_hash{};
+  suite_abi::AegpTime requested_time{};
+  suite_abi::AegpTime source_time{};
+  uint32_t project_generation{};
+  uint32_t resolved_stage_count{};
+  uint32_t resolved_depth{};
+  uint8_t stage_kind{};
+  uint8_t sampling_policy{};
 };
 
 struct ReceiptSnapshot {
@@ -41,6 +53,18 @@ struct ReceiptSnapshot {
   suite_abi::AegpRect rendered_region{};
   uint32_t render_timestamp{};
   std::array<uint8_t, 16> guid{};
+  bool has_stage_evidence{};
+  uint64_t stage_identity_hash{};
+  uint64_t item_identity{};
+  uint64_t effect_instance{};
+  uint64_t trace_hash{};
+  suite_abi::AegpTime requested_time{};
+  suite_abi::AegpTime source_time{};
+  uint32_t project_generation{};
+  uint32_t resolved_stage_count{};
+  uint32_t resolved_depth{};
+  uint8_t stage_kind{};
+  uint8_t sampling_policy{};
 };
 
 struct Statistics {

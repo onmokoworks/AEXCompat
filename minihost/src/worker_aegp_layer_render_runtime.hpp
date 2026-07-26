@@ -2,6 +2,7 @@
 
 #include "worker_aegp_async_layer_runtime.hpp"
 #include "worker_aegp_render_options.hpp"
+#include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_selector_dispatch.hpp"
 
 #include <cstddef>
@@ -46,6 +47,13 @@ struct Context {
 struct Hooks {
   bool (*is_render_worker)();
   bool (*effect_boundary_live)(const render_options::LayerValue& options);
+  void* (*current_item)();
+  bool (*publish_scheduler_stage)(
+      void* item, aegp_staged_item_runtime::StageKind stage_kind,
+      uint64_t effect_instance, suite_abi::AegpTime time,
+      suite_abi::AegpTime time_step, int8_t quality, uint8_t guide_layers,
+      int32_t pixel_format, int32_t width, int32_t height, int32_t rowbytes,
+      const void* pixels, uint64_t* stage_identity_hash);
 };
 
 void configure(Hooks hooks) noexcept;

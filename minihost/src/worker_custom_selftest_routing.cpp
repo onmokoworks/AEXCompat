@@ -194,6 +194,26 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << ",\"cycles_rejected\":" << staged.cycles_rejected
         << ",\"generation_invalidations\":" << staged.generation_invalidations
         << ",\"evictions\":" << staged.evictions
+        << ",\"exact_hits\":" << staged.exact_hits
+        << ",\"hold_hits\":" << staged.hold_hits
+        << ",\"nearest_hits\":" << staged.nearest_hits
+        << ",\"unavailable_frames\":" << staged.unavailable_frames
+        << ",\"direct_cycles_rejected\":" << staged.direct_cycles_rejected
+        << ",\"indirect_cycles_rejected\":" << staged.indirect_cycles_rejected
+        << ",\"depth_limit_rejections\":" << staged.depth_limit_rejections
+        << ",\"stage_limit_rejections\":" << staged.stage_limit_rejections
+        << ",\"effect_boundary_rejections\":" << staged.effect_boundary_rejections
+        << ",\"partial_failures\":" << staged.partial_failures
+        << ",\"cleanup_count\":" << staged.cleanup_count
+        << ",\"in_flight\":" << staged.in_flight
+        << ",\"max_in_flight\":" << staged.max_in_flight
+        << ",\"registered_items\":" << staged.registered_items
+        << ",\"cached_stages\":" << staged.cached_stages
+        << ",\"cached_bytes\":" << staged.cached_bytes
+        << ",\"last_trace_hash\":" << staged.last_trace_hash
+        << ",\"last_stage_identity_hash\":" << staged.last_stage_identity_hash
+        << ",\"last_resolved_stages\":" << staged.last_resolved_stages
+        << ",\"max_resolved_depth\":" << staged.max_resolved_depth
         << "}\n";
     return {true, passed ? 0 : 1, out.str()};
   }

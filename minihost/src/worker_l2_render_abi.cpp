@@ -78,7 +78,9 @@ const bool g_item_render_runtime_configured = [] {
 }();
 const bool g_layer_render_runtime_configured = [] {
   aexcompat::aegp_layer_render_runtime::configure({
-      &is_render_worker, &layer_effect_boundary_is_live});
+      &is_render_worker, &layer_effect_boundary_is_live,
+      &aegp_comp_item_handle,
+      &aexcompat::aegp_staged_item_runtime::publish_stage_world});
   return true;
 }();
 int32_t publish_loaded_layer_receipt(

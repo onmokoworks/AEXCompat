@@ -225,6 +225,18 @@ bool snapshot(void* handle, ReceiptSnapshot& output) {
   output.rendered_region = receipt.draft->rendered_region;
   output.render_timestamp = receipt.draft->render_timestamp;
   output.guid = receipt.guid;
+  output.has_stage_evidence = receipt.draft->has_stage_evidence;
+  output.stage_identity_hash = receipt.draft->stage_identity_hash;
+  output.item_identity = receipt.draft->item_identity;
+  output.effect_instance = receipt.draft->effect_instance;
+  output.trace_hash = receipt.draft->trace_hash;
+  output.requested_time = receipt.draft->requested_time;
+  output.source_time = receipt.draft->source_time;
+  output.project_generation = receipt.draft->project_generation;
+  output.resolved_stage_count = receipt.draft->resolved_stage_count;
+  output.resolved_depth = receipt.draft->resolved_depth;
+  output.stage_kind = receipt.draft->stage_kind;
+  output.sampling_policy = receipt.draft->sampling_policy;
   return true;
 }
 

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -46,6 +47,9 @@ NormalizedRational normalize_rational(AegpTime time) noexcept {
 
 struct StagedItemWorld {
   void* item{};
+  uint64_t item_identity{};
+  StageKind stage_kind{StageKind::final_item};
+  uint64_t effect_instance{};
   AegpTime time{};
   AegpTime time_step{};
   int8_t quality{1};
@@ -57,6 +61,9 @@ struct StagedItemWorld {
   uint32_t project_generation{};
   struct StageIdentity {
     void* item{};
+    uint64_t item_identity{};
+    StageKind stage_kind{StageKind::final_item};
+    uint64_t effect_instance{};
     NormalizedRational time{};
     NormalizedRational time_step{};
     int8_t quality{};
@@ -68,7 +75,9 @@ struct StagedItemWorld {
     uint32_t project_generation{};
 
     friend bool operator==(const StageIdentity& left, const StageIdentity& right) {
-      return left.item == right.item && left.time == right.time &&
+      return left.item == right.item && left.item_identity == right.item_identity &&
+          left.stage_kind == right.stage_kind &&
+          left.effect_instance == right.effect_instance && left.time == right.time &&
           left.time_step == right.time_step && left.quality == right.quality &&
           left.guide_layers == right.guide_layers &&
           left.pixel_format == right.pixel_format && left.width == right.width &&
@@ -80,6 +89,14 @@ struct StagedItemWorld {
   std::shared_ptr<const std::vector<std::byte>> backing;
 };
 
+struct ItemRegistration {
+  void* item{};
+  uint64_t stable_identity{};
+  SamplingPolicy policy{SamplingPolicy::exact};
+  std::vector<void*> dependencies;
+  std::vector<uint64_t> effect_instances;
+};
+
 struct ItemRenderStackKey {
   void* item{};
   AegpTime time{};
@@ -87,9 +104,18 @@ struct ItemRenderStackKey {
 };
 
 constexpr std::size_t kMaxStagedItemWorlds = 32;
+constexpr std::size_t kMaxRegisteredItems = 16;
+constexpr std::size_t kMaxDependenciesPerItem = 8;
+constexpr std::size_t kMaxEffectsPerItem = 8;
+constexpr std::size_t kMaxResolveDepth = 8;
+constexpr std::size_t kMaxResolvedStages = 24;
+constexpr uint64_t kMaxSchedulerBytes = render_receipts::kMaxReceiptBytes;
+constexpr auto kMaxResolveTime = std::chrono::milliseconds(250);
 Hooks g_hooks{};
 std::mutex g_mutex;
 std::vector<StagedItemWorld> g_worlds;
+std::vector<ItemRegistration> g_items;
+uint64_t g_world_bytes{};
 std::atomic<uint64_t> g_stage_generation{1};
 thread_local std::vector<ItemRenderStackKey> g_render_stack;
 std::atomic<uint32_t> g_published{};
@@ -98,6 +124,24 @@ std::atomic<uint32_t> g_cache_misses{};
 std::atomic<uint32_t> g_cycles_rejected{};
 std::atomic<uint32_t> g_generation_invalidations{};
 std::atomic<uint32_t> g_evictions{};
+std::atomic<uint32_t> g_exact_hits{};
+std::atomic<uint32_t> g_hold_hits{};
+std::atomic<uint32_t> g_nearest_hits{};
+std::atomic<uint32_t> g_unavailable_frames{};
+std::atomic<uint32_t> g_direct_cycles_rejected{};
+std::atomic<uint32_t> g_indirect_cycles_rejected{};
+std::atomic<uint32_t> g_depth_limit_rejections{};
+std::atomic<uint32_t> g_stage_limit_rejections{};
+std::atomic<uint32_t> g_time_limit_rejections{};
+std::atomic<uint32_t> g_effect_boundary_rejections{};
+std::atomic<uint32_t> g_partial_failures{};
+std::atomic<uint32_t> g_cleanup_count{};
+std::atomic<uint32_t> g_in_flight{};
+std::atomic<uint32_t> g_max_in_flight{};
+std::atomic<uint64_t> g_last_trace_hash{};
+std::atomic<uint64_t> g_last_stage_identity_hash{};
+std::atomic<uint32_t> g_last_resolved_stages{};
+std::atomic<uint32_t> g_max_resolved_depth{};
 uint32_t g_cache_generation{};
 
 int32_t pixel_bytes_for(int32_t pixel_format) {
@@ -112,17 +156,119 @@ bool same_rational(const AegpTime& left, const AegpTime& right) {
       normalize_rational(left) == normalize_rational(right);
 }
 
+int compare_rational(AegpTime left, AegpTime right) {
+  const int64_t left_scaled =
+      static_cast<int64_t>(left.value) * right.scale;
+  const int64_t right_scaled =
+      static_cast<int64_t>(right.value) * left.scale;
+  return left_scaled < right_scaled ? -1 : (left_scaled > right_scaled ? 1 : 0);
+}
+
+uint64_t signed_magnitude(int64_t value) {
+  return value < 0 ? static_cast<uint64_t>(-(value + 1)) + 1
+                   : static_cast<uint64_t>(value);
+}
+
+struct RationalDistance {
+  uint64_t numerator{};
+  uint64_t denominator{1};
+};
+
+RationalDistance rational_distance(AegpTime left, AegpTime right) {
+  const int64_t left_scaled =
+      static_cast<int64_t>(left.value) * right.scale;
+  const int64_t right_scaled =
+      static_cast<int64_t>(right.value) * left.scale;
+  uint64_t difference = 0;
+  if ((left_scaled < 0) == (right_scaled < 0))
+    difference = signed_magnitude(left_scaled - right_scaled);
+  else
+    difference =
+        signed_magnitude(left_scaled) + signed_magnitude(right_scaled);
+  return {difference,
+          static_cast<uint64_t>(left.scale) * right.scale};
+}
+
+int compare_positive_fractions(uint64_t left_numerator,
+                               uint64_t left_denominator,
+                               uint64_t right_numerator,
+                               uint64_t right_denominator) {
+  bool reversed = false;
+  for (;;) {
+    const uint64_t left_quotient = left_numerator / left_denominator;
+    const uint64_t right_quotient = right_numerator / right_denominator;
+    if (left_quotient != right_quotient) {
+      const int result = left_quotient < right_quotient ? -1 : 1;
+      return reversed ? -result : result;
+    }
+    const uint64_t left_remainder = left_numerator % left_denominator;
+    const uint64_t right_remainder = right_numerator % right_denominator;
+    if (left_remainder == 0 || right_remainder == 0) {
+      const int result = left_remainder == right_remainder
+          ? 0
+          : (left_remainder == 0 ? -1 : 1);
+      return reversed ? -result : result;
+    }
+    left_numerator = left_denominator;
+    left_denominator = left_remainder;
+    right_numerator = right_denominator;
+    right_denominator = right_remainder;
+    reversed = !reversed;
+  }
+}
+
+uint64_t hash_mix(uint64_t hash, uint64_t value) noexcept {
+  constexpr uint64_t kPrime = 1099511628211ULL;
+  for (int index = 0; index < 8; ++index) {
+    hash ^= static_cast<uint8_t>(value >> (index * 8));
+    hash *= kPrime;
+  }
+  return hash;
+}
+
+uint64_t stable_item_identity_locked(void* item) {
+  const auto found = std::find_if(g_items.begin(), g_items.end(),
+      [item](const auto& value) { return value.item == item; });
+  return found == g_items.end()
+      ? static_cast<uint64_t>(reinterpret_cast<uintptr_t>(item))
+      : found->stable_identity;
+}
+
 StagedItemWorld::StageIdentity make_stage_identity(
-    void* item, AegpTime time, AegpTime time_step, int8_t quality,
-    uint8_t guide_layers, int32_t pixel_format, int32_t width, int32_t height,
-    int32_t rowbytes, uint32_t project_generation) noexcept {
-  return {item, normalize_rational(time), normalize_rational(time_step), quality,
-          guide_layers, pixel_format, width, height, rowbytes, project_generation};
+    void* item, uint64_t item_identity, StageKind stage_kind, uint64_t effect_instance,
+    AegpTime time, AegpTime time_step, int8_t quality, uint8_t guide_layers,
+    int32_t pixel_format, int32_t width, int32_t height, int32_t rowbytes,
+    uint32_t project_generation) noexcept {
+  return {item, item_identity, stage_kind, effect_instance, normalize_rational(time),
+          normalize_rational(time_step), quality, guide_layers, pixel_format,
+          width, height, rowbytes, project_generation};
+}
+
+uint64_t stage_identity_hash(
+    const StagedItemWorld::StageIdentity& identity) noexcept {
+  uint64_t hash = 1469598103934665603ULL;
+  hash = hash_mix(hash, identity.item_identity);
+  hash = hash_mix(hash, static_cast<uint8_t>(identity.stage_kind));
+  hash = hash_mix(hash, identity.effect_instance);
+  hash = hash_mix(hash, static_cast<uint64_t>(identity.time.numerator));
+  hash = hash_mix(hash, identity.time.denominator);
+  hash = hash_mix(hash, static_cast<uint64_t>(identity.time_step.numerator));
+  hash = hash_mix(hash, identity.time_step.denominator);
+  hash = hash_mix(hash, static_cast<uint8_t>(identity.quality));
+  hash = hash_mix(hash, identity.guide_layers);
+  hash = hash_mix(hash, static_cast<uint32_t>(identity.pixel_format));
+  hash = hash_mix(hash, static_cast<uint32_t>(identity.width));
+  hash = hash_mix(hash, static_cast<uint32_t>(identity.height));
+  hash = hash_mix(hash, static_cast<uint32_t>(identity.rowbytes));
+  return hash_mix(hash, identity.project_generation);
 }
 
 void invalidate_generation_locked() {
-  if (!g_worlds.empty() || g_cache_generation != 0) ++g_generation_invalidations;
+  if (!g_worlds.empty() || !g_items.empty() || g_cache_generation != 0)
+    ++g_generation_invalidations;
   g_worlds.clear();
+  g_items.clear();
+  g_world_bytes = 0;
   g_cache_generation = 0;
 }
 
@@ -150,35 +296,261 @@ struct StackScope {
   ~StackScope() { if (entered) g_render_stack.pop_back(); }
 };
 
-bool snapshot_world(const ItemValue& options, StagedItemWorld& stage) {
-  const int32_t pixel_format = options.world_type == 1 ? world_registry::kPixelFormatArgb32 :
-      (options.world_type == 2 ? world_registry::kPixelFormatArgb64 :
-       (options.world_type == 3 ? world_registry::kPixelFormatArgb128 : 0));
-  if (!g_hooks.project_generation) return false;
+struct ResolveSnapshot {
+  std::vector<StagedItemWorld> worlds;
+  std::vector<ItemRegistration> items;
+};
+
+struct ResolveContext {
+  const ResolveSnapshot& snapshot;
+  const ItemValue& options;
+  int32_t pixel_format{};
+  uint32_t project_generation{};
+  std::chrono::steady_clock::time_point deadline;
+  std::vector<void*> chain;
+  uint64_t trace_hash{1469598103934665603ULL};
+  uint32_t resolved_stages{};
+  uint32_t max_depth{};
+  bool partial_recorded{};
+};
+
+struct ResolvedPlan {
+  StagedItemWorld final_stage;
+  SamplingPolicy policy{SamplingPolicy::exact};
+  uint64_t item_identity{};
+  uint64_t trace_hash{};
+  uint32_t resolved_stages{};
+  uint32_t resolved_depth{};
+  bool registered_item{};
+};
+
+template <typename Counter>
+bool resolve_failure(ResolveContext& context, Counter& counter) {
+  ++counter;
+  if (context.resolved_stages != 0 && !context.partial_recorded) {
+    ++g_partial_failures;
+    context.partial_recorded = true;
+  }
+  return false;
+}
+
+void update_atomic_max(std::atomic<uint32_t>& target, uint32_t value) {
+  uint32_t observed = target.load();
+  while (observed < value && !target.compare_exchange_weak(observed, value)) {}
+}
+
+const ItemRegistration* find_registration(
+    const ResolveSnapshot& snapshot, void* item) {
+  const auto found = std::find_if(snapshot.items.begin(), snapshot.items.end(),
+      [item](const auto& value) { return value.item == item; });
+  return found == snapshot.items.end() ? nullptr : &*found;
+}
+
+bool candidate_matches(const StagedItemWorld& value, void* item, StageKind kind,
+                       uint64_t effect_instance, const ItemValue& options,
+                       int32_t pixel_format, uint32_t project_generation) {
+  return value.item == item && value.stage_kind == kind &&
+      value.effect_instance == effect_instance &&
+      same_rational(value.time_step, options.time_step) &&
+      value.quality == options.render_quality &&
+      value.guide_layers == options.render_guide_layers &&
+      value.pixel_format == pixel_format &&
+      value.project_generation == project_generation && value.backing;
+}
+
+bool select_stage(const ResolveSnapshot& snapshot, void* item, StageKind kind,
+                  uint64_t effect_instance, SamplingPolicy policy,
+                  const ItemValue& options, int32_t pixel_format,
+                  uint32_t project_generation, StagedItemWorld& selected) {
+  const StagedItemWorld* best = nullptr;
+  RationalDistance best_distance{};
+  for (const auto& candidate : snapshot.worlds) {
+    if (!candidate_matches(candidate, item, kind, effect_instance, options,
+                           pixel_format, project_generation))
+      continue;
+    if (policy == SamplingPolicy::exact &&
+        !same_rational(candidate.time, options.time))
+      continue;
+    if (policy == SamplingPolicy::hold &&
+        compare_rational(candidate.time, options.time) > 0)
+      continue;
+    const RationalDistance distance =
+        rational_distance(candidate.time, options.time);
+    bool replace = best == nullptr;
+    if (best) {
+      const int source_order = compare_rational(candidate.time, best->time);
+      if (policy == SamplingPolicy::hold) {
+        replace = source_order > 0 ||
+            (source_order == 0 &&
+             candidate.stage_generation > best->stage_generation);
+      } else if (policy == SamplingPolicy::nearest) {
+        const int distance_order = compare_positive_fractions(
+            distance.numerator, distance.denominator,
+            best_distance.numerator, best_distance.denominator);
+        replace = distance_order < 0 ||
+            (distance_order == 0 &&
+             (source_order < 0 ||
+              (source_order == 0 &&
+               candidate.stage_generation > best->stage_generation)));
+      } else {
+        replace = candidate.stage_generation > best->stage_generation;
+      }
+    }
+    if (replace) {
+      best = &candidate;
+      best_distance = distance;
+    }
+  }
+  if (!best) {
+    ++g_cache_misses;
+    ++g_unavailable_frames;
+    return false;
+  }
+  selected = *best;
+  ++g_cache_hits;
+  if (policy == SamplingPolicy::exact) ++g_exact_hits;
+  else if (policy == SamplingPolicy::hold) ++g_hold_hits;
+  else ++g_nearest_hits;
+  return true;
+}
+
+bool record_resolved_stage(ResolveContext& context,
+                           const StagedItemWorld& stage, uint32_t depth) {
+  if (std::chrono::steady_clock::now() > context.deadline)
+    return resolve_failure(context, g_time_limit_rejections);
+  if (context.resolved_stages >= kMaxResolvedStages)
+    return resolve_failure(context, g_stage_limit_rejections);
+  ++context.resolved_stages;
+  context.max_depth = (std::max)(context.max_depth, depth);
+  context.trace_hash = hash_mix(context.trace_hash,
+                                stage_identity_hash(stage.identity));
+  return true;
+}
+
+bool resolve_item(ResolveContext& context, void* item, uint32_t depth,
+                  StagedItemWorld& final_stage, SamplingPolicy& final_policy,
+                  bool& registered_item) {
+  if (std::chrono::steady_clock::now() > context.deadline)
+    return resolve_failure(context, g_time_limit_rejections);
+  if (depth >= kMaxResolveDepth)
+    return resolve_failure(context, g_depth_limit_rejections);
+  const auto active = std::find(context.chain.begin(), context.chain.end(), item);
+  if (active != context.chain.end()) {
+    ++g_cycles_rejected;
+    if (!context.chain.empty() && context.chain.back() == item)
+      return resolve_failure(context, g_direct_cycles_rejected);
+    return resolve_failure(context, g_indirect_cycles_rejected);
+  }
+  const ItemRegistration* registration =
+      find_registration(context.snapshot, item);
+  const SamplingPolicy policy =
+      registration ? registration->policy : SamplingPolicy::exact;
+  registered_item = registration != nullptr;
+  context.chain.push_back(item);
+  struct PopChain {
+    std::vector<void*>& chain;
+    ~PopChain() { chain.pop_back(); }
+  } pop{context.chain};
+  if (registration) {
+    for (void* dependency : registration->dependencies) {
+      StagedItemWorld dependency_final{};
+      SamplingPolicy dependency_policy{};
+      bool dependency_registered{};
+      if (!resolve_item(context, dependency, depth + 1, dependency_final,
+                        dependency_policy, dependency_registered))
+        return false;
+    }
+  }
+  uint64_t previous_generation = 0;
+  if (registration) {
+    for (uint64_t effect_instance : registration->effect_instances) {
+      for (StageKind kind : {StageKind::upstream, StageKind::all_effects,
+                             StageKind::downstream}) {
+        StagedItemWorld boundary{};
+        if (!select_stage(context.snapshot, item, kind, effect_instance, policy,
+                          context.options, context.pixel_format,
+                          context.project_generation, boundary))
+          return resolve_failure(context, g_effect_boundary_rejections);
+        if (boundary.stage_generation <= previous_generation)
+          return resolve_failure(context, g_effect_boundary_rejections);
+        previous_generation = boundary.stage_generation;
+        if (!record_resolved_stage(context, boundary, depth)) return false;
+      }
+    }
+  }
+  if (!select_stage(context.snapshot, item, StageKind::final_item, 0, policy,
+                    context.options, context.pixel_format,
+                    context.project_generation, final_stage))
+    return false;
+  if (final_stage.stage_generation <= previous_generation)
+    return resolve_failure(context, g_effect_boundary_rejections);
+  if (!record_resolved_stage(context, final_stage, depth)) return false;
+  final_policy = policy;
+  return true;
+}
+
+bool resolve_plan(const ItemValue& options, ResolvedPlan& plan) {
+  const int32_t pixel_format = options.world_type == 1
+      ? world_registry::kPixelFormatArgb32
+      : (options.world_type == 2 ? world_registry::kPixelFormatArgb64
+                                 : (options.world_type == 3
+                                        ? world_registry::kPixelFormatArgb128
+                                        : 0));
+  if (!pixel_format || !g_hooks.project_generation || !options.item ||
+      options.time.scale == 0 || options.time_step.scale == 0 ||
+      options.time_step.value <= 0 || options.render_quality < 0 ||
+      options.render_quality > 1 || options.render_guide_layers > 1 ||
+      options.downsample_x <= 0 || options.downsample_y <= 0 ||
+      options.field < 0 || options.field > 2 ||
+      options.matte < 0 || options.matte > 2 ||
+      options.channel_order < 0 || options.channel_order > 1)
+    return false;
   const uint32_t generation = g_hooks.project_generation();
   if (generation == 0) return false;
   ensure_generation(generation);
-  std::lock_guard<std::mutex> lock(g_mutex);
-  const auto found = std::find_if(g_worlds.rbegin(), g_worlds.rend(), [&](const auto& value) {
-    return value.item == options.item && same_rational(value.time, options.time) &&
-        same_rational(value.time_step, options.time_step) &&
-        value.quality == options.render_quality &&
-        value.guide_layers == options.render_guide_layers &&
-        value.pixel_format == pixel_format && value.project_generation == generation &&
-        value.identity.item == options.item &&
-        value.identity.time == normalize_rational(options.time) &&
-        value.identity.time_step == normalize_rational(options.time_step) &&
-        value.identity.quality == options.render_quality &&
-        value.identity.guide_layers == options.render_guide_layers &&
-        value.identity.pixel_format == pixel_format &&
-        value.identity.project_generation == generation;
-  });
-  if (found == g_worlds.rend() || !found->backing) {
-    ++g_cache_misses;
-    return false;
+  ResolveSnapshot snapshot;
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    snapshot.worlds = g_worlds;
+    snapshot.items = g_items;
   }
-  stage = *found;
-  ++g_cache_hits;
+  ResolveContext context{snapshot, options, pixel_format, generation,
+      std::chrono::steady_clock::now() + kMaxResolveTime};
+  SamplingPolicy policy{};
+  bool registered{};
+  if (!resolve_item(context, options.item, 0, plan.final_stage, policy,
+                    registered))
+    return false;
+  plan.policy = policy;
+  plan.item_identity = plan.final_stage.item_identity;
+  plan.trace_hash = hash_mix(context.trace_hash, static_cast<uint8_t>(policy));
+  const auto requested_time = normalize_rational(options.time);
+  const auto requested_step = normalize_rational(options.time_step);
+  plan.trace_hash = hash_mix(
+      plan.trace_hash, static_cast<uint64_t>(requested_time.numerator));
+  plan.trace_hash = hash_mix(plan.trace_hash, requested_time.denominator);
+  plan.trace_hash = hash_mix(
+      plan.trace_hash, static_cast<uint64_t>(requested_step.numerator));
+  plan.trace_hash = hash_mix(plan.trace_hash, requested_step.denominator);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.field);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.world_type);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.downsample_x);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.downsample_y);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.roi.left);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.roi.top);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.roi.right);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.roi.bottom);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.matte);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.channel_order);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.render_guide_layers);
+  plan.trace_hash = hash_mix(plan.trace_hash, options.render_quality);
+  plan.resolved_stages = context.resolved_stages;
+  plan.resolved_depth = context.max_depth;
+  plan.registered_item = registered;
+  g_last_trace_hash = plan.trace_hash;
+  g_last_stage_identity_hash = stage_identity_hash(plan.final_stage.identity);
+  g_last_resolved_stages = plan.resolved_stages;
+  update_atomic_max(g_max_resolved_depth, plan.resolved_depth);
   return true;
 }
 
@@ -203,6 +575,7 @@ void write_channel(std::byte* pixel, int32_t pixel_bytes, int channel, float val
 }
 
 int32_t transform(const StagedItemWorld& stage, const ItemValue& options,
+                  const ResolvedPlan& plan,
                   std::unique_ptr<ReceiptDraft>& receipt) {
   const int32_t pixel_bytes = pixel_bytes_for(stage.pixel_format);
   if (!stage.backing || !pixel_bytes || options.downsample_x <= 0 || options.downsample_y <= 0 ||
@@ -262,6 +635,18 @@ int32_t transform(const StagedItemWorld& stage, const ItemValue& options,
       ceil_div(roi.top, options.downsample_y), ceil_div(roi.right, options.downsample_x),
       ceil_div(roi.bottom, options.downsample_y)};
   receipt->render_timestamp = stage.project_generation;
+  receipt->has_stage_evidence = true;
+  receipt->stage_identity_hash = stage_identity_hash(stage.identity);
+  receipt->item_identity = plan.item_identity;
+  receipt->effect_instance = stage.effect_instance;
+  receipt->trace_hash = plan.trace_hash;
+  receipt->requested_time = options.time;
+  receipt->source_time = stage.time;
+  receipt->project_generation = stage.project_generation;
+  receipt->resolved_stage_count = plan.resolved_stages;
+  receipt->resolved_depth = plan.resolved_depth;
+  receipt->stage_kind = static_cast<uint8_t>(stage.stage_kind);
+  receipt->sampling_policy = static_cast<uint8_t>(plan.policy);
   receipt->world.data = receipt->pixels.data();
   receipt->world.rowbytes = width * pixel_bytes;
   receipt->world.world_flags = pixel_bytes == 4 ? 0 : 1;
@@ -281,9 +666,73 @@ void clear() noexcept {
   invalidate_generation_locked();
 }
 
-bool publish_world(void* item, AegpTime time, AegpTime time_step, int8_t quality,
-                   uint8_t guide_layers, int32_t pixel_format, int32_t width,
-                   int32_t height, int32_t rowbytes, const void* pixels) {
+bool register_item(void* item, uint64_t stable_identity, SamplingPolicy policy,
+                   void* const* dependencies, std::size_t dependency_count,
+                   const uint64_t* effect_instances, std::size_t effect_count) {
+  if (!g_hooks.project_generation || !item || stable_identity == 0 ||
+      static_cast<uint8_t>(policy) >
+          static_cast<uint8_t>(SamplingPolicy::nearest) ||
+      dependency_count > kMaxDependenciesPerItem ||
+      effect_count > kMaxEffectsPerItem ||
+      (dependency_count != 0 && !dependencies) ||
+      (effect_count != 0 && !effect_instances))
+    return false;
+  std::vector<void*> dependency_copy;
+  std::vector<uint64_t> effect_copy;
+  try {
+    if (dependency_count != 0)
+      dependency_copy.assign(dependencies, dependencies + dependency_count);
+    if (effect_count != 0)
+      effect_copy.assign(effect_instances, effect_instances + effect_count);
+  } catch (...) {
+    return false;
+  }
+  if (std::any_of(dependency_copy.begin(), dependency_copy.end(),
+                  [](void* value) { return value == nullptr; }) ||
+      std::any_of(effect_copy.begin(), effect_copy.end(),
+                  [](uint64_t value) { return value == 0; }))
+    return false;
+  auto has_duplicates = [](const auto& values) {
+    for (std::size_t index = 0; index < values.size(); ++index)
+      if (std::find(values.begin() + index + 1, values.end(), values[index]) !=
+          values.end())
+        return true;
+    return false;
+  };
+  if (has_duplicates(dependency_copy) || has_duplicates(effect_copy))
+    return false;
+  const uint32_t generation = g_hooks.project_generation();
+  if (generation == 0) return false;
+  ensure_generation(generation);
+  std::lock_guard<std::mutex> lock(g_mutex);
+  const auto existing = std::find_if(g_items.begin(), g_items.end(),
+      [item](const auto& value) { return value.item == item; });
+  if (existing != g_items.end()) {
+    if (existing->stable_identity != stable_identity &&
+        std::any_of(g_worlds.begin(), g_worlds.end(),
+                    [item](const auto& value) { return value.item == item; }))
+      return false;
+    *existing = {item, stable_identity, policy, std::move(dependency_copy),
+                 std::move(effect_copy)};
+    return true;
+  }
+  if (g_items.size() >= kMaxRegisteredItems) return false;
+  try {
+    g_items.push_back({item, stable_identity, policy,
+                       std::move(dependency_copy), std::move(effect_copy)});
+  } catch (...) {
+    return false;
+  }
+  return true;
+}
+
+bool publish_stage_world(void* item, StageKind stage_kind,
+                         uint64_t effect_instance, AegpTime time,
+                         AegpTime time_step, int8_t quality,
+                         uint8_t guide_layers, int32_t pixel_format,
+                         int32_t width, int32_t height, int32_t rowbytes,
+                         const void* pixels, uint64_t* published_identity_hash) {
+  if (published_identity_hash) *published_identity_hash = 0;
   const int32_t pixel_bytes = pixel_bytes_for(pixel_format);
   const uint64_t tight_rowbytes = static_cast<uint64_t>(width) * pixel_bytes;
   const uint64_t tight_bytes = tight_rowbytes * height;
@@ -291,7 +740,12 @@ bool publish_world(void* item, AegpTime time, AegpTime time_step, int8_t quality
       time_step.value <= 0 || quality < 0 || quality > 1 || guide_layers > 1 || !pixel_bytes ||
       width <= 0 || height <= 0 || width > 4096 || height > 4096 ||
       rowbytes < tight_rowbytes || !pixels || tight_bytes == 0 ||
-      tight_bytes > render_receipts::kMaxReceiptBytes) return false;
+      tight_bytes > kMaxSchedulerBytes ||
+      static_cast<uint8_t>(stage_kind) >
+          static_cast<uint8_t>(StageKind::final_item) ||
+      (stage_kind == StageKind::final_item && effect_instance != 0) ||
+      (stage_kind != StageKind::final_item && effect_instance == 0))
+    return false;
   std::shared_ptr<std::vector<std::byte>> backing;
   try {
     backing = std::make_shared<std::vector<std::byte>>(static_cast<std::size_t>(tight_bytes));
@@ -305,55 +759,126 @@ bool publish_world(void* item, AegpTime time, AegpTime time_step, int8_t quality
   ensure_generation(project_generation);
   const uint64_t stage_generation = g_stage_generation.fetch_add(1);
   if (stage_generation == 0) return false;
-  const auto identity = make_stage_identity(item, time, time_step, quality, guide_layers,
-      pixel_format, width, height, static_cast<int32_t>(tight_rowbytes), project_generation);
-  if (!identity.time.valid || !identity.time_step.valid) return false;
-  StagedItemWorld stage{item, time, time_step, quality, guide_layers, pixel_format, width, height,
-      static_cast<int32_t>(tight_rowbytes), project_generation, identity, stage_generation,
-      std::move(backing)};
   std::lock_guard<std::mutex> lock(g_mutex);
+  const uint64_t item_identity = stable_item_identity_locked(item);
+  const auto identity = make_stage_identity(item, item_identity, stage_kind,
+      effect_instance, time, time_step, quality, guide_layers, pixel_format,
+      width, height, static_cast<int32_t>(tight_rowbytes), project_generation);
+  if (!identity.time.valid || !identity.time_step.valid) return false;
+  StagedItemWorld stage{item, item_identity, stage_kind, effect_instance, time,
+      time_step, quality, guide_layers, pixel_format, width, height,
+      static_cast<int32_t>(tight_rowbytes), project_generation, identity,
+      stage_generation, std::move(backing)};
   auto same_key = [&](const auto& value) {
-    return value.item == item && same_rational(value.time, time) &&
+    return value.item == item && value.stage_kind == stage_kind &&
+        value.effect_instance == effect_instance &&
+        same_rational(value.time, time) &&
         same_rational(value.time_step, time_step) && value.quality == quality &&
         value.guide_layers == guide_layers && value.pixel_format == pixel_format &&
         value.width == width && value.height == height && value.rowbytes == tight_rowbytes &&
         value.project_generation == project_generation && value.identity == identity;
   };
   const auto existing = std::find_if(g_worlds.begin(), g_worlds.end(), same_key);
-  if (existing != g_worlds.end()) *existing = std::move(stage);
-  else if (g_worlds.size() == kMaxStagedItemWorlds) {
-    const auto oldest = std::min_element(g_worlds.begin(), g_worlds.end(),
-        [](const auto& left, const auto& right) { return left.stage_generation < right.stage_generation; });
-    *oldest = std::move(stage);
-    ++g_evictions;
+  if (existing != g_worlds.end()) {
+    const uint64_t previous_bytes = existing->backing ? existing->backing->size() : 0;
+    if (g_world_bytes - previous_bytes > kMaxSchedulerBytes - tight_bytes)
+      return false;
+    g_world_bytes = g_world_bytes - previous_bytes + tight_bytes;
+    *existing = std::move(stage);
   } else {
-    try { g_worlds.push_back(std::move(stage)); } catch (...) { return false; }
+    while (!g_worlds.empty() &&
+           (g_worlds.size() >= kMaxStagedItemWorlds ||
+            g_world_bytes > kMaxSchedulerBytes - tight_bytes)) {
+      const auto oldest = std::min_element(g_worlds.begin(), g_worlds.end(),
+          [](const auto& left, const auto& right) {
+            return left.stage_generation < right.stage_generation;
+          });
+      g_world_bytes -= oldest->backing ? oldest->backing->size() : 0;
+      g_worlds.erase(oldest);
+      ++g_evictions;
+    }
+    if (g_worlds.size() >= kMaxStagedItemWorlds ||
+        g_world_bytes > kMaxSchedulerBytes - tight_bytes)
+      return false;
+    try {
+      g_worlds.push_back(std::move(stage));
+      g_world_bytes += tight_bytes;
+    } catch (...) {
+      return false;
+    }
   }
+  if (published_identity_hash)
+    *published_identity_hash = stage_identity_hash(identity);
   ++g_published;
   return true;
 }
 
-int32_t publish_receipt(void* options, void** receipt) {
+bool publish_world(void* item, AegpTime time, AegpTime time_step,
+                   int8_t quality, uint8_t guide_layers,
+                   int32_t pixel_format, int32_t width, int32_t height,
+                   int32_t rowbytes, const void* pixels) {
+  return publish_stage_world(item, StageKind::final_item, 0, time, time_step,
+      quality, guide_layers, pixel_format, width, height, rowbytes, pixels);
+}
+
+int32_t publish_snapshot(const ItemValue& snapshot, void** receipt,
+                         bool allow_test_synthetic) {
   if (receipt) *receipt = nullptr;
   if (!receipt || !g_hooks.project_generation) return 4;
-  ItemValue snapshot{};
-  if (!render_options::snapshot_item(options, snapshot)) return 4;
-  const ItemRenderStackKey key{snapshot.item, snapshot.time, g_hooks.project_generation()};
-  if (stack_contains(key)) { ++g_cycles_rejected; return 4; }
+  const uint32_t in_flight = g_in_flight.fetch_add(1) + 1;
+  update_atomic_max(g_max_in_flight, in_flight);
+  struct Cleanup {
+    ~Cleanup() {
+      --g_in_flight;
+      ++g_cleanup_count;
+    }
+  } cleanup;
+  const ItemRenderStackKey key{
+      snapshot.item, snapshot.time, g_hooks.project_generation()};
+  if (stack_contains(key)) {
+    ++g_cycles_rejected;
+    ++g_direct_cycles_rejected;
+    return 4;
+  }
   StackScope scope(key);
   if (!scope.entered) return 4;
-  StagedItemWorld stage{};
-  if (snapshot_world(snapshot, stage)) {
+  bool registered = false;
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    registered = std::any_of(g_items.begin(), g_items.end(),
+        [&](const auto& value) { return value.item == snapshot.item; });
+  }
+  ResolvedPlan plan{};
+  if (resolve_plan(snapshot, plan)) {
     std::unique_ptr<ReceiptDraft> draft;
-    if (transform(stage, snapshot, draft) != 0) return 4;
+    if (transform(plan.final_stage, snapshot, plan, draft) != 0) return 4;
     return render_receipts::register_receipt(std::move(draft), receipt);
   }
-  if (!g_hooks.synthetic_receipts_enabled || !g_hooks.synthetic_receipts_enabled() ||
-      snapshot.matte == 2 || !g_hooks.publish_synthetic) return 4;
-  const int32_t pixel_format = snapshot.world_type == 1 ? world_registry::kPixelFormatArgb32 :
-      (snapshot.world_type == 2 ? world_registry::kPixelFormatArgb64 :
-       (snapshot.world_type == 3 ? world_registry::kPixelFormatArgb128 : 0));
-  return pixel_format ? g_hooks.publish_synthetic(pixel_format, receipt, &snapshot) : 4;
+  if (registered || !allow_test_synthetic ||
+      !g_hooks.synthetic_receipts_enabled ||
+      !g_hooks.synthetic_receipts_enabled() || snapshot.matte == 2 ||
+      !g_hooks.publish_synthetic)
+    return 4;
+  const int32_t pixel_format = snapshot.world_type == 1
+      ? world_registry::kPixelFormatArgb32
+      : (snapshot.world_type == 2 ? world_registry::kPixelFormatArgb64
+                                  : (snapshot.world_type == 3
+                                         ? world_registry::kPixelFormatArgb128
+                                         : 0));
+  return pixel_format
+      ? g_hooks.publish_synthetic(pixel_format, receipt, &snapshot)
+      : 4;
+}
+
+int32_t publish_registered_receipt(const ItemValue& options, void** receipt) {
+  return publish_snapshot(options, receipt, false);
+}
+
+int32_t publish_receipt(void* options, void** receipt) {
+  if (receipt) *receipt = nullptr;
+  ItemValue snapshot{};
+  if (!receipt || !render_options::snapshot_item(options, snapshot)) return 4;
+  return publish_snapshot(snapshot, receipt, true);
 }
 
 bool verify_recursion_guard(void* item, AegpTime time, void* options, Checkout checkout) {
@@ -367,8 +892,45 @@ bool verify_recursion_guard(void* item, AegpTime time, void* options, Checkout c
 }
 
 Diagnostics diagnostics() noexcept {
-  return {g_published.load(), g_cache_hits.load(), g_cache_misses.load(),
-          g_cycles_rejected.load(), g_generation_invalidations.load(), g_evictions.load()};
+  Diagnostics result{};
+  result.published = g_published.load();
+  result.cache_hits = g_cache_hits.load();
+  result.cache_misses = g_cache_misses.load();
+  result.cycles_rejected = g_cycles_rejected.load();
+  result.generation_invalidations = g_generation_invalidations.load();
+  result.evictions = g_evictions.load();
+  result.exact_hits = g_exact_hits.load();
+  result.hold_hits = g_hold_hits.load();
+  result.nearest_hits = g_nearest_hits.load();
+  result.unavailable_frames = g_unavailable_frames.load();
+  result.direct_cycles_rejected = g_direct_cycles_rejected.load();
+  result.indirect_cycles_rejected = g_indirect_cycles_rejected.load();
+  result.depth_limit_rejections = g_depth_limit_rejections.load();
+  result.stage_limit_rejections = g_stage_limit_rejections.load();
+  result.time_limit_rejections = g_time_limit_rejections.load();
+  result.effect_boundary_rejections = g_effect_boundary_rejections.load();
+  result.partial_failures = g_partial_failures.load();
+  result.cleanup_count = g_cleanup_count.load();
+  result.in_flight = g_in_flight.load();
+  result.max_in_flight = g_max_in_flight.load();
+  result.last_trace_hash = g_last_trace_hash.load();
+  result.last_stage_identity_hash = g_last_stage_identity_hash.load();
+  result.last_resolved_stages = g_last_resolved_stages.load();
+  result.max_resolved_depth = g_max_resolved_depth.load();
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    result.registered_items = static_cast<uint32_t>(g_items.size());
+    result.cached_stages = static_cast<uint32_t>(g_worlds.size());
+    result.cached_bytes = g_world_bytes;
+  }
+  return result;
 }
+
+/*
+  The scheduler intentionally retains no callback that can recursively invoke
+  an effect while resolving an item. Producers publish immutable stage worlds;
+  resolution validates the complete dependency/boundary plan before a receipt
+  is registered.
+*/
 
 }  // namespace aexcompat::aegp_staged_item_runtime
