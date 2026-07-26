@@ -2,6 +2,33 @@
 #include "worker_aegp_scene.hpp"
 namespace aexcompat::l2_detail {
 struct AegpCompatColor { double alpha, red, green, blue; };
+struct AegpSceneModelSelftestReport {
+  bool passed{};
+  bool two_projects{};
+  bool mask_fixture{};
+  bool parent_camera_zoom_fixture{};
+  bool typed_identity{};
+  bool pointer_id_mismatch_rejected{};
+  bool duplicate_stable_id_rejected{};
+  bool direct_cycle_rejected{};
+  bool indirect_cycle_rejected{};
+  bool cross_project_cycle_rejected{};
+  bool effect_order{};
+  bool stage_invalidated{};
+  bool receipt_invalidated{};
+  bool invalid_handle_distinguished{};
+  bool cleanup_balanced{};
+  bool fixture_lookup{};
+  bool effect_suite_acquired{};
+  bool effect_applied{};
+  uint32_t project_generation_before{};
+  uint32_t project_generation_after{};
+  uint32_t effect_count{};
+  uint64_t stage_identity_hash{};
+  uint64_t trace_hash{};
+  uint64_t dependency_identity_hash{};
+  uint64_t effect_order_hash{};
+};
 struct AegpCompatSelftestHooks {
   int32_t (*acquire_suite)(const char*, int32_t, const void**){};
   int32_t (*release_suite)(const char*, int32_t){};
@@ -53,6 +80,7 @@ bool verify_aegp_projector_levels();
 bool verify_aegp_layer_source_item();
 bool verify_aegp_scene_registry_suites();
 bool verify_aegp_scene_mutation_transactions();
+AegpSceneModelSelftestReport verify_aegp_scene_model();
 bool verify_aegp_effect_param_union_suite4();
 bool verify_aegp_installed_effect_catalog_suite4();
 }

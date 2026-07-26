@@ -157,6 +157,31 @@ Identity Registry::active_item() const noexcept {
   return active_item_;
 }
 
+bool Registry::project_identity(uint64_t project_id,
+                                Identity& output) const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (std::size_t index = 0; index < object_count_; ++index) {
+    const auto& record = objects_[index];
+    if (record.live &&
+        record.snapshot.identity.kind == ObjectKind::project &&
+        record.snapshot.identity.project_id == project_id) {
+      output = record.snapshot.identity;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Registry::scheduler_key(Identity identity, void*& output) const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto* record = find_locked(identity);
+  if (!record) return false;
+  output = record->snapshot.legacy_handle
+      ? record->snapshot.legacy_handle
+      : const_cast<ObjectRecord*>(record);
+  return output != nullptr;
+}
+
 bool Registry::snapshot(Identity identity, ObjectSnapshot& output) const noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto* record = find_locked(identity);

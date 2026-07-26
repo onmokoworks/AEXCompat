@@ -11,10 +11,19 @@ std::atomic<uint64_t> g_staged{};
 std::atomic<uint64_t> g_validated{};
 std::atomic<uint64_t> g_committed{};
 std::atomic<uint64_t> g_cancelled{};
+std::atomic<GenerationInvalidator> g_generation_invalidator{};
 
 }  // namespace
 
 std::mutex& mutation_mutex() noexcept { return g_mutation_mutex; }
+void configure_generation_invalidator(GenerationInvalidator callback) noexcept {
+  g_generation_invalidator.store(callback);
+}
+void notify_generation_invalidated(uint64_t project_id,
+                                   uint32_t valid_generation) noexcept {
+  if (const auto callback = g_generation_invalidator.load())
+    callback(project_id, valid_generation);
+}
 void record_begin() noexcept { ++g_begun; }
 void record_stage() noexcept { ++g_staged; }
 void record_validate() noexcept { ++g_validated; }

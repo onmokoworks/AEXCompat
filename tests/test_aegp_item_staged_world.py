@@ -181,8 +181,9 @@ def test_shipped_worker_wires_scene_metadata_providers():
     assert "staged_effect_identity_for_render_ref(render_ref)" in (
         ROOT / "minihost/src/worker_classic_render_runtime.cpp"
     ).read_text(encoding="utf-8")
-    assert "instance_slot->render_ref = *effect" in scene
-    assert "instance_slot->render_ref = *duplicate" in scene
+    assert scene.count("candidate.render_ref = published") >= 2
+    assert "*effect = published" in scene
+    assert "*duplicate = published" in scene
     assert "update_composition_item_render_metadata(" in scene
     assert "active_render_effect_index" not in scene
     assert "aegp_layer_render_runtime::configure({" not in selftests

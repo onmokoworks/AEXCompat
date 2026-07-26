@@ -7,6 +7,9 @@
 #include "worker_aegp_scene_transaction.hpp"
 #include "worker_aegp_scene_runtime.hpp"
 #include "worker_aegp_external_render_runtime.hpp"
+#include "worker_aegp_staged_item_runtime.hpp"
+#include "worker_render_receipts.hpp"
+#include "worker_world_registry.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_pf_helper_runtime.hpp"
 #include "worker_pf_state_runtime.hpp"
@@ -19,6 +22,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace aexcompat::l2_detail {
 bool configure_mask_scene(const std::string&);
@@ -1805,5 +1809,264 @@ bool verify_aegp_installed_effect_catalog_suite4() {
        aegp_get_effect_category(installed_key, nullptr) == 4;
   g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
   return ok;
+}
+
+AegpSceneModelSelftestReport verify_aegp_scene_model() {
+  using scene_model::Identity;
+  using scene_model::ObjectKind;
+  using aegp_staged_item_runtime::OrderedSceneEffect;
+  using aegp_staged_item_runtime::SamplingPolicy;
+  using aegp_staged_item_runtime::StageKind;
+
+  AegpSceneModelSelftestReport report{};
+  auto& registry = scene_model::registry();
+  const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
+  g_aegp_comp_idle_roundtrip_mode = true;
+  report.two_projects = registry.project_count() == 2;
+  if (!report.two_projects) return report;
+
+  aegp_staged_item_runtime::clear();
+  scene_model::ObjectSnapshot active_item{}, active_comp{}, active_layer{},
+      root{}, child_item{}, project_b{}, root_b{}, item_b{};
+  const Identity active = registry.active_item();
+  bool ok = registry.snapshot(active, active_item) &&
+      registry.comp_from_item(active, active_comp) &&
+      registry.layer_by_index(active_comp.identity, 0, active_layer) &&
+      registry.snapshot(active_item.owner, root) &&
+      registry.child_by_index(root.identity, ObjectKind::item, 1, child_item) &&
+      registry.project_identity(2, project_b.identity) &&
+      registry.first_child(project_b.identity, root_b) &&
+      registry.first_child(root_b.identity, item_b);
+  report.fixture_lookup = ok;
+
+  const void* effect_suite_raw = nullptr;
+  using ApplyEffect = int32_t(__cdecl*)(int32_t, void*, int32_t, void**);
+  using DeleteEffect = int32_t(__cdecl*)(void*);
+  report.effect_suite_acquired =
+      compat_acquire_suite("AEGP Effect Suite", 4,
+                           &effect_suite_raw) == 0;
+  ok = ok && report.effect_suite_acquired;
+  const auto* effect_slots =
+      static_cast<void* const*>(const_cast<void*>(effect_suite_raw));
+  const auto apply_effect = effect_slots
+      ? reinterpret_cast<ApplyEffect>(effect_slots[9]) : nullptr;
+  const auto delete_effect = effect_slots
+      ? reinterpret_cast<DeleteEffect>(effect_slots[10]) : nullptr;
+  void* applied_effect = nullptr;
+  report.effect_applied = apply_effect && delete_effect &&
+      apply_effect(7, active_layer.legacy_handle,
+                   kAegpInstalledEffects[0].key, &applied_effect) == 0;
+  ok = ok && report.effect_applied;
+
+  std::vector<OrderedSceneEffect> effects;
+  for (const auto& instance : g_aegp_effect_instances) {
+    if (!instance.occupied || instance.layer != active_layer.legacy_handle)
+      continue;
+    scene_model::ObjectSnapshot effect_snapshot{};
+    if (!registry.snapshot(instance.identity, effect_snapshot)) {
+      ok = false;
+      break;
+    }
+    effects.push_back(
+        {instance.identity, static_cast<uint32_t>(instance.stack_order)});
+  }
+  std::sort(effects.begin(), effects.end(),
+            [](const auto& left, const auto& right) {
+              return left.order < right.order;
+            });
+  report.effect_count = static_cast<uint32_t>(effects.size());
+  report.effect_order = !effects.empty();
+  for (std::size_t index = 0; index < effects.size(); ++index)
+    report.effect_order = report.effect_order &&
+        effects[index].order == index;
+
+  ok = ok && report.effect_order &&
+      aegp_staged_item_runtime::register_scene_item(
+          registry, child_item.identity, SamplingPolicy::exact,
+          nullptr, 0, nullptr, 0) &&
+      aegp_staged_item_runtime::register_scene_item(
+          registry, active, SamplingPolicy::exact, &child_item.identity, 1,
+          effects.data(), effects.size());
+  report.typed_identity = ok;
+
+  report.cross_project_cycle_rejected =
+      !aegp_staged_item_runtime::register_scene_item(
+          registry, active, SamplingPolicy::exact, &item_b.identity, 1,
+          effects.data(), effects.size());
+  report.direct_cycle_rejected =
+      !aegp_staged_item_runtime::register_scene_item(
+          registry, child_item.identity, SamplingPolicy::exact,
+          &child_item.identity, 1, nullptr, 0);
+  report.indirect_cycle_rejected =
+      !aegp_staged_item_runtime::register_scene_item(
+          registry, child_item.identity, SamplingPolicy::exact,
+          &active, 1, nullptr, 0);
+
+  constexpr int32_t width = 2;
+  constexpr int32_t height = 1;
+  std::array<std::byte, width * height * 4> pixels{{
+      std::byte{255}, std::byte{17}, std::byte{29}, std::byte{41},
+      std::byte{255}, std::byte{53}, std::byte{67}, std::byte{79}}};
+  const suite_abi::AegpTime time{0, 30};
+  const suite_abi::AegpTime step{1, 30};
+  uint64_t stage_hash = 0;
+  ok = ok && aegp_staged_item_runtime::publish_scene_stage_world(
+      registry, child_item.identity, StageKind::final_item, {}, time, step,
+      1, 0, world_registry::kPixelFormatArgb32, width, height, width * 4,
+      pixels.data());
+  for (const auto& effect : effects) {
+    for (const auto kind : {StageKind::upstream, StageKind::all_effects,
+                            StageKind::downstream}) {
+      ok = ok && aegp_staged_item_runtime::publish_scene_stage_world(
+          registry, active, kind, effect.identity, time, step, 1, 0,
+          world_registry::kPixelFormatArgb32, width, height, width * 4,
+          pixels.data(), &stage_hash);
+    }
+  }
+  ok = ok && aegp_staged_item_runtime::publish_scene_stage_world(
+      registry, active, StageKind::final_item, {}, time, step, 1, 0,
+      world_registry::kPixelFormatArgb32, width, height, width * 4,
+      pixels.data(), &stage_hash);
+  report.stage_identity_hash = stage_hash;
+
+  render_options::ItemValue request{};
+  request.item = active_item.legacy_handle;
+  request.time = time;
+  request.time_step = step;
+  request.world_type = 1;
+  request.render_quality = 1;
+  void* receipt = nullptr;
+  render_receipts::ReceiptSnapshot receipt_snapshot{};
+  ok = ok &&
+      aegp_staged_item_runtime::publish_registered_receipt(
+          request, &receipt) == 0 &&
+      receipt && render_receipts::snapshot(receipt, receipt_snapshot) &&
+      receipt_snapshot.scene_bound &&
+      receipt_snapshot.scene_item == active &&
+      receipt_snapshot.scene_project.project_id == active.project_id &&
+      receipt_snapshot.dependency_identity_hash != 0 &&
+      receipt_snapshot.effect_order_hash != 0;
+  report.trace_hash = receipt_snapshot.trace_hash;
+  report.dependency_identity_hash =
+      receipt_snapshot.dependency_identity_hash;
+  report.effect_order_hash = receipt_snapshot.effect_order_hash;
+
+  report.duplicate_stable_id_rejected =
+      !aegp_staged_item_runtime::register_item(
+          reinterpret_cast<void*>(static_cast<uintptr_t>(0x26f0)),
+          receipt_snapshot.item_identity, SamplingPolicy::exact,
+          nullptr, 0, nullptr, 0);
+  Identity stale_item = active;
+  ++stale_item.generation;
+  report.pointer_id_mismatch_rejected =
+      !aegp_staged_item_runtime::register_scene_item(
+          registry, stale_item, SamplingPolicy::exact,
+          nullptr, 0, effects.data(), effects.size());
+
+  report.project_generation_before =
+      aegp_external_render_runtime::project_generation();
+  const auto scheduler_before =
+      aegp_staged_item_runtime::diagnostics();
+  const auto receipt_stats_before = render_receipts::statistics();
+  const bool saved_mask_model = mask_runtime::model_enabled();
+  const bool configured_mask = configure_mask_scene("rectangle");
+  mask_runtime::set_model_enabled(true);
+  g_aegp_comp_idle_roundtrip_mode = false;
+  const void* mask_suite_raw = nullptr;
+  const void* stream_suite_raw = nullptr;
+  const void* keyframe_suite_raw = nullptr;
+  using GetMask = int32_t(__cdecl*)(void*, int32_t, void**);
+  using DisposeMask = int32_t(__cdecl*)(void*);
+  using GetMaskStream = int32_t(__cdecl*)(int32_t, void*, int32_t, void**);
+  using DisposeStream = int32_t(__cdecl*)(void*);
+  using InsertKeyframe = int32_t(__cdecl*)(
+      void*, int16_t, const HostTime*, int32_t*);
+  bool mask_commit = configured_mask &&
+      compat_acquire_suite("AEGP Layer Mask Suite", 7,
+                           &mask_suite_raw) == 0 &&
+      compat_acquire_suite("AEGP Stream Suite", 11,
+                           &stream_suite_raw) == 0 &&
+      compat_acquire_suite("AEGP Keyframe Suite", 5,
+                           &keyframe_suite_raw) == 0;
+  const auto* mask_slots =
+      static_cast<void* const*>(const_cast<void*>(mask_suite_raw));
+  const auto* stream_slots =
+      static_cast<void* const*>(const_cast<void*>(stream_suite_raw));
+  const auto* key_slots =
+      static_cast<void* const*>(const_cast<void*>(keyframe_suite_raw));
+  const auto get_mask = mask_slots
+      ? reinterpret_cast<GetMask>(mask_slots[1]) : nullptr;
+  const auto dispose_mask = mask_slots
+      ? reinterpret_cast<DisposeMask>(mask_slots[2]) : nullptr;
+  const auto get_mask_stream = stream_slots
+      ? reinterpret_cast<GetMaskStream>(stream_slots[6]) : nullptr;
+  const auto dispose_stream = stream_slots
+      ? reinterpret_cast<DisposeStream>(stream_slots[7]) : nullptr;
+  const auto insert_key = key_slots
+      ? reinterpret_cast<InsertKeyframe>(key_slots[2]) : nullptr;
+  void* mask = nullptr;
+  void* stream = nullptr;
+  int32_t inserted_index = -1;
+  const HostTime inserted_time{77, 30};
+  mask_commit = mask_commit && get_mask && dispose_mask &&
+      get_mask_stream && dispose_stream && insert_key &&
+      get_mask(g_hooks.pf_layer, 0, &mask) == 0 &&
+      get_mask_stream(1, mask, 400, &stream) == 0 &&
+      insert_key(stream, 1, &inserted_time, &inserted_index) == 0;
+  report.project_generation_after =
+      aegp_external_render_runtime::project_generation();
+  report.mask_fixture = mask_commit;
+  const auto scheduler_after =
+      aegp_staged_item_runtime::diagnostics();
+  const auto receipt_stats_after = render_receipts::statistics();
+  report.stage_invalidated = mask_commit &&
+      report.project_generation_after ==
+          report.project_generation_before + 1 &&
+      scheduler_after.stale_stage_invalidations >
+          scheduler_before.stale_stage_invalidations &&
+      scheduler_after.cached_stages == 0;
+  report.receipt_invalidated =
+      !render_receipts::snapshot(receipt, receipt_snapshot) &&
+      receipt_stats_after.stale_invalidations >
+          receipt_stats_before.stale_invalidations;
+  void** unchanged_world =
+      reinterpret_cast<void**>(static_cast<uintptr_t>(0x2610));
+  report.invalid_handle_distinguished =
+      render_receipts::get_world(receipt, &unchanged_world) != 0 &&
+      unchanged_world == nullptr &&
+      render_receipts::statistics().invalid_handle_operations >
+          receipt_stats_after.invalid_handle_operations;
+
+  if (stream && dispose_stream) ok = dispose_stream(stream) == 0 && ok;
+  if (mask && dispose_mask) ok = dispose_mask(mask) == 0 && ok;
+  if (keyframe_suite_raw)
+    ok = compat_release_suite("AEGP Keyframe Suite", 5) == 0 && ok;
+  if (stream_suite_raw)
+    ok = compat_release_suite("AEGP Stream Suite", 11) == 0 && ok;
+  if (mask_suite_raw)
+    ok = compat_release_suite("AEGP Layer Mask Suite", 7) == 0 && ok;
+  g_mask_scene.clear();
+  mask_runtime::set_model_enabled(saved_mask_model);
+  if (applied_effect && delete_effect)
+    ok = delete_effect(applied_effect) == 0 && ok;
+  if (effect_suite_raw)
+    ok = compat_release_suite("AEGP Effect Suite", 4) == 0 && ok;
+  g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
+  aegp_staged_item_runtime::clear();
+  report.parent_camera_zoom_fixture =
+      verify_aegp_get_effect_camera() && verify_aegp_resizer_3d_chain();
+  report.cleanup_balanced =
+      render_receipts::lifetimes_balanced() &&
+      compat_suite_leases_balanced();
+  report.passed = ok && report.mask_fixture &&
+      report.parent_camera_zoom_fixture && report.typed_identity &&
+      report.pointer_id_mismatch_rejected &&
+      report.duplicate_stable_id_rejected &&
+      report.direct_cycle_rejected && report.indirect_cycle_rejected &&
+      report.cross_project_cycle_rejected && report.effect_order &&
+      report.stage_invalidated && report.receipt_invalidated &&
+      report.invalid_handle_distinguished && report.cleanup_balanced &&
+      report.stage_identity_hash != 0 && report.trace_hash != 0;
+  return report;
 }
 }  // namespace aexcompat::l2_detail

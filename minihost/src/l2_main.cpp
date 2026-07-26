@@ -106,6 +106,7 @@
 #include "worker_aegp_render_selftests.hpp"
 #include "worker_aegp_async_layer_runtime.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
+#include "worker_aegp_scene_transaction.hpp"
 #include "worker_aegp_external_render_runtime.hpp"
 #include "worker_aegp_layer_render_runtime.hpp"
 #include "worker_aegp_item_render_runtime.hpp"
@@ -4130,6 +4131,11 @@ const bool g_aegp_compat_selftests_configured = [] {
        &g_aegp_item_suite,
        &g_aegp_layer_source_item_calls, &g_aegp_item_type_calls,
        &aegp_get_effect_param_union_by_index_v3});
+  return true;
+}();
+const bool g_aegp_scene_generation_invalidator_configured = [] {
+  aexcompat::scene_transaction::configure_generation_invalidator(
+      &aexcompat::aegp_staged_item_runtime::invalidate_scene_generation);
   return true;
 }();
 const bool g_color_settings_selftests_configured = [] {

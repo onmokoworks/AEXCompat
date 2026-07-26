@@ -531,6 +531,14 @@ bool snapshot_staged_item_metadata(
     void* item, AegpStagedItemMetadata& metadata) noexcept {
   metadata = {};
   auto& runtime = scene_runtime_state();
+  ObjectSnapshot item_snapshot{}, comp_snapshot{};
+  if (!resolve_scene_item(item, item_snapshot) ||
+      !scene_registry().project_identity(
+          item_snapshot.identity.project_id, metadata.project) ||
+      !scene_registry().comp_from_item(
+          item_snapshot.identity, comp_snapshot))
+    return false;
+  metadata.identity = item_snapshot.identity;
   int32_t item_id = 0;
   if (item == composition_item_handle()) {
     item_id = static_cast<int32_t>(runtime.composition_item_identity);
@@ -549,12 +557,50 @@ bool snapshot_staged_item_metadata(
   std::copy_n(runtime.composition_item_dependencies.begin(),
               metadata.direct_dependency_count,
               metadata.direct_dependencies.begin());
-  for (std::size_t index = 0; index < runtime.effect_instances.size(); ++index) {
-    const uint64_t identity =
-        effect_instance_identity(index, runtime.effect_instances[index]);
-    if (identity != 0)
-      metadata.effect_instances[metadata.effect_instance_count++] = identity;
+  for (std::size_t index = 0;
+       index < metadata.direct_dependency_count; ++index) {
+    ObjectSnapshot dependency{};
+    if (!resolve_scene_item(
+            metadata.direct_dependencies[index], dependency))
+      return false;
+    metadata.dependency_identities[index] = dependency.identity;
   }
+  struct OrderedEffectIndex {
+    std::size_t instance_index{};
+    int32_t layer_index{};
+    int32_t stack_order{};
+  };
+  std::array<OrderedEffectIndex, kAegpEffectInstanceCapacity>
+      ordered_effects{};
+  std::size_t ordered_count = 0;
+  for (std::size_t index = 0; index < runtime.effect_instances.size(); ++index) {
+    const auto& instance = runtime.effect_instances[index];
+    const uint64_t identity = effect_instance_identity(index, instance);
+    ObjectSnapshot effect{}, layer{};
+    if (identity == 0 ||
+        !scene_registry().snapshot(instance.identity, effect) ||
+        !scene_registry().snapshot(effect.owner, layer) ||
+        layer.owner != comp_snapshot.identity)
+      continue;
+    ordered_effects[ordered_count++] = {
+        index, layer.local_index, instance.stack_order};
+  }
+  std::sort(ordered_effects.begin(),
+            ordered_effects.begin() + ordered_count,
+            [](const auto& left, const auto& right) {
+              return left.layer_index != right.layer_index
+                  ? left.layer_index < right.layer_index
+                  : left.stack_order < right.stack_order;
+            });
+  for (std::size_t order = 0; order < ordered_count; ++order) {
+    const auto index = ordered_effects[order].instance_index;
+    metadata.effect_instances[order] =
+        effect_instance_identity(index, runtime.effect_instances[index]);
+    metadata.effect_identities[order] =
+        runtime.effect_instances[index].identity;
+    metadata.effect_orders[order] = static_cast<uint32_t>(order);
+  }
+  metadata.effect_instance_count = ordered_count;
   return true;
 }
 uint64_t staged_effect_instance_identity(

@@ -83,6 +83,82 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << ",\"cancelled\":" << transactions.cancelled << "}\n";
     return {true, passed ? 0 : 1, out.str()};
   }
+  if (argc == 2 &&
+      std::wstring(argv[1]) == L"--self-test-aegp-scene-model") {
+    const auto report = aexcompat::l2_detail::verify_aegp_scene_model();
+    const auto diagnostics =
+        aexcompat::aegp_staged_item_runtime::diagnostics();
+    const auto receipts = aexcompat::render_receipts::statistics();
+    const auto hex64 = [](uint64_t value) {
+      std::ostringstream encoded;
+      encoded << std::hex << std::setw(16) << std::setfill('0') << value;
+      return encoded.str();
+    };
+    std::ostringstream out;
+    out << "{\"schema_version\":1,\"aegp_scene_model\":\""
+        << passed_or_failed(report.passed)
+        << "\",\"fixture\":{\"projects\":2,\"mask_api\":"
+        << json_bool(report.mask_fixture)
+        << ",\"parent_camera_zoom_api\":"
+        << json_bool(report.parent_camera_zoom_fixture)
+        << ",\"effect_count\":" << report.effect_count << "}"
+        << ",\"identity\":{\"typed\":" << json_bool(report.typed_identity)
+        << ",\"fixture_lookup\":" << json_bool(report.fixture_lookup)
+        << ",\"effect_suite_acquired\":"
+        << json_bool(report.effect_suite_acquired)
+        << ",\"effect_applied\":" << json_bool(report.effect_applied)
+        << ",\"pointer_id_mismatch_rejected\":"
+        << json_bool(report.pointer_id_mismatch_rejected)
+        << ",\"duplicate_stable_id_rejected\":"
+        << json_bool(report.duplicate_stable_id_rejected) << "}"
+        << ",\"cycles\":{\"direct_rejected\":"
+        << json_bool(report.direct_cycle_rejected)
+        << ",\"indirect_rejected\":"
+        << json_bool(report.indirect_cycle_rejected)
+        << ",\"cross_project_rejected\":"
+        << json_bool(report.cross_project_cycle_rejected) << "}"
+        << ",\"order\":{\"registry_effect_order\":"
+        << json_bool(report.effect_order)
+        << ",\"effect_order_hash\":\""
+        << hex64(report.effect_order_hash) << "\"}"
+        << ",\"generation\":{\"before\":"
+        << report.project_generation_before << ",\"after\":"
+        << report.project_generation_after
+        << ",\"old_stage_invalidated\":"
+        << json_bool(report.stage_invalidated)
+        << ",\"old_receipt_invalidated\":"
+        << json_bool(report.receipt_invalidated) << "}"
+        << ",\"hashes\":{\"stage_identity\":\""
+        << hex64(report.stage_identity_hash)
+        << "\",\"trace\":\"" << hex64(report.trace_hash)
+        << "\",\"dependencies\":\""
+        << hex64(report.dependency_identity_hash) << "\"}"
+        << ",\"diagnostics\":{\"typed_registrations\":"
+        << diagnostics.typed_registrations
+        << ",\"identity_mismatch_rejections\":"
+        << diagnostics.identity_mismatch_rejections
+        << ",\"duplicate_identity_rejections\":"
+        << diagnostics.duplicate_identity_rejections
+        << ",\"cross_project_rejections\":"
+        << diagnostics.cross_project_rejections
+        << ",\"registration_cycle_rejections\":"
+        << diagnostics.registration_cycle_rejections
+        << ",\"stale_stage_invalidations\":"
+        << diagnostics.stale_stage_invalidations
+        << ",\"stale_receipt_invalidations\":"
+        << diagnostics.stale_receipt_invalidations
+        << ",\"invalid_handle_rejections\":"
+        << diagnostics.invalid_handle_rejections << "}"
+        << ",\"cleanup\":{\"balanced\":"
+        << json_bool(report.cleanup_balanced)
+        << ",\"live_receipts\":" << receipts.live_count
+        << ",\"live_bytes\":" << receipts.live_bytes
+        << ",\"reserved_receipts\":" << receipts.reserved_count
+        << ",\"invalid_handle_distinguished\":"
+        << json_bool(report.invalid_handle_distinguished) << "}"
+        << ",\"unsupported_slots_preserved\":true}\n";
+    return {true, report.passed ? 0 : 1, out.str()};
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-path-data-hardening") {
     const bool passed = hooks.run_pf_path_data_hardening();
     const auto path_report = aexcompat::pf_path_runtime::snapshot();

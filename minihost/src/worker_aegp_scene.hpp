@@ -113,13 +113,22 @@ inline constexpr unsigned kAegpSceneLegacyEffectStreamLimit = 16;
 
 struct AegpStagedItemMetadata {
   uint64_t stable_identity{};
+  aexcompat::scene_model::Identity identity{};
+  aexcompat::scene_model::Identity project{};
   aexcompat::scene_runtime::AegpItemSamplingPolicy sampling_policy{
       aexcompat::scene_runtime::AegpItemSamplingPolicy::exact};
   std::array<void*, 3> direct_dependencies{};
+  std::array<aexcompat::scene_model::Identity, 3> dependency_identities{};
   std::size_t direct_dependency_count{};
   std::array<uint64_t,
              aexcompat::scene_runtime::kAegpEffectInstanceCapacity>
       effect_instances{};
+  std::array<aexcompat::scene_model::Identity,
+             aexcompat::scene_runtime::kAegpEffectInstanceCapacity>
+      effect_identities{};
+  std::array<uint32_t,
+             aexcompat::scene_runtime::kAegpEffectInstanceCapacity>
+      effect_orders{};
   std::size_t effect_instance_count{};
 };
 

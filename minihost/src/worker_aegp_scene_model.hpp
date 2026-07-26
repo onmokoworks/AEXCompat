@@ -119,6 +119,8 @@ class Registry {
   std::size_t live_object_count(ObjectKind kind) const noexcept;
   Identity active_project() const noexcept;
   Identity active_item() const noexcept;
+  bool project_identity(uint64_t project_id, Identity& output) const noexcept;
+  bool scheduler_key(Identity identity, void*& output) const noexcept;
 
   bool snapshot(Identity identity, ObjectSnapshot& output) const noexcept;
   bool identity_for_legacy(void* legacy, ObjectKind expected,

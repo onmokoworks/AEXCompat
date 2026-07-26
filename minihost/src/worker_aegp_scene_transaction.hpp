@@ -16,7 +16,13 @@ struct Diagnostics {
   uint64_t cancelled{};
 };
 
+using GenerationInvalidator = void(*)(uint64_t project_id,
+                                      uint32_t valid_generation) noexcept;
+
 std::mutex& mutation_mutex() noexcept;
+void configure_generation_invalidator(GenerationInvalidator callback) noexcept;
+void notify_generation_invalidated(uint64_t project_id,
+                                   uint32_t valid_generation) noexcept;
 void record_begin() noexcept;
 void record_stage() noexcept;
 void record_validate() noexcept;
@@ -77,6 +83,8 @@ class AtomicSceneTransaction {
       cancel();
       return false;
     }
+    notify_generation_invalidated(project_id_,
+                                  baseline_project_generation_ + 1);
     std::forward<Bump>(bump)();
     active_ = false;
     committed_ = true;

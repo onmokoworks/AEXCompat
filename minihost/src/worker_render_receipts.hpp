@@ -1,6 +1,7 @@
 #pragma once
 
 #include "worker_aegp_render_options.hpp"
+#include "worker_aegp_scene_model.hpp"
 #include "worker_world_safety.hpp"
 
 #include <array>
@@ -45,6 +46,13 @@ struct ReceiptDraft {
   uint32_t resolved_depth{};
   uint8_t stage_kind{};
   uint8_t sampling_policy{};
+  bool scene_bound{};
+  scene_model::Identity scene_item{};
+  scene_model::Identity scene_effect{};
+  scene_model::Identity scene_project{};
+  uint32_t effect_order{};
+  uint64_t dependency_identity_hash{};
+  uint64_t effect_order_hash{};
 };
 
 struct ReceiptSnapshot {
@@ -65,12 +73,21 @@ struct ReceiptSnapshot {
   uint32_t resolved_depth{};
   uint8_t stage_kind{};
   uint8_t sampling_policy{};
+  bool scene_bound{};
+  scene_model::Identity scene_item{};
+  scene_model::Identity scene_effect{};
+  scene_model::Identity scene_project{};
+  uint32_t effect_order{};
+  uint64_t dependency_identity_hash{};
+  uint64_t effect_order_hash{};
 };
 
 struct Statistics {
   uint64_t created{};
   uint64_t checked_in{};
   uint64_t invalid_operations{};
+  uint64_t stale_invalidations{};
+  uint64_t invalid_handle_operations{};
   std::size_t live_count{};
   uint64_t live_bytes{};
   std::size_t reserved_count{};
@@ -82,6 +99,8 @@ int32_t get_world(void* receipt, void*** world);
 int32_t checkin(void* receipt);
 bool checkin_if_live(void* receipt);
 bool snapshot(void* receipt, ReceiptSnapshot& output);
+std::size_t invalidate_scene_generation(uint64_t project_id,
+                                        uint32_t valid_generation);
 Statistics statistics();
 bool lifetimes_balanced();
 
