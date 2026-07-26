@@ -374,16 +374,8 @@ bool candidate_matches(const StagedItemWorld& value, void* item, StageKind kind,
 bool select_stage(const ResolveSnapshot& snapshot, void* item, StageKind kind,
                   uint64_t effect_instance, SamplingPolicy policy,
                   const ItemValue& options, int32_t pixel_format,
-                  uint32_t project_generation, StagedItemWorld& selected) {
-  return select_stage(snapshot, item, kind, effect_instance, policy, options,
-                      pixel_format, project_generation, {}, selected);
-}
-
-bool select_stage(const ResolveSnapshot& snapshot, void* item, StageKind kind,
-                  uint64_t effect_instance, SamplingPolicy policy,
-                  const ItemValue& options, int32_t pixel_format,
-                  uint32_t project_generation,
-                  const AegpTime& source_time, StagedItemWorld& selected) {
+                  uint32_t project_generation, StagedItemWorld& selected,
+                  const AegpTime& source_time = AegpTime{0, 0}) {
   const StagedItemWorld* best = nullptr;
   RationalDistance best_distance{};
   for (const auto& candidate : snapshot.worlds) {
@@ -412,6 +404,8 @@ bool select_stage(const ResolveSnapshot& snapshot, void* item, StageKind kind,
             best_distance.numerator, best_distance.denominator);
         replace = distance_order < 0 ||
             (distance_order == 0 && source_order < 0);
+      } else {
+        replace = candidate.stage_generation > best->stage_generation;
       }
     }
     if (replace) {
@@ -449,7 +443,7 @@ bool resolve_source_time(const ResolveSnapshot& snapshot, void* item,
                          SamplingPolicy policy, const ItemValue& options,
                          int32_t pixel_format, uint32_t project_generation,
                          AegpTime& source_time) {
-  source_time = {};
+  source_time = AegpTime{0, 0};
   for (const auto& candidate : snapshot.worlds) {
     if (!candidate_matches(candidate, item, StageKind::final_item, 0, options,
                            pixel_format, project_generation))
@@ -517,7 +511,7 @@ bool resolve_item(ResolveContext& context, void* item, uint32_t depth,
         return false;
     }
   }
-  AegpTime resolved_time{};
+  AegpTime resolved_time{0, 0};
   if (policy != SamplingPolicy::exact) {
     if (!resolve_source_time(context.snapshot, item, policy, context.options,
                              context.pixel_format, context.project_generation,
@@ -531,13 +525,13 @@ bool resolve_item(ResolveContext& context, void* item, uint32_t depth,
         StagedItemWorld boundary{};
         if (!select_stage(context.snapshot, item, kind, effect_instance, policy,
                           context.options, context.pixel_format,
-                          context.project_generation,
-                          resolved_time, boundary)) {
+                          context.project_generation, boundary,
+                          resolved_time)) {
           if (kind == StageKind::all_effects &&
               select_stage(context.snapshot, item, kind, 0, policy,
                            context.options, context.pixel_format,
-                           context.project_generation,
-                           resolved_time, boundary)) {
+                           context.project_generation, boundary,
+                           resolved_time)) {
             boundary.effect_instance = effect_instance;
             boundary.identity.effect_instance = effect_instance;
           } else {
@@ -550,8 +544,8 @@ bool resolve_item(ResolveContext& context, void* item, uint32_t depth,
   }
   if (!select_stage(context.snapshot, item, StageKind::final_item, 0, policy,
                     context.options, context.pixel_format,
-                    context.project_generation,
-                    resolved_time, final_stage))
+                    context.project_generation, final_stage,
+                    resolved_time))
     return false;
   if (!record_resolved_stage(context, final_stage, depth)) return false;
   final_policy = policy;
@@ -844,7 +838,8 @@ bool publish_stage_world(void* item, StageKind stage_kind,
       static_cast<uint8_t>(stage_kind) >
           static_cast<uint8_t>(StageKind::final_item) ||
       (stage_kind == StageKind::final_item && effect_instance != 0) ||
-      (stage_kind != StageKind::final_item && effect_instance == 0))
+      (stage_kind != StageKind::final_item && stage_kind != StageKind::all_effects &&
+       effect_instance == 0))
     return false;
   std::shared_ptr<std::vector<std::byte>> backing;
   try {
