@@ -4657,9 +4657,12 @@ mod tests {
 
     #[test]
     fn openmp_thread_count_is_positive_and_deterministic() {
+        const CODE: u64 = 0x1000_0000;
         assert_eq!(deterministic_import_i32("omp_get_max_threads"), Some(1));
         assert_eq!(deterministic_import_i32("unknown_import"), None);
         assert_eq!(deterministic_i32_stub(1), [0xb8, 1, 0, 0, 0, 0xc3]);
+        let mut engine = test_engine(&deterministic_i32_stub(1));
+        assert_eq!(engine.call_win64(CODE, [0; 6]).unwrap(), 1);
     }
 
     #[test]
