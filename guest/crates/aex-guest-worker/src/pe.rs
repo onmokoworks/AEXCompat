@@ -11,8 +11,11 @@ const MAX_IMAGE_SIZE: usize = 256 * 1024 * 1024;
 const MAX_SECTIONS: usize = 96;
 const MAX_IMPORTS: usize = 4096;
 const MAX_EXPORTS: usize = 4096;
+const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
 const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
+const MAX_STRING_KEY_PATH_BYTES: usize = 256;
+const MAX_STRING_KEY_DIGITS: usize = 10;
 
 #[derive(Debug, Error)]
 pub enum PeError {
@@ -91,6 +94,7 @@ pub struct PeImage {
     has_exception_directory: bool,
     file_size: usize,
     section_protections: Vec<SectionProtection>,
+    string_table: Option<BTreeMap<i32, Vec<u8>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -227,6 +231,7 @@ impl PeImage {
                 ImportLibrary { name, symbols }
             })
             .collect();
+        let string_table = parse_readonly_string_table(file, &pe.sections);
 
         Ok(Self {
             bytes: mapped,
@@ -243,6 +248,7 @@ impl PeImage {
             has_exception_directory: pe.exception_data.is_some(),
             file_size: file.len(),
             section_protections,
+            string_table,
         })
     }
 
@@ -285,6 +291,10 @@ impl PeImage {
         &self.section_protections
     }
 
+    pub fn string_table(&self) -> Option<&BTreeMap<i32, Vec<u8>>> {
+        self.string_table.as_ref()
+    }
+
     pub fn report(&self) -> PeReport {
         PeReport {
             schema_version: 1,
@@ -302,6 +312,138 @@ impl PeImage {
             has_exception_directory: self.has_exception_directory,
         }
     }
+}
+
+enum StringCandidate {
+    Lstr {
+        group: String,
+        id: i32,
+        value: Vec<u8>,
+    },
+    Ordinal {
+        id: i32,
+        value: Vec<u8>,
+    },
+}
+
+fn structural_ascii(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes.iter().all(|byte| (0x20..=0x7e).contains(byte))
+}
+
+fn parse_string_candidate(candidate: &[u8], next_ordinal: i32) -> Option<StringCandidate> {
+    const PREFIX: &[u8] = b"$$$/";
+    const MARKER: &[u8] = b"/LStr/";
+    if !candidate.starts_with(PREFIX) {
+        return None;
+    }
+    let marker = candidate[PREFIX.len()..]
+        .windows(MARKER.len())
+        .position(|window| window == MARKER)
+        .map(|offset| offset + PREFIX.len());
+    let Some(marker) = marker else {
+        let equals = candidate[PREFIX.len()..]
+            .iter()
+            .position(|byte| *byte == b'=')
+            .map(|offset| offset + PREFIX.len())?;
+        let key = &candidate[PREFIX.len()..equals];
+        if key.len() > MAX_STRING_KEY_PATH_BYTES || !structural_ascii(key) {
+            return None;
+        }
+        return Some(StringCandidate::Ordinal {
+            id: next_ordinal,
+            value: candidate[equals + 1..].to_vec(),
+        });
+    };
+    let group = &candidate[PREFIX.len()..marker];
+    let digits_begin = marker + MARKER.len();
+    let equals = candidate[digits_begin..]
+        .iter()
+        .position(|byte| *byte == b'=')
+        .map(|offset| offset + digits_begin)?;
+    let digits = &candidate[digits_begin..equals];
+    if group.is_empty()
+        || !structural_ascii(group)
+        || digits.is_empty()
+        || digits.len() > MAX_STRING_KEY_DIGITS
+        || !digits.iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    let id = digits.iter().try_fold(0i32, |value, digit| {
+        value.checked_mul(10)?.checked_add(i32::from(digit - b'0'))
+    })?;
+    Some(StringCandidate::Lstr {
+        group: String::from_utf8(group.to_vec()).ok()?,
+        id,
+        value: candidate[equals + 1..].to_vec(),
+    })
+}
+
+fn parse_readonly_string_table(
+    file: &[u8],
+    sections: &[goblin::pe::section_table::SectionTable],
+) -> Option<BTreeMap<i32, Vec<u8>>> {
+    let mut groups = BTreeMap::<String, BTreeMap<i32, Vec<u8>>>::new();
+    let mut ordinals = BTreeMap::new();
+    let mut next_ordinal = 0i32;
+    for section in sections {
+        if section.characteristics & IMAGE_SCN_MEM_READ == 0
+            || section.characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE) != 0
+        {
+            continue;
+        }
+        let start = section.pointer_to_raw_data as usize;
+        let size = section.size_of_raw_data as usize;
+        let end = start.checked_add(size)?;
+        let raw = file.get(start..end)?;
+        let mut offset = 0usize;
+        while offset + 4 <= raw.len() {
+            if &raw[offset..offset + 4] != b"$$$/" {
+                offset += 1;
+                continue;
+            }
+            let end = raw[offset..].iter().position(|byte| *byte == 0)? + offset;
+            if let Some(candidate) = parse_string_candidate(&raw[offset..end], next_ordinal) {
+                let inserted = match candidate {
+                    StringCandidate::Lstr { group, id, value } => {
+                        groups.entry(group).or_default().insert(id, value).is_none()
+                    }
+                    StringCandidate::Ordinal { id, value } => ordinals.insert(id, value).is_none(),
+                };
+                if !inserted {
+                    return None;
+                }
+                next_ordinal = next_ordinal.checked_add(1)?;
+            }
+            offset = end + 1;
+        }
+    }
+    let has_lstr = !groups.is_empty();
+    let values = if groups.len() == 1 {
+        groups
+            .pop_first()
+            .map(|(_, values)| values)
+            .unwrap_or_default()
+    } else if groups.len() > 1 {
+        let mut primary = groups
+            .iter()
+            .filter(|(_, values)| {
+                values
+                    .get(&0)
+                    .is_some_and(|value| value.windows(4).any(|window| window == b", v%"))
+            })
+            .map(|(group, _)| group.clone());
+        let group = primary.next()?;
+        if primary.next().is_some() {
+            return None;
+        }
+        groups.remove(&group)?
+    } else if !has_lstr {
+        ordinals
+    } else {
+        BTreeMap::new()
+    };
+    (!values.is_empty()).then_some(values)
 }
 
 #[cfg(test)]
@@ -326,5 +468,25 @@ mod tests {
             PeImage::parse_and_map(b"not a PE image"),
             Err(PeError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn string_candidates_preserve_values_and_validate_keys() {
+        match parse_string_candidate(b"$$$/AE/Test/LStr/0069=Rows & Columns", 3).unwrap() {
+            StringCandidate::Lstr { group, id, value } => {
+                assert_eq!(group, "AE/Test");
+                assert_eq!(id, 69);
+                assert_eq!(value, b"Rows & Columns");
+            }
+            StringCandidate::Ordinal { .. } => panic!("expected LStr candidate"),
+        }
+        match parse_string_candidate(b"$$$/MediaCore/Test/0003=\xe6\x97\xa5", 7).unwrap() {
+            StringCandidate::Ordinal { id, value } => {
+                assert_eq!(id, 7);
+                assert_eq!(value, b"\xe6\x97\xa5");
+            }
+            StringCandidate::Lstr { .. } => panic!("expected ordinal candidate"),
+        }
+        assert!(parse_string_candidate(b"$$$/AE/Test/LStr/x=no", 0).is_none());
     }
 }
