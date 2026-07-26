@@ -17,6 +17,12 @@ inline constexpr std::size_t kAegpLegacyEffectStreamCapacity = 16;
 inline constexpr int32_t kAegpInstalledEffectKeyNone = 0;
 inline constexpr std::size_t kAegpMaxEffectCategoryNameSize = 128;
 
+enum class AegpItemSamplingPolicy : uint8_t {
+  exact,
+  hold,
+  nearest,
+};
+
 struct AegpEffectInstance {
   void* layer{};
   int32_t installed_key{};
@@ -24,6 +30,7 @@ struct AegpEffectInstance {
   uint32_t flags{1};
   uint32_t generation{};
   bool occupied{};
+  void* render_ref{};
   std::array<std::array<double, 4>, kAegpEffectParameterCapacity> parameter_values{{
       {{42.5, 0.0, 0.0, 0.0}}, {{160.0, 90.0, 0.0, 0.0}},
       {{1.0, 2.0, 3.0, 0.0}}, {{0.25, 0.5, 0.75, 1.0}}}};
@@ -114,6 +121,11 @@ struct AegpCameraZoomKeyframe {
 // ever reconstituted from a second scene copy.
 struct SceneRuntimeState {
   AegpSceneObject composition_item{0x4954454d};
+  uint64_t composition_item_identity{1001};
+  AegpItemSamplingPolicy composition_item_sampling_policy{
+      AegpItemSamplingPolicy::exact};
+  std::array<void*, 3> composition_item_dependencies{};
+  std::size_t composition_item_dependency_count{};
   AegpSceneObject composition{0x434f4d50};
   std::array<AegpSceneObject, 3> layers{{
       {0x4c415930}, {0x4c415931}, {0x4c415932}}};
@@ -192,6 +204,9 @@ struct SceneRuntimeState {
 SceneRuntimeState& scene_runtime_state() noexcept;
 void* composition_item_handle() noexcept;
 void* composition_handle() noexcept;
+bool update_composition_item_render_metadata(
+    void* item, uint64_t stable_identity, AegpItemSamplingPolicy policy,
+    void* const* dependencies, std::size_t dependency_count) noexcept;
 
 extern const std::array<AegpEffectParameterRecord, 5> kAegpProbeParameters;
 extern const std::array<AegpEffectParameterRecord, 7> kAegpLevelsParameters;

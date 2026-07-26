@@ -278,6 +278,14 @@ bool configure_scene_context(const SceneContext& context) noexcept {
       !context.smart_height) return false;
   g_scene_context = context;
   g_scene_context_configured = true;
+  auto& runtime = scene_runtime_state();
+  runtime.effect_instances[0].render_ref = context.pf_effect;
+  if (!update_composition_item_render_metadata(
+          context.composition_item, runtime.composition_item_identity,
+          runtime.composition_item_sampling_policy,
+          runtime.composition_item_dependencies.data(),
+          runtime.composition_item_dependency_count))
+    return false;
   return true;
 }
 
@@ -420,6 +428,76 @@ bool layer_effect_boundary_is_live(const AegpLayerRenderOptionsValue& options) {
   return options.effect_boundary == AegpLayerEffectBoundary::all ||
       resolve_effect_instance(options.upstream_effect, options.owner_plugin_id) != nullptr;
 }
+uint64_t effect_instance_identity(std::size_t index,
+                                  const AegpEffectInstance& instance) {
+  if (!instance.occupied || instance.generation == 0 ||
+      index >= kAegpEffectInstanceCapacity)
+    return 0;
+  return (static_cast<uint64_t>(instance.generation) << 32) |
+      static_cast<uint64_t>(index + 1);
+}
+bool snapshot_staged_item_metadata(
+    void* item, AegpStagedItemMetadata& metadata) noexcept {
+  metadata = {};
+  auto& runtime = scene_runtime_state();
+  int32_t item_id = 0;
+  if (item == composition_item_handle()) {
+    item_id = static_cast<int32_t>(runtime.composition_item_identity);
+  } else if (aegp_get_item_id(item, &item_id) != 0) {
+    return false;
+  }
+  if (item_id <= 0)
+    return false;
+  metadata.stable_identity = static_cast<uint64_t>(item_id);
+  metadata.sampling_policy = runtime.composition_item_sampling_policy;
+  if (runtime.composition_item_dependency_count >
+      metadata.direct_dependencies.size())
+    return false;
+  metadata.direct_dependency_count =
+      runtime.composition_item_dependency_count;
+  std::copy_n(runtime.composition_item_dependencies.begin(),
+              metadata.direct_dependency_count,
+              metadata.direct_dependencies.begin());
+  for (std::size_t index = 0; index < runtime.effect_instances.size(); ++index) {
+    const uint64_t identity =
+        effect_instance_identity(index, runtime.effect_instances[index]);
+    if (identity != 0)
+      metadata.effect_instances[metadata.effect_instance_count++] = identity;
+  }
+  return true;
+}
+uint64_t staged_effect_instance_identity(
+    const AegpLayerRenderOptionsValue& options,
+    uint64_t active_effect_instance) noexcept {
+  std::size_t index = 0;
+  const AegpEffectInstance* instance = nullptr;
+  if (options.effect_boundary == AegpLayerEffectBoundary::all) {
+    auto& runtime = scene_runtime_state();
+    for (; index < runtime.effect_instances.size(); ++index) {
+      const auto& candidate = runtime.effect_instances[index];
+      if (effect_instance_identity(index, candidate) == active_effect_instance) {
+        instance = &candidate;
+        break;
+      }
+    }
+    if (!instance || instance->layer != options.layer) return 0;
+  } else {
+    instance = resolve_effect_instance(
+        options.upstream_effect, options.owner_plugin_id, &index);
+  }
+  return instance ? effect_instance_identity(index, *instance) : 0;
+}
+uint64_t staged_effect_identity_for_render_ref(
+    void* render_ref) noexcept {
+  if (!render_ref) return 0;
+  auto& runtime = scene_runtime_state();
+  for (std::size_t index = 0; index < runtime.effect_instances.size(); ++index) {
+    const auto& instance = runtime.effect_instances[index];
+    if (instance.render_ref == render_ref)
+      return effect_instance_identity(index, instance);
+  }
+  return 0;
+}
 const AegpInstalledEffectRecord* find_installed_effect(int32_t key);
 const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index);
 void initialize_effect_parameter_values(AegpEffectInstance& instance);
@@ -473,7 +551,7 @@ int32_t __cdecl aegp_set_item_current_time(void* item, const AegpTime* time) {
 }
 int32_t __cdecl aegp_get_item_id(void* item, int32_t* id) {
   if (item != &g_aegp_comp_item || !id) return 4;
-  *id = 1001;
+  *id = static_cast<int32_t>(scene_runtime_state().composition_item_identity);
   return 0;
 }
 int32_t __cdecl aegp_get_item_name(int32_t plugin_id, void* item, void** name) {
@@ -836,6 +914,7 @@ int32_t __cdecl aegp_apply_effect(
     instance_slot->generation = generation;
     return 4;
   }
+  instance_slot->render_ref = *effect;
   bump_render_project_timestamp();
   return 0;
 }
@@ -889,6 +968,7 @@ int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
         --value.stack_order;
     return 4;
   }
+  instance_slot->render_ref = *duplicate;
   bump_render_project_timestamp();
   return 0;
 }

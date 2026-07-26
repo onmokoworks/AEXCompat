@@ -49,6 +49,7 @@ std::array<float, 4> g_render_options_argb32f{};
 bool render_options_lifetimes_balanced();
 bool async_receipt_lifetimes_balanced();
 void* aegp_comp_item_handle();
+bool is_render_worker();
 int32_t __cdecl checkout_item_frame_async(void*, uint32_t, void*, void**);
 int32_t get_receipt_world(void*, void***);
 int32_t checkin_frame(void*);
@@ -57,6 +58,7 @@ using AegpRenderCancelV1 = int32_t(__cdecl*)(void*, uint8_t*);
 int32_t __cdecl render_checkout_frame_reject(void*, AegpRenderCancelV1, void*, void**);
 void clear_staged_item_worlds_for_test();
 bool verify_item_render_cycle_contract(void*);
+bool prepare_scene_staged_item(void*);
 
 void write_staged_test_channel(std::byte* pixel, int32_t pixel_bytes,
                                int channel, float value) {
@@ -296,9 +298,23 @@ bool verify_aegp_item_staged_worlds() {
   };
   const std::array<int32_t, 3> formats{{
       kPixelFormatArgb32, kPixelFormatArgb64, kPixelFormatArgb128}};
+  if (!prepare_scene_staged_item(aegp_comp_item_handle()))
+    return false;
+  const uint64_t production_effect_identity =
+      (static_cast<uint64_t>(g_aegp_effect_instances[0].generation) << 32) | 1;
   for (int32_t depth = 0; depth < 3; ++depth) {
     const int32_t pixel_bytes = 4 << depth;
     const auto pixels = fixture(pixel_bytes);
+    for (const auto kind : {
+             aexcompat::aegp_staged_item_runtime::StageKind::upstream,
+             aexcompat::aegp_staged_item_runtime::StageKind::all_effects,
+             aexcompat::aegp_staged_item_runtime::StageKind::downstream}) {
+      if (!aexcompat::aegp_staged_item_runtime::publish_stage_world(
+              aegp_comp_item_handle(), kind, production_effect_identity,
+              time, step, 1, 0, formats[depth], width, height,
+              width * pixel_bytes, pixels.data()))
+        return false;
+    }
     if (!aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(), time, step, 1, 0,
             formats[depth], width, height, width * pixel_bytes, pixels.data())) return false;
   }
@@ -427,6 +443,531 @@ bool verify_aegp_item_staged_worlds() {
       render_checkout_frame_reject(options, nullptr, nullptr, &rejected) == 0 || rejected ||
       render_options_set_time(options, time) != 0) return false;
 
+  using aexcompat::aegp_staged_item_runtime::SamplingPolicy;
+  using aexcompat::aegp_staged_item_runtime::StageKind;
+  const auto publish_scheduler_stage =
+      [&](void* item, StageKind kind, uint64_t effect, AegpTime at,
+          uint8_t marker, uint64_t* identity_hash = nullptr) {
+        auto pixels = pixels8;
+        pixels[0] = static_cast<std::byte>(marker);
+        return aexcompat::aegp_staged_item_runtime::publish_stage_world(
+            item, kind, effect, at, step, 1, 0, kPixelFormatArgb32,
+            width, height, width * 4, pixels.data(), identity_hash);
+      };
+  const auto make_request = [&](void* item, AegpTime at) {
+    AegpRenderOptionsValue request{};
+    request.item = item;
+    request.time = at;
+    request.time_step = step;
+    request.world_type = 1;
+    request.render_quality = 1;
+    return request;
+  };
+  const auto same_test_time = [](AegpTime left, AegpTime right) {
+    return left.scale != 0 && right.scale != 0 &&
+        static_cast<int64_t>(left.value) * right.scale ==
+            static_cast<int64_t>(right.value) * left.scale;
+  };
+  const auto checkout_registered =
+      [&](const AegpRenderOptionsValue& request, ReceiptSnapshot& snapshot,
+          uint8_t* first_channel = nullptr) {
+        void* receipt = nullptr;
+        if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
+                request, &receipt) != 0 ||
+            !receipt || !aexcompat::render_receipts::snapshot(receipt, snapshot))
+          return false;
+        bool valid = true;
+        if (first_channel) {
+          void** world = nullptr;
+          void* data = nullptr;
+          valid = get_receipt_world(receipt, &world) == 0 && world &&
+              aegp_world_get_base_addr8(world, &data) == 0 && data;
+          if (valid) *first_channel = *static_cast<uint8_t*>(data);
+        }
+        return checkin_frame(receipt) == 0 && valid;
+      };
+
+  // Fixture 1: a three-item A -> B -> C dependency chain proves two nested
+  // composition levels and post-order resolution without recursive effects.
+  clear_staged_item_worlds_for_test();
+  void* const nested_root = reinterpret_cast<void*>(0xa100);
+  void* const nested_middle = reinterpret_cast<void*>(0xa200);
+  void* const nested_leaf = reinterpret_cast<void*>(0xa300);
+  std::array<void*, 1> root_dependency{{nested_middle}};
+  std::array<void*, 1> middle_dependency{{nested_leaf}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          nested_leaf, 1003, SamplingPolicy::exact, nullptr, 0, nullptr, 0) ||
+      !aexcompat::aegp_staged_item_runtime::register_item(
+          nested_middle, 1002, SamplingPolicy::exact,
+          middle_dependency.data(), middle_dependency.size(), nullptr, 0) ||
+      !aexcompat::aegp_staged_item_runtime::register_item(
+          nested_root, 1001, SamplingPolicy::exact, root_dependency.data(),
+          root_dependency.size(), nullptr, 0) ||
+      !publish_scheduler_stage(nested_leaf, StageKind::final_item, 0, time, 31) ||
+      !publish_scheduler_stage(nested_middle, StageKind::final_item, 0, time, 41) ||
+      !publish_scheduler_stage(nested_root, StageKind::final_item, 0, time, 51))
+    return false;
+  ReceiptSnapshot nested_snapshot{};
+  uint8_t nested_first_channel = 0;
+  if (!checkout_registered(make_request(nested_root, time), nested_snapshot,
+          &nested_first_channel) ||
+      !nested_snapshot.has_stage_evidence ||
+      nested_snapshot.item_identity != 1001 ||
+      nested_snapshot.resolved_stage_count != 3 ||
+      nested_snapshot.resolved_depth != 2 ||
+      nested_snapshot.sampling_policy !=
+          static_cast<uint8_t>(SamplingPolicy::exact) ||
+      !same_test_time(nested_snapshot.requested_time, time) ||
+      !same_test_time(nested_snapshot.source_time, time) ||
+      nested_snapshot.trace_hash == 0 || nested_first_channel != 51)
+    return false;
+  auto nested_miss = make_request(nested_root, {6, 24});
+  rejected = reinterpret_cast<void*>(1);
+  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
+          nested_miss, &rejected) == 0 || rejected)
+    return false;
+
+  // Fixture 2: independent hold/nearest items plus two effect instances.
+  // A deliberately missing downstream stage must fail before receipt
+  // publication; completing and republishing the ordered chain then succeeds.
+  clear_staged_item_worlds_for_test();
+  void* const hold_item = reinterpret_cast<void*>(0xb100);
+  void* const nearest_item = reinterpret_cast<void*>(0xb200);
+  void* const multiple_root = reinterpret_cast<void*>(0xb300);
+  const std::array<uint64_t, 2> effects{{0xe101, 0xe202}};
+  std::array<void*, 2> multiple_dependencies{{hold_item, nearest_item}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          hold_item, 2001, SamplingPolicy::hold, nullptr, 0, nullptr, 0) ||
+      !aexcompat::aegp_staged_item_runtime::register_item(
+          nearest_item, 2002, SamplingPolicy::nearest, nullptr, 0,
+          effects.data(), effects.size()) ||
+      !aexcompat::aegp_staged_item_runtime::register_item(
+          multiple_root, 2003, SamplingPolicy::exact,
+          multiple_dependencies.data(), multiple_dependencies.size(),
+          nullptr, 0))
+    return false;
+  const AegpTime before{4, 24};
+  const AegpTime after{6, 24};
+  const AegpTime negative_source{-2, 24};
+  const AegpTime negative_request{-1, 24};
+  uint64_t hold_before_hash = 0, hold_after_hash = 0;
+  uint64_t nearest_before_hash = 0, nearest_after_hash = 0;
+  uint64_t root_hash = 0;
+  if (!publish_scheduler_stage(hold_item, StageKind::final_item, 0,
+          negative_source, 12) ||
+      !publish_scheduler_stage(hold_item, StageKind::final_item, 0, before,
+          14, &hold_before_hash) ||
+      !publish_scheduler_stage(hold_item, StageKind::final_item, 0, after,
+          16, &hold_after_hash) ||
+      !publish_scheduler_stage(nearest_item, StageKind::upstream, effects[0],
+          before, 21) ||
+      !publish_scheduler_stage(nearest_item, StageKind::all_effects, effects[0],
+          before, 22) ||
+      !publish_scheduler_stage(nearest_item, StageKind::final_item, 0, before,
+          29, &nearest_before_hash))
+    return false;
+  const auto boundary_rejections_before =
+      aexcompat::aegp_staged_item_runtime::diagnostics()
+          .effect_boundary_rejections;
+  rejected = reinterpret_cast<void*>(1);
+  const auto nearest_request = make_request(nearest_item, time);
+  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
+          nearest_request, &rejected) == 0 || rejected ||
+      aexcompat::aegp_staged_item_runtime::diagnostics()
+              .effect_boundary_rejections <= boundary_rejections_before)
+    return false;
+  std::array<uint64_t, 6> boundary_hashes{};
+  std::size_t boundary_index = 0;
+  if (!publish_scheduler_stage(nearest_item, StageKind::downstream, effects[0],
+          before, 23, &boundary_hashes[boundary_index++]))
+    return false;
+  for (StageKind kind : {StageKind::upstream, StageKind::all_effects,
+                         StageKind::downstream}) {
+    if (!publish_scheduler_stage(nearest_item, kind, effects[1], before,
+            static_cast<uint8_t>(24 + boundary_index),
+            &boundary_hashes[boundary_index++]))
+      return false;
+  }
+  // Republish the first two boundaries so all six identities have explicit
+  // evidence and a strictly ordered generation sequence.
+  if (!publish_scheduler_stage(nearest_item, StageKind::upstream, effects[0],
+          before, 21, &boundary_hashes[boundary_index++]) ||
+      !publish_scheduler_stage(nearest_item, StageKind::all_effects, effects[0],
+          before, 22, &boundary_hashes[boundary_index++]))
+    return false;
+  // The required order is effect[0] upstream/all/downstream followed by
+  // effect[1]. Republish the complete chain in that order after the injected
+  // failure so generation order is deterministic.
+  boundary_index = 0;
+  for (uint64_t effect : effects) {
+    for (StageKind kind : {StageKind::upstream, StageKind::all_effects,
+                           StageKind::downstream}) {
+      if (!publish_scheduler_stage(nearest_item, kind, effect, before,
+              static_cast<uint8_t>(31 + boundary_index),
+              &boundary_hashes[boundary_index]))
+        return false;
+      ++boundary_index;
+    }
+  }
+  if (!publish_scheduler_stage(nearest_item, StageKind::final_item, 0, before,
+          39, &nearest_before_hash))
+    return false;
+  for (uint64_t effect : effects)
+    for (StageKind kind : {StageKind::upstream, StageKind::all_effects,
+                           StageKind::downstream})
+      if (!publish_scheduler_stage(nearest_item, kind, effect, after,
+              static_cast<uint8_t>(41 + static_cast<uint8_t>(kind)),
+              nullptr))
+        return false;
+  if (!publish_scheduler_stage(nearest_item, StageKind::final_item, 0, after,
+          49, &nearest_after_hash) ||
+      !publish_scheduler_stage(multiple_root, StageKind::final_item, 0, time,
+          59, &root_hash))
+    return false;
+  for (std::size_t left = 0; left < boundary_hashes.size(); ++left) {
+    if (boundary_hashes[left] == 0) return false;
+    for (std::size_t right = left + 1; right < boundary_hashes.size(); ++right)
+      if (boundary_hashes[left] == boundary_hashes[right]) return false;
+  }
+  if (!hold_before_hash || !hold_after_hash || !nearest_before_hash ||
+      !nearest_after_hash || !root_hash ||
+      hold_before_hash == nearest_before_hash ||
+      nearest_before_hash == root_hash || hold_before_hash == root_hash)
+    return false;
+  ReceiptSnapshot hold_snapshot{}, negative_hold_snapshot{}, nearest_snapshot{},
+      multiple_snapshot{};
+  const bool hold_checkout =
+      checkout_registered(make_request(hold_item, time), hold_snapshot);
+  const bool negative_hold_checkout = checkout_registered(
+      make_request(hold_item, negative_request), negative_hold_snapshot);
+  const bool nearest_checkout =
+      checkout_registered(nearest_request, nearest_snapshot);
+  const bool sampling_evidence_valid = hold_checkout &&
+      same_test_time(hold_snapshot.source_time, before) &&
+      hold_snapshot.sampling_policy ==
+          static_cast<uint8_t>(SamplingPolicy::hold) &&
+      negative_hold_checkout &&
+      same_test_time(negative_hold_snapshot.source_time, negative_source) &&
+      negative_hold_snapshot.sampling_policy ==
+          static_cast<uint8_t>(SamplingPolicy::hold) &&
+      nearest_checkout &&
+      same_test_time(nearest_snapshot.source_time, before) &&
+      nearest_snapshot.sampling_policy ==
+          static_cast<uint8_t>(SamplingPolicy::nearest) &&
+      nearest_snapshot.resolved_stage_count == 7;
+  if (!sampling_evidence_valid) return false;
+  if (
+      !checkout_registered(make_request(multiple_root, time),
+          multiple_snapshot) ||
+      multiple_snapshot.item_identity != 2003 ||
+      multiple_snapshot.resolved_stage_count != 9 ||
+      multiple_snapshot.resolved_depth != 1 ||
+      multiple_snapshot.trace_hash == nearest_snapshot.trace_hash)
+    return false;
+
+  constexpr int32_t mfr_width = 1024;
+  constexpr int32_t mfr_height = 1024;
+  std::vector<std::byte> mfr_pixels(
+      static_cast<std::size_t>(mfr_width) * mfr_height * 4);
+  for (std::size_t offset = 0; offset < mfr_pixels.size(); offset += 4) {
+    mfr_pixels[offset] = std::byte{255};
+    mfr_pixels[offset + 1] = std::byte{37};
+    mfr_pixels[offset + 2] = std::byte{73};
+    mfr_pixels[offset + 3] = std::byte{109};
+  }
+  if (!aexcompat::aegp_staged_item_runtime::publish_stage_world(
+          multiple_root, StageKind::final_item, 0, time, step, 1, 0,
+          kPixelFormatArgb32, mfr_width, mfr_height, mfr_width * 4,
+          mfr_pixels.data()))
+    return false;
+  ReceiptSnapshot mfr_baseline{};
+  const auto mfr_request = make_request(multiple_root, time);
+  if (!checkout_registered(mfr_request, mfr_baseline) ||
+      mfr_baseline.resolved_stage_count != 9 ||
+      mfr_baseline.trace_hash == multiple_snapshot.trace_hash)
+    return false;
+  std::atomic<bool> mfr_ok{true};
+  std::atomic<uint32_t> mfr_ready{};
+  std::atomic<bool> mfr_start{};
+  std::array<std::thread, 8> mfr_threads;
+  for (auto& thread : mfr_threads) {
+    thread = std::thread([&] {
+      ++mfr_ready;
+      while (!mfr_start.load()) std::this_thread::yield();
+      ReceiptSnapshot snapshot{};
+      if (!checkout_registered(mfr_request, snapshot) ||
+          snapshot.trace_hash != mfr_baseline.trace_hash)
+        mfr_ok = false;
+    });
+  }
+  while (mfr_ready.load() != mfr_threads.size()) std::this_thread::yield();
+  mfr_start = true;
+  for (auto& thread : mfr_threads) thread.join();
+  if (!mfr_ok || aexcompat::aegp_staged_item_runtime::diagnostics().in_flight != 0 ||
+      aexcompat::aegp_staged_item_runtime::diagnostics().max_in_flight < 2 ||
+      !async_receipt_lifetimes_balanced())
+    return false;
+
+  // Regression F4: concurrent republish and checkout must observe only
+  // complete scheduler snapshots; publication order is intentionally shuffled.
+  clear_staged_item_worlds_for_test();
+  void* const regress_f4_item = reinterpret_cast<void*>(0xa400);
+  std::array<uint64_t, 1> regress_f4_effect{{0xe401}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          regress_f4_item, 6001, SamplingPolicy::exact, nullptr, 0,
+          regress_f4_effect.data(), regress_f4_effect.size()) ||
+      !publish_scheduler_stage(regress_f4_item, StageKind::downstream,
+          regress_f4_effect[0], time, 24) ||
+      !publish_scheduler_stage(regress_f4_item, StageKind::upstream,
+          regress_f4_effect[0], time, 21) ||
+      !publish_scheduler_stage(regress_f4_item, StageKind::all_effects,
+          regress_f4_effect[0], time, 22) ||
+      !publish_scheduler_stage(regress_f4_item, StageKind::final_item, 0,
+          time, 51))
+    return false;
+  std::atomic<bool> f4_ok{true};
+  std::atomic<uint32_t> f4_ready{};
+  std::atomic<bool> f4_start{};
+  auto f4_publish = [&](StageKind kind, uint8_t marker) {
+    return publish_scheduler_stage(regress_f4_item, kind,
+        kind == StageKind::final_item ? 0 : regress_f4_effect[0], time, marker);
+  };
+  std::thread f4_publisher([&] {
+    ++f4_ready;
+    while (!f4_start.load()) std::this_thread::yield();
+    for (uint8_t iteration = 0; iteration < 32; ++iteration) {
+      if (!f4_publish(StageKind::downstream, static_cast<uint8_t>(61 + iteration)) ||
+          !f4_publish(StageKind::upstream, static_cast<uint8_t>(81 + iteration)) ||
+          !f4_publish(StageKind::all_effects, static_cast<uint8_t>(101 + iteration)) ||
+          !f4_publish(StageKind::final_item, static_cast<uint8_t>(121 + iteration))) {
+        f4_ok = false;
+        return;
+      }
+    }
+  });
+  std::array<std::thread, 4> f4_checkouts;
+  for (auto& thread : f4_checkouts) {
+    thread = std::thread([&] {
+      ++f4_ready;
+      while (!f4_start.load()) std::this_thread::yield();
+      for (uint8_t iteration = 0; iteration < 32; ++iteration) {
+        ReceiptSnapshot snapshot{};
+        if (!checkout_registered(make_request(regress_f4_item, time), snapshot) ||
+            snapshot.item_identity != 6001 || snapshot.resolved_stage_count != 4 ||
+            !same_test_time(snapshot.source_time, time)) {
+          f4_ok = false;
+          return;
+        }
+      }
+    });
+  }
+  while (f4_ready.load() != f4_checkouts.size() + 1) std::this_thread::yield();
+  f4_start = true;
+  f4_publisher.join();
+  for (auto& thread : f4_checkouts) thread.join();
+  if (!f4_ok || aexcompat::aegp_staged_item_runtime::diagnostics().in_flight != 0)
+    return false;
+
+  // Regression F3: every boundary for every effect must share the final
+  // hold-selected source time; a mixed-time plan is rejected before output.
+  clear_staged_item_worlds_for_test();
+  void* const regress_f3_item = reinterpret_cast<void*>(0xa500);
+  const AegpTime f3_early{3, 24};
+  const AegpTime f3_late{4, 24};
+  const std::array<uint64_t, 2> regress_f3_effects{{0xe501, 0xe502}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          regress_f3_item, 7001, SamplingPolicy::hold, nullptr, 0,
+          regress_f3_effects.data(), regress_f3_effects.size()))
+    return false;
+  for (uint64_t effect : regress_f3_effects)
+    for (StageKind kind : {StageKind::upstream, StageKind::all_effects,
+                           StageKind::downstream})
+      if (!publish_scheduler_stage(regress_f3_item, kind, effect, f3_early,
+              static_cast<uint8_t>(20 + static_cast<uint8_t>(kind))))
+        return false;
+  if (!publish_scheduler_stage(regress_f3_item, StageKind::final_item, 0,
+          f3_early, 31))
+    return false;
+  for (uint64_t effect : regress_f3_effects)
+    for (StageKind kind : {StageKind::upstream, StageKind::all_effects,
+                           StageKind::downstream})
+      if ((effect != regress_f3_effects[0] || kind != StageKind::all_effects) &&
+          !publish_scheduler_stage(regress_f3_item, kind, effect, f3_late,
+              static_cast<uint8_t>(40 + static_cast<uint8_t>(kind))))
+        return false;
+  if (!publish_scheduler_stage(regress_f3_item, StageKind::final_item, 0,
+          f3_late, 51))
+    return false;
+  void* f3_rejected = reinterpret_cast<void*>(1);
+  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
+          make_request(regress_f3_item, time), &f3_rejected) == 0 || f3_rejected)
+    return false;
+  if (!publish_scheduler_stage(regress_f3_item, StageKind::all_effects,
+          regress_f3_effects[0], f3_late, 61))
+    return false;
+  ReceiptSnapshot regress_f3_snap{};
+  if (!checkout_registered(make_request(regress_f3_item, time),
+          regress_f3_snap) ||
+      !same_test_time(regress_f3_snap.source_time, f3_late) ||
+      regress_f3_snap.resolved_stage_count != 7 ||
+      regress_f3_snap.sampling_policy != static_cast<uint8_t>(SamplingPolicy::hold))
+    return false;
+
+  // Regression F2: all_effects requires the same real effect identity as its
+  // upstream/downstream boundaries; zero is never a production sentinel.
+  clear_staged_item_worlds_for_test();
+  void* const regress_f2_item = reinterpret_cast<void*>(0xa600);
+  std::array<uint64_t, 1> regress_f2_effect{{0xe601}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          regress_f2_item, 8001, SamplingPolicy::exact, nullptr, 0,
+          regress_f2_effect.data(), regress_f2_effect.size()))
+    return false;
+  if (publish_scheduler_stage(regress_f2_item, StageKind::all_effects,
+          0, time, 22) ||
+      !publish_scheduler_stage(regress_f2_item, StageKind::upstream,
+          regress_f2_effect[0], time, 21) ||
+      !publish_scheduler_stage(regress_f2_item, StageKind::all_effects,
+          regress_f2_effect[0], time, 22) ||
+      !publish_scheduler_stage(regress_f2_item, StageKind::downstream,
+          regress_f2_effect[0], time, 23) ||
+      !publish_scheduler_stage(regress_f2_item, StageKind::final_item, 0,
+          time, 51))
+    return false;
+  ReceiptSnapshot regress_f2_snap{};
+  if (!checkout_registered(make_request(regress_f2_item, time), regress_f2_snap) ||
+      regress_f2_snap.item_identity != 8001 ||
+      regress_f2_snap.resolved_stage_count != 4)
+    return false;
+
+  // Regression F1: complete metadata registration carries durable identity,
+  // declared dependency, hold policy, and every real effect instance.
+  clear_staged_item_worlds_for_test();
+  void* const regress_f1_item = reinterpret_cast<void*>(0xa700);
+  void* const regress_f1_dependency = reinterpret_cast<void*>(0xa710);
+  std::array<void*, 1> regress_f1_dependencies{{regress_f1_dependency}};
+  std::array<uint64_t, 2> regress_f1_effects{{0xe701, 0xe702}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          regress_f1_dependency, 9002, SamplingPolicy::exact, nullptr, 0,
+          nullptr, 0) ||
+      !aexcompat::aegp_staged_item_runtime::register_item(
+          regress_f1_item, 9001, SamplingPolicy::hold,
+          regress_f1_dependencies.data(), regress_f1_dependencies.size(),
+          regress_f1_effects.data(), regress_f1_effects.size()) ||
+      !publish_scheduler_stage(regress_f1_dependency, StageKind::final_item, 0,
+          time, 11))
+    return false;
+  if (!publish_scheduler_stage(regress_f1_item, StageKind::upstream, 0xe701,
+          time, 21) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::all_effects, 0xe701,
+          time, 22) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::downstream, 0xe701,
+          time, 23) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::upstream, 0xe702,
+          time, 31) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::all_effects, 0xe702,
+          time, 32) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::downstream, 0xe702,
+          time, 33) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::final_item, 0,
+          time, 51))
+    return false;
+  ReceiptSnapshot regress_f1_snap{};
+  if (!checkout_registered(make_request(regress_f1_item, time), regress_f1_snap) ||
+      regress_f1_snap.item_identity != 9001 ||
+      regress_f1_snap.resolved_stage_count != 8 ||
+      regress_f1_snap.resolved_depth != 1 ||
+      regress_f1_snap.sampling_policy != static_cast<uint8_t>(SamplingPolicy::hold))
+    return false;
+
+  // Direct/indirect cycles, excessive nesting, and stage-count overflow are
+  // all terminal and leave no partial receipt or ownership.
+  const auto cycles_before =
+      aexcompat::aegp_staged_item_runtime::diagnostics().cycles_rejected;
+  clear_staged_item_worlds_for_test();
+  void* const direct_item = reinterpret_cast<void*>(0xc100);
+  std::array<void*, 1> direct_dependency{{direct_item}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          direct_item, 3001, SamplingPolicy::exact, direct_dependency.data(),
+          direct_dependency.size(), nullptr, 0) ||
+      !publish_scheduler_stage(direct_item, StageKind::final_item, 0, time, 61))
+    return false;
+  rejected = reinterpret_cast<void*>(1);
+  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
+          make_request(direct_item, time), &rejected) == 0 || rejected)
+    return false;
+  clear_staged_item_worlds_for_test();
+  void* const indirect_a = reinterpret_cast<void*>(0xc200);
+  void* const indirect_b = reinterpret_cast<void*>(0xc300);
+  std::array<void*, 1> a_dependency{{indirect_b}};
+  std::array<void*, 1> b_dependency{{indirect_a}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          indirect_a, 3002, SamplingPolicy::exact, a_dependency.data(), 1,
+          nullptr, 0) ||
+      !aexcompat::aegp_staged_item_runtime::register_item(
+          indirect_b, 3003, SamplingPolicy::exact, b_dependency.data(), 1,
+          nullptr, 0) ||
+      !publish_scheduler_stage(indirect_b, StageKind::final_item, 0, time, 62) ||
+      !publish_scheduler_stage(indirect_a, StageKind::final_item, 0, time, 63))
+    return false;
+  rejected = reinterpret_cast<void*>(1);
+  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
+          make_request(indirect_a, time), &rejected) == 0 || rejected)
+    return false;
+  clear_staged_item_worlds_for_test();
+  std::array<void*, 9> deep_items{};
+  for (std::size_t index = 0; index < deep_items.size(); ++index)
+    deep_items[index] =
+        reinterpret_cast<void*>(0xd100 + static_cast<uintptr_t>(index) * 0x10);
+  for (std::size_t reverse = deep_items.size(); reverse-- > 0;) {
+    void* dependency =
+        reverse + 1 < deep_items.size() ? deep_items[reverse + 1] : nullptr;
+    if (!aexcompat::aegp_staged_item_runtime::register_item(
+            deep_items[reverse], 4000 + reverse, SamplingPolicy::exact,
+            dependency ? &dependency : nullptr, dependency ? 1 : 0, nullptr,
+            0) ||
+        !publish_scheduler_stage(deep_items[reverse], StageKind::final_item, 0,
+            time, static_cast<uint8_t>(70 + reverse)))
+      return false;
+  }
+  rejected = reinterpret_cast<void*>(1);
+  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
+          make_request(deep_items[0], time), &rejected) == 0 || rejected)
+    return false;
+  clear_staged_item_worlds_for_test();
+  void* const stage_limited_item = reinterpret_cast<void*>(0xe100);
+  std::array<uint64_t, 8> many_effects{{
+      1, 2, 3, 4, 5, 6, 7, 8}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          stage_limited_item, 5001, SamplingPolicy::exact, nullptr, 0,
+          many_effects.data(), many_effects.size()))
+    return false;
+  for (uint64_t effect : many_effects)
+    for (StageKind kind : {StageKind::upstream, StageKind::all_effects,
+                           StageKind::downstream})
+      if (!publish_scheduler_stage(stage_limited_item, kind, effect, time,
+              static_cast<uint8_t>(80 + effect + static_cast<uint8_t>(kind))))
+        return false;
+  if (!publish_scheduler_stage(stage_limited_item, StageKind::final_item, 0,
+          time, 99))
+    return false;
+  rejected = reinterpret_cast<void*>(1);
+  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
+          make_request(stage_limited_item, time), &rejected) == 0 || rejected)
+    return false;
+  const auto scheduler_diagnostics =
+      aexcompat::aegp_staged_item_runtime::diagnostics();
+  if (scheduler_diagnostics.cycles_rejected < cycles_before + 2 ||
+      scheduler_diagnostics.direct_cycles_rejected == 0 ||
+      scheduler_diagnostics.indirect_cycles_rejected == 0 ||
+      scheduler_diagnostics.depth_limit_rejections == 0 ||
+      scheduler_diagnostics.stage_limit_rejections == 0 ||
+      scheduler_diagnostics.hold_hits == 0 ||
+      scheduler_diagnostics.nearest_hits == 0 ||
+      scheduler_diagnostics.partial_failures == 0 ||
+      scheduler_diagnostics.in_flight != 0 ||
+      !async_receipt_lifetimes_balanced())
+    return false;
+
   const auto invalidations_before =
       aexcompat::aegp_staged_item_runtime::diagnostics().generation_invalidations;
   if (!verify_item_render_cycle_contract(options)) return false;
@@ -465,10 +1006,24 @@ int32_t __cdecl layer_suite2_async_test_callback(
 
 bool verify_aegp_layer_render_options_suite2() {
   const bool saved_effect_live = g_aegp_effect_live;
+  const auto saved_effect_instances = g_aegp_effect_instances;
+  const auto saved_effect_leases = g_aegp_effect_leases;
   const auto saved_context = aexcompat::aegp_layer_render_runtime::context();
   const uint32_t created_before = layer_created_count();
   const uint32_t disposed_before = layer_disposed_count();
   g_aegp_effect_live = true;
+  g_aegp_effect_instances[0] = {
+      &g_aegp_layers[0], kAegpInstalledEffects[0].key, 0, 1, 1, true};
+  g_aegp_effect_instances[0].render_ref = scene_context()->pf_effect;
+  for (std::size_t index = 1; index < g_aegp_effect_instances.size(); ++index)
+    g_aegp_effect_instances[index] = {};
+  g_aegp_effect_leases = {};
+  void* second_render_effect = nullptr;
+  if (aegp_apply_effect(1, &g_aegp_layers[0],
+                        kAegpInstalledEffects[0].key,
+                        &second_render_effect) != 0 ||
+      !second_render_effect)
+    return false;
   const auto make_world = [](uint8_t red, uint8_t green, uint8_t blue) {
     std::vector<unsigned char> pixels(4 * 2 * 4);
     for (std::size_t pixel = 0; pixel < pixels.size() / 4; ++pixel) {
@@ -482,6 +1037,7 @@ bool verify_aegp_layer_render_options_suite2() {
   auto source = make_world(100, 50, 25);
   auto all_effects = make_world(40, 120, 30);
   auto downstream_pixels = make_world(20, 60, 140);
+  clear_staged_item_worlds_for_test();
   LayerRenderContext context{};
   context.entry = reinterpret_cast<EffectEntry>(&verify_aegp_layer_render_options_suite2);
   context.current_time = 0;
@@ -497,6 +1053,8 @@ bool verify_aegp_layer_render_options_suite2() {
   context.all_effects_height = 2;
   context.all_effects_pixel_bytes = 4;
   context.all_effects_finalized = true;
+  context.active_effect_instance = staged_effect_identity_for_render_ref(
+      second_render_effect);
   aexcompat::aegp_layer_render_runtime::context() = context;
 
   const void* acquired = nullptr;
@@ -507,7 +1065,8 @@ bool verify_aegp_layer_render_options_suite2() {
       set_layer_render_downsample(upstream, 2, 2) == 0 &&
       set_layer_render_world_type(upstream, 2) == 0 &&
       set_layer_render_matte(upstream, 1) == 0;
-  auto checkout_hash = [&](void* options, std::string& hash) {
+  auto checkout_hash = [&](void* options, std::string& hash,
+                           uint64_t* published_effect = nullptr) {
     void* receipt = nullptr;
     void** world = nullptr;
     int32_t type = 0, width = 0, height = 0;
@@ -520,16 +1079,30 @@ bool verify_aegp_layer_render_options_suite2() {
         aegp_world_get_base_addr16(world, &pixels) == 0 && pixels;
     if (checked_out) hash = sha256_bytes(static_cast<const unsigned char*>(pixels),
         static_cast<std::size_t>(width) * height * 8);
+    ReceiptSnapshot snapshot{};
+    if (checked_out && published_effect) {
+      if (!aexcompat::render_receipts::snapshot(receipt, snapshot))
+        return false;
+      *published_effect = snapshot.effect_instance;
+    }
     return checked_out && checkin_frame(receipt) == 0;
   };
   std::string upstream_hash, all_hash, downstream_hash, async_hash;
   ok = ok && checkout_hash(upstream, upstream_hash);
 
   void* all = nullptr;
+  uint64_t all_effect_instance = 0;
+  const uint64_t slot0_effect_instance =
+      (static_cast<uint64_t>(g_aegp_effect_instances[0].generation) << 32) | 1;
+  const uint64_t slot1_effect_instance =
+      (static_cast<uint64_t>(g_aegp_effect_instances[1].generation) << 32) | 2;
   ok = ok && new_layer_render_options(1, &g_aegp_layers[0], &all) == 0 && all &&
       set_layer_render_downsample(all, 2, 2) == 0 &&
       set_layer_render_world_type(all, 2) == 0 &&
-      set_layer_render_matte(all, 1) == 0 && checkout_hash(all, all_hash);
+      set_layer_render_matte(all, 1) == 0 &&
+      checkout_hash(all, all_hash, &all_effect_instance) &&
+      all_effect_instance == slot1_effect_instance &&
+      all_effect_instance != slot0_effect_instance;
 
   void* downstream = nullptr;
   ok = ok && new_from_downstream_of_effect(1, &g_aegp_effect, &downstream) == 0 && downstream;
@@ -573,7 +1146,10 @@ bool verify_aegp_layer_render_options_suite2() {
       dispose_layer_render_options(all) == 0 &&
       dispose_layer_render_options(downstream) == 0;
   aexcompat::aegp_layer_render_runtime::context() = saved_context;
+  clear_staged_item_worlds_for_test();
   g_aegp_effect_live = saved_effect_live;
+  g_aegp_effect_instances = saved_effect_instances;
+  g_aegp_effect_leases = saved_effect_leases;
   return ok && async_receipt_lifetimes_balanced() &&
       layer_created_count() == created_before + 3 &&
       layer_disposed_count() == disposed_before + 3;

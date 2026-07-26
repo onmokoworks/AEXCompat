@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -116,6 +117,36 @@ int32_t publish_from_context(const Context& context, const LayerValue& options,
   loaded_receipt->world.height = height;
   loaded_receipt->world.extent_hint = {0, 0, width, height};
   loaded_receipt->world.pix_aspect_ratio = {1, 1};
+  const auto stage_kind =
+      options.effect_boundary == LayerEffectBoundary::upstream
+      ? aegp_staged_item_runtime::StageKind::upstream
+      : (options.effect_boundary == LayerEffectBoundary::downstream
+             ? aegp_staged_item_runtime::StageKind::downstream
+             : aegp_staged_item_runtime::StageKind::all_effects);
+  uint64_t stage_identity_hash = 0;
+  void* const item = g_hooks.current_item ? g_hooks.current_item() : nullptr;
+  if (!item ||
+      (g_hooks.prepare_staged_item
+           ? !g_hooks.prepare_staged_item(item)
+           : !aegp_staged_item_runtime::has_item_registration(item)) ||
+      !g_hooks.current_effect_instance || !g_hooks.publish_scheduler_stage)
+    return 4;
+  const uint64_t effect_instance =
+      g_hooks.current_effect_instance(context, options);
+  if (effect_instance == 0 ||
+      !g_hooks.publish_scheduler_stage(item, stage_kind, effect_instance,
+          options.time, options.time_step, 1, 0, pixel_format, width, height,
+          width * pixel_bytes, loaded_receipt->pixels.data(),
+          &stage_identity_hash))
+    return 4;
+  loaded_receipt->has_stage_evidence = true;
+  loaded_receipt->stage_identity_hash = stage_identity_hash;
+  loaded_receipt->effect_instance = effect_instance;
+  loaded_receipt->requested_time = options.time;
+  loaded_receipt->source_time = options.time;
+  loaded_receipt->stage_kind = static_cast<uint8_t>(stage_kind);
+  loaded_receipt->sampling_policy =
+      static_cast<uint8_t>(aegp_staged_item_runtime::SamplingPolicy::exact);
   return render_receipts::register_receipt(std::move(loaded_receipt), receipt);
 }
 

@@ -1,5 +1,6 @@
 #include "worker_aegp_item_render_runtime.hpp"
 
+#include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_world_registry.hpp"
 
@@ -149,6 +150,11 @@ int32_t checkout(void* options, Cancel check_cancel, void* cancel_refcon, void**
   }
   ItemValue snapshot{};
   if (!g_hooks.snapshot_options(options, snapshot)) return 4;
+  if (!snapshot.item ||
+      (g_hooks.prepare_staged_item
+           ? !g_hooks.prepare_staged_item(snapshot.item)
+           : !aegp_staged_item_runtime::has_item_registration(snapshot.item)))
+    return 4;
   bool cache_hit = false;
   const int32_t cache_error = g_hooks.publish_cached(snapshot, out, &cache_hit);
   if (cache_error != 0 || cache_hit) return cache_error;
