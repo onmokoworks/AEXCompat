@@ -1,5 +1,6 @@
 use aex_abi::x86_64_windows as abi;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -8,6 +9,7 @@ use crate::backend::{
     UnsupportedSuiteCall,
 };
 use crate::pe::PeImage;
+use crate::pixel::FramePixelFormat;
 
 const CMD_GLOBAL_SETUP: u64 = 1;
 const CMD_GLOBAL_SETDOWN: u64 = 3;
@@ -51,7 +53,7 @@ pub enum ClassicError {
     },
     #[error("selector {selector} returned {error}")]
     Selector { selector: &'static str, error: i32 },
-    #[error("invalid ARGB8 input: {0}")]
+    #[error("invalid frame input: {0}")]
     Input(String),
 }
 
@@ -157,6 +159,9 @@ pub struct RenderReport {
     pub render_mode: &'static str,
     pub width: u32,
     pub height: u32,
+    pub pixel_format: &'static str,
+    pub raw_pixel_bytes: usize,
+    pub raw_pixel_sha256: String,
     pub guards_intact: bool,
     pub parameter_values: Vec<AppliedParameter>,
     pub output_request: [i32; 4],
@@ -167,6 +172,8 @@ pub struct RenderReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub census: Option<GuestCensus>,
     pub argb8: Vec<u8>,
+    #[serde(skip)]
+    pub raw_pixels: Vec<u8>,
 }
 
 pub struct ClassicHost {
@@ -187,6 +194,7 @@ pub struct ClassicHost {
 struct FrameResources {
     width: u32,
     height: u32,
+    format: FramePixelFormat,
     pixel_bytes: usize,
     input_param: u64,
     params: u64,
@@ -479,12 +487,35 @@ impl ClassicHost {
         input_argb8: &[u8],
         parameter_values: &[ParameterValue],
     ) -> Result<RenderReport, ClassicError> {
-        self.render_resident_argb8_mode(
+        self.render_resident_pixels(
             width,
             height,
             current_time,
             time_scale,
+            FramePixelFormat::Argb8,
             input_argb8,
+            parameter_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_resident_pixels(
+        &mut self,
+        width: u32,
+        height: u32,
+        current_time: i32,
+        time_scale: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_pixels_mode(
+            width,
+            height,
+            current_time,
+            time_scale,
+            format,
+            input_pixels,
             parameter_values,
             true,
         )
@@ -497,17 +528,45 @@ impl ClassicHost {
         time_scale: u32,
         input_argb8: &[u8],
     ) -> Result<RenderReport, ClassicError> {
-        self.render_resident_argb8_mode(width, height, 0, time_scale, input_argb8, &[], false)
+        self.probe_resident_pixels(
+            width,
+            height,
+            time_scale,
+            FramePixelFormat::Argb8,
+            input_argb8,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_resident_argb8_mode(
+    pub fn probe_resident_pixels(
+        &mut self,
+        width: u32,
+        height: u32,
+        time_scale: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_pixels_mode(
+            width,
+            height,
+            0,
+            time_scale,
+            format,
+            input_pixels,
+            &[],
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_resident_pixels_mode(
         &mut self,
         width: u32,
         height: u32,
         current_time: i32,
         time_scale: u32,
-        input_argb8: &[u8],
+        format: FramePixelFormat,
+        input_pixels: &[u8],
         parameter_values: &[ParameterValue],
         count_frame: bool,
     ) -> Result<RenderReport, ClassicError> {
@@ -518,10 +577,11 @@ impl ClassicHost {
         }
         self.write_frame_context(width, height, current_time, time_scale)?;
         let report = self
-            .render_argb8_with_request_mode(
+            .render_pixels_with_request_mode(
                 width,
                 height,
-                input_argb8,
+                format,
+                input_pixels,
                 parameter_values,
                 [0, 0, width as i32, height as i32],
                 false,
@@ -674,14 +734,20 @@ impl ClassicHost {
     }
 
     pub fn render_default_2x2(&mut self) -> Result<RenderReport, ClassicError> {
-        self.render_argb8(
-            2,
-            2,
-            &[
-                255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255,
-            ],
-            &[],
-        )
+        self.render_default_2x2_format(FramePixelFormat::Argb8)
+    }
+
+    pub fn render_default_2x2_format(
+        &mut self,
+        format: FramePixelFormat,
+    ) -> Result<RenderReport, ClassicError> {
+        let rgba8 = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let pixels = format
+            .promote_rgba8(&rgba8)
+            .map_err(|error| ClassicError::Input(error.to_string()))?;
+        self.render_pixels(2, 2, format, &pixels, &[])
     }
 
     pub fn render_argb8(
@@ -691,10 +757,28 @@ impl ClassicHost {
         input_argb8: &[u8],
         parameter_values: &[ParameterValue],
     ) -> Result<RenderReport, ClassicError> {
-        self.render_argb8_with_request(
+        self.render_pixels(
             width,
             height,
+            FramePixelFormat::Argb8,
             input_argb8,
+            parameter_values,
+        )
+    }
+
+    pub fn render_pixels(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_pixels_with_request(
+            width,
+            height,
+            format,
+            input_pixels,
             parameter_values,
             [0, 0, width as i32, height as i32],
             false,
@@ -710,10 +794,28 @@ impl ClassicHost {
         input_argb8: &[u8],
         parameter_values: &[ParameterValue],
     ) -> Result<RenderReport, ClassicError> {
-        self.render_argb8_with_request(
+        self.render_pixels_census(
             width,
             height,
+            FramePixelFormat::Argb8,
             input_argb8,
+            parameter_values,
+        )
+    }
+
+    pub fn render_pixels_census(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_pixels_with_request(
+            width,
+            height,
+            format,
+            input_pixels,
             parameter_values,
             [0, 0, width as i32, height as i32],
             true,
@@ -730,10 +832,30 @@ impl ClassicHost {
         parameter_values: &[ParameterValue],
         output_request: [i32; 4],
     ) -> Result<RenderReport, ClassicError> {
-        self.render_argb8_with_request(
+        self.render_pixels_region(
             width,
             height,
+            FramePixelFormat::Argb8,
             input_argb8,
+            parameter_values,
+            output_request,
+        )
+    }
+
+    pub fn render_pixels_region(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+        output_request: [i32; 4],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_pixels_with_request(
+            width,
+            height,
+            format,
+            input_pixels,
             parameter_values,
             output_request,
             false,
@@ -749,16 +871,33 @@ impl ClassicHost {
         input_argb8: &[u8],
         parameter_values: &[ParameterValue],
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
-        let (report, traces) = self.render_argb8_with_request(
+        self.render_pixels_trace(
             width,
             height,
+            FramePixelFormat::Argb8,
             input_argb8,
+            parameter_values,
+        )
+    }
+
+    pub fn render_pixels_trace(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+    ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        self.render_pixels_with_request(
+            width,
+            height,
+            format,
+            input_pixels,
             parameter_values,
             [0, 0, width as i32, height as i32],
             false,
             true,
-        )?;
-        Ok((report, traces))
+        )
     }
 
     pub fn render_argb8_trace_with_watches(
@@ -770,25 +909,50 @@ impl ClassicHost {
         watches: Vec<TraceWatchSpec>,
         output_pixel: Option<[u32; 2]>,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
-        self.engine.configure_trace_watches(watches);
-        self.trace_output_pixel = output_pixel;
-        self.render_argb8_trace(width, height, input_argb8, parameter_values)
+        self.render_pixels_trace_with_watches(
+            width,
+            height,
+            FramePixelFormat::Argb8,
+            input_argb8,
+            parameter_values,
+            watches,
+            output_pixel,
+        )
     }
 
-    fn render_argb8_with_request(
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_pixels_trace_with_watches(
         &mut self,
         width: u32,
         height: u32,
-        input_argb8: &[u8],
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+        watches: Vec<TraceWatchSpec>,
+        output_pixel: Option<[u32; 2]>,
+    ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        self.engine.configure_trace_watches(watches);
+        self.trace_output_pixel = output_pixel;
+        self.render_pixels_trace(width, height, format, input_pixels, parameter_values)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_pixels_with_request(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
         parameter_values: &[ParameterValue],
         output_request: [i32; 4],
         census_enabled: bool,
         trace_enabled: bool,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
-        self.render_argb8_with_request_mode(
+        self.render_pixels_with_request_mode(
             width,
             height,
-            input_argb8,
+            format,
+            input_pixels,
             parameter_values,
             output_request,
             census_enabled,
@@ -797,11 +961,13 @@ impl ClassicHost {
         )
     }
 
-    fn render_argb8_with_request_mode(
+    #[allow(clippy::too_many_arguments)]
+    fn render_pixels_with_request_mode(
         &mut self,
         width: u32,
         height: u32,
-        input_argb8: &[u8],
+        format: FramePixelFormat,
+        input_pixels: &[u8],
         parameter_values: &[ParameterValue],
         output_request: [i32; 4],
         census_enabled: bool,
@@ -824,20 +990,22 @@ impl ClassicHost {
                 "output request must be a non-empty rectangle inside {width}x{height}, got {output_request:?}"
             )));
         }
-        let rowbytes = width
-            .checked_mul(abi::PF_PIXEL_SIZE as u32)
-            .ok_or_else(|| ClassicError::Input("rowbytes overflow".into()))?;
-        let pixel_bytes = usize::try_from(rowbytes)
-            .ok()
-            .and_then(|row| row.checked_mul(height as usize))
-            .ok_or_else(|| ClassicError::Input("pixel byte count overflow".into()))?;
-        if input_argb8.len() != pixel_bytes {
+        let rowbytes = format
+            .rowbytes(width)
+            .map_err(|error| ClassicError::Input(error.to_string()))?;
+        let pixel_bytes = format
+            .byte_count(width, height)
+            .map_err(|error| ClassicError::Input(error.to_string()))?;
+        format
+            .validate_bytes(width, height, input_pixels)
+            .map_err(|error| ClassicError::Input(error.to_string()))?;
+        let setup = self.setup()?;
+        if !format.advertised_by(setup.out_flags, setup.out_flags2) {
             return Err(ClassicError::Input(format!(
-                "expected {pixel_bytes} ARGB8 bytes for {width}x{height}, got {}",
-                input_argb8.len()
+                "AEX did not advertise support for {} pixel depth",
+                format.name()
             )));
         }
-        let setup = self.setup()?;
         let smart_render = setup.out_flags2 & (1 << 10) != 0;
         if census_enabled && !smart_render {
             return Err(ClassicError::Input(
@@ -874,11 +1042,11 @@ impl ClassicHost {
         let mut applied_values = Vec::with_capacity(parameter_values.len());
         let mut applied_requests = BTreeSet::new();
         let resources =
-            self.ensure_frame_resources(width, height, pixel_bytes, captured_params.len())?;
+            self.ensure_frame_resources(width, height, format, pixel_bytes, captured_params.len())?;
         let input_param = resources.input_param;
         let params = resources.params;
         let output_world = resources.output_world;
-        let input_pixels = resources.input_pixels;
+        let guest_input_pixels = resources.input_pixels;
         let output_pixels = resources.output_pixels;
         if let Some([x, y]) = self.trace_output_pixel {
             if x >= width || y >= height {
@@ -892,18 +1060,23 @@ impl ClassicHost {
                 function_rva: None,
                 instruction_rva: None,
                 absolute_address: Some(
-                    output_pixels + row_offset + u64::from(x) * abi::PF_PIXEL_SIZE as u64,
+                    output_pixels + row_offset + u64::from(x) * format.bytes_per_pixel() as u64,
                 ),
                 register: "absolute",
-                size: abi::PF_PIXEL_SIZE,
+                size: format.bytes_per_pixel(),
                 image_coordinate: Some([x, y]),
                 image_row_offset: Some(row_offset),
-                image_format: Some("argb8"),
+                image_format: Some(format.name()),
             });
         }
 
         let mut input_world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
-        write_u64(&mut input_world, abi::LAYER_DATA_OFFSET, input_pixels);
+        write_i32(
+            &mut input_world,
+            abi::LAYER_WORLD_FLAGS_OFFSET,
+            format.world_flags(),
+        );
+        write_u64(&mut input_world, abi::LAYER_DATA_OFFSET, guest_input_pixels);
         write_i32(
             &mut input_world,
             abi::LAYER_ROWBYTES_OFFSET,
@@ -921,7 +1094,7 @@ impl ClassicHost {
         input_definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
             .copy_from_slice(&input_world);
         self.engine.write(input_param, &input_definition)?;
-        self.engine.write(input_pixels, input_argb8)?;
+        self.engine.write(guest_input_pixels, input_pixels)?;
         let output_guard = vec![OUTPUT_GUARD_PATTERN; OUTPUT_GUARD_BYTES];
         self.engine
             .write(resources.output_guard_base, &output_guard)?;
@@ -971,6 +1144,11 @@ impl ClassicHost {
         }
 
         let mut world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        write_i32(
+            &mut world,
+            abi::LAYER_WORLD_FLAGS_OFFSET,
+            format.world_flags(),
+        );
         write_u64(&mut world, abi::LAYER_DATA_OFFSET, output_pixels);
         write_i32(&mut world, abi::LAYER_ROWBYTES_OFFSET, rowbytes as i32);
         write_i32(&mut world, abi::LAYER_WIDTH_OFFSET, width as i32);
@@ -1036,7 +1214,7 @@ impl ClassicHost {
                     output_world,
                     width,
                     height,
-                    rowbytes,
+                    format,
                     output_request,
                     census_enabled,
                     trace_enabled,
@@ -1144,8 +1322,12 @@ impl ClassicHost {
                 "guest render corrupted an output pixel guard".into(),
             ));
         }
-        let mut argb8 = vec![0u8; pixel_bytes];
-        self.engine.read(output_pixels, &mut argb8)?;
+        let mut raw_pixels = vec![0u8; pixel_bytes];
+        self.engine.read(output_pixels, &mut raw_pixels)?;
+        let argb8 = format
+            .to_argb8_preview(&raw_pixels)
+            .map_err(|error| ClassicError::Input(error.to_string()))?;
+        let raw_pixel_sha256 = format!("{:x}", Sha256::digest(&raw_pixels));
         Ok((
             RenderReport {
                 schema_version: 1,
@@ -1160,6 +1342,9 @@ impl ClassicHost {
                 },
                 width,
                 height,
+                pixel_format: format.name(),
+                raw_pixel_bytes: raw_pixels.len(),
+                raw_pixel_sha256,
                 guards_intact: true,
                 parameter_values: applied_values,
                 output_request,
@@ -1169,6 +1354,7 @@ impl ClassicHost {
                 dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
                 census,
                 argb8,
+                raw_pixels,
             },
             traces,
         ))
@@ -1178,12 +1364,14 @@ impl ClassicHost {
         &mut self,
         width: u32,
         height: u32,
+        format: FramePixelFormat,
         pixel_bytes: usize,
         parameter_count: usize,
     ) -> Result<FrameResources, ClassicError> {
         if let Some(resources) = &self.frame_resources {
             if resources.width != width
                 || resources.height != height
+                || resources.format != format
                 || resources.pixel_bytes != pixel_bytes
                 || resources.parameter_definitions.len() != parameter_count
             {
@@ -1209,6 +1397,7 @@ impl ClassicHost {
         let resources = FrameResources {
             width,
             height,
+            format,
             pixel_bytes,
             input_param,
             params,
@@ -1331,15 +1520,20 @@ impl ClassicHost {
         output_world: u64,
         width: u32,
         height: u32,
-        _rowbytes: u32,
+        format: FramePixelFormat,
         output_request: [i32; 4],
         census_enabled: bool,
         trace_enabled: bool,
     ) -> Result<(i32, Option<GuestCensus>, Vec<ExecutionTrace>), ClassicError> {
         let mut traces = Vec::new();
         let input_world = input_param + abi::PARAM_U_OFFSET as u64;
-        self.engine
-            .configure_smart_render(input_world, output_world, width, height);
+        self.engine.configure_smart_render(
+            input_world,
+            output_world,
+            width,
+            height,
+            format.pf_pixel_format(),
+        );
 
         let pre_input = self.engine.allocate(abi::PF_PRE_RENDER_INPUT_SIZE, 8)?;
         let pre_output = self.engine.allocate(abi::PF_PRE_RENDER_OUTPUT_SIZE, 8)?;
@@ -1351,7 +1545,11 @@ impl ClassicHost {
             abi::PRE_INPUT_OUTPUT_REQUEST_OFFSET,
             output_request,
         );
-        write_i16(&mut pre_input_bytes, abi::SMART_INPUT_BITDEPTH_OFFSET, 8);
+        write_i16(
+            &mut pre_input_bytes,
+            abi::SMART_INPUT_BITDEPTH_OFFSET,
+            format.bit_depth(),
+        );
         self.engine.write(pre_input, &pre_input_bytes)?;
         self.engine
             .write(pre_output, &vec![0u8; abi::PF_PRE_RENDER_OUTPUT_SIZE])?;
@@ -1410,7 +1608,11 @@ impl ClassicHost {
             .allocate(abi::PF_SMART_RENDER_CALLBACKS_SIZE, 8)?;
         let smart_extra = self.engine.allocate(abi::PF_SMART_RENDER_EXTRA_SIZE, 8)?;
         let mut smart_input_bytes = vec![0u8; abi::PF_SMART_RENDER_INPUT_SIZE];
-        write_i16(&mut smart_input_bytes, abi::SMART_INPUT_BITDEPTH_OFFSET, 8);
+        write_i16(
+            &mut smart_input_bytes,
+            abi::SMART_INPUT_BITDEPTH_OFFSET,
+            format.bit_depth(),
+        );
         write_u64(&mut smart_input_bytes, 48, pre_render_data);
         self.engine.write(smart_input, &smart_input_bytes)?;
         let mut smart_callbacks_bytes = vec![0u8; abi::PF_SMART_RENDER_CALLBACKS_SIZE];

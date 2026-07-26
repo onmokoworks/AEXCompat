@@ -152,6 +152,7 @@ struct NativeState {
     smart_output_world: u64,
     smart_width: u32,
     smart_height: u32,
+    smart_pixel_format: i32,
     suite_requests: Vec<String>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
@@ -598,12 +599,14 @@ impl GuestEngine<'static> {
         output_world: u64,
         width: u32,
         height: u32,
+        pixel_format: i32,
     ) {
         self.state.pre_checkout_requests.clear();
         self.state.smart_input_world = input_world;
         self.state.smart_output_world = output_world;
         self.state.smart_width = width;
         self.state.smart_height = height;
+        self.state.smart_pixel_format = pixel_format;
     }
 
     pub fn parameters(&self) -> &[GuestParam] {
@@ -1693,7 +1696,7 @@ unsafe extern "win64" fn get_world_pixel_format(
             .or_else(|| {
                 (world != 0
                     && (world == state.smart_input_world || world == state.smart_output_world))
-                    .then_some(0x6267_7261u32 as i32)
+                    .then_some(state.smart_pixel_format)
             })
             .or_else(|| {
                 if !native_world_descriptor_valid(state, world) {
@@ -2475,6 +2478,18 @@ mod tests {
             0
         );
         assert_eq!(format, 0x3631_6561);
+        let mut smart_input_storage = [0u8; abi::PF_LAYER_DEF_SIZE];
+        let mut smart_output_storage = [0u8; abi::PF_LAYER_DEF_SIZE];
+        state.smart_input_world = smart_input_storage.as_mut_ptr() as u64;
+        state.smart_output_world = smart_output_storage.as_mut_ptr() as u64;
+        state.smart_pixel_format = crate::pixel::PF_PIXEL_FORMAT_ARGB128;
+        for smart_world in [state.smart_input_world, state.smart_output_world] {
+            assert_eq!(
+                unsafe { get_world_pixel_format(smart_world, format_output, 0, 0, 0, 0) },
+                0
+            );
+            assert_eq!(format as i32, crate::pixel::PF_PIXEL_FORMAT_ARGB128);
+        }
         assert_eq!(unsafe { get_world_pixel_format(world, 0, 0, 0, 0, 0) }, 4);
         assert_eq!(unsafe { dispose_world(1, world, 0, 0, 0, 0) }, 0);
         assert!(state.worlds.is_empty());

@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use aex_guest_worker::backend::TraceWatchSpec;
 use aex_guest_worker::classic::{ClassicHost, ParameterValue};
 use aex_guest_worker::pe::PeImage;
+use aex_guest_worker::pixel::FramePixelFormat;
 use sha2::{Digest, Sha256};
 
 struct CommandFailure {
@@ -59,6 +60,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let pixel_format = match extract_pixel_format(&mut remaining_args) {
+        Ok(format) => format,
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            return ExitCode::from(2);
+        }
+    };
     let input = (!remaining_args.is_empty()).then(|| PathBuf::from(remaining_args.remove(0)));
     let output = (!remaining_args.is_empty()).then(|| PathBuf::from(remaining_args.remove(0)));
     let mut trailing_args = remaining_args;
@@ -98,6 +106,16 @@ fn main() -> ExitCode {
         eprintln!(
             "aex_guest_error: --watch and --watch-output-pixel are only valid with render-trace-png"
         );
+        return ExitCode::from(2);
+    }
+    if pixel_format != FramePixelFormat::Argb8
+        && command != "render"
+        && command != "render-png"
+        && command != "render-trace-png"
+        && command != "render-region-png"
+        && command != "census-png"
+    {
+        eprintln!("aex_guest_error: --pixel-format is only valid with render commands or session");
         return ExitCode::from(2);
     }
     if ((command == "render-png"
@@ -161,7 +179,7 @@ fn main() -> ExitCode {
                 let mut host = ClassicHost::new_with_effect(&image, effect_selector.as_deref())
                     .map_err(|error| CommandFailure::from(error.to_string()))?;
                 let report = host
-                    .render_default_2x2()
+                    .render_default_2x2_format(pixel_format)
                     .map_err(|error| CommandFailure::with_classic_report(&host, error))?;
                 serde_json::to_string_pretty(&report)
                     .map_err(|error| CommandFailure::from(error.to_string()))
@@ -177,6 +195,7 @@ fn main() -> ExitCode {
                 &[],
                 None,
                 effect_selector.as_deref(),
+                pixel_format,
             ),
             Some("render-trace-png") => render_png(
                 &image,
@@ -189,6 +208,7 @@ fn main() -> ExitCode {
                 &watches,
                 output_pixel,
                 effect_selector.as_deref(),
+                pixel_format,
             ),
             Some("render-region-png") => render_png(
                 &image,
@@ -201,6 +221,7 @@ fn main() -> ExitCode {
                 &[],
                 None,
                 effect_selector.as_deref(),
+                pixel_format,
             ),
             Some("census-png") => render_png(
                 &image,
@@ -213,6 +234,7 @@ fn main() -> ExitCode {
                 &[],
                 None,
                 effect_selector.as_deref(),
+                pixel_format,
             ),
             _ => Err(CommandFailure::from(
                 "command must be inspect, setup, trace-selector, render, render-png, render-trace-png, render-region-png, or census-png".to_string(),
@@ -245,25 +267,25 @@ fn selector_error(return_value: u64) -> Option<i32> {
 
 fn usage() {
     eprintln!(
-        "usage: aex-guest-worker <inspect|setup|render> <x64.aex> [--effect <#index|match-name>]"
+        "usage: aex-guest-worker <inspect|setup|render> <x64.aex> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>]"
     );
     eprintln!(
-        "       aex-guest-worker session <x64.aex> <input.argb8> <output.argb8> <width> <height> <time-scale> [--effect <#index|match-name>]"
+        "       aex-guest-worker session <x64.aex> <input.raw> <output.raw> <width> <height> <time-scale> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>]"
     );
     eprintln!(
         "       aex-guest-worker trace-selector <x64.aex> <GLOBAL_SETUP|PARAMS_SETUP> [--effect <#index|match-name>]"
     );
     eprintln!(
-        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [name=value | name@slot=a,r,g,b ...]"
+        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [name=value | name@slot=a,r,g,b ...]"
     );
     eprintln!(
-        "       aex-guest-worker render-trace-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--watch <spec>] [--watch-output-pixel x,y] [name=value ...]"
+        "       aex-guest-worker render-trace-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--watch <spec>] [--watch-output-pixel x,y] [name=value ...]"
     );
     eprintln!(
-        "       aex-guest-worker render-region-png <x64.aex> <input.png> <output.png> <left> <top> <right> <bottom> [--effect <#index|match-name>] [name=value ...]"
+        "       aex-guest-worker render-region-png <x64.aex> <input.png> <output.png> <left> <top> <right> <bottom> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [name=value ...]"
     );
     eprintln!(
-        "       aex-guest-worker census-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [name=value ...]"
+        "       aex-guest-worker census-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [name=value ...]"
     );
 }
 
@@ -295,9 +317,41 @@ fn extract_effect_selector(
     Ok(selector)
 }
 
+fn extract_pixel_format(
+    arguments: &mut Vec<std::ffi::OsString>,
+) -> Result<FramePixelFormat, String> {
+    let mut format = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] != "--pixel-format" {
+            index += 1;
+            continue;
+        }
+        if format.is_some() {
+            return Err("--pixel-format may be specified only once".into());
+        }
+        if index + 1 >= arguments.len() {
+            return Err("--pixel-format requires argb8, argb16, or argb32f".into());
+        }
+        let value = arguments[index + 1]
+            .to_str()
+            .ok_or_else(|| "--pixel-format must be UTF-8".to_string())?;
+        format = Some(FramePixelFormat::parse(value).map_err(|error| error.to_string())?);
+        arguments.drain(index..=index + 1);
+    }
+    Ok(format.unwrap_or(FramePixelFormat::Argb8))
+}
+
 fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
     let effect_selector = match extract_effect_selector(&mut arguments) {
         Ok(selector) => selector,
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let pixel_format = match extract_pixel_format(&mut arguments) {
+        Ok(format) => format,
         Err(error) => {
             eprintln!("aex_guest_error: {error}");
             return ExitCode::from(2);
@@ -341,6 +395,7 @@ fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
                 width,
                 height,
                 time_scale,
+                pixel_format,
                 effect_selector.as_deref(),
                 stdin.lock(),
                 stdout.lock(),
@@ -367,6 +422,7 @@ fn render_png(
     watches: &[TraceWatchSpec],
     output_pixel: Option<[u32; 2]>,
     effect_selector: Option<&str>,
+    pixel_format: FramePixelFormat,
 ) -> Result<String, CommandFailure> {
     let input_png_sha256 = fs::read(input)
         .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
@@ -375,17 +431,17 @@ fn render_png(
         .map_err(|error| format!("decode input PNG: {error}"))?
         .into_rgba8();
     let (width, height) = rgba.dimensions();
-    let mut argb8 = Vec::with_capacity(rgba.as_raw().len());
-    for pixel in rgba.as_raw().chunks_exact(4) {
-        argb8.extend_from_slice(&[pixel[3], pixel[0], pixel[1], pixel[2]]);
-    }
+    let input_pixels = pixel_format
+        .promote_rgba8(rgba.as_raw())
+        .map_err(|error| error.to_string())?;
     let mut host = ClassicHost::new_with_effect(image, effect_selector)
         .map_err(|error| CommandFailure::from(error.to_string()))?;
     let render_result = if trace {
-        host.render_argb8_trace_with_watches(
+        host.render_pixels_trace_with_watches(
             width,
             height,
-            &argb8,
+            pixel_format,
+            &input_pixels,
             parameter_values,
             watches.to_vec(),
             output_pixel,
@@ -393,13 +449,20 @@ fn render_png(
     } else {
         match (region, census) {
             (None, true) => host
-                .render_argb8_census(width, height, &argb8, parameter_values)
+                .render_pixels_census(width, height, pixel_format, &input_pixels, parameter_values)
                 .map(|report| (report, Vec::new())),
             (Some(region), _) => host
-                .render_argb8_region(width, height, &argb8, parameter_values, region)
+                .render_pixels_region(
+                    width,
+                    height,
+                    pixel_format,
+                    &input_pixels,
+                    parameter_values,
+                    region,
+                )
                 .map(|report| (report, Vec::new())),
             (None, false) => host
-                .render_argb8(width, height, &argb8, parameter_values)
+                .render_pixels(width, height, pixel_format, &input_pixels, parameter_values)
                 .map(|report| (report, Vec::new())),
         }
     };
@@ -416,7 +479,7 @@ fn render_png(
         .map_err(|error| format!("write output PNG: {error}"))?;
     let mut report_json =
         serde_json::to_value(&report).map_err(|error| format!("serialize report: {error}"))?;
-    report_json["pixel_bytes"] = serde_json::json!(report.argb8.len());
+    report_json["pixel_bytes"] = serde_json::json!(report.raw_pixel_bytes);
     report_json["input_png_sha256"] = serde_json::json!(input_png_sha256);
     report_json["output_png"] = serde_json::json!(output);
     if !execution_traces.is_empty() {
@@ -638,8 +701,10 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_effect_selector, parse_parameter_values, parse_trace_watches, selector_error,
+        extract_effect_selector, extract_pixel_format, parse_parameter_values, parse_trace_watches,
+        selector_error,
     };
+    use aex_guest_worker::pixel::FramePixelFormat;
     use std::ffi::OsString;
 
     #[test]
@@ -673,6 +738,30 @@ mod tests {
         values.extend([OsString::from("--effect"), OsString::from("duplicate")]);
         values.extend([OsString::from("--effect"), OsString::from("duplicate")]);
         assert!(extract_effect_selector(&mut values).is_err());
+    }
+
+    #[test]
+    fn pixel_format_is_bounded_removed_and_defaults_to_argb8() {
+        let mut values = vec![
+            OsString::from("input.png"),
+            OsString::from("--pixel-format"),
+            OsString::from("argb32f"),
+            OsString::from("output.png"),
+        ];
+        assert_eq!(
+            extract_pixel_format(&mut values).unwrap(),
+            FramePixelFormat::Argb32f
+        );
+        assert_eq!(
+            values,
+            [OsString::from("input.png"), OsString::from("output.png")]
+        );
+        assert_eq!(
+            extract_pixel_format(&mut values).unwrap(),
+            FramePixelFormat::Argb8
+        );
+        values.extend([OsString::from("--pixel-format"), OsString::from("rgba8")]);
+        assert!(extract_pixel_format(&mut values).is_err());
     }
 
     #[test]
