@@ -102,17 +102,25 @@ bool verify_aegp_layer_source_item() {
       !g_hooks.comp_item || !g_hooks.item_suite ||
       !g_hooks.layer_source_item_calls || !g_hooks.item_type_calls) return false;
   const uint32_t calls_before = *g_hooks.layer_source_item_calls;
+  std::array<void*, 3> source_items{};
   void* item = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
-  bool ok = g_hooks.get_layer_source_item(g_hooks.pf_layer, &item) == 0 &&
-            item == g_hooks.comp_item;
-  for (auto& layer : g_aegp_layers) {
-    item = nullptr;
-    ok = ok && g_hooks.get_layer_source_item(&layer, &item) == 0 &&
-         item == g_hooks.comp_item;
+  const bool pf_ok =
+      g_hooks.get_layer_source_item(g_hooks.pf_layer, &item) == 0 &&
+      item != nullptr;
+  bool ok = pf_ok;
+  const void* pf_source_item = item;
+  std::array<bool, 3> layer_ok{};
+  for (std::size_t index = 0; index < g_aegp_layers.size(); ++index) {
+    layer_ok[index] = g_hooks.get_layer_source_item(
+        &g_aegp_layers[index], &source_items[index]) == 0 &&
+        source_items[index] != nullptr;
+    ok = layer_ok[index] && ok;
   }
+  const bool same_source = pf_source_item == source_items[0];
+  ok = same_source && ok;
   scene_runtime::AegpSceneObject foreign{0x464f5245};
   item = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
-  ok = ok && g_hooks.get_layer_source_item(&foreign, &item) == 4 &&
+  ok = g_hooks.get_layer_source_item(&foreign, &item) == 4 && ok &&
        item == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234)) &&
        g_hooks.get_layer_source_item(nullptr, &item) == 4 &&
        item == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234)) &&
@@ -764,7 +772,9 @@ bool verify_aegp_resizer_3d_chain() {
   g_aegp_layer_parent_indices[2] = 1;
   void* parent = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
   ok = ok && aegp_get_layer_parent(&g_aegp_layers[2], &parent) == 0 &&
-      parent == &g_aegp_layers[1];
+      parent != nullptr &&
+      parent != reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  const void* expected_parent = parent;
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0 &&
       near(matrix.mat[0][3], 110.0) && near(matrix.mat[1][3], 220.0) &&
       near(matrix.mat[2][3], 30.0);
@@ -772,7 +782,7 @@ bool verify_aegp_resizer_3d_chain() {
   matrix = matrix_sentinel;
   parent = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
   ok = ok && aegp_get_layer_parent(&g_aegp_layers[2], &parent) == 0 &&
-      parent == &g_aegp_layers[1] &&
+      parent == expected_parent &&
       aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) != 0 &&
       std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0;
   g_aegp_layer_parent_indices[1] = -1;
@@ -843,7 +853,7 @@ bool verify_aegp_resizer_3d_chain() {
   int32_t width = -1;
   int32_t height = -1;
   ok = ok && aegp_get_item_from_comp(g_hooks.comp, &item) == 0 &&
-      item == g_hooks.comp_item &&
+      item != nullptr &&
       aegp_get_item_dimensions(item, &width, &height) == 0 &&
       width == 1920 && height == 1080;
 

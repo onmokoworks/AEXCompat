@@ -1,0 +1,152 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
+#include <string_view>
+
+namespace aexcompat::scene_model {
+
+enum class ObjectKind : uint8_t {
+  none = 0,
+  project = 1,
+  item = 2,
+  composition = 3,
+  folder = 4,
+  footage = 5,
+  layer = 6,
+  effect = 7,
+  stream = 8,
+  keyframe = 9,
+};
+
+enum class ItemKind : uint8_t {
+  none = 0,
+  folder = 1,
+  composition = 2,
+  footage = 3,
+};
+
+struct Identity {
+  uint64_t project_id{};
+  uint64_t object_id{};
+  uint32_t generation{};
+  ObjectKind kind{ObjectKind::none};
+  uint8_t reserved[3]{};
+
+  friend constexpr bool operator==(const Identity& left,
+                                   const Identity& right) noexcept {
+    return left.project_id == right.project_id &&
+        left.object_id == right.object_id &&
+        left.generation == right.generation &&
+        left.kind == right.kind;
+  }
+  friend constexpr bool operator!=(const Identity& left,
+                                   const Identity& right) noexcept {
+    return !(left == right);
+  }
+};
+static_assert(sizeof(Identity) == 24);
+static_assert(offsetof(Identity, project_id) == 0);
+static_assert(offsetof(Identity, object_id) == 8);
+static_assert(offsetof(Identity, generation) == 16);
+static_assert(offsetof(Identity, kind) == 20);
+static_assert(sizeof(void*) == sizeof(uint64_t));
+
+struct ObjectSnapshot {
+  Identity identity{};
+  Identity owner{};
+  Identity related_item{};
+  Identity parent_layer{};
+  ItemKind item_kind{ItemKind::none};
+  int32_t local_index{-1};
+  void* legacy_handle{};
+  std::array<char16_t, 48> name{};
+};
+
+inline constexpr std::size_t kProjectCapacity = 4;
+inline constexpr std::size_t kObjectCapacity = 64;
+inline constexpr std::size_t kBorrowedHandleCapacity = 64;
+
+class Registry {
+ public:
+  Registry() noexcept;
+
+  bool initialize_fixture(void* primary_item, void* primary_comp,
+                          void* const* primary_layers,
+                          std::size_t primary_layer_count) noexcept;
+
+  std::size_t project_count() const noexcept;
+  std::size_t live_object_count(ObjectKind kind) const noexcept;
+  Identity active_project() const noexcept;
+  Identity active_item() const noexcept;
+
+  bool snapshot(Identity identity, ObjectSnapshot& output) const noexcept;
+  bool identity_for_legacy(void* legacy, ObjectKind expected,
+                           Identity& output) const noexcept;
+  bool identity_for_legacy_item(void* legacy, Identity& output) const noexcept;
+
+  void* borrow(Identity identity) noexcept;
+  bool resolve(void* handle, ObjectKind expected, ObjectSnapshot& output,
+               uint64_t required_project_id = 0) const noexcept;
+  bool resolve_item(void* handle, ObjectSnapshot& output,
+                    uint64_t required_project_id = 0) const noexcept;
+  bool resolve_or_legacy(void* handle, ObjectKind expected,
+                         ObjectSnapshot& output,
+                         uint64_t required_project_id = 0) const noexcept;
+  bool resolve_item_or_legacy(void* handle, ObjectSnapshot& output,
+                              uint64_t required_project_id = 0) const noexcept;
+
+  bool first_child(Identity owner, ObjectSnapshot& output) const noexcept;
+  bool next_sibling(Identity identity, ObjectSnapshot& output) const noexcept;
+  bool comp_from_item(Identity item, ObjectSnapshot& output) const noexcept;
+  bool item_from_comp(Identity comp, ObjectSnapshot& output) const noexcept;
+  std::size_t layer_count(Identity comp) const noexcept;
+  bool layer_by_index(Identity comp, std::size_t index,
+                      ObjectSnapshot& output) const noexcept;
+  bool layer_from_id(Identity comp, uint64_t object_id,
+                     ObjectSnapshot& output) const noexcept;
+
+  bool invalidate(Identity identity, Identity& replacement) noexcept;
+  uint64_t fingerprint() const noexcept;
+
+ private:
+  struct ObjectRecord {
+    ObjectSnapshot snapshot{};
+    bool live{};
+  };
+  struct BorrowedHandle {
+    Identity target{};
+    uint32_t lease_generation{};
+    bool live{};
+    bool exhausted{};
+  };
+
+  bool append(ObjectKind kind, uint64_t project_id, uint64_t object_id,
+              Identity owner, Identity related_item, Identity parent_layer,
+              ItemKind item_kind, int32_t local_index, void* legacy_handle,
+              std::u16string_view name, Identity& output) noexcept;
+  const ObjectRecord* find_locked(Identity identity) const noexcept;
+  ObjectRecord* find_locked(Identity identity) noexcept;
+  bool is_item_kind(ObjectKind kind) const noexcept;
+  bool decode_handle(void* handle, std::size_t& slot,
+                     uint32_t& generation) const noexcept;
+  void* encode_handle(std::size_t slot, uint32_t generation) const noexcept;
+  bool resolve_locked(void* handle, ObjectKind expected,
+                      bool item_family, ObjectSnapshot& output,
+                      uint64_t required_project_id) const noexcept;
+
+  mutable std::mutex mutex_;
+  std::array<ObjectRecord, kObjectCapacity> objects_{};
+  std::array<BorrowedHandle, kBorrowedHandleCapacity> borrowed_{};
+  std::size_t object_count_{};
+  std::size_t project_count_{};
+  Identity active_project_{};
+  Identity active_item_{};
+  bool initialized_{};
+};
+
+Registry& registry() noexcept;
+
+}  // namespace aexcompat::scene_model

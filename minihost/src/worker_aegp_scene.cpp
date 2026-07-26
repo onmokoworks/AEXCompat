@@ -2,6 +2,7 @@
 // Independent compiled implementation for the AEGP scene family.
 
 #include "worker_aegp_scene.hpp"
+#include "worker_aegp_scene_model.hpp"
 #include "worker_suite_registry.hpp"
 
 #include <algorithm>
@@ -11,6 +12,10 @@
 #include <iterator>
 
 using aexcompat::scene_runtime::scene_runtime_state;
+using aexcompat::scene_model::Identity;
+using aexcompat::scene_model::ItemKind;
+using aexcompat::scene_model::ObjectKind;
+using aexcompat::scene_model::ObjectSnapshot;
 using aexcompat::worker_runtime::UnsupportedSuiteId;
 using aexcompat::worker_runtime::unsupported_suite_slots;
 
@@ -358,6 +363,51 @@ auto& g_aegp_effect = state().effect;
 #define make_utf16_handle(...) scene_context()->hooks.make_utf16_handle(__VA_ARGS__)
 #define free_aegp_mem_handle(...) scene_context()->hooks.free_mem_handle(__VA_ARGS__)
 
+aexcompat::scene_model::Registry& scene_registry() noexcept {
+  return aexcompat::scene_model::registry();
+}
+
+bool resolve_scene_item(void* handle, ObjectSnapshot& output,
+                        uint64_t required_project_id = 0) noexcept {
+  return scene_registry().resolve_item_or_legacy(
+      handle, output, required_project_id);
+}
+
+bool resolve_scene_comp(void* handle, ObjectSnapshot& output,
+                        uint64_t required_project_id = 0) noexcept {
+  return scene_registry().resolve_or_legacy(
+      handle, ObjectKind::composition, output, required_project_id);
+}
+
+bool resolve_scene_layer(void* handle, ObjectSnapshot& output,
+                         uint64_t required_project_id = 0) noexcept {
+  if (handle == &g_layer)
+    handle = &g_aegp_layers[0];
+  return scene_registry().resolve_or_legacy(
+      handle, ObjectKind::layer, output, required_project_id);
+}
+
+void* borrow_scene_object(Identity identity) noexcept {
+  return scene_registry().borrow(identity);
+}
+
+std::u16string scene_name(const ObjectSnapshot& snapshot) {
+  const auto end = std::find(
+      snapshot.name.begin(), snapshot.name.end(), char16_t{});
+  return {snapshot.name.begin(), end};
+}
+
+int32_t primary_layer_index(const ObjectSnapshot& snapshot) noexcept {
+  if (snapshot.identity.kind != ObjectKind::layer ||
+      snapshot.identity.project_id != 1 ||
+      snapshot.owner.object_id != 5001 || !snapshot.legacy_handle)
+    return -1;
+  for (std::size_t index = 0; index < g_aegp_layers.size(); ++index)
+    if (snapshot.legacy_handle == &g_aegp_layers[index])
+      return static_cast<int32_t>(index);
+  return -1;
+}
+
 bool& g_aegp_effect_live = scene_runtime_state().effect_live;
 std::array<AegpEffectInstance, kAegpEffectInstanceCapacity>& g_aegp_effect_instances =
     scene_runtime_state().effect_instances;
@@ -509,18 +559,31 @@ uint32_t& g_aegp_legacy_effect_stream_generation =
 
 int32_t __cdecl aegp_get_active_item(void** item) {
   if (!item) return 4;
-  *item = (g_aegp_update_menu_mode || g_aegp_command_roundtrip_mode ||
-           g_aegp_comp_idle_roundtrip_mode)
-      ? &g_aegp_comp_item : nullptr;
+  if (!(g_aegp_update_menu_mode || g_aegp_command_roundtrip_mode ||
+        g_aegp_comp_idle_roundtrip_mode)) {
+    *item = nullptr;
+    return 0;
+  }
+  void* borrowed = borrow_scene_object(scene_registry().active_item());
+  if (!borrowed) return 4;
+  *item = borrowed;
   return 0;
 }
 int32_t __cdecl aegp_get_item_type(void* item, int16_t* item_type);
 AegpItemSuite g_aegp_item_suite{};
 
 int32_t __cdecl aegp_get_item_type(void* item, int16_t* item_type) {
-  if (item != &g_aegp_comp_item || !item_type) return 4;
+  ObjectSnapshot resolved{};
+  if (!item_type || !resolve_scene_item(item, resolved)) return 4;
+  int16_t result = 0;
+  switch (resolved.item_kind) {
+    case ItemKind::folder: result = 1; break;
+    case ItemKind::composition: result = 2; break;
+    case ItemKind::footage: result = 3; break;
+    default: return 4;
+  }
   ++g_aegp_item_type_calls;
-  *item_type = 2;  // AEGP_ItemType_COMP in AE_GeneralPlug.h.
+  *item_type = result;
   return 0;
 }
 AegpLegacyItemSuite6 g_aegp_legacy_item_suite6{};
@@ -531,7 +594,11 @@ std::array<AegpLayerTransform, 3>& g_aegp_layer_transforms = state().layer_trans
 std::array<int32_t, 3>& g_aegp_layer_parent_indices = state().layer_parent_indices;
 
 int32_t __cdecl aegp_get_item_current_time(void* item, AegpTime* time) {
-  if (item != &g_aegp_comp_item || !time) return 4;
+  ObjectSnapshot resolved{};
+  if (!time || !resolve_scene_item(item, resolved) ||
+      resolved.item_kind != ItemKind::composition ||
+      resolved.legacy_handle != &g_aegp_comp_item)
+    return 4;
   ++g_aegp_item_current_time_calls;
   if (g_aegp_first_observed_frame < 0) g_aegp_first_observed_frame = g_aegp_scene_frame;
   g_aegp_last_observed_frame = g_aegp_scene_frame;
@@ -539,8 +606,12 @@ int32_t __cdecl aegp_get_item_current_time(void* item, AegpTime* time) {
   return 0;
 }
 int32_t __cdecl aegp_set_item_current_time(void* item, const AegpTime* time) {
-  if (item != &g_aegp_comp_item || !time || time->scale == 0 || time->value < 0 ||
-      time->value > 300) return 4;
+  ObjectSnapshot resolved{};
+  if (!time || !resolve_scene_item(item, resolved) ||
+      resolved.item_kind != ItemKind::composition ||
+      resolved.legacy_handle != &g_aegp_comp_item || time->scale == 0 ||
+      time->value < 0 || time->value > 300)
+    return 4;
   ++g_aegp_item_set_current_time_calls;
   g_aegp_item_last_set_time_value = time->value;
   g_aegp_item_last_set_time_scale = time->scale;
@@ -550,57 +621,89 @@ int32_t __cdecl aegp_set_item_current_time(void* item, const AegpTime* time) {
   return 0;
 }
 int32_t __cdecl aegp_get_item_id(void* item, int32_t* id) {
-  if (item != &g_aegp_comp_item || !id) return 4;
-  *id = static_cast<int32_t>(scene_runtime_state().composition_item_identity);
+  ObjectSnapshot resolved{};
+  if (!id || !resolve_scene_item(item, resolved) ||
+      resolved.identity.object_id > INT32_MAX)
+    return 4;
+  *id = resolved.legacy_handle == &g_aegp_comp_item
+      ? static_cast<int32_t>(scene_runtime_state().composition_item_identity)
+      : static_cast<int32_t>(resolved.identity.object_id);
   return 0;
 }
 int32_t __cdecl aegp_get_item_name(int32_t plugin_id, void* item, void** name) {
-  if (plugin_id != 1 || item != &g_aegp_comp_item || !name) return 4;
-  if (make_utf16_handle(u"AEXCompat Composition", "item name", name) != 0) return 4;
+  ObjectSnapshot resolved{};
+  if (plugin_id != 1 || !name || !resolve_scene_item(item, resolved))
+    return 4;
+  const std::u16string value = scene_name(resolved);
+  if (value.empty() ||
+      make_utf16_handle(value, "item name", name) != 0)
+    return 4;
   ++g_aegp_item_name_calls;
   return 0;
 }
 int32_t __cdecl aegp_get_item_duration(void* item, AegpTime* duration) {
-  if (item != &g_aegp_comp_item || !duration) return 4;
+  ObjectSnapshot resolved{};
+  if (!duration || !resolve_scene_item(item, resolved) ||
+      resolved.item_kind != ItemKind::composition)
+    return 4;
   *duration = {300, 30};
   ++g_aegp_item_duration_calls;
   return 0;
 }
 int32_t __cdecl aegp_get_comp_from_item(void* item, void** comp) {
-  if (item != &g_aegp_comp_item || !comp) return 4;
+  ObjectSnapshot resolved_item{};
+  ObjectSnapshot resolved_comp{};
+  if (!comp || !resolve_scene_item(item, resolved_item) ||
+      !scene_registry().comp_from_item(
+          resolved_item.identity, resolved_comp))
+    return 4;
+  void* borrowed = borrow_scene_object(resolved_comp.identity);
+  if (!borrowed) return 4;
   ++g_aegp_comp_from_item_calls;
-  *comp = &g_aegp_comp;
+  *comp = borrowed;
   return 0;
 }
 int32_t __cdecl aegp_get_comp_framerate(void* comp, double* fps) {
-  if (comp != &g_aegp_comp || !fps) return 4;
+  ObjectSnapshot resolved{};
+  if (!fps || !resolve_scene_comp(comp, resolved)) return 4;
   ++g_aegp_comp_framerate_calls;
   *fps = 30.0;
   return 0;
 }
 int32_t __cdecl aegp_get_comp_frame_duration(void* comp, AegpTime* duration) {
-  if (comp != &g_aegp_comp || !duration) return 4;
+  ObjectSnapshot resolved{};
+  if (!duration || !resolve_scene_comp(comp, resolved)) return 4;
   *duration = {1, 30};
   return 0;
 }
 int32_t __cdecl aegp_get_comp_num_layers(void* comp, int32_t* count) {
-  if (comp != &g_aegp_comp || !count) return 4;
+  ObjectSnapshot resolved{};
+  if (!count || !resolve_scene_comp(comp, resolved)) return 4;
+  const std::size_t result = scene_registry().layer_count(resolved.identity);
+  if (result > static_cast<std::size_t>(INT32_MAX)) return 4;
   ++g_aegp_layer_count_calls;
-  *count = static_cast<int32_t>(g_aegp_layers.size());
+  *count = static_cast<int32_t>(result);
   return 0;
 }
 int32_t __cdecl aegp_get_comp_layer_by_index(void* comp, int32_t index, void** layer) {
-  if (comp != &g_aegp_comp || index < 0 ||
-      static_cast<std::size_t>(index) >= g_aegp_layers.size() || !layer) return 4;
+  ObjectSnapshot resolved_comp{};
+  ObjectSnapshot resolved_layer{};
+  if (!layer || index < 0 || !resolve_scene_comp(comp, resolved_comp) ||
+      !scene_registry().layer_by_index(
+          resolved_comp.identity, static_cast<std::size_t>(index),
+          resolved_layer))
+    return 4;
+  void* borrowed = borrow_scene_object(resolved_layer.identity);
+  if (!borrowed) return 4;
   ++g_aegp_layer_by_index_calls;
-  *layer = &g_aegp_layers[static_cast<std::size_t>(index)];
+  *layer = borrowed;
   return 0;
 }
 int32_t aegp_layer_index(void* layer) {
   if (layer == &g_layer) return 0;
-  for (std::size_t index = 0; index < g_aegp_layers.size(); ++index)
-    if (layer == &g_aegp_layers[index]) return static_cast<int32_t>(index);
-  return -1;
+  ObjectSnapshot resolved{};
+  return resolve_scene_layer(layer, resolved)
+      ? primary_layer_index(resolved) : -1;
 }
 int32_t __cdecl aegp_get_layer_to_world_xform(
     void* layer, const AegpTime* comp_time, AegpMatrix4* transform) {
@@ -612,13 +715,23 @@ int32_t __cdecl aegp_get_layer_to_world_xform(
   return 0;
 }
 int32_t __cdecl aegp_get_item_from_comp(void* comp, void** item) {
-  if (comp != &g_aegp_comp || !item) return 4;
-  *item = &g_aegp_comp_item;
+  ObjectSnapshot resolved_comp{};
+  ObjectSnapshot resolved_item{};
+  if (!item || !resolve_scene_comp(comp, resolved_comp) ||
+      !scene_registry().item_from_comp(
+          resolved_comp.identity, resolved_item))
+    return 4;
+  void* borrowed = borrow_scene_object(resolved_item.identity);
+  if (!borrowed) return 4;
+  *item = borrowed;
   return 0;
 }
 int32_t __cdecl aegp_get_item_dimensions(
     void* item, int32_t* width, int32_t* height) {
-  if (item != &g_aegp_comp_item || !width || !height) return 4;
+  ObjectSnapshot resolved{};
+  if (!width || !height || !resolve_scene_item(item, resolved) ||
+      resolved.item_kind != ItemKind::composition)
+    return 4;
   const int32_t result_width = g_full_resolution_width > 0
       ? g_full_resolution_width : g_smart_width;
   const int32_t result_height = g_full_resolution_height > 0
@@ -658,31 +771,54 @@ int32_t __cdecl aegp_get_active_layer(void** layer) {
   return 0;
 }
 int32_t __cdecl aegp_get_layer_index(void* layer, int32_t* index) {
-  const int32_t found = aegp_layer_index(layer);
-  if (found < 0 || !index) return 4;
-  *index = found;
+  ObjectSnapshot resolved{};
+  if (!index || !resolve_scene_layer(layer, resolved) ||
+      resolved.local_index < 0)
+    return 4;
+  *index = resolved.local_index;
   return 0;
 }
 int32_t __cdecl aegp_get_layer_source_item(void* layer, void** item) {
-  if (aegp_layer_index(layer) < 0 || !item) return 4;
-  *item = composition_item_handle();
+  ObjectSnapshot resolved{};
+  if (!item || !resolve_scene_layer(layer, resolved)) return 4;
+  if (resolved.related_item.kind == ObjectKind::none) {
+    *item = nullptr;
+    ++g_aegp_layer_source_item_calls;
+    return 0;
+  }
+  void* borrowed = borrow_scene_object(resolved.related_item);
+  if (!borrowed) return 4;
+  *item = borrowed;
   ++g_aegp_layer_source_item_calls;
   return 0;
 }
 int32_t __cdecl aegp_get_layer_parent_comp(void* layer, void** comp) {
-  if (aegp_layer_index(layer) < 0 || !comp) return 4;
-  *comp = &g_aegp_comp;
+  ObjectSnapshot resolved{};
+  if (!comp || !resolve_scene_layer(layer, resolved)) return 4;
+  void* borrowed = borrow_scene_object(resolved.owner);
+  if (!borrowed) return 4;
+  *comp = borrowed;
   return 0;
 }
 int32_t __cdecl aegp_get_layer_name(
     int32_t plugin_id, void* layer, void** layer_name, void** source_name) {
-  const int32_t index = aegp_layer_index(layer);
-  if (plugin_id != 1 || index < 0 || !layer_name || !source_name) return 4;
+  ObjectSnapshot resolved{};
+  if (plugin_id != 1 || !layer_name || !source_name ||
+      !resolve_scene_layer(layer, resolved))
+    return 4;
   *layer_name = nullptr;
   *source_name = nullptr;
-  const std::u16string suffix(1, static_cast<char16_t>(u'1' + index));
-  if (make_utf16_handle(u"Layer " + suffix, "layer name", layer_name) != 0) return 4;
-  if (make_utf16_handle(u"Source " + suffix, "source name", source_name) != 0) {
+  const std::u16string layer_value = scene_name(resolved);
+  if (layer_value.empty() ||
+      make_utf16_handle(layer_value, "layer name", layer_name) != 0)
+    return 4;
+  std::u16string source_value = u"Source";
+  ObjectSnapshot source{};
+  if (resolved.related_item.kind != ObjectKind::none &&
+      scene_registry().snapshot(resolved.related_item, source))
+    source_value = scene_name(source);
+  if (source_value.empty() ||
+      make_utf16_handle(source_value, "source name", source_name) != 0) {
     free_aegp_mem_handle(*layer_name);
     *layer_name = nullptr;
     return 4;
@@ -691,28 +827,56 @@ int32_t __cdecl aegp_get_layer_name(
   return 0;
 }
 int32_t __cdecl aegp_get_layer_parent(void* layer, void** parent) {
-  const int32_t index = aegp_layer_index(layer);
-  if (index < 0 || !parent) return 4;
-  const int32_t parent_index = g_aegp_layer_parent_indices[static_cast<std::size_t>(index)];
-  if (parent_index == -1) {
+  ObjectSnapshot resolved{};
+  if (!parent || !resolve_scene_layer(layer, resolved)) return 4;
+  const int32_t index = primary_layer_index(resolved);
+  Identity parent_identity = resolved.parent_layer;
+  if (index >= 0) {
+    const int32_t parent_index =
+        g_aegp_layer_parent_indices[static_cast<std::size_t>(index)];
+    if (parent_index == -1) {
+      *parent = nullptr;
+      return 0;
+    }
+    if (parent_index < 0 || static_cast<std::size_t>(parent_index) >=
+        g_aegp_layers.size())
+      return 4;
+    ObjectSnapshot parent_snapshot{};
+    if (!resolve_scene_layer(
+            &g_aegp_layers[static_cast<std::size_t>(parent_index)],
+            parent_snapshot, resolved.identity.project_id))
+      return 4;
+    parent_identity = parent_snapshot.identity;
+  }
+  if (parent_identity.kind == ObjectKind::none) {
     *parent = nullptr;
     return 0;
   }
-  if (parent_index < 0 || static_cast<std::size_t>(parent_index) >=
-      g_aegp_layers.size()) return 4;
-  *parent = &g_aegp_layers[static_cast<std::size_t>(parent_index)];
+  if (parent_identity.project_id != resolved.identity.project_id)
+    return 4;
+  void* borrowed = borrow_scene_object(parent_identity);
+  if (!borrowed) return 4;
+  *parent = borrowed;
   return 0;
 }
 int32_t __cdecl aegp_get_layer_from_id(void* comp, int32_t id, void** layer) {
-  const int32_t index = id - 2001;
-  if (comp != &g_aegp_comp || index < 0 ||
-      static_cast<std::size_t>(index) >= g_aegp_layers.size() || !layer) return 4;
-  *layer = &g_aegp_layers[static_cast<std::size_t>(index)];
+  ObjectSnapshot resolved_comp{};
+  ObjectSnapshot resolved_layer{};
+  if (!layer || id <= 0 || !resolve_scene_comp(comp, resolved_comp) ||
+      !scene_registry().layer_from_id(
+          resolved_comp.identity, static_cast<uint64_t>(id), resolved_layer))
+    return 4;
+  void* borrowed = borrow_scene_object(resolved_layer.identity);
+  if (!borrowed) return 4;
+  *layer = borrowed;
   return 0;
 }
 int32_t __cdecl aegp_get_comp_selection(
     int32_t plugin_id, void* comp, void** collection) {
-  if (plugin_id <= 0 || comp != &g_aegp_comp || !collection || g_aegp_selection.live)
+  ObjectSnapshot resolved{};
+  if (plugin_id <= 0 || !collection || g_aegp_selection.live ||
+      !resolve_scene_comp(comp, resolved) ||
+      resolved.legacy_handle != &g_aegp_comp)
     return 4;
   g_aegp_selection.live = true;
   ++g_aegp_collection_creates;
@@ -734,19 +898,28 @@ int32_t __cdecl aegp_get_collection_item(
     void* collection, uint32_t index, AegpCollectionItem* item) {
   if (collection != &g_aegp_selection || !g_aegp_selection.live || index >= 2 || !item)
     return 4;
+  ObjectSnapshot layer_snapshot{};
+  Identity primary_comp{};
+  if (!scene_registry().identity_for_legacy(
+          &g_aegp_comp, ObjectKind::composition, primary_comp) ||
+      !scene_registry().layer_by_index(primary_comp, index, layer_snapshot))
+    return 4;
+  void* layer = borrow_scene_object(layer_snapshot.identity);
+  if (!layer) return 4;
   *item = {};
   item->type = 1;
-  void* layer = &g_aegp_layers[index];
   std::memcpy(item->item.data(), &layer, sizeof(layer));
   ++g_aegp_collection_item_reads;
   return 0;
 }
 AegpCollectionSuite g_aegp_collection_suite{};
 int32_t __cdecl aegp_get_layer_id(void* layer, int32_t* id) {
-  const int32_t index = aegp_layer_index(layer);
-  if (index < 0 || !id) return 4;
+  ObjectSnapshot resolved{};
+  if (!id || !resolve_scene_layer(layer, resolved) ||
+      resolved.identity.object_id > INT32_MAX)
+    return 4;
   ++g_aegp_layer_id_calls;
-  *id = 2001 + index;
+  *id = static_cast<int32_t>(resolved.identity.object_id);
   return 0;
 }
 int32_t __cdecl aegp_get_layer_flags(void* layer, uint32_t* flags) {

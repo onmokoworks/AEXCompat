@@ -1,5 +1,7 @@
 #include "worker_aegp_scene_runtime.hpp"
 
+#include "worker_aegp_scene_model.hpp"
+
 namespace aexcompat::scene_runtime {
 namespace {
 SceneRuntimeContext g_context{};
@@ -15,6 +17,11 @@ SceneRuntimeState::SceneRuntimeState() noexcept {
     transform.scale = {{100.0, 100.0, 100.0}};
   layer_parent_indices = {{-1, -1, -1}};
   effect_instances[0] = {&layers[0], 3001, 0, 1, 1, true};
+  const std::array<void*, 3> primary_layers{{
+      &layers[0], &layers[1], &layers[2]}};
+  scene_model::registry().initialize_fixture(
+      &composition_item, &composition, primary_layers.data(),
+      primary_layers.size());
 }
 
 SceneRuntimeState& scene_runtime_state() noexcept {
