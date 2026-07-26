@@ -302,6 +302,60 @@ impl ClassicHost {
             abi::UTILS_COPY_OFFSET,
             engine.copy_callback_address(),
         );
+        write_u64(
+            &mut utility_bytes,
+            abi::UTILS_FILL_OFFSET,
+            engine.fill8_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
+            abi::UTILS_NEW_WORLD_OFFSET,
+            engine.new_world8_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
+            abi::UTILS_DISPOSE_WORLD_OFFSET,
+            engine.dispose_world_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
+            abi::UTILS_GET_CALLBACK_ADDR_OFFSET,
+            engine.get_callback_addr_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
+            abi::UTILS_ITERATE_OFFSET,
+            engine.iterate8_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
+            abi::UTILS_ITERATE_ORIGIN_OFFSET,
+            engine.iterate8_origin_callback_address(),
+        );
+        for (offset, callback) in [
+            (
+                abi::UTILS_ANSI_CEIL_OFFSET,
+                engine.ansi_ceil_callback_address(),
+            ),
+            (
+                abi::UTILS_ANSI_COS_OFFSET,
+                engine.ansi_cos_callback_address(),
+            ),
+            (
+                abi::UTILS_ANSI_FABS_OFFSET,
+                engine.ansi_fabs_callback_address(),
+            ),
+            (
+                abi::UTILS_ANSI_POW_OFFSET,
+                engine.ansi_pow_callback_address(),
+            ),
+            (
+                abi::UTILS_ANSI_SIN_OFFSET,
+                engine.ansi_sin_callback_address(),
+            ),
+        ] {
+            write_u64(&mut utility_bytes, offset, callback);
+        }
         for (offset, callback) in [
             (
                 abi::UTILS_HOST_NEW_HANDLE_OFFSET,

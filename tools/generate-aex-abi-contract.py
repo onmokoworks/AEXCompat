@@ -168,6 +168,9 @@ REQUIRED_FIELDS.update(
     field for table in CALLBACK_TABLES.values() for field in table
 )
 REQUIRED_FIELDS.add("utils.color_callbacks")
+REQUIRED_FIELDS.add("utils.iterate_origin")
+REQUIRED_FIELDS.add("utils.get_callback_addr")
+REQUIRED_FIELDS.add("utils.ansi_cos")
 
 
 class ContractError(ValueError):
