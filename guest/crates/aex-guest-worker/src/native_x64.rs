@@ -307,15 +307,7 @@ impl GuestEngine<'static> {
     fn install_imports(&mut self, image: &PeImage) -> Result<(), GuestError> {
         for library in image.imports() {
             for symbol in &library.symbols {
-                let callback = match symbol.name.as_str() {
-                    "strncpy" => callback_address!(native_strncpy),
-                    "memset" => callback_address!(native_memset),
-                    "expf" => callback_address!(native_expf),
-                    "floorf" => callback_address!(native_floorf),
-                    "powf" => callback_address!(native_powf),
-                    "pow" => callback_address!(native_pow),
-                    _ => callback_address!(noop_import),
-                };
+                let callback = native_import_callback(&symbol.name);
                 self.write_u64(image.image_base() + symbol.iat_rva as u64, callback)?;
             }
         }
@@ -597,6 +589,30 @@ unsafe fn write_pointer(pointer: u64, bytes: &[u8]) {
 
 unsafe extern "win64" fn noop_import(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
     0
+}
+
+unsafe extern "win64" fn native_omp_get_max_threads(
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    1
+}
+
+fn native_import_callback(name: &str) -> u64 {
+    match name {
+        "strncpy" => callback_address!(native_strncpy),
+        "memset" => callback_address!(native_memset),
+        "expf" => callback_address!(native_expf),
+        "floorf" => callback_address!(native_floorf),
+        "powf" => callback_address!(native_powf),
+        "pow" => callback_address!(native_pow),
+        "omp_get_max_threads" => callback_address!(native_omp_get_max_threads),
+        _ => callback_address!(noop_import),
+    }
 }
 
 unsafe extern "win64" fn poison_callback(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
@@ -1899,6 +1915,19 @@ mod tests {
                 .is_some_and(|message| message.contains("unknown handle"))
         );
         ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
+
+    #[test]
+    fn openmp_thread_count_is_positive_and_deterministic() {
+        assert_eq!(unsafe { native_omp_get_max_threads(0, 0, 0, 0, 0, 0) }, 1);
+        assert_eq!(
+            native_import_callback("omp_get_max_threads"),
+            callback_address!(native_omp_get_max_threads)
+        );
+        assert_eq!(
+            native_import_callback("unknown_import"),
+            callback_address!(noop_import)
+        );
     }
 
     #[test]
