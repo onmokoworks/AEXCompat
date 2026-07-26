@@ -13,10 +13,21 @@ RUST_STRING_LITERAL = re.compile(
     r'(?:b?r(?P<hash>#{0,16})"(?P<raw>.*?)"(?P=hash)|b?"(?:\\.|[^"\\])*")',
     re.DOTALL,
 )
+RUST_STRINGIFY_AEX = re.compile(
+    r"\bstringify!\s*\([^)]*\." + "aex" + r"\b[^)]*\)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def rust_string_literals(source: str):
     return (match.group(0) for match in RUST_STRING_LITERAL.finditer(source))
+
+
+def production_aex_strings(source: str):
+    for literal in rust_string_literals(source):
+        if "." + "aex" in literal.lower():
+            yield literal
+    yield from (match.group(0) for match in RUST_STRINGIFY_AEX.finditer(source))
 
 
 class NativeCodeGuardTests(unittest.TestCase):
@@ -30,15 +41,16 @@ class NativeCodeGuardTests(unittest.TestCase):
                     self.assertNotIn(token, text)
             production = text.split("#[cfg(test)]", 1)[0]
             with self.subTest(path=path, token="production .aex literal"):
-                for literal in rust_string_literals(production):
-                    self.assertNotIn("." + "aex", literal.lower())
+                self.assertEqual(list(production_aex_strings(production)), [])
 
     def test_production_aex_guard_distinguishes_fields_from_path_literals(self):
-        self.assertEqual(list(rust_string_literals("session.aex = selected;")), [])
-        for source in ('"effect.aex"', 'r#"C:\\plugins\\effect.aex"#'):
-            literals = list(rust_string_literals(source))
-            self.assertEqual(len(literals), 1)
-            self.assertIn("." + "aex", literals[0].lower())
+        self.assertEqual(list(production_aex_strings("session.aex = selected;")), [])
+        for source in (
+            '"effect.aex"',
+            'r#"C:\\plugins\\effect.aex"#',
+            "stringify!(effect.aex)",
+        ):
+            self.assertEqual(len(list(production_aex_strings(source))), 1)
 
     def test_broker_has_no_network_or_shell_process_dependencies(self):
         cargo_files = [BROKER_ROOT / "Cargo.toml", *sorted(BROKER_SOURCE_ROOT.rglob("Cargo.toml"))]
