@@ -101,6 +101,7 @@ pub fn run_resident_session(
     width: u32,
     height: u32,
     time_scale: u32,
+    effect_selector: Option<&str>,
     mut request: impl Read,
     mut response: impl Write,
 ) -> Result<(), SessionError> {
@@ -109,7 +110,7 @@ pub fn run_resident_session(
         .and_then(|width| width.checked_mul(height as usize))
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or_else(|| SessionError::Protocol("resident pixel size overflow".into()))?;
-    let mut host = ClassicHost::new(image)?;
+    let mut host = ClassicHost::new_with_effect(image, effect_selector)?;
     let setup = host.begin_resident_session(width, height, time_scale)?;
     write_message(
         &mut response,

@@ -8,6 +8,9 @@ use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::{RegisterX86, UcHookId, Unicorn};
 
 use crate::pe::PeImage;
+use crate::plugin_data::{
+    CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
+};
 
 const PAGE_SIZE: u64 = 0x1000;
 const STACK_BASE: u64 = 0x0000_0000_7000_0000;
@@ -47,6 +50,8 @@ const HOST_AEGP_UNLOCK_MEM_HANDLE: u64 = STUB_BASE + 0x801b0;
 const HOST_AEGP_MEM_HANDLE_SIZE: u64 = STUB_BASE + 0x801c0;
 const HOST_AEGP_RESIZE_MEM_HANDLE: u64 = STUB_BASE + 0x801d0;
 const HOST_AEGP_MEMORY_UNSUPPORTED: u64 = STUB_BASE + 0x801e0;
+const HOST_PLUGIN_DATA_V2: u64 = STUB_BASE + 0x801f0;
+const HOST_PLUGIN_DATA_V1: u64 = STUB_BASE + 0x80200;
 const HOST_NEW_WORLD: u64 = STUB_BASE + 0x80210;
 const HOST_DISPOSE_WORLD: u64 = STUB_BASE + 0x80220;
 const HOST_GET_WORLD_PIXEL_FORMAT: u64 = STUB_BASE + 0x80230;
@@ -1438,6 +1443,8 @@ struct GuestState {
     trace_watches: Vec<TraceWatchSpec>,
     pending_iterate8: Option<PendingIterate8>,
     vcomp_dynamic_loop: Option<VcompDynamicLoop>,
+    plugin_data_registry: EffectRegistry,
+    plugin_data_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -2003,7 +2010,6 @@ impl GuestEngine<'static> {
             "map guest data",
             unicorn.mem_map(DATA_BASE, DATA_SIZE, Prot::READ | Prot::WRITE),
         )?;
-
         let mut stub_index = 0u64;
         for library in image.imports() {
             for symbol in &library.symbols {
@@ -2191,6 +2197,8 @@ impl GuestEngine<'static> {
                 "write get-world-pixel-format callback",
                 HOST_GET_WORLD_PIXEL_FORMAT,
             ),
+            ("write PluginData v2 callback", HOST_PLUGIN_DATA_V2),
+            ("write PluginData v1 callback", HOST_PLUGIN_DATA_V1),
             ("write Iterate8 callback", HOST_ITERATE8),
             ("write Iterate8 continuation", HOST_ITERATE8_CONTINUE),
             ("write color-param callback", HOST_COLOR_PARAM_VALUE),
@@ -2301,6 +2309,18 @@ impl GuestEngine<'static> {
                 HOST_POINT_PARAM_VALUE,
                 emulate_point_param_value,
             ),
+        )?;
+        uc(
+            "install PluginData v2 callback",
+            unicorn.add_code_hook(HOST_PLUGIN_DATA_V2, HOST_PLUGIN_DATA_V2, |unicorn, _, _| {
+                capture_plugin_data_registration(unicorn, true)
+            }),
+        )?;
+        uc(
+            "install PluginData v1 callback",
+            unicorn.add_code_hook(HOST_PLUGIN_DATA_V1, HOST_PLUGIN_DATA_V1, |unicorn, _, _| {
+                capture_plugin_data_registration(unicorn, false)
+            }),
         )?;
         uc(
             "install checkout-param callback",
@@ -2494,6 +2514,8 @@ impl GuestEngine<'static> {
             (HOST_NEW_WORLD, "new_world"),
             (HOST_DISPOSE_WORLD, "dispose_world"),
             (HOST_GET_WORLD_PIXEL_FORMAT, "get_world_pixel_format"),
+            (HOST_PLUGIN_DATA_V2, "plugin_data_v2"),
+            (HOST_PLUGIN_DATA_V1, "plugin_data_v1"),
             (HOST_ITERATE8, "iterate8"),
             (HOST_ITERATE8_CONTINUE, "iterate8_continue"),
             (HOST_COLOR_PARAM_VALUE, "color_param_value"),
@@ -2526,6 +2548,75 @@ impl GuestEngine<'static> {
             }
         }
         Ok(engine)
+    }
+
+    pub fn resolve_effect_entry(
+        &mut self,
+        image: &PeImage,
+        selector: Option<&str>,
+        basic_suite: u64,
+    ) -> Result<u64, GuestError> {
+        if let Some(entry) = image.entry_address() {
+            if selector.is_some() {
+                return Err(GuestError::Callback(
+                    "effect selection is unavailable when a direct effect entrypoint exists".into(),
+                ));
+            }
+            return Ok(entry);
+        }
+        let (registration_entry, callback) = if let Some(entry) =
+            image.export_address("PluginDataEntryFunction2")
+        {
+            (entry, HOST_PLUGIN_DATA_V2)
+        } else if let Some(entry) = image.export_address("PluginDataEntryFunction") {
+            (entry, HOST_PLUGIN_DATA_V1)
+        } else {
+            return Err(GuestError::Callback(
+                    "effect selector requires PluginData registration, but no registration export exists"
+                        .into(),
+                ));
+        };
+        self.unicorn.get_data_mut().plugin_data_registry = EffectRegistry::default();
+        self.unicorn.get_data_mut().plugin_data_error = None;
+        let host_name = self.allocate(10, 1)?;
+        self.write(host_name, b"AEXCompat\0")?;
+        let host_version = self.allocate(5, 1)?;
+        self.write(host_version, b"2025\0")?;
+        let returned = self.call_win64(
+            registration_entry,
+            [1, callback, basic_suite, host_name, host_version, 0],
+        )? as i32;
+        if let Some(error) = self.unicorn.get_data_mut().plugin_data_error.take() {
+            return Err(GuestError::Callback(format!(
+                "PluginData registration rejected: {error}"
+            )));
+        }
+        if returned != 0 {
+            return Err(GuestError::Callback(format!(
+                "PluginData entrypoint returned {returned}"
+            )));
+        }
+        let registration = self
+            .unicorn
+            .get_data()
+            .plugin_data_registry
+            .select(selector)
+            .map_err(|error| GuestError::Callback(error.to_string()))?
+            .clone();
+        let entry = image
+            .export_address(&registration.entrypoint)
+            .ok_or_else(|| {
+                GuestError::Callback(format!(
+                    "registered effect entrypoint {} is not an executable export",
+                    registration.entrypoint
+                ))
+            })?;
+        self.entry_export.clone_from(&registration.entrypoint);
+        if let Some(module) = self.trace_modules.first_mut() {
+            module.name.clone_from(&registration.entrypoint);
+            module.symbols = vec![registration.entrypoint];
+        }
+        Ok(entry)
     }
 
     pub fn begin_execution_trace(
@@ -3425,6 +3516,76 @@ fn capture_add_param(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn capture_plugin_data_registration(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    includes_support_url: bool,
+) {
+    let result = (|| -> Result<(), String> {
+        let context = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("PluginData context read failed: {error}"))?;
+        if context != 1 {
+            return Err(format!(
+                "PluginData callback context {context:#x} is invalid"
+            ));
+        }
+        let register = |unicorn: &Unicorn<'_, GuestState>, register| {
+            unicorn
+                .reg_read(register)
+                .map_err(|error| format!("PluginData register read failed: {error}"))
+        };
+        let rsp = register(unicorn, RegisterX86::RSP)?;
+        let stack_u64 = |unicorn: &Unicorn<'_, GuestState>, offset: u64| {
+            let address = rsp
+                .checked_add(offset)
+                .ok_or_else(|| "PluginData stack address overflow".to_string())?;
+            let bytes = unicorn.mem_read_as_vec(address, 8).map_err(|error| {
+                format!("PluginData stack read at {address:#x} failed: {error}")
+            })?;
+            Ok::<u64, String>(u64::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| "PluginData stack read returned wrong size".to_string())?,
+            ))
+        };
+        let pointers = RegistrationPointers {
+            name: register(unicorn, RegisterX86::RDX)?,
+            match_name: register(unicorn, RegisterX86::R8)?,
+            category: register(unicorn, RegisterX86::R9)?,
+            entrypoint: stack_u64(unicorn, 0x28)?,
+            kind: stack_u64(unicorn, 0x30)? as u32 as i32,
+            api_major: stack_u64(unicorn, 0x38)? as u32 as i32,
+            api_minor: stack_u64(unicorn, 0x40)? as u32 as i32,
+            reserved_info: stack_u64(unicorn, 0x48)? as u32 as i32,
+            support_url: includes_support_url
+                .then(|| stack_u64(unicorn, 0x50))
+                .transpose()?,
+        };
+        let registration = decode_registration(pointers, |address| {
+            unicorn
+                .mem_read_as_vec(address, 1)
+                .ok()
+                .and_then(|bytes| bytes.first().copied())
+        })
+        .map_err(|error| error.to_string())?;
+        unicorn
+            .get_data_mut()
+            .plugin_data_registry
+            .push(registration)
+            .map_err(|error| error.to_string())
+    })();
+    let returned = match result {
+        Ok(()) => 0,
+        Err(error) => {
+            if unicorn.get_data().plugin_data_error.is_none() {
+                unicorn.get_data_mut().plugin_data_error = Some(error);
+            }
+            CALLBACK_REJECTED
+        }
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, returned as u32 as u64);
 }
 
 fn vcomp_callback_error(unicorn: &mut Unicorn<'_, GuestState>, message: String) {
@@ -5838,6 +5999,103 @@ mod tests {
                 .unwrap(),
             66
         );
+    }
+
+    #[test]
+    fn plugin_data_v2_and_v1_callbacks_decode_distinct_win64_stack_arguments() {
+        const CALLBACK_V2: u64 = STUB_BASE + 0x180;
+        const CALLBACK_V1: u64 = STUB_BASE + 0x190;
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.mem_write(CALLBACK_V2, &[0xc3]).unwrap();
+        engine
+            .unicorn
+            .add_code_hook(CALLBACK_V2, CALLBACK_V2, |unicorn, _, _| {
+                capture_plugin_data_registration(unicorn, true);
+            })
+            .unwrap();
+        engine.unicorn.mem_write(CALLBACK_V1, &[0xc3]).unwrap();
+        engine
+            .unicorn
+            .add_code_hook(CALLBACK_V1, CALLBACK_V1, |unicorn, _, _| {
+                capture_plugin_data_registration(unicorn, false);
+            })
+            .unwrap();
+        let mut cursor = DATA_BASE;
+        let mut write_text = |text: &[u8]| {
+            let address = cursor;
+            engine.unicorn.mem_write(address, text).unwrap();
+            cursor += text.len() as u64;
+            address
+        };
+        let name = write_text(b"Fixture\0");
+        let match_name = write_text(b"fixture.match\0");
+        let category = write_text(b"Tests\0");
+        let entrypoint = write_text(b"FilterMain\0");
+        let support_url = write_text(b"https://example.invalid\0");
+
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    CALLBACK_V2,
+                    &[
+                        1,
+                        name,
+                        match_name,
+                        category,
+                        entrypoint,
+                        crate::plugin_data::EFFECT_KIND as u32 as u64,
+                        13,
+                        29,
+                        9,
+                        support_url,
+                    ],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        let registration = engine
+            .unicorn
+            .get_data()
+            .plugin_data_registry
+            .select(Some("fixture.match"))
+            .unwrap();
+        assert_eq!(registration.entrypoint, "FilterMain");
+        assert_eq!(registration.reserved_info, 9);
+        assert_eq!(
+            registration.support_url.as_deref(),
+            Some(b"https://example.invalid".as_slice())
+        );
+
+        engine.unicorn.get_data_mut().plugin_data_registry = EffectRegistry::default();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    CALLBACK_V1,
+                    &[
+                        1,
+                        name,
+                        match_name,
+                        category,
+                        entrypoint,
+                        crate::plugin_data::EFFECT_KIND as u32 as u64,
+                        13,
+                        29,
+                        11,
+                    ],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        let registration = engine
+            .unicorn
+            .get_data()
+            .plugin_data_registry
+            .select(Some("fixture.match"))
+            .unwrap();
+        assert_eq!(registration.reserved_info, 11);
+        assert_eq!(registration.support_url, None);
     }
 
     #[test]
