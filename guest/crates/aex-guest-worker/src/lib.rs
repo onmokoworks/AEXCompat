@@ -22,6 +22,7 @@ mod native_aegp_memory;
 #[cfg(all(feature = "native-carrier", target_os = "macos"))]
 pub mod native_x64;
 pub mod pe;
+pub mod pixel;
 pub mod plugin_data;
 pub mod resident;
 pub mod x64;

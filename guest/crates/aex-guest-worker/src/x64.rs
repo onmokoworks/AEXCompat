@@ -1418,6 +1418,7 @@ struct GuestState {
     smart_output_world: u64,
     smart_width: u32,
     smart_height: u32,
+    smart_pixel_format: i32,
     suite_requests: Vec<String>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
@@ -3461,6 +3462,7 @@ impl GuestEngine<'static> {
         output_world: u64,
         width: u32,
         height: u32,
+        pixel_format: i32,
     ) {
         let state = self.unicorn.get_data_mut();
         state.pre_checkout_requests.clear();
@@ -3468,6 +3470,7 @@ impl GuestEngine<'static> {
         state.smart_output_world = output_world;
         state.smart_width = width;
         state.smart_height = height;
+        state.smart_pixel_format = pixel_format;
     }
 
     pub fn parameters(&self) -> &[GuestParam] {
@@ -5586,7 +5589,7 @@ fn emulate_get_world_pixel_format(unicorn: &mut Unicorn<'_, GuestState>, _: u64,
             (world != 0
                 && (world == unicorn.get_data().smart_input_world
                     || world == unicorn.get_data().smart_output_world))
-                .then_some(0x6267_7261u32 as i32)
+                .then_some(unicorn.get_data().smart_pixel_format)
         })
         .or_else(|| {
             if world == 0 {
@@ -6436,6 +6439,30 @@ mod tests {
             engine.unicorn.mem_read_as_vec(format_output, 4).unwrap(),
             0x3631_6561u32.to_le_bytes()
         );
+        let smart_input = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let smart_output = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        engine.configure_smart_render(
+            smart_input,
+            smart_output,
+            3,
+            2,
+            crate::pixel::PF_PIXEL_FORMAT_ARGB128,
+        );
+        for smart_world in [smart_input, smart_output] {
+            assert_eq!(
+                engine
+                    .call_win64(
+                        HOST_GET_WORLD_PIXEL_FORMAT,
+                        [smart_world, format_output, 0, 0, 0, 0]
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                engine.unicorn.mem_read_as_vec(format_output, 4).unwrap(),
+                crate::pixel::PF_PIXEL_FORMAT_ARGB128.to_le_bytes()
+            );
+        }
         assert_eq!(
             engine
                 .call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0])

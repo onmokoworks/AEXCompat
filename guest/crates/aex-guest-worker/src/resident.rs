@@ -3,6 +3,7 @@ use crate::classic::{
     SetupReport,
 };
 use crate::pe::PeImage;
+use crate::pixel::FramePixelFormat;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -101,15 +102,14 @@ pub fn run_resident_session(
     width: u32,
     height: u32,
     time_scale: u32,
+    pixel_format: FramePixelFormat,
     effect_selector: Option<&str>,
     mut request: impl Read,
     mut response: impl Write,
 ) -> Result<(), SessionError> {
-    let pixel_bytes = usize::try_from(width)
-        .ok()
-        .and_then(|width| width.checked_mul(height as usize))
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| SessionError::Protocol("resident pixel size overflow".into()))?;
+    let pixel_bytes = pixel_format
+        .byte_count(width, height)
+        .map_err(|error| SessionError::Protocol(error.to_string()))?;
     let mut host = ClassicHost::new_with_effect(image, effect_selector)?;
     let setup = host.begin_resident_session(width, height, time_scale)?;
     write_message(
@@ -150,7 +150,13 @@ pub fn run_resident_session(
                             input.len()
                         )));
                     }
-                    match host.probe_resident_argb8(width, height, time_scale, &input) {
+                    match host.probe_resident_pixels(
+                        width,
+                        height,
+                        time_scale,
+                        pixel_format,
+                        &input,
+                    ) {
                         Ok(report) => write_message(
                             &mut response,
                             &SessionProbed {
@@ -205,6 +211,7 @@ pub fn run_resident_session(
                         width,
                         height,
                         pixel_bytes,
+                        pixel_format,
                         &mut host,
                         &mut generation,
                         &mut response,
@@ -254,6 +261,7 @@ fn parse_render_frame(
     width: u32,
     height: u32,
     pixel_bytes: usize,
+    pixel_format: FramePixelFormat,
     host: &mut ClassicHost,
     generation: &mut u64,
     response: &mut impl Write,
@@ -319,16 +327,20 @@ fn parse_render_frame(
             input.len()
         )));
     }
-    match host.render_resident_argb8(
+    let rowbytes = pixel_format
+        .rowbytes(width)
+        .map_err(|error| SessionError::Protocol(error.to_string()))?;
+    match host.render_resident_pixels(
         width,
         height,
         current_value,
         current_scale,
+        pixel_format,
         &input,
         &parameters,
     ) {
         Ok(report) => {
-            fs::write(output_slot, &report.argb8).map_err(|error| {
+            fs::write(output_slot, &report.raw_pixels).map_err(|error| {
                 SessionError::Io(format!("write resident output slot: {error}"))
             })?;
             *generation += 1;
@@ -342,9 +354,9 @@ fn parse_render_frame(
                     output: Some(FrameOutput {
                         width,
                         height,
-                        rowbytes: width * 4,
-                        pixel_format: "argb8",
-                        checksum: format!("{:x}", Sha256::digest(&report.argb8)),
+                        rowbytes,
+                        pixel_format: pixel_format.name(),
+                        checksum: format!("{:x}", Sha256::digest(&report.raw_pixels)),
                         guards_intact: report.guards_intact,
                     }),
                     render_error: 0,
