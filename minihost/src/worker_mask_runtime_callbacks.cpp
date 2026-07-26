@@ -883,20 +883,70 @@ int32_t __cdecl get_stream_temporal_dimensionality(void* stream, int16_t* dimens
   if (!find_stream(stream) || !dimensions) return 4;
   *dimensions = kHostTemporalDimensions; return 0;
 }
-bool register_keyframe_stream_value(HostStreamRef* stream, HostKeyframe* key,
-                                    const OutlineData& source, StreamValue* value) {
-  auto owned = std::make_unique<OutlineData>(source);
-  OutlineData* outline = owned.get();
-  aexcompat::scene_model::Identity value_identity{};
-  if (!aexcompat::scene_model::registry().create_child(
-          aexcompat::scene_model::ObjectKind::value, key->identity,
-          0, value, u"Keyframe Tangent", value_identity))
+bool register_keyframe_stream_values_atomic(
+    HostStreamRef* stream, HostKeyframe* key,
+    StreamValue* in_value, StreamValue* out_value) {
+  std::array<StreamValue*, 2> values{};
+  std::array<const OutlineData*, 2> sources{};
+  std::size_t requested = 0;
+  if (in_value) {
+    values[requested] = in_value;
+    sources[requested++] = &key->spatial_in;
+  }
+  if (out_value) {
+    values[requested] = out_value;
+    sources[requested++] = &key->spatial_out;
+  }
+
+  auto& registry = aexcompat::scene_model::registry();
+  if (requested == 0 ||
+      !registry.can_create_children(key->identity, requested))
     return false;
-  g_stream_values.emplace(value, CheckedStreamValue{
-      stream, outline, key, std::move(owned), value_identity});
-  ++stream->live_values; stream->mask->value_live = true;
-  ++g_mask_lifetime.values_acquired;
-  value->stream = stream->handle; value->value = &outline->outline;
+
+  std::size_t reserved_values = 0;
+  try {
+    g_stream_values.reserve(g_stream_values.size() + requested);
+    for (; reserved_values < requested; ++reserved_values) {
+      auto owned = std::make_unique<OutlineData>(*sources[reserved_values]);
+      OutlineData* outline = owned.get();
+      const auto inserted = g_stream_values.emplace(
+          values[reserved_values],
+          CheckedStreamValue{
+              stream, outline, key, std::move(owned), {}});
+      if (!inserted.second) break;
+    }
+  } catch (...) {
+  }
+  if (reserved_values != requested) {
+    for (std::size_t index = 0; index < reserved_values; ++index)
+      g_stream_values.erase(values[index]);
+    return false;
+  }
+
+  std::array<aexcompat::scene_model::Identity, 2> identities{};
+  const bool registered = requested == 2
+      ? registry.create_child_pair(
+            aexcompat::scene_model::ObjectKind::value, key->identity,
+            {0, 1}, {values[0], values[1]},
+            u"Keyframe Tangent", identities)
+      : registry.create_child(
+            aexcompat::scene_model::ObjectKind::value, key->identity,
+            0, values[0], u"Keyframe Tangent", identities[0]);
+  if (!registered) {
+    for (std::size_t index = 0; index < requested; ++index)
+      g_stream_values.erase(values[index]);
+    return false;
+  }
+
+  for (std::size_t index = 0; index < requested; ++index) {
+    auto& checked = g_stream_values.find(values[index])->second;
+    checked.identity = identities[index];
+    values[index]->stream = stream->handle;
+    values[index]->value = &checked.outline->outline;
+  }
+  stream->live_values += static_cast<uint32_t>(requested);
+  stream->mask->value_live = true;
+  g_mask_lifetime.values_acquired += static_cast<uint32_t>(requested);
   return true;
 }
 int32_t __cdecl get_new_keyframe_spatial_tangents(int32_t plugin_id, void* stream,
@@ -906,21 +956,26 @@ int32_t __cdecl get_new_keyframe_spatial_tangents(int32_t plugin_id, void* strea
   HostKeyframe* key = keyframe_at(record, index);
   const std::size_t requested = (in_value ? 1u : 0u) + (out_value ? 1u : 0u);
   if (plugin_id != 1 || !record || !key ||
-      !ensure_keyframe_identity(record, key, index) ||
       requested == 0 || in_value == out_value ||
       g_stream_values.size() + requested > kMaxCheckedStreamValues ||
       (in_value && g_stream_values.find(in_value) != g_stream_values.end()) ||
       (out_value && g_stream_values.find(out_value) != g_stream_values.end())) {
     ++g_invalid_keyframe_operations; return 4;
   }
-  if (in_value &&
-      !register_keyframe_stream_value(
-          record, key, key->spatial_in, in_value))
+  auto& registry = aexcompat::scene_model::registry();
+  aexcompat::scene_model::ObjectSnapshot registered_key{};
+  if ((!registry.snapshot(key->identity, registered_key) &&
+       !registry.can_create_children(
+           record->identity, requested + 1)) ||
+      !ensure_keyframe_identity(record, key, index)) {
+    ++g_invalid_keyframe_operations;
     return 4;
-  if (out_value &&
-      !register_keyframe_stream_value(
-          record, key, key->spatial_out, out_value))
+  }
+  if (!register_keyframe_stream_values_atomic(
+          record, key, in_value, out_value)) {
+    ++g_invalid_keyframe_operations;
     return 4;
+  }
   return 0;
 }
 int32_t __cdecl set_keyframe_spatial_tangents(void* stream, int32_t index,
@@ -1032,9 +1087,14 @@ int32_t __cdecl set_keyframe_interpolation(void* stream, int32_t index,
   return commit_keyframe_candidate(record, key, std::move(candidate))
       ? 0 : 4;
 }
+bool usable_keyframe_stream(const HostStreamRef* stream) {
+  return stream && stream->kind == DynamicNodeKind::MaskOutline &&
+      stream->mask && usable_mask(stream->mask);
+}
 int32_t __cdecl start_add_keyframes(void* stream, void** transaction) {
   HostStreamRef* record = find_stream(stream);
-  if (!record || !transaction || g_add_keyframe_transactions.size() >= 8) {
+  if (!usable_keyframe_stream(record) || !transaction ||
+      g_add_keyframe_transactions.size() >= 8) {
     ++g_invalid_keyframe_operations; return 4;
   }
   g_add_keyframe_transactions.push_back({{}, record, {}});
@@ -1044,7 +1104,8 @@ int32_t __cdecl start_add_keyframes(void* stream, void** transaction) {
 int32_t __cdecl add_keyframes(void* handle, int16_t time_mode, const HostTime* time,
                               int32_t* index) {
   AddKeyframesTransaction* transaction = find_add_transaction(handle);
-  if (!transaction || time_mode < 0 || time_mode > 1 || !valid_time(time) || !index ||
+  if (!transaction || !usable_keyframe_stream(transaction->stream) ||
+      time_mode < 0 || time_mode > 1 || !valid_time(time) || !index ||
       transaction->stream->mask->keyframes.size() + transaction->staged.size() >=
           kMaxKeyframesPerStream) {
     ++g_invalid_keyframe_operations; return 4;
@@ -1061,7 +1122,9 @@ int32_t __cdecl add_keyframes(void* handle, int16_t time_mode, const HostTime* t
 int32_t __cdecl set_add_keyframe(void* handle, int32_t index, const StreamValue* value) {
   AddKeyframesTransaction* transaction = find_add_transaction(handle);
   OutlineData* source = value ? find_outline(value->value) : nullptr;
-  if (!transaction || index < 0 || static_cast<std::size_t>(index) >= transaction->staged.size() ||
+  if (!transaction || !usable_keyframe_stream(transaction->stream) ||
+      index < 0 ||
+      static_cast<std::size_t>(index) >= transaction->staged.size() ||
       !source) { ++g_invalid_keyframe_operations; return 4; }
   static_cast<OutlineData&>(transaction->staged[index]) = *source;
   return 0;
@@ -1069,11 +1132,26 @@ int32_t __cdecl set_add_keyframe(void* handle, int32_t index, const StreamValue*
 int32_t __cdecl end_add_keyframes(uint8_t add, void* handle) {
   AddKeyframesTransaction* transaction = find_add_transaction(handle);
   if (!transaction) { ++g_invalid_keyframe_operations; return 4; }
+  struct CleanupGuard {
+    AddKeyframesTransaction* transaction;
+    ~CleanupGuard() {
+      const auto found = std::find_if(
+          g_add_keyframe_transactions.begin(),
+          g_add_keyframe_transactions.end(),
+          [this](auto& item) { return &item == transaction; });
+      if (found != g_add_keyframe_transactions.end())
+        g_add_keyframe_transactions.erase(found);
+    }
+  } cleanup{transaction};
   if (add > 1) {
     ++g_invalid_keyframe_operations;
     return 4;
   }
   auto* stream = transaction->stream;
+  if (!usable_keyframe_stream(stream)) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
   auto staged = transaction->staged;
   auto& registry = aexcompat::scene_model::registry();
   const uint32_t generation =
@@ -1134,8 +1212,6 @@ int32_t __cdecl end_add_keyframes(uint8_t add, void* handle) {
       return 4;
     }
   }
-  g_add_keyframe_transactions.erase(std::find_if(g_add_keyframe_transactions.begin(),
-      g_add_keyframe_transactions.end(), [transaction](auto& item) { return &item == transaction; }));
   return 0;
 }
 int32_t __cdecl get_keyframe_label(void* stream, int32_t index, int32_t* label) {
@@ -1852,6 +1928,11 @@ bool configure_mask_scene(const std::string& scene_id) {
       {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world});
   if (!g_stream_refs.empty() || !g_stream_values.empty() ||
       !g_add_keyframe_transactions.empty()) return false;
+  try {
+    g_stream_values.reserve(kMaxCheckedStreamValues);
+  } catch (...) {
+    return false;
+  }
   aexcompat::mask_runtime::SceneSeed seed;
   if (!aexcompat::mask_runtime::build_scene_seed(scene_id, seed)) return false;
   g_mask_scene.clear();

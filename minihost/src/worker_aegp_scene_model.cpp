@@ -251,6 +251,39 @@ bool Registry::create_child(ObjectKind kind, Identity owner,
   return true;
 }
 
+bool Registry::create_child_pair(
+    ObjectKind kind, Identity owner,
+    const std::array<int32_t, 2>& local_indices,
+    const std::array<void*, 2>& legacy_handles,
+    std::u16string_view name,
+    std::array<Identity, 2>& outputs) noexcept {
+  if (kind == ObjectKind::none || kind == ObjectKind::project)
+    return false;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!find_locked(owner) || objects_.size() - object_count_ < 2 ||
+      next_dynamic_object_id_ == 0 ||
+      next_dynamic_object_id_ > UINT64_MAX - 2)
+    return false;
+
+  const std::size_t baseline_count = object_count_;
+  std::array<Identity, 2> staged{};
+  for (std::size_t index = 0; index < staged.size(); ++index) {
+    if (append(kind, owner.project_id,
+               next_dynamic_object_id_ + index, owner, {}, {},
+               ItemKind::none, local_indices[index],
+               legacy_handles[index], name, staged[index]))
+      continue;
+    for (std::size_t rollback = baseline_count;
+         rollback < object_count_; ++rollback)
+      objects_[rollback] = {};
+    object_count_ = baseline_count;
+    return false;
+  }
+  next_dynamic_object_id_ += staged.size();
+  outputs = staged;
+  return true;
+}
+
 bool Registry::create_child_borrowed(
     ObjectKind kind, Identity owner, int32_t local_index,
     void* legacy_handle, std::u16string_view name, int32_t possession_id,

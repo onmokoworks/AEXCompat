@@ -100,6 +100,8 @@ bool dynamic_leaf(DynamicNodeKind kind);
 OutlineData* sampled_outline(HostStreamRef*, const HostTime*, std::unique_ptr<OutlineData>&);
 int32_t create_stream_ref(HostMask*, DynamicNodeKind, int32_t, void**);
 HostKeyframe* keyframe_at(HostStreamRef*, int32_t);
+bool ensure_keyframe_identity(HostStreamRef*, HostKeyframe*, int32_t);
+AddKeyframesTransaction* find_add_transaction(void*);
 bool valid_time_mode(int16_t mode);
 bool valid_stream_plugin(int32_t plugin_id);
 int32_t __cdecl get_mask_outline_vertex_info(void*, int32_t, MaskVertex*);

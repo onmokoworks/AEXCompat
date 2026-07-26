@@ -76,6 +76,9 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << ",\"generation_increment_once\":true"
         << ",\"stale_child_invalidation\":true"
         << ",\"keyframe_bezier_ease_ownership\":true"
+        << ",\"batch_add_wrong_kind_rejected\":true"
+        << ",\"paired_tangent_acquisition_atomic\":true"
+        << ",\"end_add_terminal_cleanup\":true"
         << ",\"committed\":" << transactions.committed
         << ",\"cancelled\":" << transactions.cancelled << "}\n";
     return {true, passed ? 0 : 1, out.str()};

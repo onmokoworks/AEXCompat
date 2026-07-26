@@ -133,6 +133,12 @@ class Registry {
   bool create_child(ObjectKind kind, Identity owner, int32_t local_index,
                     void* legacy_handle, std::u16string_view name,
                     Identity& output) noexcept;
+  bool create_child_pair(
+      ObjectKind kind, Identity owner,
+      const std::array<int32_t, 2>& local_indices,
+      const std::array<void*, 2>& legacy_handles,
+      std::u16string_view name,
+      std::array<Identity, 2>& outputs) noexcept;
   bool create_child_borrowed(ObjectKind kind, Identity owner,
                              int32_t local_index, void* legacy_handle,
                              std::u16string_view name, int32_t possession_id,

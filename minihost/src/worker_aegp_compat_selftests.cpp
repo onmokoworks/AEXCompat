@@ -1526,6 +1526,54 @@ bool verify_aegp_scene_mutation_transactions() {
       get_dynamic_by_index(1, dynamic_parade, 0, &dynamic_atom) == 0 &&
       get_dynamic_by_index(1, dynamic_atom, 0, &dynamic_outline) == 0;
 
+  const std::size_t transactions_before_wrong_kind =
+      g_add_keyframe_transactions.size();
+  void* unchanged_transaction =
+      reinterpret_cast<void*>(static_cast<uintptr_t>(0x1357));
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  const uint64_t registry_before_wrong_kind = registry.fingerprint();
+  ok = ok && start_add(dynamic_root, &unchanged_transaction) == 4 &&
+      unchanged_transaction ==
+          reinterpret_cast<void*>(static_cast<uintptr_t>(0x1357)) &&
+      start_add(dynamic_parade, &unchanged_transaction) == 4 &&
+      unchanged_transaction ==
+          reinterpret_cast<void*>(static_cast<uintptr_t>(0x1357)) &&
+      g_add_keyframe_transactions.size() == transactions_before_wrong_kind &&
+      registry.fingerprint() == registry_before_wrong_kind &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+
+  void* wrong_kind_transaction = nullptr;
+  ok = ok && start_add(dynamic_outline, &wrong_kind_transaction) == 0;
+  AddKeyframesTransaction* wrong_kind_record =
+      find_add_transaction(wrong_kind_transaction);
+  HostStreamRef* parade_record = find_stream(dynamic_parade);
+  if (wrong_kind_record) wrong_kind_record->stream = parade_record;
+  const HostTime wrong_kind_time{60, 30};
+  int32_t wrong_kind_index = 0x12345678;
+  ok = ok && wrong_kind_record && parade_record &&
+      add_key(wrong_kind_transaction, 1, &wrong_kind_time,
+              &wrong_kind_index) == 4 &&
+      wrong_kind_index == 0x12345678 &&
+      end_add(1, wrong_kind_transaction) == 4 &&
+      g_add_keyframe_transactions.size() == transactions_before_wrong_kind &&
+      add_key(wrong_kind_transaction, 1, &wrong_kind_time,
+              &wrong_kind_index) == 4 &&
+      end_add(1, wrong_kind_transaction) == 4 &&
+      registry.fingerprint() == registry_before_wrong_kind &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+
+  void* invalid_terminal_transaction = nullptr;
+  ok = ok && start_add(
+                 dynamic_outline, &invalid_terminal_transaction) == 0 &&
+      end_add(2, invalid_terminal_transaction) == 4 &&
+      g_add_keyframe_transactions.size() == transactions_before_wrong_kind &&
+      end_add(1, invalid_terminal_transaction) == 4 &&
+      registry.fingerprint() == registry_before_wrong_kind &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+
   uint32_t dynamic_flags = 0;
   generation = aexcompat::aegp_external_render_runtime::project_generation();
   const uint64_t dynamic_before_failure = registry.fingerprint();
@@ -1588,6 +1636,112 @@ bool verify_aegp_scene_mutation_transactions() {
       aexcompat::aegp_external_render_runtime::project_generation() ==
           generation + 1 &&
       dispose_mask_stream(added_atom) == 0;
+
+  HostStreamRef* capacity_stream = find_stream(dynamic_outline);
+  HostKeyframe* capacity_key = keyframe_at(capacity_stream, final_index);
+  ok = ok && capacity_stream && capacity_key &&
+      ensure_keyframe_identity(capacity_stream, capacity_key, final_index);
+
+  std::array<StreamValue, kMaxCheckedStreamValues> reserved_map_values{};
+  std::size_t reserved_map_count = 0;
+  while (g_stream_values.size() < kMaxCheckedStreamValues - 1 &&
+         reserved_map_count < reserved_map_values.size()) {
+    const auto inserted = g_stream_values.emplace(
+        &reserved_map_values[reserved_map_count], CheckedStreamValue{});
+    if (!inserted.second) break;
+    ++reserved_map_count;
+  }
+  StreamValue map_in_failure{};
+  StreamValue map_out_failure{};
+  std::memset(&map_in_failure, 0xa5, sizeof(map_in_failure));
+  std::memset(&map_out_failure, 0x5a, sizeof(map_out_failure));
+  const StreamValue map_in_sentinel = map_in_failure;
+  const StreamValue map_out_sentinel = map_out_failure;
+  const uint64_t registry_before_map_failure = registry.fingerprint();
+  const uint32_t live_values_before_map_failure =
+      capacity_stream ? capacity_stream->live_values : 0;
+  ok = ok &&
+      g_stream_values.size() == kMaxCheckedStreamValues - 1 &&
+      get_tangents(1, dynamic_outline, final_index,
+                   &map_in_failure, &map_out_failure) == 4 &&
+      std::memcmp(
+          &map_in_failure, &map_in_sentinel,
+          sizeof(map_in_failure)) == 0 &&
+      std::memcmp(
+          &map_out_failure, &map_out_sentinel,
+          sizeof(map_out_failure)) == 0 &&
+      registry.fingerprint() == registry_before_map_failure &&
+      capacity_stream->live_values == live_values_before_map_failure;
+  for (std::size_t index = 0; index < reserved_map_count; ++index)
+    g_stream_values.erase(&reserved_map_values[index]);
+
+  std::vector<aexcompat::scene_model::Identity> capacity_fillers;
+  while (capacity_key &&
+         registry.can_create_children(capacity_key->identity, 2)) {
+    aexcompat::scene_model::Identity filler{};
+    if (!registry.create_child(
+            aexcompat::scene_model::ObjectKind::value,
+            capacity_key->identity,
+            static_cast<int32_t>(capacity_fillers.size()), nullptr,
+            u"Capacity Filler", filler)) {
+      ok = false;
+      break;
+    }
+    capacity_fillers.push_back(filler);
+  }
+  ok = ok && capacity_key &&
+      registry.can_create_child(capacity_key->identity) &&
+      !registry.can_create_children(capacity_key->identity, 2);
+
+  StreamValue registry_in_failure{};
+  StreamValue registry_out_failure{};
+  std::memset(&registry_in_failure, 0xc3, sizeof(registry_in_failure));
+  std::memset(&registry_out_failure, 0x3c, sizeof(registry_out_failure));
+  const StreamValue registry_in_sentinel = registry_in_failure;
+  const StreamValue registry_out_sentinel = registry_out_failure;
+  const uint64_t registry_before_pair_failure = registry.fingerprint();
+  const std::size_t values_before_pair_failure = g_stream_values.size();
+  const uint32_t live_values_before_pair_failure =
+      capacity_stream ? capacity_stream->live_values : 0;
+  ok = ok && get_tangents(
+                 1, dynamic_outline, final_index,
+                 &registry_in_failure, &registry_out_failure) == 4 &&
+      std::memcmp(
+          &registry_in_failure, &registry_in_sentinel,
+          sizeof(registry_in_failure)) == 0 &&
+      std::memcmp(
+          &registry_out_failure, &registry_out_sentinel,
+          sizeof(registry_out_failure)) == 0 &&
+      registry.fingerprint() == registry_before_pair_failure &&
+      g_stream_values.size() == values_before_pair_failure &&
+      capacity_stream->live_values == live_values_before_pair_failure;
+
+  aexcompat::scene_model::Identity final_capacity_filler{};
+  ok = ok && registry.create_child(
+      aexcompat::scene_model::ObjectKind::value,
+      capacity_key->identity,
+      static_cast<int32_t>(capacity_fillers.size()), nullptr,
+      u"Final Capacity Filler", final_capacity_filler);
+  void* failed_commit_transaction = nullptr;
+  int32_t failed_commit_index = 0x12345678;
+  const HostTime failed_commit_time{90, 30};
+  ok = ok && start_add(
+                 dynamic_outline, &failed_commit_transaction) == 0 &&
+      add_key(failed_commit_transaction, 1, &failed_commit_time,
+              &failed_commit_index) == 0;
+  const std::size_t keys_before_failed_commit =
+      capacity_stream->mask->keyframes.size();
+  const uint64_t registry_before_failed_commit = registry.fingerprint();
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && end_add(1, failed_commit_transaction) == 4 &&
+      g_add_keyframe_transactions.size() == transactions_before_wrong_kind &&
+      capacity_stream->mask->keyframes.size() == keys_before_failed_commit &&
+      registry.fingerprint() == registry_before_failed_commit &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation &&
+      add_key(failed_commit_transaction, 1, &failed_commit_time,
+              &failed_commit_index) == 4 &&
+      end_add(1, failed_commit_transaction) == 4;
 
   ok = dispose_mask_stream(dynamic_outline) == 0 && ok;
   ok = dispose_mask_stream(dynamic_atom) == 0 && ok;
