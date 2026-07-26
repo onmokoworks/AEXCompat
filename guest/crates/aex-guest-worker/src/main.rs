@@ -544,6 +544,7 @@ fn parse_trace_watches(
         let mut instruction_rva = None;
         let mut register = None;
         let mut size = None;
+        let mut occurrence = None;
         for field in specification.split(',') {
             let (key, value) = field
                 .split_once('=')
@@ -572,6 +573,18 @@ fn parse_trace_watches(
                             .map_err(|error| format!("invalid watch size: {error}"))?,
                     )
                 }
+                "occurrence" => {
+                    if occurrence.is_some() {
+                        return Err("duplicate watch occurrence".into());
+                    }
+                    let parsed = value
+                        .parse::<u64>()
+                        .map_err(|error| format!("invalid watch occurrence: {error}"))?;
+                    if parsed == 0 {
+                        return Err("watch occurrence must be at least 1".into());
+                    }
+                    occurrence = Some(parsed);
+                }
                 "when" => {
                     if value != "entry+return" && value != "both" {
                         return Err("watch when must be entry+return or both".into());
@@ -597,6 +610,7 @@ fn parse_trace_watches(
             absolute_address: None,
             register,
             size,
+            occurrence,
             image_coordinate: None,
             image_row_offset: None,
             image_format: None,
@@ -808,7 +822,9 @@ mod tests {
     #[test]
     fn trace_watches_are_separated_from_parameter_assignments() {
         let mut values = vec![
-            OsString::from("--watch=function=0xcce0,arg=rcx,size=16,when=entry+return"),
+            OsString::from(
+                "--watch=function=0xcce0,arg=rcx,size=16,when=entry+return,occurrence=2113",
+            ),
             OsString::from("Amount=2.5"),
             OsString::from("--watch"),
             OsString::from("rva=0x350b,register=r9,size=64"),
@@ -818,8 +834,22 @@ mod tests {
         assert_eq!(watches.len(), 2);
         assert_eq!(watches[0].function_rva, Some(0xcce0));
         assert_eq!(watches[0].register, "rcx");
+        assert_eq!(watches[0].occurrence, Some(2113));
         assert_eq!(watches[1].instruction_rva, Some(0x350b));
+        assert_eq!(watches[1].occurrence, None);
         assert_eq!(output_pixel, Some([92, 841]));
         assert_eq!(values, [OsString::from("Amount=2.5")]);
+    }
+
+    #[test]
+    fn trace_watch_occurrence_rejects_zero_malformed_and_duplicate_values() {
+        for specification in [
+            "--watch=function=0xcce0,arg=rcx,size=16,occurrence=0",
+            "--watch=function=0xcce0,arg=rcx,size=16,occurrence=nope",
+            "--watch=function=0xcce0,arg=rcx,size=16,occurrence=2,occurrence=3",
+        ] {
+            let mut values = vec![OsString::from(specification)];
+            assert!(parse_trace_watches(&mut values).is_err(), "{specification}");
+        }
     }
 }

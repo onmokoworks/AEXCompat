@@ -373,6 +373,49 @@ fn update_numeric_ranges(exemplars: &mut TraceExemplars, observation: &TraceObse
     }
 }
 
+fn selected_watch_occurrence(capture: &mut TraceCapture, spec: &TraceWatchSpec) -> bool {
+    let count = capture
+        .watch_occurrence_counts
+        .entry(spec.id.clone())
+        .or_default();
+    *count += 1;
+    spec.occurrence
+        .is_none_or(|occurrence| occurrence == *count)
+}
+
+fn select_function_watches(capture: &mut TraceCapture, function_rva: u64) -> Vec<TraceWatchSpec> {
+    let matches = capture
+        .watch_specs
+        .iter()
+        .filter(|spec| spec.function_rva == Some(function_rva))
+        .cloned()
+        .collect::<Vec<_>>();
+    matches
+        .into_iter()
+        .filter(|spec| selected_watch_occurrence(capture, spec))
+        .collect()
+}
+
+fn select_call_watches(
+    capture: &mut TraceCapture,
+    target_rva: Option<u64>,
+    pc_rva: Option<u64>,
+) -> Vec<TraceWatchSpec> {
+    let matches = capture
+        .watch_specs
+        .iter()
+        .filter(|spec| {
+            spec.function_rva.is_some_and(|rva| Some(rva) == target_rva)
+                || spec.instruction_rva.is_some_and(|rva| Some(rva) == pc_rva)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    matches
+        .into_iter()
+        .filter(|spec| selected_watch_occurrence(capture, spec))
+        .collect()
+}
+
 fn trace_instruction(
     unicorn: &mut Unicorn<'_, GuestState>,
     address: u64,
@@ -382,25 +425,22 @@ fn trace_instruction(
 ) {
     let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or(0);
     let entry_rva = address.saturating_sub(image_base);
-    let entry_watches = unicorn
-        .get_data()
-        .trace
-        .as_ref()
-        .filter(|capture| address == image_base + capture.entry_rva)
-        .map(|capture| {
-            capture
-                .watch_specs
+    let entry_watches = if unicorn.get_data().trace.as_ref().is_some_and(|capture| {
+        address == image_base + capture.entry_rva
+            && !capture
+                .selector_watches
                 .iter()
-                .filter(|spec| {
-                    spec.function_rva == Some(entry_rva)
-                        && !capture.selector_watches.iter().any(|pending| {
-                            pending.spec_id == spec.id && pending.function_rva == Some(entry_rva)
-                        })
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+                .any(|pending| pending.function_rva == Some(entry_rva))
+    }) {
+        unicorn
+            .get_data_mut()
+            .trace
+            .as_mut()
+            .map(|capture| select_function_watches(capture, entry_rva))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if !entry_watches.is_empty() {
         let pending = entry_watches
             .into_iter()
@@ -583,20 +623,10 @@ fn trace_instruction(
             .contains(&address)
             .then(|| address - image_base);
         let matching_watches = unicorn
-            .get_data()
+            .get_data_mut()
             .trace
-            .as_ref()
-            .map(|capture| {
-                capture
-                    .watch_specs
-                    .iter()
-                    .filter(|spec| {
-                        spec.function_rva.is_some_and(|rva| Some(rva) == target_rva)
-                            || spec.instruction_rva.is_some_and(|rva| Some(rva) == pc_rva)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
+            .as_mut()
+            .map(|capture| select_call_watches(capture, target_rva, pc_rva))
             .unwrap_or_default();
         if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
             let depth = capture.return_stack.len();
@@ -695,20 +725,10 @@ fn trace_instruction(
                 })
             });
         let matching_watches = unicorn
-            .get_data()
+            .get_data_mut()
             .trace
-            .as_ref()
-            .map(|capture| {
-                capture
-                    .watch_specs
-                    .iter()
-                    .filter(|spec| {
-                        spec.function_rva.is_some_and(|rva| Some(rva) == target_rva)
-                            || spec.instruction_rva.is_some_and(|rva| Some(rva) == pc_rva)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
+            .as_mut()
+            .map(|capture| select_call_watches(capture, target_rva, pc_rva))
             .unwrap_or_default();
         let tail_stack_arguments = trace_stack_arguments(unicorn, rsp, 0x28, image_base, image_end);
         if is_tail_target && let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
@@ -1556,6 +1576,7 @@ struct TraceCapture {
     call_id_stack: Vec<u64>,
     next_call_id: u64,
     watch_specs: Vec<TraceWatchSpec>,
+    watch_occurrence_counts: HashMap<String, u64>,
     watch_stack: Vec<Vec<PendingTraceWatch>>,
     selector_watches: Vec<PendingTraceWatch>,
     witnesses: Vec<TraceMemoryWitness>,
@@ -1597,6 +1618,8 @@ pub struct TraceWatchSpec {
     pub absolute_address: Option<u64>,
     pub register: &'static str,
     pub size: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occurrence: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_coordinate: Option<[u32; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2682,6 +2705,7 @@ impl GuestEngine<'static> {
             call_id_stack: Vec::new(),
             next_call_id: 1,
             watch_specs,
+            watch_occurrence_counts: HashMap::new(),
             watch_stack: Vec::new(),
             selector_watches,
             witnesses: Vec::new(),
@@ -7502,6 +7526,7 @@ mod tests {
             absolute_address: None,
             register: "rcx",
             size: 1,
+            occurrence: None,
             image_coordinate: None,
             image_row_offset: None,
             image_format: None,
@@ -7559,6 +7584,7 @@ mod tests {
             absolute_address: None,
             register: "stack5",
             size: 1,
+            occurrence: None,
             image_coordinate: None,
             image_row_offset: None,
             image_format: None,
@@ -7581,6 +7607,46 @@ mod tests {
     }
 
     #[test]
+    fn execution_trace_applies_watch_occurrence_to_tail_calls() {
+        const CODE: u64 = 0x1000_0000;
+        // Call target once, then tail-call it. The second match must be the tail call.
+        let mut engine = test_engine(&[
+            0xe8, 0x06, 0, 0, 0, 0xeb, 0x04, 0x90, 0x90, 0x90, 0x90, 0xfe, 0x01, 0xb8, 42, 0, 0, 0,
+            0xc3,
+        ]);
+        let buffer = engine.allocate(1, 1).unwrap();
+        engine.write(buffer, &[1]).unwrap();
+        engine.configure_trace_watches(vec![TraceWatchSpec {
+            id: "second-tail-target".into(),
+            function_rva: Some(11),
+            instruction_rva: None,
+            absolute_address: None,
+            register: "rcx",
+            size: 1,
+            occurrence: Some(2),
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
+        }]);
+        engine.begin_execution_trace("GLOBAL_SETUP", CODE).unwrap();
+        let result = engine.call_win64(CODE, [buffer, 0, 0, 0, 0, 0]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        assert_eq!(result, 42);
+        assert_eq!(trace.memory_witnesses.len(), 1);
+        let witness = &trace.memory_witnesses[0];
+        assert_eq!(witness.watch_id, "second-tail-target");
+        assert_eq!(witness.before.u8_values, [2]);
+        assert_eq!(witness.after.u8_values, [3]);
+        assert!(
+            trace
+                .events
+                .iter()
+                .any(|event| { event.kind == "tail_call" && event.target_rva == Some(11) })
+        );
+    }
+
+    #[test]
     fn execution_trace_activates_function_watch_at_selector_entry() {
         const CODE: u64 = 0x1000_0000;
         // inc byte ptr [rcx]; ret
@@ -7594,6 +7660,7 @@ mod tests {
             absolute_address: None,
             register: "rcx",
             size: 1,
+            occurrence: None,
             image_coordinate: None,
             image_row_offset: None,
             image_format: None,
@@ -7735,6 +7802,7 @@ mod tests {
             absolute_address: None,
             register: "rcx",
             size: 4,
+            occurrence: None,
             image_coordinate: None,
             image_row_offset: None,
             image_format: None,
@@ -7764,6 +7832,44 @@ mod tests {
     }
 
     #[test]
+    fn execution_trace_selects_one_based_watch_occurrence_without_spending_witness_budget() {
+        const CODE: u64 = 0x1000_0000;
+        // Call the same target three times, then return 42. The target increments [rcx].
+        let mut engine = test_engine(&[
+            0xe8, 0x10, 0, 0, 0, 0xe8, 0x0b, 0, 0, 0, 0xe8, 0x06, 0, 0, 0, 0xb8, 42, 0, 0, 0, 0xc3,
+            0xfe, 0x01, 0xc3,
+        ]);
+        let buffer = engine.allocate(1, 1).unwrap();
+        engine.write(buffer, &[1]).unwrap();
+        engine.configure_trace_watches(vec![TraceWatchSpec {
+            id: "second-target-call".into(),
+            function_rva: Some(21),
+            instruction_rva: None,
+            absolute_address: None,
+            register: "rcx",
+            size: 1,
+            occurrence: Some(2),
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
+        }]);
+        engine.begin_execution_trace("RENDER", CODE).unwrap();
+        let result = engine.call_win64(CODE, [buffer, 0, 0, 0, 0, 0]).unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+
+        assert_eq!(result, 42);
+        let mut final_value = [0u8; 1];
+        engine.read(buffer, &mut final_value).unwrap();
+        assert_eq!(final_value, [4]);
+        assert_eq!(trace.memory_witnesses.len(), 1);
+        assert_eq!(trace.dropped_memory_witnesses, 0);
+        let witness = &trace.memory_witnesses[0];
+        assert_eq!(witness.watch_id, "second-target-call");
+        assert_eq!(witness.before.u8_values, [2]);
+        assert_eq!(witness.after.u8_values, [3]);
+    }
+
+    #[test]
     fn inferred_return_path_completes_pending_memory_witness() {
         const CODE: u64 = 0x1000_0000;
         // call target_a; call target_b; ret; nop;
@@ -7781,6 +7887,7 @@ mod tests {
             absolute_address: None,
             register: "rcx",
             size: 4,
+            occurrence: None,
             image_coordinate: None,
             image_row_offset: None,
             image_format: None,
@@ -7912,6 +8019,7 @@ mod tests {
             call_id_stack: Vec::new(),
             next_call_id: 1,
             watch_specs: Vec::new(),
+            watch_occurrence_counts: HashMap::new(),
             watch_stack: Vec::new(),
             selector_watches: Vec::new(),
             witnesses: Vec::new(),

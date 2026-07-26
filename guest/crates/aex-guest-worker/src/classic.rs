@@ -1064,6 +1064,7 @@ impl ClassicHost {
                 ),
                 register: "absolute",
                 size: format.bytes_per_pixel(),
+                occurrence: None,
                 image_coordinate: Some([x, y]),
                 image_row_offset: Some(row_offset),
                 image_format: Some(format.name()),
