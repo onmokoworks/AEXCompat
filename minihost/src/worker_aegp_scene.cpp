@@ -585,6 +585,18 @@ bool snapshot_staged_item_metadata(
     ordered_effects[ordered_count++] = {
         index, layer.local_index, instance.stack_order};
   }
+  for (std::size_t left = 0; left < ordered_count; ++left) {
+    if (ordered_effects[left].layer_index < 0 ||
+        ordered_effects[left].stack_order < 0)
+      return false;
+    for (std::size_t right = left + 1; right < ordered_count; ++right) {
+      if (ordered_effects[left].layer_index ==
+              ordered_effects[right].layer_index &&
+          ordered_effects[left].stack_order ==
+              ordered_effects[right].stack_order)
+        return false;
+    }
+  }
   std::sort(ordered_effects.begin(),
             ordered_effects.begin() + ordered_count,
             [](const auto& left, const auto& right) {

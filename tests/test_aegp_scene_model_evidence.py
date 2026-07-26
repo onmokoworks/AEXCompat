@@ -56,6 +56,12 @@ def test_scene_model_source_contract_connects_registry_scheduler_receipts() -> N
     wiring = (
         ROOT / "minihost" / "src" / "worker_l2_render_abi.cpp"
     ).read_text(encoding="utf-8")
+    scene = (
+        ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
+    ).read_text(encoding="utf-8")
+    selftest = (
+        ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp"
+    ).read_text(encoding="utf-8")
     for marker in (
         "register_scene_item(",
         "publish_scene_stage_world(",
@@ -69,7 +75,6 @@ def test_scene_model_source_contract_connects_registry_scheduler_receipts() -> N
         "render_receipts::invalidate_scene_generation",
         "notify_generation_invalidated(project_id_",
         'L"--self-test-aegp-scene-model"',
-        "unsupported_slots_preserved",
         "&publish_scene_scheduler_stage",
     ):
         assert (
@@ -81,6 +86,20 @@ def test_scene_model_source_contract_connects_registry_scheduler_receipts() -> N
         )
     assert "register_scene_item(" in wiring
     assert "publish_scene_stage_world(" in wiring
+    assert "ordered_effects[left].layer_index ==" in scene
+    assert "ordered_effects[left].stack_order ==" in scene
+    assert "effect_slots[7]" in selftest
+    assert "unsupported_suite_calls_report_json()" in selftest
+    assert "invalid_after_unsupported == invalid_before_unsupported" in selftest
+    assert "report.unsupported_slots_preserved =" in selftest
+    assert "!prepare_scene_staged_item(active_item.legacy_handle)" in selftest
+    assert "report.duplicate_order_state_unchanged" in selftest
+    assert "report.duplicate_order_receipt_unchanged" in selftest
+    assert (
+        '<< json_bool(report.unsupported_slots_preserved)'
+        in routing
+    )
+    assert ',"unsupported_slots_preserved":true' not in routing
 
 
 def test_scene_model_evidence_all_production_workers() -> None:
@@ -101,5 +120,18 @@ def test_scene_model_evidence_all_production_workers() -> None:
         )
         validator.validate(report)
         assert report["generation"]["after"] == report["generation"]["before"] + 1
+        assert report["unsupported_slot"] == {
+            "observed": True,
+            "suite": "AEGP Effect Suite",
+            "version": 4,
+            "slot": 7,
+            "error": 4,
+            "call_count": 1,
+            "distinct_from_invalid_handle": True,
+        }
+        assert report["unsupported_slots_preserved"] is True
+        assert report["order"]["duplicate_layer_stack_rejected"] is True
+        assert report["order"]["failure_state_unchanged"] is True
+        assert report["order"]["failure_receipt_unchanged"] is True
         reports.append(report)
     assert len(reports) == 3

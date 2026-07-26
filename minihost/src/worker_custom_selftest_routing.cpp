@@ -119,6 +119,12 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << json_bool(report.cross_project_cycle_rejected) << "}"
         << ",\"order\":{\"registry_effect_order\":"
         << json_bool(report.effect_order)
+        << ",\"duplicate_layer_stack_rejected\":"
+        << json_bool(report.duplicate_effect_order_rejected)
+        << ",\"failure_state_unchanged\":"
+        << json_bool(report.duplicate_order_state_unchanged)
+        << ",\"failure_receipt_unchanged\":"
+        << json_bool(report.duplicate_order_receipt_unchanged)
         << ",\"effect_order_hash\":\""
         << hex64(report.effect_order_hash) << "\"}"
         << ",\"generation\":{\"before\":"
@@ -156,7 +162,15 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << ",\"reserved_receipts\":" << receipts.reserved_count
         << ",\"invalid_handle_distinguished\":"
         << json_bool(report.invalid_handle_distinguished) << "}"
-        << ",\"unsupported_slots_preserved\":true}\n";
+        << ",\"unsupported_slot\":{\"observed\":"
+        << json_bool(report.unsupported_diagnostic_observed)
+        << ",\"suite\":\"AEGP Effect Suite\",\"version\":4,\"slot\":7"
+        << ",\"error\":" << report.unsupported_error
+        << ",\"call_count\":" << report.unsupported_call_count
+        << ",\"distinct_from_invalid_handle\":"
+        << json_bool(report.unsupported_distinct_from_invalid_handle) << "}"
+        << ",\"unsupported_slots_preserved\":"
+        << json_bool(report.unsupported_slots_preserved) << "}\n";
     return {true, report.passed ? 0 : 1, out.str()};
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-path-data-hardening") {

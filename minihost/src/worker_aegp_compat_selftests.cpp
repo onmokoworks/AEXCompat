@@ -9,6 +9,7 @@
 #include "worker_aegp_external_render_runtime.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_render_receipts.hpp"
+#include "worker_suite_registry.hpp"
 #include "worker_world_registry.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_pf_helper_runtime.hpp"
@@ -26,6 +27,7 @@
 
 namespace aexcompat::l2_detail {
 bool configure_mask_scene(const std::string&);
+bool prepare_scene_staged_item(void*);
 namespace { AegpCompatSelftestHooks g_hooks; }
 
 namespace {
@@ -36,6 +38,27 @@ int32_t compat_release_suite(const char* name, int32_t version) {
   return g_hooks.release_suite(name, version);
 }
 bool compat_suite_leases_balanced() { return g_hooks.suite_leases_balanced(); }
+
+uint32_t unsupported_effect_slot_seven_count(const std::string& report) {
+  constexpr char marker[] =
+      "{\"name\":\"AEGP Effect Suite\",\"version\":4,"
+      "\"slot\":7,\"call_count\":";
+  const auto marker_offset = report.find(marker);
+  if (marker_offset == std::string::npos) return 0;
+  auto cursor = marker_offset + sizeof(marker) - 1;
+  uint32_t count = 0;
+  bool found_digit = false;
+  while (cursor < report.size() &&
+         report[cursor] >= '0' && report[cursor] <= '9') {
+    found_digit = true;
+    const uint32_t digit = static_cast<uint32_t>(report[cursor] - '0');
+    if (count > (std::numeric_limits<uint32_t>::max() - digit) / 10u)
+      return std::numeric_limits<uint32_t>::max();
+    count = count * 10u + digit;
+    ++cursor;
+  }
+  return found_digit ? count : 0;
+}
 }
 
 #define g_aegp_layers scene_runtime_state().layers
@@ -1852,6 +1875,36 @@ AegpSceneModelSelftestReport verify_aegp_scene_model() {
       ? reinterpret_cast<ApplyEffect>(effect_slots[9]) : nullptr;
   const auto delete_effect = effect_slots
       ? reinterpret_cast<DeleteEffect>(effect_slots[10]) : nullptr;
+  using UnsupportedSlot = int32_t(__cdecl*)();
+  const auto unsupported_slot = effect_slots
+      ? reinterpret_cast<UnsupportedSlot>(effect_slots[7]) : nullptr;
+  const auto unsupported_before =
+      worker_runtime::suite_registry()
+          .unsupported_suite_calls_report_json();
+  const auto invalid_before_unsupported =
+      aegp_staged_item_runtime::diagnostics().invalid_handle_rejections;
+  report.unsupported_error =
+      unsupported_slot ? unsupported_slot() : 0;
+  const auto unsupported_after =
+      worker_runtime::suite_registry()
+          .unsupported_suite_calls_report_json();
+  const auto invalid_after_unsupported =
+      aegp_staged_item_runtime::diagnostics().invalid_handle_rejections;
+  const uint32_t unsupported_count_before =
+      unsupported_effect_slot_seven_count(unsupported_before);
+  const uint32_t unsupported_count_after =
+      unsupported_effect_slot_seven_count(unsupported_after);
+  report.unsupported_diagnostic_observed =
+      unsupported_count_before != std::numeric_limits<uint32_t>::max() &&
+      unsupported_count_after == unsupported_count_before + 1u;
+  report.unsupported_call_count =
+      report.unsupported_diagnostic_observed ? 1u : 0u;
+  report.unsupported_distinct_from_invalid_handle =
+      invalid_after_unsupported == invalid_before_unsupported;
+  report.unsupported_slots_preserved =
+      report.unsupported_error == 4 &&
+      report.unsupported_diagnostic_observed &&
+      report.unsupported_distinct_from_invalid_handle;
   void* applied_effect = nullptr;
   report.effect_applied = apply_effect && delete_effect &&
       apply_effect(7, active_layer.legacy_handle,
@@ -1950,6 +2003,78 @@ AegpSceneModelSelftestReport verify_aegp_scene_model() {
   report.dependency_identity_hash =
       receipt_snapshot.dependency_identity_hash;
   report.effect_order_hash = receipt_snapshot.effect_order_hash;
+
+  const auto scene_before_duplicate_order = g_aegp_effect_instances;
+  const uint64_t registry_before_duplicate_order = registry.fingerprint();
+  const auto scheduler_before_duplicate_order =
+      aegp_staged_item_runtime::diagnostics();
+  const auto receipts_before_duplicate_order =
+      render_receipts::statistics();
+  const auto receipt_before_duplicate_order = receipt_snapshot;
+  std::array<std::size_t, 2> same_layer_effects{};
+  std::size_t same_layer_count = 0;
+  for (std::size_t index = 0;
+       index < g_aegp_effect_instances.size() && same_layer_count < 2;
+       ++index) {
+    const auto& instance = g_aegp_effect_instances[index];
+    if (instance.occupied &&
+        instance.layer == active_layer.legacy_handle)
+      same_layer_effects[same_layer_count++] = index;
+  }
+  bool duplicate_order_scene_unchanged = false;
+  if (same_layer_count == 2) {
+    g_aegp_effect_instances[same_layer_effects[1]].stack_order =
+        g_aegp_effect_instances[same_layer_effects[0]].stack_order;
+    const auto malformed_scene = g_aegp_effect_instances;
+    report.duplicate_effect_order_rejected =
+        !prepare_scene_staged_item(active_item.legacy_handle);
+    duplicate_order_scene_unchanged =
+        std::memcmp(g_aegp_effect_instances.data(),
+                    malformed_scene.data(),
+                    sizeof(malformed_scene)) == 0;
+  }
+  g_aegp_effect_instances = scene_before_duplicate_order;
+  const auto scheduler_after_duplicate_order =
+      aegp_staged_item_runtime::diagnostics();
+  const auto receipts_after_duplicate_order =
+      render_receipts::statistics();
+  render_receipts::ReceiptSnapshot receipt_after_duplicate_order{};
+  report.duplicate_order_state_unchanged =
+      same_layer_count == 2 &&
+      duplicate_order_scene_unchanged &&
+      std::memcmp(g_aegp_effect_instances.data(),
+                  scene_before_duplicate_order.data(),
+                  sizeof(scene_before_duplicate_order)) == 0 &&
+      registry.fingerprint() == registry_before_duplicate_order &&
+      scheduler_after_duplicate_order.published ==
+          scheduler_before_duplicate_order.published &&
+      scheduler_after_duplicate_order.registered_items ==
+          scheduler_before_duplicate_order.registered_items &&
+      scheduler_after_duplicate_order.cached_stages ==
+          scheduler_before_duplicate_order.cached_stages &&
+      scheduler_after_duplicate_order.cached_bytes ==
+          scheduler_before_duplicate_order.cached_bytes &&
+      receipts_after_duplicate_order.created ==
+          receipts_before_duplicate_order.created &&
+      receipts_after_duplicate_order.live_count ==
+          receipts_before_duplicate_order.live_count &&
+      receipts_after_duplicate_order.live_bytes ==
+          receipts_before_duplicate_order.live_bytes;
+  report.duplicate_order_receipt_unchanged =
+      render_receipts::snapshot(receipt, receipt_after_duplicate_order) &&
+      receipt_after_duplicate_order.stage_identity_hash ==
+          receipt_before_duplicate_order.stage_identity_hash &&
+      receipt_after_duplicate_order.trace_hash ==
+          receipt_before_duplicate_order.trace_hash &&
+      receipt_after_duplicate_order.project_generation ==
+          receipt_before_duplicate_order.project_generation &&
+      receipt_after_duplicate_order.dependency_identity_hash ==
+          receipt_before_duplicate_order.dependency_identity_hash &&
+      receipt_after_duplicate_order.effect_order_hash ==
+          receipt_before_duplicate_order.effect_order_hash;
+  ok = ok && report.duplicate_effect_order_rejected &&
+      report.duplicate_order_state_unchanged &&
+      report.duplicate_order_receipt_unchanged;
 
   report.duplicate_stable_id_rejected =
       !aegp_staged_item_runtime::register_item(
@@ -2064,6 +2189,10 @@ AegpSceneModelSelftestReport verify_aegp_scene_model() {
       report.duplicate_stable_id_rejected &&
       report.direct_cycle_rejected && report.indirect_cycle_rejected &&
       report.cross_project_cycle_rejected && report.effect_order &&
+      report.duplicate_effect_order_rejected &&
+      report.duplicate_order_state_unchanged &&
+      report.duplicate_order_receipt_unchanged &&
+      report.unsupported_slots_preserved &&
       report.stage_invalidated && report.receipt_invalidated &&
       report.invalid_handle_distinguished && report.cleanup_balanced &&
       report.stage_identity_hash != 0 && report.trace_hash != 0;

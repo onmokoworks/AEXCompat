@@ -15,11 +15,15 @@ remains owned by Issue #30 APIs.
   stable hash from the exact live registry record.
 - An item dependency must be a live composition item in the same project.
 - An effect must be live, owned by a layer in the item's composition, and
-  listed exactly once at its current contiguous stack order.
+  listed exactly once at its current contiguous stack order. Duplicate
+  `(layer, stack_order)` positions are rejected before scheduler or receipt
+  publication; the previous graph and live receipts remain unchanged.
 - ABI calls without a plug-in ID use the existing explicit possession policy:
   only an exact live registry token with the required kind is accepted.
-  Unsupported suite slots remain unsupported; invalid handles return the
-  ordinary invalid-parameter error and increment invalid-handle diagnostics.
+  Unsupported suite slots remain unsupported and record their suite, version,
+  slot, and call count through the suite diagnostic path. Invalid handles
+  return the ordinary invalid-parameter error and increment a separate
+  invalid-handle diagnostic.
 
 ## Generations and invalidation
 
@@ -56,7 +60,8 @@ borrowed-handle capacity behind.
   effects per item.
 - Duplicate stable identities, duplicate dependencies/effects, wrong-kind or
   foreign identities, cross-project edges, non-contiguous effect order, and
-  pointer/identity mismatches fail before state publication.
+  duplicate `(layer, stack_order)` positions or pointer/identity mismatches
+  fail before state publication.
 - Direct and indirect dependency cycles are rejected while staging the
   registration update. The previous graph remains live and unchanged.
 - Resolution retains the existing depth, stage-count, time, memory, and
@@ -68,6 +73,10 @@ borrowed-handle capacity behind.
 `aex_render_worker`, and `aex_smart_worker`. Its strict JSON report is validated
 by `schemas/aegp-scene-model-selftest.schema.json`, rejects duplicate keys,
 requires non-zero identity/dependency/order/trace hashes, and requires zero live
-or reserved receipts. Existing scene mutation, staged-item, mask, camera, and
-3D self-tests remain independent gates. Real-AEX probing is a later phase and
-is not represented as completed by this self-test.
+or reserved receipts. The test invokes a published unsupported Effect Suite
+slot and requires the observed suite diagnostic/error to remain distinct from
+invalid-handle rejection. It also injects a duplicate effect position and
+requires rejection with unchanged scheduler state and receipt evidence.
+Existing scene mutation, staged-item, mask, camera, and 3D self-tests remain
+independent gates. Real-AEX probing is a later phase and is not represented as
+completed by this self-test.

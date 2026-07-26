@@ -14,6 +14,9 @@ struct AegpSceneModelSelftestReport {
   bool indirect_cycle_rejected{};
   bool cross_project_cycle_rejected{};
   bool effect_order{};
+  bool duplicate_effect_order_rejected{};
+  bool duplicate_order_state_unchanged{};
+  bool duplicate_order_receipt_unchanged{};
   bool stage_invalidated{};
   bool receipt_invalidated{};
   bool invalid_handle_distinguished{};
@@ -21,6 +24,11 @@ struct AegpSceneModelSelftestReport {
   bool fixture_lookup{};
   bool effect_suite_acquired{};
   bool effect_applied{};
+  bool unsupported_slots_preserved{};
+  bool unsupported_diagnostic_observed{};
+  bool unsupported_distinct_from_invalid_handle{};
+  int32_t unsupported_error{};
+  uint32_t unsupported_call_count{};
   uint32_t project_generation_before{};
   uint32_t project_generation_after{};
   uint32_t effect_count{};

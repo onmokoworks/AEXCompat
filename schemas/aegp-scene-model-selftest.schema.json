@@ -15,6 +15,7 @@
     "hashes",
     "diagnostics",
     "cleanup",
+    "unsupported_slot",
     "unsupported_slots_preserved"
   ],
   "properties": {
@@ -64,9 +65,18 @@
     "order": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["registry_effect_order", "effect_order_hash"],
+      "required": [
+        "registry_effect_order",
+        "duplicate_layer_stack_rejected",
+        "failure_state_unchanged",
+        "failure_receipt_unchanged",
+        "effect_order_hash"
+      ],
       "properties": {
         "registry_effect_order": {"const": true},
+        "duplicate_layer_stack_rejected": {"const": true},
+        "failure_state_unchanged": {"const": true},
+        "failure_receipt_unchanged": {"const": true},
         "effect_order_hash": {"$ref": "#/$defs/hash64"}
       }
     },
@@ -131,6 +141,28 @@
         "live_bytes": {"const": 0},
         "reserved_receipts": {"const": 0},
         "invalid_handle_distinguished": {"const": true}
+      }
+    },
+    "unsupported_slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observed",
+        "suite",
+        "version",
+        "slot",
+        "error",
+        "call_count",
+        "distinct_from_invalid_handle"
+      ],
+      "properties": {
+        "observed": {"const": true},
+        "suite": {"const": "AEGP Effect Suite"},
+        "version": {"const": 4},
+        "slot": {"const": 7},
+        "error": {"const": 4},
+        "call_count": {"const": 1},
+        "distinct_from_invalid_handle": {"const": true}
       }
     },
     "unsupported_slots_preserved": {"const": true}
