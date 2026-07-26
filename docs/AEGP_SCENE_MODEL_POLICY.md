@@ -78,5 +78,30 @@ slot and requires the observed suite diagnostic/error to remain distinct from
 invalid-handle rejection. It also injects a duplicate effect position and
 requires rejection with unchanged scheduler state and receipt evidence.
 Existing scene mutation, staged-item, mask, camera, and 3D self-tests remain
-independent gates. Real-AEX probing is a later phase and is not represented as
-completed by this self-test.
+independent gates.
+
+## Public-AEGP probe evidence
+
+`instruments/aex/issue26-scene-probe` is one host-neutral public-SDK AEGP.
+The identical built AEX identity is used for After Effects and AEXCompat; the
+probe contains no host-name or process-name branch. Its oracle is structural:
+typed project/item/comp/layer/effect/stream traversal, total effect order,
+stream and keyframe metadata, parent/camera/zoom relationships, public
+transaction cancel/commit behavior, and rejection of a child stream after its
+effect owner is deleted. Pixel equality is not part of this oracle.
+
+The committed records under `corpus/issue26-scene-probe` bind the selected
+After Effects executable, SDK guide and API version, probe, JSX fixture,
+AEXCompat worker, and unchanged SDK sample hashes. The strict schema is
+`schemas/issue26-scene-probe-evidence.schema.json`. A host or public suite may
+produce a partial record only when every unavailable acquisition or operation
+is preserved in `unsupported_slots`; missing real-host execution is a blocked
+record with its exact external-state reason, never a passing substitute.
+
+The real-AE runner refuses to modify a running user's After Effects process.
+It installs the hash-named probe directory only for a fresh bounded launch,
+verifies the copied AEX hash, captures the JSX and AEGP reports, and removes
+only that exact directory after After Effects exits. `Projector.aex` and
+`Resizer.aex` are built from the installed SDK with source hashes checked
+before and after, then run unchanged against AEXCompat as independent public
+plug-in evidence.

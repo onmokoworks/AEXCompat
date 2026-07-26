@@ -1,0 +1,489 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/schemas/issue26-scene-probe-evidence.schema.json",
+  "title": "Issue #26 public AEGP scene probe evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_kind",
+    "target",
+    "recorded_utc",
+    "status",
+    "execution",
+    "environment",
+    "artifacts",
+    "probe_report",
+    "host_report",
+    "sample_report",
+    "unsupported_slots",
+    "cleanup"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "evidence_kind": {"const": "issue26-public-aegp-scene"},
+    "target": {
+      "enum": [
+        "aexcompat",
+        "after_effects",
+        "sdk_projector_aexcompat",
+        "sdk_resizer_aexcompat"
+      ]
+    },
+    "recorded_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {"enum": ["passed", "partial", "blocked", "failed"]},
+    "execution": {"$ref": "#/$defs/execution"},
+    "environment": {"$ref": "#/$defs/environment"},
+    "artifacts": {"$ref": "#/$defs/artifacts"},
+    "probe_report": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/probe_report"}
+      ]
+    },
+    "host_report": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/host_report"}
+      ]
+    },
+    "sample_report": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/sample_report"}
+      ]
+    },
+    "unsupported_slots": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/unsupported_slot"}
+    },
+    "cleanup": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/cleanup"}
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "target": {"enum": ["aexcompat", "after_effects"]}
+        }
+      },
+      "then": {
+        "properties": {
+          "sample_report": {"type": "null"},
+          "artifacts": {
+            "properties": {
+              "probe": {"$ref": "#/$defs/artifact"},
+              "fixture": {"$ref": "#/$defs/artifact"},
+              "worker": {"$ref": "#/$defs/artifact"},
+              "sample": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "target": {
+            "enum": [
+              "sdk_projector_aexcompat",
+              "sdk_resizer_aexcompat"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "probe_report": {"type": "null"},
+          "host_report": {"type": "null"},
+          "unsupported_slots": {"maxItems": 0},
+          "cleanup": {"type": "null"},
+          "sample_report": {"$ref": "#/$defs/sample_report"},
+          "artifacts": {
+            "properties": {
+              "probe": {"$ref": "#/$defs/artifact"},
+              "fixture": {"$ref": "#/$defs/artifact"},
+              "worker": {"$ref": "#/$defs/artifact"},
+              "sample": {"$ref": "#/$defs/artifact"}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "nullable_artifact": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/artifact"}
+      ]
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "exit_code",
+        "stdout_sha256",
+        "stderr_sha256",
+        "blocker"
+      ],
+      "properties": {
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {"type": "string"}
+        },
+        "exit_code": {"type": ["integer", "null"]},
+        "stdout_sha256": {"$ref": "#/$defs/sha256"},
+        "stderr_sha256": {"$ref": "#/$defs/sha256"},
+        "blocker": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9_]+$"
+                },
+                "message": {"type": "string", "minLength": 1},
+                "details": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {"type": "string"}
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["after_effects", "sdk"],
+      "properties": {
+        "after_effects": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "executable"],
+          "properties": {
+            "version": {"type": "string", "minLength": 1},
+            "executable": {"$ref": "#/$defs/artifact"}
+          }
+        },
+        "sdk": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "root",
+            "aefx_api_version",
+            "guide"
+          ],
+          "properties": {
+            "root": {"type": "string", "minLength": 1},
+            "aefx_api_version": {"type": "integer", "minimum": 1},
+            "guide": {"$ref": "#/$defs/artifact"}
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["probe", "fixture", "worker", "sample"],
+      "properties": {
+        "probe": {"$ref": "#/$defs/nullable_artifact"},
+        "fixture": {"$ref": "#/$defs/nullable_artifact"},
+        "worker": {"$ref": "#/$defs/nullable_artifact"},
+        "sample": {"$ref": "#/$defs/nullable_artifact"}
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "token",
+        "stable_id",
+        "owner_id",
+        "ordinal",
+        "subtype"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "project",
+            "folder",
+            "footage",
+            "item",
+            "comp",
+            "layer",
+            "effect"
+          ]
+        },
+        "token": {"type": "string", "pattern": "^[0-9a-f]{1,16}$"},
+        "stable_id": {"type": "integer"},
+        "owner_id": {"type": "integer"},
+        "ordinal": {"type": "integer"},
+        "subtype": {"type": "integer"}
+      }
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token", "owner", "ordinal", "type", "keyframes"],
+      "properties": {
+        "token": {"type": "string", "pattern": "^[0-9a-f]{1,16}$"},
+        "owner": {"type": "string", "pattern": "^[0-9a-f]{1,16}$"},
+        "ordinal": {"type": "integer", "minimum": 0},
+        "type": {"type": "integer"},
+        "keyframes": {"type": "integer", "minimum": -1}
+      }
+    },
+    "unsupported_slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suite", "version", "slot", "operation", "error"],
+      "properties": {
+        "suite": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1},
+        "slot": {"type": "integer", "minimum": -1},
+        "operation": {"type": "string", "minLength": 1},
+        "error": {"type": "integer"}
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "suite_acquires",
+        "suite_releases",
+        "stream_acquires",
+        "stream_releases",
+        "effect_acquires",
+        "effect_releases",
+        "invalidated_children",
+        "applied_effects",
+        "removed_applied_effects",
+        "balanced"
+      ],
+      "properties": {
+        "suite_acquires": {"type": "integer", "minimum": 0},
+        "suite_releases": {"type": "integer", "minimum": 0},
+        "stream_acquires": {"type": "integer", "minimum": 0},
+        "stream_releases": {"type": "integer", "minimum": 0},
+        "effect_acquires": {"type": "integer", "minimum": 0},
+        "effect_releases": {"type": "integer", "minimum": 0},
+        "invalidated_children": {"type": "integer", "minimum": 0},
+        "applied_effects": {"type": "integer", "minimum": 0},
+        "removed_applied_effects": {"type": "integer", "minimum": 0},
+        "balanced": {"type": "boolean"}
+      }
+    },
+    "probe_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "probe",
+        "status",
+        "host_input",
+        "oracle",
+        "pixel_equality_required",
+        "identities",
+        "streams",
+        "coverage",
+        "unsupported_slots",
+        "cleanup"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "probe": {"const": "issue26-public-aegp-scene"},
+        "status": {"enum": ["passed", "partial", "blocked"]},
+        "host_input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["driver_major", "driver_minor"],
+          "properties": {
+            "driver_major": {"type": "integer", "minimum": 0},
+            "driver_minor": {"type": "integer", "minimum": 0}
+          }
+        },
+        "oracle": {
+          "const": "structural_identity_mutation_generation_stage_order_ownership"
+        },
+        "pixel_equality_required": {"const": false},
+        "identities": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/identity"}
+        },
+        "streams": {
+          "type": "array",
+          "maxItems": 2048,
+          "items": {"$ref": "#/$defs/stream"}
+        },
+        "coverage": {"$ref": "#/$defs/coverage"},
+        "unsupported_slots": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "#/$defs/unsupported_slot"}
+        },
+        "cleanup": {"$ref": "#/$defs/cleanup"}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_enumeration",
+        "effect_order",
+        "stream_metadata",
+        "parent_camera_zoom",
+        "keyframes",
+        "transaction",
+        "generation"
+      ],
+      "properties": {
+        "identity_enumeration": {"type": "boolean"},
+        "effect_order": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["observed", "total"],
+          "properties": {
+            "observed": {"type": "boolean"},
+            "total": {"type": "boolean"}
+          }
+        },
+        "stream_metadata": {"type": "boolean"},
+        "parent_camera_zoom": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["parent", "camera", "zoom"],
+          "properties": {
+            "parent": {"type": "boolean"},
+            "camera": {"type": "boolean"},
+            "zoom": {"type": "boolean"}
+          }
+        },
+        "keyframes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["interpolation", "ease", "spatial_tangents"],
+          "properties": {
+            "interpolation": {"type": "boolean"},
+            "ease": {"type": "boolean"},
+            "spatial_tangents": {"type": "boolean"}
+          }
+        },
+        "transaction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cancel_observed",
+            "cancel_unchanged",
+            "commit_observed",
+            "commit_incremented",
+            "before",
+            "after_cancel",
+            "after_commit"
+          ],
+          "properties": {
+            "cancel_observed": {"type": "boolean"},
+            "cancel_unchanged": {"type": "boolean"},
+            "commit_observed": {"type": "boolean"},
+            "commit_incremented": {"type": "boolean"},
+            "before": {"type": "integer", "minimum": -1},
+            "after_cancel": {"type": "integer", "minimum": -1},
+            "after_commit": {"type": "integer", "minimum": -1}
+          }
+        },
+        "generation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["public_project_generation", "stale_owner_rejected"],
+          "properties": {
+            "public_project_generation": {"const": "not_exposed"},
+            "stale_owner_rejected": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "host_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "stage",
+        "status",
+        "event_requested",
+        "init_error",
+        "event_error",
+        "effect_lifetimes_balanced",
+        "stream_lifetimes_balanced",
+        "suite_leases_balanced"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "stage": {"const": "aegp_init"},
+        "status": {"enum": ["event_completed", "initialization_failed"]},
+        "event_requested": {"type": "string"},
+        "init_error": {"type": "integer"},
+        "event_error": {"type": "integer"},
+        "effect_lifetimes_balanced": {"type": "boolean"},
+        "stream_lifetimes_balanced": {"type": "boolean"},
+        "suite_leases_balanced": {"type": "boolean"}
+      }
+    },
+    "sample_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sample",
+        "route",
+        "classification",
+        "sdk_source_unchanged"
+      ],
+      "properties": {
+        "sample": {"enum": ["Projector", "Resizer"]},
+        "route": {"enum": ["aegp_init", "l2_params_only"]},
+        "classification": {
+          "enum": [
+            "completed",
+            "unsupported_suite",
+            "nonzero_exit",
+            "load_failure"
+          ]
+        },
+        "sdk_source_unchanged": {"const": true}
+      }
+    }
+  }
+}

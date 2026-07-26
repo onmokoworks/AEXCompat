@@ -1,0 +1,318 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "issue26-public-aegp-scene",
+  "target": "aexcompat",
+  "recorded_utc": "2026-07-26T21:32:02.000439Z",
+  "status": "partial",
+  "execution": {
+    "command": [
+      "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
+      "--aegp-comp-idle-roundtrip",
+      "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-scene-probe-build\\Release\\issue26_scene_probe.aex",
+      "3d69ca85ffda16c1f87443bb8d5491f7cac09166cc958b583fcd40b772ed0e57"
+    ],
+    "exit_code": 0,
+    "stdout_sha256": "0e7544a93a48427e32f9a317804cbacd2a2e4e78110865dcd94f4d0e766f9e38",
+    "stderr_sha256": "fd221db12eb650ce891ee48f61fb798ce3d1f6bc238e44a93ec51ddd96f81842",
+    "blocker": null
+  },
+  "environment": {
+    "after_effects": {
+      "version": "26.3",
+      "executable": {
+        "path": "C:\\Program Files\\Adobe\\Adobe After Effects 2026\\Support Files\\AfterFX.exe",
+        "sha256": "8599b66580ececdf1a6df008faffdd47c06afceef582eca599a98e81de3aaf71",
+        "size_bytes": 5931016
+      }
+    },
+    "sdk": {
+      "root": "C:\\Program Files\\Adobe\\AfterEffectsSDK",
+      "aefx_api_version": 8,
+      "guide": {
+        "path": "C:\\Program Files\\Adobe\\AfterEffectsSDK\\After_Effects_SDK_Guide.pdf",
+        "sha256": "826d4920ac974042f689a5a3f6a3a161ebd3b6a17fe969abffabdc3ff52cf548",
+        "size_bytes": 177221
+      }
+    }
+  },
+  "artifacts": {
+    "probe": {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-scene-probe-build\\Release\\issue26_scene_probe.aex",
+      "sha256": "3d69ca85ffda16c1f87443bb8d5491f7cac09166cc958b583fcd40b772ed0e57",
+      "size_bytes": 55296
+    },
+    "fixture": {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\instruments\\aex\\issue26-scene-probe\\fixture.jsx",
+      "sha256": "f06e418317d8fa4ce39b506b1fa72261d787deb6acb309b05ae84886c8939b7f",
+      "size_bytes": 3117
+    },
+    "worker": {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
+      "sha256": "c46eb83acce7a26df614172dfdab9c0d0c0e3642262c32e9eebf955b60ddf940",
+      "size_bytes": 1807360
+    },
+    "sample": null
+  },
+  "probe_report": {
+    "schema_version": 1,
+    "probe": "issue26-public-aegp-scene",
+    "status": "partial",
+    "host_input": {
+      "driver_major": 24,
+      "driver_minor": 0
+    },
+    "oracle": "structural_identity_mutation_generation_stage_order_ownership",
+    "pixel_equality_required": false,
+    "identities": [
+      {
+        "kind": "comp",
+        "token": "48c88b1869433e12",
+        "stable_id": 1001,
+        "owner_id": -1,
+        "ordinal": 0,
+        "subtype": 2
+      },
+      {
+        "kind": "layer",
+        "token": "84c6e96651a90d62",
+        "stable_id": 2001,
+        "owner_id": 1001,
+        "ordinal": 0,
+        "subtype": 0
+      },
+      {
+        "kind": "comp",
+        "token": "2c349d5b16345b8a",
+        "stable_id": 1002,
+        "owner_id": 1001,
+        "ordinal": 0,
+        "subtype": 2
+      },
+      {
+        "kind": "layer",
+        "token": "90349dc7133d28f2",
+        "stable_id": 2002,
+        "owner_id": 1001,
+        "ordinal": 1,
+        "subtype": 0
+      },
+      {
+        "kind": "item",
+        "token": "ccf93d85418ef89a",
+        "stable_id": 200,
+        "owner_id": 1001,
+        "ordinal": 1,
+        "subtype": 3
+      },
+      {
+        "kind": "layer",
+        "token": "2799d42e4a5e5ac2",
+        "stable_id": 2003,
+        "owner_id": 1001,
+        "ordinal": 2,
+        "subtype": 0
+      },
+      {
+        "kind": "item",
+        "token": "ccf93d85418ef89a",
+        "stable_id": 200,
+        "owner_id": 1001,
+        "ordinal": 2,
+        "subtype": 3
+      },
+      {
+        "kind": "effect",
+        "token": "bbe02dbfe73d6cd2",
+        "stable_id": 3001,
+        "owner_id": 2001,
+        "ordinal": 0,
+        "subtype": 0
+      }
+    ],
+    "streams": [
+      {
+        "token": "e233e5256cc6ef7a",
+        "owner": "bbe02dbfe73d6cd2",
+        "ordinal": 1,
+        "type": 5,
+        "keyframes": 0
+      },
+      {
+        "token": "550205b337fcf522",
+        "owner": "bbe02dbfe73d6cd2",
+        "ordinal": 2,
+        "type": 4,
+        "keyframes": 0
+      },
+      {
+        "token": "cc14a5de77bafc4a",
+        "owner": "bbe02dbfe73d6cd2",
+        "ordinal": 3,
+        "type": 2,
+        "keyframes": 0
+      },
+      {
+        "token": "ac4ccabb7d0b87b2",
+        "owner": "bbe02dbfe73d6cd2",
+        "ordinal": 4,
+        "type": 6,
+        "keyframes": 0
+      }
+    ],
+    "coverage": {
+      "identity_enumeration": false,
+      "effect_order": {
+        "observed": true,
+        "total": true
+      },
+      "stream_metadata": true,
+      "parent_camera_zoom": {
+        "parent": false,
+        "camera": false,
+        "zoom": false
+      },
+      "keyframes": {
+        "interpolation": false,
+        "ease": false,
+        "spatial_tangents": false
+      },
+      "transaction": {
+        "cancel_observed": false,
+        "cancel_unchanged": false,
+        "commit_observed": false,
+        "commit_incremented": false,
+        "before": 0,
+        "after_cancel": -1,
+        "after_commit": -1
+      },
+      "generation": {
+        "public_project_generation": "not_exposed",
+        "stale_owner_rejected": true
+      }
+    },
+    "unsupported_slots": [
+      {
+        "suite": "AEGP Proj Suite",
+        "version": 9,
+        "slot": -1,
+        "operation": "AcquireSuite",
+        "error": 1
+      },
+      {
+        "suite": "AEGP Layer Suite",
+        "version": 15,
+        "slot": 42,
+        "operation": "AEGP_SetLayerParent(fixture)",
+        "error": 4
+      },
+      {
+        "suite": "AEGP Comp Suite",
+        "version": 25,
+        "slot": 23,
+        "operation": "AEGP_CreateCameraInComp(fixture)",
+        "error": 4
+      },
+      {
+        "suite": "AEGP Stream Suite",
+        "version": 11,
+        "slot": 5,
+        "operation": "AEGP_GetNewEffectStreamByIndex",
+        "error": 4
+      },
+      {
+        "suite": "AEGP Keyframe Suite",
+        "version": 5,
+        "slot": 16,
+        "operation": "batch_cancel",
+        "error": 4
+      },
+      {
+        "suite": "AEGP Keyframe Suite",
+        "version": 5,
+        "slot": 16,
+        "operation": "batch_commit",
+        "error": 4
+      }
+    ],
+    "cleanup": {
+      "suite_acquires": 6,
+      "suite_releases": 6,
+      "stream_acquires": 6,
+      "stream_releases": 5,
+      "effect_acquires": 3,
+      "effect_releases": 3,
+      "invalidated_children": 1,
+      "applied_effects": 1,
+      "removed_applied_effects": 1,
+      "balanced": true
+    }
+  },
+  "host_report": {
+    "schema_version": 1,
+    "stage": "aegp_init",
+    "status": "event_completed",
+    "event_requested": "comp_idle_roundtrip",
+    "init_error": 0,
+    "event_error": 0,
+    "effect_lifetimes_balanced": true,
+    "stream_lifetimes_balanced": true,
+    "suite_leases_balanced": true
+  },
+  "sample_report": null,
+  "unsupported_slots": [
+    {
+      "suite": "AEGP Proj Suite",
+      "version": 9,
+      "slot": -1,
+      "operation": "AcquireSuite",
+      "error": 1
+    },
+    {
+      "suite": "AEGP Layer Suite",
+      "version": 15,
+      "slot": 42,
+      "operation": "AEGP_SetLayerParent(fixture)",
+      "error": 4
+    },
+    {
+      "suite": "AEGP Comp Suite",
+      "version": 25,
+      "slot": 23,
+      "operation": "AEGP_CreateCameraInComp(fixture)",
+      "error": 4
+    },
+    {
+      "suite": "AEGP Stream Suite",
+      "version": 11,
+      "slot": 5,
+      "operation": "AEGP_GetNewEffectStreamByIndex",
+      "error": 4
+    },
+    {
+      "suite": "AEGP Keyframe Suite",
+      "version": 5,
+      "slot": 16,
+      "operation": "batch_cancel",
+      "error": 4
+    },
+    {
+      "suite": "AEGP Keyframe Suite",
+      "version": 5,
+      "slot": 16,
+      "operation": "batch_commit",
+      "error": 4
+    }
+  ],
+  "cleanup": {
+    "suite_acquires": 6,
+    "suite_releases": 6,
+    "stream_acquires": 6,
+    "stream_releases": 5,
+    "effect_acquires": 3,
+    "effect_releases": 3,
+    "invalidated_children": 1,
+    "applied_effects": 1,
+    "removed_applied_effects": 1,
+    "balanced": true
+  }
+}

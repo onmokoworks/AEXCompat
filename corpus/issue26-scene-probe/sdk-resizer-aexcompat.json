@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "issue26-public-aegp-scene",
+  "target": "sdk_resizer_aexcompat",
+  "recorded_utc": "2026-07-26T21:32:41.614075Z",
+  "status": "passed",
+  "execution": {
+    "command": [
+      "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
+      "--l2-params-only",
+      "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-sdk-samples\\resizer\\Resizer.aex",
+      "cc9efc2c47a13f96b50551eacccfd3406ba694745c44eac8e82413fc7213701f"
+    ],
+    "exit_code": 0,
+    "stdout_sha256": "ab43e6c7dfb47a4e6c408452383edf4d6e792acff6a11337fdb89668c690af13",
+    "stderr_sha256": "32a356d85ee330ec89d6437fc72a7fa3b0a9c3e71953b93b45a07d5ece15238d",
+    "blocker": null
+  },
+  "environment": {
+    "after_effects": {
+      "version": "26.3",
+      "executable": {
+        "path": "C:\\Program Files\\Adobe\\Adobe After Effects 2026\\Support Files\\AfterFX.exe",
+        "sha256": "8599b66580ececdf1a6df008faffdd47c06afceef582eca599a98e81de3aaf71",
+        "size_bytes": 5931016
+      }
+    },
+    "sdk": {
+      "root": "C:\\Program Files\\Adobe\\AfterEffectsSDK",
+      "aefx_api_version": 8,
+      "guide": {
+        "path": "C:\\Program Files\\Adobe\\AfterEffectsSDK\\After_Effects_SDK_Guide.pdf",
+        "sha256": "826d4920ac974042f689a5a3f6a3a161ebd3b6a17fe969abffabdc3ff52cf548",
+        "size_bytes": 177221
+      }
+    }
+  },
+  "artifacts": {
+    "probe": {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-scene-probe-build\\Release\\issue26_scene_probe.aex",
+      "sha256": "3d69ca85ffda16c1f87443bb8d5491f7cac09166cc958b583fcd40b772ed0e57",
+      "size_bytes": 55296
+    },
+    "fixture": {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\instruments\\aex\\issue26-scene-probe\\fixture.jsx",
+      "sha256": "f06e418317d8fa4ce39b506b1fa72261d787deb6acb309b05ae84886c8939b7f",
+      "size_bytes": 3117
+    },
+    "worker": {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
+      "sha256": "c46eb83acce7a26df614172dfdab9c0d0c0e3642262c32e9eebf955b60ddf940",
+      "size_bytes": 1807360
+    },
+    "sample": {
+      "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-sdk-samples\\resizer\\Resizer.aex",
+      "sha256": "cc9efc2c47a13f96b50551eacccfd3406ba694745c44eac8e82413fc7213701f",
+      "size_bytes": 26624
+    }
+  },
+  "probe_report": null,
+  "host_report": null,
+  "sample_report": {
+    "sample": "Resizer",
+    "route": "l2_params_only",
+    "classification": "completed",
+    "sdk_source_unchanged": true
+  },
+  "unsupported_slots": [],
+  "cleanup": null
+}

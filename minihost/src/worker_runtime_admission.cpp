@@ -112,7 +112,8 @@ int admit_runtime(const RuntimeHostHooks& hooks,
   // image-only preflight so its DllMain and delay-loaded dependencies never
   // execute in a PF inspection process. In particular, this keeps an AEGP's
   // third-party teardown outside the PF worker's shutdown contract (#377).
-  if (is_aegp_candidate_without_execution(plugin_path)) {
+  if (!request.allow_aegp_plugin &&
+      is_aegp_candidate_without_execution(plugin_path)) {
     std::cerr << "plugin_kind:aegp_candidate\n" << std::flush;
     return 12;
   }

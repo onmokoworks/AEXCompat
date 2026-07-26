@@ -1269,6 +1269,7 @@ int32_t __cdecl aegp_delete_layer_effect(void* effect) {
   auto candidate_legacy_streams = g_aegp_legacy_effect_streams;
   uint32_t invalidated_streams = 0;
   uint32_t invalidated_values = 0;
+  uint32_t invalidated_effect_leases = 0;
   auto& instance = candidate_instances[instance_index];
   void* layer = instance.layer;
   const int32_t deleted_order = instance.stack_order;
@@ -1281,6 +1282,7 @@ int32_t __cdecl aegp_delete_layer_effect(void* effect) {
       --value.stack_order;
   for (auto& lease : candidate_leases)
     if (lease.live && lease.instance_index == instance_index) {
+      ++invalidated_effect_leases;
       lease.live = false;
       lease.handle = nullptr;
     }
@@ -1310,6 +1312,7 @@ int32_t __cdecl aegp_delete_layer_effect(void* effect) {
         g_aegp_effect_leases = candidate_leases;
         g_aegp_transform_stream = candidate_transform_stream;
         g_aegp_legacy_effect_streams = candidate_legacy_streams;
+        g_aegp_effect_disposes += invalidated_effect_leases;
         g_aegp_stream_disposes += invalidated_streams;
         g_aegp_stream_value_disposes += invalidated_values;
         return true;

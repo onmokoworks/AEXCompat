@@ -285,6 +285,9 @@ bool verify_aegp_item_staged_worlds() {
   if (!render_options_lifetimes_balanced() || !async_receipt_lifetimes_balanced())
     return false;
   clear_staged_item_worlds_for_test();
+  struct StagedWorldCleanup final {
+    ~StagedWorldCleanup() { clear_staged_item_worlds_for_test(); }
+  } staged_world_cleanup;
   const AegpTime time{5, 24}, step{1, 24};
   constexpr int32_t width = 5, height = 4;
   auto fixture = [=](int32_t pixel_bytes) {

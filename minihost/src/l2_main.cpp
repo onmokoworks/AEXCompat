@@ -3368,6 +3368,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   const int request_error = aexcompat::worker_runtime::prepare_runtime_request(
       argv[2], argv[3], authorize_runtime_modules, authorization_basename, runtime_request);
   if (request_error != 0) return request_error;
+  runtime_request.allow_aegp_plugin = g_aegp_init_mode;
   std::unique_ptr<aexcompat::TraceWriter> trace_writer;
   RuntimeContext runtime_context;
   const int admission_error = aexcompat::worker_runtime::admit_worker_entry(
