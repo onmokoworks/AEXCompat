@@ -100,6 +100,8 @@ const MAX_TRACE_WITNESSES: usize = 256;
 const MAX_UNSUPPORTED_SUITE_CALLS: usize = 256;
 const MAX_SUITE_REQUESTS: usize = 256;
 const MAX_AVX_FALLBACK_INSTRUCTIONS: u64 = 1_000_000;
+const MAX_CRT_MEMORY_COPY_BYTES: u64 = 128 * 1024 * 1024;
+const CRT_MEMORY_COPY_CHUNK: usize = 64 * 1024;
 
 pub(crate) fn utility_suite_layout(version: u32) -> Option<(usize, usize, usize)> {
     match version {
@@ -2297,6 +2299,18 @@ impl GuestEngine<'static> {
                             }),
                         )?;
                     }
+                    "memcpy" | "memmove" => {
+                        uc(
+                            "write CRT memory-copy return",
+                            unicorn.mem_write(stub, &[0xc3]),
+                        )?;
+                        uc(
+                            "install CRT memory-copy import",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_crt_memory_copy(unicorn);
+                            }),
+                        )?;
+                    }
                     "expf" => install_float_import(&mut unicorn, stub, "expf", f32::exp)?,
                     "floorf" => install_float_import(&mut unicorn, stub, "floorf", f32::floor)?,
                     "powf" => install_float_binary_import(&mut unicorn, stub, "powf", f32::powf)?,
@@ -4240,6 +4254,70 @@ fn emulate_memset(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         Err(error) => {
             unicorn.get_data_mut().callback_error = Some(error);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_crt_memory_copy(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| {
+        let destination = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("memory-copy destination: {error}"))?;
+        let source = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("memory-copy source: {error}"))?;
+        let length = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("memory-copy length: {error}"))?;
+        if length > MAX_CRT_MEMORY_COPY_BYTES {
+            return Err(format!(
+                "memory-copy length {length} exceeds {MAX_CRT_MEMORY_COPY_BYTES}"
+            ));
+        }
+        if length == 0 {
+            return Ok(destination);
+        }
+        let source_end = source
+            .checked_add(length)
+            .ok_or_else(|| "memory-copy source range overflow".to_string())?;
+        destination
+            .checked_add(length)
+            .ok_or_else(|| "memory-copy destination range overflow".to_string())?;
+        let copy_backward = destination > source && destination < source_end;
+        let mut copied = 0u64;
+        while copied < length {
+            let chunk = (length - copied).min(CRT_MEMORY_COPY_CHUNK as u64);
+            let offset = if copy_backward {
+                length - copied - chunk
+            } else {
+                copied
+            };
+            let source_address = source
+                .checked_add(offset)
+                .ok_or_else(|| "memory-copy source address overflow".to_string())?;
+            let destination_address = destination
+                .checked_add(offset)
+                .ok_or_else(|| "memory-copy destination address overflow".to_string())?;
+            let mut bytes = vec![0u8; chunk as usize];
+            unicorn
+                .mem_read(source_address, &mut bytes)
+                .map_err(|error| format!("memory-copy source read: {error}"))?;
+            unicorn
+                .mem_write(destination_address, &bytes)
+                .map_err(|error| format!("memory-copy destination write: {error}"))?;
+            copied += chunk;
+        }
+        Ok(destination)
+    })();
+    match result {
+        Ok(destination) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, destination);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
             let _ = unicorn.emu_stop();
         }
     }
@@ -6286,6 +6364,112 @@ mod tests {
                 .callback_error
                 .as_deref()
                 .is_some_and(|message| message.contains("foreign or already-freed"))
+        );
+    }
+
+    #[test]
+    fn crt_memory_copy_copies_bytes_and_returns_destination() {
+        let mut engine = test_engine(&[0xc3]);
+        let source = DATA_BASE + 0x100;
+        let destination = DATA_BASE + 0x200;
+        let bytes = b"generic CRT memory copy";
+        engine.unicorn.mem_write(source, bytes).unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RCX, destination)
+            .unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, source).unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::R8, bytes.len() as u64)
+            .unwrap();
+
+        emulate_crt_memory_copy(&mut engine.unicorn);
+
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(destination, bytes.len())
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(
+            engine.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+            destination
+        );
+        assert_eq!(engine.unicorn.get_data().callback_error, None);
+    }
+
+    #[test]
+    fn crt_memory_copy_preserves_overlapping_memmove_semantics() {
+        let mut engine = test_engine(&[0xc3]);
+        let buffer = DATA_BASE + 0x100;
+        engine
+            .unicorn
+            .mem_write(buffer, b"0123456789abcdef")
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RCX, buffer + 4)
+            .unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, buffer).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R8, 12).unwrap();
+
+        emulate_crt_memory_copy(&mut engine.unicorn);
+
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(buffer, 16).unwrap(),
+            b"01230123456789ab"
+        );
+    }
+
+    #[test]
+    fn zero_length_crt_memory_copy_accepts_unmapped_pointers() {
+        let mut engine = test_engine(&[0xc3]);
+        let destination = 0xdead_beef_dead_beef;
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RCX, destination)
+            .unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, 0).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R8, 0).unwrap();
+
+        emulate_crt_memory_copy(&mut engine.unicorn);
+
+        assert_eq!(
+            engine.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+            destination
+        );
+        assert_eq!(engine.unicorn.get_data().callback_error, None);
+    }
+
+    #[test]
+    fn crt_memory_copy_fails_closed_without_masking_an_earlier_error() {
+        let mut engine = test_engine(&[0xc3]);
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RCX, DATA_BASE)
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RDX, u64::MAX)
+            .unwrap();
+        engine.unicorn.reg_write(RegisterX86::R8, 2).unwrap();
+        emulate_crt_memory_copy(&mut engine.unicorn);
+        assert_eq!(
+            engine.unicorn.get_data().callback_error.as_deref(),
+            Some("memory-copy source range overflow")
+        );
+
+        engine.unicorn.get_data_mut().callback_error = Some("earlier failure".into());
+        engine
+            .unicorn
+            .reg_write(RegisterX86::R8, MAX_CRT_MEMORY_COPY_BYTES + 1)
+            .unwrap();
+        emulate_crt_memory_copy(&mut engine.unicorn);
+        assert_eq!(
+            engine.unicorn.get_data().callback_error.as_deref(),
+            Some("earlier failure")
         );
     }
 
