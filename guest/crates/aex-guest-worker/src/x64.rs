@@ -76,6 +76,9 @@ const HOST_PF_ANSI_STRCPY: u64 = STUB_BASE + 0x80340;
 const HOST_PF_ANSI_ASIN: u64 = STUB_BASE + 0x80350;
 const HOST_PF_ANSI_ACOS: u64 = STUB_BASE + 0x80360;
 const HOST_PF_ANSI_STRCPY_BOUNDED: u64 = STUB_BASE + 0x80370;
+const HOST_EXTENDED_ALLOC: u64 = STUB_BASE + 0x80380;
+const HOST_EXTENDED_FREE: u64 = STUB_BASE + 0x80390;
+const HOST_EXTENDED_LOOKUP: u64 = STUB_BASE + 0x803a0;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
 const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
@@ -1677,6 +1680,9 @@ struct GuestState {
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
     crt_heap: CrtHeap,
+    extended_strings: HashMap<i32, u64>,
+    extended_empty_string: u64,
+    extended_string_table_valid: bool,
     avx_fallback_instructions: u64,
     avx_defined_ymm: [bool; 16],
     avx_chain_next_rip: Option<u64>,
@@ -2492,6 +2498,9 @@ impl GuestEngine<'static> {
             ("write Iterate8 continuation", HOST_ITERATE8_CONTINUE),
             ("write color-param callback", HOST_COLOR_PARAM_VALUE),
             ("write point-param callback", HOST_POINT_PARAM_VALUE),
+            ("write extended allocation callback", HOST_EXTENDED_ALLOC),
+            ("write extended free callback", HOST_EXTENDED_FREE),
+            ("write extended lookup callback", HOST_EXTENDED_LOOKUP),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -2624,6 +2633,30 @@ impl GuestEngine<'static> {
             unicorn.add_code_hook(HOST_CHECKIN_PARAM, HOST_CHECKIN_PARAM, |unicorn, _, _| {
                 let _ = unicorn.reg_write(RegisterX86::RAX, 0);
             }),
+        )?;
+        uc(
+            "install extended allocation callback",
+            unicorn.add_code_hook(
+                HOST_EXTENDED_ALLOC,
+                HOST_EXTENDED_ALLOC,
+                emulate_extended_alloc,
+            ),
+        )?;
+        uc(
+            "install extended free callback",
+            unicorn.add_code_hook(
+                HOST_EXTENDED_FREE,
+                HOST_EXTENDED_FREE,
+                emulate_extended_free,
+            ),
+        )?;
+        uc(
+            "install extended lookup callback",
+            unicorn.add_code_hook(
+                HOST_EXTENDED_LOOKUP,
+                HOST_EXTENDED_LOOKUP,
+                emulate_extended_lookup,
+            ),
         )?;
         for (operation, address, callback) in [
             (
@@ -2830,6 +2863,9 @@ impl GuestEngine<'static> {
             (HOST_ITERATE8_CONTINUE, "iterate8_continue"),
             (HOST_COLOR_PARAM_VALUE, "color_param_value"),
             (HOST_POINT_PARAM_VALUE, "point_param_value"),
+            (HOST_EXTENDED_ALLOC, "extended_alloc"),
+            (HOST_EXTENDED_FREE, "extended_free"),
+            (HOST_EXTENDED_LOOKUP, "extended_lookup"),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -2851,6 +2887,21 @@ impl GuestEngine<'static> {
             entry_export: image_report.entry_export,
             trace_modules,
         };
+        if let Some(table) = image.string_table() {
+            let empty = engine.allocate(1, 1)?;
+            engine.write(empty, &[0])?;
+            let mut strings = HashMap::with_capacity(table.len());
+            for (id, value) in table {
+                let address = engine.allocate(value.len() + 1, 1)?;
+                engine.write(address, value)?;
+                engine.write(address + value.len() as u64, &[0])?;
+                strings.insert(*id, address);
+            }
+            let state = engine.unicorn.get_data_mut();
+            state.extended_strings = strings;
+            state.extended_empty_string = empty;
+            state.extended_string_table_valid = true;
+        }
         if let Some(entry) = image.dll_entry_address() {
             let attached = engine.call_win64(entry, [image.image_base(), 1, 0, 0, 0, 0])?;
             if attached == 0 {
@@ -3661,6 +3712,18 @@ impl GuestEngine<'static> {
         HOST_CHECKIN_PARAM
     }
 
+    pub fn extended_alloc_callback_address(&self) -> u64 {
+        HOST_EXTENDED_ALLOC
+    }
+
+    pub fn extended_free_callback_address(&self) -> u64 {
+        HOST_EXTENDED_FREE
+    }
+
+    pub fn extended_lookup_callback_address(&self) -> u64 {
+        HOST_EXTENDED_LOOKUP
+    }
+
     pub fn configure_parameter_definitions(
         &mut self,
         definitions: Vec<u64>,
@@ -4218,26 +4281,120 @@ fn emulate_crt_malloc(unicorn: &mut Unicorn<'_, GuestState>, calloc: bool) {
             .reg_read(RegisterX86::RCX)
             .map_err(|_| CrtHeapError::SizeOverflow)
     };
-    let allocation =
-        requested_size.and_then(|size| unicorn.get_data().crt_heap.prepare_allocation(size));
-    let pointer = allocation.and_then(|allocation| {
-        let pointer =
-            unicorn
-                .get_data()
-                .crt_heap
-                .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
-        unicorn
-            .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
-            .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
-        if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
-            let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
-            return Err(error);
-        }
-        Ok(pointer)
-    });
+    let pointer = requested_size.and_then(|size| allocate_crt_region(unicorn, size));
     // malloc/calloc report normal bounded allocation failure as NULL. This is
     // distinct from free ownership violations, which stop at the callback boundary.
     let _ = unicorn.reg_write(RegisterX86::RAX, pointer.unwrap_or(0));
+}
+
+fn allocate_crt_region(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    size: u64,
+) -> Result<u64, CrtHeapError> {
+    let allocation = unicorn.get_data().crt_heap.prepare_allocation(size)?;
+    let pointer = unicorn
+        .get_data()
+        .crt_heap
+        .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
+    unicorn
+        .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
+        .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
+    if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
+        let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
+        return Err(error);
+    }
+    Ok(pointer)
+}
+
+fn free_crt_region(unicorn: &mut Unicorn<'_, GuestState>, pointer: u64) -> Result<(), String> {
+    let allocation = unicorn
+        .get_data_mut()
+        .crt_heap
+        .remove(pointer)
+        .map_err(|error| error.to_string())?;
+    unicorn
+        .mem_unmap(pointer, allocation.backing_size)
+        .map_err(|error| format!("unmap CRT allocation {pointer:#x}: {error}"))
+}
+
+fn emulate_extended_alloc(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let (output, size) = match (
+        unicorn.reg_read(RegisterX86::RCX),
+        unicorn.reg_read(RegisterX86::RDX),
+    ) {
+        (Ok(output), Ok(size)) => (output, size),
+        (output, size) => {
+            unicorn.get_data_mut().callback_error = Some(format!(
+                "read extended allocation arguments: output={output:?}, size={size:?}"
+            ));
+            let _ = unicorn.emu_stop();
+            return;
+        }
+    };
+    if output == 0 || size == 0 || size > 1 << 24 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+        return;
+    }
+    let pointer = match allocate_crt_region(unicorn, size) {
+        Ok(pointer) => pointer,
+        Err(_) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+            return;
+        }
+    };
+    if let Err(error) = unicorn.mem_write(output, &pointer.to_le_bytes()) {
+        let _ = free_crt_region(unicorn, pointer);
+        unicorn.get_data_mut().callback_error =
+            Some(format!("extended allocation output write: {error}"));
+        let _ = unicorn.emu_stop();
+        return;
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+}
+
+fn emulate_extended_free(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let pointer_address = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("extended free pointer address: {error}"))?;
+        if pointer_address == 0 {
+            return Ok(());
+        }
+        let mut pointer = [0u8; 8];
+        unicorn
+            .mem_read(pointer_address, &mut pointer)
+            .map_err(|error| format!("extended free pointer read: {error}"))?;
+        let pointer = u64::from_le_bytes(pointer);
+        if pointer != 0 {
+            free_crt_region(unicorn, pointer)?;
+        }
+        Ok(())
+    })();
+    finish_callback(unicorn, result);
+}
+
+fn emulate_extended_lookup(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let id = match unicorn.reg_read(RegisterX86::RDX) {
+        Ok(id) => id as i32,
+        Err(error) => {
+            unicorn.get_data_mut().callback_error =
+                Some(format!("read extended lookup id: {error}"));
+            let _ = unicorn.emu_stop();
+            return;
+        }
+    };
+    let state = unicorn.get_data();
+    let pointer = state
+        .extended_strings
+        .get(&id)
+        .copied()
+        .or_else(|| {
+            state
+                .extended_string_table_valid
+                .then_some(state.extended_empty_string)
+        })
+        .unwrap_or(0);
+    let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
 }
 
 fn emulate_crt_free(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -4253,19 +4410,9 @@ fn emulate_crt_free(unicorn: &mut Unicorn<'_, GuestState>) {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         return;
     }
-    let allocation = unicorn.get_data_mut().crt_heap.remove(pointer);
-    match allocation {
-        Ok(allocation) => {
-            if let Err(error) = unicorn.mem_unmap(pointer, allocation.backing_size) {
-                unicorn.get_data_mut().callback_error =
-                    Some(format!("unmap CRT allocation {pointer:#x}: {error}"));
-                let _ = unicorn.emu_stop();
-            }
-        }
-        Err(error) => {
-            unicorn.get_data_mut().callback_error = Some(error.to_string());
-            let _ = unicorn.emu_stop();
-        }
+    if let Err(error) = free_crt_region(unicorn, pointer) {
+        unicorn.get_data_mut().callback_error = Some(error);
+        let _ = unicorn.emu_stop();
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
@@ -6571,6 +6718,9 @@ mod tests {
             HOST_ITERATE8_CONTINUE,
             HOST_COLOR_PARAM_VALUE,
             HOST_POINT_PARAM_VALUE,
+            HOST_EXTENDED_ALLOC,
+            HOST_EXTENDED_FREE,
+            HOST_EXTENDED_LOOKUP,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -6686,6 +6836,27 @@ mod tests {
                 emulate_point_param_value,
             )
             .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_EXTENDED_ALLOC,
+                HOST_EXTENDED_ALLOC,
+                emulate_extended_alloc,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_EXTENDED_FREE,
+                HOST_EXTENDED_FREE,
+                emulate_extended_free,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_EXTENDED_LOOKUP,
+                HOST_EXTENDED_LOOKUP,
+                emulate_extended_lookup,
+            )
+            .unwrap();
         install_iterate8_suites(&mut unicorn).unwrap();
         install_pf_ansi_suite_v2(&mut unicorn).unwrap();
         unicorn
@@ -6771,6 +6942,83 @@ mod tests {
                 .callback_error
                 .as_deref()
                 .is_some_and(|message| message.contains("foreign or already-freed"))
+        );
+    }
+
+    #[test]
+    fn extended_inter_allocation_is_zeroed_bounded_and_owned() {
+        let mut engine = test_engine(&[0xc3]);
+        let output = engine.allocate(8, 8).unwrap();
+        engine.write(output, &[0xff; 8]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_EXTENDED_ALLOC, [output, 4000, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut pointer = [0u8; 8];
+        engine.read(output, &mut pointer).unwrap();
+        let pointer = u64::from_le_bytes(pointer);
+        assert_ne!(pointer, 0);
+        let mut bytes = [0xff; 32];
+        engine.read(pointer, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 32]);
+
+        assert_eq!(
+            engine
+                .call_win64(HOST_EXTENDED_FREE, [output, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .crt_heap
+                .allocations()
+                .next()
+                .is_none()
+        );
+
+        assert_eq!(
+            engine
+                .call_win64(HOST_EXTENDED_ALLOC, [0, 4000, 0, 0, 0, 0])
+                .unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn extended_inter_lookup_serves_values_empty_and_absent_tables() {
+        let mut engine = test_engine(&[0xc3]);
+        let value = engine.allocate(6, 1).unwrap();
+        let empty = engine.allocate(1, 1).unwrap();
+        engine.write(value, b"Label\0").unwrap();
+        engine.write(empty, &[0]).unwrap();
+        {
+            let state = engine.unicorn.get_data_mut();
+            state.extended_strings.insert(27, value);
+            state.extended_empty_string = empty;
+            state.extended_string_table_valid = true;
+        }
+        assert_eq!(
+            engine
+                .call_win64(HOST_EXTENDED_LOOKUP, [0, 27, 0, 0, 0, 0])
+                .unwrap(),
+            value
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_EXTENDED_LOOKUP, [0, 999, 0, 0, 0, 0])
+                .unwrap(),
+            empty
+        );
+        engine.unicorn.get_data_mut().extended_string_table_valid = false;
+        assert_eq!(
+            engine
+                .call_win64(HOST_EXTENDED_LOOKUP, [0, 999, 0, 0, 0, 0])
+                .unwrap(),
+            0
         );
     }
 

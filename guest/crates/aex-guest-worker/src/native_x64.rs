@@ -684,6 +684,18 @@ impl GuestEngine<'static> {
     pub fn checkin_param_callback_address(&self) -> u64 {
         callback_address!(noop_import)
     }
+    // The extended Inter callbacks are implemented only by the Unicorn
+    // backend in this issue. Keep the native carrier buildable without
+    // advertising silent success at an unimplemented callback boundary.
+    pub fn extended_alloc_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn extended_lookup_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn extended_free_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
     pub fn new_handle_callback_address(&self) -> u64 {
         callback_address!(new_handle)
     }

@@ -116,6 +116,8 @@ pub struct FailureReport {
     pub schema_version: u32,
     pub execution_backend: &'static str,
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_message: Option<String>,
     pub suite_requests: Vec<String>,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     pub dropped_unsupported_suite_calls: u64,
@@ -248,6 +250,21 @@ impl ClassicHost {
             &mut input_bytes,
             abi::INTER_PROGRESS_OFFSET,
             engine.noop_callback_address(),
+        );
+        write_u64(
+            &mut input_bytes,
+            abi::INTER_RESERVED_0_OFFSET,
+            engine.extended_alloc_callback_address(),
+        );
+        write_u64(
+            &mut input_bytes,
+            abi::INTER_RESERVED_1_OFFSET,
+            engine.extended_lookup_callback_address(),
+        );
+        write_u64(
+            &mut input_bytes,
+            abi::INTER_RESERVED_2_OFFSET,
+            engine.extended_free_callback_address(),
         );
         write_u64(&mut input_bytes, abi::IN_UTILS_OFFSET, utils);
         write_u64(&mut input_bytes, abi::IN_PICA_BASICP_OFFSET, pica_basic);
@@ -615,10 +632,20 @@ impl ClassicHost {
     }
 
     pub fn failure_report(&self, error: &ClassicError) -> FailureReport {
+        let mut return_message = [0u8; abi::OUT_RETURN_MSG_SIZE];
+        let return_message = self
+            .engine
+            .read(
+                self.output + abi::OUT_RETURN_MSG_OFFSET as u64,
+                &mut return_message,
+            )
+            .ok()
+            .and_then(|_| decode_return_message(&return_message));
         FailureReport {
             schema_version: 1,
             execution_backend: self.engine.backend_name(),
             error: error.to_string(),
+            return_message,
             suite_requests: self.engine.suite_requests().to_vec(),
             unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
             dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
@@ -2067,6 +2094,14 @@ fn bounded_failure_text(value: &str) -> String {
     bounded_text(value, MAX_FAILURE_TEXT_BYTES)
 }
 
+fn decode_return_message(bytes: &[u8]) -> Option<String> {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    (end != 0).then(|| String::from_utf8_lossy(&bytes[..end]).into_owned())
+}
+
 fn bounded_text(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
@@ -2089,6 +2124,24 @@ mod tests {
         assert!(bounded.len() <= MAX_FAILURE_TEXT_BYTES);
         assert!(bounded.is_char_boundary(bounded.len()));
         assert_eq!(bounded, "界".repeat(MAX_FAILURE_TEXT_BYTES / 3));
+    }
+
+    #[test]
+    fn return_message_is_bounded_nul_terminated_and_utf8_safe() {
+        assert_eq!(decode_return_message(&[0; 256]), None);
+        assert_eq!(
+            decode_return_message(b"could not be initialized\0ignored"),
+            Some("could not be initialized".into())
+        );
+        assert_eq!(
+            decode_return_message(&[b'a', 0xff, b'b', 0]),
+            Some("a\u{fffd}b".into())
+        );
+        let full = vec![b'x'; abi::OUT_RETURN_MSG_SIZE];
+        assert_eq!(
+            decode_return_message(&full).unwrap(),
+            "x".repeat(abi::OUT_RETURN_MSG_SIZE)
+        );
     }
 
     #[test]
