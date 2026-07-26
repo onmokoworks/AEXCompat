@@ -46,8 +46,8 @@ aex-guest-worker render-trace-png \
 ### `--watch`構文
 
 ```text
---watch function=<function-rva>,arg=<register>,size=<bytes>[,when=entry+return]
---watch rva=<call-site-rva>,register=<register>,size=<bytes>[,when=both]
+--watch function=<function-rva>,arg=<register>,size=<bytes>[,when=entry+return][,occurrence=<n>]
+--watch rva=<call-site-rva>,register=<register>,size=<bytes>[,when=both][,occurrence=<n>]
 ```
 
 - `function`は監視対象関数の入口RVAです。trace対象selector自身も指定できます。
@@ -57,6 +57,10 @@ aex-guest-worker render-trace-png \
   `stack5`～`stack8`（または`5`～`8`）を指定できます。
 - `size`は1～4096 byteです。
 - `when`は省略可能です。指定する場合は`entry+return`または`both`です。
+- `occurrence`は省略可能な1始まりの呼び出し番号です。例えば
+  `occurrence=2113`は、同じwatchに一致する2113回目だけを記録します。
+  番号はselectorごとのexecution trace内で数え、選択前の呼び出しはmemory
+  witness上限を消費しません。
 - RVAは`0x`付き16進数または10進数で指定できます。
 - `--watch`は複数回指定できます。
 - `--watch-output-pixel x,y`は出力pixelの前後値と画像内位置を記録します。
