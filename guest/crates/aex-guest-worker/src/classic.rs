@@ -353,6 +353,10 @@ impl ClassicHost {
                 abi::UTILS_ANSI_SIN_OFFSET,
                 engine.ansi_sin_callback_address(),
             ),
+            (
+                abi::UTILS_ANSI_SQRT_OFFSET,
+                engine.ansi_sqrt_callback_address(),
+            ),
         ] {
             write_u64(&mut utility_bytes, offset, callback);
         }
