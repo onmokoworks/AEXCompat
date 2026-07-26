@@ -25,7 +25,10 @@ REGISTRATION_EXPORTS = {
 }
 
 
-def load_excluded_shas(path: Path) -> set[str]:
+def load_excluded_shas(path: Path, expected_sha256: str) -> set[str]:
+    actual_sha256 = sha256_file(path)
+    if actual_sha256 != expected_sha256.lower():
+        raise SweepError("excluded SHA file differs from expected identity")
     try:
         lines = path.read_text(encoding="ascii").splitlines()
     except (OSError, UnicodeError) as error:
@@ -196,7 +199,11 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
     inventory = load_json_strict(inventory_path)
     windows_summary = load_json_strict(summary_path)
     validate_source_pair(inventory, windows_summary, inventory_sha)
-    excluded = load_excluded_shas(excluded_path)
+    excluded_sha = sha256_file(excluded_path)
+    excluded = load_excluded_shas(
+        excluded_path,
+        args.expected_excluded_sha256,
+    )
     if len(excluded) != args.expected_excluded_count:
         raise SweepError(
             f"excluded SHA count differs: {len(excluded)} != "
@@ -209,6 +216,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
             "windows_inventory_sha256": inventory_sha,
             "windows_summary_sha256": summary_sha,
             "windows_inventory_entries": len(inventory["entries"]),
+            "excluded_sha256_file_sha256": excluded_sha,
             "excluded_sha256_count": len(excluded),
             "excluded_sha256s": sorted(excluded),
         },
@@ -219,7 +227,9 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
             "exclude_audio_prefix": True,
             "registration_abis": ["v1", "v2"],
             "per_registration_abi": args.per_registration_abi,
-            "ordering": ["size", "sha256"],
+            "selection_partition_order": ["v1", "v2"],
+            "selection_rank_order": ["size", "sha256"],
+            "output_order": ["sha256"],
         },
         "entries": entries,
     }
@@ -233,6 +243,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-inventory-sha256", required=True)
     parser.add_argument("--expected-summary-sha256", required=True)
+    parser.add_argument("--expected-excluded-sha256", required=True)
     parser.add_argument("--expected-excluded-count", type=int, required=True)
     parser.add_argument("--per-registration-abi", type=int, default=12)
     return parser.parse_args()

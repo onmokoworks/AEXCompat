@@ -72,6 +72,16 @@ def test_selection_rejects_exclusion_absent_from_eligible_inventory():
         SELECT.select_tranche(inventory, {"2" * 64}, per_registration_abi=1)
 
 
+def test_exclusion_file_is_bound_to_expected_digest(tmp_path):
+    source = tmp_path / "prior-shas.txt"
+    source.write_text("1" * 64 + "\n", encoding="ascii")
+    expected = SELECT.sha256_file(source)
+
+    assert SELECT.load_excluded_shas(source, expected) == {"1" * 64}
+    with pytest.raises(SELECT.SweepError, match="differs from expected identity"):
+        SELECT.load_excluded_shas(source, "0" * 64)
+
+
 def test_selection_rejects_insufficient_registration_abi():
     inventory = {
         "entries": [
