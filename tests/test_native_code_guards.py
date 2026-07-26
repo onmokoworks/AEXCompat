@@ -14,7 +14,11 @@ RUST_STRING_LITERAL = re.compile(
     re.DOTALL,
 )
 RUST_MACRO_AEX = re.compile(
-    r"\b[A-Za-z_]\w*!\s*\([^)]*\." + "aex" + r"\b[^)]*\)",
+    r"\b[A-Za-z_]\w*!\s*(?:"
+    r"\([^)]*\." + "aex" + r"\b[^)]*\)|"
+    r"\[[^\]]*\." + "aex" + r"\b[^\]]*\]|"
+    r"\{[^}]*\." + "aex" + r"\b[^}]*\}"
+    r")",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -50,6 +54,8 @@ class NativeCodeGuardTests(unittest.TestCase):
             'r#"C:\\plugins\\effect.aex"#',
             "stringify!(effect.aex)",
             "aex_path!(effect.aex)",
+            "stringify!{effect.aex}",
+            "aex_path![effect.aex]",
         ):
             self.assertEqual(len(list(production_aex_strings(source))), 1)
 
