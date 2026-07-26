@@ -116,12 +116,16 @@ class Registry {
     ObjectSnapshot snapshot{};
     bool live{};
   };
-  struct BorrowedHandle {
-    Identity target{};
-    uint32_t lease_generation{};
-    bool live{};
-    bool exhausted{};
+  struct alignas(std::max_align_t) BorrowedToken {
+    uint64_t lease_identity{};
   };
+  struct BorrowedLease {
+    Identity target{};
+    uint64_t lease_identity{};
+    bool issued{};
+    bool live{};
+  };
+  static_assert(alignof(BorrowedToken) >= alignof(std::max_align_t));
 
   bool append(ObjectKind kind, uint64_t project_id, uint64_t object_id,
               Identity owner, Identity related_item, Identity parent_layer,
@@ -130,18 +134,21 @@ class Registry {
   const ObjectRecord* find_locked(Identity identity) const noexcept;
   ObjectRecord* find_locked(Identity identity) noexcept;
   bool is_item_kind(ObjectKind kind) const noexcept;
-  bool decode_handle(void* handle, std::size_t& slot,
-                     uint32_t& generation) const noexcept;
-  void* encode_handle(std::size_t slot, uint32_t generation) const noexcept;
+  bool token_slot_for_address_locked(
+      const void* handle, std::size_t& slot) const noexcept;
   bool resolve_locked(void* handle, ObjectKind expected,
                       bool item_family, ObjectSnapshot& output,
                       uint64_t required_project_id) const noexcept;
 
   mutable std::mutex mutex_;
   std::array<ObjectRecord, kObjectCapacity> objects_{};
-  std::array<BorrowedHandle, kBorrowedHandleCapacity> borrowed_{};
+  std::array<BorrowedToken, kBorrowedHandleCapacity> borrowed_tokens_{};
+  std::array<BorrowedLease, kBorrowedHandleCapacity> borrowed_leases_{};
   std::size_t object_count_{};
   std::size_t project_count_{};
+  std::size_t issued_token_count_{};
+  uint64_t next_lease_identity_{1};
+  bool lease_identity_exhausted_{};
   Identity active_project_{};
   Identity active_item_{};
   bool initialized_{};

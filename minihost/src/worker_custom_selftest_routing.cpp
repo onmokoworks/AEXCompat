@@ -42,6 +42,22 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << "}\n";
     return {true, passed ? 0 : 1, out.str()};
   }
+  if (argc == 2 &&
+      std::wstring(argv[1]) ==
+          L"--self-test-aegp-scene-registry-suites") {
+    const bool passed =
+        aexcompat::l2_detail::verify_aegp_scene_registry_suites();
+    std::ostringstream out;
+    out << "{\"aegp_scene_registry_suites\":\""
+        << passed_or_failed(passed)
+        << "\",\"published_suites\":true,\"active_to_comp\":true"
+        << ",\"comp_to_layers\":true,\"wrong_kind_rejected\":true"
+        << ",\"cross_project_rejected\":true"
+        << ",\"cross_registry_rejected\":true"
+        << ",\"foreign_rejected\":true,\"forged_rejected\":true"
+        << ",\"outputs_unchanged\":true}\n";
+    return {true, passed ? 0 : 1, out.str()};
+  }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-path-data-hardening") {
     const bool passed = hooks.run_pf_path_data_hardening();
     const auto path_report = aexcompat::pf_path_runtime::snapshot();

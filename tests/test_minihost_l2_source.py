@@ -169,6 +169,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         for marker in ("struct Request", "struct Hooks", "struct Result"):
             self.assertIn(marker, header)
         for marker in ('L"--self-test-aegp-layer-source-item"',
+                       'L"--self-test-aegp-scene-registry-suites"',
                        'L"--self-test-pf-path-data-hardening"',
                        'L"--self-test-pf-world-registry"',
                        'L"--self-test-pf-ae-channel-transport"',
@@ -197,6 +198,7 @@ class MinihostL2SourceTests(unittest.TestCase):
                      "verify_aegp_apply_effect",
                      "verify_aegp_effect_stack",
                      "verify_aegp_projector_levels",
+                     "verify_aegp_scene_registry_suites",
                      "verify_aegp_effect_param_union_suite4",
                      "verify_aegp_installed_effect_catalog_suite4"):
             self.assertIn(f"bool {name}()", implementation)

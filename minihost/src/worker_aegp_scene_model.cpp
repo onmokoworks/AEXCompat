@@ -7,13 +7,6 @@
 namespace aexcompat::scene_model {
 namespace {
 
-constexpr uintptr_t kBorrowedTag = 0xAu;
-constexpr uintptr_t kBorrowedTagMask = 0xFu;
-constexpr unsigned kBorrowedSlotShift = 4;
-constexpr unsigned kBorrowedGenerationShift = 12;
-constexpr uintptr_t kBorrowedSlotMask = 0xffu;
-constexpr uint32_t kMaxLeaseGeneration = 0x7fffffffu;
-
 uint64_t mix(uint64_t hash, uint64_t value) noexcept {
   hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
   return hash;
@@ -202,59 +195,54 @@ bool Registry::identity_for_legacy_item(void* legacy,
   return false;
 }
 
-void* Registry::encode_handle(std::size_t slot,
-                              uint32_t generation) const noexcept {
-  if (slot >= borrowed_.size() || generation == 0 ||
-      generation > kMaxLeaseGeneration)
-    return nullptr;
-  const uintptr_t value =
-      (static_cast<uintptr_t>(generation) << kBorrowedGenerationShift) |
-      (static_cast<uintptr_t>(slot) << kBorrowedSlotShift) |
-      kBorrowedTag;
-  return reinterpret_cast<void*>(value);
-}
-
-bool Registry::decode_handle(void* handle, std::size_t& slot,
-                             uint32_t& generation) const noexcept {
-  const uintptr_t value = reinterpret_cast<uintptr_t>(handle);
-  if (!handle || (value & kBorrowedTagMask) != kBorrowedTag) return false;
-  slot = static_cast<std::size_t>(
-      (value >> kBorrowedSlotShift) & kBorrowedSlotMask);
-  generation = static_cast<uint32_t>(value >> kBorrowedGenerationShift);
-  return slot < borrowed_.size() && generation != 0;
+bool Registry::token_slot_for_address_locked(
+    const void* handle, std::size_t& slot) const noexcept {
+  if (!handle) return false;
+  for (std::size_t index = 0; index < borrowed_tokens_.size(); ++index) {
+    if (handle == static_cast<const void*>(&borrowed_tokens_[index])) {
+      slot = index;
+      return true;
+    }
+  }
+  return false;
 }
 
 void* Registry::borrow(Identity identity) noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!find_locked(identity)) return nullptr;
-  for (std::size_t slot = 0; slot < borrowed_.size(); ++slot) {
-    const auto& lease = borrowed_[slot];
+  for (std::size_t index = 0; index < issued_token_count_; ++index) {
+    const auto& lease = borrowed_leases_[index];
     if (lease.live && lease.target == identity)
-      return encode_handle(slot, lease.lease_generation);
+      return &borrowed_tokens_[index];
   }
-  for (std::size_t slot = 0; slot < borrowed_.size(); ++slot) {
-    auto& lease = borrowed_[slot];
-    if (lease.live || lease.exhausted) continue;
-    if (lease.lease_generation >= kMaxLeaseGeneration) {
-      lease.exhausted = true;
-      continue;
-    }
-    ++lease.lease_generation;
-    lease.target = identity;
-    lease.live = true;
-    return encode_handle(slot, lease.lease_generation);
-  }
-  return nullptr;
+  if (issued_token_count_ >= borrowed_tokens_.size() ||
+      lease_identity_exhausted_ || next_lease_identity_ == 0)
+    return nullptr;
+  const std::size_t slot = issued_token_count_++;
+  auto& token = borrowed_tokens_[slot];
+  auto& lease = borrowed_leases_[slot];
+  token.lease_identity = next_lease_identity_;
+  lease.target = identity;
+  lease.lease_identity = next_lease_identity_;
+  lease.issued = true;
+  lease.live = true;
+  if (next_lease_identity_ == UINT64_MAX)
+    lease_identity_exhausted_ = true;
+  else
+    ++next_lease_identity_;
+  return &token;
 }
 
 bool Registry::resolve_locked(void* handle, ObjectKind expected,
                               bool item_family, ObjectSnapshot& output,
                               uint64_t required_project_id) const noexcept {
   std::size_t slot = 0;
-  uint32_t generation = 0;
-  if (!decode_handle(handle, slot, generation)) return false;
-  const auto& lease = borrowed_[slot];
-  if (!lease.live || lease.lease_generation != generation) return false;
+  if (!token_slot_for_address_locked(handle, slot)) return false;
+  const auto& token = borrowed_tokens_[slot];
+  const auto& lease = borrowed_leases_[slot];
+  if (!lease.issued || !lease.live || lease.lease_identity == 0 ||
+      token.lease_identity != lease.lease_identity)
+    return false;
   const auto* record = find_locked(lease.target);
   if (!record ||
       (item_family ? !is_item_kind(record->snapshot.identity.kind)
@@ -289,8 +277,7 @@ bool Registry::resolve_or_legacy(void* handle, ObjectKind expected,
   if (resolve_locked(handle, expected, false, output, required_project_id))
     return true;
   std::size_t borrowed_slot = 0;
-  uint32_t borrowed_generation = 0;
-  if (decode_handle(handle, borrowed_slot, borrowed_generation)) return false;
+  if (token_slot_for_address_locked(handle, borrowed_slot)) return false;
   for (std::size_t index = 0; index < object_count_; ++index) {
     const auto& record = objects_[index];
     if (record.live && record.snapshot.legacy_handle == handle &&
@@ -313,8 +300,7 @@ bool Registry::resolve_item_or_legacy(
                      required_project_id))
     return true;
   std::size_t borrowed_slot = 0;
-  uint32_t borrowed_generation = 0;
-  if (decode_handle(handle, borrowed_slot, borrowed_generation)) return false;
+  if (token_slot_for_address_locked(handle, borrowed_slot)) return false;
   for (std::size_t index = 0; index < object_count_; ++index) {
     const auto& record = objects_[index];
     if (record.live && record.snapshot.legacy_handle == handle &&
@@ -452,10 +438,19 @@ bool Registry::invalidate(Identity identity, Identity& replacement) noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   auto* record = find_locked(identity);
   if (!record || identity.generation == UINT32_MAX) return false;
-  for (auto& lease : borrowed_)
+  for (auto& lease : borrowed_leases_)
     if (lease.live && lease.target == identity) lease.live = false;
   ++record->snapshot.identity.generation;
   replacement = record->snapshot.identity;
+  for (std::size_t index = 0; index < object_count_; ++index) {
+    auto& snapshot = objects_[index].snapshot;
+    if (!objects_[index].live) continue;
+    if (snapshot.owner == identity) snapshot.owner = replacement;
+    if (snapshot.related_item == identity)
+      snapshot.related_item = replacement;
+    if (snapshot.parent_layer == identity)
+      snapshot.parent_layer = replacement;
+  }
   if (active_item_ == identity) active_item_ = replacement;
   if (active_project_ == identity) active_project_ = replacement;
   return true;
@@ -466,22 +461,33 @@ uint64_t Registry::fingerprint() const noexcept {
   uint64_t hash = 0xcbf29ce484222325ull;
   hash = mix(hash, object_count_);
   hash = mix(hash, project_count_);
+  hash = mix(hash, issued_token_count_);
+  hash = mix(hash, next_lease_identity_);
+  hash = mix(hash, lease_identity_exhausted_);
+  const auto mix_identity = [&hash](const Identity& identity) {
+    hash = mix(hash, identity.project_id);
+    hash = mix(hash, identity.object_id);
+    hash = mix(hash, identity.generation);
+    hash = mix(hash, static_cast<uint8_t>(identity.kind));
+  };
+  mix_identity(active_project_);
+  mix_identity(active_item_);
   for (std::size_t index = 0; index < object_count_; ++index) {
     const auto& record = objects_[index];
     hash = mix(hash, record.live);
-    hash = mix(hash, record.snapshot.identity.project_id);
-    hash = mix(hash, record.snapshot.identity.object_id);
-    hash = mix(hash, record.snapshot.identity.generation);
-    hash = mix(hash, static_cast<uint8_t>(record.snapshot.identity.kind));
-    hash = mix(hash, record.snapshot.owner.object_id);
-    hash = mix(hash, record.snapshot.related_item.object_id);
-    hash = mix(hash, record.snapshot.parent_layer.object_id);
+    mix_identity(record.snapshot.identity);
+    mix_identity(record.snapshot.owner);
+    mix_identity(record.snapshot.related_item);
+    mix_identity(record.snapshot.parent_layer);
   }
-  for (const auto& lease : borrowed_) {
+  for (std::size_t index = 0; index < borrowed_tokens_.size(); ++index) {
+    const auto& token = borrowed_tokens_[index];
+    const auto& lease = borrowed_leases_[index];
+    hash = mix(hash, token.lease_identity);
+    hash = mix(hash, lease.issued);
     hash = mix(hash, lease.live);
-    hash = mix(hash, lease.lease_generation);
-    hash = mix(hash, lease.target.object_id);
-    hash = mix(hash, static_cast<uint8_t>(lease.target.kind));
+    hash = mix(hash, lease.lease_identity);
+    mix_identity(lease.target);
   }
   return hash;
 }

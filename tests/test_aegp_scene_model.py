@@ -6,6 +6,12 @@ MODEL_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_model.hpp"
 MODEL_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_model.cpp"
 SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 SCENE_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
+COMPAT_SELFTEST = (
+    ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp"
+)
+CUSTOM_ROUTING = (
+    ROOT / "minihost" / "src" / "worker_custom_selftest_routing.cpp"
+)
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 NATIVE_SELFTEST = ROOT / "tests" / "native" / "worker_aegp_scene_model_selftest.cpp"
 
@@ -63,22 +69,61 @@ def test_registry_fixture_covers_multiple_projects_and_item_families() -> None:
         assert marker in source or marker in native
 
 
-def test_borrowed_handles_are_generation_checked_and_fail_closed() -> None:
+def test_borrowed_tokens_are_owned_aligned_non_reused_and_fail_closed() -> None:
     source = read(MODEL_SOURCE)
+    header = read(MODEL_HEADER)
     native = read(NATIVE_SELFTEST)
     for marker in (
-        "kBorrowedTag = 0xAu",
-        "lease.lease_generation != generation",
+        "struct alignas(std::max_align_t) BorrowedToken",
+        "struct BorrowedLease",
+        "token_slot_for_address_locked",
+        "handle == static_cast<const void*>(&borrowed_tokens_[index])",
+        "token.lease_identity != lease.lease_identity",
+        "issued_token_count_ >= borrowed_tokens_.size()",
+        "lease_identity_exhausted_",
         "record->snapshot.identity.kind != expected",
         "record->snapshot.identity.project_id != required_project_id",
-        "decode_handle(handle, borrowed_slot, borrowed_generation)",
+        "if (token_slot_for_address_locked(handle, borrowed_slot)) return false",
         "if (lease.live && lease.target == identity) lease.live = false",
+        "ForgedBorrowedToken",
+        "foreign_registry.resolve_item(item_handle, unchanged)",
+        "exhaustion.borrow(current) == nullptr",
+        "aligned_tokens",
+        "cross_registry_rejected",
+        "forged_token_rejected",
+        "lease_identity_checked",
+        "token_exhaustion_rejected",
         "replacement.generation == layer.identity.generation + 1",
         "wrong_kind_rejected",
         "cross_project_rejected",
         "foreign_rejected",
         "stale_rejected",
         "registry.fingerprint() == before_rejections",
+    ):
+        assert marker in source or marker in header or marker in native
+
+
+def test_invalidation_propagates_every_identity_relationship() -> None:
+    source = read(MODEL_SOURCE)
+    native = read(NATIVE_SELFTEST)
+    for marker in (
+        "if (snapshot.owner == identity) snapshot.owner = replacement",
+        "if (snapshot.related_item == identity)",
+        "snapshot.related_item = replacement",
+        "if (snapshot.parent_layer == identity)",
+        "snapshot.parent_layer = replacement",
+        "if (active_item_ == identity) active_item_ = replacement",
+        "if (active_project_ == identity) active_project_ = replacement",
+        "propagation.comp_from_item(new_item, linked_comp)",
+        "linked_comp.owner == new_item",
+        "linked_comp.related_item == new_item",
+        "propagation.item_from_comp(new_comp, linked_item)",
+        "propagation.layer_count(new_comp) == 3",
+        "linked_layer0.owner == new_comp",
+        "linked_layer1.parent_layer == new_layer0",
+        "propagation.first_child(new_project, linked_root)",
+        "propagation.fingerprint() == before_failed_invalidation",
+        "relationships_propagated",
     ):
         assert marker in source or marker in native
 
@@ -100,6 +145,29 @@ def test_aegp_traversal_returns_registry_borrowed_handles() -> None:
         "resolved.identity.project_id",
     ):
         assert marker in scene or marker in runtime
+
+
+def test_worker_selftest_traverses_published_suites_and_rejects_bad_handles() -> None:
+    compat = read(COMPAT_SELFTEST)
+    routing = read(CUSTOM_ROUTING)
+    for marker in (
+        'compat_acquire_suite("AEGP Item Suite", 14',
+        'compat_acquire_suite("AEGP Comp Suite", 25',
+        'compat_acquire_suite("AEGP Layer Suite", 14',
+        "item_suite->get_active_item(&item)",
+        "get_comp_from_item(item, &comp)",
+        "get_layer_count(comp, &layer_count)",
+        "get_layer_by_index(comp, index, &layer)",
+        "get_comp_from_item(comp, &unchanged_handle) != 0",
+        "get_layer_count(item, &unchanged_i32) != 0",
+        "get_comp_from_item(&forged, &unchanged_handle) != 0",
+        "get_comp_from_item(cross_registry_item, &unchanged_handle) != 0",
+        "get_layer_from_id(",
+        "unchanged_handle == handle_sentinel",
+        'L"--self-test-aegp-scene-registry-suites"',
+        "aegp_scene_registry_suites",
+    ):
+        assert marker in compat or marker in routing
 
 
 def test_native_selftest_is_a_release_build_target() -> None:

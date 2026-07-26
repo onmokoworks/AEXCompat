@@ -2,6 +2,7 @@
 #include "worker_parameter_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_aegp_scene.hpp"
+#include "worker_aegp_scene_model.hpp"
 #include "worker_aegp_scene_runtime.hpp"
 #include "worker_aegp_external_render_runtime.hpp"
 #include "worker_handle_runtime.hpp"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -143,6 +145,166 @@ bool verify_aegp_layer_source_item() {
        *g_hooks.item_type_calls == item_type_calls_before + 1;
   g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
   return ok;
+}
+
+bool verify_aegp_scene_registry_suites() {
+  if (!g_hooks.acquire_suite || !g_hooks.release_suite ||
+      !g_hooks.comp_idle_roundtrip_mode ||
+      !g_hooks.suite_leases_balanced)
+    return false;
+  using GetCompFromItem = int32_t (__cdecl*)(void*, void**);
+  using GetLayerCount = int32_t (__cdecl*)(void*, int32_t*);
+  using GetLayerByIndex = int32_t (__cdecl*)(void*, int32_t, void**);
+  using GetLayerIndex = int32_t (__cdecl*)(void*, int32_t*);
+  using GetLayerParentComp = int32_t (__cdecl*)(void*, void**);
+  using GetLayerFromId = int32_t (__cdecl*)(void*, int32_t, void**);
+  struct alignas(std::max_align_t) ForgedBorrowedToken {
+    uint64_t lease_identity{};
+  };
+
+  const bool saved_mode = g_aegp_comp_idle_roundtrip_mode;
+  g_aegp_comp_idle_roundtrip_mode = true;
+  const void* item_suite_raw = nullptr;
+  const void* comp_suite_raw = nullptr;
+  const void* layer_suite_raw = nullptr;
+  const bool item_acquired =
+      compat_acquire_suite("AEGP Item Suite", 14, &item_suite_raw) == 0;
+  const bool comp_acquired =
+      compat_acquire_suite("AEGP Comp Suite", 25, &comp_suite_raw) == 0;
+  const bool layer_acquired =
+      compat_acquire_suite("AEGP Layer Suite", 14, &layer_suite_raw) == 0;
+  bool ok = item_acquired && comp_acquired && layer_acquired &&
+      item_suite_raw == &g_aegp_item_suite &&
+      comp_suite_raw == g_aegp_comp_suite11.data() &&
+      layer_suite_raw == g_aegp_layer_suite8.data();
+
+  const auto* item_suite =
+      static_cast<const AegpItemSuite*>(item_suite_raw);
+  const auto* comp_slots = static_cast<void* const*>(comp_suite_raw);
+  const auto* layer_slots = static_cast<void* const*>(layer_suite_raw);
+  const auto get_comp_from_item = comp_slots
+      ? reinterpret_cast<GetCompFromItem>(comp_slots[0]) : nullptr;
+  const auto get_layer_count = layer_slots
+      ? reinterpret_cast<GetLayerCount>(layer_slots[0]) : nullptr;
+  const auto get_layer_by_index = layer_slots
+      ? reinterpret_cast<GetLayerByIndex>(layer_slots[1]) : nullptr;
+  const auto get_layer_index = layer_slots
+      ? reinterpret_cast<GetLayerIndex>(layer_slots[3]) : nullptr;
+  const auto get_layer_parent_comp = layer_slots
+      ? reinterpret_cast<GetLayerParentComp>(layer_slots[6]) : nullptr;
+  const auto get_layer_from_id = layer_slots
+      ? reinterpret_cast<GetLayerFromId>(layer_slots[45]) : nullptr;
+  ok = ok && item_suite && item_suite->get_active_item &&
+      item_suite->get_item_type && get_comp_from_item &&
+      get_layer_count && get_layer_by_index && get_layer_index &&
+      get_layer_parent_comp && get_layer_from_id;
+
+  void* item = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1110));
+  void* comp = reinterpret_cast<void*>(static_cast<uintptr_t>(0x2220));
+  int16_t item_type = -1;
+  int32_t layer_count = -1;
+  if (ok) {
+    ok = item_suite->get_active_item(&item) == 0 && item &&
+        reinterpret_cast<uintptr_t>(item) % alignof(std::max_align_t) == 0 &&
+        item_suite->get_item_type(item, &item_type) == 0 &&
+        item_type == 2 &&
+        get_comp_from_item(item, &comp) == 0 && comp &&
+        reinterpret_cast<uintptr_t>(comp) % alignof(std::max_align_t) == 0 &&
+        get_layer_count(comp, &layer_count) == 0 && layer_count == 3;
+  }
+  std::array<void*, 3> traversed_layers{};
+  for (int32_t index = 0; ok && index < layer_count; ++index) {
+    void* layer = reinterpret_cast<void*>(static_cast<uintptr_t>(0x3330));
+    int32_t observed_index = -1;
+    void* parent_comp =
+        reinterpret_cast<void*>(static_cast<uintptr_t>(0x4440));
+    ok = get_layer_by_index(comp, index, &layer) == 0 && layer &&
+        reinterpret_cast<uintptr_t>(layer) % alignof(std::max_align_t) == 0 &&
+        get_layer_index(layer, &observed_index) == 0 &&
+        observed_index == index &&
+        get_layer_parent_comp(layer, &parent_comp) == 0 &&
+        parent_comp == comp;
+    traversed_layers[static_cast<std::size_t>(index)] = layer;
+  }
+  ok = ok && traversed_layers[0] && traversed_layers[1] &&
+      traversed_layers[2] && traversed_layers[0] != traversed_layers[1] &&
+      traversed_layers[1] != traversed_layers[2];
+
+  void* unchanged_handle =
+      reinterpret_cast<void*>(static_cast<uintptr_t>(0x5550));
+  int32_t unchanged_i32 = 0x12345678;
+  const void* handle_sentinel = unchanged_handle;
+  const int32_t i32_sentinel = unchanged_i32;
+  ok = ok && get_comp_from_item(comp, &unchanged_handle) != 0 &&
+      unchanged_handle == handle_sentinel &&
+      get_layer_count(item, &unchanged_i32) != 0 &&
+      unchanged_i32 == i32_sentinel &&
+      get_layer_index(comp, &unchanged_i32) != 0 &&
+      unchanged_i32 == i32_sentinel;
+
+  auto& registry = scene_model::registry();
+  const auto observed_lease_identity =
+      *static_cast<const uint64_t*>(item);
+  ForgedBorrowedToken forged{observed_lease_identity};
+  unchanged_handle =
+      reinterpret_cast<void*>(static_cast<uintptr_t>(0x5550));
+  ok = ok && observed_lease_identity != 0 &&
+      get_comp_from_item(&forged, &unchanged_handle) != 0 &&
+      unchanged_handle == handle_sentinel;
+
+  alignas(std::max_align_t) std::array<std::byte, 64> foreign{};
+  unchanged_handle =
+      reinterpret_cast<void*>(static_cast<uintptr_t>(0x5550));
+  ok = ok && get_comp_from_item(foreign.data(), &unchanged_handle) != 0 &&
+      unchanged_handle == handle_sentinel;
+
+  int local_item{};
+  int local_comp{};
+  std::array<int, 3> local_layers{};
+  std::array<void*, 3> local_layer_handles{{
+      &local_layers[0], &local_layers[1], &local_layers[2]}};
+  scene_model::Registry other_registry;
+  ok = ok && other_registry.initialize_fixture(
+      &local_item, &local_comp, local_layer_handles.data(),
+      local_layer_handles.size());
+  void* cross_registry_item =
+      other_registry.borrow(other_registry.active_item());
+  unchanged_handle =
+      reinterpret_cast<void*>(static_cast<uintptr_t>(0x5550));
+  ok = ok && cross_registry_item &&
+      get_comp_from_item(cross_registry_item, &unchanged_handle) != 0 &&
+      unchanged_handle == handle_sentinel;
+
+  const scene_model::Identity project_b{
+      2, 2, 1, scene_model::ObjectKind::project, {}};
+  scene_model::ObjectSnapshot root_b{};
+  scene_model::ObjectSnapshot item_b{};
+  scene_model::ObjectSnapshot comp_b{};
+  scene_model::ObjectSnapshot layer_b{};
+  ok = ok && registry.first_child(project_b, root_b) &&
+      registry.first_child(root_b.identity, item_b) &&
+      registry.comp_from_item(item_b.identity, comp_b) &&
+      registry.layer_by_index(comp_b.identity, 0, layer_b) &&
+      layer_b.identity.object_id <= INT32_MAX;
+  unchanged_handle =
+      reinterpret_cast<void*>(static_cast<uintptr_t>(0x5550));
+  ok = ok && get_layer_from_id(
+      comp, static_cast<int32_t>(layer_b.identity.object_id),
+      &unchanged_handle) != 0 &&
+      unchanged_handle == handle_sentinel;
+
+  bool released = true;
+  if (layer_acquired)
+    released = compat_release_suite("AEGP Layer Suite", 14) == 0 &&
+        released;
+  if (comp_acquired)
+    released = compat_release_suite("AEGP Comp Suite", 25) == 0 &&
+        released;
+  if (item_acquired)
+    released = compat_release_suite("AEGP Item Suite", 14) == 0 &&
+        released;
+  g_aegp_comp_idle_roundtrip_mode = saved_mode;
+  return ok && released && g_hooks.suite_leases_balanced();
 }
 
 bool verify_camera_case(bool smart_case) {
