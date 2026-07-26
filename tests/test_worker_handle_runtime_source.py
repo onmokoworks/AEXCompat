@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import source_owners
 
@@ -16,7 +17,7 @@ def test_pf_handle_ownership_is_bounded_and_hidden_behind_snapshots():
     for marker in (
         "kMaxHandleBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL",
         "kObservedLargeHandleBytes = 333294848ULL",
-        "kMaxHandleCount = 1024",
+        "kMaxHandleCount = 16384",
         "Statistics statistics()",
         "bool host_handle_is_live(const void* handle)",
         "void record_automatic_pre_render_disposal()",
@@ -41,11 +42,26 @@ def test_pf_handle_ownership_is_bounded_and_hidden_behind_snapshots():
     for marker in (
         "new_handle(kObservedLargeHandleBytes)",
         "large_data[kObservedLargeHandleBytes - 1]",
+        "regression_handles.reserve(1025)",
         "resized != stable_handle",
         "replacement[31] != 0x78",
         "handle_lifetimes_balanced()",
     ):
         assert marker in SELFTEST
+    for schema_name in (
+        "parameterized_smartfx_render_report.schema.json",
+        "smartfx_suite_fault_report.schema.json",
+    ):
+        schema = json.loads((ROOT / "contracts" / "aex" / schema_name).read_text())
+        properties = schema["$defs"]["run"]["properties"]
+        for field in (
+            "handles_created",
+            "handles_disposed",
+            "handle_locks",
+            "handle_unlocks",
+        ):
+            assert properties[field]["maximum"] == 4294967295
+        assert properties["live_handle_count"]["maximum"] == 16384
 
 
 def test_aegp_memory_handle_family_keeps_suite_abi_and_fail_closed_limits():

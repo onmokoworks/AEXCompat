@@ -30,7 +30,7 @@ use crate::x64::{record_suite_request, record_unsupported_suite_call, utility_su
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
 const PAGE_SIZE: usize = 4096;
 const MAX_PF_HANDLE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_PF_HANDLE_COUNT: usize = 1024;
+const MAX_PF_HANDLE_COUNT: usize = 16_384;
 const PROT_READ: c_int = 0x1;
 const PROT_WRITE: c_int = 0x2;
 const PROT_EXEC: c_int = 0x4;
@@ -1885,6 +1885,23 @@ mod tests {
         unsafe {
             dispose_handle(released_budget_handle, 0, 0, 0, 0, 0);
         }
+
+        let mut regression_handles = Vec::with_capacity(1025);
+        for _ in 0..1025 {
+            let handle = unsafe { new_handle(0, 0, 0, 0, 0, 0) };
+            assert_ne!(
+                handle, 0,
+                "real AEX workloads must be allowed to exceed the old 1024-handle cap"
+            );
+            regression_handles.push(handle);
+        }
+        for handle in regression_handles {
+            unsafe {
+                dispose_handle(handle, 0, 0, 0, 0, 0);
+            }
+        }
+        assert!(state.handles.is_empty());
+        assert!(state.callback_error.is_none());
 
         assert_eq!(unsafe { lock_handle(0xdead_beef, 0, 0, 0, 0, 0) }, 0);
         assert!(

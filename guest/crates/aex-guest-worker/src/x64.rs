@@ -53,7 +53,7 @@ const HANDLE_DATA_BASE: u64 = DATA_BASE + 0x400_0000;
 const PF_HANDLE_DATA_BASE: u64 = 0x0000_0001_0000_0000;
 const PF_HANDLE_DATA_END: u64 = PF_HANDLE_DATA_BASE + 0x2_0000_0000;
 const MAX_PF_HANDLE_SIZE: u64 = 0x8000_0000;
-const MAX_PF_HANDLE_COUNT: usize = 1024;
+const MAX_PF_HANDLE_COUNT: usize = 16_384;
 // A nonzero Unicorn instruction limit enables instruction counting across the
 // whole run, which is prohibitively expensive for image kernels. The wall-clock
 // timeout and return-sentinel check still bound and validate guest execution.
@@ -4739,7 +4739,24 @@ mod tests {
         assert!(validate_pf_handle_budget(&state, observed_size, Some(&existing)).is_ok());
 
         state.handles.clear();
-        for index in 0..MAX_PF_HANDLE_COUNT as u64 {
+        for index in 0..1025u64 {
+            state.handles.insert(
+                PF_HANDLE_DATA_BASE + index * PAGE_SIZE,
+                GuestHandle {
+                    data: 0,
+                    size: 0,
+                    locks: 0,
+                    handle_region: 0,
+                    data_region: 0,
+                    data_mapped_size: PAGE_SIZE,
+                },
+            );
+        }
+        assert!(
+            validate_pf_handle_budget(&state, 0, None).is_ok(),
+            "real AEX workloads must be allowed to exceed the old 1024-handle cap"
+        );
+        for index in 1025..MAX_PF_HANDLE_COUNT as u64 {
             state.handles.insert(
                 PF_HANDLE_DATA_BASE + index * PAGE_SIZE,
                 GuestHandle {
