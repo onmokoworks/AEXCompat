@@ -84,6 +84,30 @@ def test_exclusion_file_is_bound_to_expected_digest(tmp_path):
         SELECT.load_excluded_shas(source, "0" * 64)
 
 
+def test_bound_json_hashes_and_parses_one_authenticated_buffer(tmp_path):
+    source = tmp_path / "inventory.json"
+    source.write_text('{"schema_version":1}', encoding="utf-8")
+    expected = SELECT.sha256_file(source)
+
+    value, actual = SELECT.load_bound_json(source, expected, "inventory")
+    assert value == {"schema_version": 1}
+    assert actual == expected
+    with pytest.raises(SELECT.SweepError, match="differs from expected identity"):
+        SELECT.load_bound_json(source, "0" * 64, "inventory")
+
+
+def test_bound_json_rejects_duplicate_keys(tmp_path):
+    source = tmp_path / "inventory.json"
+    source.write_text('{"schema_version":1,"schema_version":1}', encoding="utf-8")
+
+    with pytest.raises(SELECT.SweepError, match="duplicate JSON key"):
+        SELECT.load_bound_json(
+            source,
+            SELECT.sha256_file(source),
+            "inventory",
+        )
+
+
 def test_selection_rejects_insufficient_registration_abi():
     inventory = {
         "entries": [
@@ -100,9 +124,12 @@ def test_eligibility_excludes_audio_prefix_and_non_product_entries():
     audio = entry("Aud_example", "1" * 64, 10, "v1")
     fixture = entry("fixture", "2" * 64, 10, "v1")
     fixture["fixture_hint"] = True
+    missing_root_category = entry("missing-root", "3" * 64, 10, "v1")
+    del missing_root_category["root_category"]
 
     assert SELECT.is_eligible(audio) is False
     assert SELECT.is_eligible(fixture) is False
+    assert SELECT.is_eligible(missing_root_category) is False
 
 
 def test_ambiguous_registration_exports_fail_closed():

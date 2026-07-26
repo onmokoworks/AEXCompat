@@ -13,7 +13,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sweep_macos_x64_aex import (  # noqa: E402
     SweepError,
-    load_json_strict,
     sha256_file,
     validate_source_pair,
 )
@@ -24,6 +23,39 @@ REGISTRATION_EXPORTS = {
     "v1": "PluginDataEntryFunction",
     "v2": "PluginDataEntryFunction2",
 }
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise SweepError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def load_bound_json(
+    path: Path,
+    expected_sha256: str,
+    label: str,
+) -> tuple[dict[str, object], str]:
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise SweepError(f"read {label} {path}: {error}") from error
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if actual_sha256 != expected_sha256.lower():
+        raise SweepError(f"{label} SHA-256 differs from expected identity")
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise SweepError(f"parse {label} {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise SweepError(f"{label} root must be an object")
+    return value, actual_sha256
 
 
 def load_excluded_shas(path: Path, expected_sha256: str) -> tuple[set[str], str]:
@@ -81,6 +113,7 @@ def is_eligible(entry: dict[str, object]) -> bool:
         or entry.get("fixture_hint") is not False
         or entry.get("backup_hint") is not False
         or entry.get("source_category") != "adobe_installed"
+        or not isinstance(entry.get("root_category"), str)
         or not isinstance(canonical_path, str)
         or "after effects 2025" not in canonical_path.casefold()
         or not isinstance(relative_path, str)
@@ -195,14 +228,18 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
     inventory_path = args.inventory.resolve(strict=True)
     summary_path = args.windows_summary.resolve(strict=True)
     excluded_path = args.exclude_sha_file.resolve(strict=True)
-    inventory_sha = sha256_file(inventory_path)
-    summary_sha = sha256_file(summary_path)
-    if inventory_sha != args.expected_inventory_sha256.lower():
-        raise SweepError("Windows inventory SHA-256 differs from expected identity")
-    if summary_sha != args.expected_summary_sha256.lower():
-        raise SweepError("Windows summary SHA-256 differs from expected identity")
-    inventory = load_json_strict(inventory_path)
-    windows_summary = load_json_strict(summary_path)
+    inventory, inventory_sha = load_bound_json(
+        inventory_path,
+        args.expected_inventory_sha256,
+        "Windows inventory",
+    )
+    windows_summary, summary_sha = load_bound_json(
+        summary_path,
+        args.expected_summary_sha256,
+        "Windows summary",
+    )
+    if inventory.get("schema_version") != 1:
+        raise SweepError("Windows inventory schema_version must be 1")
     validate_source_pair(inventory, windows_summary, inventory_sha)
     excluded, excluded_sha = load_excluded_shas(
         excluded_path,
