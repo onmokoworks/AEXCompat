@@ -1783,6 +1783,7 @@ struct GuestState {
     pre_checkout_requests: Vec<[i32; 4]>,
     checkout_pixels_calls: u32,
     checkout_output_calls: u32,
+    input_parameter_definition: u64,
     parameter_definitions: Vec<u64>,
     next_handle_data: u64,
     next_pf_handle_data: u64,
@@ -3972,8 +3973,21 @@ impl GuestEngine<'static> {
 
     pub fn configure_parameter_definitions(
         &mut self,
+        input_definition: u64,
         definitions: Vec<u64>,
     ) -> Result<(), GuestError> {
+        if input_definition == 0 {
+            return Err(GuestError::Callback(
+                "active input parameter definition is null".into(),
+            ));
+        }
+        let mut input_bytes = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        self.unicorn
+            .mem_read(input_definition, &mut input_bytes)
+            .map_err(|error| GuestError::Unicorn {
+                operation: "read active input parameter definition",
+                detail: error.to_string(),
+            })?;
         if definitions.len() != self.unicorn.get_data().params.len() {
             return Err(GuestError::Callback(
                 "active parameter definition count differs from setup".into(),
@@ -4005,6 +4019,7 @@ impl GuestEngine<'static> {
                     .copy_from_slice(&color);
             }
         }
+        state.input_parameter_definition = input_definition;
         state.parameter_definitions = definitions;
         Ok(())
     }
@@ -6702,11 +6717,16 @@ fn emulate_checkout_param(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
             .reg_read(RegisterX86::RDX)
             .map_err(|error| format!("checkout-param index: {error}"))?
             as usize;
-        let source = index
-            .checked_sub(1)
-            .and_then(|offset| unicorn.get_data().parameter_definitions.get(offset))
-            .copied()
-            .ok_or_else(|| format!("checkout-param index is outside definitions: {index}"))?;
+        let source = if index == 0 {
+            Some(unicorn.get_data().input_parameter_definition)
+        } else {
+            index
+                .checked_sub(1)
+                .and_then(|offset| unicorn.get_data().parameter_definitions.get(offset))
+                .copied()
+        }
+        .filter(|source| *source != 0)
+        .ok_or_else(|| format!("checkout-param index is outside definitions: {index}"))?;
         let rsp = unicorn
             .reg_read(RegisterX86::RSP)
             .map_err(|error| format!("checkout-param stack: {error}"))?;
@@ -7425,6 +7445,7 @@ mod tests {
             HOST_FILL8,
             HOST_NEW_WORLD8,
             HOST_GET_CALLBACK_ADDR,
+            HOST_CHECKOUT_PARAM,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -7538,6 +7559,13 @@ mod tests {
                 HOST_POINT_PARAM_VALUE,
                 HOST_POINT_PARAM_VALUE,
                 emulate_point_param_value,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_CHECKOUT_PARAM,
+                HOST_CHECKOUT_PARAM,
+                emulate_checkout_param,
             )
             .unwrap();
         unicorn
@@ -8688,7 +8716,7 @@ mod tests {
         let definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
         engine.write(definition, &captured).unwrap();
         engine
-            .configure_parameter_definitions(vec![definition])
+            .configure_parameter_definitions(definition, vec![definition])
             .unwrap();
         let definition_copy = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
         engine.write(definition_copy, &captured).unwrap();
@@ -8750,6 +8778,47 @@ mod tests {
                 .call_win64(HOST_COLOR_PARAM_VALUE, [0, definition, output, 0, 0, 0])
                 .unwrap(),
             516
+        );
+    }
+
+    #[test]
+    fn classic_checkout_param_maps_sdk_index_zero_to_the_input_layer_definition() {
+        let mut engine = test_engine(&[0xc3]);
+        let input_definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+        let mut input = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        input[abi::PARAM_U_OFFSET + abi::LAYER_DATA_OFFSET
+            ..abi::PARAM_U_OFFSET + abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&0x1234_5678u64.to_le_bytes());
+        input[abi::PARAM_U_OFFSET + abi::LAYER_WIDTH_OFFSET
+            ..abi::PARAM_U_OFFSET + abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&1920i32.to_le_bytes());
+        engine.write(input_definition, &input).unwrap();
+        engine
+            .configure_parameter_definitions(input_definition, Vec::new())
+            .unwrap();
+
+        let checkout = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_CHECKOUT_PARAM, [1, 0, 0, 1, 1, checkout])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(checkout, abi::PF_PARAM_DEF_SIZE)
+                .unwrap(),
+            input
+        );
+
+        let error = engine
+            .call_win64(HOST_CHECKOUT_PARAM, [1, 1, 0, 1, 1, checkout])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("checkout-param index is outside definitions: 1")
         );
     }
 
