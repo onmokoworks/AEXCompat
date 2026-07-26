@@ -1634,7 +1634,6 @@ impl ClassicHost {
         census_enabled: bool,
         trace_enabled: bool,
     ) -> Result<(i32, Option<GuestCensus>, Vec<ExecutionTrace>), ClassicError> {
-        let mut traces = Vec::new();
         let input_world = input_param + abi::PARAM_U_OFFSET as u64;
         self.engine.configure_smart_render(
             input_world,
@@ -1643,7 +1642,30 @@ impl ClassicHost {
             height,
             format.pf_pixel_format(),
         );
+        let result = self.render_smart_configured(
+            params,
+            width,
+            height,
+            format,
+            output_request,
+            census_enabled,
+            trace_enabled,
+        );
+        self.engine.finish_smart_checkout_scope();
+        result
+    }
 
+    fn render_smart_configured(
+        &mut self,
+        params: u64,
+        width: u32,
+        height: u32,
+        format: FramePixelFormat,
+        output_request: [i32; 4],
+        census_enabled: bool,
+        trace_enabled: bool,
+    ) -> Result<(i32, Option<GuestCensus>, Vec<ExecutionTrace>), ClassicError> {
+        let mut traces = Vec::new();
         let pre_input = self.engine.allocate(abi::PF_PRE_RENDER_INPUT_SIZE, 8)?;
         let pre_output = self.engine.allocate(abi::PF_PRE_RENDER_OUTPUT_SIZE, 8)?;
         let pre_callbacks = self.engine.allocate(abi::PF_PRE_RENDER_CALLBACKS_SIZE, 8)?;
