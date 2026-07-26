@@ -56,12 +56,33 @@ const HOST_PLUGIN_DATA_V1: u64 = STUB_BASE + 0x80200;
 const HOST_NEW_WORLD: u64 = STUB_BASE + 0x80210;
 const HOST_DISPOSE_WORLD: u64 = STUB_BASE + 0x80220;
 const HOST_GET_WORLD_PIXEL_FORMAT: u64 = STUB_BASE + 0x80230;
+const HOST_PF_ANSI_ATAN: u64 = STUB_BASE + 0x80240;
+const HOST_PF_ANSI_ATAN2: u64 = STUB_BASE + 0x80250;
+const HOST_PF_ANSI_CEIL: u64 = STUB_BASE + 0x80260;
+const HOST_PF_ANSI_COS: u64 = STUB_BASE + 0x80270;
+const HOST_PF_ANSI_EXP: u64 = STUB_BASE + 0x80280;
+const HOST_PF_ANSI_FABS: u64 = STUB_BASE + 0x80290;
+const HOST_PF_ANSI_FLOOR: u64 = STUB_BASE + 0x802a0;
+const HOST_PF_ANSI_FMOD: u64 = STUB_BASE + 0x802b0;
+const HOST_PF_ANSI_HYPOT: u64 = STUB_BASE + 0x802c0;
+const HOST_PF_ANSI_LOG: u64 = STUB_BASE + 0x802d0;
+const HOST_PF_ANSI_LOG10: u64 = STUB_BASE + 0x802e0;
+const HOST_PF_ANSI_POW: u64 = STUB_BASE + 0x802f0;
+const HOST_PF_ANSI_SIN: u64 = STUB_BASE + 0x80300;
+const HOST_PF_ANSI_SQRT: u64 = STUB_BASE + 0x80310;
+const HOST_PF_ANSI_TAN: u64 = STUB_BASE + 0x80320;
+const HOST_PF_ANSI_SPRINTF: u64 = STUB_BASE + 0x80330;
+const HOST_PF_ANSI_STRCPY: u64 = STUB_BASE + 0x80340;
+const HOST_PF_ANSI_ASIN: u64 = STUB_BASE + 0x80350;
+const HOST_PF_ANSI_ACOS: u64 = STUB_BASE + 0x80360;
+const HOST_PF_ANSI_STRCPY_BOUNDED: u64 = STUB_BASE + 0x80370;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
 const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
 const HOST_POINT_PARAM_SUITE: u64 = STUB_BASE + 0x81300;
 const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81400;
 const HOST_WORLD_SUITE: u64 = STUB_BASE + 0x81500;
+const HOST_PF_ANSI_SUITE_V2: u64 = STUB_BASE + 0x81600;
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
 const HOST_ITERATE8_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x88000;
@@ -2737,6 +2758,7 @@ impl GuestEngine<'static> {
             unicorn.mem_write(HOST_WORLD_SUITE, &world_suite),
         )?;
         install_iterate8_suites(&mut unicorn)?;
+        install_pf_ansi_suite_v2(&mut unicorn)?;
         uc(
             "write PF ColorParamSuite",
             unicorn.mem_write(
@@ -2782,6 +2804,26 @@ impl GuestEngine<'static> {
             (HOST_NEW_WORLD, "new_world"),
             (HOST_DISPOSE_WORLD, "dispose_world"),
             (HOST_GET_WORLD_PIXEL_FORMAT, "get_world_pixel_format"),
+            (HOST_PF_ANSI_ATAN, "pf_ansi_atan"),
+            (HOST_PF_ANSI_ATAN2, "pf_ansi_atan2"),
+            (HOST_PF_ANSI_CEIL, "pf_ansi_ceil"),
+            (HOST_PF_ANSI_COS, "pf_ansi_cos"),
+            (HOST_PF_ANSI_EXP, "pf_ansi_exp"),
+            (HOST_PF_ANSI_FABS, "pf_ansi_fabs"),
+            (HOST_PF_ANSI_FLOOR, "pf_ansi_floor"),
+            (HOST_PF_ANSI_FMOD, "pf_ansi_fmod"),
+            (HOST_PF_ANSI_HYPOT, "pf_ansi_hypot"),
+            (HOST_PF_ANSI_LOG, "pf_ansi_log"),
+            (HOST_PF_ANSI_LOG10, "pf_ansi_log10"),
+            (HOST_PF_ANSI_POW, "pf_ansi_pow"),
+            (HOST_PF_ANSI_SIN, "pf_ansi_sin"),
+            (HOST_PF_ANSI_SQRT, "pf_ansi_sqrt"),
+            (HOST_PF_ANSI_TAN, "pf_ansi_tan"),
+            (HOST_PF_ANSI_SPRINTF, "pf_ansi_sprintf"),
+            (HOST_PF_ANSI_STRCPY, "pf_ansi_strcpy"),
+            (HOST_PF_ANSI_ASIN, "pf_ansi_asin"),
+            (HOST_PF_ANSI_ACOS, "pf_ansi_acos"),
+            (HOST_PF_ANSI_STRCPY_BOUNDED, "pf_ansi_strcpy_bounded"),
             (HOST_PLUGIN_DATA_V2, "plugin_data_v2"),
             (HOST_PLUGIN_DATA_V1, "plugin_data_v1"),
             (HOST_ITERATE8, "iterate8"),
@@ -4378,19 +4420,27 @@ fn emulate_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
         let source = unicorn
             .reg_read(RegisterX86::RDX)
             .map_err(|error| format!("strcpy source: {error}"))?;
+        if destination == 0 || source == 0 {
+            return Ok(0);
+        }
+        let mut output = Vec::new();
         for index in 0..4096u64 {
             let mut byte = [0u8; 1];
+            let source_address = source
+                .checked_add(index)
+                .ok_or_else(|| "strcpy source range overflow".to_string())?;
             unicorn
-                .mem_read(source + index, &mut byte)
+                .mem_read(source_address, &mut byte)
                 .map_err(|error| format!("strcpy source read: {error}"))?;
-            unicorn
-                .mem_write(destination + index, &byte)
-                .map_err(|error| format!("strcpy destination write: {error}"))?;
+            output.push(byte[0]);
             if byte[0] == 0 {
+                unicorn
+                    .mem_write(destination, &output)
+                    .map_err(|error| format!("strcpy destination write: {error}"))?;
                 return Ok(destination);
             }
         }
-        Err("strcpy source exceeds 4096 bytes".to_string())
+        Ok(0)
     })();
     match result {
         Ok(destination) => {
@@ -4398,6 +4448,58 @@ fn emulate_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         Err(error) => {
             unicorn.get_data_mut().callback_error = Some(error);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_ansi_strcpy_bounded(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| {
+        let destination = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("PF ANSI bounded strcpy destination: {error}"))?;
+        let destination_size = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("PF ANSI bounded strcpy size: {error}"))?;
+        let source = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("PF ANSI bounded strcpy source: {error}"))?;
+        if destination == 0 || source == 0 || destination_size == 0 {
+            return Ok(4);
+        }
+        let mut source_bytes = Vec::new();
+        for index in 0..4096u64 {
+            let mut byte = [0u8; 1];
+            let source_address = source
+                .checked_add(index)
+                .ok_or_else(|| "PF ANSI bounded strcpy source range overflow".to_string())?;
+            unicorn
+                .mem_read(source_address, &mut byte)
+                .map_err(|error| format!("PF ANSI bounded strcpy source read: {error}"))?;
+            if byte[0] == 0 {
+                let copied = (source_bytes.len() as u64).min(destination_size - 1) as usize;
+                source_bytes.truncate(copied);
+                source_bytes.push(0);
+                unicorn
+                    .mem_write(destination, &source_bytes)
+                    .map_err(|error| {
+                        format!("PF ANSI bounded strcpy destination write: {error}")
+                    })?;
+                return Ok(0);
+            }
+            source_bytes.push(byte[0]);
+        }
+        Ok(4)
+    })();
+    match result {
+        Ok(error) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, error);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
             let _ = unicorn.emu_stop();
         }
     }
@@ -4898,6 +5000,300 @@ fn install_aegp_utility_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<
     Ok(())
 }
 
+fn ansi_finite_unary(value: f64, operation: fn(f64) -> f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    let result = operation(value);
+    if result.is_finite() { result } else { 0.0 }
+}
+
+fn ansi_finite_binary(left: f64, right: f64, operation: fn(f64, f64) -> f64) -> f64 {
+    if !left.is_finite() || !right.is_finite() {
+        return 0.0;
+    }
+    let result = operation(left, right);
+    if result.is_finite() { result } else { 0.0 }
+}
+
+fn ansi_atan(value: f64) -> f64 {
+    ansi_finite_unary(value, f64::atan)
+}
+
+fn ansi_ceil(value: f64) -> f64 {
+    ansi_finite_unary(value, f64::ceil)
+}
+
+fn ansi_cos(value: f64) -> f64 {
+    ansi_finite_unary(value, f64::cos)
+}
+
+fn ansi_exp(value: f64) -> f64 {
+    ansi_finite_unary(value, f64::exp)
+}
+
+fn ansi_fabs(value: f64) -> f64 {
+    ansi_finite_unary(value, f64::abs)
+}
+
+fn ansi_floor(value: f64) -> f64 {
+    ansi_finite_unary(value, f64::floor)
+}
+
+fn ansi_log(value: f64) -> f64 {
+    if value > 0.0 {
+        ansi_finite_unary(value, f64::ln)
+    } else {
+        0.0
+    }
+}
+
+fn ansi_log10(value: f64) -> f64 {
+    if value > 0.0 {
+        ansi_finite_unary(value, f64::log10)
+    } else {
+        0.0
+    }
+}
+
+fn ansi_sin(value: f64) -> f64 {
+    ansi_finite_unary(value, f64::sin)
+}
+
+fn ansi_sqrt(value: f64) -> f64 {
+    if value >= 0.0 {
+        ansi_finite_unary(value, f64::sqrt)
+    } else {
+        0.0
+    }
+}
+
+fn ansi_tan(value: f64) -> f64 {
+    ansi_finite_unary(value, f64::tan)
+}
+
+fn ansi_asin(value: f64) -> f64 {
+    if (-1.0..=1.0).contains(&value) {
+        ansi_finite_unary(value, f64::asin)
+    } else {
+        0.0
+    }
+}
+
+fn ansi_acos(value: f64) -> f64 {
+    if (-1.0..=1.0).contains(&value) {
+        ansi_finite_unary(value, f64::acos)
+    } else {
+        0.0
+    }
+}
+
+fn ansi_atan2(left: f64, right: f64) -> f64 {
+    ansi_finite_binary(left, right, f64::atan2)
+}
+
+fn ansi_fmod(left: f64, right: f64) -> f64 {
+    if right == 0.0 {
+        0.0
+    } else {
+        ansi_finite_binary(left, right, |value, divisor| value % divisor)
+    }
+}
+
+fn ansi_hypot(left: f64, right: f64) -> f64 {
+    ansi_finite_binary(left, right, f64::hypot)
+}
+
+fn ansi_pow(left: f64, right: f64) -> f64 {
+    ansi_finite_binary(left, right, f64::powf)
+}
+
+fn read_ansi_xmm_f64(
+    unicorn: &Unicorn<'_, GuestState>,
+    register: RegisterX86,
+) -> Result<f64, String> {
+    let bytes = unicorn
+        .reg_read_long(register)
+        .map_err(|error| format!("PF ANSI XMM read: {error}"))?;
+    let bits = bytes
+        .get(..8)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_le_bytes)
+        .ok_or_else(|| "PF ANSI XMM register is shorter than 8 bytes".to_string())?;
+    Ok(f64::from_bits(bits))
+}
+
+fn write_ansi_xmm_f64(
+    unicorn: &Unicorn<'_, GuestState>,
+    register: RegisterX86,
+    value: f64,
+) -> Result<(), String> {
+    let mut bytes = unicorn
+        .reg_read_long(register)
+        .map_err(|error| format!("PF ANSI XMM preserve read: {error}"))?;
+    let lane = bytes
+        .get_mut(..8)
+        .ok_or_else(|| "PF ANSI XMM register is shorter than 8 bytes".to_string())?;
+    lane.copy_from_slice(&value.to_le_bytes());
+    unicorn
+        .reg_write_long(register, &bytes)
+        .map_err(|error| format!("PF ANSI XMM write: {error}"))
+}
+
+fn emulate_ansi_numeric_callback(unicorn: &mut Unicorn<'_, GuestState>, address: u64, _: u32) {
+    let result = (|| {
+        let left = read_ansi_xmm_f64(unicorn, RegisterX86::XMM0)?;
+        let output = match address {
+            HOST_PF_ANSI_ATAN => ansi_atan(left),
+            HOST_PF_ANSI_CEIL => ansi_ceil(left),
+            HOST_PF_ANSI_COS => ansi_cos(left),
+            HOST_PF_ANSI_EXP => ansi_exp(left),
+            HOST_PF_ANSI_FABS => ansi_fabs(left),
+            HOST_PF_ANSI_FLOOR => ansi_floor(left),
+            HOST_PF_ANSI_LOG => ansi_log(left),
+            HOST_PF_ANSI_LOG10 => ansi_log10(left),
+            HOST_PF_ANSI_SIN => ansi_sin(left),
+            HOST_PF_ANSI_SQRT => ansi_sqrt(left),
+            HOST_PF_ANSI_TAN => ansi_tan(left),
+            HOST_PF_ANSI_ASIN => ansi_asin(left),
+            HOST_PF_ANSI_ACOS => ansi_acos(left),
+            HOST_PF_ANSI_ATAN2 | HOST_PF_ANSI_FMOD | HOST_PF_ANSI_HYPOT | HOST_PF_ANSI_POW => {
+                let right = read_ansi_xmm_f64(unicorn, RegisterX86::XMM1)?;
+                match address {
+                    HOST_PF_ANSI_ATAN2 => ansi_atan2(left, right),
+                    HOST_PF_ANSI_FMOD => ansi_fmod(left, right),
+                    HOST_PF_ANSI_HYPOT => ansi_hypot(left, right),
+                    HOST_PF_ANSI_POW => ansi_pow(left, right),
+                    _ => unreachable!(),
+                }
+            }
+            _ => return Ok(()),
+        };
+        write_ansi_xmm_f64(unicorn, RegisterX86::XMM0, output)
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
+    };
+}
+
+fn install_pf_ansi_suite_v2(unicorn: &mut Unicorn<'static, GuestState>) -> Result<(), GuestError> {
+    for address in [
+        HOST_PF_ANSI_ATAN,
+        HOST_PF_ANSI_ATAN2,
+        HOST_PF_ANSI_CEIL,
+        HOST_PF_ANSI_COS,
+        HOST_PF_ANSI_EXP,
+        HOST_PF_ANSI_FABS,
+        HOST_PF_ANSI_FLOOR,
+        HOST_PF_ANSI_FMOD,
+        HOST_PF_ANSI_HYPOT,
+        HOST_PF_ANSI_LOG,
+        HOST_PF_ANSI_LOG10,
+        HOST_PF_ANSI_POW,
+        HOST_PF_ANSI_SIN,
+        HOST_PF_ANSI_SQRT,
+        HOST_PF_ANSI_TAN,
+        HOST_PF_ANSI_ASIN,
+        HOST_PF_ANSI_ACOS,
+    ] {
+        uc(
+            "write PF ANSI numeric callback",
+            unicorn.mem_write(address, &[0xc3]),
+        )?;
+    }
+    uc(
+        "install PF ANSI numeric callbacks 0 through 14",
+        unicorn.add_code_hook(
+            HOST_PF_ANSI_ATAN,
+            HOST_PF_ANSI_TAN,
+            emulate_ansi_numeric_callback,
+        ),
+    )?;
+    uc(
+        "install PF ANSI numeric callbacks 17 through 18",
+        unicorn.add_code_hook(
+            HOST_PF_ANSI_ASIN,
+            HOST_PF_ANSI_ACOS,
+            emulate_ansi_numeric_callback,
+        ),
+    )?;
+    for (operation, address) in [
+        ("write PF ANSI sprintf callback", HOST_PF_ANSI_SPRINTF),
+        ("write PF ANSI strcpy callback", HOST_PF_ANSI_STRCPY),
+        (
+            "write PF ANSI bounded strcpy callback",
+            HOST_PF_ANSI_STRCPY_BOUNDED,
+        ),
+    ] {
+        uc(operation, unicorn.mem_write(address, &[0xc3]))?;
+    }
+    uc(
+        "install PF ANSI sprintf callback",
+        unicorn.add_code_hook(
+            HOST_PF_ANSI_SPRINTF,
+            HOST_PF_ANSI_SPRINTF,
+            |unicorn, _, _| {
+                if unicorn.get_data().callback_error.is_none() {
+                    unicorn.get_data_mut().callback_error =
+                        Some("PF ANSI Suite v2 sprintf is unsupported".into());
+                }
+                let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+                let _ = unicorn.emu_stop();
+            },
+        ),
+    )?;
+    uc(
+        "install PF ANSI strcpy callback",
+        unicorn.add_code_hook(HOST_PF_ANSI_STRCPY, HOST_PF_ANSI_STRCPY, |unicorn, _, _| {
+            emulate_strcpy(unicorn)
+        }),
+    )?;
+    uc(
+        "install PF ANSI bounded strcpy callback",
+        unicorn.add_code_hook(
+            HOST_PF_ANSI_STRCPY_BOUNDED,
+            HOST_PF_ANSI_STRCPY_BOUNDED,
+            |unicorn, _, _| emulate_ansi_strcpy_bounded(unicorn),
+        ),
+    )?;
+
+    let callbacks = [
+        HOST_PF_ANSI_ATAN,
+        HOST_PF_ANSI_ATAN2,
+        HOST_PF_ANSI_CEIL,
+        HOST_PF_ANSI_COS,
+        HOST_PF_ANSI_EXP,
+        HOST_PF_ANSI_FABS,
+        HOST_PF_ANSI_FLOOR,
+        HOST_PF_ANSI_FMOD,
+        HOST_PF_ANSI_HYPOT,
+        HOST_PF_ANSI_LOG,
+        HOST_PF_ANSI_LOG10,
+        HOST_PF_ANSI_POW,
+        HOST_PF_ANSI_SIN,
+        HOST_PF_ANSI_SQRT,
+        HOST_PF_ANSI_TAN,
+        HOST_PF_ANSI_SPRINTF,
+        HOST_PF_ANSI_STRCPY,
+        HOST_PF_ANSI_ASIN,
+        HOST_PF_ANSI_ACOS,
+        0,
+        HOST_PF_ANSI_STRCPY_BOUNDED,
+    ];
+    let mut table = [0u8; 21 * 8];
+    for (slot, callback) in callbacks.into_iter().enumerate() {
+        table[slot * 8..slot * 8 + 8].copy_from_slice(&callback.to_le_bytes());
+    }
+    uc(
+        "write PF ANSI Suite v2",
+        unicorn.mem_write(HOST_PF_ANSI_SUITE_V2, &table),
+    )?;
+    Ok(())
+}
+
 fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let name_pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let version = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
@@ -4945,6 +5341,16 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         && output != 0
         && unicorn
             .mem_write(output, &HOST_WORLD_SUITE.to_le_bytes())
+            .is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
+    if name == "PF ANSI Suite"
+        && version == 2
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_PF_ANSI_SUITE_V2.to_le_bytes())
             .is_ok()
     {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
@@ -6281,6 +6687,7 @@ mod tests {
             )
             .unwrap();
         install_iterate8_suites(&mut unicorn).unwrap();
+        install_pf_ansi_suite_v2(&mut unicorn).unwrap();
         unicorn
             .mem_write(
                 HOST_COLOR_PARAM_SUITE,
@@ -7401,6 +7808,193 @@ mod tests {
                 slot: 1,
                 call_count: 1,
             }]
+        );
+    }
+
+    #[test]
+    fn pf_ansi_suite_v2_matches_the_windows_slot_layout() {
+        let mut engine = test_engine(&[0xc3]);
+        let name = DATA_BASE + 0x100;
+        let output = DATA_BASE + 0x200;
+        engine.unicorn.mem_write(name, b"PF ANSI Suite\0").unwrap();
+
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [name, 2, output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut suite_pointer = [0u8; 8];
+        engine.unicorn.mem_read(output, &mut suite_pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(suite_pointer), HOST_PF_ANSI_SUITE_V2);
+
+        let mut table = [0u8; 21 * 8];
+        engine
+            .unicorn
+            .mem_read(HOST_PF_ANSI_SUITE_V2, &mut table)
+            .unwrap();
+        let callbacks = table
+            .chunks_exact(8)
+            .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            callbacks,
+            [
+                HOST_PF_ANSI_ATAN,
+                HOST_PF_ANSI_ATAN2,
+                HOST_PF_ANSI_CEIL,
+                HOST_PF_ANSI_COS,
+                HOST_PF_ANSI_EXP,
+                HOST_PF_ANSI_FABS,
+                HOST_PF_ANSI_FLOOR,
+                HOST_PF_ANSI_FMOD,
+                HOST_PF_ANSI_HYPOT,
+                HOST_PF_ANSI_LOG,
+                HOST_PF_ANSI_LOG10,
+                HOST_PF_ANSI_POW,
+                HOST_PF_ANSI_SIN,
+                HOST_PF_ANSI_SQRT,
+                HOST_PF_ANSI_TAN,
+                HOST_PF_ANSI_SPRINTF,
+                HOST_PF_ANSI_STRCPY,
+                HOST_PF_ANSI_ASIN,
+                HOST_PF_ANSI_ACOS,
+                0,
+                HOST_PF_ANSI_STRCPY_BOUNDED,
+            ]
+        );
+        assert_eq!(engine.suite_requests(), ["PF ANSI Suite v2"]);
+    }
+
+    #[test]
+    fn pf_ansi_suite_v2_executes_double_and_bounded_string_callbacks() {
+        let mut engine = test_engine(&[0xc3]);
+        let name = DATA_BASE + 0x20;
+        let output = DATA_BASE + 0x40;
+        engine.unicorn.mem_write(name, b"PF ANSI Suite\0").unwrap();
+        engine
+            .call_win64(HOST_ACQUIRE_SUITE, [name, 2, output, 0, 0, 0])
+            .unwrap();
+        let mut suite_bytes = [0u8; 8];
+        engine.unicorn.mem_read(output, &mut suite_bytes).unwrap();
+        let suite = u64::from_le_bytes(suite_bytes);
+        let callback = |engine: &GuestEngine<'_>, slot: u64| {
+            let mut bytes = [0u8; 8];
+            engine
+                .unicorn
+                .mem_read(suite + slot * 8, &mut bytes)
+                .unwrap();
+            u64::from_le_bytes(bytes)
+        };
+
+        let mut xmm0 = [0u8; 16];
+        xmm0[..8].copy_from_slice(&(0.5f64).to_le_bytes());
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM0, &xmm0)
+            .unwrap();
+        engine.call_win64(callback(&engine, 12), [0; 6]).unwrap();
+        let xmm0 = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+        let sine = f64::from_le_bytes(xmm0[..8].try_into().unwrap());
+        assert!((sine - 0.5f64.sin()).abs() < f64::EPSILON);
+
+        let source = DATA_BASE + 0x100;
+        let destination = DATA_BASE + 0x200;
+        engine
+            .unicorn
+            .mem_write(source, b"bounded metadata\0")
+            .unwrap();
+        engine.unicorn.mem_write(destination, b"XXXXXXXX").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(callback(&engine, 16), [destination, source, 0, 0, 0, 0])
+                .unwrap(),
+            destination
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(destination, b"bounded metadata\0".len())
+                .unwrap(),
+            b"bounded metadata\0"
+        );
+        assert_eq!(
+            engine
+                .call_win64(callback(&engine, 20), [destination, 8, source, 0, 0, 0],)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 8).unwrap(),
+            b"bounded\0"
+        );
+    }
+
+    #[test]
+    fn pf_ansi_numeric_policy_matches_the_windows_finite_contract() {
+        assert_eq!(ansi_sqrt(-1.0), 0.0);
+        assert_eq!(ansi_log(0.0), 0.0);
+        assert_eq!(ansi_asin(2.0), 0.0);
+        assert_eq!(ansi_fmod(4.0, 0.0), 0.0);
+        assert_eq!(ansi_pow(f64::NAN, 2.0), 0.0);
+        assert_eq!(ansi_exp(1000.0), 0.0);
+        assert_eq!(ansi_pow(2.0, 3.0), 8.0);
+        assert_eq!(ansi_hypot(3.0, 4.0), 5.0);
+    }
+
+    #[test]
+    fn pf_ansi_bounded_copy_rejects_malformed_calls_and_unmapped_memory() {
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            engine
+                .call_win64(HOST_PF_ANSI_STRCPY, [0, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_PF_ANSI_STRCPY_BOUNDED, [0, 0, 0, 0, 0, 0])
+                .unwrap(),
+            4
+        );
+        let error = engine
+            .call_win64(
+                HOST_PF_ANSI_STRCPY_BOUNDED,
+                [DATA_BASE, 32, 0xdead_beef, 0, 0, 0],
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("PF ANSI bounded strcpy source read"),
+            "{error}"
+        );
+
+        let mut engine = test_engine(&[0xc3]);
+        engine
+            .unicorn
+            .mem_map(DATA_BASE + PAGE_SIZE, PAGE_SIZE, Prot::READ | Prot::WRITE)
+            .unwrap();
+        engine
+            .unicorn
+            .mem_write(DATA_BASE, &vec![b'x'; 4096])
+            .unwrap();
+        let destination = DATA_BASE + PAGE_SIZE;
+        engine
+            .unicorn
+            .mem_write(destination, b"unchanged\0")
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_PF_ANSI_STRCPY, [destination, DATA_BASE, 0, 0, 0, 0],)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(destination, b"unchanged\0".len())
+                .unwrap(),
+            b"unchanged\0"
         );
     }
 
