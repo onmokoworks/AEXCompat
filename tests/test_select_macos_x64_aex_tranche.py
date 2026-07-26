@@ -77,7 +77,9 @@ def test_exclusion_file_is_bound_to_expected_digest(tmp_path):
     source.write_text("1" * 64 + "\n", encoding="ascii")
     expected = SELECT.sha256_file(source)
 
-    assert SELECT.load_excluded_shas(source, expected) == {"1" * 64}
+    values, actual = SELECT.load_excluded_shas(source, expected)
+    assert values == {"1" * 64}
+    assert actual == expected
     with pytest.raises(SELECT.SweepError, match="differs from expected identity"):
         SELECT.load_excluded_shas(source, "0" * 64)
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections import defaultdict
@@ -25,14 +26,18 @@ REGISTRATION_EXPORTS = {
 }
 
 
-def load_excluded_shas(path: Path, expected_sha256: str) -> set[str]:
-    actual_sha256 = sha256_file(path)
+def load_excluded_shas(path: Path, expected_sha256: str) -> tuple[set[str], str]:
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise SweepError(f"read excluded SHA list {path}: {error}") from error
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
     if actual_sha256 != expected_sha256.lower():
         raise SweepError("excluded SHA file differs from expected identity")
     try:
-        lines = path.read_text(encoding="ascii").splitlines()
-    except (OSError, UnicodeError) as error:
-        raise SweepError(f"read excluded SHA list {path}: {error}") from error
+        lines = payload.decode("ascii").splitlines()
+    except UnicodeError as error:
+        raise SweepError(f"decode excluded SHA list {path}: {error}") from error
     result: set[str] = set()
     for line_number, raw_value in enumerate(lines, 1):
         value = raw_value.strip().lower()
@@ -45,7 +50,7 @@ def load_excluded_shas(path: Path, expected_sha256: str) -> set[str]:
         result.add(value)
     if not result:
         raise SweepError("excluded SHA list is empty")
-    return result
+    return result, actual_sha256
 
 
 def registration_abi(entry: dict[str, object]) -> str | None:
@@ -199,8 +204,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
     inventory = load_json_strict(inventory_path)
     windows_summary = load_json_strict(summary_path)
     validate_source_pair(inventory, windows_summary, inventory_sha)
-    excluded_sha = sha256_file(excluded_path)
-    excluded = load_excluded_shas(
+    excluded, excluded_sha = load_excluded_shas(
         excluded_path,
         args.expected_excluded_sha256,
     )
