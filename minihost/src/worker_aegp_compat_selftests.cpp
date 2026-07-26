@@ -1,8 +1,10 @@
 #include "worker_aegp_compat_selftests.hpp"
 #include "worker_parameter_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
+#include "worker_mask_runtime.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_scene_model.hpp"
+#include "worker_aegp_scene_transaction.hpp"
 #include "worker_aegp_scene_runtime.hpp"
 #include "worker_aegp_external_render_runtime.hpp"
 #include "worker_handle_runtime.hpp"
@@ -19,6 +21,7 @@
 #include <string>
 
 namespace aexcompat::l2_detail {
+bool configure_mask_scene(const std::string&);
 namespace { AegpCompatSelftestHooks g_hooks; }
 
 namespace {
@@ -686,9 +689,9 @@ bool verify_aegp_effect_stack() {
   int32_t count = -1;
   ok = ok && aegp_get_stream_type_v2(stream, &type) == 4 &&
       aegp_get_layer_num_effects(&g_aegp_layers[1], &count) == 0 && count == 2 &&
-      aegp_dispose_stream_v2(stream) == 0 &&
+      aegp_dispose_stream_v2(stream) == 4 &&
       aegp_get_effect_flags(duplicate, &flags) == 4 &&
-      aegp_dispose_effect(duplicate) == 0;
+      aegp_dispose_effect(duplicate) == 4;
 
   const auto snapshot = g_aegp_effect_instances;
   void* unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
@@ -836,8 +839,8 @@ bool verify_aegp_projector_levels() {
        aegp_delete_layer_effect(effect) == 0;
   type = 0x12345678;
   ok = ok && aegp_get_stream_type_v2(stale_stream, &type) == 4 &&
-       type == 0x12345678 && aegp_dispose_stream_v2(stale_stream) == 0 &&
-       aegp_dispose_effect(effect) == 0;
+       type == 0x12345678 && aegp_dispose_stream_v2(stale_stream) == 4 &&
+       aegp_dispose_effect(effect) == 4;
 
   ok = ok && g_aegp_stream_acquires - stream_acquires_before ==
                  g_aegp_stream_disposes - stream_disposes_before &&
@@ -1094,6 +1097,516 @@ bool verify_aegp_effect_param_union_suite4() {
                  1, &g_aegp_effect, 0, &type, value.data()) == 4;
   g_aegp_effect_live = saved_live;
   return ok;
+}
+
+bool verify_aegp_scene_mutation_transactions() {
+  using ApplyEffect = int32_t (__cdecl*)(int32_t, void*, int32_t, void**);
+  using DuplicateEffect = int32_t (__cdecl*)(void*, void**);
+  using DeleteEffect = int32_t (__cdecl*)(void*);
+  using ReorderEffect = int32_t (__cdecl*)(void*, int32_t);
+  using SetEffectFlags = int32_t (__cdecl*)(void*, uint32_t, uint32_t);
+  using GetEffectStream = int32_t (__cdecl*)(int32_t, void*, int32_t, void**);
+  using GetStreamType = int32_t (__cdecl*)(void*, int32_t*);
+  using GetStreamValue = int32_t (__cdecl*)(
+      int32_t, void*, int32_t, const AegpTime*, uint8_t, AegpStreamValue*);
+  using SetStreamValue = int32_t (__cdecl*)(
+      int32_t, void*, AegpStreamValue*);
+  using DisposeStreamValue = int32_t (__cdecl*)(AegpStreamValue*);
+  using DisposeStream = int32_t (__cdecl*)(void*);
+
+  const auto saved_instances = g_aegp_effect_instances;
+  const auto saved_leases = g_aegp_effect_leases;
+  const auto saved_streams = g_aegp_legacy_effect_streams;
+  const auto saved_transform = g_aegp_transform_stream;
+  const bool saved_mode = g_aegp_comp_idle_roundtrip_mode;
+  g_aegp_effect_instances = {};
+  g_aegp_effect_instances[0] = {
+      &g_aegp_layers[0], kAegpInstalledEffects[0].key, 0, 1, 1, true};
+  g_aegp_effect_leases = {};
+  g_aegp_legacy_effect_streams = {};
+  g_aegp_transform_stream = {};
+  g_aegp_comp_idle_roundtrip_mode = true;
+
+  const void* effect_suite_raw = nullptr;
+  const void* stream7_raw = nullptr;
+  bool ok = acquire_suite("AEGP Effect Suite", 4, &effect_suite_raw) == 0 &&
+      acquire_suite("AEGP Stream Suite", 7, &stream7_raw) == 0 &&
+      effect_suite_raw == g_aegp_effect_suite4.data() &&
+      stream7_raw == g_aegp_stream_suite2.data();
+  const auto* effect_slots =
+      static_cast<void* const*>(const_cast<void*>(effect_suite_raw));
+  const auto* stream_slots =
+      static_cast<void* const*>(const_cast<void*>(stream7_raw));
+  const auto apply = effect_slots
+      ? reinterpret_cast<ApplyEffect>(effect_slots[9]) : nullptr;
+  const auto duplicate = effect_slots
+      ? reinterpret_cast<DuplicateEffect>(effect_slots[16]) : nullptr;
+  const auto erase = effect_slots
+      ? reinterpret_cast<DeleteEffect>(effect_slots[10]) : nullptr;
+  const auto reorder = effect_slots
+      ? reinterpret_cast<ReorderEffect>(effect_slots[6]) : nullptr;
+  const auto set_flags = effect_slots
+      ? reinterpret_cast<SetEffectFlags>(effect_slots[5]) : nullptr;
+  const auto get_effect_stream = stream_slots
+      ? reinterpret_cast<GetEffectStream>(stream_slots[5]) : nullptr;
+  const auto get_stream_type = stream_slots
+      ? reinterpret_cast<GetStreamType>(stream_slots[12]) : nullptr;
+  const auto get_stream_value = stream_slots
+      ? reinterpret_cast<GetStreamValue>(stream_slots[13]) : nullptr;
+  const auto set_stream_value = stream_slots
+      ? reinterpret_cast<SetStreamValue>(stream_slots[15]) : nullptr;
+  const auto dispose_stream_value = stream_slots
+      ? reinterpret_cast<DisposeStreamValue>(stream_slots[14]) : nullptr;
+  const auto dispose_stream = stream_slots
+      ? reinterpret_cast<DisposeStream>(stream_slots[7]) : nullptr;
+  ok = ok && apply && duplicate && erase && reorder && set_flags &&
+      get_effect_stream && get_stream_type && get_stream_value &&
+      set_stream_value && dispose_stream_value && dispose_stream;
+
+  uint32_t generation =
+      aexcompat::aegp_external_render_runtime::project_generation();
+  void* first = nullptr;
+  ok = ok && apply(7, &g_aegp_layers[1],
+                   kAegpInstalledEffects[0].key, &first) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  const auto scene_before_failure = g_aegp_effect_instances;
+  void* unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && apply(7, &g_aegp_layers[1], 9999, &unchanged) == 4 &&
+      unchanged == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234)) &&
+      std::memcmp(scene_before_failure.data(), g_aegp_effect_instances.data(),
+                  sizeof(scene_before_failure)) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+
+  aexcompat::scene_model::ObjectSnapshot project_b_root{};
+  aexcompat::scene_model::ObjectSnapshot project_b_item{};
+  aexcompat::scene_model::ObjectSnapshot project_b_comp{};
+  aexcompat::scene_model::ObjectSnapshot project_b_layer{};
+  const aexcompat::scene_model::Identity project_b{
+      2, 2, 1, aexcompat::scene_model::ObjectKind::project, {}};
+  auto& registry = aexcompat::scene_model::registry();
+  ok = ok && registry.first_child(project_b, project_b_root) &&
+      registry.first_child(project_b_root.identity, project_b_item) &&
+      registry.comp_from_item(project_b_item.identity, project_b_comp) &&
+      registry.layer_by_index(project_b_comp.identity, 0, project_b_layer);
+  void* cross_project_layer = registry.borrow(project_b_layer.identity);
+  unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
+  ok = ok && apply(7, cross_project_layer,
+                   kAegpInstalledEffects[0].key, &unchanged) == 4 &&
+      unchanged == reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678)) &&
+      apply(7, first, kAegpInstalledEffects[0].key, &unchanged) == 4 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+
+  void* second = nullptr;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && duplicate(first, &second) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && set_flags(second, 3, 2) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && reorder(second, 0) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+
+  void* effect_stream = nullptr;
+  unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc));
+  ok = ok && get_effect_stream(8, second, 1, &unchanged) == 4 &&
+      unchanged == reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc)) &&
+      get_effect_stream(7, second, 1, &effect_stream) == 0;
+  AegpTime time{0, 30};
+  AegpStreamValue effect_value{};
+  ok = ok && get_stream_value(
+                   7, effect_stream, 1, &time, 0, &effect_value) == 0;
+  const auto stream_scene_before_failure = g_aegp_effect_instances;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  std::memcpy(effect_value.value.data(), &nan, sizeof(nan));
+  ok = ok && set_stream_value(7, effect_stream, &effect_value) == 4 &&
+      std::memcmp(stream_scene_before_failure.data(),
+                  g_aegp_effect_instances.data(),
+                  sizeof(stream_scene_before_failure)) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+  const double amount = 72.5;
+  std::memcpy(effect_value.value.data(), &amount, sizeof(amount));
+  ok = ok && set_stream_value(7, effect_stream, &effect_value) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1 &&
+      dispose_stream_value(&effect_value) == 0;
+  aexcompat::scene_model::ObjectSnapshot effect_stream_identity{};
+  ok = ok && registry.resolve(
+      effect_stream, aexcompat::scene_model::ObjectKind::stream,
+      effect_stream_identity);
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && erase(second) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  int32_t type_sentinel = 0x12345678;
+  ok = ok && get_stream_type(effect_stream, &type_sentinel) == 4 &&
+      type_sentinel == 0x12345678 &&
+      dispose_stream(effect_stream) == 4 &&
+      !registry.snapshot(effect_stream_identity.identity,
+                         effect_stream_identity) &&
+      aegp_dispose_effect(second) == 4 &&
+      aegp_dispose_effect(first) == 0;
+
+  ok = release_suite("AEGP Stream Suite", 7) == 0 && ok;
+  ok = release_suite("AEGP Effect Suite", 4) == 0 && ok;
+
+  using GetMask = int32_t (__cdecl*)(void*, int32_t, void**);
+  using DisposeMask = int32_t (__cdecl*)(void*);
+  using GetMaskStream = int32_t (__cdecl*)(
+      int32_t, void*, int32_t, void**);
+  using InsertKeyframe = int32_t (__cdecl*)(
+      void*, int16_t, const HostTime*, int32_t*);
+  using DeleteKeyframe = int32_t (__cdecl*)(void*, int32_t);
+  using KeyframeCount = int32_t (__cdecl*)(void*, int32_t*);
+  using StartAdd = int32_t (__cdecl*)(void*, void**);
+  using AddKey = int32_t (__cdecl*)(
+      void*, int16_t, const HostTime*, int32_t*);
+  using EndAdd = int32_t (__cdecl*)(uint8_t, void*);
+  using GetKeyValue = int32_t (__cdecl*)(
+      int32_t, void*, int32_t, StreamValue*);
+  using SetKeyValue = int32_t (__cdecl*)(
+      void*, int32_t, const StreamValue*);
+  using GetTangents = int32_t (__cdecl*)(
+      int32_t, void*, int32_t, StreamValue*, StreamValue*);
+  using SetTangents = int32_t (__cdecl*)(
+      void*, int32_t, const StreamValue*, const StreamValue*);
+  using SetEase = int32_t (__cdecl*)(
+      void*, int32_t, int32_t, const KeyframeEase*, const KeyframeEase*);
+  using SetKeyFlag = int32_t (__cdecl*)(
+      void*, int32_t, int32_t, uint8_t);
+  using SetInterpolation = int32_t (__cdecl*)(
+      void*, int32_t, int32_t, int32_t);
+  using SetLabel = int32_t (__cdecl*)(void*, int32_t, int32_t);
+  using GetDynamicForLayer = int32_t (__cdecl*)(int32_t, void*, void**);
+  using GetDynamicByIndex = int32_t (__cdecl*)(
+      int32_t, void*, int32_t, void**);
+  using GetDynamicFlags = int32_t (__cdecl*)(void*, uint32_t*);
+  using SetDynamicFlag = int32_t (__cdecl*)(
+      void*, uint32_t, uint8_t, uint8_t);
+  using DeleteDynamic = int32_t (__cdecl*)(void*);
+  using ReorderDynamic = int32_t (__cdecl*)(void*, int32_t);
+  using DuplicateDynamic = int32_t (__cdecl*)(int32_t, void*, int32_t*);
+  using SetDynamicName = int32_t (__cdecl*)(void*, const uint16_t*);
+  using AddDynamic = int32_t (__cdecl*)(
+      int32_t, void*, const char*, void**);
+
+  ok = configure_mask_scene("rectangle") && ok;
+  const bool saved_mask_model_enabled =
+      aexcompat::mask_runtime::model_enabled();
+  aexcompat::mask_runtime::set_model_enabled(true);
+  g_aegp_comp_idle_roundtrip_mode = false;
+  const void* mask_suite_raw = nullptr;
+  const void* mask_stream_suite_raw = nullptr;
+  const void* keyframe_suite_raw = nullptr;
+  const void* dynamic_suite_raw = nullptr;
+  ok = acquire_suite("AEGP Layer Mask Suite", 7, &mask_suite_raw) == 0 &&
+      acquire_suite("AEGP Stream Suite", 11, &mask_stream_suite_raw) == 0 &&
+      acquire_suite("AEGP Keyframe Suite", 5, &keyframe_suite_raw) == 0 &&
+      acquire_suite("AEGP Dynamic Stream Suite", 5, &dynamic_suite_raw) == 0 &&
+      ok;
+  const auto* mask_slots =
+      static_cast<void* const*>(const_cast<void*>(mask_suite_raw));
+  const auto* mask_stream_slots =
+      static_cast<void* const*>(const_cast<void*>(mask_stream_suite_raw));
+  const auto* key_slots =
+      static_cast<void* const*>(const_cast<void*>(keyframe_suite_raw));
+  const auto* dynamic_slots =
+      static_cast<void* const*>(const_cast<void*>(dynamic_suite_raw));
+  const auto get_mask = mask_slots
+      ? reinterpret_cast<GetMask>(mask_slots[1]) : nullptr;
+  const auto dispose_mask_fn = mask_slots
+      ? reinterpret_cast<DisposeMask>(mask_slots[2]) : nullptr;
+  const auto get_mask_stream = mask_stream_slots
+      ? reinterpret_cast<GetMaskStream>(mask_stream_slots[6]) : nullptr;
+  const auto dispose_mask_stream = mask_stream_slots
+      ? reinterpret_cast<DisposeStream>(mask_stream_slots[7]) : nullptr;
+  const auto dispose_mask_value = mask_stream_slots
+      ? reinterpret_cast<int32_t (__cdecl*)(StreamValue*)>(
+            mask_stream_slots[14]) : nullptr;
+  const auto key_count = key_slots
+      ? reinterpret_cast<KeyframeCount>(key_slots[0]) : nullptr;
+  const auto insert_key = key_slots
+      ? reinterpret_cast<InsertKeyframe>(key_slots[2]) : nullptr;
+  const auto delete_key = key_slots
+      ? reinterpret_cast<DeleteKeyframe>(key_slots[3]) : nullptr;
+  const auto start_add = key_slots
+      ? reinterpret_cast<StartAdd>(key_slots[16]) : nullptr;
+  const auto add_key = key_slots
+      ? reinterpret_cast<AddKey>(key_slots[17]) : nullptr;
+  const auto end_add = key_slots
+      ? reinterpret_cast<EndAdd>(key_slots[19]) : nullptr;
+  const auto get_key_value = key_slots
+      ? reinterpret_cast<GetKeyValue>(key_slots[4]) : nullptr;
+  const auto set_key_value = key_slots
+      ? reinterpret_cast<SetKeyValue>(key_slots[5]) : nullptr;
+  const auto get_tangents = key_slots
+      ? reinterpret_cast<GetTangents>(key_slots[8]) : nullptr;
+  const auto set_tangents = key_slots
+      ? reinterpret_cast<SetTangents>(key_slots[9]) : nullptr;
+  const auto set_ease = key_slots
+      ? reinterpret_cast<SetEase>(key_slots[11]) : nullptr;
+  const auto set_key_flag = key_slots
+      ? reinterpret_cast<SetKeyFlag>(key_slots[13]) : nullptr;
+  const auto set_interpolation = key_slots
+      ? reinterpret_cast<SetInterpolation>(key_slots[15]) : nullptr;
+  const auto set_label = key_slots
+      ? reinterpret_cast<SetLabel>(key_slots[21]) : nullptr;
+  const auto get_dynamic_for_layer = dynamic_slots
+      ? reinterpret_cast<GetDynamicForLayer>(dynamic_slots[0]) : nullptr;
+  const auto get_dynamic_by_index = dynamic_slots
+      ? reinterpret_cast<GetDynamicByIndex>(dynamic_slots[7]) : nullptr;
+  const auto get_dynamic_flags = dynamic_slots
+      ? reinterpret_cast<GetDynamicFlags>(dynamic_slots[5]) : nullptr;
+  const auto set_dynamic_flag = dynamic_slots
+      ? reinterpret_cast<SetDynamicFlag>(dynamic_slots[6]) : nullptr;
+  const auto delete_dynamic = dynamic_slots
+      ? reinterpret_cast<DeleteDynamic>(dynamic_slots[9]) : nullptr;
+  const auto reorder_dynamic = dynamic_slots
+      ? reinterpret_cast<ReorderDynamic>(dynamic_slots[10]) : nullptr;
+  const auto duplicate_dynamic = dynamic_slots
+      ? reinterpret_cast<DuplicateDynamic>(dynamic_slots[11]) : nullptr;
+  const auto set_dynamic_name = dynamic_slots
+      ? reinterpret_cast<SetDynamicName>(dynamic_slots[12]) : nullptr;
+  const auto add_dynamic = dynamic_slots
+      ? reinterpret_cast<AddDynamic>(dynamic_slots[14]) : nullptr;
+  ok = ok && get_mask && dispose_mask_fn && get_mask_stream &&
+      dispose_mask_stream && dispose_mask_value && key_count && insert_key &&
+      delete_key && start_add && add_key && end_add && get_key_value &&
+      set_key_value && get_tangents && set_tangents && set_ease &&
+      set_key_flag && set_interpolation && set_label &&
+      get_dynamic_for_layer && get_dynamic_by_index && get_dynamic_flags &&
+      set_dynamic_flag && delete_dynamic && reorder_dynamic &&
+      duplicate_dynamic && set_dynamic_name && add_dynamic;
+
+  void* mask = nullptr;
+  void* mask_stream = nullptr;
+  ok = ok && get_mask(&g_layer, 0, &mask) == 0 &&
+      get_mask_stream(1, mask, 400, &mask_stream) == 0;
+  int32_t keyframes_before = -1;
+  ok = ok && key_count(mask_stream, &keyframes_before) == 0;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  const uint64_t registry_before_cancel = registry.fingerprint();
+  void* add_transaction = nullptr;
+  int32_t staged_index = -1;
+  const HostTime staged_time{15, 30};
+  const auto transaction_before =
+      aexcompat::scene_transaction::diagnostics();
+  ok = ok && start_add(mask_stream, &add_transaction) == 0 &&
+      add_key(add_transaction, 1, &staged_time, &staged_index) == 0 &&
+      end_add(0, add_transaction) == 0;
+  int32_t keyframes_after_cancel = -1;
+  const auto transaction_after =
+      aexcompat::scene_transaction::diagnostics();
+  ok = ok && key_count(mask_stream, &keyframes_after_cancel) == 0 &&
+      keyframes_after_cancel == keyframes_before &&
+      registry.fingerprint() == registry_before_cancel &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation &&
+      transaction_after.cancelled == transaction_before.cancelled + 1;
+
+  int32_t unchanged_index = 0x12345678;
+  const HostTime invalid_time{1, 0};
+  ok = ok && insert_key(
+                   mask_stream, 1, &invalid_time, &unchanged_index) == 4 &&
+      unchanged_index == 0x12345678 &&
+      registry.fingerprint() == registry_before_cancel &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+  int32_t inserted_index = -1;
+  const HostTime key_time{30, 30};
+  ok = ok && insert_key(
+                   mask_stream, 1, &key_time, &inserted_index) == 0 &&
+      inserted_index == keyframes_before &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  HostStreamRef* mask_stream_record = find_stream(mask_stream);
+  HostKeyframe* key = keyframe_at(mask_stream_record, inserted_index);
+  ok = ok && mask_stream_record && key &&
+      key->identity.kind == aexcompat::scene_model::ObjectKind::keyframe;
+  const auto key_identity = key ? key->identity :
+      aexcompat::scene_model::Identity{};
+
+  StreamValue wrong_owner_value{};
+  wrong_owner_value.stream =
+      reinterpret_cast<void*>(static_cast<uintptr_t>(0x4444));
+  const StreamValue wrong_owner_sentinel = wrong_owner_value;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && get_key_value(
+                   2, mask_stream, inserted_index, &wrong_owner_value) == 4 &&
+      std::memcmp(&wrong_owner_value, &wrong_owner_sentinel,
+                  sizeof(wrong_owner_value)) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+
+  StreamValue key_value{};
+  StreamValue tangent_in{};
+  StreamValue tangent_out{};
+  ok = ok && get_key_value(
+                   1, mask_stream, inserted_index, &key_value) == 0 &&
+      get_tangents(1, mask_stream, inserted_index,
+                   &tangent_in, &tangent_out) == 0;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && set_key_value(
+                   mask_stream, inserted_index, &key_value) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && set_tangents(mask_stream, inserted_index,
+                          &tangent_in, &tangent_out) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  KeyframeEase ease_in{12.0, 25.0};
+  KeyframeEase ease_out{18.0, 75.0};
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && set_ease(mask_stream, inserted_index, 0,
+                      &ease_in, &ease_out) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  const uint64_t before_invalid_ease = registry.fingerprint();
+  KeyframeEase invalid_ease{1.0, 101.0};
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && set_ease(mask_stream, inserted_index, 0,
+                      &invalid_ease, nullptr) == 4 &&
+      registry.fingerprint() == before_invalid_ease &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && set_key_flag(
+                   mask_stream, inserted_index, 1, 1) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && set_interpolation(
+                   mask_stream, inserted_index, 2, 3) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && set_label(mask_stream, inserted_index, 9) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && delete_key(mask_stream, inserted_index) == 4 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+  ok = dispose_mask_value(&tangent_out) == 0 && ok;
+  ok = dispose_mask_value(&tangent_in) == 0 && ok;
+  ok = dispose_mask_value(&key_value) == 0 && ok;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && delete_key(mask_stream, inserted_index) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1 &&
+      !registry.snapshot(key_identity, project_b_layer);
+
+  const HostTime final_time{45, 30};
+  int32_t final_index = -1;
+  ok = ok && insert_key(mask_stream, 1, &final_time, &final_index) == 0;
+  key = keyframe_at(find_stream(mask_stream), final_index);
+  const auto child_before_dispose = key ? key->identity :
+      aexcompat::scene_model::Identity{};
+  ok = ok && dispose_mask_stream(mask_stream) == 0 &&
+      !registry.snapshot(child_before_dispose, project_b_layer) &&
+      dispose_mask_stream(mask_stream) == 4;
+
+  void* dynamic_root = nullptr;
+  void* dynamic_parade = nullptr;
+  void* dynamic_atom = nullptr;
+  void* dynamic_outline = nullptr;
+  ok = ok && get_dynamic_for_layer(1, &g_layer, &dynamic_root) == 0 &&
+      get_dynamic_by_index(1, dynamic_root, 0, &dynamic_parade) == 0 &&
+      get_dynamic_by_index(1, dynamic_parade, 0, &dynamic_atom) == 0 &&
+      get_dynamic_by_index(1, dynamic_atom, 0, &dynamic_outline) == 0;
+
+  uint32_t dynamic_flags = 0;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  const uint64_t dynamic_before_failure = registry.fingerprint();
+  ok = ok && set_dynamic_flag(dynamic_outline, 2, 2, 1) == 4 &&
+      get_dynamic_flags(dynamic_outline, &dynamic_flags) == 0 &&
+      dynamic_flags == 0 &&
+      registry.fingerprint() == dynamic_before_failure &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && set_dynamic_flag(dynamic_outline, 2, 0, 1) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  const uint16_t dynamic_name[]{'I','s','s','u','e','2','6',0};
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && set_dynamic_name(dynamic_atom, dynamic_name) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+
+  int32_t duplicate_index = 0x12345678;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && duplicate_dynamic(2, dynamic_atom, &duplicate_index) == 4 &&
+      duplicate_index == 0x12345678 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && duplicate_dynamic(1, dynamic_atom, &duplicate_index) == 0 &&
+      duplicate_index == 1 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && reorder_dynamic(dynamic_atom, 1) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+
+  void* duplicated_atom = nullptr;
+  ok = ok && get_dynamic_by_index(
+                 1, dynamic_parade, 0, &duplicated_atom) == 0;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && delete_dynamic(duplicated_atom) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1 &&
+      dispose_mask_stream(duplicated_atom) == 0;
+
+  void* added_atom =
+      reinterpret_cast<void*>(static_cast<uintptr_t>(0x2468));
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && add_dynamic(
+                 1, dynamic_parade, "ADBE Not A Mask", &added_atom) == 4 &&
+      added_atom == reinterpret_cast<void*>(static_cast<uintptr_t>(0x2468)) &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && add_dynamic(
+                 1, dynamic_parade, "ADBE Mask Atom", &added_atom) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1;
+  generation = aexcompat::aegp_external_render_runtime::project_generation();
+  ok = ok && delete_dynamic(added_atom) == 0 &&
+      aexcompat::aegp_external_render_runtime::project_generation() ==
+          generation + 1 &&
+      dispose_mask_stream(added_atom) == 0;
+
+  ok = dispose_mask_stream(dynamic_outline) == 0 && ok;
+  ok = dispose_mask_stream(dynamic_atom) == 0 && ok;
+  ok = dispose_mask_stream(dynamic_parade) == 0 && ok;
+  ok = dispose_mask_stream(dynamic_root) == 0 && ok;
+  ok = dispose_mask_fn(mask) == 0 && ok;
+
+  ok = release_suite("AEGP Dynamic Stream Suite", 5) == 0 && ok;
+  ok = release_suite("AEGP Keyframe Suite", 5) == 0 && ok;
+  ok = release_suite("AEGP Stream Suite", 11) == 0 && ok;
+  ok = release_suite("AEGP Layer Mask Suite", 7) == 0 && ok;
+  g_mask_scene.clear();
+  aexcompat::mask_runtime::set_model_enabled(saved_mask_model_enabled);
+  g_aegp_effect_instances = saved_instances;
+  g_aegp_effect_leases = saved_leases;
+  g_aegp_legacy_effect_streams = saved_streams;
+  g_aegp_transform_stream = saved_transform;
+  g_aegp_comp_idle_roundtrip_mode = saved_mode;
+  return ok && suite_leases_balanced();
 }
 
 bool verify_aegp_installed_effect_catalog_suite4() {

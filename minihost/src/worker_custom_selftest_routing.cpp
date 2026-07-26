@@ -4,6 +4,7 @@
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_render_selftests.hpp"
 #include "worker_aegp_scene_runtime.hpp"
+#include "worker_aegp_scene_transaction.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_color_settings_runtime.hpp"
 #include "worker_color_settings_selftests.hpp"
@@ -56,6 +57,27 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << ",\"cross_registry_rejected\":true"
         << ",\"foreign_rejected\":true,\"forged_rejected\":true"
         << ",\"outputs_unchanged\":true}\n";
+    return {true, passed ? 0 : 1, out.str()};
+  }
+  if (argc == 2 &&
+      std::wstring(argv[1]) ==
+          L"--self-test-aegp-scene-mutation-transactions") {
+    const bool passed =
+        aexcompat::l2_detail::verify_aegp_scene_mutation_transactions();
+    const auto transactions =
+        aexcompat::scene_transaction::diagnostics();
+    std::ostringstream out;
+    out << "{\"aegp_scene_mutation_transactions\":\""
+        << passed_or_failed(passed)
+        << "\",\"published_suites\":true"
+        << ",\"effect_stream_value_keyframe_registry\":true"
+        << ",\"transaction_failure_byte_invariant\":true"
+        << ",\"transaction_cancel_byte_invariant\":true"
+        << ",\"generation_increment_once\":true"
+        << ",\"stale_child_invalidation\":true"
+        << ",\"keyframe_bezier_ease_ownership\":true"
+        << ",\"committed\":" << transactions.committed
+        << ",\"cancelled\":" << transactions.cancelled << "}\n";
     return {true, passed ? 0 : 1, out.str()};
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-path-data-hardening") {

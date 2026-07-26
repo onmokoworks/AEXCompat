@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "worker_aegp_scene_model.hpp"
 #include "worker_suite_abi.hpp"
 
 namespace aexcompat::scene_runtime {
@@ -34,6 +35,7 @@ struct AegpEffectInstance {
   std::array<std::array<double, 4>, kAegpEffectParameterCapacity> parameter_values{{
       {{42.5, 0.0, 0.0, 0.0}}, {{160.0, 90.0, 0.0, 0.0}},
       {{1.0, 2.0, 3.0, 0.0}}, {{0.25, 0.5, 0.75, 1.0}}}};
+  scene_model::Identity identity{};
 };
 
 struct AegpEffectLease {
@@ -42,6 +44,7 @@ struct AegpEffectLease {
   uint32_t instance_generation{};
   uint32_t generation{};
   bool live{};
+  void* handle{};
 };
 
 struct AegpInstalledEffectRecord {
@@ -75,6 +78,10 @@ struct AegpTransformStream {
   uint32_t effect_instance_index{};
   uint32_t effect_instance_generation{};
   int32_t owner_plugin_id{};
+  scene_model::Identity identity{};
+  scene_model::Identity value_identity{};
+  std::array<scene_model::Identity, 2> keyframe_identities{};
+  void* handle{};
 };
 
 struct AegpLegacyEffectStream {
@@ -87,6 +94,9 @@ struct AegpLegacyEffectStream {
   uint32_t effect_instance_generation{};
   uint32_t generation{};
   int32_t owner_plugin_id{};
+  scene_model::Identity identity{};
+  scene_model::Identity value_identity{};
+  void* handle{};
 };
 
 struct AegpSelectionCollection {

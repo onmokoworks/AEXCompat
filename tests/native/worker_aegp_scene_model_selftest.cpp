@@ -1,4 +1,5 @@
 #include "worker_aegp_scene_model.hpp"
+#include "worker_aegp_scene_transaction.hpp"
 
 #include <algorithm>
 #include <array>
@@ -6,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <type_traits>
 
 using aexcompat::scene_model::Identity;
 using aexcompat::scene_model::ItemKind;
@@ -241,6 +244,157 @@ int main() {
   assert(propagation.first_child(new_project, linked_root));
   assert(linked_root.owner == new_project);
 
+  FixtureStorage mutation_storage{};
+  Registry mutation_registry;
+  assert(initialize(mutation_registry, mutation_storage));
+  ObjectSnapshot mutation_comp{};
+  ObjectSnapshot mutation_layer{};
+  assert(mutation_registry.comp_from_item(
+      mutation_registry.active_item(), mutation_comp));
+  assert(mutation_registry.layer_by_index(
+      mutation_comp.identity, 0, mutation_layer));
+  Identity effect_identity{};
+  void* effect_handle = nullptr;
+  assert(mutation_registry.create_child_borrowed(
+      ObjectKind::effect, mutation_layer.identity, 0, nullptr,
+      u"Effect", 7, effect_identity, effect_handle));
+  assert(aligned_token(effect_handle));
+  ObjectSnapshot resolved_effect{};
+  assert(mutation_registry.resolve_possessed(
+      effect_handle, ObjectKind::effect, 7, resolved_effect, 1));
+  assert(!mutation_registry.resolve_possessed(
+      effect_handle, ObjectKind::effect, 8, unchanged, 1));
+  assert(unchanged.identity.object_id == sentinel.identity.object_id);
+  assert(!mutation_registry.resolve(
+      effect_handle, ObjectKind::stream, unchanged, 1));
+
+  const std::array<aexcompat::scene_model::StreamValueKind, 5> value_kinds{{
+      aexcompat::scene_model::StreamValueKind::scalar,
+      aexcompat::scene_model::StreamValueKind::color,
+      aexcompat::scene_model::StreamValueKind::layer,
+      aexcompat::scene_model::StreamValueKind::mask,
+      aexcompat::scene_model::StreamValueKind::arbitrary}};
+  std::array<Identity, 5> stream_identities{};
+  std::array<void*, 5> stream_handles{};
+  for (std::size_t index = 0; index < value_kinds.size(); ++index) {
+    assert(mutation_registry.create_child_borrowed(
+        ObjectKind::stream, effect_identity, static_cast<int32_t>(index),
+        nullptr, u"Stream", 7, stream_identities[index],
+        stream_handles[index]));
+    aexcompat::scene_model::StreamState stream_state{};
+    stream_state.value_kind = value_kinds[index];
+    stream_state.dimensions = value_kinds[index] ==
+            aexcompat::scene_model::StreamValueKind::color ? 4 : 1;
+    stream_state.temporal_dimensions = 1;
+    assert(mutation_registry.initialize_stream_state(
+        stream_identities[index], stream_state));
+    ObjectSnapshot stream_snapshot{};
+    assert(mutation_registry.resolve_possessed(
+        stream_handles[index], ObjectKind::stream, 7,
+        stream_snapshot, 1));
+    assert(stream_snapshot.owner == effect_identity);
+    assert(stream_snapshot.stream.value_kind == value_kinds[index]);
+  }
+
+  Identity key_identity{};
+  assert(mutation_registry.create_child(
+      ObjectKind::keyframe, stream_identities[0], 0, nullptr,
+      u"Keyframe", key_identity));
+  aexcompat::scene_model::KeyframeState key_state{};
+  key_state.time_value = 15;
+  key_state.time_scale = 30;
+  key_state.in_interpolation = 2;
+  key_state.out_interpolation = 3;
+  key_state.spatial_in = {{1.0, 2.0, 3.0, 4.0}};
+  key_state.spatial_out = {{5.0, 6.0, 7.0, 8.0}};
+  key_state.temporal_in[0] = {9.0, 33.0};
+  key_state.temporal_out[0] = {10.0, 66.0};
+  key_state.flags = 0x05;
+  key_state.label = 7;
+  assert(mutation_registry.initialize_keyframe_state(
+      key_identity, key_state));
+  void* key_handle = mutation_registry.borrow_unique(key_identity, 7);
+  assert(aligned_token(key_handle));
+  Identity value_identity{};
+  int value_storage = 0;
+  assert(mutation_registry.create_child(
+      ObjectKind::value, key_identity, 0, &value_storage,
+      u"Value", value_identity));
+
+  ObjectSnapshot key_before{};
+  assert(mutation_registry.snapshot(key_identity, key_before));
+  const uint64_t fingerprint_before_cancel =
+      mutation_registry.fingerprint();
+  uint32_t project_generation = 41;
+  {
+    aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+        mutation_registry, 1, project_generation);
+    assert(transaction.stage());
+    transaction.cancel();
+  }
+  ObjectSnapshot key_after_cancel{};
+  assert(mutation_registry.snapshot(key_identity, key_after_cancel));
+  static_assert(std::is_trivially_copyable_v<ObjectSnapshot>);
+  assert(std::memcmp(
+      &key_before, &key_after_cancel, sizeof(key_before)) == 0);
+  assert(mutation_registry.fingerprint() == fingerprint_before_cancel);
+  assert(project_generation == 41);
+  {
+    aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+        mutation_registry, 1, project_generation);
+    assert(transaction.stage());
+    assert(!transaction.validate(false));
+  }
+  assert(mutation_registry.fingerprint() == fingerprint_before_cancel);
+  assert(project_generation == 41);
+
+  ObjectSnapshot key_candidate = key_before;
+  key_candidate.keyframe.label = 11;
+  key_candidate.keyframe.flags = 0x1f;
+  key_candidate.keyframe.spatial_in[0] = 123.5;
+  key_candidate.keyframe.spatial_out[3] = -45.25;
+  key_candidate.keyframe.temporal_in[0] = {12.0, 25.0};
+  key_candidate.keyframe.temporal_out[0] = {13.0, 75.0};
+  Identity replacement_key{};
+  {
+    aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+        mutation_registry, 1, project_generation);
+    assert(transaction.stage());
+    assert(transaction.validate(true));
+    assert(transaction.commit(
+        project_generation,
+        [&]() noexcept {
+          return mutation_registry.replace_snapshot(
+              key_identity, key_candidate, replacement_key);
+        },
+        [&]() noexcept { ++project_generation; }));
+  }
+  assert(project_generation == 42);
+  assert(replacement_key.generation == key_identity.generation + 1);
+  assert(!mutation_registry.resolve_possessed(
+      key_handle, ObjectKind::keyframe, 7, unchanged, 1));
+  ObjectSnapshot replacement_key_snapshot{};
+  assert(mutation_registry.snapshot(
+      replacement_key, replacement_key_snapshot));
+  assert(replacement_key_snapshot.keyframe.label == 11);
+  assert(replacement_key_snapshot.keyframe.flags == 0x1f);
+  assert(replacement_key_snapshot.keyframe.spatial_in[0] == 123.5);
+  assert(replacement_key_snapshot.keyframe.spatial_out[3] == -45.25);
+  assert(replacement_key_snapshot.keyframe.temporal_in[0].influence == 25.0);
+  ObjectSnapshot replacement_value{};
+  assert(mutation_registry.snapshot(value_identity, replacement_value));
+  assert(replacement_value.owner == replacement_key);
+
+  assert(mutation_registry.erase_tree(effect_identity));
+  assert(!mutation_registry.resolve_possessed(
+      effect_handle, ObjectKind::effect, 7, unchanged, 1));
+  for (void* stale_stream : stream_handles)
+    assert(!mutation_registry.resolve_possessed(
+        stale_stream, ObjectKind::stream, 7, unchanged, 1));
+  assert(!mutation_registry.snapshot(replacement_key, unchanged));
+  assert(!mutation_registry.identity_for_legacy(
+      &value_storage, ObjectKind::value, value_identity));
+
   FixtureStorage exhaustion_storage{};
   Registry exhaustion;
   assert(initialize(exhaustion, exhaustion_storage));
@@ -274,6 +428,12 @@ int main() {
       "\"forged_token_rejected\":true,\"lease_identity_checked\":true,"
       "\"token_exhaustion_rejected\":true,"
       "\"relationships_propagated\":true,\"stale_rejected\":true,"
+      "\"effect_stream_value_keyframe_registry\":true,"
+      "\"stream_kinds\":[\"scalar\",\"color\",\"layer\",\"mask\",\"arbitrary\"],"
+      "\"transaction_cancel_byte_invariant\":true,"
+      "\"transaction_commit_generation_once\":true,"
+      "\"keyframe_bezier_ease_identity\":true,"
+      "\"child_invalidation\":true,\"possession_policy\":true,"
       "\"wrong_kind_rejected\":true,\"cross_project_rejected\":true,"
       "\"foreign_rejected\":true}");
   return 0;

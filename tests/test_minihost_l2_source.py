@@ -170,6 +170,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertIn(marker, header)
         for marker in ('L"--self-test-aegp-layer-source-item"',
                        'L"--self-test-aegp-scene-registry-suites"',
+                       'L"--self-test-aegp-scene-mutation-transactions"',
                        'L"--self-test-pf-path-data-hardening"',
                        'L"--self-test-pf-world-registry"',
                        'L"--self-test-pf-ae-channel-transport"',

@@ -4,6 +4,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_HEADER = ROOT / "minihost" / "src" / "worker_aegp_scene_model.hpp"
 MODEL_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene_model.cpp"
+TRANSACTION_HEADER = (
+    ROOT / "minihost" / "src" / "worker_aegp_scene_transaction.hpp"
+)
+TRANSACTION_SOURCE = (
+    ROOT / "minihost" / "src" / "worker_aegp_scene_transaction.cpp"
+)
 SCENE_SOURCE = ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
 SCENE_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.cpp"
 COMPAT_SELFTEST = (
@@ -33,6 +39,7 @@ def test_typed_scene_identity_abi_and_bounds_are_fixed() -> None:
         "effect = 7",
         "stream = 8",
         "keyframe = 9",
+        "value = 10",
         "uint64_t project_id{}",
         "uint64_t object_id{}",
         "uint32_t generation{}",
@@ -40,8 +47,8 @@ def test_typed_scene_identity_abi_and_bounds_are_fixed() -> None:
         "static_assert(offsetof(Identity, generation) == 16)",
         "static_assert(sizeof(void*) == sizeof(uint64_t))",
         "kProjectCapacity = 4",
-        "kObjectCapacity = 64",
-        "kBorrowedHandleCapacity = 64",
+        "kObjectCapacity = 256",
+        "kBorrowedHandleCapacity = 128",
     ):
         assert marker in header
 
@@ -132,7 +139,7 @@ def test_aegp_traversal_returns_registry_borrowed_handles() -> None:
     scene = read(SCENE_SOURCE)
     runtime = read(SCENE_RUNTIME)
     for marker in (
-        "scene_model::registry().initialize_fixture(",
+        "registry.initialize_fixture(",
         "resolve_scene_item",
         "resolve_scene_comp",
         "resolve_scene_layer",
@@ -176,3 +183,75 @@ def test_native_selftest_is_a_release_build_target() -> None:
     assert "add_executable(worker_aegp_scene_model_selftest" in cmake
     assert "../tests/native/worker_aegp_scene_model_selftest.cpp" in cmake
     assert "target_compile_options(worker_aegp_scene_model_selftest PRIVATE /UNDEBUG)" in cmake
+
+
+def test_effect_stream_value_and_keyframe_identities_are_registry_owned() -> None:
+    header = read(MODEL_HEADER)
+    source = read(MODEL_SOURCE)
+    scene = read(SCENE_SOURCE)
+    native = read(NATIVE_SELFTEST)
+    for marker in (
+        "enum class StreamValueKind : uint8_t",
+        "scalar = 1",
+        "color = 2",
+        "layer = 3",
+        "mask = 4",
+        "arbitrary = 5",
+        "create_child_borrowed",
+        "resolve_possessed",
+        "possession_id",
+        "borrow_unique",
+        "erase_tree",
+        "replace_snapshot",
+        "identity.generation == UINT32_MAX",
+        "g_aegp_effect_lease_generation == UINT32_MAX",
+        "g_aegp_legacy_effect_stream_generation == UINT32_MAX",
+        "effect_stream_value_keyframe_registry",
+        "keyframe_bezier_ease_identity",
+        "child_invalidation",
+        "possession_policy",
+    ):
+        assert marker in header or marker in source or marker in scene or marker in native
+
+
+def test_common_scene_transaction_has_explicit_atomic_lifecycle() -> None:
+    header = read(TRANSACTION_HEADER)
+    source = read(TRANSACTION_SOURCE)
+    scene = read(SCENE_SOURCE)
+    mask = read(ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp")
+    native = read(NATIVE_SELFTEST)
+    for marker in (
+        "class AtomicSceneTransaction",
+        "bool stage() noexcept",
+        "bool validate(bool condition) noexcept",
+        "bool commit(uint32_t current_project_generation",
+        "void cancel() noexcept",
+        "registry_.fingerprint() != baseline_fingerprint_",
+        "record_commit",
+        "record_cancel",
+        "transaction_cancel_byte_invariant",
+        "transaction_commit_generation_once",
+        "std::memcmp(",
+        "bump_render_project_timestamp()",
+    ):
+        assert marker in header or marker in source or marker in scene or marker in mask or marker in native
+
+
+def test_published_worker_suites_cover_phase_3_to_5_mutations() -> None:
+    compat = read(COMPAT_SELFTEST)
+    routing = read(CUSTOM_ROUTING)
+    for marker in (
+        'acquire_suite("AEGP Effect Suite", 4',
+        'acquire_suite("AEGP Stream Suite", 7',
+        'acquire_suite("AEGP Layer Mask Suite", 7',
+        'acquire_suite("AEGP Stream Suite", 11',
+        'acquire_suite("AEGP Keyframe Suite", 5',
+        "verify_aegp_scene_mutation_transactions",
+        "transaction_failure_byte_invariant",
+        "transaction_cancel_byte_invariant",
+        "generation_increment_once",
+        "stale_child_invalidation",
+        "keyframe_bezier_ease_ownership",
+        'L"--self-test-aegp-scene-mutation-transactions"',
+    ):
+        assert marker in compat or marker in routing

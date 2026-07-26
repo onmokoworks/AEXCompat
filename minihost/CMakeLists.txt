@@ -107,6 +107,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_effect_bootstrap.cpp
     src/worker_aegp_timeline_probe.cpp
     src/worker_aegp_scene_model.cpp
+    src/worker_aegp_scene_transaction.cpp
     src/worker_aegp_scene.cpp
     src/worker_aegp_scene_runtime.cpp
     src/worker_aegp_scene_selftests.cpp
@@ -202,6 +203,7 @@ target_link_libraries(worker_aegp_compute_cache_selftest PRIVATE
 add_executable(worker_aegp_scene_model_selftest
   ../tests/native/worker_aegp_scene_model_selftest.cpp
   src/worker_aegp_scene_model.cpp
+  src/worker_aegp_scene_transaction.cpp
 )
 target_compile_features(worker_aegp_scene_model_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_aegp_scene_model_selftest PRIVATE

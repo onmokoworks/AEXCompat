@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "worker_aegp_scene_model.hpp"
+
 namespace aexcompat::l2_detail {
 
 struct OpaqueHostObject { uint32_t tag; };
@@ -30,6 +32,7 @@ struct HostKeyframe : OutlineData {
   OutlineData spatial_in; OutlineData spatial_out;
   std::array<KeyframeEase, kHostTemporalDimensions> temporal_in{};
   std::array<KeyframeEase, kHostTemporalDimensions> temporal_out{};
+  aexcompat::scene_model::Identity identity{};
 };
 struct HostMask : OutlineData {
   OpaqueHostObject mask{0x4d41534b};
@@ -50,6 +53,9 @@ enum class DynamicNodeKind { MaskOutline, LayerRoot, MaskParade, MaskAtom,
 struct HostStreamRef {
   OpaqueHostObject opaque{0x5354524d}; HostMask* mask{}; int32_t selector{}, unique_id{};
   uint32_t live_values{}; DynamicNodeKind kind{DynamicNodeKind::MaskOutline};
+  int32_t owner_plugin_id{1};
+  aexcompat::scene_model::Identity identity{};
+  void* handle{};
 };
 struct StreamValue {
   void* stream; union { void* value; double one_d; double two_d[2]; std::byte raw_value[32]; };
@@ -57,6 +63,7 @@ struct StreamValue {
 struct CheckedStreamValue {
   HostStreamRef* stream{}; OutlineData* outline{}; HostKeyframe* source_keyframe{};
   std::unique_ptr<OutlineData> owned_outline;
+  aexcompat::scene_model::Identity identity{};
 };
 struct MaskLifetimeCounts {
   uint32_t masks_acquired{}, masks_disposed{}, streams_acquired{}, streams_disposed{},

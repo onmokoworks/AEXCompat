@@ -52,6 +52,7 @@ bool verify_aegp_effect_stack();
 bool verify_aegp_projector_levels();
 bool verify_aegp_layer_source_item();
 bool verify_aegp_scene_registry_suites();
+bool verify_aegp_scene_mutation_transactions();
 bool verify_aegp_effect_param_union_suite4();
 bool verify_aegp_installed_effect_catalog_suite4();
 }

@@ -19,6 +19,7 @@ enum class ObjectKind : uint8_t {
   effect = 7,
   stream = 8,
   keyframe = 9,
+  value = 10,
 };
 
 enum class ItemKind : uint8_t {
@@ -26,6 +27,41 @@ enum class ItemKind : uint8_t {
   folder = 1,
   composition = 2,
   footage = 3,
+};
+
+enum class StreamValueKind : uint8_t {
+  none = 0,
+  scalar = 1,
+  color = 2,
+  layer = 3,
+  mask = 4,
+  arbitrary = 5,
+};
+
+struct TemporalEase {
+  double speed{};
+  double influence{};
+};
+
+struct StreamState {
+  StreamValueKind value_kind{StreamValueKind::none};
+  uint8_t dimensions{};
+  uint8_t temporal_dimensions{};
+  uint8_t reserved{};
+  std::array<std::byte, 32> value{};
+};
+
+struct KeyframeState {
+  int32_t time_value{};
+  uint32_t time_scale{1};
+  int32_t in_interpolation{1};
+  int32_t out_interpolation{1};
+  uint32_t flags{};
+  int32_t label{};
+  std::array<double, 4> spatial_in{};
+  std::array<double, 4> spatial_out{};
+  std::array<TemporalEase, 4> temporal_in{};
+  std::array<TemporalEase, 4> temporal_out{};
 };
 
 struct Identity {
@@ -63,11 +99,13 @@ struct ObjectSnapshot {
   int32_t local_index{-1};
   void* legacy_handle{};
   std::array<char16_t, 48> name{};
+  StreamState stream{};
+  KeyframeState keyframe{};
 };
 
 inline constexpr std::size_t kProjectCapacity = 4;
-inline constexpr std::size_t kObjectCapacity = 64;
-inline constexpr std::size_t kBorrowedHandleCapacity = 64;
+inline constexpr std::size_t kObjectCapacity = 256;
+inline constexpr std::size_t kBorrowedHandleCapacity = 128;
 
 class Registry {
  public:
@@ -86,10 +124,40 @@ class Registry {
   bool identity_for_legacy(void* legacy, ObjectKind expected,
                            Identity& output) const noexcept;
   bool identity_for_legacy_item(void* legacy, Identity& output) const noexcept;
+  bool identity_for_object(uint64_t project_id, uint64_t object_id,
+                           ObjectKind expected, Identity& output) const noexcept;
 
-  void* borrow(Identity identity) noexcept;
+  bool can_create_child(Identity owner) const noexcept;
+  bool can_create_children(Identity owner, std::size_t object_count,
+                           std::size_t borrowed_count = 0) const noexcept;
+  bool create_child(ObjectKind kind, Identity owner, int32_t local_index,
+                    void* legacy_handle, std::u16string_view name,
+                    Identity& output) noexcept;
+  bool create_child_borrowed(ObjectKind kind, Identity owner,
+                             int32_t local_index, void* legacy_handle,
+                             std::u16string_view name, int32_t possession_id,
+                             Identity& output, void*& handle) noexcept;
+  bool update_local_index(Identity identity, int32_t local_index) noexcept;
+  bool initialize_stream_state(Identity identity,
+                               const StreamState& state) noexcept;
+  bool initialize_keyframe_state(Identity identity,
+                                  const KeyframeState& state) noexcept;
+  bool replace_snapshot(Identity identity, const ObjectSnapshot& candidate,
+                        Identity& replacement) noexcept;
+  bool erase_tree(Identity identity) noexcept;
+
+  void* borrow(Identity identity, int32_t possession_id = 0) noexcept;
+  void* borrow_unique(Identity identity, int32_t possession_id) noexcept;
   bool resolve(void* handle, ObjectKind expected, ObjectSnapshot& output,
                uint64_t required_project_id = 0) const noexcept;
+  bool resolve_possessed(void* handle, ObjectKind expected,
+                         int32_t possession_id, ObjectSnapshot& output,
+                         uint64_t required_project_id = 0) const noexcept;
+  bool possession(void* handle, ObjectKind expected,
+                  int32_t& possession_id) const noexcept;
+  bool release(void* handle, ObjectKind expected,
+               int32_t possession_id = 0,
+               bool require_possession = false) noexcept;
   bool resolve_item(void* handle, ObjectSnapshot& output,
                     uint64_t required_project_id = 0) const noexcept;
   bool resolve_or_legacy(void* handle, ObjectKind expected,
@@ -107,6 +175,8 @@ class Registry {
                       ObjectSnapshot& output) const noexcept;
   bool layer_from_id(Identity comp, uint64_t object_id,
                      ObjectSnapshot& output) const noexcept;
+  bool child_by_index(Identity owner, ObjectKind kind, std::size_t index,
+                      ObjectSnapshot& output) const noexcept;
 
   bool invalidate(Identity identity, Identity& replacement) noexcept;
   uint64_t fingerprint() const noexcept;
@@ -122,6 +192,7 @@ class Registry {
   struct BorrowedLease {
     Identity target{};
     uint64_t lease_identity{};
+    int32_t possession_id{};
     bool issued{};
     bool live{};
   };
@@ -138,7 +209,9 @@ class Registry {
       const void* handle, std::size_t& slot) const noexcept;
   bool resolve_locked(void* handle, ObjectKind expected,
                       bool item_family, ObjectSnapshot& output,
-                      uint64_t required_project_id) const noexcept;
+                      uint64_t required_project_id,
+                      bool require_possession = false,
+                      int32_t possession_id = 0) const noexcept;
 
   mutable std::mutex mutex_;
   std::array<ObjectRecord, kObjectCapacity> objects_{};
@@ -147,6 +220,7 @@ class Registry {
   std::size_t object_count_{};
   std::size_t project_count_{};
   std::size_t issued_token_count_{};
+  uint64_t next_dynamic_object_id_{100000};
   uint64_t next_lease_identity_{1};
   bool lease_identity_exhausted_{};
   Identity active_project_{};
