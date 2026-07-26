@@ -21,6 +21,7 @@ use std::marker::PhantomData;
 use std::ptr;
 use thiserror::Error;
 
+use crate::crt_heap::CrtHeap;
 #[cfg(test)]
 use crate::native_aegp_memory::active_arena_next;
 use crate::native_aegp_memory::{
@@ -177,6 +178,7 @@ struct NativeState {
     image_start: u64,
     image_end: u64,
     plugin_data_registry: EffectRegistry,
+    crt_heap: CrtHeap,
 }
 
 thread_local! {
@@ -254,6 +256,11 @@ impl Drop for GuestEngine<'_> {
         for record in self.state.worlds.drain().map(|(_, record)| record) {
             unsafe {
                 munmap(record.data as *mut c_void, record.mapping_size);
+            }
+        }
+        for (pointer, allocation) in self.state.crt_heap.allocations() {
+            unsafe {
+                munmap(pointer as *mut c_void, allocation.backing_size as usize);
             }
         }
     }
@@ -817,6 +824,10 @@ unsafe extern "win64" fn native_omp_get_max_threads(
 
 fn native_import_callback(name: &str) -> u64 {
     match name {
+        "malloc" => callback_address!(native_crt_malloc),
+        "calloc" => callback_address!(native_crt_calloc),
+        "free" => callback_address!(native_crt_free),
+        "_callnewh" => callback_address!(noop_import),
         "strncpy" => callback_address!(native_strncpy),
         "memset" => callback_address!(native_memset),
         "expf" => callback_address!(native_expf),
@@ -826,6 +837,84 @@ fn native_import_callback(name: &str) -> u64 {
         "omp_get_max_threads" => callback_address!(native_omp_get_max_threads),
         _ => callback_address!(noop_import),
     }
+}
+
+unsafe extern "win64" fn native_crt_malloc(
+    size: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    native_crt_allocate(size)
+}
+
+unsafe extern "win64" fn native_crt_calloc(
+    count: u64,
+    element_size: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    CrtHeap::checked_calloc_size(count, element_size)
+        .map(native_crt_allocate)
+        .unwrap_or(0)
+}
+
+fn native_crt_allocate(requested_size: u64) -> u64 {
+    with_state(|state| {
+        let allocation = match state.crt_heap.prepare_allocation(requested_size) {
+            Ok(allocation) => allocation,
+            Err(_) => return 0,
+        };
+        let pointer = unsafe {
+            mmap(
+                ptr::null_mut(),
+                allocation.backing_size as usize,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if pointer as usize == usize::MAX {
+            return 0;
+        }
+        let address = pointer as u64;
+        if let Err(error) = state.crt_heap.insert(address, allocation) {
+            unsafe {
+                munmap(pointer, allocation.backing_size as usize);
+            }
+            state.callback_error = Some(error.to_string());
+            return 0;
+        }
+        address
+    })
+    .unwrap_or(0)
+}
+
+unsafe extern "win64" fn native_crt_free(
+    pointer: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    if pointer == 0 {
+        return 0;
+    }
+    with_state(|state| match state.crt_heap.remove(pointer) {
+        Ok(allocation) => {
+            if unsafe { munmap(pointer as *mut c_void, allocation.backing_size as usize) } != 0 {
+                state.callback_error = Some(format!("unmap CRT allocation {pointer:#x} failed"));
+            }
+        }
+        Err(error) => state.callback_error = Some(error.to_string()),
+    });
+    0
 }
 
 unsafe extern "win64" fn poison_callback(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
@@ -1547,6 +1636,9 @@ fn native_guest_range_valid(state: &NativeState, address: u64, size: u64) -> boo
     (address >= arena_base && end <= state.arena_end)
         || (address >= state.image_start && end <= state.image_end)
         || (address >= stack_base && end <= stack_top)
+        || state.crt_heap.allocations().any(|(pointer, allocation)| {
+            address >= pointer && end <= pointer + allocation.requested_size
+        })
         || state
             .worlds
             .values()
@@ -2069,6 +2161,50 @@ unsafe extern "win64" fn resize_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crt_heap_imports_allocate_zero_and_reject_invalid_free() {
+        let mut state = NativeState::default();
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+
+        let zero = unsafe { native_crt_malloc(0, 0, 0, 0, 0, 0) };
+        assert_ne!(zero, 0);
+        assert_eq!(zero % crate::crt_heap::CRT_HEAP_ALIGNMENT, 0);
+        let calloc_pointer = unsafe { native_crt_calloc(8, 4, 0, 0, 0, 0) };
+        assert_ne!(calloc_pointer, 0);
+        let bytes = unsafe { std::slice::from_raw_parts(calloc_pointer as *const u8, 32) };
+        assert_eq!(bytes, &[0; 32]);
+
+        assert_eq!(unsafe { native_crt_free(0, 0, 0, 0, 0, 0) }, 0);
+        assert!(state.callback_error.is_none());
+        assert_eq!(unsafe { native_crt_free(zero, 0, 0, 0, 0, 0) }, 0);
+        assert_eq!(unsafe { native_crt_free(zero, 0, 0, 0, 0, 0) }, 0);
+        assert!(
+            state
+                .callback_error
+                .as_deref()
+                .is_some_and(|message| message.contains("foreign or already-freed"))
+        );
+        state.callback_error = None;
+        assert_eq!(unsafe { native_crt_free(calloc_pointer, 0, 0, 0, 0, 0) }, 0);
+        assert_eq!(state.crt_heap.allocations().count(), 0);
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
+
+    #[test]
+    fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
+        let mut state = NativeState::default();
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+        assert_eq!(unsafe { native_crt_calloc(u64::MAX, 2, 0, 0, 0, 0) }, 0);
+        assert_eq!(
+            unsafe {
+                native_crt_malloc(crate::crt_heap::MAX_CRT_ALLOCATION_BYTES + 1, 0, 0, 0, 0, 0)
+            },
+            0
+        );
+        assert!(state.callback_error.is_none());
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
 
     #[test]
     fn color_param_suite_v1_is_stateful_and_fails_closed() {

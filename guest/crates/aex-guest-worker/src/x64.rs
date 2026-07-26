@@ -7,6 +7,7 @@ use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::{RegisterX86, UcHookId, Unicorn};
 
+use crate::crt_heap::{CrtHeap, CrtHeapError, MAX_CRT_HEAP_BYTES};
 use crate::pe::PeImage;
 use crate::plugin_data::{
     CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
@@ -77,6 +78,8 @@ const MAX_PF_HANDLE_SIZE: u64 = 0x8000_0000;
 const MAX_PF_HANDLE_COUNT: usize = 16_384;
 const WORLD_DATA_BASE: u64 = PF_HANDLE_DATA_END;
 const WORLD_DATA_END: u64 = WORLD_DATA_BASE + 0x2_0000_0000;
+const CRT_HEAP_BASE: u64 = 0x0000_0010_0000_0000;
+const CRT_HEAP_END: u64 = CRT_HEAP_BASE + MAX_CRT_HEAP_BYTES;
 const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_WORLD_COUNT: usize = 256;
 // A nonzero Unicorn instruction limit enables instruction counting across the
@@ -1231,6 +1234,8 @@ fn classify_trace_value(raw: u64, image_base: u64, image_end: u64) -> TraceValue
         ("guest_stack", Some(raw - STACK_BASE))
     } else if (STUB_BASE..STUB_BASE + STUB_SIZE).contains(&raw) {
         ("host_stub", Some(raw - STUB_BASE))
+    } else if (CRT_HEAP_BASE..CRT_HEAP_END).contains(&raw) {
+        ("crt_heap", Some(raw - CRT_HEAP_BASE))
     } else {
         ("scalar", None)
     };
@@ -1466,6 +1471,7 @@ struct GuestState {
     vcomp_dynamic_loop: Option<VcompDynamicLoop>,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
+    crt_heap: CrtHeap,
 }
 
 #[derive(Clone, Debug)]
@@ -1540,13 +1546,20 @@ pub struct GuestEngine<'a> {
 
 impl Drop for GuestEngine<'_> {
     fn drop(&mut self) {
-        let mappings = self
+        let mut mappings = self
             .unicorn
             .get_data_mut()
             .worlds
             .drain()
             .map(|(_, record)| (record.data_region, record.data_mapped_size))
             .collect::<Vec<_>>();
+        mappings.extend(
+            self.unicorn
+                .get_data()
+                .crt_heap
+                .allocations()
+                .map(|(pointer, allocation)| (pointer, allocation.backing_size)),
+        );
         for (address, size) in mappings {
             let _ = self.unicorn.mem_unmap(address, size);
         }
@@ -2051,6 +2064,37 @@ impl GuestEngine<'static> {
                     unicorn.mem_write(stub, &[0x31, 0xc0, 0xc3]),
                 )?;
                 match symbol.name.as_str() {
+                    "malloc" => {
+                        uc("write malloc return", unicorn.mem_write(stub, &[0xc3]))?;
+                        uc(
+                            "install malloc import",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_crt_malloc(unicorn, false);
+                            }),
+                        )?;
+                    }
+                    "calloc" => {
+                        uc("write calloc return", unicorn.mem_write(stub, &[0xc3]))?;
+                        uc(
+                            "install calloc import",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_crt_malloc(unicorn, true);
+                            }),
+                        )?;
+                    }
+                    "free" => {
+                        uc("write free return", unicorn.mem_write(stub, &[0xc3]))?;
+                        uc(
+                            "install free import",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_crt_free(unicorn);
+                            }),
+                        )?;
+                    }
+                    "_callnewh" => {
+                        // No new-handler is installed by this bounded host.
+                        // Returning zero tells the MSVC allocation path not to retry.
+                    }
                     "strncpy" => {
                         uc(
                             "install strncpy import",
@@ -3914,6 +3958,71 @@ fn install_double_binary_import(
         }),
     )
     .map(|_| ())
+}
+
+fn emulate_crt_malloc(unicorn: &mut Unicorn<'_, GuestState>, calloc: bool) {
+    let requested_size = if calloc {
+        let count = unicorn.reg_read(RegisterX86::RCX);
+        let element_size = unicorn.reg_read(RegisterX86::RDX);
+        match (count, element_size) {
+            (Ok(count), Ok(element_size)) => CrtHeap::checked_calloc_size(count, element_size),
+            _ => Err(CrtHeapError::SizeOverflow),
+        }
+    } else {
+        unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|_| CrtHeapError::SizeOverflow)
+    };
+    let allocation =
+        requested_size.and_then(|size| unicorn.get_data().crt_heap.prepare_allocation(size));
+    let pointer = allocation.and_then(|allocation| {
+        let pointer =
+            unicorn
+                .get_data()
+                .crt_heap
+                .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
+        unicorn
+            .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
+            .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
+        if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
+            let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
+            return Err(error);
+        }
+        Ok(pointer)
+    });
+    // malloc/calloc report normal bounded allocation failure as NULL. This is
+    // distinct from free ownership violations, which stop at the callback boundary.
+    let _ = unicorn.reg_write(RegisterX86::RAX, pointer.unwrap_or(0));
+}
+
+fn emulate_crt_free(unicorn: &mut Unicorn<'_, GuestState>) {
+    let pointer = match unicorn.reg_read(RegisterX86::RCX) {
+        Ok(pointer) => pointer,
+        Err(error) => {
+            unicorn.get_data_mut().callback_error = Some(format!("read CRT free pointer: {error}"));
+            let _ = unicorn.emu_stop();
+            return;
+        }
+    };
+    if pointer == 0 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
+    let allocation = unicorn.get_data_mut().crt_heap.remove(pointer);
+    match allocation {
+        Ok(allocation) => {
+            if let Err(error) = unicorn.mem_unmap(pointer, allocation.backing_size) {
+                unicorn.get_data_mut().callback_error =
+                    Some(format!("unmap CRT allocation {pointer:#x}: {error}"));
+                let _ = unicorn.emu_stop();
+            }
+        }
+        Err(error) => {
+            unicorn.get_data_mut().callback_error = Some(error.to_string());
+            let _ = unicorn.emu_stop();
+        }
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
 fn emulate_memset(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -5946,6 +6055,71 @@ mod tests {
                 symbols: vec!["fixture_entry".into()],
             }],
         }
+    }
+
+    #[test]
+    fn crt_heap_imports_allocate_zero_reuse_and_reject_invalid_free() {
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+        emulate_crt_malloc(&mut engine.unicorn, false);
+        let first = engine.unicorn.reg_read(RegisterX86::RAX).unwrap();
+        assert_ne!(first, 0);
+        assert_eq!(first % crate::crt_heap::CRT_HEAP_ALIGNMENT, 0);
+
+        engine.unicorn.reg_write(RegisterX86::RCX, 8).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, 4).unwrap();
+        emulate_crt_malloc(&mut engine.unicorn, true);
+        let calloc_pointer = engine.unicorn.reg_read(RegisterX86::RAX).unwrap();
+        let mut bytes = [0xff; 32];
+        engine.unicorn.mem_read(calloc_pointer, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 32]);
+
+        engine.unicorn.reg_write(RegisterX86::RCX, first).unwrap();
+        emulate_crt_free(&mut engine.unicorn);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+        engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+        emulate_crt_malloc(&mut engine.unicorn, false);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), first);
+
+        engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+        emulate_crt_free(&mut engine.unicorn);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RCX, 0xdead_beef)
+            .unwrap();
+        emulate_crt_free(&mut engine.unicorn);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|message| message.contains("foreign or already-freed"))
+        );
+    }
+
+    #[test]
+    fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
+        let mut engine = test_engine(&[0xc3]);
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RCX, u64::MAX)
+            .unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, 2).unwrap();
+        emulate_crt_malloc(&mut engine.unicorn, true);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+
+        engine
+            .unicorn
+            .reg_write(
+                RegisterX86::RCX,
+                crate::crt_heap::MAX_CRT_ALLOCATION_BYTES + 1,
+            )
+            .unwrap();
+        emulate_crt_malloc(&mut engine.unicorn, false);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
     }
 
     fn read_u64(engine: &GuestEngine<'static>, address: u64) -> u64 {

@@ -13,6 +13,7 @@ pub mod backend {
     pub use crate::x64::*;
 }
 pub mod classic;
+mod crt_heap;
 #[cfg(all(
     feature = "native-carrier",
     target_arch = "x86_64",
