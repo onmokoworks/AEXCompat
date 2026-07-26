@@ -56,6 +56,8 @@ void clear() noexcept;
 bool register_item(void* item, uint64_t stable_identity, SamplingPolicy policy,
                    void* const* dependencies, std::size_t dependency_count,
                    const uint64_t* effect_instances, std::size_t effect_count);
+bool ensure_item_registered(void* item, uint64_t stable_identity,
+                            SamplingPolicy policy, uint64_t effect_instance);
 bool publish_stage_world(void* item, StageKind stage_kind, uint64_t effect_instance,
                          suite_abi::AegpTime time, suite_abi::AegpTime time_step,
                          int8_t quality, uint8_t guide_layers, int32_t pixel_format,

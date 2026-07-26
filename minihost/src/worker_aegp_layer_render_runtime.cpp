@@ -126,9 +126,14 @@ int32_t publish_from_context(const Context& context, const LayerValue& options,
   const uint64_t effect_instance = options.upstream_effect
       ? static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
             options.upstream_effect))
-      : (std::numeric_limits<uint64_t>::max)();
+      : 0;
   uint64_t stage_identity_hash = 0;
   void* const item = g_hooks.current_item ? g_hooks.current_item() : nullptr;
+  if (item && effect_instance != 0) {
+    aegp_staged_item_runtime::ensure_item_registered(
+        item, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(item)),
+        aegp_staged_item_runtime::SamplingPolicy::exact, effect_instance);
+  }
   if (!item || !g_hooks.publish_scheduler_stage ||
       !g_hooks.publish_scheduler_stage(item, stage_kind, effect_instance,
           options.time, options.time_step, 1, 0, pixel_format, width, height,

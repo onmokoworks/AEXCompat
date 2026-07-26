@@ -358,15 +358,40 @@ bool candidate_matches(const StagedItemWorld& value, void* item, StageKind kind,
       value.project_generation == project_generation && value.backing;
 }
 
+bool candidate_matches(const StagedItemWorld& value, void* item, StageKind kind,
+                       uint64_t effect_instance, const ItemValue& options,
+                       int32_t pixel_format, uint32_t project_generation,
+                       const AegpTime& source_time) {
+  if (!candidate_matches(value, item, kind, effect_instance, options,
+                         pixel_format, project_generation))
+    return false;
+  if (source_time.scale != 0 &&
+      !same_rational(value.time, source_time))
+    return false;
+  return true;
+}
+
 bool select_stage(const ResolveSnapshot& snapshot, void* item, StageKind kind,
                   uint64_t effect_instance, SamplingPolicy policy,
                   const ItemValue& options, int32_t pixel_format,
                   uint32_t project_generation, StagedItemWorld& selected) {
+  return select_stage(snapshot, item, kind, effect_instance, policy, options,
+                      pixel_format, project_generation, {}, selected);
+}
+
+bool select_stage(const ResolveSnapshot& snapshot, void* item, StageKind kind,
+                  uint64_t effect_instance, SamplingPolicy policy,
+                  const ItemValue& options, int32_t pixel_format,
+                  uint32_t project_generation,
+                  const AegpTime& source_time, StagedItemWorld& selected) {
   const StagedItemWorld* best = nullptr;
   RationalDistance best_distance{};
   for (const auto& candidate : snapshot.worlds) {
     if (!candidate_matches(candidate, item, kind, effect_instance, options,
                            pixel_format, project_generation))
+      continue;
+    if (source_time.scale != 0 &&
+        !same_rational(candidate.time, source_time))
       continue;
     if (policy == SamplingPolicy::exact &&
         !same_rational(candidate.time, options.time))
@@ -380,20 +405,13 @@ bool select_stage(const ResolveSnapshot& snapshot, void* item, StageKind kind,
     if (best) {
       const int source_order = compare_rational(candidate.time, best->time);
       if (policy == SamplingPolicy::hold) {
-        replace = source_order > 0 ||
-            (source_order == 0 &&
-             candidate.stage_generation > best->stage_generation);
+        replace = source_order > 0;
       } else if (policy == SamplingPolicy::nearest) {
         const int distance_order = compare_positive_fractions(
             distance.numerator, distance.denominator,
             best_distance.numerator, best_distance.denominator);
         replace = distance_order < 0 ||
-            (distance_order == 0 &&
-             (source_order < 0 ||
-              (source_order == 0 &&
-               candidate.stage_generation > best->stage_generation)));
-      } else {
-        replace = candidate.stage_generation > best->stage_generation;
+            (distance_order == 0 && source_order < 0);
       }
     }
     if (replace) {
@@ -425,6 +443,44 @@ bool record_resolved_stage(ResolveContext& context,
   context.trace_hash = hash_mix(context.trace_hash,
                                 stage_identity_hash(stage.identity));
   return true;
+}
+
+bool resolve_source_time(const ResolveSnapshot& snapshot, void* item,
+                         SamplingPolicy policy, const ItemValue& options,
+                         int32_t pixel_format, uint32_t project_generation,
+                         AegpTime& source_time) {
+  source_time = {};
+  for (const auto& candidate : snapshot.worlds) {
+    if (!candidate_matches(candidate, item, StageKind::final_item, 0, options,
+                           pixel_format, project_generation))
+      continue;
+    if (policy == SamplingPolicy::exact &&
+        !same_rational(candidate.time, options.time))
+      continue;
+    if (policy == SamplingPolicy::hold &&
+        compare_rational(candidate.time, options.time) > 0)
+      continue;
+    if (source_time.scale == 0) {
+      source_time = candidate.time;
+      continue;
+    }
+    const int source_order = compare_rational(candidate.time, source_time);
+    if (policy == SamplingPolicy::hold) {
+      if (source_order > 0) source_time = candidate.time;
+    } else if (policy == SamplingPolicy::nearest) {
+      const RationalDistance candidate_distance =
+          rational_distance(candidate.time, options.time);
+      const RationalDistance current_distance =
+          rational_distance(source_time, options.time);
+      const int distance_order = compare_positive_fractions(
+          candidate_distance.numerator, candidate_distance.denominator,
+          current_distance.numerator, current_distance.denominator);
+      if (distance_order < 0 ||
+          (distance_order == 0 && compare_rational(candidate.time, source_time) < 0))
+        source_time = candidate.time;
+    }
+  }
+  return source_time.scale != 0;
 }
 
 bool resolve_item(ResolveContext& context, void* item, uint32_t depth,
@@ -461,7 +517,13 @@ bool resolve_item(ResolveContext& context, void* item, uint32_t depth,
         return false;
     }
   }
-  uint64_t previous_generation = 0;
+  AegpTime resolved_time{};
+  if (policy != SamplingPolicy::exact) {
+    if (!resolve_source_time(context.snapshot, item, policy, context.options,
+                             context.pixel_format, context.project_generation,
+                             resolved_time))
+      return resolve_failure(context, g_unavailable_frames);
+  }
   if (registration) {
     for (uint64_t effect_instance : registration->effect_instances) {
       for (StageKind kind : {StageKind::upstream, StageKind::all_effects,
@@ -469,21 +531,28 @@ bool resolve_item(ResolveContext& context, void* item, uint32_t depth,
         StagedItemWorld boundary{};
         if (!select_stage(context.snapshot, item, kind, effect_instance, policy,
                           context.options, context.pixel_format,
-                          context.project_generation, boundary))
-          return resolve_failure(context, g_effect_boundary_rejections);
-        if (boundary.stage_generation <= previous_generation)
-          return resolve_failure(context, g_effect_boundary_rejections);
-        previous_generation = boundary.stage_generation;
+                          context.project_generation,
+                          resolved_time, boundary)) {
+          if (kind == StageKind::all_effects &&
+              select_stage(context.snapshot, item, kind, 0, policy,
+                           context.options, context.pixel_format,
+                           context.project_generation,
+                           resolved_time, boundary)) {
+            boundary.effect_instance = effect_instance;
+            boundary.identity.effect_instance = effect_instance;
+          } else {
+            return resolve_failure(context, g_effect_boundary_rejections);
+          }
+        }
         if (!record_resolved_stage(context, boundary, depth)) return false;
       }
     }
   }
   if (!select_stage(context.snapshot, item, StageKind::final_item, 0, policy,
                     context.options, context.pixel_format,
-                    context.project_generation, final_stage))
+                    context.project_generation,
+                    resolved_time, final_stage))
     return false;
-  if (final_stage.stage_generation <= previous_generation)
-    return resolve_failure(context, g_effect_boundary_rejections);
   if (!record_resolved_stage(context, final_stage, depth)) return false;
   final_policy = policy;
   return true;
@@ -720,6 +789,37 @@ bool register_item(void* item, uint64_t stable_identity, SamplingPolicy policy,
   try {
     g_items.push_back({item, stable_identity, policy,
                        std::move(dependency_copy), std::move(effect_copy)});
+  } catch (...) {
+    return false;
+  }
+  return true;
+}
+
+bool ensure_item_registered(void* item, uint64_t stable_identity,
+                            SamplingPolicy policy, uint64_t effect_instance) {
+  if (!item || stable_identity == 0 || effect_instance == 0) return false;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  const auto existing = std::find_if(g_items.begin(), g_items.end(),
+      [item](const auto& value) { return value.item == item; });
+  if (existing != g_items.end()) {
+    if (existing->stable_identity != stable_identity) return false;
+    if (existing->policy != policy) existing->policy = policy;
+    const bool has_effect =
+        std::find(existing->effect_instances.begin(),
+                  existing->effect_instances.end(),
+                  effect_instance) != existing->effect_instances.end();
+    if (!has_effect) {
+      if (existing->effect_instances.size() >= kMaxEffectsPerItem) return false;
+      try {
+        existing->effect_instances.push_back(effect_instance);
+      } catch (...) { return false; }
+    }
+    return true;
+  }
+  if (g_items.size() >= kMaxRegisteredItems) return false;
+  try {
+    g_items.push_back({item, stable_identity, policy, {},
+                       {effect_instance}});
   } catch (...) {
     return false;
   }

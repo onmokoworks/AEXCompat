@@ -692,6 +692,108 @@ bool verify_aegp_item_staged_worlds() {
       !async_receipt_lifetimes_balanced())
     return false;
 
+  // Regression F4: out-of-order publication must not block resolution.
+  // Publish downstream first (newer generation) then upstream (older).
+  clear_staged_item_worlds_for_test();
+  void* const regress_f4_item = reinterpret_cast<void*>(0xa400);
+  std::array<void*, 1> regress_f4_deps{{nested_middle}};
+  std::array<uint64_t, 1> regress_f4_effect{{0xe401}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          regress_f4_item, 6001, SamplingPolicy::exact,
+          regress_f4_deps.data(), regress_f4_deps.size(),
+          regress_f4_effect.data(), regress_f4_effect.size()) ||
+      !publish_scheduler_stage(regress_f4_item, StageKind::downstream,
+          regress_f4_effect[0], time, 24) ||
+      !publish_scheduler_stage(regress_f4_item, StageKind::upstream,
+          regress_f4_effect[0], time, 21) ||
+      !publish_scheduler_stage(regress_f4_item, StageKind::all_effects,
+          regress_f4_effect[0], time, 22) ||
+      !publish_scheduler_stage(regress_f4_item, StageKind::final_item, 0,
+          time, 51))
+    return false;
+  ReceiptSnapshot regress_f4_snap{};
+  if (!publish_scheduler_stage(nested_middle, StageKind::final_item, 0, time, 41) ||
+      !publish_scheduler_stage(nested_leaf, StageKind::final_item, 0, time, 31))
+    return false;
+  if (!checkout_registered(make_request(regress_f4_item, time), regress_f4_snap) ||
+      regress_f4_snap.item_identity != 6001 ||
+      regress_f4_snap.resolved_stage_count < 4 ||
+      !same_test_time(regress_f4_snap.source_time, time))
+    return false;
+
+  // Regression F3: hold item with disparate source times must pick one source
+  // for all stages and never mix across frames.
+  clear_staged_item_worlds_for_test();
+  void* const regress_f3_item = reinterpret_cast<void*>(0xa500);
+  const AegpTime f3_early{3, 24};
+  const AegpTime f3_late{4, 24};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          regress_f3_item, 7001, SamplingPolicy::hold, nullptr, 0, nullptr, 0))
+    return false;
+  for (AegpTime at : {f3_early, f3_late})
+    if (!publish_scheduler_stage(regress_f3_item, StageKind::final_item, 0, at,
+            static_cast<uint8_t>(at.value)))
+      return false;
+  ReceiptSnapshot regress_f3_snap{};
+  if (!checkout_registered(make_request(regress_f3_item, time),
+          regress_f3_snap) ||
+      !same_test_time(regress_f3_snap.source_time, f3_late))
+    return false;
+
+  // Regression F2: all_effects published with instance 0 (production sentinel)
+  // must match an effect instance in the registration.
+  clear_staged_item_worlds_for_test();
+  void* const regress_f2_item = reinterpret_cast<void*>(0xa600);
+  std::array<uint64_t, 1> regress_f2_effect{{0xe601}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          regress_f2_item, 8001, SamplingPolicy::exact, nullptr, 0,
+          regress_f2_effect.data(), regress_f2_effect.size()))
+    return false;
+  if (!publish_scheduler_stage(regress_f2_item, StageKind::upstream,
+          regress_f2_effect[0], time, 21) ||
+      !publish_scheduler_stage(regress_f2_item, StageKind::all_effects,
+          0, time, 22) ||
+      !publish_scheduler_stage(regress_f2_item, StageKind::downstream,
+          regress_f2_effect[0], time, 23) ||
+      !publish_scheduler_stage(regress_f2_item, StageKind::final_item, 0,
+          time, 51))
+    return false;
+  ReceiptSnapshot regress_f2_snap{};
+  if (!checkout_registered(make_request(regress_f2_item, time), regress_f2_snap) ||
+      regress_f2_snap.item_identity != 8001 ||
+      regress_f2_snap.resolved_stage_count != 4)
+    return false;
+
+  // Regression F1: ensure_item_registered during production-stage publish
+  // assembles an item that was not pre-registered via register_item.
+  clear_staged_item_worlds_for_test();
+  void* const regress_f1_item = reinterpret_cast<void*>(0xa700);
+  if (!aexcompat::aegp_staged_item_runtime::ensure_item_registered(
+          regress_f1_item, 9001, SamplingPolicy::exact, 0xe701) ||
+      !aexcompat::aegp_staged_item_runtime::ensure_item_registered(
+          regress_f1_item, 9001, SamplingPolicy::exact, 0xe702))
+    return false;
+  if (!publish_scheduler_stage(regress_f1_item, StageKind::upstream, 0xe701,
+          time, 21) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::all_effects, 0xe701,
+          time, 22) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::downstream, 0xe701,
+          time, 23) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::upstream, 0xe702,
+          time, 31) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::all_effects, 0xe702,
+          time, 32) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::downstream, 0xe702,
+          time, 33) ||
+      !publish_scheduler_stage(regress_f1_item, StageKind::final_item, 0,
+          time, 51))
+    return false;
+  ReceiptSnapshot regress_f1_snap{};
+  if (!checkout_registered(make_request(regress_f1_item, time), regress_f1_snap) ||
+      regress_f1_snap.item_identity != 9001 ||
+      regress_f1_snap.resolved_stage_count != 7)
+    return false;
+
   // Direct/indirect cycles, excessive nesting, and stage-count overflow are
   // all terminal and leave no partial receipt or ownership.
   const auto cycles_before =
