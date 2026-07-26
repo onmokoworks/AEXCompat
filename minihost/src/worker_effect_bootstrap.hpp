@@ -22,7 +22,8 @@ struct State {
 
 struct AbiHooks {
   std::array<void*, 12> input_callbacks{};
-  std::array<void*, 32> utility_callbacks{};
+  std::array<void*, abi::x86_64_windows::UTILITY_CALLBACK_OFFSETS.size()>
+      utility_callbacks{};
   const void* color_callbacks{};
   std::size_t color_callbacks_size{};
   void* basic_suite{};

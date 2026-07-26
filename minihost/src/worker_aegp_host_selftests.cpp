@@ -89,14 +89,15 @@ bool verify_utils_handle_callbacks_wired() {
   boot::State state{};
   boot::AbiHooks abi{};
   // The handle callbacks occupy the tail of the utility table, index-aligned
-  // with kUtilityCallbackOffsets (160/168/176/184/440/464). Mirror the exact
+  // with kUtilityCallbackOffsets (160/168/176/184/440/464). transfer_rect at
+  // index 15 shifts these host callbacks to indices 26..31. Mirror the exact
   // functions l2_main installs so this drives the production write path.
-  abi.utility_callbacks[25] = reinterpret_cast<void*>(&new_handle);
-  abi.utility_callbacks[26] = reinterpret_cast<void*>(&lock_handle);
-  abi.utility_callbacks[27] = reinterpret_cast<void*>(&unlock_handle);
-  abi.utility_callbacks[28] = reinterpret_cast<void*>(&dispose_handle);
-  abi.utility_callbacks[29] = reinterpret_cast<void*>(&handle_size);
-  abi.utility_callbacks[30] = reinterpret_cast<void*>(&resize_handle);
+  abi.utility_callbacks[26] = reinterpret_cast<void*>(&new_handle);
+  abi.utility_callbacks[27] = reinterpret_cast<void*>(&lock_handle);
+  abi.utility_callbacks[28] = reinterpret_cast<void*>(&unlock_handle);
+  abi.utility_callbacks[29] = reinterpret_cast<void*>(&dispose_handle);
+  abi.utility_callbacks[30] = reinterpret_cast<void*>(&handle_size);
+  abi.utility_callbacks[31] = reinterpret_cast<void*>(&resize_handle);
   boot::install_callback_tables(state, abi);
 
   // A plug-in reaches these as in_data->utils->host_*; recover the utility
