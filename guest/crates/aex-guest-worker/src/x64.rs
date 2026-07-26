@@ -4540,6 +4540,19 @@ fn valid_aegp_memory_size(size: u64) -> Option<u64> {
     (size <= i32::MAX as u64 && size <= MAX_AEGP_MEMORY_BYTES).then_some(size)
 }
 
+fn checked_aegp_memory_live_bytes_after(
+    state: &GuestState,
+    replaced_size: u64,
+    size: u64,
+) -> Option<u64> {
+    let live_bytes = state
+        .aegp_memory_handles
+        .values()
+        .try_fold(0u64, |total, record| total.checked_add(record.size))?;
+    let total = live_bytes.checked_sub(replaced_size)?.checked_add(size)?;
+    (total <= MAX_AEGP_MEMORY_BYTES).then_some(total)
+}
+
 fn aegp_memory_capacity(size: u64) -> Option<u64> {
     size.max(1).checked_add(15).map(|size| size & !15)
 }
@@ -4635,6 +4648,9 @@ fn emulate_aegp_new_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _:
         let state = unicorn.get_data();
         if state.aegp_memory_handles.len() >= MAX_AEGP_MEMORY_HANDLES {
             return Err("AEGP Memory handle limit reached".to_string());
+        }
+        if checked_aegp_memory_live_bytes_after(state, 0, size).is_none() {
+            return Err("AEGP Memory live-byte budget exceeded".to_string());
         }
         let handle = state.next_aegp_memory_handle;
         let next_handle = handle
@@ -4788,6 +4804,9 @@ fn emulate_aegp_resize_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64,
             .ok_or("AEGP Memory handle is stale")?;
         if old.locks != 0 {
             return Err("AEGP Memory handle is locked".to_string());
+        }
+        if checked_aegp_memory_live_bytes_after(unicorn.get_data(), old.size, size).is_none() {
+            return Err("AEGP Memory live-byte budget exceeded".to_string());
         }
         let old_capacity = old.end - old.data;
         let new_capacity = aegp_memory_capacity(size).ok_or("AEGP Memory resize overflow")?;
@@ -5739,6 +5758,49 @@ mod tests {
                 symbols: vec!["fixture_entry".into()],
             }],
         }
+    }
+
+    fn read_u64(engine: &GuestEngine<'static>, address: u64) -> u64 {
+        let mut bytes = [0u8; 8];
+        engine.read(address, &mut bytes).unwrap();
+        u64::from_le_bytes(bytes)
+    }
+
+    fn call_aegp_new_mem_handle(
+        engine: &mut GuestEngine<'static>,
+        callback: u64,
+        label: u64,
+        output: u64,
+        size: u64,
+    ) -> (u64, u64) {
+        engine.write(output, &u64::MAX.to_le_bytes()).unwrap();
+        let result = engine
+            .call_win64(callback, [1, label, size, 0, output, 0])
+            .unwrap();
+        (result, read_u64(engine, output))
+    }
+
+    fn aegp_memory_state_snapshot(
+        engine: &GuestEngine<'static>,
+    ) -> (u64, u64, Vec<(u64, u64, u64, u32, u64)>, Vec<(u64, u64)>) {
+        let state = engine.unicorn.get_data();
+        let mut handles = state
+            .aegp_memory_handles
+            .iter()
+            .map(|(&handle, record)| (handle, record.data, record.size, record.locks, record.end))
+            .collect::<Vec<_>>();
+        handles.sort_by_key(|record| record.0);
+        let free = state
+            .aegp_memory_free
+            .iter()
+            .map(|block| (block.data, block.end))
+            .collect();
+        (
+            state.next_handle_data,
+            state.next_aegp_memory_handle,
+            handles,
+            free,
+        )
     }
 
     #[test]
@@ -6734,6 +6796,173 @@ mod tests {
         );
         assert_eq!(engine.call_win64(callbacks[6], [0; 6]).unwrap(), 4);
         assert_eq!(engine.call_win64(callbacks[7], [0; 6]).unwrap(), 4);
+    }
+
+    #[test]
+    fn aegp_memory_v1_callbacks_enforce_aggregate_live_byte_budget_atomically() {
+        const MIB: u64 = 1024 * 1024;
+
+        let mut engine = test_engine(&[0xc3]);
+        engine
+            .unicorn
+            .mem_unmap(HANDLE_DATA_BASE, PAGE_SIZE)
+            .unwrap();
+        engine
+            .unicorn
+            .mem_map(
+                HANDLE_DATA_BASE,
+                MAX_AEGP_MEMORY_BYTES * 2,
+                Prot::READ | Prot::WRITE,
+            )
+            .unwrap();
+
+        let suite_name = engine.allocate(18, 1).unwrap();
+        engine.write(suite_name, b"AEGP Memory Suite\0").unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [suite_name, 1, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let table = read_u64(&engine, suite_output);
+        let mut callbacks = [0u64; 6];
+        for (slot, callback) in callbacks.iter_mut().enumerate() {
+            *callback = read_u64(&engine, table + (slot * 8) as u64);
+        }
+        let label = engine.allocate(7, 1).unwrap();
+        engine.write(label, b"budget\0").unwrap();
+        let handle_output = engine.allocate(8, 8).unwrap();
+        let data_output = engine.allocate(8, 8).unwrap();
+
+        let (result, nine_mib_handle) =
+            call_aegp_new_mem_handle(&mut engine, callbacks[0], label, handle_output, 9 * MIB);
+        assert_eq!(result, 0);
+        assert_ne!(nine_mib_handle, 0);
+        assert_eq!(
+            engine
+                .call_win64(callbacks[2], [nine_mib_handle, data_output, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let nine_mib_data = read_u64(&engine, data_output);
+        engine
+            .write(nine_mib_data, &[0x51, 0x42, 0x33, 0x24])
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(callbacks[3], [nine_mib_handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let before_rejected_new = aegp_memory_state_snapshot(&engine);
+        let (result, rejected_handle) =
+            call_aegp_new_mem_handle(&mut engine, callbacks[0], label, handle_output, 9 * MIB);
+        assert_eq!(result, 4);
+        assert_eq!(rejected_handle, 0);
+        assert_eq!(aegp_memory_state_snapshot(&engine), before_rejected_new);
+        let mut marker = [0u8; 4];
+        engine.read(nine_mib_data, &mut marker).unwrap();
+        assert_eq!(marker, [0x51, 0x42, 0x33, 0x24]);
+        assert_eq!(
+            engine
+                .call_win64(callbacks[1], [nine_mib_handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+
+        let (result, eight_mib_a) =
+            call_aegp_new_mem_handle(&mut engine, callbacks[0], label, handle_output, 8 * MIB);
+        assert_eq!(result, 0);
+        let (result, eight_mib_b) =
+            call_aegp_new_mem_handle(&mut engine, callbacks[0], label, handle_output, 8 * MIB);
+        assert_eq!(result, 0);
+        assert_eq!(
+            engine
+                .call_win64(callbacks[2], [eight_mib_a, data_output, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let eight_mib_a_data = read_u64(&engine, data_output);
+        engine
+            .write(eight_mib_a_data, &[0xa1, 0xb2, 0xc3, 0xd4])
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(callbacks[3], [eight_mib_a, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+
+        let before_one_byte_rejection = aegp_memory_state_snapshot(&engine);
+        let (result, rejected_handle) =
+            call_aegp_new_mem_handle(&mut engine, callbacks[0], label, handle_output, 1);
+        assert_eq!(result, 4);
+        assert_eq!(rejected_handle, 0);
+        assert_eq!(
+            aegp_memory_state_snapshot(&engine),
+            before_one_byte_rejection
+        );
+
+        assert_eq!(
+            engine
+                .call_win64(callbacks[1], [eight_mib_b, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let (result, replacement_eight_mib) =
+            call_aegp_new_mem_handle(&mut engine, callbacks[0], label, handle_output, 8 * MIB);
+        assert_eq!(result, 0);
+        assert_eq!(
+            engine
+                .call_win64(callbacks[5], [label, 8 * MIB, eight_mib_a, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+
+        let before_rejected_resize = aegp_memory_state_snapshot(&engine);
+        assert_eq!(
+            engine
+                .call_win64(callbacks[5], [label, 9 * MIB, eight_mib_a, 0, 0, 0])
+                .unwrap(),
+            4
+        );
+        assert_eq!(aegp_memory_state_snapshot(&engine), before_rejected_resize);
+        assert_eq!(
+            engine
+                .call_win64(callbacks[2], [eight_mib_a, data_output, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(read_u64(&engine, data_output), eight_mib_a_data);
+        engine.read(eight_mib_a_data, &mut marker).unwrap();
+        assert_eq!(marker, [0xa1, 0xb2, 0xc3, 0xd4]);
+        assert_eq!(
+            engine
+                .call_win64(callbacks[3], [eight_mib_a, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+
+        assert_eq!(
+            engine
+                .call_win64(callbacks[5], [label, 7 * MIB, eight_mib_a, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let (result, recovered_one_mib) =
+            call_aegp_new_mem_handle(&mut engine, callbacks[0], label, handle_output, MIB);
+        assert_eq!(result, 0);
+
+        for handle in [eight_mib_a, replacement_eight_mib, recovered_one_mib] {
+            assert_eq!(
+                engine
+                    .call_win64(callbacks[1], [handle, 0, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+        }
+        assert!(engine.unicorn.get_data().aegp_memory_handles.is_empty());
     }
 
     #[test]
