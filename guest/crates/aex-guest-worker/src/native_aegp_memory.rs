@@ -116,6 +116,15 @@ impl NativeAegpMemory {
         (size <= i32::MAX as u64 && size <= MAX_AEGP_MEMORY_BYTES).then_some(size)
     }
 
+    fn checked_live_bytes_after(&self, replaced_size: u64, size: u64) -> Option<u64> {
+        let live_bytes = self
+            .handles
+            .values()
+            .try_fold(0u64, |total, record| total.checked_add(record.size))?;
+        let total = live_bytes.checked_sub(replaced_size)?.checked_add(size)?;
+        (total <= MAX_AEGP_MEMORY_BYTES).then_some(total)
+    }
+
     fn capacity(size: u64) -> Option<u64> {
         size.max(1).checked_add(15).map(|size| size & !15)
     }
@@ -211,6 +220,9 @@ impl NativeAegpMemory {
             || flags & !3 != 0
             || self.handles.len() >= MAX_AEGP_MEMORY_HANDLES
         {
+            return 4;
+        }
+        if self.checked_live_bytes_after(0, size).is_none() {
             return 4;
         }
         let handle = self.next_handle.max(8);
@@ -315,6 +327,9 @@ impl NativeAegpMemory {
             return 4;
         };
         if old.locks != 0 {
+            return 4;
+        }
+        if self.checked_live_bytes_after(old.size, size).is_none() {
             return 4;
         }
         let old_capacity = old.end - old.data;
@@ -480,6 +495,30 @@ mod windows_tests {
 
     fn callback(table: &[u64; 8], slot: usize) -> Win64Function {
         unsafe { std::mem::transmute(table[slot] as usize) }
+    }
+
+    fn active_memory_state_snapshot() -> (u64, u64, Vec<(u64, u64, u64, u32, u64)>, Vec<(u64, u64)>)
+    {
+        let arena_next = active_arena_next().unwrap();
+        let (next_handle, mut handles, free) = with_active_context(|context| unsafe {
+            let memory = &*context.memory;
+            let handles = memory
+                .handles
+                .iter()
+                .map(|(&handle, record)| {
+                    (handle, record.data, record.size, record.locks, record.end)
+                })
+                .collect::<Vec<_>>();
+            let free = memory
+                .free
+                .iter()
+                .map(|block| (block.data, block.end))
+                .collect::<Vec<_>>();
+            (memory.next_handle, handles, free)
+        })
+        .unwrap();
+        handles.sort_by_key(|record| record.0);
+        (arena_next, next_handle, handles, free)
     }
 
     #[test]
@@ -685,5 +724,203 @@ mod windows_tests {
             4
         );
         assert_eq!(post_scope_handle, u64::MAX);
+    }
+
+    #[test]
+    fn windows_native_callback_table_enforces_aggregate_live_byte_budget_atomically() {
+        const MIB: u64 = 1024 * 1024;
+
+        let mut arena = vec![0u8; (MAX_AEGP_MEMORY_BYTES * 2 + 16) as usize];
+        let mut arena_next = arena.as_mut_ptr() as u64;
+        let arena_end = arena_next + arena.len() as u64;
+        let mut memory = NativeAegpMemory::default();
+        let label = CString::new("native_memory_budget").unwrap();
+        let table = native_aegp_memory_callbacks();
+        let new_handle = callback(&table, 0);
+        let free_handle = callback(&table, 1);
+        let lock_handle = callback(&table, 2);
+        let unlock_handle = callback(&table, 3);
+        let resize_handle = callback(&table, 5);
+
+        with_native_aegp_memory_context(&mut memory, &mut arena_next, arena_end, || {
+            let mut nine_mib_handle = u64::MAX;
+            assert_eq!(
+                unsafe {
+                    new_handle(
+                        1,
+                        label.as_ptr() as u64,
+                        9 * MIB,
+                        0,
+                        (&mut nine_mib_handle as *mut u64) as u64,
+                        0,
+                    )
+                },
+                0
+            );
+            let mut nine_mib_data = 0u64;
+            assert_eq!(
+                unsafe {
+                    lock_handle(
+                        nine_mib_handle,
+                        (&mut nine_mib_data as *mut u64) as u64,
+                        0,
+                        0,
+                        0,
+                        0,
+                    )
+                },
+                0
+            );
+            unsafe {
+                *(nine_mib_data as *mut u32) = 0x5142_3324;
+            }
+            assert_eq!(unsafe { unlock_handle(nine_mib_handle, 0, 0, 0, 0, 0) }, 0);
+
+            let before_rejected_new = active_memory_state_snapshot();
+            let mut rejected_handle = u64::MAX;
+            assert_eq!(
+                unsafe {
+                    new_handle(
+                        1,
+                        label.as_ptr() as u64,
+                        9 * MIB,
+                        0,
+                        (&mut rejected_handle as *mut u64) as u64,
+                        0,
+                    )
+                },
+                4
+            );
+            assert_eq!(rejected_handle, 0);
+            assert_eq!(active_memory_state_snapshot(), before_rejected_new);
+            assert_eq!(unsafe { *(nine_mib_data as *const u32) }, 0x5142_3324);
+            assert_eq!(unsafe { free_handle(nine_mib_handle, 0, 0, 0, 0, 0) }, 0);
+
+            let mut eight_mib_a = 0;
+            let mut eight_mib_b = 0;
+            for output in [&mut eight_mib_a, &mut eight_mib_b] {
+                assert_eq!(
+                    unsafe {
+                        new_handle(
+                            1,
+                            label.as_ptr() as u64,
+                            8 * MIB,
+                            0,
+                            (output as *mut u64) as u64,
+                            0,
+                        )
+                    },
+                    0
+                );
+            }
+            let mut eight_mib_a_data = 0u64;
+            assert_eq!(
+                unsafe {
+                    lock_handle(
+                        eight_mib_a,
+                        (&mut eight_mib_a_data as *mut u64) as u64,
+                        0,
+                        0,
+                        0,
+                        0,
+                    )
+                },
+                0
+            );
+            unsafe {
+                *(eight_mib_a_data as *mut u32) = 0xa1b2_c3d4;
+            }
+            assert_eq!(unsafe { unlock_handle(eight_mib_a, 0, 0, 0, 0, 0) }, 0);
+
+            let before_one_byte_rejection = active_memory_state_snapshot();
+            rejected_handle = u64::MAX;
+            assert_eq!(
+                unsafe {
+                    new_handle(
+                        1,
+                        label.as_ptr() as u64,
+                        1,
+                        0,
+                        (&mut rejected_handle as *mut u64) as u64,
+                        0,
+                    )
+                },
+                4
+            );
+            assert_eq!(rejected_handle, 0);
+            assert_eq!(active_memory_state_snapshot(), before_one_byte_rejection);
+
+            assert_eq!(unsafe { free_handle(eight_mib_b, 0, 0, 0, 0, 0) }, 0);
+            let mut replacement_eight_mib = 0;
+            assert_eq!(
+                unsafe {
+                    new_handle(
+                        1,
+                        label.as_ptr() as u64,
+                        8 * MIB,
+                        0,
+                        (&mut replacement_eight_mib as *mut u64) as u64,
+                        0,
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                unsafe { resize_handle(label.as_ptr() as u64, 8 * MIB, eight_mib_a, 0, 0, 0) },
+                0
+            );
+
+            let before_rejected_resize = active_memory_state_snapshot();
+            assert_eq!(
+                unsafe { resize_handle(label.as_ptr() as u64, 9 * MIB, eight_mib_a, 0, 0, 0) },
+                4
+            );
+            assert_eq!(active_memory_state_snapshot(), before_rejected_resize);
+            let mut data_after_rejection = 0u64;
+            assert_eq!(
+                unsafe {
+                    lock_handle(
+                        eight_mib_a,
+                        (&mut data_after_rejection as *mut u64) as u64,
+                        0,
+                        0,
+                        0,
+                        0,
+                    )
+                },
+                0
+            );
+            assert_eq!(data_after_rejection, eight_mib_a_data);
+            assert_eq!(
+                unsafe { *(data_after_rejection as *const u32) },
+                0xa1b2_c3d4
+            );
+            assert_eq!(unsafe { unlock_handle(eight_mib_a, 0, 0, 0, 0, 0) }, 0);
+
+            assert_eq!(
+                unsafe { resize_handle(label.as_ptr() as u64, 7 * MIB, eight_mib_a, 0, 0, 0) },
+                0
+            );
+            let mut recovered_one_mib = 0;
+            assert_eq!(
+                unsafe {
+                    new_handle(
+                        1,
+                        label.as_ptr() as u64,
+                        MIB,
+                        0,
+                        (&mut recovered_one_mib as *mut u64) as u64,
+                        0,
+                    )
+                },
+                0
+            );
+
+            for handle in [eight_mib_a, replacement_eight_mib, recovered_one_mib] {
+                assert_eq!(unsafe { free_handle(handle, 0, 0, 0, 0, 0) }, 0);
+            }
+            assert!(active_memory_state_snapshot().2.is_empty());
+        });
+        assert_eq!(active_arena_next(), None);
     }
 }
