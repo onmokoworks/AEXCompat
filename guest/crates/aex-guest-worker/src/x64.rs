@@ -38,16 +38,20 @@ const HOST_AEGP_REGISTER: u64 = STUB_BASE + 0x80120;
 const HOST_AEGP_GET_MAIN_WINDOW: u64 = STUB_BASE + 0x80130;
 const HOST_ITERATE8: u64 = STUB_BASE + 0x80140;
 const HOST_ITERATE8_CONTINUE: u64 = STUB_BASE + 0x80150;
-const HOST_AEGP_NEW_MEM_HANDLE: u64 = STUB_BASE + 0x80160;
-const HOST_AEGP_FREE_MEM_HANDLE: u64 = STUB_BASE + 0x80170;
-const HOST_AEGP_LOCK_MEM_HANDLE: u64 = STUB_BASE + 0x80180;
-const HOST_AEGP_UNLOCK_MEM_HANDLE: u64 = STUB_BASE + 0x80190;
-const HOST_AEGP_MEM_HANDLE_SIZE: u64 = STUB_BASE + 0x801a0;
-const HOST_AEGP_RESIZE_MEM_HANDLE: u64 = STUB_BASE + 0x801b0;
-const HOST_AEGP_MEMORY_UNSUPPORTED: u64 = STUB_BASE + 0x801c0;
+const HOST_COLOR_PARAM_VALUE: u64 = STUB_BASE + 0x80160;
+const HOST_POINT_PARAM_VALUE: u64 = STUB_BASE + 0x80170;
+const HOST_AEGP_NEW_MEM_HANDLE: u64 = STUB_BASE + 0x80180;
+const HOST_AEGP_FREE_MEM_HANDLE: u64 = STUB_BASE + 0x80190;
+const HOST_AEGP_LOCK_MEM_HANDLE: u64 = STUB_BASE + 0x801a0;
+const HOST_AEGP_UNLOCK_MEM_HANDLE: u64 = STUB_BASE + 0x801b0;
+const HOST_AEGP_MEM_HANDLE_SIZE: u64 = STUB_BASE + 0x801c0;
+const HOST_AEGP_RESIZE_MEM_HANDLE: u64 = STUB_BASE + 0x801d0;
+const HOST_AEGP_MEMORY_UNSUPPORTED: u64 = STUB_BASE + 0x801e0;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
-const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81200;
+const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
+const HOST_POINT_PARAM_SUITE: u64 = STUB_BASE + 0x81300;
+const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81400;
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
 const HOST_ITERATE8_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x88000;
@@ -58,6 +62,10 @@ const HANDLE_DATA_END: u64 = DATA_BASE + DATA_SIZE;
 const AEGP_MEMORY_HANDLE_BASE: u64 = STUB_BASE + 0x90000;
 const MAX_AEGP_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_AEGP_MEMORY_HANDLES: usize = 256;
+const PF_HANDLE_DATA_BASE: u64 = 0x0000_0001_0000_0000;
+const PF_HANDLE_DATA_END: u64 = PF_HANDLE_DATA_BASE + 0x2_0000_0000;
+const MAX_PF_HANDLE_SIZE: u64 = 0x8000_0000;
+const MAX_PF_HANDLE_COUNT: usize = 16_384;
 // A nonzero Unicorn instruction limit enables instruction counting across the
 // whole run, which is prohibitively expensive for image kernels. The wall-clock
 // timeout and return-sentinel check still bound and validate guest execution.
@@ -1406,12 +1414,15 @@ struct GuestState {
     checkout_output_calls: u32,
     parameter_definitions: Vec<u64>,
     next_handle_data: u64,
+    next_pf_handle_data: u64,
+    image_region: Option<(u64, u64)>,
     handles: HashMap<u64, GuestHandle>,
     aegp_memory_handles: HashMap<u64, AegpMemoryHandle>,
     aegp_memory_free: Vec<AegpMemoryBlock>,
     next_aegp_memory_handle: u64,
     math_calls: Vec<String>,
     handle_allocations: Vec<u64>,
+    handle_allocation_failures: Vec<String>,
     census_blocks: HashMap<(u64, u32), u64>,
     trace: Option<TraceCapture>,
     trace_labels: HashMap<u64, TraceLabel>,
@@ -1441,6 +1452,9 @@ struct GuestHandle {
     data: u64,
     size: u64,
     locks: u32,
+    handle_region: u64,
+    data_region: u64,
+    data_mapped_size: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1660,6 +1674,11 @@ pub struct TraceCrashSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_rva: Option<u64>,
     pub instruction_bytes: String,
+    pub handle_allocations: Vec<u64>,
+    pub handle_allocation_failures: Vec<String>,
+    pub live_handle_count: usize,
+    pub next_pf_handle_data: u64,
+    pub pf_handle_data_end: u64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1899,8 +1918,16 @@ impl GuestEngine<'static> {
         )?;
         unicorn.get_data_mut().next_handle_data = HANDLE_DATA_BASE;
         unicorn.get_data_mut().next_aegp_memory_handle = AEGP_MEMORY_HANDLE_BASE;
+        unicorn.get_data_mut().next_pf_handle_data = PF_HANDLE_DATA_BASE;
         let image_size =
             u64::try_from(image.mapped_bytes().len()).map_err(|_| GuestError::ImageAlignment)?;
+        unicorn.get_data_mut().image_region = Some((
+            image.image_base(),
+            image
+                .image_base()
+                .checked_add(image_size)
+                .ok_or(GuestError::DataCapacity)?,
+        ));
         if image.image_base() % PAGE_SIZE != 0 || image_size % PAGE_SIZE != 0 {
             return Err(GuestError::ImageAlignment);
         }
@@ -1973,6 +2000,14 @@ impl GuestEngine<'static> {
                     "floorf" => install_float_import(&mut unicorn, stub, "floorf", f32::floor)?,
                     "powf" => install_float_binary_import(&mut unicorn, stub, "powf", f32::powf)?,
                     "pow" => install_double_binary_import(&mut unicorn, stub, "pow", f64::powf)?,
+                    "omp_get_max_threads" => {
+                        let value = deterministic_import_i32("omp_get_max_threads")
+                            .expect("known deterministic import");
+                        uc(
+                            "install omp_get_max_threads import",
+                            unicorn.mem_write(stub, &deterministic_i32_stub(value)),
+                        )?;
+                    }
                     _ => {}
                 }
                 unicorn.get_data_mut().trace_labels.insert(
@@ -2049,6 +2084,8 @@ impl GuestEngine<'static> {
             ),
             ("write Iterate8 callback", HOST_ITERATE8),
             ("write Iterate8 continuation", HOST_ITERATE8_CONTINUE),
+            ("write color-param callback", HOST_COLOR_PARAM_VALUE),
+            ("write point-param callback", HOST_POINT_PARAM_VALUE),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -2138,6 +2175,22 @@ impl GuestEngine<'static> {
                 HOST_ITERATE8_CONTINUE,
                 HOST_ITERATE8_CONTINUE,
                 continue_iterate8,
+            ),
+        )?;
+        uc(
+            "install color-param callback",
+            unicorn.add_code_hook(
+                HOST_COLOR_PARAM_VALUE,
+                HOST_COLOR_PARAM_VALUE,
+                emulate_color_param_value,
+            ),
+        )?;
+        uc(
+            "install point-param callback",
+            unicorn.add_code_hook(
+                HOST_POINT_PARAM_VALUE,
+                HOST_POINT_PARAM_VALUE,
+                emulate_point_param_value,
             ),
         )?;
         uc(
@@ -2257,6 +2310,20 @@ impl GuestEngine<'static> {
             unicorn.mem_write(HOST_AEGP_MEMORY_SUITE, &aegp_memory_suite),
         )?;
         install_iterate8_suites(&mut unicorn)?;
+        uc(
+            "write PF ColorParamSuite",
+            unicorn.mem_write(
+                HOST_COLOR_PARAM_SUITE,
+                &HOST_COLOR_PARAM_VALUE.to_le_bytes(),
+            ),
+        )?;
+        uc(
+            "write PF PointParamSuite",
+            unicorn.mem_write(
+                HOST_POINT_PARAM_SUITE,
+                &HOST_POINT_PARAM_VALUE.to_le_bytes(),
+            ),
+        )?;
         install_aegp_utility_suites(&mut unicorn)?;
         for (address, name) in [
             (HOST_ADD_PARAM, "add_param"),
@@ -2287,6 +2354,8 @@ impl GuestEngine<'static> {
             (HOST_AEGP_RESIZE_MEM_HANDLE, "aegp_resize_mem_handle"),
             (HOST_ITERATE8, "iterate8"),
             (HOST_ITERATE8_CONTINUE, "iterate8_continue"),
+            (HOST_COLOR_PARAM_VALUE, "color_param_value"),
+            (HOST_POINT_PARAM_VALUE, "point_param_value"),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -2873,13 +2942,13 @@ impl GuestEngine<'static> {
             "read instruction pointer",
             self.unicorn.reg_read(RegisterX86::RIP),
         )?;
+        if let Some(error) = self.unicorn.get_data_mut().callback_error.take() {
+            return Err(GuestError::Callback(error));
+        }
         if rip != RETURN_ADDRESS {
             return Err(self.execution_crash(format!(
                 "execution stopped before the guest returned (RIP={rip:#x})"
             )));
-        }
-        if let Some(error) = self.unicorn.get_data_mut().callback_error.take() {
-            return Err(GuestError::Callback(error));
         }
         uc("read return value", self.unicorn.reg_read(RegisterX86::RAX))
     }
@@ -2970,6 +3039,11 @@ impl GuestEngine<'static> {
                 .contains(&rip)
                 .then(|| rip - self.image_base),
             instruction_bytes,
+            handle_allocations: self.unicorn.get_data().handle_allocations.clone(),
+            handle_allocation_failures: self.unicorn.get_data().handle_allocation_failures.clone(),
+            live_handle_count: self.unicorn.get_data().handles.len(),
+            next_pf_handle_data: self.unicorn.get_data().next_pf_handle_data,
+            pf_handle_data_end: PF_HANDLE_DATA_END,
         };
         GuestError::ExecutionCrash {
             reason,
@@ -2989,7 +3063,7 @@ impl GuestEngine<'static> {
         let end = start
             .checked_add(u64::try_from(size).map_err(|_| GuestError::DataCapacity)?)
             .ok_or(GuestError::DataCapacity)?;
-        if end > DATA_BASE + DATA_SIZE {
+        if end > HANDLE_DATA_BASE {
             return Err(GuestError::DataCapacity);
         }
         self.next_data = end;
@@ -3040,8 +3114,43 @@ impl GuestEngine<'static> {
         HOST_CHECKIN_PARAM
     }
 
-    pub fn configure_parameter_definitions(&mut self, definitions: Vec<u64>) {
-        self.unicorn.get_data_mut().parameter_definitions = definitions;
+    pub fn configure_parameter_definitions(
+        &mut self,
+        definitions: Vec<u64>,
+    ) -> Result<(), GuestError> {
+        if definitions.len() != self.unicorn.get_data().params.len() {
+            return Err(GuestError::Callback(
+                "active parameter definition count differs from setup".into(),
+            ));
+        }
+        let mut active_colors = Vec::with_capacity(definitions.len());
+        for (definition, parameter) in definitions
+            .iter()
+            .copied()
+            .zip(self.unicorn.get_data().params.iter())
+        {
+            let mut color = [0u8; abi::PF_PIXEL_SIZE];
+            if parameter.param_type == 5 {
+                self.unicorn
+                    .mem_read(definition + abi::PARAM_U_OFFSET as u64, &mut color)
+                    .map_err(|error| GuestError::Unicorn {
+                        operation: "read active color parameter",
+                        detail: error.to_string(),
+                    })?;
+                active_colors.push(Some(color));
+            } else {
+                active_colors.push(None);
+            }
+        }
+        let state = self.unicorn.get_data_mut();
+        for (parameter, active) in state.params.iter_mut().zip(active_colors) {
+            if let Some(color) = active {
+                parameter.bytes[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE]
+                    .copy_from_slice(&color);
+            }
+        }
+        state.parameter_definitions = definitions;
+        Ok(())
     }
 
     pub fn suite_requests(&self) -> &[String] {
@@ -3199,6 +3308,21 @@ fn install_float_import(
         }),
     )
     .map(|_| ())
+}
+
+fn deterministic_import_i32(name: &str) -> Option<i32> {
+    match name {
+        // The emulator is deliberately single-threaded. Returning one keeps
+        // OpenMP-aware kernels deterministic while preserving the API's
+        // required positive thread-count contract.
+        "omp_get_max_threads" => Some(1),
+        _ => None,
+    }
+}
+
+fn deterministic_i32_stub(value: i32) -> [u8; 6] {
+    let bytes = value.to_le_bytes();
+    [0xb8, bytes[0], bytes[1], bytes[2], bytes[3], 0xc3]
 }
 
 fn install_float_binary_import(
@@ -3913,6 +4037,26 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         return;
     }
+    if name == "PF ColorParamSuite"
+        && version == 1
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_COLOR_PARAM_SUITE.to_le_bytes())
+            .is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
+    if name == "PF PointParamSuite"
+        && version == 1
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_POINT_PARAM_SUITE.to_le_bytes())
+            .is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
     if name == "AEGP Utility Suite"
         && output != 0
         && let Some(table) = u32::try_from(version)
@@ -3924,6 +4068,82 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         return;
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+}
+
+fn emulate_color_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    const PF_INVALID_INDEX: u64 = 513;
+    const PF_UNRECOGNIZED_PARAM_TYPE: u64 = 514;
+    const PF_BAD_CALLBACK_PARAM: u64 = 516;
+    let effect_ref = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let definition = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    if effect_ref != 1 || definition == 0 || output == 0 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, PF_BAD_CALLBACK_PARAM);
+        return;
+    }
+    let result = (|| {
+        let mut disk_id = [0u8; 4];
+        let mut param_type = [0u8; 4];
+        let mut argb = [0u8; abi::PF_PIXEL_SIZE];
+        unicorn
+            .mem_read(definition, &mut disk_id)
+            .map_err(|error| format!("color-param disk id read: {error}"))?;
+        unicorn
+            .mem_read(
+                definition + abi::PARAM_PARAM_TYPE_OFFSET as u64,
+                &mut param_type,
+            )
+            .map_err(|error| format!("color-param type read: {error}"))?;
+        unicorn
+            .mem_read(definition + abi::PARAM_U_OFFSET as u64, &mut argb)
+            .map_err(|error| format!("color-param value read: {error}"))?;
+        let disk_id = i32::from_le_bytes(disk_id);
+        let param_type = i32::from_le_bytes(param_type);
+        let Some(source) = unicorn.get_data().params.iter().find(|parameter| {
+            parameter
+                .bytes
+                .get(..4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(i32::from_le_bytes)
+                == Some(disk_id)
+        }) else {
+            return Ok(PF_INVALID_INDEX);
+        };
+        if param_type != 5 || source.param_type != 5 {
+            return Ok(PF_UNRECOGNIZED_PARAM_TYPE);
+        }
+        let current: [u8; 4] = source.bytes
+            [abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE]
+            .try_into()
+            .expect("PF_Pixel is four bytes");
+        let default: [u8; 4] = source.bytes[abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE
+            ..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE * 2]
+            .try_into()
+            .expect("PF color default is four bytes");
+        if argb != current && argb != default {
+            return Ok(PF_BAD_CALLBACK_PARAM);
+        }
+        let mut pixel_float = [0u8; abi::PF_PIXEL_FLOAT_SIZE];
+        for (index, channel) in argb.into_iter().enumerate() {
+            let offset = index * 4;
+            pixel_float[offset..offset + 4]
+                .copy_from_slice(&(f32::from(channel) / 255.0).to_le_bytes());
+        }
+        unicorn
+            .mem_write(output, &pixel_float)
+            .map_err(|error| format!("color-param output write: {error}"))?;
+        Ok(0)
+    })();
+    match result {
+        Ok(error) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, error);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().callback_error = Some(error);
+            let _ = unicorn.reg_write(RegisterX86::RAX, PF_BAD_CALLBACK_PARAM);
+            let _ = unicorn.emu_stop();
+        }
+    }
 }
 
 fn emulate_aegp_register(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
@@ -4278,6 +4498,34 @@ fn emulate_aegp_resize_mem_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64,
     }
 }
 
+fn emulate_point_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let definition = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    if definition == 0 || output == 0 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+        return;
+    }
+    let mut fixed = [0u8; 8];
+    if unicorn
+        .mem_read(definition + abi::PARAM_U_OFFSET as u64, &mut fixed)
+        .is_err()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+        return;
+    }
+    let x = i32::from_le_bytes(fixed[..4].try_into().unwrap()) as f64 / 65536.0;
+    let y = i32::from_le_bytes(fixed[4..].try_into().unwrap()) as f64 / 65536.0;
+    let mut values = [0u8; 16];
+    values[..8].copy_from_slice(&x.to_le_bytes());
+    values[8..].copy_from_slice(&y.to_le_bytes());
+    let result = if unicorn.mem_write(output, &values).is_ok() {
+        0
+    } else {
+        4
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, result);
+}
+
 fn emulate_checkout_param(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let index = unicorn
@@ -4312,43 +4560,149 @@ fn emulate_checkout_param(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
     finish_callback(unicorn, result);
 }
 
+fn aligned_pf_region_size(size: u64) -> Result<u64, String> {
+    size.max(1)
+        .checked_add(PAGE_SIZE - 1)
+        .map(|end| end & !(PAGE_SIZE - 1))
+        .ok_or_else(|| "PF Handle region size overflow".to_string())
+}
+
+fn validate_pf_handle_budget(
+    state: &GuestState,
+    size: u64,
+    replacing: Option<&GuestHandle>,
+) -> Result<(), String> {
+    if size > MAX_PF_HANDLE_SIZE {
+        return Err(format!(
+            "handle allocation exceeds {} bytes: {size}",
+            MAX_PF_HANDLE_SIZE
+        ));
+    }
+    let live_bytes = state
+        .handles
+        .values()
+        .map(|record| record.size)
+        .sum::<u64>();
+    let replaced_bytes = replacing.map_or(0, |record| record.size);
+    let live_count = state.handles.len() - usize::from(replacing.is_some());
+    if live_count >= MAX_PF_HANDLE_COUNT || live_bytes - replaced_bytes > MAX_PF_HANDLE_SIZE - size
+    {
+        return Err(format!(
+            "PF Handle live budget exceeded: size={size}, live_bytes={live_bytes}, live_count={}",
+            state.handles.len()
+        ));
+    }
+    Ok(())
+}
+
+fn find_pf_region(
+    state: &GuestState,
+    mapped_size: u64,
+    reserved: Option<(u64, u64)>,
+) -> Result<u64, String> {
+    let mut occupied = state
+        .handles
+        .values()
+        .flat_map(|record| {
+            [
+                (record.handle_region, record.handle_region + PAGE_SIZE),
+                (
+                    record.data_region,
+                    record.data_region + record.data_mapped_size,
+                ),
+            ]
+        })
+        .collect::<Vec<_>>();
+    occupied.extend(state.image_region);
+    occupied.extend(reserved);
+    occupied.sort_unstable();
+    let mut candidate = PF_HANDLE_DATA_BASE;
+    for (start, end) in occupied {
+        if candidate
+            .checked_add(mapped_size)
+            .is_some_and(|candidate_end| candidate_end <= start)
+        {
+            return Ok(candidate);
+        }
+        candidate = candidate.max(end);
+    }
+    if candidate
+        .checked_add(mapped_size)
+        .is_some_and(|candidate_end| candidate_end <= PF_HANDLE_DATA_END)
+    {
+        Ok(candidate)
+    } else {
+        Err("PF Handle address space exhausted".into())
+    }
+}
+
 fn emulate_new_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let size = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX);
     unicorn.get_data_mut().handle_allocations.push(size);
     let allocation = (|| {
-        if size > 128 * 1024 * 1024 {
-            return Err(format!("handle allocation exceeds 128 MiB: {size}"));
+        validate_pf_handle_budget(unicorn.get_data(), size, None)?;
+        let handle_region = find_pf_region(unicorn.get_data(), PAGE_SIZE, None)?;
+        unicorn
+            .mem_map(handle_region, PAGE_SIZE, Prot::READ | Prot::WRITE)
+            .map_err(|error| format!("PF Handle header map: {error}"))?;
+        let data_mapped_size = aligned_pf_region_size(size)?;
+        let data_region = match find_pf_region(
+            unicorn.get_data(),
+            data_mapped_size,
+            Some((handle_region, handle_region + PAGE_SIZE)),
+        ) {
+            Ok(region) => region,
+            Err(error) => {
+                let _ = unicorn.mem_unmap(handle_region, PAGE_SIZE);
+                return Err(error);
+            }
+        };
+        if let Err(error) = unicorn.mem_map(data_region, data_mapped_size, Prot::READ | Prot::WRITE)
+        {
+            let _ = unicorn.mem_unmap(handle_region, PAGE_SIZE);
+            return Err(format!("PF Handle data map: {error}"));
         }
+        let handle = handle_region;
+        let data = data_region;
         let state = unicorn.get_data_mut();
-        let handle = (state.next_handle_data + 7) & !7;
-        let data = (handle + 8 + 15) & !15;
-        let end = data
-            .checked_add(size.max(1))
-            .ok_or_else(|| "handle allocation overflow".to_string())?;
-        if end > HANDLE_DATA_END {
-            return Err("handle arena exhausted".to_string());
-        }
-        state.next_handle_data = end;
+        state.next_pf_handle_data = state
+            .next_pf_handle_data
+            .max(data_region + data_mapped_size);
         state.handles.insert(
             handle,
             GuestHandle {
                 data,
                 size,
                 locks: 0,
+                handle_region,
+                data_region,
+                data_mapped_size,
             },
         );
-        Ok((handle, data))
+        Ok((handle, data, handle_region, data_region, data_mapped_size))
     })();
     match allocation {
-        Ok((handle, data)) => {
-            let _ = unicorn.mem_write(handle, &data.to_le_bytes());
-            if size != 0 {
-                let _ = unicorn.mem_write(data, &vec![0u8; size as usize]);
+        Ok((handle, data, handle_region, data_region, data_mapped_size)) => {
+            if let Err(error) = unicorn.mem_write(handle, &data.to_le_bytes()) {
+                unicorn.get_data_mut().handles.remove(&handle);
+                let _ = unicorn.mem_unmap(data_region, data_mapped_size);
+                let _ = unicorn.mem_unmap(handle_region, PAGE_SIZE);
+                unicorn.get_data_mut().callback_error =
+                    Some(format!("PF Handle header write failed: {error}"));
+                let _ = unicorn.emu_stop();
             }
             let _ = unicorn.reg_write(RegisterX86::RAX, handle);
         }
-        Err(_) => {
+        Err(error) => {
+            unicorn
+                .get_data_mut()
+                .handle_allocation_failures
+                .push(format!("size={size}: {error}"));
             let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            unicorn.get_data_mut().callback_error = Some(format!(
+                "PF Handle allocation failed for {size} bytes: {error}"
+            ));
+            let _ = unicorn.emu_stop();
         }
     }
 }
@@ -4363,32 +4717,83 @@ fn emulate_lock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
             record.locks = record.locks.saturating_add(1);
             record.data
         });
-    let _ = unicorn.reg_write(RegisterX86::RAX, data.unwrap_or_default());
+    if let Some(data) = data {
+        let _ = unicorn.reg_write(RegisterX86::RAX, data);
+    } else {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        unicorn.get_data_mut().callback_error = Some(format!(
+            "PF Handle lock received unknown handle {handle:#x}"
+        ));
+        let _ = unicorn.emu_stop();
+    }
 }
 
 fn emulate_unlock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
-    if let Some(record) = unicorn.get_data_mut().handles.get_mut(&handle) {
-        record.locks = record.locks.saturating_sub(1);
+    let valid = unicorn
+        .get_data_mut()
+        .handles
+        .get_mut(&handle)
+        .is_some_and(|record| {
+            if record.locks == 0 {
+                false
+            } else {
+                record.locks -= 1;
+                true
+            }
+        });
+    if !valid {
+        unicorn.get_data_mut().callback_error = Some(format!(
+            "PF Handle unlock received stale or unlocked handle {handle:#x}"
+        ));
+        let _ = unicorn.emu_stop();
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
 fn emulate_dispose_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
-    unicorn.get_data_mut().handles.remove(&handle);
+    let record = unicorn.get_data().handles.get(&handle).cloned();
+    match record {
+        Some(record) if record.locks == 0 => {
+            unicorn.get_data_mut().handles.remove(&handle);
+            if let Err(error) = unicorn.mem_unmap(record.data_region, record.data_mapped_size) {
+                unicorn.get_data_mut().callback_error =
+                    Some(format!("PF Handle data unmap failed: {error}"));
+                let _ = unicorn.emu_stop();
+            }
+            if let Err(error) = unicorn.mem_unmap(record.handle_region, PAGE_SIZE) {
+                unicorn.get_data_mut().callback_error =
+                    Some(format!("PF Handle header unmap failed: {error}"));
+                let _ = unicorn.emu_stop();
+            }
+        }
+        _ => {
+            unicorn.get_data_mut().callback_error = Some(format!(
+                "PF Handle dispose received stale or locked handle {handle:#x}"
+            ));
+            let _ = unicorn.emu_stop();
+        }
+    }
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
 fn emulate_handle_size(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
-    let size = unicorn
+    if let Some(size) = unicorn
         .get_data()
         .handles
         .get(&handle)
         .map(|record| record.size)
-        .unwrap_or_default();
-    let _ = unicorn.reg_write(RegisterX86::RAX, size);
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, size);
+    } else {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        unicorn.get_data_mut().callback_error = Some(format!(
+            "PF Handle size received unknown handle {handle:#x}"
+        ));
+        let _ = unicorn.emu_stop();
+    }
 }
 
 fn emulate_resize_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
@@ -4399,7 +4804,7 @@ fn emulate_resize_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         let handle_pointer = unicorn
             .reg_read(RegisterX86::RDX)
             .map_err(|error| format!("resize-handle pointer: {error}"))?;
-        if size > 128 * 1024 * 1024 || handle_pointer == 0 {
+        if size > MAX_PF_HANDLE_SIZE || handle_pointer == 0 {
             return Err("invalid resize-handle request".to_string());
         }
         let mut handle_bytes = [0u8; 8];
@@ -4416,36 +4821,44 @@ fn emulate_resize_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         if old.locks != 0 {
             return Err("resize-handle locked handle".to_string());
         }
-        let data = {
-            let state = unicorn.get_data_mut();
-            let data = (state.next_handle_data + 15) & !15;
-            let end = data
-                .checked_add(size.max(1))
-                .ok_or_else(|| "resize-handle overflow".to_string())?;
-            if end > HANDLE_DATA_END {
-                return Err("handle arena exhausted".to_string());
+        validate_pf_handle_budget(unicorn.get_data(), size, Some(&old))?;
+        let data_mapped_size = aligned_pf_region_size(size)?;
+        let data_region = find_pf_region(unicorn.get_data(), data_mapped_size, None)?;
+        unicorn
+            .mem_map(data_region, data_mapped_size, Prot::READ | Prot::WRITE)
+            .map_err(|error| format!("resize-handle memory map: {error}"))?;
+        let data = data_region;
+        unicorn.get_data_mut().next_pf_handle_data = unicorn
+            .get_data()
+            .next_pf_handle_data
+            .max(data_region + data_mapped_size);
+        let copied = old.size.min(size);
+        let mut offset = 0u64;
+        let mut buffer = vec![0u8; 1024 * 1024];
+        while offset < copied {
+            let length = (copied - offset).min(buffer.len() as u64) as usize;
+            if let Err(error) = unicorn.mem_read(old.data + offset, &mut buffer[..length]) {
+                let _ = unicorn.mem_unmap(data_region, data_mapped_size);
+                return Err(format!("resize-handle old data: {error}"));
             }
-            state.next_handle_data = end;
-            data
-        };
-        let mut bytes = vec![0u8; size as usize];
-        let copied = old.size.min(size) as usize;
-        if copied != 0 {
-            unicorn
-                .mem_read(old.data, &mut bytes[..copied])
-                .map_err(|error| format!("resize-handle old data: {error}"))?;
+            if let Err(error) = unicorn.mem_write(data + offset, &buffer[..length]) {
+                let _ = unicorn.mem_unmap(data_region, data_mapped_size);
+                return Err(format!("resize-handle new data: {error}"));
+            }
+            offset += length as u64;
         }
-        if size != 0 {
-            unicorn
-                .mem_write(data, &bytes)
-                .map_err(|error| format!("resize-handle new data: {error}"))?;
+        if let Err(error) = unicorn.mem_write(handle, &data.to_le_bytes()) {
+            let _ = unicorn.mem_unmap(data_region, data_mapped_size);
+            return Err(format!("resize-handle record: {error}"));
         }
         unicorn
-            .mem_write(handle, &data.to_le_bytes())
-            .map_err(|error| format!("resize-handle record: {error}"))?;
+            .mem_unmap(old.data_region, old.data_mapped_size)
+            .map_err(|error| format!("resize-handle old data unmap: {error}"))?;
         if let Some(record) = unicorn.get_data_mut().handles.get_mut(&handle) {
             record.data = data;
             record.size = size;
+            record.data_region = data_region;
+            record.data_mapped_size = data_mapped_size;
         }
         Ok(())
     })();
@@ -4573,6 +4986,12 @@ mod tests {
         unicorn.mem_write(RETURN_ADDRESS, &[0xcc]).unwrap();
         for address in [
             HOST_ACQUIRE_SUITE,
+            HOST_NEW_HANDLE,
+            HOST_LOCK_HANDLE,
+            HOST_UNLOCK_HANDLE,
+            HOST_DISPOSE_HANDLE,
+            HOST_HANDLE_SIZE,
+            HOST_RESIZE_HANDLE,
             HOST_AEGP_REGISTER,
             HOST_AEGP_GET_MAIN_WINDOW,
             HOST_AEGP_NEW_MEM_HANDLE,
@@ -4583,6 +5002,8 @@ mod tests {
             HOST_AEGP_RESIZE_MEM_HANDLE,
             HOST_ITERATE8,
             HOST_ITERATE8_CONTINUE,
+            HOST_COLOR_PARAM_VALUE,
+            HOST_POINT_PARAM_VALUE,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -4599,6 +5020,19 @@ mod tests {
                 emulate_acquire_suite,
             )
             .unwrap();
+        for (address, callback) in [
+            (
+                HOST_NEW_HANDLE,
+                emulate_new_handle as fn(&mut Unicorn<'_, GuestState>, u64, u32),
+            ),
+            (HOST_LOCK_HANDLE, emulate_lock_handle),
+            (HOST_UNLOCK_HANDLE, emulate_unlock_handle),
+            (HOST_DISPOSE_HANDLE, emulate_dispose_handle),
+            (HOST_HANDLE_SIZE, emulate_handle_size),
+            (HOST_RESIZE_HANDLE, emulate_resize_handle),
+        ] {
+            unicorn.add_code_hook(address, address, callback).unwrap();
+        }
         unicorn
             .add_code_hook(
                 HOST_AEGP_REGISTER,
@@ -4655,7 +5089,34 @@ mod tests {
                 continue_iterate8,
             )
             .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_COLOR_PARAM_VALUE,
+                HOST_COLOR_PARAM_VALUE,
+                emulate_color_param_value,
+            )
+            .unwrap();
+        unicorn.get_data_mut().next_pf_handle_data = PF_HANDLE_DATA_BASE;
+        unicorn
+            .add_code_hook(
+                HOST_POINT_PARAM_VALUE,
+                HOST_POINT_PARAM_VALUE,
+                emulate_point_param_value,
+            )
+            .unwrap();
         install_iterate8_suites(&mut unicorn).unwrap();
+        unicorn
+            .mem_write(
+                HOST_COLOR_PARAM_SUITE,
+                &HOST_COLOR_PARAM_VALUE.to_le_bytes(),
+            )
+            .unwrap();
+        unicorn
+            .mem_write(
+                HOST_POINT_PARAM_SUITE,
+                &HOST_POINT_PARAM_VALUE.to_le_bytes(),
+            )
+            .unwrap();
         install_aegp_utility_suites(&mut unicorn).unwrap();
         let mut trace_points = Vec::new();
         let mut decoder = Decoder::with_ip(64, code, CODE, DecoderOptions::NONE);
@@ -4694,6 +5155,316 @@ mod tests {
         // mov rax, rcx; add rax, rdx; ret
         let mut engine = test_engine(&[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3]);
         assert_eq!(engine.call_win64(CODE, [40, 2, 0, 0, 0, 0]).unwrap(), 42);
+    }
+
+    #[test]
+    fn openmp_thread_count_is_positive_and_deterministic() {
+        const CODE: u64 = 0x1000_0000;
+        assert_eq!(deterministic_import_i32("omp_get_max_threads"), Some(1));
+        assert_eq!(deterministic_import_i32("unknown_import"), None);
+        assert_eq!(deterministic_i32_stub(1), [0xb8, 1, 0, 0, 0, 0xc3]);
+        let mut engine = test_engine(&deterministic_i32_stub(1));
+        assert_eq!(engine.call_win64(CODE, [0; 6]).unwrap(), 1);
+    }
+
+    #[test]
+    fn pf_handle_suite_maps_large_allocations_outside_guest_data() {
+        let mut engine = test_engine(&[0xc3]);
+        let size = 333_294_848;
+        let handle = engine
+            .call_win64(HOST_NEW_HANDLE, [size, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert!(handle >= PF_HANDLE_DATA_BASE);
+        let data = engine
+            .call_win64(HOST_LOCK_HANDLE, [handle, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert!(data > handle);
+        assert_eq!(
+            engine
+                .call_win64(HOST_HANDLE_SIZE, [handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            size
+        );
+        engine.write(data + size - 1, &[0x5a]).unwrap();
+        let mut last = [0u8; 1];
+        engine.read(data + size - 1, &mut last).unwrap();
+        assert_eq!(last, [0x5a]);
+        assert_eq!(
+            engine
+                .call_win64(HOST_UNLOCK_HANDLE, [handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_DISPOSE_HANDLE, [handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let reused = engine
+            .call_win64(HOST_NEW_HANDLE, [size, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_eq!(reused, handle, "disposed address space must be reusable");
+    }
+
+    #[test]
+    fn pf_handle_region_finder_skips_the_mapped_pe_image() {
+        let state = GuestState {
+            image_region: Some((
+                PF_HANDLE_DATA_BASE + PAGE_SIZE,
+                PF_HANDLE_DATA_BASE + 3 * PAGE_SIZE,
+            )),
+            ..GuestState::default()
+        };
+        assert_eq!(
+            find_pf_region(&state, 2 * PAGE_SIZE, None).unwrap(),
+            PF_HANDLE_DATA_BASE + 3 * PAGE_SIZE
+        );
+    }
+
+    #[test]
+    fn pf_handle_budget_bounds_live_bytes_and_handle_count() {
+        let observed_size = 333_294_848;
+        let mut state = GuestState::default();
+        for index in 0..6u64 {
+            state.handles.insert(
+                PF_HANDLE_DATA_BASE + index * PAGE_SIZE,
+                GuestHandle {
+                    data: 0,
+                    size: observed_size,
+                    locks: 0,
+                    handle_region: 0,
+                    data_region: 0,
+                    data_mapped_size: PAGE_SIZE,
+                },
+            );
+        }
+        assert!(validate_pf_handle_budget(&state, observed_size, None).is_err());
+        let existing = state.handles.values().next().unwrap().clone();
+        assert!(validate_pf_handle_budget(&state, observed_size, Some(&existing)).is_ok());
+
+        state.handles.clear();
+        for index in 0..1025u64 {
+            state.handles.insert(
+                PF_HANDLE_DATA_BASE + index * PAGE_SIZE,
+                GuestHandle {
+                    data: 0,
+                    size: 0,
+                    locks: 0,
+                    handle_region: 0,
+                    data_region: 0,
+                    data_mapped_size: PAGE_SIZE,
+                },
+            );
+        }
+        assert!(
+            validate_pf_handle_budget(&state, 0, None).is_ok(),
+            "real AEX workloads must be allowed to exceed the old 1024-handle cap"
+        );
+        for index in 1025..MAX_PF_HANDLE_COUNT as u64 {
+            state.handles.insert(
+                PF_HANDLE_DATA_BASE + index * PAGE_SIZE,
+                GuestHandle {
+                    data: 0,
+                    size: 0,
+                    locks: 0,
+                    handle_region: 0,
+                    data_region: 0,
+                    data_mapped_size: PAGE_SIZE,
+                },
+            );
+        }
+        assert!(validate_pf_handle_budget(&state, 0, None).is_err());
+        let existing = state.handles.values().next().unwrap().clone();
+        assert!(validate_pf_handle_budget(&state, 1, Some(&existing)).is_ok());
+    }
+
+    #[test]
+    fn pf_handle_suite_fails_closed_on_unknown_lock() {
+        let mut engine = test_engine(&[0xc3]);
+        let error = engine
+            .call_win64(HOST_LOCK_HANDLE, [0xdead_beef, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown handle"));
+    }
+
+    #[test]
+    fn pf_handle_resize_preserves_bytes_and_stable_handle() {
+        let mut engine = test_engine(&[0xc3]);
+        let handle = engine
+            .call_win64(HOST_NEW_HANDLE, [16, 0, 0, 0, 0, 0])
+            .unwrap();
+        let old_data = engine
+            .call_win64(HOST_LOCK_HANDLE, [handle, 0, 0, 0, 0, 0])
+            .unwrap();
+        engine.write(old_data, &[1, 2, 3, 4]).unwrap();
+        engine
+            .call_win64(HOST_UNLOCK_HANDLE, [handle, 0, 0, 0, 0, 0])
+            .unwrap();
+        let handle_pointer = engine.allocate(8, 8).unwrap();
+        engine.write(handle_pointer, &handle.to_le_bytes()).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_RESIZE_HANDLE, [8192, handle_pointer, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut stable = [0u8; 8];
+        engine.read(handle_pointer, &mut stable).unwrap();
+        assert_eq!(u64::from_le_bytes(stable), handle);
+        let new_data = engine
+            .call_win64(HOST_LOCK_HANDLE, [handle, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_ne!(new_data, old_data);
+        let mut preserved = [0u8; 4];
+        engine.read(new_data, &mut preserved).unwrap();
+        assert_eq!(preserved, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn color_param_suite_is_stateful_and_fails_closed() {
+        let mut engine = test_engine(&[0xc3]);
+        let name = engine.allocate(32, 1).unwrap();
+        engine.write(name, b"PF ColorParamSuite\0").unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [name, 1, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut pointer = [0u8; 8];
+        engine.read(suite_output, &mut pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(pointer), HOST_COLOR_PARAM_SUITE);
+
+        let mut captured = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        captured[..4].copy_from_slice(&101i32.to_le_bytes());
+        captured[abi::PARAM_PARAM_TYPE_OFFSET..abi::PARAM_PARAM_TYPE_OFFSET + 4]
+            .copy_from_slice(&5i32.to_le_bytes());
+        captured[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8]
+            .copy_from_slice(&[255, 10, 20, 30, 255, 1, 2, 3]);
+        engine.unicorn.get_data_mut().params.push(GuestParam {
+            index: 1,
+            param_type: 5,
+            name: "Key Color".into(),
+            bytes: captured.clone(),
+        });
+        let definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+        engine.write(definition, &captured).unwrap();
+        engine
+            .configure_parameter_definitions(vec![definition])
+            .unwrap();
+        let definition_copy = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+        engine.write(definition_copy, &captured).unwrap();
+        let definition = definition_copy;
+        let output = engine.allocate(abi::PF_PIXEL_FLOAT_SIZE, 4).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [1, definition, output, 0, 0, 0],)
+                .unwrap(),
+            0
+        );
+        let mut values = [0u8; abi::PF_PIXEL_FLOAT_SIZE];
+        engine.read(output, &mut values).unwrap();
+        let channels = (0..4)
+            .map(|index| f32::from_le_bytes(values[index * 4..index * 4 + 4].try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(channels, [1.0, 10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0]);
+
+        engine
+            .write(definition + abi::PARAM_U_OFFSET as u64, &[255, 1, 2, 3])
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [1, definition, output, 0, 0, 0],)
+                .unwrap(),
+            0
+        );
+        engine
+            .write(definition + abi::PARAM_U_OFFSET as u64, &[9, 9, 9, 9])
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [1, definition, output, 0, 0, 0],)
+                .unwrap(),
+            516
+        );
+        engine.write(definition, &999i32.to_le_bytes()).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [1, definition, output, 0, 0, 0],)
+                .unwrap(),
+            513
+        );
+        engine.write(definition, &101i32.to_le_bytes()).unwrap();
+        engine
+            .write(
+                definition + abi::PARAM_PARAM_TYPE_OFFSET as u64,
+                &6i32.to_le_bytes(),
+            )
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [1, definition, output, 0, 0, 0],)
+                .unwrap(),
+            514
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_COLOR_PARAM_VALUE, [0, definition, output, 0, 0, 0])
+                .unwrap(),
+            516
+        );
+    }
+
+    #[test]
+    fn point_param_suite_returns_signed_fixed_values_as_doubles() {
+        let mut engine = test_engine(&[0xc3]);
+        let name = engine.allocate(32, 1).unwrap();
+        engine.write(name, b"PF PointParamSuite\0").unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [name, 1, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut pointer = [0u8; 8];
+        engine.read(suite_output, &mut pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(pointer), HOST_POINT_PARAM_SUITE);
+        engine.read(HOST_POINT_PARAM_SUITE, &mut pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(pointer), HOST_POINT_PARAM_VALUE);
+
+        let definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+        engine
+            .write(
+                definition + abi::PARAM_U_OFFSET as u64,
+                &[98304i32.to_le_bytes(), (-147456i32).to_le_bytes()].concat(),
+            )
+            .unwrap();
+        let output = engine.allocate(16, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_POINT_PARAM_VALUE, [1, definition, output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut values = [0u8; 16];
+        engine.read(output, &mut values).unwrap();
+        assert_eq!(f64::from_le_bytes(values[..8].try_into().unwrap()), 1.5);
+        assert_eq!(f64::from_le_bytes(values[8..].try_into().unwrap()), -2.25);
+        assert_eq!(
+            engine
+                .call_win64(HOST_POINT_PARAM_VALUE, [1, 0, output, 0, 0, 0])
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_POINT_PARAM_VALUE, [1, definition, 0, 0, 0, 0])
+                .unwrap(),
+            4
+        );
     }
 
     #[test]

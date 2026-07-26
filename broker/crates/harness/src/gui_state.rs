@@ -9,6 +9,8 @@ pub(crate) struct GuiParameter {
     pub(crate) param_type: i64,
     pub(crate) value: f64,
     pub(crate) default_value: f64,
+    pub(crate) color: Option<[u8; 4]>,
+    pub(crate) default_color: Option<[u8; 4]>,
     pub(crate) minimum: f64,
     pub(crate) maximum: f64,
     pub(crate) precision: usize,
@@ -16,14 +18,22 @@ pub(crate) struct GuiParameter {
 
 impl GuiParameter {
     pub(crate) fn is_default(&self) -> bool {
-        self.value == self.default_value
+        match (self.color, self.default_color) {
+            (Some(value), Some(default)) => value == default,
+            (None, None) => self.value == self.default_value,
+            _ => false,
+        }
     }
 
     pub(crate) fn reset(&mut self) -> bool {
         if self.is_default() {
             return false;
         }
-        self.value = self.default_value;
+        if let Some(default) = self.default_color {
+            self.color = Some(default);
+        } else {
+            self.value = self.default_value;
+        }
         true
     }
 }
@@ -112,6 +122,8 @@ mod tests {
             param_type: 1,
             value,
             default_value,
+            color: None,
+            default_color: None,
             minimum: 0.0,
             maximum: 100.0,
             precision: 0,
@@ -132,6 +144,17 @@ mod tests {
         assert!(reset_all(&mut parameters));
         assert!(parameters.iter().all(GuiParameter::is_default));
         assert!(!reset_all(&mut parameters));
+    }
+
+    #[test]
+    fn color_parameter_reset_restores_argb8_default() {
+        let mut parameter = parameter(0.0, 0.0);
+        parameter.color = Some([255, 255, 0, 0]);
+        parameter.default_color = Some([255, 0, 0, 0]);
+        assert!(!parameter.is_default());
+        assert!(parameter.reset());
+        assert_eq!(parameter.color, Some([255, 0, 0, 0]));
+        assert!(parameter.is_default());
     }
 
     #[test]

@@ -561,7 +561,8 @@ class MinihostL2SourceTests(unittest.TestCase):
         for marker in ("new_handle(std::uint64_t size)", "g_handles.count", "invalid_operation()",
                        "record->lock_count != 0", "g_statistics.live_bytes"):
             self.assertIn(marker, runtime)
-        for marker in ("kMaxHandleCount = 1024", "kMaxHandleBytes = 256ULL * 1024ULL * 1024ULL",
+        for marker in ("kMaxHandleCount = 16384", "kMaxHandleBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL",
+                       "kObservedLargeHandleBytes = 333294848ULL",
                        "Statistics statistics()", "__cdecl resize_handle",
                        "static_assert(sizeof(AegpMemorySuite) == 8 * sizeof(void*))",
                        "kMaxAegpMemoryHandles = 256", "aegp_memory_balanced()"):

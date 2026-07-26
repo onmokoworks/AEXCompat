@@ -234,7 +234,7 @@ fn usage() {
     );
     eprintln!("       aex-guest-worker trace-selector <x64.aex> <GLOBAL_SETUP|PARAMS_SETUP>");
     eprintln!(
-        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [name=value ...]"
+        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [name=value | name@slot=a,r,g,b ...]"
     );
     eprintln!(
         "       aex-guest-worker render-trace-png <x64.aex> <input.png> <output.png> [--watch <spec>] [--watch-output-pixel x,y] [name=value ...]"
@@ -503,24 +503,76 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
         let value = value
             .to_str()
             .ok_or_else(|| "parameter assignment must be UTF-8".to_string())?;
-        let (name, number) = value
+        let (identity, encoded) = value
             .split_once('=')
             .ok_or_else(|| format!("parameter assignment must be name=value: {value:?}"))?;
+        let (name, slot) = match identity.rsplit_once('@') {
+            Some((name, slot)) => {
+                let slot = slot
+                    .parse::<usize>()
+                    .map_err(|error| format!("invalid parameter slot in {identity:?}: {error}"))?;
+                if slot == 0 {
+                    return Err("parameter slot must be greater than zero".into());
+                }
+                (name, Some(slot))
+            }
+            None => (identity, None),
+        };
         if name.is_empty() {
             return Err("parameter name must not be empty".into());
         }
         if parsed
             .iter()
-            .any(|existing: &ParameterValue| existing.name == name)
+            .any(|existing: &ParameterValue| match (existing.slot, slot) {
+                (Some(existing), Some(requested)) => existing == requested,
+                (None, None) => existing.name == name,
+                _ => false,
+            })
         {
-            return Err(format!("duplicate parameter assignment: {name:?}"));
+            return Err(format!("duplicate parameter assignment: {identity:?}"));
         }
+        let components = encoded.split(',').collect::<Vec<_>>();
+        let (numeric, point, color) = match components.as_slice() {
+            [number] => (
+                Some(
+                    number
+                        .parse()
+                        .map_err(|error| format!("invalid value for {name:?}: {error}"))?,
+                ),
+                None,
+                None,
+            ),
+            [x, y] => (
+                None,
+                Some([
+                    x.parse()
+                        .map_err(|error| format!("invalid point x for {name:?}: {error}"))?,
+                    y.parse()
+                        .map_err(|error| format!("invalid point y for {name:?}: {error}"))?,
+                ]),
+                None,
+            ),
+            [alpha, red, green, blue] => {
+                let mut color = [0u8; 4];
+                for (destination, component) in color.iter_mut().zip([alpha, red, green, blue]) {
+                    *destination = component.parse::<u8>().map_err(|_| {
+                        format!("ARGB8 component for {name:?} must be an integer from 0 to 255")
+                    })?;
+                }
+                (None, None, Some(color))
+            }
+            _ => {
+                return Err(format!(
+                    "parameter assignment must contain one scalar, two point components, or four ARGB8 components: {encoded:?}"
+                ));
+            }
+        };
         parsed.push(ParameterValue {
-            slot: None,
+            slot,
             name: name.to_string(),
-            value: number
-                .parse()
-                .map_err(|error| format!("invalid value for {name:?}: {error}"))?,
+            value: numeric,
+            color,
+            point,
         });
     }
     Ok(parsed)
@@ -528,7 +580,7 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_trace_watches, selector_error};
+    use super::{parse_parameter_values, parse_trace_watches, selector_error};
     use std::ffi::OsString;
 
     #[test]
@@ -536,6 +588,47 @@ mod tests {
         assert_eq!(selector_error(0), None);
         assert_eq!(selector_error(7), Some(7));
         assert_eq!(selector_error(u64::MAX), Some(-1));
+    }
+
+    #[test]
+    fn parameter_parser_accepts_slot_qualified_argb8() {
+        let values =
+            parse_parameter_values(&[OsString::from("Key Color@2=255,64,128,192")]).unwrap();
+        assert_eq!(values[0].name, "Key Color");
+        assert_eq!(values[0].slot, Some(2));
+        assert_eq!(values[0].value, None);
+        assert_eq!(values[0].color, Some([255, 64, 128, 192]));
+        assert_eq!(values[0].point, None);
+    }
+
+    #[test]
+    fn parameter_parser_rejects_invalid_argb8_and_duplicate_slots() {
+        assert!(parse_parameter_values(&[OsString::from("Tint@2=256,1,2,3")]).is_err());
+        assert!(
+            parse_parameter_values(&[
+                OsString::from("First@2=255,1,2,3"),
+                OsString::from("Second@2=255,4,5,6"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parameter_parser_accepts_scalar_and_point_assignments() {
+        let values = parse_parameter_values(&[
+            OsString::from("Amount=12.5"),
+            OsString::from("Center=42,-7.25"),
+            OsString::from("Strength@4=100"),
+        ])
+        .unwrap();
+        assert_eq!(values[0].value, Some(12.5));
+        assert_eq!(values[0].point, None);
+        assert_eq!(values[0].color, None);
+        assert_eq!(values[1].value, None);
+        assert_eq!(values[1].point, Some([42.0, -7.25]));
+        assert_eq!(values[1].color, None);
+        assert_eq!(values[2].slot, Some(4));
+        assert_eq!(values[2].value, Some(100.0));
     }
 
     #[test]

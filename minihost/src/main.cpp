@@ -1,6 +1,8 @@
 #include <windows.h>
 #include <bcrypt.h>
 
+#include "worker_openmp_policy.hpp"
+
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -78,6 +80,12 @@ void report(const char* status, bool identity, bool loaded, bool entrypoint,
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+  std::string openmp_diagnostic;
+  if (!aexcompat::worker_runtime::openmp::install_deterministic_policy(
+          openmp_diagnostic)) {
+    report("openmp_policy_failed", false, false, false);
+    return kInternalError;
+  }
   if (argc != 4 || std::wstring_view(argv[1]) != L"--l1") {
     report("invalid_request", false, false, false);
     return kUsage;

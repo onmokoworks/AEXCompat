@@ -24,9 +24,12 @@ use thiserror::Error;
 #[cfg(test)]
 use crate::native_aegp_memory::active_arena_next;
 use crate::native_aegp_memory::{
-    NativeAegpMemory, free_aegp_mem_handle, get_aegp_mem_handle_size, lock_aegp_mem_handle,
-    native_aegp_memory_callbacks, new_aegp_mem_handle, resize_aegp_mem_handle,
-    unlock_aegp_mem_handle, unsupported_aegp_memory_slot, with_native_aegp_memory_context,
+    NativeAegpMemory, native_aegp_memory_callbacks, with_native_aegp_memory_context,
+};
+#[cfg(test)]
+use crate::native_aegp_memory::{
+    free_aegp_mem_handle, get_aegp_mem_handle_size, lock_aegp_mem_handle, new_aegp_mem_handle,
+    resize_aegp_mem_handle, unlock_aegp_mem_handle, unsupported_aegp_memory_slot,
 };
 use crate::pe::PeImage;
 pub use crate::x64::{
@@ -35,13 +38,23 @@ pub use crate::x64::{
 use crate::x64::{record_suite_request, record_unsupported_suite_call, utility_suite_layout};
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
-const MAX_HANDLE_SIZE: u64 = 128 * 1024 * 1024;
+#[cfg(test)]
 const MAX_AEGP_MEMORY_HANDLES: usize = 256;
+const PAGE_SIZE: usize = 4096;
+const MAX_PF_HANDLE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_PF_HANDLE_COUNT: usize = 16_384;
 const PROT_READ: c_int = 0x1;
 const PROT_WRITE: c_int = 0x2;
 const PROT_EXEC: c_int = 0x4;
 const MAP_PRIVATE: c_int = 0x0002;
 const MAP_ANON: c_int = 0x1000;
+const PF_INVALID_INDEX: u64 = 513;
+const PF_UNRECOGNIZED_PARAM_TYPE: u64 = 514;
+const PF_BAD_CALLBACK_PARAM: u64 = 516;
+const PARAM_TYPE_COLOR: i32 = 5;
+#[cfg(test)]
+const PARAM_TYPE_POINT: i32 = 6;
+const HOST_EFFECT_REF: u64 = 1;
 
 macro_rules! callback_address {
     ($callback:expr) => {
@@ -103,6 +116,16 @@ struct NativeHandle {
     data: u64,
     size: u64,
     locks: u32,
+    data_mapping_size: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ColorParamPixelFloat {
+    alpha: f32,
+    red: f32,
+    green: f32,
+    blue: f32,
 }
 
 #[derive(Default)]
@@ -130,6 +153,8 @@ struct NativeState {
     arena_end: u64,
     handle_suite: u64,
     aegp_memory_suite: u64,
+    color_param_suite: u64,
+    point_param_suite: u64,
 }
 
 thread_local! {
@@ -193,6 +218,17 @@ pub struct GuestEngine<'a> {
     arena: Mapping,
     state: NativeState,
     lifetime: PhantomData<&'a ()>,
+}
+
+impl Drop for GuestEngine<'_> {
+    fn drop(&mut self) {
+        for (handle, record) in self.state.handles.drain() {
+            unsafe {
+                munmap(record.data as *mut c_void, record.data_mapping_size);
+                munmap(handle as *mut c_void, PAGE_SIZE);
+            }
+        }
+    }
 }
 
 type Win64Function = unsafe extern "win64" fn(u64, u64, u64, u64, u64, u64) -> u64;
@@ -259,6 +295,12 @@ impl GuestEngine<'static> {
             engine.write_u64(iterate8_suite + (slot * 8) as u64, callback)?;
         }
         engine.state.iterate8_suite = iterate8_suite;
+        let color_param_suite = engine.allocate(8, 8)?;
+        engine.write_u64(color_param_suite, callback_address!(color_param_value))?;
+        engine.state.color_param_suite = color_param_suite;
+        let point_param_suite = engine.allocate(8, 8)?;
+        engine.write_u64(point_param_suite, callback_address!(point_param_value))?;
+        engine.state.point_param_suite = point_param_suite;
         for version in [3u32, 7, 11, 13] {
             let callbacks =
                 native_utility_callbacks(version).expect("known AEGP Utility Suite version");
@@ -284,15 +326,7 @@ impl GuestEngine<'static> {
     fn install_imports(&mut self, image: &PeImage) -> Result<(), GuestError> {
         for library in image.imports() {
             for symbol in &library.symbols {
-                let callback = match symbol.name.as_str() {
-                    "strncpy" => callback_address!(native_strncpy),
-                    "memset" => callback_address!(native_memset),
-                    "expf" => callback_address!(native_expf),
-                    "floorf" => callback_address!(native_floorf),
-                    "powf" => callback_address!(native_powf),
-                    "pow" => callback_address!(native_pow),
-                    _ => callback_address!(noop_import),
-                };
+                let callback = native_import_callback(&symbol.name);
                 self.write_u64(image.image_base() + symbol.iat_rva as u64, callback)?;
             }
         }
@@ -428,8 +462,29 @@ impl GuestEngine<'static> {
 
     pub fn add_trace_watch(&mut self, _: TraceWatchSpec) {}
 
-    pub fn configure_parameter_definitions(&mut self, definitions: Vec<u64>) {
+    pub fn configure_parameter_definitions(
+        &mut self,
+        definitions: Vec<u64>,
+    ) -> Result<(), GuestError> {
+        if definitions.len() != self.state.params.len() {
+            return Err(GuestError::Callback(
+                "active parameter definition count differs from setup".into(),
+            ));
+        }
+        for (definition, parameter) in definitions
+            .iter()
+            .copied()
+            .zip(self.state.params.iter_mut())
+        {
+            if parameter.param_type == PARAM_TYPE_COLOR {
+                let color =
+                    unsafe { copy_from_pointer(definition + abi::PARAM_U_OFFSET as u64, 4) };
+                parameter.bytes[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE]
+                    .copy_from_slice(&color);
+            }
+        }
         self.state.parameter_definitions = definitions;
+        Ok(())
     }
 
     pub fn configure_smart_render(
@@ -558,6 +613,30 @@ unsafe fn write_pointer(pointer: u64, bytes: &[u8]) {
 
 unsafe extern "win64" fn noop_import(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
     0
+}
+
+unsafe extern "win64" fn native_omp_get_max_threads(
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    1
+}
+
+fn native_import_callback(name: &str) -> u64 {
+    match name {
+        "strncpy" => callback_address!(native_strncpy),
+        "memset" => callback_address!(native_memset),
+        "expf" => callback_address!(native_expf),
+        "floorf" => callback_address!(native_floorf),
+        "powf" => callback_address!(native_powf),
+        "pow" => callback_address!(native_pow),
+        "omp_get_max_threads" => callback_address!(native_omp_get_max_threads),
+        _ => callback_address!(noop_import),
+    }
 }
 
 unsafe extern "win64" fn poison_callback(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
@@ -1215,6 +1294,16 @@ unsafe extern "win64" fn acquire_suite(
                 *(output as *mut u64) = state.iterate8_suite;
             }
             0
+        } else if name == "PF ColorParamSuite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.color_param_suite;
+            }
+            0
+        } else if name == "PF PointParamSuite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.point_param_suite;
+            }
+            0
         } else if name == "AEGP Utility Suite" && output != 0 {
             let Some(table) = u32::try_from(version)
                 .ok()
@@ -1232,6 +1321,90 @@ unsafe extern "win64" fn acquire_suite(
         }
     })
     .unwrap_or(u32::MAX as u64)
+}
+
+unsafe extern "win64" fn color_param_value(
+    effect_ref: u64,
+    definition: u64,
+    output: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    if effect_ref != HOST_EFFECT_REF || definition == 0 || output == 0 {
+        return PF_BAD_CALLBACK_PARAM;
+    }
+    with_state(|state| {
+        let disk_id = unsafe { ptr::read_unaligned(definition as *const i32) };
+        let param_type = unsafe {
+            ptr::read_unaligned((definition + abi::PARAM_PARAM_TYPE_OFFSET as u64) as *const i32)
+        };
+        let Some(source) = state.params.iter().find(|parameter| {
+            parameter
+                .bytes
+                .get(..4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(i32::from_le_bytes)
+                == Some(disk_id)
+        }) else {
+            return PF_INVALID_INDEX;
+        };
+        if param_type != PARAM_TYPE_COLOR || source.param_type != PARAM_TYPE_COLOR {
+            return PF_UNRECOGNIZED_PARAM_TYPE;
+        }
+        let argb: [u8; 4] = unsafe {
+            copy_from_pointer(definition + abi::PARAM_U_OFFSET as u64, abi::PF_PIXEL_SIZE)
+        }
+        .try_into()
+        .expect("PF_Pixel is four bytes");
+        let current: [u8; 4] = source.bytes
+            [abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE]
+            .try_into()
+            .expect("PF_Pixel is four bytes");
+        let default: [u8; 4] = source.bytes[abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE
+            ..abi::PARAM_U_OFFSET + abi::PF_PIXEL_SIZE * 2]
+            .try_into()
+            .expect("PF color default is four bytes");
+        if argb != current && argb != default {
+            return PF_BAD_CALLBACK_PARAM;
+        }
+        let pixel = ColorParamPixelFloat {
+            alpha: f32::from(argb[0]) / 255.0,
+            red: f32::from(argb[1]) / 255.0,
+            green: f32::from(argb[2]) / 255.0,
+            blue: f32::from(argb[3]) / 255.0,
+        };
+        unsafe {
+            ptr::write_unaligned(output as *mut ColorParamPixelFloat, pixel);
+        }
+        0
+    })
+    .unwrap_or(PF_BAD_CALLBACK_PARAM)
+}
+
+unsafe extern "win64" fn point_param_value(
+    _: u64,
+    definition: u64,
+    output: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    if definition == 0 || output == 0 {
+        return 4;
+    }
+    let x = unsafe { ptr::read_unaligned((definition + abi::PARAM_U_OFFSET as u64) as *const i32) }
+        as f64
+        / 65536.0;
+    let y =
+        unsafe { ptr::read_unaligned((definition + abi::PARAM_U_OFFSET as u64 + 4) as *const i32) }
+            as f64
+            / 65536.0;
+    unsafe {
+        ptr::write_unaligned(output as *mut f64, x);
+        ptr::write_unaligned((output + 8) as *mut f64, y);
+    }
+    0
 }
 
 unsafe extern "win64" fn checkout_param(
@@ -1271,21 +1444,63 @@ unsafe extern "win64" fn checkout_param(
 unsafe extern "win64" fn new_handle(size: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
     with_state(|state| {
         state.handle_allocations.push(size);
-        if size > MAX_HANDLE_SIZE {
+        let live_bytes = state.handles.values().map(|record| record.size).sum::<u64>();
+        if size > MAX_PF_HANDLE_SIZE
+            || state.handles.len() >= MAX_PF_HANDLE_COUNT
+            || live_bytes > MAX_PF_HANDLE_SIZE - size
+        {
+            state.callback_error = Some(format!(
+                "PF Handle allocation exceeds live budget: size={size}, live_bytes={live_bytes}, live_count={}",
+                state.handles.len()
+            ));
             return 0;
         }
-        let handle = (state.arena_next + 7) & !7;
-        let data = (handle + 8 + 15) & !15;
-        let Some(end) = data.checked_add(size.max(1)) else {
+        let Some(data_mapping_size) = usize::try_from(size.max(1))
+            .ok()
+            .and_then(|size| size.checked_add(PAGE_SIZE - 1))
+            .map(|size| size & !(PAGE_SIZE - 1))
+        else {
+            state.callback_error = Some(format!("PF Handle allocation size overflow: {size}"));
             return 0;
         };
-        if end > state.arena_end {
+        let handle = unsafe {
+            mmap(
+                ptr::null_mut(),
+                PAGE_SIZE,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if handle as isize == -1 {
+            state.callback_error = Some(format!(
+                "PF Handle header allocation failed for {size} bytes"
+            ));
             return 0;
         }
-        state.arena_next = end;
+        let data = unsafe {
+            mmap(
+                ptr::null_mut(),
+                data_mapping_size,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if data as isize == -1 {
+            unsafe {
+                munmap(handle, PAGE_SIZE);
+            }
+            state.callback_error =
+                Some(format!("PF Handle data allocation failed for {size} bytes"));
+            return 0;
+        }
+        let handle = handle as u64;
+        let data = data as u64;
         unsafe {
             *(handle as *mut u64) = data;
-            ptr::write_bytes(data as *mut u8, 0, size as usize);
         }
         state.handles.insert(
             handle,
@@ -1293,6 +1508,7 @@ unsafe extern "win64" fn new_handle(size: u64, _: u64, _: u64, _: u64, _: u64, _
                 data,
                 size,
                 locks: 0,
+                data_mapping_size,
             },
         );
         handle
@@ -1302,18 +1518,26 @@ unsafe extern "win64" fn new_handle(size: u64, _: u64, _: u64, _: u64, _: u64, _
 
 unsafe extern "win64" fn lock_handle(handle: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
     with_state(|state| {
-        state.handles.get_mut(&handle).map_or(0, |record| {
+        if let Some(record) = state.handles.get_mut(&handle) {
             record.locks = record.locks.saturating_add(1);
             record.data
-        })
+        } else {
+            state.callback_error = Some(format!(
+                "PF Handle lock received unknown handle {handle:#x}"
+            ));
+            0
+        }
     })
     .unwrap_or(0)
 }
 
 unsafe extern "win64" fn unlock_handle(handle: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
-    with_state(|state| {
-        if let Some(record) = state.handles.get_mut(&handle) {
-            record.locks = record.locks.saturating_sub(1);
+    with_state(|state| match state.handles.get_mut(&handle) {
+        Some(record) if record.locks != 0 => record.locks -= 1,
+        _ => {
+            state.callback_error = Some(format!(
+                "PF Handle unlock received stale or unlocked handle {handle:#x}"
+            ));
         }
     });
     0
@@ -1328,13 +1552,39 @@ unsafe extern "win64" fn dispose_handle(
     _: u64,
 ) -> u64 {
     with_state(|state| {
+        let Some(record) = state.handles.get(&handle).cloned() else {
+            state.callback_error = Some(format!(
+                "PF Handle dispose received stale handle {handle:#x}"
+            ));
+            return;
+        };
+        if record.locks != 0 {
+            state.callback_error = Some(format!(
+                "PF Handle dispose received locked handle {handle:#x}"
+            ));
+            return;
+        }
         state.handles.remove(&handle);
+        unsafe {
+            munmap(record.data as *mut c_void, record.data_mapping_size);
+            munmap(handle as *mut c_void, PAGE_SIZE);
+        }
     });
     0
 }
 
 unsafe extern "win64" fn handle_size(handle: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
-    with_state(|state| state.handles.get(&handle).map_or(0, |record| record.size)).unwrap_or(0)
+    with_state(|state| {
+        if let Some(record) = state.handles.get(&handle) {
+            record.size
+        } else {
+            state.callback_error = Some(format!(
+                "PF Handle size received unknown handle {handle:#x}"
+            ));
+            0
+        }
+    })
+    .unwrap_or(0)
 }
 
 unsafe extern "win64" fn resize_handle(
@@ -1346,7 +1596,7 @@ unsafe extern "win64" fn resize_handle(
     _: u64,
 ) -> u64 {
     with_state(|state| {
-        if size > MAX_HANDLE_SIZE || handle_pointer == 0 {
+        if size > MAX_PF_HANDLE_SIZE || handle_pointer == 0 {
             return 4;
         }
         let handle = unsafe { *(handle_pointer as *const u64) };
@@ -1356,26 +1606,54 @@ unsafe extern "win64" fn resize_handle(
         if old.locks != 0 {
             return 4;
         }
-        let data = (state.arena_next + 15) & !15;
-        let Some(end) = data.checked_add(size.max(1)) else {
-            return 4;
-        };
-        if end > state.arena_end {
+        let live_bytes = state
+            .handles
+            .values()
+            .map(|record| record.size)
+            .sum::<u64>();
+        if live_bytes - old.size > MAX_PF_HANDLE_SIZE - size {
+            state.callback_error = Some(format!(
+                "PF Handle resize exceeds live budget: size={size}, live_bytes={live_bytes}"
+            ));
             return 4;
         }
-        state.arena_next = end;
+        let Some(data_mapping_size) = usize::try_from(size.max(1))
+            .ok()
+            .and_then(|size| size.checked_add(PAGE_SIZE - 1))
+            .map(|size| size & !(PAGE_SIZE - 1))
+        else {
+            return 4;
+        };
+        let data = unsafe {
+            mmap(
+                ptr::null_mut(),
+                data_mapping_size,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if data as isize == -1 {
+            state.callback_error = Some(format!(
+                "PF Handle resize allocation failed for {size} bytes"
+            ));
+            return 1;
+        }
+        let data = data as u64;
         unsafe {
-            ptr::write_bytes(data as *mut u8, 0, size as usize);
             ptr::copy_nonoverlapping(
                 old.data as *const u8,
                 data as *mut u8,
                 old.size.min(size) as usize,
             );
             *(handle as *mut u64) = data;
+            munmap(old.data as *mut c_void, old.data_mapping_size);
         }
         if let Some(record) = state.handles.get_mut(&handle) {
             record.data = data;
             record.size = size;
+            record.data_mapping_size = data_mapping_size;
         }
         0
     })
@@ -1385,6 +1663,299 @@ unsafe extern "win64" fn resize_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_param_suite_v1_is_stateful_and_fails_closed() {
+        let mut definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        definition[..4].copy_from_slice(&101i32.to_le_bytes());
+        definition[abi::PARAM_PARAM_TYPE_OFFSET..abi::PARAM_PARAM_TYPE_OFFSET + 4]
+            .copy_from_slice(&PARAM_TYPE_COLOR.to_le_bytes());
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8]
+            .copy_from_slice(&[255, 64, 128, 192, 255, 1, 2, 3]);
+        let mut state = NativeState::default();
+        state.color_param_suite = 0x1234;
+        state.params.push(GuestParam {
+            index: 1,
+            param_type: PARAM_TYPE_COLOR,
+            name: "Key Color".into(),
+            bytes: definition.clone(),
+        });
+        state.parameter_definitions.push(definition.as_ptr() as u64);
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+        let name = b"PF ColorParamSuite\0";
+        let mut suite = 0u64;
+        assert_eq!(
+            unsafe {
+                acquire_suite(
+                    name.as_ptr() as u64,
+                    1,
+                    (&mut suite as *mut u64) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(suite, state.color_param_suite);
+
+        let mut output = ColorParamPixelFloat {
+            alpha: -1.0,
+            red: -1.0,
+            green: -1.0,
+            blue: -1.0,
+        };
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            output,
+            ColorParamPixelFloat {
+                alpha: 1.0,
+                red: 64.0 / 255.0,
+                green: 128.0 / 255.0,
+                blue: 192.0 / 255.0,
+            }
+        );
+
+        let sentinel = output;
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4].copy_from_slice(&[9, 9, 9, 9]);
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            PF_BAD_CALLBACK_PARAM
+        );
+        assert_eq!(output, sentinel);
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4].copy_from_slice(&[255, 1, 2, 3]);
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        definition[..4].copy_from_slice(&999i32.to_le_bytes());
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            PF_INVALID_INDEX
+        );
+        definition[..4].copy_from_slice(&101i32.to_le_bytes());
+        definition[abi::PARAM_PARAM_TYPE_OFFSET..abi::PARAM_PARAM_TYPE_OFFSET + 4]
+            .copy_from_slice(&6i32.to_le_bytes());
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            PF_UNRECOGNIZED_PARAM_TYPE
+        );
+        assert_eq!(
+            unsafe {
+                color_param_value(
+                    0,
+                    definition.as_ptr() as u64,
+                    (&mut output as *mut ColorParamPixelFloat) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            PF_BAD_CALLBACK_PARAM
+        );
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
+
+    #[test]
+    fn point_param_suite_v1_returns_signed_fixed_values_and_rejects_nulls() {
+        let mut state = NativeState {
+            point_param_suite: 0x5678,
+            ..NativeState::default()
+        };
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+        let name = b"PF PointParamSuite\0";
+        let mut suite = 0u64;
+        assert_eq!(
+            unsafe {
+                acquire_suite(
+                    name.as_ptr() as u64,
+                    1,
+                    (&mut suite as *mut u64) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(suite, state.point_param_suite);
+
+        let mut definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        definition[abi::PARAM_PARAM_TYPE_OFFSET..abi::PARAM_PARAM_TYPE_OFFSET + 4]
+            .copy_from_slice(&PARAM_TYPE_POINT.to_le_bytes());
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4]
+            .copy_from_slice(&98304i32.to_le_bytes());
+        definition[abi::PARAM_U_OFFSET + 4..abi::PARAM_U_OFFSET + 8]
+            .copy_from_slice(&(-147456i32).to_le_bytes());
+        let mut output = [0.0f64; 2];
+        assert_eq!(
+            unsafe {
+                point_param_value(
+                    HOST_EFFECT_REF,
+                    definition.as_ptr() as u64,
+                    output.as_mut_ptr() as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(output, [1.5, -2.25]);
+        assert_eq!(
+            unsafe { point_param_value(HOST_EFFECT_REF, 0, output.as_mut_ptr() as u64, 0, 0, 0) },
+            4
+        );
+        assert_eq!(
+            unsafe { point_param_value(HOST_EFFECT_REF, definition.as_ptr() as u64, 0, 0, 0, 0,) },
+            4
+        );
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
+
+    #[test]
+    fn pf_handles_map_large_storage_and_preserve_resize_bytes() {
+        let mut state = NativeState::default();
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+        let size = 333_294_848;
+        let handle = unsafe { new_handle(size, 0, 0, 0, 0, 0) };
+        assert_ne!(handle, 0);
+        let data = unsafe { lock_handle(handle, 0, 0, 0, 0, 0) };
+        assert_ne!(data, 0);
+        unsafe {
+            *((data + size - 1) as *mut u8) = 0x5a;
+        }
+        assert_eq!(unsafe { handle_size(handle, 0, 0, 0, 0, 0) }, size);
+        unsafe {
+            unlock_handle(handle, 0, 0, 0, 0, 0);
+            dispose_handle(handle, 0, 0, 0, 0, 0);
+        }
+
+        let handle = unsafe { new_handle(16, 0, 0, 0, 0, 0) };
+        let data = unsafe { lock_handle(handle, 0, 0, 0, 0, 0) };
+        unsafe {
+            *(data as *mut u32) = 0x0403_0201;
+            unlock_handle(handle, 0, 0, 0, 0, 0);
+        }
+        let mut handle_pointer = handle;
+        assert_eq!(
+            unsafe { resize_handle(8192, (&mut handle_pointer as *mut u64) as u64, 0, 0, 0, 0,) },
+            0
+        );
+        assert_eq!(handle_pointer, handle);
+        let resized = unsafe { lock_handle(handle, 0, 0, 0, 0, 0) };
+        assert_eq!(unsafe { *(resized as *const u32) }, 0x0403_0201);
+        unsafe {
+            unlock_handle(handle, 0, 0, 0, 0, 0);
+            dispose_handle(handle, 0, 0, 0, 0, 0);
+        }
+        assert!(state.handles.is_empty());
+        assert!(state.callback_error.is_none());
+
+        let budget_handle = unsafe { new_handle(MAX_PF_HANDLE_SIZE, 0, 0, 0, 0, 0) };
+        assert_ne!(budget_handle, 0);
+        assert_eq!(unsafe { new_handle(1, 0, 0, 0, 0, 0) }, 0);
+        assert!(
+            state
+                .callback_error
+                .as_deref()
+                .is_some_and(|message| message.contains("live budget"))
+        );
+        state.callback_error = None;
+        unsafe {
+            dispose_handle(budget_handle, 0, 0, 0, 0, 0);
+        }
+        let released_budget_handle = unsafe { new_handle(1, 0, 0, 0, 0, 0) };
+        assert_ne!(released_budget_handle, 0);
+        unsafe {
+            dispose_handle(released_budget_handle, 0, 0, 0, 0, 0);
+        }
+
+        let mut regression_handles = Vec::with_capacity(1025);
+        for _ in 0..1025 {
+            let handle = unsafe { new_handle(0, 0, 0, 0, 0, 0) };
+            assert_ne!(
+                handle, 0,
+                "real AEX workloads must be allowed to exceed the old 1024-handle cap"
+            );
+            regression_handles.push(handle);
+        }
+        for handle in regression_handles {
+            unsafe {
+                dispose_handle(handle, 0, 0, 0, 0, 0);
+            }
+        }
+        assert!(state.handles.is_empty());
+        assert!(state.callback_error.is_none());
+
+        assert_eq!(unsafe { lock_handle(0xdead_beef, 0, 0, 0, 0, 0) }, 0);
+        assert!(
+            state
+                .callback_error
+                .as_deref()
+                .is_some_and(|message| message.contains("unknown handle"))
+        );
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
+
+    #[test]
+    fn openmp_thread_count_is_positive_and_deterministic() {
+        assert_eq!(unsafe { native_omp_get_max_threads(0, 0, 0, 0, 0, 0) }, 1);
+        let omp_callback: unsafe extern "win64" fn(u64, u64, u64, u64, u64, u64) -> u64 =
+            unsafe { std::mem::transmute(native_import_callback("omp_get_max_threads")) };
+        assert_eq!(unsafe { omp_callback(0, 0, 0, 0, 0, 0) }, 1);
+        let unknown_callback: unsafe extern "win64" fn(u64, u64, u64, u64, u64, u64) -> u64 =
+            unsafe { std::mem::transmute(native_import_callback("unknown_import")) };
+        assert_eq!(unsafe { unknown_callback(0, 0, 0, 0, 0, 0) }, 0);
+    }
 
     #[test]
     fn utility_v7_v13_callbacks_match_unicorn_contract() {

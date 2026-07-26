@@ -139,7 +139,6 @@ int admit_runtime(const RuntimeHostHooks& hooks,
     remove_directory_cookie(sealed_directory_cookie);
     return report_load_failure("load_library", error);
   }
-
   ModuleAuditReport& audit = module_audit_report();
   audit.required = sealed;
   audit.plugin_path = plugin_path;
