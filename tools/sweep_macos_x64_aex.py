@@ -490,7 +490,11 @@ def spawn_worker(
     output_slot: Path,
     width: int,
     height: int,
+    extra_environment: dict[str, str] | None = None,
 ) -> subprocess.Popen[bytes]:
+    environment = os.environ.copy()
+    environment.pop("AEXCOMPAT_NATIVE_RUN_DLLMAIN", None)
+    environment.update(extra_environment or {})
     return subprocess.Popen(
         [
             os.fspath(worker),
@@ -506,6 +510,7 @@ def spawn_worker(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
+        env=environment,
     )
 
 
@@ -605,8 +610,17 @@ def launch_ready(
     output_slot: Path,
     width: int,
     height: int,
+    extra_environment: dict[str, str],
 ) -> tuple[subprocess.Popen[bytes], dict[str, object]]:
-    process = spawn_worker(worker, plugin, input_slot, output_slot, width, height)
+    process = spawn_worker(
+        worker,
+        plugin,
+        input_slot,
+        output_slot,
+        width,
+        height,
+        extra_environment,
+    )
     try:
         if process.stdout is None:
             raise SweepError("worker stdout is unavailable")
@@ -623,6 +637,7 @@ def launch_ready(
 def run_backend(
     worker: Path,
     expected_backend: str,
+    extra_environment: dict[str, str],
     plugin: Path,
     argb8: bytes,
     width: int,
@@ -634,7 +649,13 @@ def run_backend(
     input_slot.write_bytes(argb8)
     output_slot.write_bytes(bytes(len(argb8)))
     probe, probe_ready = launch_ready(
-        worker, plugin, input_slot, output_slot, width, height
+        worker,
+        plugin,
+        input_slot,
+        output_slot,
+        width,
+        height,
+        extra_environment,
     )
     try:
         require_backend(probe_ready, expected_backend, "probe")
@@ -653,7 +674,13 @@ def run_backend(
         raise
 
     process, ready = launch_ready(
-        worker, plugin, input_slot, output_slot, width, height
+        worker,
+        plugin,
+        input_slot,
+        output_slot,
+        width,
+        height,
+        extra_environment,
     )
     try:
         require_backend(ready, expected_backend, "render")
@@ -777,15 +804,21 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
         "native": (
             args.native_worker.resolve(strict=True),
             "native-x86_64-carrier",
+            (
+                {"AEXCOMPAT_NATIVE_RUN_DLLMAIN": "1"}
+                if args.native_run_dllmain
+                else {}
+            ),
         ),
         "unicorn": (
             args.unicorn_worker.resolve(strict=True),
             "unicorn-x86_64",
+            {},
         ),
     }
     requested_backends = args.backend or ["native", "unicorn"]
     workers = {name: available_workers[name] for name in requested_backends}
-    for name, (worker, _) in workers.items():
+    for name, (worker, _, _) in workers.items():
         if not worker.is_file():
             raise SweepError(f"{name} worker is not a file: {worker}")
     output = args.output.resolve()
@@ -804,14 +837,14 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
         },
         **{
             os.fspath(worker): f"<{name}-worker>"
-            for name, (worker, _) in available_workers.items()
+            for name, (worker, _, _) in available_workers.items()
         },
     }
     entries = []
     counts: Counter[str] = Counter()
     for index, item in enumerate(mapped):
         backend_results = {}
-        for backend, (worker, expected_backend) in workers.items():
+        for backend, (worker, expected_backend, extra_environment) in workers.items():
             directory = run_root / f"{index:04d}-{item['sha256'][:12]}-{backend}"
             directory.mkdir(parents=True, exist_ok=True)
             started = time.monotonic()
@@ -819,6 +852,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
                 result = run_backend(
                     worker,
                     expected_backend,
+                    extra_environment,
                     item["path"],
                     argb8,
                     width,
@@ -871,6 +905,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
             "input_dimensions": [width, height],
             "native_worker_sha256": sha256_file(available_workers["native"][0]),
             "unicorn_worker_sha256": sha256_file(available_workers["unicorn"][0]),
+            "native_run_dllmain": args.native_run_dllmain,
         },
         "summary": {
             "entry_count": len(entries),
@@ -903,6 +938,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-inventory-sha256", required=True)
     parser.add_argument("--expected-summary-sha256", required=True)
+    parser.add_argument(
+        "--native-run-dllmain",
+        action="store_true",
+        help="explicitly opt the isolated native carrier into DLL_PROCESS_ATTACH",
+    )
     return parser.parse_args()
 
 

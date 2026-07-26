@@ -358,6 +358,46 @@ def test_spawn_worker_uses_an_isolated_process_group(tmp_path):
         SWEEP.terminate_worker(process)
 
 
+def test_spawn_worker_applies_explicit_environment_without_mutating_parent(
+    tmp_path, monkeypatch
+):
+    captured = {}
+    sentinel = object()
+
+    def fake_popen(*arguments, **options):
+        captured["arguments"] = arguments
+        captured["options"] = options
+        return sentinel
+
+    monkeypatch.setenv("AEXCOMPAT_NATIVE_RUN_DLLMAIN", "ambient")
+    monkeypatch.setattr(SWEEP.subprocess, "Popen", fake_popen)
+
+    without_opt_in = SWEEP.spawn_worker(
+        Path("/worker"),
+        tmp_path / "plugin.aex",
+        tmp_path / "input.argb8",
+        tmp_path / "output.argb8",
+        1,
+        1,
+    )
+    assert without_opt_in is sentinel
+    assert "AEXCOMPAT_NATIVE_RUN_DLLMAIN" not in captured["options"]["env"]
+
+    process = SWEEP.spawn_worker(
+        Path("/worker"),
+        tmp_path / "plugin.aex",
+        tmp_path / "input.argb8",
+        tmp_path / "output.argb8",
+        1,
+        1,
+        {"AEXCOMPAT_NATIVE_RUN_DLLMAIN": "1"},
+    )
+
+    assert process is sentinel
+    assert captured["options"]["env"]["AEXCOMPAT_NATIVE_RUN_DLLMAIN"] == "1"
+    assert SWEEP.os.environ["AEXCOMPAT_NATIVE_RUN_DLLMAIN"] == "ambient"
+
+
 def test_cleanup_failure_is_not_misclassified_as_suite_gap():
     message = "resident cleanup was not clean; suite_requests=['AEGP Compute Cache v1']"
 
