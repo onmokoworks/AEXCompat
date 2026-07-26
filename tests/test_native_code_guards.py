@@ -8,6 +8,7 @@ BROKER_ROOT = ROOT / "broker"
 BROKER_SOURCE_ROOT = BROKER_ROOT / "crates"
 MINIHOST_ROOT = ROOT / "minihost"
 
+
 class NativeCodeGuardTests(unittest.TestCase):
     def test_broker_sources_exclude_native_loader_symbols_and_production_aex_literals(self):
         sources = sorted(BROKER_SOURCE_ROOT.rglob("*.rs"))
