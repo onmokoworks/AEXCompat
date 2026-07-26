@@ -139,6 +139,8 @@
     "utils.ansi_sqrt":{"offset":312,"size":8},
     "utils.ansi_sprintf":{"offset":328,"size":8},
     "utils.ansi_strcpy":{"offset":336,"size":8},
+    "utils.ansi_asin":{"offset":344,"size":8},
+    "utils.ansi_acos":{"offset":352,"size":8},
     "utils.color_callbacks":{"offset":368,"size":64},
     "utils.blend":{"offset":48,"size":8},
     "utils.convolve":{"offset":56,"size":8},

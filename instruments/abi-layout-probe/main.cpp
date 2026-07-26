@@ -302,6 +302,10 @@ int main() {
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, sprintf), first);
   field<decltype(PF_ANSICallbacks::strcpy)>("utils.ansi_strcpy",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, strcpy), first);
+  field<decltype(PF_ANSICallbacks::asin)>("utils.ansi_asin",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, asin), first);
+  field<decltype(PF_ANSICallbacks::acos)>("utils.ansi_acos",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, acos), first);
   field<decltype(PF_UtilCallbacks::colorCB)>("utils.color_callbacks", offsetof(PF_UtilCallbacks, colorCB), first);
   field<decltype(PF_UtilCallbacks::blend)>("utils.blend", offsetof(PF_UtilCallbacks, blend), first);
   field<decltype(PF_UtilCallbacks::convolve)>("utils.convolve", offsetof(PF_UtilCallbacks, convolve), first);
