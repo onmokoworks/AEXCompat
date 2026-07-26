@@ -141,6 +141,7 @@ CALLBACK_TABLES = {
         "utils.iterate",
         "utils.new_world",
         "utils.dispose_world",
+        "utils.transfer_rect",
         "utils.transform_world",
         "utils.ansi_ceil",
         "utils.ansi_fabs",

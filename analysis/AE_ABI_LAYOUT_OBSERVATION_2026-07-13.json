@@ -153,6 +153,7 @@
     "utils.get_callback_addr":{"offset":192,"size":8},
     "utils.new_world":{"offset":112,"size":8},
     "utils.dispose_world":{"offset":120,"size":8},
+    "utils.transfer_rect":{"offset":144,"size":8},
     "utils.transform_world":{"offset":152,"size":8},
     "utils.fill16":{"offset":488,"size":8},
     "utils.premultiply_color16":{"offset":496,"size":8},

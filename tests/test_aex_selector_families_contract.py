@@ -92,4 +92,9 @@ def test_legacy_app_callback_is_wired_at_utils_offset_200():
     # in make_bootstrap_abi_hooks matches one-to-one.
     assert '"utils.app"' in GENERATOR
     assert "UTILS_APP_OFFSET = 200" in CONTRACT
-    assert "std::array<std::size_t, 32> UTILITY_CALLBACK_OFFSETS" in CONTRACT
+    assert "std::array<std::size_t, 33> UTILITY_CALLBACK_OFFSETS" in CONTRACT
+    assert (
+        "reinterpret_cast<void*>(&dispose_world), "
+        "reinterpret_cast<void*>(&transfer_rect),\n"
+        "    reinterpret_cast<void*>(&transform_world)"
+    ) in L2

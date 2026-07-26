@@ -86,6 +86,7 @@ const HOST_GET_CALLBACK_ADDR: u64 = STUB_BASE + 0x803e0;
 const HOST_ZERO_PIXEL: u64 = STUB_BASE + 0x803f0;
 const HOST_SUBPIXEL_SAMPLE8: u64 = STUB_BASE + 0x80400;
 const HOST_AREA_SAMPLE8: u64 = STUB_BASE + 0x80410;
+const HOST_TRANSFER_RECT8: u64 = STUB_BASE + 0x80420;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
 const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
@@ -2640,6 +2641,7 @@ impl GuestEngine<'static> {
             ),
             ("write SubpixelSample8 callback", HOST_SUBPIXEL_SAMPLE8),
             ("write AreaSample8 callback", HOST_AREA_SAMPLE8),
+            ("write TransferRect8 callback", HOST_TRANSFER_RECT8),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -2750,6 +2752,14 @@ impl GuestEngine<'static> {
         uc(
             "install AreaSample8 callback",
             unicorn.add_code_hook(HOST_AREA_SAMPLE8, HOST_AREA_SAMPLE8, emulate_area_sample8),
+        )?;
+        uc(
+            "install TransferRect8 callback",
+            unicorn.add_code_hook(
+                HOST_TRANSFER_RECT8,
+                HOST_TRANSFER_RECT8,
+                emulate_transfer_rect8,
+            ),
         )?;
         uc(
             "install legacy new-world callback",
@@ -3925,6 +3935,10 @@ impl GuestEngine<'static> {
 
     pub fn area_sample8_callback_address(&self) -> u64 {
         HOST_AREA_SAMPLE8
+    }
+
+    pub fn transfer_rect8_callback_address(&self) -> u64 {
+        HOST_TRANSFER_RECT8
     }
 
     pub fn new_world8_callback_address(&self) -> u64 {
@@ -5307,6 +5321,202 @@ fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
         unicorn
             .mem_write(destination, &output)
             .map_err(|error| format!("AreaSample8 destination pixel: {error}"))?;
+        Ok(true)
+    })();
+    finish_legacy_sample(unicorn, result);
+}
+
+fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let effect_ref = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("TransferRect8 effect ref: {error}"))?;
+        let quality = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("TransferRect8 quality: {error}"))?
+            as u32 as i32;
+        let mode_flags = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("TransferRect8 mode flags: {error}"))?
+            as u32;
+        let field = unicorn
+            .reg_read(RegisterX86::R9)
+            .map_err(|error| format!("TransferRect8 field: {error}"))? as u32
+            as i32;
+        let source_rect = aegp_stack_arg(unicorn, 0x28)?;
+        let source_world = aegp_stack_arg(unicorn, 0x30)?;
+        let composite_mode = aegp_stack_arg(unicorn, 0x38)?;
+        let mask_world = aegp_stack_arg(unicorn, 0x40)?;
+        let destination_x = aegp_stack_arg(unicorn, 0x48)? as u32 as i32;
+        let destination_y = aegp_stack_arg(unicorn, 0x50)? as u32 as i32;
+        let destination_world = aegp_stack_arg(unicorn, 0x58)?;
+        if effect_ref == 0
+            || source_world == 0
+            || composite_mode == 0
+            || destination_world == 0
+            || quality < 0
+            || quality > 1
+            || mode_flags > 1
+            || field < 0
+            || field > 2
+            || mask_world != 0
+            || !(-4096..=4096).contains(&destination_x)
+            || !(-4096..=4096).contains(&destination_y)
+        {
+            return Ok(false);
+        }
+        let transfer_mode = read_guest_i32(unicorn, composite_mode, "TransferRect8 transfer mode")?;
+        let mut mode_tail = [0u8; 4];
+        unicorn
+            .mem_read(composite_mode + 8, &mut mode_tail)
+            .map_err(|error| format!("TransferRect8 composite mode: {error}"))?;
+        let opacity = mode_tail[0];
+        let rgb_only = mode_tail[1];
+        let opacity16 = u16::from_le_bytes([mode_tail[2], mode_tail[3]]);
+        if !(0..=2).contains(&transfer_mode) || rgb_only > 1 || opacity16 > 32768 {
+            return Ok(false);
+        }
+        let Some(source) = read_argb8_world(unicorn, source_world, "TransferRect8 source")? else {
+            return Ok(false);
+        };
+        let Some(destination) =
+            read_argb8_world(unicorn, destination_world, "TransferRect8 destination")?
+        else {
+            return Ok(false);
+        };
+        let bounds = if source_rect == 0 {
+            [0, 0, source.width, source.height]
+        } else {
+            [
+                read_guest_i32(unicorn, source_rect, "TransferRect8 source left")?,
+                read_guest_i32(unicorn, source_rect + 4, "TransferRect8 source top")?,
+                read_guest_i32(unicorn, source_rect + 8, "TransferRect8 source right")?,
+                read_guest_i32(unicorn, source_rect + 12, "TransferRect8 source bottom")?,
+            ]
+        };
+        if bounds[0] < 0
+            || bounds[1] < 0
+            || bounds[2] < bounds[0]
+            || bounds[3] < bounds[1]
+            || bounds[2] > source.width
+            || bounds[3] > source.height
+        {
+            return Ok(false);
+        }
+        let clipped_left = bounds[0].max(bounds[0].saturating_sub(destination_x));
+        let clipped_top = bounds[1].max(bounds[1].saturating_sub(destination_y));
+        let clipped_right = bounds[2].min(
+            bounds[0]
+                .saturating_sub(destination_x)
+                .saturating_add(destination.width),
+        );
+        let clipped_bottom = bounds[3].min(
+            bounds[1]
+                .saturating_sub(destination_y)
+                .saturating_add(destination.height),
+        );
+        if clipped_right <= clipped_left || clipped_bottom <= clipped_top {
+            return Ok(true);
+        }
+        let width = usize::try_from(clipped_right - clipped_left)
+            .map_err(|_| "TransferRect8 width conversion failed".to_string())?;
+        let height = usize::try_from(clipped_bottom - clipped_top)
+            .map_err(|_| "TransferRect8 height conversion failed".to_string())?;
+        let pixels = width
+            .checked_mul(height)
+            .filter(|count| *count <= 16_777_216)
+            .ok_or_else(|| "TransferRect8 snapshot exceeds pixel bound".to_string())?;
+        let mut snapshot = vec![0u8; pixels * abi::PF_PIXEL_SIZE];
+        for row in 0..height {
+            let address = source
+                .data
+                .checked_add((clipped_top as u64 + row as u64) * source.rowbytes)
+                .and_then(|address| {
+                    address.checked_add(clipped_left as u64 * abi::PF_PIXEL_SIZE as u64)
+                })
+                .ok_or_else(|| "TransferRect8 source row address overflow".to_string())?;
+            let row_start = row * width * abi::PF_PIXEL_SIZE;
+            let bytes = &mut snapshot[row_start..row_start + width * abi::PF_PIXEL_SIZE];
+            unicorn
+                .mem_read(address, bytes)
+                .map_err(|error| format!("TransferRect8 source row: {error}"))?;
+        }
+        let opacity = f64::from(opacity) / 255.0;
+        for row in 0..height {
+            let source_y = clipped_top + row as i32;
+            let output_y = destination_y + source_y - bounds[1];
+            if (field == 1 && output_y & 1 != 0) || (field == 2 && output_y & 1 == 0) {
+                continue;
+            }
+            for column in 0..width {
+                let source_x = clipped_left + column as i32;
+                let output_x = destination_x + source_x - bounds[0];
+                let address = destination
+                    .data
+                    .checked_add(output_y as u64 * destination.rowbytes)
+                    .and_then(|address| {
+                        address.checked_add(output_x as u64 * abi::PF_PIXEL_SIZE as u64)
+                    })
+                    .ok_or_else(|| {
+                        "TransferRect8 destination pixel address overflow".to_string()
+                    })?;
+                let input_start = (row * width + column) * abi::PF_PIXEL_SIZE;
+                let input = &snapshot[input_start..input_start + abi::PF_PIXEL_SIZE];
+                let mut output = [0u8; 4];
+                unicorn
+                    .mem_read(address, &mut output)
+                    .map_err(|error| format!("TransferRect8 destination pixel read: {error}"))?;
+                if transfer_mode == 0 {
+                    for channel in if rgb_only == 0 { 0 } else { 1 }..4 {
+                        output[channel] = (f64::from(input[channel]) * opacity
+                            + f64::from(output[channel]) * (1.0 - opacity))
+                            .round()
+                            .clamp(0.0, 255.0) as u8;
+                    }
+                } else {
+                    let source_alpha = f64::from(input[0]) / 255.0 * opacity;
+                    let destination_alpha = f64::from(output[0]) / 255.0;
+                    let behind = transfer_mode == 1;
+                    let output_alpha = if behind {
+                        destination_alpha + source_alpha * (1.0 - destination_alpha)
+                    } else {
+                        source_alpha + destination_alpha * (1.0 - source_alpha)
+                    };
+                    for channel in 1..4 {
+                        let value = if mode_flags == 1 {
+                            if output_alpha == 0.0 {
+                                0.0
+                            } else if behind {
+                                (f64::from(output[channel]) * destination_alpha
+                                    + f64::from(input[channel])
+                                        * source_alpha
+                                        * (1.0 - destination_alpha))
+                                    / output_alpha
+                            } else {
+                                (f64::from(input[channel]) * source_alpha
+                                    + f64::from(output[channel])
+                                        * destination_alpha
+                                        * (1.0 - source_alpha))
+                                    / output_alpha
+                            }
+                        } else if behind {
+                            f64::from(output[channel])
+                                + f64::from(input[channel]) * opacity * (1.0 - destination_alpha)
+                        } else {
+                            f64::from(input[channel]) * opacity
+                                + f64::from(output[channel]) * (1.0 - source_alpha)
+                        };
+                        output[channel] = value.round().clamp(0.0, 255.0) as u8;
+                    }
+                    if rgb_only == 0 {
+                        output[0] = (output_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+                unicorn
+                    .mem_write(address, &output)
+                    .map_err(|error| format!("TransferRect8 destination pixel write: {error}"))?;
+            }
+        }
         Ok(true)
     })();
     finish_legacy_sample(unicorn, result);
@@ -7446,6 +7656,7 @@ mod tests {
             HOST_NEW_WORLD8,
             HOST_GET_CALLBACK_ADDR,
             HOST_CHECKOUT_PARAM,
+            HOST_TRANSFER_RECT8,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -7566,6 +7777,13 @@ mod tests {
                 HOST_CHECKOUT_PARAM,
                 HOST_CHECKOUT_PARAM,
                 emulate_checkout_param,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_TRANSFER_RECT8,
+                HOST_TRANSFER_RECT8,
+                emulate_transfer_rect8,
             )
             .unwrap();
         unicorn
@@ -7815,6 +8033,30 @@ mod tests {
         (params, destination, world)
     }
 
+    fn argb8_world_fixture(
+        engine: &mut GuestEngine<'static>,
+        width: i32,
+        height: i32,
+        pixels: &[u8],
+    ) -> (u64, u64) {
+        let rowbytes = width * abi::PF_PIXEL_SIZE as i32;
+        assert_eq!(pixels.len(), (rowbytes * height) as usize);
+        let pixel_data = engine.allocate(pixels.len(), 8).unwrap();
+        engine.write(pixel_data, pixels).unwrap();
+        let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&pixel_data.to_le_bytes());
+        definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&rowbytes.to_le_bytes());
+        definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&width.to_le_bytes());
+        definition[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&height.to_le_bytes());
+        engine.write(world, &definition).unwrap();
+        (world, pixel_data)
+    }
+
     #[test]
     fn legacy_subpixel_sample8_bilinearly_samples_argb8_and_transparent_edges() {
         let mut engine = test_engine(&[0xc3]);
@@ -7885,6 +8127,67 @@ mod tests {
         assert_eq!(
             engine.unicorn.mem_read_as_vec(destination, 4).unwrap(),
             [7, 7, 7, 7]
+        );
+    }
+
+    #[test]
+    fn legacy_transfer_rect8_copies_clipped_argb8_with_opacity_and_rejects_other_modes() {
+        let mut engine = test_engine(&[0xc3]);
+        let (source, _) = argb8_world_fixture(
+            &mut engine,
+            2,
+            2,
+            &[
+                255, 100, 0, 0, 255, 200, 0, 0, 255, 0, 100, 0, 255, 0, 200, 0,
+            ],
+        );
+        let (destination, destination_pixels) = argb8_world_fixture(&mut engine, 3, 2, &[0; 24]);
+        let rect = engine.allocate(16, 4).unwrap();
+        engine
+            .write(
+                rect,
+                &[0i32, 0, 2, 2]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let composite = engine.allocate(12, 4).unwrap();
+        let mut mode = [0u8; 12];
+        mode[8] = 128;
+        mode[10..12].copy_from_slice(&32768u16.to_le_bytes());
+        engine.write(composite, &mode).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_TRANSFER_RECT8,
+                    &[1, 1, 0, 0, rect, source, composite, 0, 1, 0, destination],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(destination_pixels, 24)
+                .unwrap(),
+            [
+                0, 0, 0, 0, 128, 50, 0, 0, 128, 100, 0, 0, 0, 0, 0, 0, 128, 0, 50, 0, 128, 0, 100,
+                0,
+            ]
+        );
+
+        engine.write(composite, &3i32.to_le_bytes()).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_TRANSFER_RECT8,
+                    &[1, 1, 0, 0, rect, source, composite, 0, 1, 0, destination],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            4
         );
     }
 

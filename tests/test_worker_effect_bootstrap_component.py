@@ -28,8 +28,8 @@ def test_utility_table_wires_handle_callbacks_at_sdk_offsets():
     # effects (issue #362 selector families); like every other offset it is
     # generated into UTILITY_CALLBACK_OFFSETS from the ABI observation.
     assert "contract::UTILITY_CALLBACK_OFFSETS" in SOURCE
-    assert "std::array<void*, 32> utility_callbacks" in HEADER
-    assert "std::array<std::size_t, 32> UTILITY_CALLBACK_OFFSETS" in CONTRACT
+    assert "UTILITY_CALLBACK_OFFSETS.size()>" in HEADER
+    assert "std::array<std::size_t, 33> UTILITY_CALLBACK_OFFSETS" in CONTRACT
     for offset in ("160", "168", "176", "184", "440", "464", "200"):
         assert offset in CONTRACT
     assert "UTILS_APP_OFFSET = 200" in CONTRACT
