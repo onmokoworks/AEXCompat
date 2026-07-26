@@ -17,6 +17,12 @@ inline constexpr std::size_t kAegpLegacyEffectStreamCapacity = 16;
 inline constexpr int32_t kAegpInstalledEffectKeyNone = 0;
 inline constexpr std::size_t kAegpMaxEffectCategoryNameSize = 128;
 
+enum class AegpItemSamplingPolicy : uint8_t {
+  exact,
+  hold,
+  nearest,
+};
+
 struct AegpEffectInstance {
   void* layer{};
   int32_t installed_key{};
@@ -114,12 +120,18 @@ struct AegpCameraZoomKeyframe {
 // ever reconstituted from a second scene copy.
 struct SceneRuntimeState {
   AegpSceneObject composition_item{0x4954454d};
+  uint64_t composition_item_identity{1001};
+  AegpItemSamplingPolicy composition_item_sampling_policy{
+      AegpItemSamplingPolicy::exact};
+  std::array<void*, 3> composition_item_dependencies{};
+  std::size_t composition_item_dependency_count{};
   AegpSceneObject composition{0x434f4d50};
   std::array<AegpSceneObject, 3> layers{{
       {0x4c415930}, {0x4c415931}, {0x4c415932}}};
   AegpSceneObject effect{0x45464643};
   int32_t scene_frame{1};
   bool effect_live{};
+  std::size_t active_render_effect_index{};
   std::array<AegpEffectInstance, kAegpEffectInstanceCapacity> effect_instances{};
   std::array<AegpEffectLease, kAegpEffectLeaseCapacity> effect_leases{};
   uint32_t effect_lease_generation{};

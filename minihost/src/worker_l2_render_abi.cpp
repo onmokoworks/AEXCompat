@@ -69,24 +69,45 @@ const bool g_external_render_runtime_configured = [] {
       +[](void* item) { return item == aegp_comp_item_handle(); }});
   return true;
 }();
+bool prepare_scene_staged_item(void* item) {
+  AegpStagedItemMetadata metadata{};
+  if (!snapshot_staged_item_metadata(item, metadata)) return false;
+  using SamplingPolicy =
+      aexcompat::aegp_staged_item_runtime::SamplingPolicy;
+  SamplingPolicy policy = SamplingPolicy::exact;
+  switch (metadata.sampling_policy) {
+    case AegpItemSamplingPolicy::exact:
+      policy = SamplingPolicy::exact;
+      break;
+    case AegpItemSamplingPolicy::hold:
+      policy = SamplingPolicy::hold;
+      break;
+    case AegpItemSamplingPolicy::nearest:
+      policy = SamplingPolicy::nearest;
+      break;
+  }
+  return aexcompat::aegp_staged_item_runtime::register_item(
+      item, metadata.stable_identity, policy,
+      metadata.direct_dependencies.data(), metadata.direct_dependency_count,
+      metadata.effect_instances.data(), metadata.effect_instance_count);
+}
+uint64_t current_scene_effect_instance(
+    const AegpLayerRenderOptionsValue& options) {
+  return staged_effect_instance_identity(options);
+}
 const bool g_item_render_runtime_configured = [] {
-  // The bounded worker has no durable scene metadata provider for staged
-  // item identity/dependencies/sampling. Checkout therefore fails closed
-  // until a production host installs the explicit registration contract.
   aexcompat::aegp_item_render_runtime::configure({
       &snapshot_render_options,
-      nullptr,
+      &prepare_scene_staged_item,
       &aexcompat::aegp_external_render_runtime::publish_cached_receipt,
       &aexcompat::aegp_staged_item_runtime::publish_receipt});
   return true;
 }();
 const bool g_layer_render_runtime_configured = [] {
-  // Likewise, layer publication requires a host-provided item registration
-  // and durable active-effect identity; neither is inferred from a pointer.
   aexcompat::aegp_layer_render_runtime::configure({
       &is_render_worker, &layer_effect_boundary_is_live,
       &aegp_comp_item_handle,
-      nullptr, nullptr,
+      &prepare_scene_staged_item, &current_scene_effect_instance,
       &aexcompat::aegp_staged_item_runtime::publish_stage_world});
   return true;
 }();

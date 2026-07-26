@@ -58,6 +58,7 @@ using AegpRenderCancelV1 = int32_t(__cdecl*)(void*, uint8_t*);
 int32_t __cdecl render_checkout_frame_reject(void*, AegpRenderCancelV1, void*, void**);
 void clear_staged_item_worlds_for_test();
 bool verify_item_render_cycle_contract(void*);
+bool prepare_scene_staged_item(void*);
 
 void write_staged_test_channel(std::byte* pixel, int32_t pixel_bytes,
                                int channel, float value) {
@@ -297,14 +298,23 @@ bool verify_aegp_item_staged_worlds() {
   };
   const std::array<int32_t, 3> formats{{
       kPixelFormatArgb32, kPixelFormatArgb64, kPixelFormatArgb128}};
-  if (!aexcompat::aegp_staged_item_runtime::register_item(
-          aegp_comp_item_handle(), 4001,
-          aexcompat::aegp_staged_item_runtime::SamplingPolicy::exact,
-          nullptr, 0, nullptr, 0))
+  if (!prepare_scene_staged_item(aegp_comp_item_handle()))
     return false;
+  const uint64_t production_effect_identity =
+      (static_cast<uint64_t>(g_aegp_effect_instances[0].generation) << 32) | 1;
   for (int32_t depth = 0; depth < 3; ++depth) {
     const int32_t pixel_bytes = 4 << depth;
     const auto pixels = fixture(pixel_bytes);
+    for (const auto kind : {
+             aexcompat::aegp_staged_item_runtime::StageKind::upstream,
+             aexcompat::aegp_staged_item_runtime::StageKind::all_effects,
+             aexcompat::aegp_staged_item_runtime::StageKind::downstream}) {
+      if (!aexcompat::aegp_staged_item_runtime::publish_stage_world(
+              aegp_comp_item_handle(), kind, production_effect_identity,
+              time, step, 1, 0, formats[depth], width, height,
+              width * pixel_bytes, pixels.data()))
+        return false;
+    }
     if (!aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(), time, step, 1, 0,
             formats[depth], width, height, width * pixel_bytes, pixels.data())) return false;
   }
@@ -996,10 +1006,13 @@ int32_t __cdecl layer_suite2_async_test_callback(
 
 bool verify_aegp_layer_render_options_suite2() {
   const bool saved_effect_live = g_aegp_effect_live;
+  const auto saved_effect_instances = g_aegp_effect_instances;
   const auto saved_context = aexcompat::aegp_layer_render_runtime::context();
   const uint32_t created_before = layer_created_count();
   const uint32_t disposed_before = layer_disposed_count();
   g_aegp_effect_live = true;
+  g_aegp_effect_instances[0] = {
+      &g_aegp_layers[0], kAegpInstalledEffects[0].key, 0, 1, 1, true};
   const auto make_world = [](uint8_t red, uint8_t green, uint8_t blue) {
     std::vector<unsigned char> pixels(4 * 2 * 4);
     for (std::size_t pixel = 0; pixel < pixels.size() / 4; ++pixel) {
@@ -1013,25 +1026,7 @@ bool verify_aegp_layer_render_options_suite2() {
   auto source = make_world(100, 50, 25);
   auto all_effects = make_world(40, 120, 30);
   auto downstream_pixels = make_world(20, 60, 140);
-  // The production runtime deliberately has no fabricated metadata defaults.
-  // Install a complete test-only provider so this suite exercises successful
-  // layer publication through the same explicit contract.
-  const auto prepare_staged_item = +[](void* item) {
-    static constexpr uint64_t kItemIdentity = 9101;
-    static constexpr uint64_t kEffectIdentity = 0x91010001ULL;
-    return aexcompat::aegp_staged_item_runtime::register_item(
-        item, kItemIdentity,
-        aexcompat::aegp_staged_item_runtime::SamplingPolicy::exact,
-        nullptr, 0, &kEffectIdentity, 1);
-  };
-  const auto current_effect_instance = +[](const LayerValue&) {
-    return 0x91010001ULL;
-  };
   clear_staged_item_worlds_for_test();
-  aexcompat::aegp_layer_render_runtime::configure({
-      &is_render_worker, &layer_effect_boundary_is_live,
-      &aegp_comp_item_handle, prepare_staged_item, current_effect_instance,
-      &aexcompat::aegp_staged_item_runtime::publish_stage_world});
   LayerRenderContext context{};
   context.entry = reinterpret_cast<EffectEntry>(&verify_aegp_layer_render_options_suite2);
   context.current_time = 0;
@@ -1123,12 +1118,9 @@ bool verify_aegp_layer_render_options_suite2() {
       dispose_layer_render_options(all) == 0 &&
       dispose_layer_render_options(downstream) == 0;
   aexcompat::aegp_layer_render_runtime::context() = saved_context;
-  aexcompat::aegp_layer_render_runtime::configure({
-      &is_render_worker, &layer_effect_boundary_is_live,
-      &aegp_comp_item_handle, nullptr, nullptr,
-      &aexcompat::aegp_staged_item_runtime::publish_stage_world});
   clear_staged_item_worlds_for_test();
   g_aegp_effect_live = saved_effect_live;
+  g_aegp_effect_instances = saved_effect_instances;
   return ok && async_receipt_lifetimes_balanced() &&
       layer_created_count() == created_before + 3 &&
       layer_disposed_count() == disposed_before + 3;

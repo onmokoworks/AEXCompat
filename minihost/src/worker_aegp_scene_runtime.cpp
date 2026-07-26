@@ -7,6 +7,11 @@ bool g_configured{};
 }
 
 SceneRuntimeState::SceneRuntimeState() noexcept {
+  composition_item_identity = 1001;
+  composition_item_sampling_policy = AegpItemSamplingPolicy::exact;
+  composition_item_dependencies = {};
+  composition_item_dependency_count = 0;
+  active_render_effect_index = 0;
   for (auto& transform : layer_transforms)
     transform.scale = {{100.0, 100.0, 100.0}};
   layer_parent_indices = {{-1, -1, -1}};

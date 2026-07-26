@@ -156,6 +156,31 @@ def test_effect_boundaries_publish_into_scheduler_and_receipts_keep_evidence():
     assert "output.trace_hash = receipt.draft->trace_hash" in receipts
 
 
+def test_shipped_worker_wires_scene_metadata_providers():
+    wiring = (ROOT / "minihost/src/worker_l2_render_abi.cpp").read_text(
+        encoding="utf-8"
+    )
+    scene = (ROOT / "minihost/src/worker_aegp_scene.cpp").read_text(
+        encoding="utf-8"
+    )
+    selftests = (ROOT / "minihost/src/worker_aegp_render_selftests.cpp").read_text(
+        encoding="utf-8"
+    )
+    for marker in (
+        "&prepare_scene_staged_item",
+        "&current_scene_effect_instance",
+        "snapshot_staged_item_metadata(item, metadata)",
+        "staged_effect_instance_identity(options)",
+    ):
+        assert marker in wiring
+    assert "nullptr, nullptr" not in wiring
+    assert "effect_instance_identity(index, runtime.effect_instances[index])" in scene
+    assert "composition_item_identity" in scene
+    assert "composition_item_dependency_count" in scene
+    assert "composition_item_sampling_policy" in scene
+    assert "aegp_layer_render_runtime::configure({" not in selftests
+
+
 def test_native_item_stage_pixel_oracle():
     worker = _worker()
     assert worker is not None, "build the production render worker first"
