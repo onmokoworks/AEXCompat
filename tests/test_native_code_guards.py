@@ -13,8 +13,8 @@ RUST_STRING_LITERAL = re.compile(
     r'(?:b?r(?P<hash>#{0,16})"(?P<raw>.*?)"(?P=hash)|b?"(?:\\.|[^"\\])*")',
     re.DOTALL,
 )
-RUST_STRINGIFY_AEX = re.compile(
-    r"\bstringify!\s*\([^)]*\." + "aex" + r"\b[^)]*\)",
+RUST_MACRO_AEX = re.compile(
+    r"\b[A-Za-z_]\w*!\s*\([^)]*\." + "aex" + r"\b[^)]*\)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -27,7 +27,7 @@ def production_aex_strings(source: str):
     for literal in rust_string_literals(source):
         if "." + "aex" in literal.lower():
             yield literal
-    yield from (match.group(0) for match in RUST_STRINGIFY_AEX.finditer(source))
+    yield from (match.group(0) for match in RUST_MACRO_AEX.finditer(source))
 
 
 class NativeCodeGuardTests(unittest.TestCase):
@@ -49,6 +49,7 @@ class NativeCodeGuardTests(unittest.TestCase):
             '"effect.aex"',
             'r#"C:\\plugins\\effect.aex"#',
             "stringify!(effect.aex)",
+            "aex_path!(effect.aex)",
         ):
             self.assertEqual(len(list(production_aex_strings(source))), 1)
 
