@@ -79,6 +79,11 @@ const HOST_PF_ANSI_STRCPY_BOUNDED: u64 = STUB_BASE + 0x80370;
 const HOST_EXTENDED_ALLOC: u64 = STUB_BASE + 0x80380;
 const HOST_EXTENDED_FREE: u64 = STUB_BASE + 0x80390;
 const HOST_EXTENDED_LOOKUP: u64 = STUB_BASE + 0x803a0;
+const HOST_ITERATE8_ORIGIN: u64 = STUB_BASE + 0x803b0;
+const HOST_FILL8: u64 = STUB_BASE + 0x803c0;
+const HOST_NEW_WORLD8: u64 = STUB_BASE + 0x803d0;
+const HOST_GET_CALLBACK_ADDR: u64 = STUB_BASE + 0x803e0;
+const HOST_ZERO_PIXEL: u64 = STUB_BASE + 0x803f0;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
 const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
@@ -1274,6 +1279,28 @@ fn iced_ymm_register(register: Register) -> Option<RegisterX86> {
     })
 }
 
+fn iced_xmm_register(register: Register) -> Option<RegisterX86> {
+    Some(match register {
+        Register::XMM0 => RegisterX86::XMM0,
+        Register::XMM1 => RegisterX86::XMM1,
+        Register::XMM2 => RegisterX86::XMM2,
+        Register::XMM3 => RegisterX86::XMM3,
+        Register::XMM4 => RegisterX86::XMM4,
+        Register::XMM5 => RegisterX86::XMM5,
+        Register::XMM6 => RegisterX86::XMM6,
+        Register::XMM7 => RegisterX86::XMM7,
+        Register::XMM8 => RegisterX86::XMM8,
+        Register::XMM9 => RegisterX86::XMM9,
+        Register::XMM10 => RegisterX86::XMM10,
+        Register::XMM11 => RegisterX86::XMM11,
+        Register::XMM12 => RegisterX86::XMM12,
+        Register::XMM13 => RegisterX86::XMM13,
+        Register::XMM14 => RegisterX86::XMM14,
+        Register::XMM15 => RegisterX86::XMM15,
+        _ => return None,
+    })
+}
+
 fn iced_ymm_index(register: Register) -> Option<usize> {
     match register {
         Register::YMM0 => Some(0),
@@ -1360,6 +1387,96 @@ fn write_avx256_operand(
     }
 }
 
+fn read_avx128_operand(
+    unicorn: &Unicorn<'_, GuestState>,
+    instruction: &iced_x86::Instruction,
+    kind: OpKind,
+    register: Register,
+) -> Option<[u8; 16]> {
+    let mut value = [0u8; 16];
+    match kind {
+        OpKind::Register => {
+            let bytes = unicorn.reg_read_long(iced_xmm_register(register)?).ok()?;
+            value.copy_from_slice(bytes.get(..16)?);
+        }
+        OpKind::Memory => {
+            unicorn
+                .mem_read(iced_memory_address(unicorn, instruction)?, &mut value)
+                .ok()?;
+        }
+        _ => return None,
+    }
+    Some(value)
+}
+
+fn emulate_vblendvps(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    instruction: &iced_x86::Instruction,
+    rip: u64,
+) -> bool {
+    if instruction.op_count() != 4
+        || instruction.op0_kind() != OpKind::Register
+        || instruction.op1_kind() != OpKind::Register
+        || instruction.op3_kind() != OpKind::Register
+    {
+        return false;
+    }
+    let Some(left) = read_avx128_operand(
+        unicorn,
+        instruction,
+        instruction.op1_kind(),
+        instruction.op1_register(),
+    ) else {
+        return false;
+    };
+    let Some(right) = read_avx128_operand(
+        unicorn,
+        instruction,
+        instruction.op2_kind(),
+        instruction.op2_register(),
+    ) else {
+        return false;
+    };
+    let Some(mask) = read_avx128_operand(
+        unicorn,
+        instruction,
+        instruction.op3_kind(),
+        instruction.op3_register(),
+    ) else {
+        return false;
+    };
+    if unicorn.get_data().avx_fallback_instructions >= MAX_AVX_FALLBACK_INSTRUCTIONS {
+        unicorn.get_data_mut().callback_error = Some(format!(
+            "AVX fallback instruction limit exceeded ({MAX_AVX_FALLBACK_INSTRUCTIONS})"
+        ));
+        let _ = unicorn.emu_stop();
+        return true;
+    }
+    let mut output = [0u8; 16];
+    for lane in 0..4 {
+        let start = lane * 4;
+        let source = if mask[start + 3] & 0x80 != 0 {
+            &right
+        } else {
+            &left
+        };
+        output[start..start + 4].copy_from_slice(&source[start..start + 4]);
+    }
+    let Some(destination) = iced_xmm_register(instruction.op0_register()) else {
+        return false;
+    };
+    if unicorn.reg_write_long(destination, &output).is_err() {
+        return false;
+    }
+    let Some(next_rip) = rip.checked_add(instruction.len() as u64) else {
+        return false;
+    };
+    let state = unicorn.get_data_mut();
+    state.avx_fallback_instructions += 1;
+    state.avx_chain_next_rip = None;
+    unicorn.reg_write(RegisterX86::RIP, next_rip).is_ok()
+}
+
 fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
     let Ok(rip) = unicorn.reg_read(RegisterX86::RIP) else {
         return false;
@@ -1371,10 +1488,14 @@ fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> boo
     let instruction = Decoder::with_ip(64, &bytes, rip, DecoderOptions::NONE).decode();
     if instruction.is_invalid()
         || !matches!(bytes[0], 0xc4 | 0xc5)
-        || instruction.mnemonic() != Mnemonic::Vmovups
-        || instruction.op_count() != 2
         || instruction.segment_prefix() != Register::None
     {
+        return false;
+    }
+    if instruction.mnemonic() == Mnemonic::Vblendvps {
+        return emulate_vblendvps(unicorn, &instruction, rip);
+    }
+    if instruction.mnemonic() != Mnemonic::Vmovups || instruction.op_count() != 2 {
         return false;
     }
     if instruction.op1_kind() == OpKind::Register {
@@ -1704,6 +1825,9 @@ struct PendingIterate8 {
     pixel_function: u64,
     source_data: u64,
     source_rowbytes: u64,
+    source_width: i32,
+    source_height: i32,
+    zero_outside_source: bool,
     destination_data: u64,
     destination_rowbytes: u64,
     left: i32,
@@ -1711,6 +1835,8 @@ struct PendingIterate8 {
     bottom: i32,
     x: i32,
     y: i32,
+    origin_x: i32,
+    origin_y: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -2501,9 +2627,20 @@ impl GuestEngine<'static> {
             ("write extended allocation callback", HOST_EXTENDED_ALLOC),
             ("write extended free callback", HOST_EXTENDED_FREE),
             ("write extended lookup callback", HOST_EXTENDED_LOOKUP),
+            ("write Iterate8 origin callback", HOST_ITERATE8_ORIGIN),
+            ("write Fill8 callback", HOST_FILL8),
+            ("write legacy new-world callback", HOST_NEW_WORLD8),
+            (
+                "write get-callback-address callback",
+                HOST_GET_CALLBACK_ADDR,
+            ),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
+        uc(
+            "write Iterate8 zero source pixel",
+            unicorn.mem_write(HOST_ZERO_PIXEL, &[0; 16]),
+        )?;
         uc(
             "install add_param callback",
             unicorn.add_code_hook(HOST_ADD_PARAM, HOST_ADD_PARAM, |unicorn, _, _| {
@@ -2583,6 +2720,30 @@ impl GuestEngine<'static> {
         uc(
             "install Iterate8 callback",
             unicorn.add_code_hook(HOST_ITERATE8, HOST_ITERATE8, emulate_iterate8),
+        )?;
+        uc(
+            "install Iterate8 origin callback",
+            unicorn.add_code_hook(
+                HOST_ITERATE8_ORIGIN,
+                HOST_ITERATE8_ORIGIN,
+                emulate_iterate8_origin,
+            ),
+        )?;
+        uc(
+            "install Fill8 callback",
+            unicorn.add_code_hook(HOST_FILL8, HOST_FILL8, emulate_fill8),
+        )?;
+        uc(
+            "install legacy new-world callback",
+            unicorn.add_code_hook(HOST_NEW_WORLD8, HOST_NEW_WORLD8, emulate_new_world8),
+        )?;
+        uc(
+            "install get-callback-address callback",
+            unicorn.add_code_hook(
+                HOST_GET_CALLBACK_ADDR,
+                HOST_GET_CALLBACK_ADDR,
+                emulate_get_callback_addr,
+            ),
         )?;
         uc(
             "install Iterate8 continuation",
@@ -2866,6 +3027,10 @@ impl GuestEngine<'static> {
             (HOST_EXTENDED_ALLOC, "extended_alloc"),
             (HOST_EXTENDED_FREE, "extended_free"),
             (HOST_EXTENDED_LOOKUP, "extended_lookup"),
+            (HOST_ITERATE8_ORIGIN, "iterate8_origin"),
+            (HOST_FILL8, "fill8"),
+            (HOST_NEW_WORLD8, "new_world8"),
+            (HOST_GET_CALLBACK_ADDR, "get_callback_addr"),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -3722,6 +3887,50 @@ impl GuestEngine<'static> {
 
     pub fn extended_lookup_callback_address(&self) -> u64 {
         HOST_EXTENDED_LOOKUP
+    }
+
+    pub fn iterate8_callback_address(&self) -> u64 {
+        HOST_ITERATE8
+    }
+
+    pub fn iterate8_origin_callback_address(&self) -> u64 {
+        HOST_ITERATE8_ORIGIN
+    }
+
+    pub fn fill8_callback_address(&self) -> u64 {
+        HOST_FILL8
+    }
+
+    pub fn new_world8_callback_address(&self) -> u64 {
+        HOST_NEW_WORLD8
+    }
+
+    pub fn dispose_world_callback_address(&self) -> u64 {
+        HOST_DISPOSE_WORLD
+    }
+
+    pub fn get_callback_addr_callback_address(&self) -> u64 {
+        HOST_GET_CALLBACK_ADDR
+    }
+
+    pub fn ansi_ceil_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_CEIL
+    }
+
+    pub fn ansi_cos_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_COS
+    }
+
+    pub fn ansi_fabs_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_FABS
+    }
+
+    pub fn ansi_pow_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_POW
+    }
+
+    pub fn ansi_sin_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_SIN
     }
 
     pub fn configure_parameter_definitions(
@@ -4712,6 +4921,133 @@ fn emulate_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn emulate_fill8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let color = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("Fill8 color: {error}"))?;
+        let area = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("Fill8 area: {error}"))?;
+        let world = unicorn
+            .reg_read(RegisterX86::R9)
+            .map_err(|error| format!("Fill8 world: {error}"))?;
+        if world == 0 {
+            return Ok(4);
+        }
+        let data = read_guest_u64(
+            unicorn,
+            world + abi::LAYER_DATA_OFFSET as u64,
+            "Fill8 world data",
+        )?;
+        let rowbytes = read_guest_i32(
+            unicorn,
+            world + abi::LAYER_ROWBYTES_OFFSET as u64,
+            "Fill8 world rowbytes",
+        )?;
+        let width = read_guest_i32(
+            unicorn,
+            world + abi::LAYER_WIDTH_OFFSET as u64,
+            "Fill8 world width",
+        )?;
+        let height = read_guest_i32(
+            unicorn,
+            world + abi::LAYER_HEIGHT_OFFSET as u64,
+            "Fill8 world height",
+        )?;
+        if data == 0
+            || width <= 0
+            || height <= 0
+            || rowbytes < width.saturating_mul(abi::PF_PIXEL_SIZE as i32)
+        {
+            return Ok(4);
+        }
+        let mut bounds = [0, 0, width, height];
+        if area != 0 {
+            for (index, value) in bounds.iter_mut().enumerate() {
+                *value = read_guest_i32(unicorn, area + (index * 4) as u64, "Fill8 area field")?;
+            }
+            if bounds[0] < 0
+                || bounds[1] < 0
+                || bounds[2] < bounds[0]
+                || bounds[3] < bounds[1]
+                || bounds[2] > width
+                || bounds[3] > height
+            {
+                return Ok(4);
+            }
+        }
+        let mut pixel = [0u8; abi::PF_PIXEL_SIZE];
+        if color != 0 {
+            unicorn
+                .mem_read(color, &mut pixel)
+                .map_err(|error| format!("Fill8 color read: {error}"))?;
+        }
+        for y in bounds[1]..bounds[3] {
+            for x in bounds[0]..bounds[2] {
+                let offset = (y as u64)
+                    .checked_mul(rowbytes as u64)
+                    .and_then(|offset| offset.checked_add((x as u64) * abi::PF_PIXEL_SIZE as u64))
+                    .ok_or_else(|| "Fill8 pixel offset overflow".to_string())?;
+                unicorn
+                    .mem_write(data + offset, &pixel)
+                    .map_err(|error| format!("Fill8 pixel write: {error}"))?;
+            }
+        }
+        Ok(0)
+    })();
+    match result {
+        Ok(error) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, error);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_get_callback_addr(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let callback_id = unicorn
+            .reg_read(RegisterX86::R9)
+            .map_err(|error| format!("get-callback-address id: {error}"))?
+            as u32;
+        let output = aegp_stack_arg(unicorn, 0x28)?;
+        if output == 0 {
+            return Err("get-callback-address output is null".to_string());
+        }
+        let callback = match callback_id {
+            9 => HOST_COPY,
+            _ => {
+                unicorn
+                    .mem_write(output, &0u64.to_le_bytes())
+                    .map_err(|error| format!("get-callback-address clear output: {error}"))?;
+                return Ok(4);
+            }
+        };
+        unicorn
+            .mem_write(output, &callback.to_le_bytes())
+            .map_err(|error| format!("get-callback-address output: {error}"))?;
+        Ok(0)
+    })();
+    match result {
+        Ok(error) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, error);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     unicorn.get_data_mut().pre_checkout_calls += 1;
     let result = (|| {
@@ -4861,7 +5197,15 @@ fn schedule_iterate8_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), 
         .as_ref()
         .cloned()
         .ok_or_else(|| "Iterate8 continuation has no pending call".to_string())?;
-    let input = if pending.source_data == 0 {
+    let input = if pending.zero_outside_source
+        && (pending.source_data == 0
+            || pending.x < 0
+            || pending.y < 0
+            || pending.x >= pending.source_width
+            || pending.y >= pending.source_height)
+    {
+        HOST_ZERO_PIXEL
+    } else if pending.source_data == 0 {
         0
     } else {
         pending.source_data + pending.y as u64 * pending.source_rowbytes + pending.x as u64 * 4
@@ -4882,8 +5226,14 @@ fn schedule_iterate8_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), 
     for (register, value) in [
         (RegisterX86::RSP, callback_rsp),
         (RegisterX86::RCX, pending.refcon),
-        (RegisterX86::RDX, pending.x as u32 as u64),
-        (RegisterX86::R8, pending.y as u32 as u64),
+        (
+            RegisterX86::RDX,
+            pending.x.wrapping_add(pending.origin_x) as u32 as u64,
+        ),
+        (
+            RegisterX86::R8,
+            pending.y.wrapping_add(pending.origin_y) as u32 as u64,
+        ),
         (RegisterX86::R9, input),
         (RegisterX86::RIP, pending.pixel_function),
     ] {
@@ -4913,6 +5263,14 @@ fn finish_iterate8(unicorn: &mut Unicorn<'_, GuestState>, result: u64) -> Result
 }
 
 fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    emulate_iterate8_common(unicorn, false);
+}
+
+fn emulate_iterate8_origin(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    emulate_iterate8_common(unicorn, true);
+}
+
+fn emulate_iterate8_common(unicorn: &mut Unicorn<'_, GuestState>, has_origin: bool) {
     let result = (|| {
         if unicorn.get_data().pending_iterate8.is_some() {
             return Err("nested PF Iterate8 calls are unsupported".to_string());
@@ -4925,10 +5283,33 @@ fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
             .reg_read(RegisterX86::R9)
             .map_err(|error| format!("Iterate8 source world: {error}"))?;
         let area = read_guest_u64(unicorn, caller_rsp + 0x28, "Iterate8 area")?;
-        let refcon = read_guest_u64(unicorn, caller_rsp + 0x30, "Iterate8 refcon")?;
-        let pixel_function = read_guest_u64(unicorn, caller_rsp + 0x38, "Iterate8 pixel callback")?;
-        let destination_world =
-            read_guest_u64(unicorn, caller_rsp + 0x40, "Iterate8 destination world")?;
+        let (origin_x, origin_y, stack_shift) = if has_origin {
+            let origin = read_guest_u64(unicorn, caller_rsp + 0x30, "Iterate8 origin")?;
+            if origin == 0 {
+                unicorn
+                    .reg_write(RegisterX86::RAX, 4)
+                    .map_err(|error| format!("Iterate8 invalid-origin return: {error}"))?;
+                return Ok(());
+            }
+            (
+                read_guest_i32(unicorn, origin, "Iterate8 origin x")?,
+                read_guest_i32(unicorn, origin + 4, "Iterate8 origin y")?,
+                8,
+            )
+        } else {
+            (0, 0, 0)
+        };
+        let refcon = read_guest_u64(unicorn, caller_rsp + 0x30 + stack_shift, "Iterate8 refcon")?;
+        let pixel_function = read_guest_u64(
+            unicorn,
+            caller_rsp + 0x38 + stack_shift,
+            "Iterate8 pixel callback",
+        )?;
+        let destination_world = read_guest_u64(
+            unicorn,
+            caller_rsp + 0x40 + stack_shift,
+            "Iterate8 destination world",
+        )?;
         if pixel_function == 0 || destination_world == 0 {
             unicorn
                 .reg_write(RegisterX86::RAX, 4)
@@ -4955,8 +5336,8 @@ fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
             destination_world + abi::LAYER_HEIGHT_OFFSET as u64,
             "Iterate8 destination height",
         )?;
-        let (source_data, source_rowbytes, width, height) = if source_world == 0 {
-            (0, 0, destination_width, destination_height)
+        let (source_data, source_rowbytes, source_width, source_height) = if source_world == 0 {
+            (0, 0, 0, 0)
         } else {
             let data = read_guest_u64(
                 unicorn,
@@ -4978,17 +5359,21 @@ fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
                 source_world + abi::LAYER_HEIGHT_OFFSET as u64,
                 "Iterate8 source height",
             )?;
+            (data, rowbytes, source_width, source_height)
+        };
+        let (width, height) = if has_origin || source_world == 0 {
+            (destination_width, destination_height)
+        } else {
             (
-                data,
-                rowbytes,
                 source_width.min(destination_width),
                 source_height.min(destination_height),
             )
         };
         if destination_data == 0
             || source_world != 0 && source_data == 0
-            || source_world != 0 && source_rowbytes < width.saturating_mul(4)
-            || destination_rowbytes < width.saturating_mul(4)
+            || source_world != 0 && source_rowbytes < source_width.saturating_mul(4)
+            || destination_rowbytes < destination_width.saturating_mul(4)
+            || source_world != 0 && (source_width <= 0 || source_height <= 0)
             || width <= 0
             || height <= 0
         {
@@ -5020,6 +5405,9 @@ fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
             pixel_function,
             source_data,
             source_rowbytes: source_rowbytes as u64,
+            source_width,
+            source_height,
+            zero_outside_source: has_origin,
             destination_data,
             destination_rowbytes: destination_rowbytes as u64,
             left: bounds[0],
@@ -5027,6 +5415,8 @@ fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
             bottom: bounds[3],
             x: bounds[0],
             y: bounds[1],
+            origin_x,
+            origin_y,
         });
         schedule_iterate8_pixel(unicorn)
     })();
@@ -6410,6 +6800,22 @@ fn find_world_region(state: &GuestState, mapped_size: u64) -> Result<u64, String
 }
 
 fn emulate_new_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    emulate_new_world_common(unicorn, false);
+}
+
+fn emulate_new_world8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    emulate_new_world_common(unicorn, true);
+}
+
+fn emulate_new_world_common(unicorn: &mut Unicorn<'_, GuestState>, legacy_argb8: bool) {
+    let flags = unicorn.reg_read(RegisterX86::R9).unwrap_or_default() as u32;
+    if legacy_argb8 && flags & 0x2 != 0 {
+        unicorn.get_data_mut().callback_error =
+            Some("legacy new-world requested unsupported DEEP_PIXELS".into());
+        let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+        let _ = unicorn.emu_stop();
+        return;
+    }
     let result = (|| {
         let width = unicorn
             .reg_read(RegisterX86::RDX)
@@ -6419,12 +6825,19 @@ fn emulate_new_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
             .reg_read(RegisterX86::R8)
             .map_err(|error| format!("new-world height: {error}"))? as u32
             as i32;
-        let clear = unicorn
-            .reg_read(RegisterX86::R9)
-            .map_err(|error| format!("new-world clear flag: {error}"))? as u8
-            != 0;
-        let pixel_format = aegp_stack_arg(unicorn, 0x28)? as u32 as i32;
-        let world = aegp_stack_arg(unicorn, 0x30)?;
+        let clear = if legacy_argb8 {
+            flags & 0x1 != 0
+        } else {
+            flags as u8 != 0
+        };
+        let (pixel_format, world) = if legacy_argb8 {
+            (0x6267_7261u32 as i32, aegp_stack_arg(unicorn, 0x28)?)
+        } else {
+            (
+                aegp_stack_arg(unicorn, 0x28)? as u32 as i32,
+                aegp_stack_arg(unicorn, 0x30)?,
+            )
+        };
         let pixel_bytes = world_pixel_bytes(pixel_format)
             .ok_or_else(|| format!("unsupported PF pixel format {pixel_format:#x}"))?;
         if width <= 0 || height <= 0 || world == 0 {
@@ -6721,6 +7134,10 @@ mod tests {
             HOST_EXTENDED_ALLOC,
             HOST_EXTENDED_FREE,
             HOST_EXTENDED_LOOKUP,
+            HOST_ITERATE8_ORIGIN,
+            HOST_FILL8,
+            HOST_NEW_WORLD8,
+            HOST_GET_CALLBACK_ADDR,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -6855,6 +7272,26 @@ mod tests {
                 HOST_EXTENDED_LOOKUP,
                 HOST_EXTENDED_LOOKUP,
                 emulate_extended_lookup,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_ITERATE8_ORIGIN,
+                HOST_ITERATE8_ORIGIN,
+                emulate_iterate8_origin,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(HOST_FILL8, HOST_FILL8, emulate_fill8)
+            .unwrap();
+        unicorn
+            .add_code_hook(HOST_NEW_WORLD8, HOST_NEW_WORLD8, emulate_new_world8)
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_GET_CALLBACK_ADDR,
+                HOST_GET_CALLBACK_ADDR,
+                emulate_get_callback_addr,
             )
             .unwrap();
         install_iterate8_suites(&mut unicorn).unwrap();
@@ -7767,6 +8204,14 @@ mod tests {
             4
         );
         assert!(engine.unicorn.get_data().worlds.is_empty());
+        let error = engine
+            .call_win64(HOST_NEW_WORLD8, [1, 3, 2, 0x2, world, 0])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported DEEP_PIXELS"),
+            "{error}"
+        );
+        assert!(engine.unicorn.get_data().worlds.is_empty());
     }
 
     #[test]
@@ -8035,6 +8480,198 @@ mod tests {
         let mut output = [0xffu8; 4];
         engine.read(destination_pixels, &mut output).unwrap();
         assert_eq!(output, [0; 4]);
+    }
+
+    #[test]
+    fn iterate8_origin_offsets_callback_coordinates() {
+        const CODE: u64 = 0x1000_0000;
+        // mov rax,[rsp+0x28]; mov [rax+1],dl; mov [rax+2],r8b; xor eax,eax; ret
+        let mut engine = test_engine(&[
+            0x48, 0x8b, 0x44, 0x24, 0x28, 0x88, 0x50, 0x01, 0x44, 0x88, 0x40, 0x02, 0x31, 0xc0,
+            0xc3,
+        ]);
+        let source_pixels = engine.allocate(8, 4).unwrap();
+        let destination_pixels = engine.allocate(8, 4).unwrap();
+        let source_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        for (world, pixels) in [
+            (source_world, source_pixels),
+            (destination_world, destination_pixels),
+        ] {
+            let mut bytes = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+            bytes[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                .copy_from_slice(&pixels.to_le_bytes());
+            bytes[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                .copy_from_slice(&8i32.to_le_bytes());
+            bytes[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+                .copy_from_slice(&2i32.to_le_bytes());
+            bytes[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+                .copy_from_slice(&1i32.to_le_bytes());
+            engine.write(world, &bytes).unwrap();
+        }
+        let origin = engine.allocate(8, 4).unwrap();
+        engine
+            .write(
+                origin,
+                &[10i32.to_le_bytes(), (-3i32).to_le_bytes()].concat(),
+            )
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_ITERATE8_ORIGIN,
+                    &[0, 0, 1, source_world, 0, origin, 0, CODE, destination_world,],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        let mut output = [0u8; 8];
+        engine.read(destination_pixels, &mut output).unwrap();
+        assert_eq!(output, [0, 10, 253, 0, 0, 11, 253, 0]);
+    }
+
+    #[test]
+    fn iterate8_origin_walks_the_destination_and_zeros_outside_the_source() {
+        const CODE: u64 = 0x1000_0000;
+        // mov rax,[rsp+0x28]; mov ecx,[r9]; mov [rax],ecx; xor eax,eax; ret
+        let mut engine = test_engine(&[
+            0x48, 0x8b, 0x44, 0x24, 0x28, 0x41, 0x8b, 0x09, 0x89, 0x08, 0x31, 0xc0, 0xc3,
+        ]);
+        let source_pixels = engine.allocate(4, 4).unwrap();
+        engine.write(source_pixels, &[1, 2, 3, 4]).unwrap();
+        let destination_pixels = engine.allocate(16, 4).unwrap();
+        engine.write(destination_pixels, &[0xff; 16]).unwrap();
+        let source_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        for (world, pixels, width, height) in [
+            (source_world, source_pixels, 1i32, 1i32),
+            (destination_world, destination_pixels, 2i32, 2i32),
+        ] {
+            let mut bytes = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+            bytes[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                .copy_from_slice(&pixels.to_le_bytes());
+            bytes[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                .copy_from_slice(&(width * 4).to_le_bytes());
+            bytes[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+                .copy_from_slice(&width.to_le_bytes());
+            bytes[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+                .copy_from_slice(&height.to_le_bytes());
+            engine.write(world, &bytes).unwrap();
+        }
+        let origin = engine.allocate(8, 4).unwrap();
+        engine.write(origin, &[0; 8]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_ITERATE8_ORIGIN,
+                    &[0, 0, 1, source_world, 0, origin, 0, CODE, destination_world,],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        let mut output = [0u8; 16];
+        engine.read(destination_pixels, &mut output).unwrap();
+        assert_eq!(output, [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fill8_writes_only_the_requested_argb8_area() {
+        let mut engine = test_engine(&[]);
+        let pixels = engine.allocate(24, 4).unwrap();
+        let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&pixels.to_le_bytes());
+        definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&12i32.to_le_bytes());
+        definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&3i32.to_le_bytes());
+        definition[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&2i32.to_le_bytes());
+        engine.write(world, &definition).unwrap();
+        let color = engine.allocate(4, 1).unwrap();
+        engine.write(color, &[255, 1, 2, 3]).unwrap();
+        let area = engine.allocate(16, 4).unwrap();
+        engine
+            .write(
+                area,
+                &[
+                    1i32.to_le_bytes(),
+                    0i32.to_le_bytes(),
+                    3i32.to_le_bytes(),
+                    1i32.to_le_bytes(),
+                ]
+                .concat(),
+            )
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_FILL8, [0, color, area, world, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut output = [0u8; 24];
+        engine.read(pixels, &mut output).unwrap();
+        assert_eq!(
+            output,
+            [
+                0, 0, 0, 0, 255, 1, 2, 3, 255, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_new_world_forces_argb8_and_disposes_through_shared_registry() {
+        let mut engine = test_engine(&[]);
+        let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_NEW_WORLD8, [1, 3, 2, 1, world, 0])
+                .unwrap(),
+            0
+        );
+        let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        engine.read(world, &mut definition).unwrap();
+        assert_eq!(
+            i32::from_le_bytes(
+                definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            12
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert!(engine.unicorn.get_data().worlds.is_empty());
+    }
+
+    #[test]
+    fn get_callback_addr_resolves_copy_and_fails_closed_for_unknown_ids() {
+        let mut engine = test_engine(&[]);
+        let output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_GET_CALLBACK_ADDR, [1, 0, 0, 9, output, 0])
+                .unwrap(),
+            0
+        );
+        let mut callback = [0u8; 8];
+        engine.read(output, &mut callback).unwrap();
+        assert_eq!(u64::from_le_bytes(callback), HOST_COPY);
+        assert_eq!(
+            engine
+                .call_win64(HOST_GET_CALLBACK_ADDR, [1, 0, 0, 999, output, 0])
+                .unwrap(),
+            4
+        );
+        engine.read(output, &mut callback).unwrap();
+        assert_eq!(u64::from_le_bytes(callback), 0);
     }
 
     #[test]
@@ -9335,6 +9972,48 @@ mod tests {
         engine.unicorn.mem_read(destination, &mut actual).unwrap();
         assert_eq!(actual, expected);
         assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 2);
+    }
+
+    #[test]
+    fn avx_fallback_blends_xmm_f32_lanes_from_the_mask_sign_bits() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[
+            0xc4, 0xe3, 0x51, 0x4a, 0xc6, 0x00, // vblendvps xmm0,xmm5,xmm6,xmm0
+            0xc3,
+        ]);
+        let lanes = |values: [f32; 4]| {
+            values
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM5, &lanes([1.0, 2.0, 3.0, 4.0]))
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM6, &lanes([10.0, 20.0, 30.0, 40.0]))
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write_long(
+                RegisterX86::XMM0,
+                &[
+                    0u32.to_le_bytes(),
+                    0x8000_0000u32.to_le_bytes(),
+                    0u32.to_le_bytes(),
+                    0x8000_0000u32.to_le_bytes(),
+                ]
+                .concat(),
+            )
+            .unwrap();
+
+        engine.call_win64(CODE, [0; 6]).unwrap();
+
+        let actual = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+        assert_eq!(&actual[..16], lanes([1.0, 20.0, 3.0, 40.0]));
+        assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 1);
     }
 
     #[test]

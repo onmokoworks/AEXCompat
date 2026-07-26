@@ -290,6 +290,8 @@ int main() {
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, sin), first);
   field<decltype(PF_ANSICallbacks::ceil)>("utils.ansi_ceil",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, ceil), first);
+  field<decltype(PF_ANSICallbacks::cos)>("utils.ansi_cos",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, cos), first);
   field<decltype(PF_ANSICallbacks::fabs)>("utils.ansi_fabs",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, fabs), first);
   field<decltype(PF_ANSICallbacks::pow)>("utils.ansi_pow",
@@ -306,6 +308,8 @@ int main() {
   field<decltype(PF_UtilCallbacks::premultiply)>("utils.premultiply", offsetof(PF_UtilCallbacks, premultiply), first);
   field<decltype(PF_UtilCallbacks::premultiply_color)>("utils.premultiply_color", offsetof(PF_UtilCallbacks, premultiply_color), first);
   field<decltype(PF_UtilCallbacks::iterate)>("utils.iterate", offsetof(PF_UtilCallbacks, iterate), first);
+  field<decltype(PF_UtilCallbacks::iterate_origin)>("utils.iterate_origin", offsetof(PF_UtilCallbacks, iterate_origin), first);
+  field<decltype(PF_UtilCallbacks::get_callback_addr)>("utils.get_callback_addr", offsetof(PF_UtilCallbacks, get_callback_addr), first);
   field<decltype(PF_UtilCallbacks::new_world)>("utils.new_world", offsetof(PF_UtilCallbacks, new_world), first);
   field<decltype(PF_UtilCallbacks::dispose_world)>("utils.dispose_world", offsetof(PF_UtilCallbacks, dispose_world), first);
   field<decltype(PF_UtilCallbacks::transform_world)>("utils.transform_world", offsetof(PF_UtilCallbacks, transform_world), first);
