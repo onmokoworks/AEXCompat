@@ -294,6 +294,16 @@ impl ClassicHost {
         let mut utility_bytes = vec![0u8; abi::PF_UTIL_CALLBACKS_SIZE];
         write_u64(
             &mut utility_bytes,
+            abi::UTILS_SUBPIXEL_SAMPLE_OFFSET,
+            engine.subpixel_sample8_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
+            abi::UTILS_AREA_SAMPLE_OFFSET,
+            engine.area_sample8_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
             abi::UTILS_ANSI_STRCPY_OFFSET,
             engine.ansi_strcpy_callback_address(),
         );
