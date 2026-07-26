@@ -7,13 +7,19 @@
 #![cfg_attr(not(feature = "native-carrier"), forbid(unsafe_code))]
 
 pub mod backend {
-    #[cfg(feature = "native-carrier")]
+    #[cfg(all(feature = "native-carrier", target_os = "macos"))]
     pub use crate::native_x64::*;
-    #[cfg(not(feature = "native-carrier"))]
+    #[cfg(any(not(feature = "native-carrier"), not(target_os = "macos")))]
     pub use crate::x64::*;
 }
 pub mod classic;
-#[cfg(feature = "native-carrier")]
+#[cfg(all(
+    feature = "native-carrier",
+    target_arch = "x86_64",
+    any(target_os = "macos", all(test, target_os = "windows"))
+))]
+mod native_aegp_memory;
+#[cfg(all(feature = "native-carrier", target_os = "macos"))]
 pub mod native_x64;
 pub mod pe;
 pub mod resident;
