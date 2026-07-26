@@ -1,5 +1,4 @@
 import os
-import re
 import unittest
 from pathlib import Path
 
@@ -8,31 +7,6 @@ ROOT = Path(__file__).resolve().parents[1]
 BROKER_ROOT = ROOT / "broker"
 BROKER_SOURCE_ROOT = BROKER_ROOT / "crates"
 MINIHOST_ROOT = ROOT / "minihost"
-
-RUST_STRING_LITERAL = re.compile(
-    r'(?:b?r(?P<hash>#{0,16})"(?P<raw>.*?)"(?P=hash)|b?"(?:\\.|[^"\\])*")',
-    re.DOTALL,
-)
-RUST_MACRO_AEX = re.compile(
-    r"\b[A-Za-z_]\w*!\s*(?:"
-    r"\([^)]*\." + "aex" + r"\b[^)]*\)|"
-    r"\[[^\]]*\." + "aex" + r"\b[^\]]*\]|"
-    r"\{[^}]*\." + "aex" + r"\b[^}]*\}"
-    r")",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def rust_string_literals(source: str):
-    return (match.group(0) for match in RUST_STRING_LITERAL.finditer(source))
-
-
-def production_aex_strings(source: str):
-    for literal in rust_string_literals(source):
-        if "." + "aex" in literal.lower():
-            yield literal
-    yield from (match.group(0) for match in RUST_MACRO_AEX.finditer(source))
-
 
 class NativeCodeGuardTests(unittest.TestCase):
     def test_broker_sources_exclude_native_loader_symbols_and_production_aex_literals(self):
@@ -45,19 +19,7 @@ class NativeCodeGuardTests(unittest.TestCase):
                     self.assertNotIn(token, text)
             production = text.split("#[cfg(test)]", 1)[0]
             with self.subTest(path=path, token="production .aex literal"):
-                self.assertEqual(list(production_aex_strings(production)), [])
-
-    def test_production_aex_guard_distinguishes_fields_from_path_literals(self):
-        self.assertEqual(list(production_aex_strings("session.aex = selected;")), [])
-        for source in (
-            '"effect.aex"',
-            'r#"C:\\plugins\\effect.aex"#',
-            "stringify!(effect.aex)",
-            "aex_path!(effect.aex)",
-            "stringify!{effect.aex}",
-            "aex_path![effect.aex]",
-        ):
-            self.assertEqual(len(list(production_aex_strings(source))), 1)
+                self.assertNotIn("." + "aex", production.lower())
 
     def test_broker_has_no_network_or_shell_process_dependencies(self):
         cargo_files = [BROKER_ROOT / "Cargo.toml", *sorted(BROKER_SOURCE_ROOT.rglob("Cargo.toml"))]
