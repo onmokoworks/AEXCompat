@@ -85,6 +85,7 @@ def test_scheduler_policy_dag_boundaries_and_limits_are_explicit():
         "enum class SamplingPolicy : uint8_t { exact, hold, nearest }",
         "enum class StageKind : uint8_t { upstream, all_effects, downstream, final_item }",
         "bool register_item(",
+        "bool has_item_registration(",
         "bool publish_stage_world(",
         "int32_t publish_registered_receipt(",
     ):
@@ -111,8 +112,12 @@ def test_scheduler_policy_dag_boundaries_and_limits_are_explicit():
         "kMaxSchedulerBytes = render_receipts::kMaxReceiptBytes",
         "kMaxResolveTime = std::chrono::milliseconds(250)",
         "g_world_bytes > kMaxSchedulerBytes - tight_bytes",
+        "stage_kind != StageKind::final_item && effect_instance == 0",
     ):
         assert marker in text
+    assert "ensure_item_registered" not in text
+    assert "reinterpret_cast<uintptr_t>(item)" not in text
+    assert "select_stage(context.snapshot, item, kind, 0" not in text
 
 
 def test_effect_boundaries_publish_into_scheduler_and_receipts_keep_evidence():
@@ -130,6 +135,10 @@ def test_effect_boundaries_publish_into_scheduler_and_receipts_keep_evidence():
     ):
         assert marker in layer
     assert "publish_scheduler_stage" in layer_header
+    assert "prepare_staged_item" in layer_header
+    assert "current_effect_instance" in layer_header
+    assert "g_hooks.current_effect_instance(options)" in layer
+    assert "effect_instance == 0" in layer
     for marker in (
         "bool has_stage_evidence",
         "uint64_t stage_identity_hash",
@@ -191,5 +200,5 @@ def test_native_item_stage_pixel_oracle():
     assert report["cached_bytes"] == 0
     assert report["last_trace_hash"] != 0
     assert report["last_stage_identity_hash"] != 0
-    assert report["last_resolved_stages"] == 9
+    assert report["last_resolved_stages"] == 8
     assert report["max_resolved_depth"] >= 2

@@ -70,16 +70,23 @@ const bool g_external_render_runtime_configured = [] {
   return true;
 }();
 const bool g_item_render_runtime_configured = [] {
+  // The bounded worker has no durable scene metadata provider for staged
+  // item identity/dependencies/sampling. Checkout therefore fails closed
+  // until a production host installs the explicit registration contract.
   aexcompat::aegp_item_render_runtime::configure({
       &snapshot_render_options,
+      nullptr,
       &aexcompat::aegp_external_render_runtime::publish_cached_receipt,
       &aexcompat::aegp_staged_item_runtime::publish_receipt});
   return true;
 }();
 const bool g_layer_render_runtime_configured = [] {
+  // Likewise, layer publication requires a host-provided item registration
+  // and durable active-effect identity; neither is inferred from a pointer.
   aexcompat::aegp_layer_render_runtime::configure({
       &is_render_worker, &layer_effect_boundary_is_live,
       &aegp_comp_item_handle,
+      nullptr, nullptr,
       &aexcompat::aegp_staged_item_runtime::publish_stage_world});
   return true;
 }();

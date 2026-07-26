@@ -48,6 +48,10 @@ struct Hooks {
   bool (*is_render_worker)();
   bool (*effect_boundary_live)(const render_options::LayerValue& options);
   void* (*current_item)();
+  // Registers the current item with its durable scheduler metadata.
+  bool (*prepare_staged_item)(void* item);
+  // Returns the durable identity of the effect being rendered.
+  uint64_t (*current_effect_instance)(const render_options::LayerValue& options);
   bool (*publish_scheduler_stage)(
       void* item, aegp_staged_item_runtime::StageKind stage_kind,
       uint64_t effect_instance, suite_abi::AegpTime time,

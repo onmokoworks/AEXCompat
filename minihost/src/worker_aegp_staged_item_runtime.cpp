@@ -229,9 +229,7 @@ uint64_t hash_mix(uint64_t hash, uint64_t value) noexcept {
 uint64_t stable_item_identity_locked(void* item) {
   const auto found = std::find_if(g_items.begin(), g_items.end(),
       [item](const auto& value) { return value.item == item; });
-  return found == g_items.end()
-      ? static_cast<uint64_t>(reinterpret_cast<uintptr_t>(item))
-      : found->stable_identity;
+  return found == g_items.end() ? 0 : found->stable_identity;
 }
 
 StagedItemWorld::StageIdentity make_stage_identity(
@@ -526,18 +524,8 @@ bool resolve_item(ResolveContext& context, void* item, uint32_t depth,
         if (!select_stage(context.snapshot, item, kind, effect_instance, policy,
                           context.options, context.pixel_format,
                           context.project_generation, boundary,
-                          resolved_time)) {
-          if (kind == StageKind::all_effects &&
-              select_stage(context.snapshot, item, kind, 0, policy,
-                           context.options, context.pixel_format,
-                           context.project_generation, boundary,
-                           resolved_time)) {
-            boundary.effect_instance = effect_instance;
-            boundary.identity.effect_instance = effect_instance;
-          } else {
-            return resolve_failure(context, g_effect_boundary_rejections);
-          }
-        }
+                          resolved_time))
+          return resolve_failure(context, g_effect_boundary_rejections);
         if (!record_resolved_stage(context, boundary, depth)) return false;
       }
     }
@@ -729,6 +717,13 @@ void clear() noexcept {
   invalidate_generation_locked();
 }
 
+bool has_item_registration(void* item) noexcept {
+  if (!item) return false;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  return std::any_of(g_items.begin(), g_items.end(),
+      [item](const auto& value) { return value.item == item; });
+}
+
 bool register_item(void* item, uint64_t stable_identity, SamplingPolicy policy,
                    void* const* dependencies, std::size_t dependency_count,
                    const uint64_t* effect_instances, std::size_t effect_count) {
@@ -789,37 +784,6 @@ bool register_item(void* item, uint64_t stable_identity, SamplingPolicy policy,
   return true;
 }
 
-bool ensure_item_registered(void* item, uint64_t stable_identity,
-                            SamplingPolicy policy, uint64_t effect_instance) {
-  if (!item || stable_identity == 0 || effect_instance == 0) return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
-  const auto existing = std::find_if(g_items.begin(), g_items.end(),
-      [item](const auto& value) { return value.item == item; });
-  if (existing != g_items.end()) {
-    if (existing->stable_identity != stable_identity) return false;
-    if (existing->policy != policy) existing->policy = policy;
-    const bool has_effect =
-        std::find(existing->effect_instances.begin(),
-                  existing->effect_instances.end(),
-                  effect_instance) != existing->effect_instances.end();
-    if (!has_effect) {
-      if (existing->effect_instances.size() >= kMaxEffectsPerItem) return false;
-      try {
-        existing->effect_instances.push_back(effect_instance);
-      } catch (...) { return false; }
-    }
-    return true;
-  }
-  if (g_items.size() >= kMaxRegisteredItems) return false;
-  try {
-    g_items.push_back({item, stable_identity, policy, {},
-                       {effect_instance}});
-  } catch (...) {
-    return false;
-  }
-  return true;
-}
-
 bool publish_stage_world(void* item, StageKind stage_kind,
                          uint64_t effect_instance, AegpTime time,
                          AegpTime time_step, int8_t quality,
@@ -838,8 +802,7 @@ bool publish_stage_world(void* item, StageKind stage_kind,
       static_cast<uint8_t>(stage_kind) >
           static_cast<uint8_t>(StageKind::final_item) ||
       (stage_kind == StageKind::final_item && effect_instance != 0) ||
-      (stage_kind != StageKind::final_item && stage_kind != StageKind::all_effects &&
-       effect_instance == 0))
+      (stage_kind != StageKind::final_item && effect_instance == 0))
     return false;
   std::shared_ptr<std::vector<std::byte>> backing;
   try {

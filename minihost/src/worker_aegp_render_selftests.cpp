@@ -49,6 +49,7 @@ std::array<float, 4> g_render_options_argb32f{};
 bool render_options_lifetimes_balanced();
 bool async_receipt_lifetimes_balanced();
 void* aegp_comp_item_handle();
+bool is_render_worker();
 int32_t __cdecl checkout_item_frame_async(void*, uint32_t, void*, void**);
 int32_t get_receipt_world(void*, void***);
 int32_t checkin_frame(void*);
@@ -296,6 +297,11 @@ bool verify_aegp_item_staged_worlds() {
   };
   const std::array<int32_t, 3> formats{{
       kPixelFormatArgb32, kPixelFormatArgb64, kPixelFormatArgb128}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          aegp_comp_item_handle(), 4001,
+          aexcompat::aegp_staged_item_runtime::SamplingPolicy::exact,
+          nullptr, 0, nullptr, 0))
+    return false;
   for (int32_t depth = 0; depth < 3; ++depth) {
     const int32_t pixel_bytes = 4 << depth;
     const auto pixels = fixture(pixel_bytes);
@@ -692,15 +698,13 @@ bool verify_aegp_item_staged_worlds() {
       !async_receipt_lifetimes_balanced())
     return false;
 
-  // Regression F4: out-of-order publication must not block resolution.
-  // Publish downstream first (newer generation) then upstream (older).
+  // Regression F4: concurrent republish and checkout must observe only
+  // complete scheduler snapshots; publication order is intentionally shuffled.
   clear_staged_item_worlds_for_test();
   void* const regress_f4_item = reinterpret_cast<void*>(0xa400);
-  std::array<void*, 1> regress_f4_deps{{nested_middle}};
   std::array<uint64_t, 1> regress_f4_effect{{0xe401}};
   if (!aexcompat::aegp_staged_item_runtime::register_item(
-          regress_f4_item, 6001, SamplingPolicy::exact,
-          regress_f4_deps.data(), regress_f4_deps.size(),
+          regress_f4_item, 6001, SamplingPolicy::exact, nullptr, 0,
           regress_f4_effect.data(), regress_f4_effect.size()) ||
       !publish_scheduler_stage(regress_f4_item, StageKind::downstream,
           regress_f4_effect[0], time, 24) ||
@@ -711,37 +715,96 @@ bool verify_aegp_item_staged_worlds() {
       !publish_scheduler_stage(regress_f4_item, StageKind::final_item, 0,
           time, 51))
     return false;
-  ReceiptSnapshot regress_f4_snap{};
-  if (!publish_scheduler_stage(nested_middle, StageKind::final_item, 0, time, 41) ||
-      !publish_scheduler_stage(nested_leaf, StageKind::final_item, 0, time, 31))
-    return false;
-  if (!checkout_registered(make_request(regress_f4_item, time), regress_f4_snap) ||
-      regress_f4_snap.item_identity != 6001 ||
-      regress_f4_snap.resolved_stage_count < 4 ||
-      !same_test_time(regress_f4_snap.source_time, time))
+  std::atomic<bool> f4_ok{true};
+  std::atomic<uint32_t> f4_ready{};
+  std::atomic<bool> f4_start{};
+  auto f4_publish = [&](StageKind kind, uint8_t marker) {
+    return publish_scheduler_stage(regress_f4_item, kind,
+        kind == StageKind::final_item ? 0 : regress_f4_effect[0], time, marker);
+  };
+  std::thread f4_publisher([&] {
+    ++f4_ready;
+    while (!f4_start.load()) std::this_thread::yield();
+    for (uint8_t iteration = 0; iteration < 32; ++iteration) {
+      if (!f4_publish(StageKind::downstream, static_cast<uint8_t>(61 + iteration)) ||
+          !f4_publish(StageKind::upstream, static_cast<uint8_t>(81 + iteration)) ||
+          !f4_publish(StageKind::all_effects, static_cast<uint8_t>(101 + iteration)) ||
+          !f4_publish(StageKind::final_item, static_cast<uint8_t>(121 + iteration))) {
+        f4_ok = false;
+        return;
+      }
+    }
+  });
+  std::array<std::thread, 4> f4_checkouts;
+  for (auto& thread : f4_checkouts) {
+    thread = std::thread([&] {
+      ++f4_ready;
+      while (!f4_start.load()) std::this_thread::yield();
+      for (uint8_t iteration = 0; iteration < 32; ++iteration) {
+        ReceiptSnapshot snapshot{};
+        if (!checkout_registered(make_request(regress_f4_item, time), snapshot) ||
+            snapshot.item_identity != 6001 || snapshot.resolved_stage_count != 4 ||
+            !same_test_time(snapshot.source_time, time)) {
+          f4_ok = false;
+          return;
+        }
+      }
+    });
+  }
+  while (f4_ready.load() != f4_checkouts.size() + 1) std::this_thread::yield();
+  f4_start = true;
+  f4_publisher.join();
+  for (auto& thread : f4_checkouts) thread.join();
+  if (!f4_ok || aexcompat::aegp_staged_item_runtime::diagnostics().in_flight != 0)
     return false;
 
-  // Regression F3: hold item with disparate source times must pick one source
-  // for all stages and never mix across frames.
+  // Regression F3: every boundary for every effect must share the final
+  // hold-selected source time; a mixed-time plan is rejected before output.
   clear_staged_item_worlds_for_test();
   void* const regress_f3_item = reinterpret_cast<void*>(0xa500);
   const AegpTime f3_early{3, 24};
   const AegpTime f3_late{4, 24};
+  const std::array<uint64_t, 2> regress_f3_effects{{0xe501, 0xe502}};
   if (!aexcompat::aegp_staged_item_runtime::register_item(
-          regress_f3_item, 7001, SamplingPolicy::hold, nullptr, 0, nullptr, 0))
+          regress_f3_item, 7001, SamplingPolicy::hold, nullptr, 0,
+          regress_f3_effects.data(), regress_f3_effects.size()))
     return false;
-  for (AegpTime at : {f3_early, f3_late})
-    if (!publish_scheduler_stage(regress_f3_item, StageKind::final_item, 0, at,
-            static_cast<uint8_t>(at.value)))
-      return false;
+  for (uint64_t effect : regress_f3_effects)
+    for (StageKind kind : {StageKind::upstream, StageKind::all_effects,
+                           StageKind::downstream})
+      if (!publish_scheduler_stage(regress_f3_item, kind, effect, f3_early,
+              static_cast<uint8_t>(20 + static_cast<uint8_t>(kind))))
+        return false;
+  if (!publish_scheduler_stage(regress_f3_item, StageKind::final_item, 0,
+          f3_early, 31))
+    return false;
+  for (uint64_t effect : regress_f3_effects)
+    for (StageKind kind : {StageKind::upstream, StageKind::all_effects,
+                           StageKind::downstream})
+      if ((effect != regress_f3_effects[0] || kind != StageKind::all_effects) &&
+          !publish_scheduler_stage(regress_f3_item, kind, effect, f3_late,
+              static_cast<uint8_t>(40 + static_cast<uint8_t>(kind))))
+        return false;
+  if (!publish_scheduler_stage(regress_f3_item, StageKind::final_item, 0,
+          f3_late, 51))
+    return false;
+  void* f3_rejected = reinterpret_cast<void*>(1);
+  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
+          make_request(regress_f3_item, time), &f3_rejected) == 0 || f3_rejected)
+    return false;
+  if (!publish_scheduler_stage(regress_f3_item, StageKind::all_effects,
+          regress_f3_effects[0], f3_late, 61))
+    return false;
   ReceiptSnapshot regress_f3_snap{};
   if (!checkout_registered(make_request(regress_f3_item, time),
           regress_f3_snap) ||
-      !same_test_time(regress_f3_snap.source_time, f3_late))
+      !same_test_time(regress_f3_snap.source_time, f3_late) ||
+      regress_f3_snap.resolved_stage_count != 7 ||
+      regress_f3_snap.sampling_policy != static_cast<uint8_t>(SamplingPolicy::hold))
     return false;
 
-  // Regression F2: all_effects published with instance 0 (production sentinel)
-  // must match an effect instance in the registration.
+  // Regression F2: all_effects requires the same real effect identity as its
+  // upstream/downstream boundaries; zero is never a production sentinel.
   clear_staged_item_worlds_for_test();
   void* const regress_f2_item = reinterpret_cast<void*>(0xa600);
   std::array<uint64_t, 1> regress_f2_effect{{0xe601}};
@@ -749,10 +812,12 @@ bool verify_aegp_item_staged_worlds() {
           regress_f2_item, 8001, SamplingPolicy::exact, nullptr, 0,
           regress_f2_effect.data(), regress_f2_effect.size()))
     return false;
-  if (!publish_scheduler_stage(regress_f2_item, StageKind::upstream,
+  if (publish_scheduler_stage(regress_f2_item, StageKind::all_effects,
+          0, time, 22) ||
+      !publish_scheduler_stage(regress_f2_item, StageKind::upstream,
           regress_f2_effect[0], time, 21) ||
       !publish_scheduler_stage(regress_f2_item, StageKind::all_effects,
-          0, time, 22) ||
+          regress_f2_effect[0], time, 22) ||
       !publish_scheduler_stage(regress_f2_item, StageKind::downstream,
           regress_f2_effect[0], time, 23) ||
       !publish_scheduler_stage(regress_f2_item, StageKind::final_item, 0,
@@ -764,14 +829,22 @@ bool verify_aegp_item_staged_worlds() {
       regress_f2_snap.resolved_stage_count != 4)
     return false;
 
-  // Regression F1: ensure_item_registered during production-stage publish
-  // assembles an item that was not pre-registered via register_item.
+  // Regression F1: complete metadata registration carries durable identity,
+  // declared dependency, hold policy, and every real effect instance.
   clear_staged_item_worlds_for_test();
   void* const regress_f1_item = reinterpret_cast<void*>(0xa700);
-  if (!aexcompat::aegp_staged_item_runtime::ensure_item_registered(
-          regress_f1_item, 9001, SamplingPolicy::exact, 0xe701) ||
-      !aexcompat::aegp_staged_item_runtime::ensure_item_registered(
-          regress_f1_item, 9001, SamplingPolicy::exact, 0xe702))
+  void* const regress_f1_dependency = reinterpret_cast<void*>(0xa710);
+  std::array<void*, 1> regress_f1_dependencies{{regress_f1_dependency}};
+  std::array<uint64_t, 2> regress_f1_effects{{0xe701, 0xe702}};
+  if (!aexcompat::aegp_staged_item_runtime::register_item(
+          regress_f1_dependency, 9002, SamplingPolicy::exact, nullptr, 0,
+          nullptr, 0) ||
+      !aexcompat::aegp_staged_item_runtime::register_item(
+          regress_f1_item, 9001, SamplingPolicy::hold,
+          regress_f1_dependencies.data(), regress_f1_dependencies.size(),
+          regress_f1_effects.data(), regress_f1_effects.size()) ||
+      !publish_scheduler_stage(regress_f1_dependency, StageKind::final_item, 0,
+          time, 11))
     return false;
   if (!publish_scheduler_stage(regress_f1_item, StageKind::upstream, 0xe701,
           time, 21) ||
@@ -791,7 +864,9 @@ bool verify_aegp_item_staged_worlds() {
   ReceiptSnapshot regress_f1_snap{};
   if (!checkout_registered(make_request(regress_f1_item, time), regress_f1_snap) ||
       regress_f1_snap.item_identity != 9001 ||
-      regress_f1_snap.resolved_stage_count != 7)
+      regress_f1_snap.resolved_stage_count != 8 ||
+      regress_f1_snap.resolved_depth != 1 ||
+      regress_f1_snap.sampling_policy != static_cast<uint8_t>(SamplingPolicy::hold))
     return false;
 
   // Direct/indirect cycles, excessive nesting, and stage-count overflow are
@@ -938,6 +1013,25 @@ bool verify_aegp_layer_render_options_suite2() {
   auto source = make_world(100, 50, 25);
   auto all_effects = make_world(40, 120, 30);
   auto downstream_pixels = make_world(20, 60, 140);
+  // The production runtime deliberately has no fabricated metadata defaults.
+  // Install a complete test-only provider so this suite exercises successful
+  // layer publication through the same explicit contract.
+  const auto prepare_staged_item = +[](void* item) {
+    static constexpr uint64_t kItemIdentity = 9101;
+    static constexpr uint64_t kEffectIdentity = 0x91010001ULL;
+    return aexcompat::aegp_staged_item_runtime::register_item(
+        item, kItemIdentity,
+        aexcompat::aegp_staged_item_runtime::SamplingPolicy::exact,
+        nullptr, 0, &kEffectIdentity, 1);
+  };
+  const auto current_effect_instance = +[](const LayerValue&) {
+    return 0x91010001ULL;
+  };
+  clear_staged_item_worlds_for_test();
+  aexcompat::aegp_layer_render_runtime::configure({
+      &is_render_worker, &layer_effect_boundary_is_live,
+      &aegp_comp_item_handle, prepare_staged_item, current_effect_instance,
+      &aexcompat::aegp_staged_item_runtime::publish_stage_world});
   LayerRenderContext context{};
   context.entry = reinterpret_cast<EffectEntry>(&verify_aegp_layer_render_options_suite2);
   context.current_time = 0;
@@ -1029,6 +1123,11 @@ bool verify_aegp_layer_render_options_suite2() {
       dispose_layer_render_options(all) == 0 &&
       dispose_layer_render_options(downstream) == 0;
   aexcompat::aegp_layer_render_runtime::context() = saved_context;
+  aexcompat::aegp_layer_render_runtime::configure({
+      &is_render_worker, &layer_effect_boundary_is_live,
+      &aegp_comp_item_handle, nullptr, nullptr,
+      &aexcompat::aegp_staged_item_runtime::publish_stage_world});
+  clear_staged_item_worlds_for_test();
   g_aegp_effect_live = saved_effect_live;
   return ok && async_receipt_lifetimes_balanced() &&
       layer_created_count() == created_before + 3 &&

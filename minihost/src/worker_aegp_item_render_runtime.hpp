@@ -9,12 +9,16 @@ namespace aexcompat::aegp_item_render_runtime {
 
 using Cancel = int32_t(__cdecl*)(void* refcon, uint8_t* canceled);
 using SnapshotOptions = bool(*)(void* handle, render_options::ItemValue& output);
+// The host must register the item with aegp_staged_item_runtime::register_item
+// using its durable identity, dependencies, sampling policy, and effects.
+using PrepareStagedItem = bool(*)(void* item);
 using PublishCached = int32_t(*)(const render_options::ItemValue& options,
                                  void** output, bool* cache_hit);
 using PublishStaged = int32_t(*)(void* options, void** receipt);
 
 struct Hooks {
   SnapshotOptions snapshot_options;
+  PrepareStagedItem prepare_staged_item;
   PublishCached publish_cached;
   PublishStaged publish_staged;
 };
