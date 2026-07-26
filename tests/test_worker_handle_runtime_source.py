@@ -59,9 +59,9 @@ def test_pf_handle_ownership_is_bounded_and_hidden_behind_snapshots():
             "handles_disposed",
             "handle_locks",
             "handle_unlocks",
-            "live_handle_count",
         ):
-            assert properties[field]["maximum"] == 16384
+            assert properties[field]["maximum"] == 4294967295
+        assert properties["live_handle_count"]["maximum"] == 16384
 
 
 def test_aegp_memory_handle_family_keeps_suite_abi_and_fail_closed_limits():
