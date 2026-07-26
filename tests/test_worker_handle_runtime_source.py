@@ -54,7 +54,13 @@ def test_pf_handle_ownership_is_bounded_and_hidden_behind_snapshots():
     ):
         schema = json.loads((ROOT / "contracts" / "aex" / schema_name).read_text())
         properties = schema["$defs"]["run"]["properties"]
-        for field in ("handles_created", "handles_disposed", "live_handle_count"):
+        for field in (
+            "handles_created",
+            "handles_disposed",
+            "handle_locks",
+            "handle_unlocks",
+            "live_handle_count",
+        ):
             assert properties[field]["maximum"] == 16384
 
 
