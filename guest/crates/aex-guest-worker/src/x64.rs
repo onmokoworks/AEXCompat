@@ -47,11 +47,15 @@ const HOST_AEGP_UNLOCK_MEM_HANDLE: u64 = STUB_BASE + 0x801b0;
 const HOST_AEGP_MEM_HANDLE_SIZE: u64 = STUB_BASE + 0x801c0;
 const HOST_AEGP_RESIZE_MEM_HANDLE: u64 = STUB_BASE + 0x801d0;
 const HOST_AEGP_MEMORY_UNSUPPORTED: u64 = STUB_BASE + 0x801e0;
+const HOST_NEW_WORLD: u64 = STUB_BASE + 0x80210;
+const HOST_DISPOSE_WORLD: u64 = STUB_BASE + 0x80220;
+const HOST_GET_WORLD_PIXEL_FORMAT: u64 = STUB_BASE + 0x80230;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
 const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
 const HOST_POINT_PARAM_SUITE: u64 = STUB_BASE + 0x81300;
 const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81400;
+const HOST_WORLD_SUITE: u64 = STUB_BASE + 0x81500;
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
 const HOST_ITERATE8_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x88000;
@@ -66,6 +70,10 @@ const PF_HANDLE_DATA_BASE: u64 = 0x0000_0001_0000_0000;
 const PF_HANDLE_DATA_END: u64 = PF_HANDLE_DATA_BASE + 0x2_0000_0000;
 const MAX_PF_HANDLE_SIZE: u64 = 0x8000_0000;
 const MAX_PF_HANDLE_COUNT: usize = 16_384;
+const WORLD_DATA_BASE: u64 = PF_HANDLE_DATA_END;
+const WORLD_DATA_END: u64 = WORLD_DATA_BASE + 0x2_0000_0000;
+const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
+const MAX_WORLD_COUNT: usize = 256;
 // A nonzero Unicorn instruction limit enables instruction counting across the
 // whole run, which is prohibitively expensive for image kernels. The wall-clock
 // timeout and return-sentinel check still bound and validate guest execution.
@@ -1417,6 +1425,7 @@ struct GuestState {
     next_pf_handle_data: u64,
     image_region: Option<(u64, u64)>,
     handles: HashMap<u64, GuestHandle>,
+    worlds: HashMap<u64, GuestWorld>,
     aegp_memory_handles: HashMap<u64, AegpMemoryHandle>,
     aegp_memory_free: Vec<AegpMemoryBlock>,
     next_aegp_memory_handle: u64,
@@ -1458,6 +1467,14 @@ struct GuestHandle {
 }
 
 #[derive(Clone, Debug)]
+struct GuestWorld {
+    pixel_format: i32,
+    size: u64,
+    data_region: u64,
+    data_mapped_size: u64,
+}
+
+#[derive(Clone, Debug)]
 struct AegpMemoryHandle {
     data: u64,
     size: u64,
@@ -1482,6 +1499,21 @@ pub struct GuestEngine<'a> {
     image_sha256: String,
     entry_export: String,
     trace_modules: Vec<TraceModule>,
+}
+
+impl Drop for GuestEngine<'_> {
+    fn drop(&mut self) {
+        let mappings = self
+            .unicorn
+            .get_data_mut()
+            .worlds
+            .drain()
+            .map(|(_, record)| (record.data_region, record.data_mapped_size))
+            .collect::<Vec<_>>();
+        for (address, size) in mappings {
+            let _ = self.unicorn.mem_unmap(address, size);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2082,6 +2114,12 @@ impl GuestEngine<'static> {
                 "write AEGP resize-memory callback",
                 HOST_AEGP_RESIZE_MEM_HANDLE,
             ),
+            ("write new-world callback", HOST_NEW_WORLD),
+            ("write dispose-world callback", HOST_DISPOSE_WORLD),
+            (
+                "write get-world-pixel-format callback",
+                HOST_GET_WORLD_PIXEL_FORMAT,
+            ),
             ("write Iterate8 callback", HOST_ITERATE8),
             ("write Iterate8 continuation", HOST_ITERATE8_CONTINUE),
             ("write color-param callback", HOST_COLOR_PARAM_VALUE),
@@ -2268,6 +2306,21 @@ impl GuestEngine<'static> {
                 HOST_AEGP_RESIZE_MEM_HANDLE,
                 emulate_aegp_resize_mem_handle,
             ),
+            (
+                "install new-world callback",
+                HOST_NEW_WORLD,
+                emulate_new_world,
+            ),
+            (
+                "install dispose-world callback",
+                HOST_DISPOSE_WORLD,
+                emulate_dispose_world,
+            ),
+            (
+                "install get-world-pixel-format callback",
+                HOST_GET_WORLD_PIXEL_FORMAT,
+                emulate_get_world_pixel_format,
+            ),
         ] {
             uc(operation, unicorn.add_code_hook(address, address, callback))?;
         }
@@ -2308,6 +2361,21 @@ impl GuestEngine<'static> {
         uc(
             "write AEGP Memory Suite",
             unicorn.mem_write(HOST_AEGP_MEMORY_SUITE, &aegp_memory_suite),
+        )?;
+        let mut world_suite = [0u8; 24];
+        for (slot, address) in [
+            HOST_NEW_WORLD,
+            HOST_DISPOSE_WORLD,
+            HOST_GET_WORLD_PIXEL_FORMAT,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            world_suite[slot * 8..slot * 8 + 8].copy_from_slice(&address.to_le_bytes());
+        }
+        uc(
+            "write PF World Suite",
+            unicorn.mem_write(HOST_WORLD_SUITE, &world_suite),
         )?;
         install_iterate8_suites(&mut unicorn)?;
         uc(
@@ -2352,6 +2420,9 @@ impl GuestEngine<'static> {
             (HOST_AEGP_UNLOCK_MEM_HANDLE, "aegp_unlock_mem_handle"),
             (HOST_AEGP_MEM_HANDLE_SIZE, "aegp_mem_handle_size"),
             (HOST_AEGP_RESIZE_MEM_HANDLE, "aegp_resize_mem_handle"),
+            (HOST_NEW_WORLD, "new_world"),
+            (HOST_DISPOSE_WORLD, "dispose_world"),
+            (HOST_GET_WORLD_PIXEL_FORMAT, "get_world_pixel_format"),
             (HOST_ITERATE8, "iterate8"),
             (HOST_ITERATE8_CONTINUE, "iterate8_continue"),
             (HOST_COLOR_PARAM_VALUE, "color_param_value"),
@@ -4029,6 +4100,16 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         return;
     }
+    if name == "PF World Suite"
+        && version == 2
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_WORLD_SUITE.to_le_bytes())
+            .is_ok()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
     if name == "PF Iterate8 Suite"
         && output != 0
         && let Some(table) = iterate8_suite_table_address(version)
@@ -4614,6 +4695,7 @@ fn find_pf_region(
         })
         .collect::<Vec<_>>();
     occupied.extend(state.image_region);
+    occupied.extend(state.image_region);
     occupied.extend(reserved);
     occupied.sort_unstable();
     let mut candidate = PF_HANDLE_DATA_BASE;
@@ -4865,6 +4947,222 @@ fn emulate_resize_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
     let _ = unicorn.reg_write(RegisterX86::RAX, if result.is_ok() { 0 } else { 4 });
 }
 
+fn world_pixel_bytes(pixel_format: i32) -> Option<u64> {
+    match pixel_format as u32 {
+        0x6267_7261 => Some(abi::PF_PIXEL_SIZE as u64),
+        0x3631_6561 => Some(abi::PF_PIXEL16_SIZE as u64),
+        0x3233_6561 => Some(abi::PF_PIXEL_FLOAT_SIZE as u64),
+        _ => None,
+    }
+}
+
+fn read_world_i32(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+) -> Result<i32, unicorn_engine::unicorn_const::uc_error> {
+    let mut bytes = [0u8; 4];
+    unicorn.mem_read(address, &mut bytes)?;
+    Ok(i32::from_le_bytes(bytes))
+}
+
+fn find_world_region(state: &GuestState, mapped_size: u64) -> Result<u64, String> {
+    let mut occupied = state
+        .worlds
+        .values()
+        .map(|record| {
+            (
+                record.data_region,
+                record.data_region + record.data_mapped_size,
+            )
+        })
+        .collect::<Vec<_>>();
+    occupied.sort_unstable();
+    let mut candidate = WORLD_DATA_BASE;
+    for (start, end) in occupied {
+        if candidate
+            .checked_add(mapped_size)
+            .is_some_and(|candidate_end| candidate_end <= start)
+        {
+            return Ok(candidate);
+        }
+        candidate = candidate.max(end);
+    }
+    if candidate
+        .checked_add(mapped_size)
+        .is_some_and(|candidate_end| candidate_end <= WORLD_DATA_END)
+    {
+        Ok(candidate)
+    } else {
+        Err("PF World address space exhausted".into())
+    }
+}
+
+fn emulate_new_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| {
+        let width = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("new-world width: {error}"))? as u32
+            as i32;
+        let height = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("new-world height: {error}"))? as u32
+            as i32;
+        let clear = unicorn
+            .reg_read(RegisterX86::R9)
+            .map_err(|error| format!("new-world clear flag: {error}"))? as u8
+            != 0;
+        let pixel_format = aegp_stack_arg(unicorn, 0x28)? as u32 as i32;
+        let world = aegp_stack_arg(unicorn, 0x30)?;
+        let pixel_bytes = world_pixel_bytes(pixel_format)
+            .ok_or_else(|| format!("unsupported PF pixel format {pixel_format:#x}"))?;
+        if width <= 0 || height <= 0 || world == 0 {
+            return Err("invalid new-world dimensions or destination".to_string());
+        }
+        let rowbytes = u64::try_from(width)
+            .ok()
+            .and_then(|value| value.checked_mul(pixel_bytes))
+            .ok_or_else(|| "new-world rowbytes overflow".to_string())?;
+        let size = rowbytes
+            .checked_mul(height as u64)
+            .ok_or_else(|| "new-world allocation overflow".to_string())?;
+        if rowbytes > i32::MAX as u64 || size > MAX_WORLD_SIZE {
+            return Err("new-world allocation exceeds worker bounds".to_string());
+        }
+        let state = unicorn.get_data();
+        if state.worlds.contains_key(&world) {
+            return Err("new-world destination is already owned".to_string());
+        }
+        if state.worlds.len() >= MAX_WORLD_COUNT
+            || state.worlds.values().map(|record| record.size).sum::<u64>() > MAX_WORLD_SIZE - size
+        {
+            return Err("PF World live budget exceeded".to_string());
+        }
+        unicorn
+            .mem_read_as_vec(world, abi::PF_LAYER_DEF_SIZE)
+            .map_err(|error| format!("new-world destination: {error}"))?;
+        let mapped_size = aligned_pf_region_size(size)?;
+        let data = find_world_region(state, mapped_size)?;
+        unicorn
+            .mem_map(data, mapped_size, Prot::READ | Prot::WRITE)
+            .map_err(|error| format!("new-world data map: {error}"))?;
+        if !clear {
+            let fill = vec![0xcd; size.min(1024 * 1024) as usize];
+            let mut offset = 0;
+            while offset < size {
+                let length = (size - offset).min(fill.len() as u64) as usize;
+                if let Err(error) = unicorn.mem_write(data + offset, &fill[..length]) {
+                    let _ = unicorn.mem_unmap(data, mapped_size);
+                    return Err(format!("new-world deterministic fill: {error}"));
+                }
+                offset += length as u64;
+            }
+        }
+        let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        let flags = 2 | i32::from(pixel_format as u32 != 0x6267_7261);
+        definition[abi::LAYER_WORLD_FLAGS_OFFSET..abi::LAYER_WORLD_FLAGS_OFFSET + 4]
+            .copy_from_slice(&flags.to_le_bytes());
+        definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&data.to_le_bytes());
+        definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&(rowbytes as i32).to_le_bytes());
+        definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&width.to_le_bytes());
+        definition[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&height.to_le_bytes());
+        for (index, value) in [0, 0, width, height].into_iter().enumerate() {
+            let offset = abi::LAYER_EXTENT_HINT_OFFSET + index * 4;
+            definition[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        definition[88..92].copy_from_slice(&1i32.to_le_bytes());
+        definition[92..96].copy_from_slice(&1u32.to_le_bytes());
+        if let Err(error) = unicorn.mem_write(world, &definition) {
+            let _ = unicorn.mem_unmap(data, mapped_size);
+            return Err(format!("new-world definition: {error}"));
+        }
+        unicorn.get_data_mut().worlds.insert(
+            world,
+            GuestWorld {
+                pixel_format,
+                size,
+                data_region: data,
+                data_mapped_size: mapped_size,
+            },
+        );
+        Ok(())
+    })();
+    let _ = unicorn.reg_write(RegisterX86::RAX, if result.is_ok() { 0 } else { 4 });
+}
+
+fn emulate_dispose_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let world = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let result: Result<(), String> = (|| {
+        let record = unicorn
+            .get_data()
+            .worlds
+            .get(&world)
+            .cloned()
+            .ok_or_else(|| "dispose-world received a stale world".to_string())?;
+        let old_definition = unicorn
+            .mem_read_as_vec(world, abi::PF_LAYER_DEF_SIZE)
+            .map_err(|error| format!("dispose-world destination: {error}"))?;
+        unicorn
+            .mem_write(world, &vec![0u8; abi::PF_LAYER_DEF_SIZE])
+            .map_err(|error| format!("dispose-world definition: {error}"))?;
+        if let Err(error) = unicorn.mem_unmap(record.data_region, record.data_mapped_size) {
+            let _ = unicorn.mem_write(world, &old_definition);
+            return Err(format!("dispose-world data unmap: {error}"));
+        }
+        unicorn.get_data_mut().worlds.remove(&world);
+        Ok(())
+    })();
+    let _ = unicorn.reg_write(RegisterX86::RAX, if result.is_ok() { 0 } else { 4 });
+}
+
+fn emulate_get_world_pixel_format(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let world = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let pixel_format = unicorn
+        .get_data()
+        .worlds
+        .get(&world)
+        .map(|record| record.pixel_format)
+        .or_else(|| {
+            (world != 0
+                && (world == unicorn.get_data().smart_input_world
+                    || world == unicorn.get_data().smart_output_world))
+                .then_some(0x6267_7261u32 as i32)
+        })
+        .or_else(|| {
+            if world == 0 {
+                return None;
+            }
+            let width = read_world_i32(unicorn, world + abi::LAYER_WIDTH_OFFSET as u64).ok()?;
+            let rowbytes =
+                read_world_i32(unicorn, world + abi::LAYER_ROWBYTES_OFFSET as u64).ok()?;
+            if width <= 0 || rowbytes <= 0 || rowbytes % width != 0 {
+                return None;
+            }
+            let bytes_per_pixel = rowbytes / width;
+            match bytes_per_pixel {
+                4 => Some(0x6267_7261u32 as i32),
+                8 => Some(0x3631_6561u32 as i32),
+                16 => Some(0x3233_6561u32 as i32),
+                _ => None,
+            }
+        });
+    let result = if let Some(pixel_format) = pixel_format
+        && output != 0
+        && unicorn
+            .mem_write(output, &pixel_format.to_le_bytes())
+            .is_ok()
+    {
+        0
+    } else {
+        4
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, result);
+}
+
 fn finish_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<(), String>) {
     match result {
         Ok(()) => {
@@ -5000,6 +5298,9 @@ mod tests {
             HOST_AEGP_UNLOCK_MEM_HANDLE,
             HOST_AEGP_MEM_HANDLE_SIZE,
             HOST_AEGP_RESIZE_MEM_HANDLE,
+            HOST_NEW_WORLD,
+            HOST_DISPOSE_WORLD,
+            HOST_GET_WORLD_PIXEL_FORMAT,
             HOST_ITERATE8,
             HOST_ITERATE8_CONTINUE,
             HOST_COLOR_PARAM_VALUE,
@@ -5057,6 +5358,9 @@ mod tests {
             (HOST_AEGP_UNLOCK_MEM_HANDLE, emulate_aegp_unlock_mem_handle),
             (HOST_AEGP_MEM_HANDLE_SIZE, emulate_aegp_mem_handle_size),
             (HOST_AEGP_RESIZE_MEM_HANDLE, emulate_aegp_resize_mem_handle),
+            (HOST_NEW_WORLD, emulate_new_world),
+            (HOST_DISPOSE_WORLD, emulate_dispose_world),
+            (HOST_GET_WORLD_PIXEL_FORMAT, emulate_get_world_pixel_format),
         ] {
             unicorn.add_code_hook(address, address, callback).unwrap();
         }
@@ -5079,6 +5383,18 @@ mod tests {
         unicorn
             .mem_write(HOST_AEGP_MEMORY_SUITE, &aegp_memory_suite)
             .unwrap();
+        let mut world_suite = [0u8; 24];
+        for (slot, callback) in [
+            HOST_NEW_WORLD,
+            HOST_DISPOSE_WORLD,
+            HOST_GET_WORLD_PIXEL_FORMAT,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            world_suite[slot * 8..slot * 8 + 8].copy_from_slice(&callback.to_le_bytes());
+        }
+        unicorn.mem_write(HOST_WORLD_SUITE, &world_suite).unwrap();
         unicorn
             .add_code_hook(HOST_ITERATE8, HOST_ITERATE8, emulate_iterate8)
             .unwrap();
@@ -5277,6 +5593,169 @@ mod tests {
         assert!(validate_pf_handle_budget(&state, 0, None).is_err());
         let existing = state.handles.values().next().unwrap().clone();
         assert!(validate_pf_handle_budget(&state, 1, Some(&existing)).is_ok());
+    }
+
+    #[test]
+    fn pf_world_suite_v2_owns_formats_and_fails_closed() {
+        let mut engine = test_engine(&[0xc3]);
+        let suite_name = engine.allocate(15, 1).unwrap();
+        engine.write(suite_name, b"PF World Suite\0").unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [suite_name, 2, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut suite = [0u8; 8];
+        engine.read(suite_output, &mut suite).unwrap();
+        assert_eq!(u64::from_le_bytes(suite), HOST_WORLD_SUITE);
+        let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_NEW_WORLD, [1, 3, 2, 1, 0xdead_beef, world])
+                .unwrap(),
+            4
+        );
+        assert!(engine.unicorn.get_data().worlds.is_empty());
+        assert_eq!(
+            engine
+                .call_win64(HOST_NEW_WORLD, [1, 3, 2, 1, 0x3631_6561, world])
+                .unwrap(),
+            0
+        );
+        let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        engine.unicorn.mem_read(world, &mut definition).unwrap();
+        let data = u64::from_le_bytes(
+            definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            i32::from_le_bytes(
+                definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            24
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(data, 48).unwrap(),
+            vec![0; 48]
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_NEW_WORLD, [1, 3, 2, 1, 0x3631_6561, world])
+                .unwrap(),
+            4
+        );
+        assert_eq!(engine.unicorn.get_data().worlds.len(), 1);
+
+        let format_output = engine.allocate(4, 4).unwrap();
+        engine
+            .unicorn
+            .mem_write(format_output, &0xfeed_beefu32.to_le_bytes())
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_GET_WORLD_PIXEL_FORMAT, [0, format_output, 0, 0, 0, 0])
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(format_output, 4).unwrap(),
+            0xfeed_beefu32.to_le_bytes()
+        );
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_GET_WORLD_PIXEL_FORMAT,
+                    [world, format_output, 0, 0, 0, 0]
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(format_output, 4).unwrap(),
+            0x3631_6561u32.to_le_bytes()
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert!(engine.unicorn.get_data().worlds.is_empty());
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(world, abi::PF_LAYER_DEF_SIZE)
+                .unwrap(),
+            vec![0; abi::PF_LAYER_DEF_SIZE]
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_DISPOSE_WORLD, [1, world, 0, 0, 0, 0])
+                .unwrap(),
+            4
+        );
+        let classic_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let mut classic_definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        classic_definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&2i32.to_le_bytes());
+        classic_definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&8i32.to_le_bytes());
+        engine.write(classic_world, &classic_definition).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_GET_WORLD_PIXEL_FORMAT,
+                    [classic_world, format_output, 0, 0, 0, 0]
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(format_output, 4).unwrap(),
+            0x6267_7261u32.to_le_bytes()
+        );
+
+        let float_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_NEW_WORLD, [1, 1, 1, 0x100, 0x3233_6561, float_world],)
+                .unwrap(),
+            0
+        );
+        engine
+            .unicorn
+            .mem_read(float_world, &mut definition)
+            .unwrap();
+        let float_data = u64::from_le_bytes(
+            definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(float_data, 16).unwrap(),
+            vec![0xcd; 16]
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_DISPOSE_WORLD, [1, float_world, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_NEW_WORLD,
+                    [1, i32::MAX as u64, i32::MAX as u64, 1, 0x6267_7261, world,]
+                )
+                .unwrap(),
+            4
+        );
+        assert!(engine.unicorn.get_data().worlds.is_empty());
     }
 
     #[test]
