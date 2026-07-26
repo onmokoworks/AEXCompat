@@ -729,6 +729,9 @@ impl GuestEngine<'static> {
     pub fn ansi_sin_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
+    pub fn ansi_sqrt_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
     pub fn new_handle_callback_address(&self) -> u64 {
         callback_address!(new_handle)
     }

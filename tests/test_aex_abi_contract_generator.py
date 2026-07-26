@@ -162,7 +162,7 @@ def test_probe_covers_every_current_bootstrap_callback():
         "utils.new_world",
         "utils.dispose_world", "utils.transform_world", "utils.ansi_ceil",
         "utils.ansi_cos",
-        "utils.ansi_fabs", "utils.ansi_pow", "utils.ansi_sin",
+        "utils.ansi_fabs", "utils.ansi_pow", "utils.ansi_sin", "utils.ansi_sqrt",
         "utils.ansi_sprintf", "utils.ansi_strcpy", "utils.get_platform_data",
         "utils.get_pixel_data8", "utils.get_pixel_data16",
         "utils.host_new_handle", "utils.host_lock_handle",
