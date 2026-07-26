@@ -51,9 +51,17 @@ fn main() -> ExitCode {
         usage();
         return ExitCode::from(2);
     };
-    let input = args.next().map(PathBuf::from);
-    let output = args.next().map(PathBuf::from);
-    let mut trailing_args = args.collect::<Vec<_>>();
+    let mut remaining_args = args.collect::<Vec<_>>();
+    let effect_selector = match extract_effect_selector(&mut remaining_args) {
+        Ok(selector) => selector,
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let input = (!remaining_args.is_empty()).then(|| PathBuf::from(remaining_args.remove(0)));
+    let output = (!remaining_args.is_empty()).then(|| PathBuf::from(remaining_args.remove(0)));
+    let mut trailing_args = remaining_args;
     let region = if command == "render-region-png" {
         if trailing_args.len() < 4 {
             usage();
@@ -119,11 +127,15 @@ fn main() -> ExitCode {
         })
         .and_then(|image| match command.to_str() {
             Some("inspect") => {
+                if effect_selector.is_some() {
+                    ClassicHost::new_with_effect(&image, effect_selector.as_deref())
+                        .map_err(|error| CommandFailure::from(error.to_string()))?;
+                }
                 serde_json::to_string_pretty(&image.report())
                     .map_err(|error| CommandFailure::from(error.to_string()))
             }
             Some("setup") => {
-                let mut host = ClassicHost::new(&image)
+                let mut host = ClassicHost::new_with_effect(&image, effect_selector.as_deref())
                     .map_err(|error| CommandFailure::from(error.to_string()))?;
                 let report = host
                     .setup()
@@ -136,7 +148,7 @@ fn main() -> ExitCode {
                     .as_deref()
                     .and_then(Path::to_str)
                     .ok_or_else(|| CommandFailure::from("trace selector must be UTF-8".to_string()))?;
-                let mut host = ClassicHost::new(&image)
+                let mut host = ClassicHost::new_with_effect(&image, effect_selector.as_deref())
                     .map_err(|error| CommandFailure::from(error.to_string()))?;
                 let trace = host
                     .trace_setup_selector(selector)
@@ -146,7 +158,7 @@ fn main() -> ExitCode {
                     .map_err(|error| CommandFailure::from(error.to_string()))
             }
             Some("render") => {
-                let mut host = ClassicHost::new(&image)
+                let mut host = ClassicHost::new_with_effect(&image, effect_selector.as_deref())
                     .map_err(|error| CommandFailure::from(error.to_string()))?;
                 let report = host
                     .render_default_2x2()
@@ -164,6 +176,7 @@ fn main() -> ExitCode {
                 false,
                 &[],
                 None,
+                effect_selector.as_deref(),
             ),
             Some("render-trace-png") => render_png(
                 &image,
@@ -175,6 +188,7 @@ fn main() -> ExitCode {
                 true,
                 &watches,
                 output_pixel,
+                effect_selector.as_deref(),
             ),
             Some("render-region-png") => render_png(
                 &image,
@@ -186,6 +200,7 @@ fn main() -> ExitCode {
                 false,
                 &[],
                 None,
+                effect_selector.as_deref(),
             ),
             Some("census-png") => render_png(
                 &image,
@@ -197,6 +212,7 @@ fn main() -> ExitCode {
                 false,
                 &[],
                 None,
+                effect_selector.as_deref(),
             ),
             _ => Err(CommandFailure::from(
                 "command must be inspect, setup, trace-selector, render, render-png, render-trace-png, render-region-png, or census-png".to_string(),
@@ -228,26 +244,65 @@ fn selector_error(return_value: u64) -> Option<i32> {
 }
 
 fn usage() {
-    eprintln!("usage: aex-guest-worker <inspect|setup|render> <x64.aex>");
     eprintln!(
-        "       aex-guest-worker session <x64.aex> <input.argb8> <output.argb8> <width> <height> <time-scale>"
-    );
-    eprintln!("       aex-guest-worker trace-selector <x64.aex> <GLOBAL_SETUP|PARAMS_SETUP>");
-    eprintln!(
-        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [name=value | name@slot=a,r,g,b ...]"
+        "usage: aex-guest-worker <inspect|setup|render> <x64.aex> [--effect <#index|match-name>]"
     );
     eprintln!(
-        "       aex-guest-worker render-trace-png <x64.aex> <input.png> <output.png> [--watch <spec>] [--watch-output-pixel x,y] [name=value ...]"
+        "       aex-guest-worker session <x64.aex> <input.argb8> <output.argb8> <width> <height> <time-scale> [--effect <#index|match-name>]"
     );
     eprintln!(
-        "       aex-guest-worker render-region-png <x64.aex> <input.png> <output.png> <left> <top> <right> <bottom> [name=value ...]"
+        "       aex-guest-worker trace-selector <x64.aex> <GLOBAL_SETUP|PARAMS_SETUP> [--effect <#index|match-name>]"
     );
     eprintln!(
-        "       aex-guest-worker census-png <x64.aex> <input.png> <output.png> [name=value ...]"
+        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [name=value | name@slot=a,r,g,b ...]"
+    );
+    eprintln!(
+        "       aex-guest-worker render-trace-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--watch <spec>] [--watch-output-pixel x,y] [name=value ...]"
+    );
+    eprintln!(
+        "       aex-guest-worker render-region-png <x64.aex> <input.png> <output.png> <left> <top> <right> <bottom> [--effect <#index|match-name>] [name=value ...]"
+    );
+    eprintln!(
+        "       aex-guest-worker census-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [name=value ...]"
     );
 }
 
-fn run_session_command(arguments: Vec<std::ffi::OsString>) -> ExitCode {
+fn extract_effect_selector(
+    arguments: &mut Vec<std::ffi::OsString>,
+) -> Result<Option<String>, String> {
+    let mut selector = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] != "--effect" {
+            index += 1;
+            continue;
+        }
+        if selector.is_some() {
+            return Err("--effect may be specified only once".into());
+        }
+        if index + 1 >= arguments.len() {
+            return Err("--effect requires #index or an exact match name".into());
+        }
+        let value = arguments[index + 1]
+            .to_str()
+            .ok_or_else(|| "--effect selector must be UTF-8".to_string())?;
+        if value.is_empty() {
+            return Err("--effect selector must not be empty".into());
+        }
+        selector = Some(value.to_string());
+        arguments.drain(index..=index + 1);
+    }
+    Ok(selector)
+}
+
+fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
+    let effect_selector = match extract_effect_selector(&mut arguments) {
+        Ok(selector) => selector,
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            return ExitCode::from(2);
+        }
+    };
     if arguments.len() != 6 {
         usage();
         return ExitCode::from(2);
@@ -286,6 +341,7 @@ fn run_session_command(arguments: Vec<std::ffi::OsString>) -> ExitCode {
                 width,
                 height,
                 time_scale,
+                effect_selector.as_deref(),
                 stdin.lock(),
                 stdout.lock(),
             )
@@ -310,6 +366,7 @@ fn render_png(
     trace: bool,
     watches: &[TraceWatchSpec],
     output_pixel: Option<[u32; 2]>,
+    effect_selector: Option<&str>,
 ) -> Result<String, CommandFailure> {
     let input_png_sha256 = fs::read(input)
         .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
@@ -322,8 +379,8 @@ fn render_png(
     for pixel in rgba.as_raw().chunks_exact(4) {
         argb8.extend_from_slice(&[pixel[3], pixel[0], pixel[1], pixel[2]]);
     }
-    let mut host =
-        ClassicHost::new(image).map_err(|error| CommandFailure::from(error.to_string()))?;
+    let mut host = ClassicHost::new_with_effect(image, effect_selector)
+        .map_err(|error| CommandFailure::from(error.to_string()))?;
     let render_result = if trace {
         host.render_argb8_trace_with_watches(
             width,
@@ -580,7 +637,9 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_parameter_values, parse_trace_watches, selector_error};
+    use super::{
+        extract_effect_selector, parse_parameter_values, parse_trace_watches, selector_error,
+    };
     use std::ffi::OsString;
 
     #[test]
@@ -588,6 +647,32 @@ mod tests {
         assert_eq!(selector_error(0), None);
         assert_eq!(selector_error(7), Some(7));
         assert_eq!(selector_error(u64::MAX), Some(-1));
+    }
+
+    #[test]
+    fn effect_selector_is_removed_without_consuming_parameter_assignments() {
+        let mut values = vec![
+            OsString::from("input.png"),
+            OsString::from("--effect"),
+            OsString::from("#2"),
+            OsString::from("output.png"),
+            OsString::from("Amount=5"),
+        ];
+        assert_eq!(
+            extract_effect_selector(&mut values).unwrap().as_deref(),
+            Some("#2")
+        );
+        assert_eq!(
+            values,
+            [
+                OsString::from("input.png"),
+                OsString::from("output.png"),
+                OsString::from("Amount=5")
+            ]
+        );
+        values.extend([OsString::from("--effect"), OsString::from("duplicate")]);
+        values.extend([OsString::from("--effect"), OsString::from("duplicate")]);
+        assert!(extract_effect_selector(&mut values).is_err());
     }
 
     #[test]

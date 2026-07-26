@@ -36,8 +36,14 @@ pub enum PeError {
     SectionFileRange { name: String },
     #[error("section {name} virtual range is outside the mapped image")]
     SectionImageRange { name: String },
-    #[error("entry export was not found (tried EffectMain, entryPointFunc, entry_point)")]
+    #[error(
+        "effect discovery export was not found (tried EffectMain, entryPointFunc, entry_point, PluginDataEntryFunction2, PluginDataEntryFunction)"
+    )]
     MissingEntryExport,
+    #[error("duplicate named export {0}")]
+    DuplicateExport(String),
+    #[error("export {0} does not point into an executable image section")]
+    NonExecutableExport(String),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -76,6 +82,8 @@ pub struct PeImage {
     image_base: u64,
     entry_export: String,
     entry_rva: usize,
+    direct_entry: Option<String>,
+    exports: BTreeMap<String, usize>,
     dll_entry_rva: usize,
     section_count: usize,
     imports: Vec<ImportLibrary>,
@@ -158,16 +166,49 @@ impl PeImage {
             });
         }
 
-        let candidates = ["EffectMain", "entryPointFunc", "entry_point"];
-        let (entry_export, entry_rva) = candidates
+        let mut exports = BTreeMap::new();
+        for export in pe.exports.iter().filter(|export| export.reexport.is_none()) {
+            let Some(name) = export.name else {
+                continue;
+            };
+            if exports.insert(name.to_string(), export.rva).is_some() {
+                return Err(PeError::DuplicateExport(name.to_string()));
+            }
+        }
+        let executable_export = |name: &str, rva: usize| {
+            section_protections
+                .iter()
+                .any(|section| {
+                    section.executable
+                        && rva >= section.virtual_address
+                        && rva < section.virtual_address.saturating_add(section.virtual_size)
+                })
+                .then_some((name.to_string(), rva))
+        };
+        for (name, rva) in &exports {
+            if ["EffectMain", "entryPointFunc", "entry_point"]
+                .into_iter()
+                .chain(["PluginDataEntryFunction2", "PluginDataEntryFunction"])
+                .any(|candidate| candidate == name)
+                && executable_export(name, *rva).is_none()
+            {
+                return Err(PeError::NonExecutableExport(name.clone()));
+            }
+        }
+
+        let direct_candidates = ["EffectMain", "entryPointFunc", "entry_point"];
+        let direct_entry = direct_candidates
             .iter()
-            .find_map(|candidate| {
-                pe.exports
-                    .iter()
-                    .find(|export| export.name == Some(*candidate) && export.reexport.is_none())
-                    .map(|export| ((*candidate).to_string(), export.rva))
-            })
-            .ok_or(PeError::MissingEntryExport)?;
+            .find(|candidate| exports.contains_key(**candidate))
+            .map(|candidate| (*candidate).to_string());
+        let discovery_entry = direct_entry.clone().or_else(|| {
+            ["PluginDataEntryFunction2", "PluginDataEntryFunction"]
+                .into_iter()
+                .find(|candidate| exports.contains_key(*candidate))
+                .map(str::to_string)
+        });
+        let entry_export = discovery_entry.ok_or(PeError::MissingEntryExport)?;
+        let entry_rva = exports[&entry_export];
 
         let mut grouped: BTreeMap<String, Vec<ImportSymbol>> = BTreeMap::new();
         for import in &pe.imports {
@@ -193,6 +234,8 @@ impl PeImage {
             image_base: pe.image_base,
             entry_export,
             entry_rva,
+            direct_entry,
+            exports,
             dll_entry_rva,
             section_count: pe.sections.len(),
             imports,
@@ -211,8 +254,23 @@ impl PeImage {
         self.image_base
     }
 
-    pub fn entry_address(&self) -> u64 {
-        self.image_base + self.entry_rva as u64
+    pub fn entry_address(&self) -> Option<u64> {
+        self.direct_entry
+            .as_deref()
+            .and_then(|name| self.export_address(name))
+    }
+
+    pub fn export_address(&self, name: &str) -> Option<u64> {
+        let rva = *self.exports.get(name)?;
+        self.section_protections
+            .iter()
+            .any(|section| {
+                section.executable
+                    && rva >= section.virtual_address
+                    && rva < section.virtual_address.saturating_add(section.virtual_size)
+            })
+            .then(|| self.image_base.checked_add(rva as u64))
+            .flatten()
     }
 
     pub fn dll_entry_address(&self) -> Option<u64> {

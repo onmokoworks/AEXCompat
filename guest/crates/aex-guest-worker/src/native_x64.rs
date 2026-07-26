@@ -32,6 +32,9 @@ use crate::native_aegp_memory::{
     resize_aegp_mem_handle, unlock_aegp_mem_handle, unsupported_aegp_memory_slot,
 };
 use crate::pe::PeImage;
+use crate::plugin_data::{
+    CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
+};
 pub use crate::x64::{
     ExecutionTrace, GuestCensus, GuestParam, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
 };
@@ -172,6 +175,7 @@ struct NativeState {
     world_suite: u64,
     image_start: u64,
     image_end: u64,
+    plugin_data_registry: EffectRegistry,
 }
 
 thread_local! {
@@ -234,6 +238,7 @@ pub struct GuestEngine<'a> {
     image: Mapping,
     arena: Mapping,
     state: NativeState,
+    dllmain_attached: bool,
     lifetime: PhantomData<&'a ()>,
 }
 
@@ -291,6 +296,7 @@ impl GuestEngine<'static> {
                 image_end: image.image_base() + image_size as u64,
                 ..NativeState::default()
             },
+            dllmain_attached: image.dll_entry_address().is_none(),
             lifetime: PhantomData,
         };
         engine.install_imports(image)?;
@@ -356,8 +362,70 @@ impl GuestEngine<'static> {
             if attached == 0 {
                 return Err(GuestError::DllProcessAttach);
             }
+            engine.dllmain_attached = true;
         }
         Ok(engine)
+    }
+
+    pub fn resolve_effect_entry(
+        &mut self,
+        image: &PeImage,
+        selector: Option<&str>,
+        basic_suite: u64,
+    ) -> Result<u64, GuestError> {
+        if let Some(entry) = image.entry_address() {
+            if selector.is_some() {
+                return Err(GuestError::Callback(
+                    "effect selection is unavailable when a direct effect entrypoint exists".into(),
+                ));
+            }
+            return Ok(entry);
+        }
+        if !self.dllmain_attached {
+            return Err(GuestError::Callback(
+                "PluginData registration requires DLL_PROCESS_ATTACH in the native carrier".into(),
+            ));
+        }
+        let (registration_entry, callback) = if let Some(entry) =
+            image.export_address("PluginDataEntryFunction2")
+        {
+            (entry, callback_address!(plugin_data_callback_v2))
+        } else if let Some(entry) = image.export_address("PluginDataEntryFunction") {
+            (entry, callback_address!(plugin_data_callback_v1))
+        } else {
+            return Err(GuestError::Callback(
+                    "effect selector requires PluginData registration, but no registration export exists"
+                        .into(),
+                ));
+        };
+        self.state.plugin_data_registry = EffectRegistry::default();
+        let host_name = self.allocate(10, 1)?;
+        self.write(host_name, b"AEXCompat\0")?;
+        let host_version = self.allocate(5, 1)?;
+        self.write(host_version, b"2025\0")?;
+        let returned = self.call_win64(
+            registration_entry,
+            [1, callback, basic_suite, host_name, host_version, 0],
+        )? as i32;
+        if returned != 0 {
+            return Err(GuestError::Callback(format!(
+                "PluginData entrypoint returned {returned}"
+            )));
+        }
+        let registration = self
+            .state
+            .plugin_data_registry
+            .select(selector)
+            .map_err(|error| GuestError::Callback(error.to_string()))?
+            .clone();
+        image
+            .export_address(&registration.entrypoint)
+            .ok_or_else(|| {
+                GuestError::Callback(format!(
+                    "registered effect entrypoint {} is not an executable export",
+                    registration.entrypoint
+                ))
+            })
     }
 
     fn install_imports(&mut self, image: &PeImage) -> Result<(), GuestError> {
@@ -650,6 +718,87 @@ unsafe fn write_pointer(pointer: u64, bytes: &[u8]) {
 
 unsafe extern "win64" fn noop_import(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
     0
+}
+
+fn capture_native_plugin_data(context: u64, pointers: RegistrationPointers) -> u64 {
+    if context != 1 {
+        with_state(|state| {
+            state.callback_error = Some(format!(
+                "PluginData callback context {context:#x} is invalid"
+            ))
+        });
+        return CALLBACK_REJECTED as u32 as u64;
+    }
+    with_state(|state| {
+        let decoded = decode_registration(pointers, |address| {
+            native_guest_range_valid(state, address, 1).then(|| unsafe { *(address as *const u8) })
+        });
+        match decoded.and_then(|registration| state.plugin_data_registry.push(registration)) {
+            Ok(()) => 0,
+            Err(error) => {
+                state.callback_error = Some(format!("PluginData registration rejected: {error}"));
+                CALLBACK_REJECTED as u32 as u64
+            }
+        }
+    })
+    .unwrap_or(CALLBACK_REJECTED as u32 as u64)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "win64" fn plugin_data_callback_v2(
+    context: u64,
+    name: u64,
+    match_name: u64,
+    category: u64,
+    entrypoint: u64,
+    kind: u64,
+    api_major: u64,
+    api_minor: u64,
+    reserved_info: u64,
+    support_url: u64,
+) -> u64 {
+    capture_native_plugin_data(
+        context,
+        RegistrationPointers {
+            name,
+            match_name,
+            category,
+            entrypoint,
+            kind: kind as u32 as i32,
+            api_major: api_major as u32 as i32,
+            api_minor: api_minor as u32 as i32,
+            reserved_info: reserved_info as u32 as i32,
+            support_url: Some(support_url),
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "win64" fn plugin_data_callback_v1(
+    context: u64,
+    name: u64,
+    match_name: u64,
+    category: u64,
+    entrypoint: u64,
+    kind: u64,
+    api_major: u64,
+    api_minor: u64,
+    reserved_info: u64,
+) -> u64 {
+    capture_native_plugin_data(
+        context,
+        RegistrationPointers {
+            name,
+            match_name,
+            category,
+            entrypoint,
+            kind: kind as u32 as i32,
+            api_major: api_major as u32 as i32,
+            api_minor: api_minor as u32 as i32,
+            reserved_info: reserved_info as u32 as i32,
+            support_url: None,
+        },
+    )
 }
 
 unsafe extern "win64" fn native_omp_get_max_threads(

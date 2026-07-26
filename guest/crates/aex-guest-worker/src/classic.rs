@@ -199,7 +199,13 @@ struct FrameResources {
 
 impl ClassicHost {
     pub fn new(image: &PeImage) -> Result<Self, ClassicError> {
-        let entry = image.entry_address();
+        Self::new_with_effect(image, None)
+    }
+
+    pub fn new_with_effect(
+        image: &PeImage,
+        effect_selector: Option<&str>,
+    ) -> Result<Self, ClassicError> {
         let mut engine = GuestEngine::load(image)?;
         let input = engine.allocate(abi::PF_IN_DATA_SIZE, 8)?;
         let output = engine.allocate(abi::PF_OUT_DATA_SIZE, 8)?;
@@ -300,6 +306,7 @@ impl ClassicHost {
             write_u64(&mut utility_bytes, offset, callback);
         }
         engine.write(utils, &utility_bytes)?;
+        let entry = engine.resolve_effect_entry(image, effect_selector, pica_basic)?;
         Ok(Self {
             engine,
             entry,
