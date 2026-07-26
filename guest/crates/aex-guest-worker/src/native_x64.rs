@@ -49,6 +49,7 @@ const MAX_PF_HANDLE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_PF_HANDLE_COUNT: usize = 16_384;
 const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_WORLD_COUNT: usize = 256;
+const MAX_SMART_CHECKOUT_IDS: usize = 64;
 const PROT_READ: c_int = 0x1;
 const PROT_WRITE: c_int = 0x2;
 const PROT_EXEC: c_int = 0x4;
@@ -161,7 +162,9 @@ struct NativeState {
     iterate8_suite: u64,
     pre_checkout_calls: u32,
     pre_checkout_requests: Vec<[i32; 4]>,
+    smart_checkout_ids: HashMap<i32, bool>,
     checkout_pixels_calls: u32,
+    checkin_pixels_calls: u32,
     checkout_output_calls: u32,
     input_parameter_definition: u64,
     parameter_definitions: Vec<u64>,
@@ -619,11 +622,16 @@ impl GuestEngine<'static> {
         pixel_format: i32,
     ) {
         self.state.pre_checkout_requests.clear();
+        self.state.smart_checkout_ids.clear();
         self.state.smart_input_world = input_world;
         self.state.smart_output_world = output_world;
         self.state.smart_width = width;
         self.state.smart_height = height;
         self.state.smart_pixel_format = pixel_format;
+    }
+
+    pub fn finish_smart_checkout_scope(&mut self) {
+        self.state.smart_checkout_ids.clear();
     }
 
     pub fn parameters(&self) -> &[GuestParam] {
@@ -680,7 +688,7 @@ impl GuestEngine<'static> {
         callback_address!(checkout_layer_pixels)
     }
     pub fn checkin_layer_pixels_callback_address(&self) -> u64 {
-        callback_address!(noop_import)
+        callback_address!(checkin_layer_pixels)
     }
     pub fn checkout_output_callback_address(&self) -> u64 {
         callback_address!(checkout_output)
@@ -1437,7 +1445,13 @@ unsafe extern "win64" fn pre_checkout_layer(
 ) -> u64 {
     with_state(|state| {
         state.pre_checkout_calls += 1;
-        if index != 0 || checkout_id != 0 || request == 0 || result == 0 {
+        let checkout_id = checkout_id as u32 as i32;
+        if index != 0
+            || request == 0
+            || result == 0
+            || state.smart_checkout_ids.contains_key(&checkout_id)
+            || state.smart_checkout_ids.len() >= MAX_SMART_CHECKOUT_IDS
+        {
             state.callback_error = Some(format!(
                 "invalid pre-checkout index={index} id={checkout_id} request={request:#x} result={result:#x}"
             ));
@@ -1470,6 +1484,7 @@ unsafe extern "win64" fn pre_checkout_layer(
         unsafe {
             write_pointer(result, &bytes);
         }
+        state.smart_checkout_ids.insert(checkout_id, false);
         0
     })
     .unwrap_or(4)
@@ -1485,13 +1500,40 @@ unsafe extern "win64" fn checkout_layer_pixels(
 ) -> u64 {
     with_state(|state| {
         state.checkout_pixels_calls += 1;
-        if checkout_id != 0 || output == 0 || state.smart_input_world == 0 {
+        let checkout_id = checkout_id as u32 as i32;
+        if state.smart_checkout_ids.get(&checkout_id) != Some(&false)
+            || output == 0
+            || state.smart_input_world == 0
+        {
             state.callback_error = Some("invalid checkout-layer-pixels request".into());
             4
         } else {
             unsafe {
                 *(output as *mut u64) = state.smart_input_world;
             }
+            state.smart_checkout_ids.insert(checkout_id, true);
+            0
+        }
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn checkin_layer_pixels(
+    _: u64,
+    checkout_id: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    with_state(|state| {
+        state.checkin_pixels_calls += 1;
+        let checkout_id = checkout_id as u32 as i32;
+        if state.smart_checkout_ids.get(&checkout_id) != Some(&true) {
+            state.callback_error = Some("invalid checkin-layer-pixels request".into());
+            4
+        } else {
+            state.smart_checkout_ids.insert(checkout_id, false);
             0
         }
     })

@@ -1793,6 +1793,7 @@ impl ClassicHost {
                 self.engine.handle_allocations()
             )));
         }
+        self.engine.finish_smart_checkout_scope();
         Ok((render_error, census, traces))
     }
 

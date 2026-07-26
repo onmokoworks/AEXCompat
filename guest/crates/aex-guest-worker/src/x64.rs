@@ -87,6 +87,7 @@ const HOST_ZERO_PIXEL: u64 = STUB_BASE + 0x803f0;
 const HOST_SUBPIXEL_SAMPLE8: u64 = STUB_BASE + 0x80400;
 const HOST_AREA_SAMPLE8: u64 = STUB_BASE + 0x80410;
 const HOST_TRANSFER_RECT8: u64 = STUB_BASE + 0x80420;
+const MAX_SMART_CHECKOUT_IDS: usize = 64;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
 const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
@@ -1782,7 +1783,9 @@ struct GuestState {
     dropped_unsupported_suite_calls: u64,
     pre_checkout_calls: u32,
     pre_checkout_requests: Vec<[i32; 4]>,
+    smart_checkout_ids: HashMap<i32, bool>,
     checkout_pixels_calls: u32,
+    checkin_pixels_calls: u32,
     checkout_output_calls: u32,
     input_parameter_definition: u64,
     parameter_definitions: Vec<u64>,
@@ -2688,9 +2691,7 @@ impl GuestEngine<'static> {
             unicorn.add_code_hook(
                 HOST_CHECKIN_LAYER_PIXELS,
                 HOST_CHECKIN_LAYER_PIXELS,
-                |unicorn, _, _| {
-                    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
-                },
+                emulate_checkin_layer_pixels,
             ),
         )?;
         uc(
@@ -4117,11 +4118,16 @@ impl GuestEngine<'static> {
     ) {
         let state = self.unicorn.get_data_mut();
         state.pre_checkout_requests.clear();
+        state.smart_checkout_ids.clear();
         state.smart_input_world = input_world;
         state.smart_output_world = output_world;
         state.smart_width = width;
         state.smart_height = height;
         state.smart_pixel_format = pixel_format;
+    }
+
+    pub fn finish_smart_checkout_scope(&mut self) {
+        self.unicorn.get_data_mut().smart_checkout_ids.clear();
     }
 
     pub fn parameters(&self) -> &[GuestParam] {
@@ -5569,9 +5575,23 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
         let checkout_id = unicorn
             .reg_read(RegisterX86::R8)
             .map_err(|error| format!("pre-checkout id: {error}"))? as i32;
-        if index != 0 || checkout_id != 0 {
+        if index != 0 {
             return Err(format!(
                 "unsupported smart checkout index={index} id={checkout_id}"
+            ));
+        }
+        if unicorn
+            .get_data()
+            .smart_checkout_ids
+            .contains_key(&checkout_id)
+        {
+            return Err(format!(
+                "duplicate smart checkout id={checkout_id} for input index=0"
+            ));
+        }
+        if unicorn.get_data().smart_checkout_ids.len() >= MAX_SMART_CHECKOUT_IDS {
+            return Err(format!(
+                "smart checkout token capacity exceeded: {MAX_SMART_CHECKOUT_IDS}"
             ));
         }
         let request_pointer = unicorn
@@ -5631,6 +5651,10 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
         unicorn
             .mem_write(result_pointer, &bytes)
             .map_err(|error| format!("pre-checkout result write: {error}"))?;
+        unicorn
+            .get_data_mut()
+            .smart_checkout_ids
+            .insert(checkout_id, false);
         Ok(())
     })();
     finish_callback(unicorn, result);
@@ -5646,8 +5670,12 @@ fn emulate_checkout_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, 
         let output = unicorn
             .reg_read(RegisterX86::R8)
             .map_err(|error| format!("checkout-pixels output: {error}"))?;
-        let input_world = unicorn.get_data().smart_input_world;
-        if checkout_id != 0 || output == 0 || input_world == 0 {
+        let state = unicorn.get_data();
+        let input_world = state.smart_input_world;
+        if state.smart_checkout_ids.get(&checkout_id) != Some(&false)
+            || output == 0
+            || input_world == 0
+        {
             return Err(format!(
                 "invalid checkout-pixels id={checkout_id} output={output:#x}"
             ));
@@ -5655,6 +5683,29 @@ fn emulate_checkout_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, 
         unicorn
             .mem_write(output, &input_world.to_le_bytes())
             .map_err(|error| format!("checkout-pixels world write: {error}"))?;
+        unicorn
+            .get_data_mut()
+            .smart_checkout_ids
+            .insert(checkout_id, true);
+        Ok(())
+    })();
+    finish_callback(unicorn, result);
+}
+
+fn emulate_checkin_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    unicorn.get_data_mut().checkin_pixels_calls += 1;
+    let result = (|| {
+        let checkout_id = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("checkin-pixels id: {error}"))?
+            as u32 as i32;
+        if unicorn.get_data().smart_checkout_ids.get(&checkout_id) != Some(&true) {
+            return Err(format!("invalid checkin-pixels id={checkout_id}"));
+        }
+        unicorn
+            .get_data_mut()
+            .smart_checkout_ids
+            .insert(checkout_id, false);
         Ok(())
     })();
     finish_callback(unicorn, result);
@@ -7657,6 +7708,9 @@ mod tests {
             HOST_GET_CALLBACK_ADDR,
             HOST_CHECKOUT_PARAM,
             HOST_TRANSFER_RECT8,
+            HOST_PRE_CHECKOUT_LAYER,
+            HOST_CHECKOUT_LAYER_PIXELS,
+            HOST_CHECKIN_LAYER_PIXELS,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -7784,6 +7838,27 @@ mod tests {
                 HOST_TRANSFER_RECT8,
                 HOST_TRANSFER_RECT8,
                 emulate_transfer_rect8,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_PRE_CHECKOUT_LAYER,
+                HOST_PRE_CHECKOUT_LAYER,
+                emulate_pre_checkout_layer,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_CHECKOUT_LAYER_PIXELS,
+                HOST_CHECKOUT_LAYER_PIXELS,
+                emulate_checkout_layer_pixels,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_CHECKIN_LAYER_PIXELS,
+                HOST_CHECKIN_LAYER_PIXELS,
+                emulate_checkin_layer_pixels,
             )
             .unwrap();
         unicorn
@@ -9081,6 +9156,94 @@ mod tests {
                 .call_win64(HOST_COLOR_PARAM_VALUE, [0, definition, output, 0, 0, 0])
                 .unwrap(),
             516
+        );
+    }
+
+    #[test]
+    fn smart_checkout_tracks_multiple_opaque_ids_and_selector_scope_cleanup() {
+        let mut engine = test_engine(&[0xc3]);
+        let input_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let output_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        engine.configure_smart_render(
+            input_world,
+            output_world,
+            8,
+            6,
+            crate::pixel::PF_PIXEL_FORMAT_ARGB32,
+        );
+        let request = engine.allocate(16, 4).unwrap();
+        engine
+            .write(
+                request,
+                &[0i32, 0, 8, 6]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let result = engine.allocate(76, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_PRE_CHECKOUT_LAYER,
+                    &[1, 0, 9999, request, 0, 1, 1, result],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        let second_result = engine.allocate(76, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_PRE_CHECKOUT_LAYER,
+                    &[1, 0, 0, request, 0, 1, 1, second_result],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+
+        let checked_out_world = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_CHECKOUT_LAYER_PIXELS,
+                    [1, 9999, checked_out_world, 0, 0, 0],
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(checked_out_world, 8)
+                .unwrap(),
+            input_world.to_le_bytes()
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_CHECKIN_LAYER_PIXELS, [1, 9999, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_CHECKOUT_LAYER_PIXELS,
+                    [1, 0, checked_out_world, 0, 0, 0],
+                )
+                .unwrap(),
+            0
+        );
+        engine.finish_smart_checkout_scope();
+        assert!(engine.unicorn.get_data().smart_checkout_ids.is_empty());
+        assert!(
+            engine
+                .call_win64(HOST_CHECKIN_LAYER_PIXELS, [1, 0, 0, 0, 0, 0])
+                .unwrap_err()
+                .to_string()
+                .contains("invalid checkin-pixels id=0")
         );
     }
 
