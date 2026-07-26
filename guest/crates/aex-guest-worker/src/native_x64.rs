@@ -43,6 +43,8 @@ const MAX_AEGP_MEMORY_HANDLES: usize = 256;
 const PAGE_SIZE: usize = 4096;
 const MAX_PF_HANDLE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_PF_HANDLE_COUNT: usize = 16_384;
+const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
+const MAX_WORLD_COUNT: usize = 256;
 const PROT_READ: c_int = 0x1;
 const PROT_WRITE: c_int = 0x2;
 const PROT_EXEC: c_int = 0x4;
@@ -73,6 +75,9 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn munmap(address: *mut c_void, length: usize) -> c_int;
     fn mprotect(address: *mut c_void, length: usize, protection: c_int) -> c_int;
+    fn pthread_self() -> *mut c_void;
+    fn pthread_get_stackaddr_np(thread: *mut c_void) -> *mut c_void;
+    fn pthread_get_stacksize_np(thread: *mut c_void) -> usize;
 }
 
 #[derive(Debug, Error)]
@@ -119,6 +124,14 @@ struct NativeHandle {
     data_mapping_size: usize,
 }
 
+#[derive(Clone, Debug)]
+struct NativeWorld {
+    pixel_format: i32,
+    size: u64,
+    data: u64,
+    mapping_size: usize,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ColorParamPixelFloat {
@@ -147,6 +160,7 @@ struct NativeState {
     checkout_output_calls: u32,
     parameter_definitions: Vec<u64>,
     handles: HashMap<u64, NativeHandle>,
+    worlds: HashMap<u64, NativeWorld>,
     aegp_memory: NativeAegpMemory,
     handle_allocations: Vec<u64>,
     arena_next: u64,
@@ -155,6 +169,9 @@ struct NativeState {
     aegp_memory_suite: u64,
     color_param_suite: u64,
     point_param_suite: u64,
+    world_suite: u64,
+    image_start: u64,
+    image_end: u64,
 }
 
 thread_local! {
@@ -228,10 +245,23 @@ impl Drop for GuestEngine<'_> {
                 munmap(handle as *mut c_void, PAGE_SIZE);
             }
         }
+        for record in self.state.worlds.drain().map(|(_, record)| record) {
+            unsafe {
+                munmap(record.data as *mut c_void, record.mapping_size);
+            }
+        }
     }
 }
 
 type Win64Function = unsafe extern "win64" fn(u64, u64, u64, u64, u64, u64) -> u64;
+
+fn native_world_callbacks() -> [u64; 3] {
+    [
+        callback_address!(new_world),
+        callback_address!(dispose_world),
+        callback_address!(get_world_pixel_format),
+    ]
+}
 
 impl GuestEngine<'static> {
     pub fn backend_name(&self) -> &'static str {
@@ -257,6 +287,8 @@ impl GuestEngine<'static> {
             state: NativeState {
                 arena_next: arena_base,
                 arena_end: arena_base + ARENA_SIZE as u64,
+                image_start: image.image_base(),
+                image_end: image.image_base() + image_size as u64,
                 ..NativeState::default()
             },
             lifetime: PhantomData,
@@ -301,6 +333,11 @@ impl GuestEngine<'static> {
         let point_param_suite = engine.allocate(8, 8)?;
         engine.write_u64(point_param_suite, callback_address!(point_param_value))?;
         engine.state.point_param_suite = point_param_suite;
+        let world_suite = engine.allocate(24, 8)?;
+        for (slot, callback) in native_world_callbacks().into_iter().enumerate() {
+            engine.write_u64(world_suite + (slot * 8) as u64, callback)?;
+        }
+        engine.state.world_suite = world_suite;
         for version in [3u32, 7, 11, 13] {
             let callbacks =
                 native_utility_callbacks(version).expect("known AEGP Utility Suite version");
@@ -814,7 +851,12 @@ fn native_world8(state: &NativeState, world: u64) -> Option<NativeWorld8> {
     }
     let bytes = rowbytes.checked_mul(usize::try_from(height).ok()?)?;
     let end = data.checked_add(bytes as u64)?;
-    if data < arena_base || end > state.arena_end {
+    let in_arena = data >= arena_base && end <= state.arena_end;
+    let in_owned_world = state
+        .worlds
+        .values()
+        .any(|record| data >= record.data && end <= record.data + record.size);
+    if !in_arena && !in_owned_world {
         return None;
     }
     Some(NativeWorld8 {
@@ -1289,6 +1331,11 @@ unsafe extern "win64" fn acquire_suite(
                 *(output as *mut u64) = state.aegp_memory_suite;
             }
             0
+        } else if name == "PF World Suite" && version == 2 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.world_suite;
+            }
+            0
         } else if name == "PF Iterate8 Suite" && matches!(version, 1 | 2) && output != 0 {
             unsafe {
                 *(output as *mut u64) = state.iterate8_suite;
@@ -1321,6 +1368,213 @@ unsafe extern "win64" fn acquire_suite(
         }
     })
     .unwrap_or(u32::MAX as u64)
+}
+
+fn native_world_pixel_bytes(pixel_format: i32) -> Option<u64> {
+    match pixel_format as u32 {
+        0x6267_7261 => Some(abi::PF_PIXEL_SIZE as u64),
+        0x3631_6561 => Some(abi::PF_PIXEL16_SIZE as u64),
+        0x3233_6561 => Some(abi::PF_PIXEL_FLOAT_SIZE as u64),
+        _ => None,
+    }
+}
+
+fn native_world_descriptor_valid(state: &NativeState, world: u64) -> bool {
+    native_guest_range_valid(state, world, abi::PF_LAYER_DEF_SIZE as u64)
+}
+
+fn native_guest_range_valid(state: &NativeState, address: u64, size: u64) -> bool {
+    let Some(end) = address.checked_add(size) else {
+        return false;
+    };
+    let arena_base = state.arena_end.saturating_sub(ARENA_SIZE as u64);
+    let thread = unsafe { pthread_self() };
+    let stack_top = unsafe { pthread_get_stackaddr_np(thread) } as u64;
+    let stack_size = unsafe { pthread_get_stacksize_np(thread) } as u64;
+    let stack_base = stack_top.saturating_sub(stack_size);
+    (address >= arena_base && end <= state.arena_end)
+        || (address >= state.image_start && end <= state.image_end)
+        || (address >= stack_base && end <= stack_top)
+        || state
+            .worlds
+            .values()
+            .any(|record| address >= record.data && end <= record.data + record.size)
+}
+
+unsafe extern "win64" fn new_world(
+    _: u64,
+    width: u64,
+    height: u64,
+    clear: u64,
+    pixel_format: u64,
+    world: u64,
+) -> u64 {
+    let width = width as u32 as i32;
+    let height = height as u32 as i32;
+    let pixel_format = pixel_format as u32 as i32;
+    with_state(|state| {
+        let Some(pixel_bytes) = native_world_pixel_bytes(pixel_format) else {
+            return 4;
+        };
+        if width <= 0
+            || height <= 0
+            || !native_world_descriptor_valid(state, world)
+            || state.worlds.contains_key(&world)
+        {
+            return 4;
+        }
+        let Some(rowbytes) = u64::try_from(width)
+            .ok()
+            .and_then(|value| value.checked_mul(pixel_bytes))
+        else {
+            return 4;
+        };
+        let Some(size) = rowbytes.checked_mul(height as u64) else {
+            return 4;
+        };
+        if rowbytes > i32::MAX as u64
+            || size > MAX_WORLD_SIZE
+            || state.worlds.len() >= MAX_WORLD_COUNT
+            || state.worlds.values().map(|record| record.size).sum::<u64>() > MAX_WORLD_SIZE - size
+        {
+            return 4;
+        }
+        let Some(mapping_size) = usize::try_from(size)
+            .ok()
+            .and_then(|size| size.checked_add(PAGE_SIZE - 1))
+            .map(|size| size & !(PAGE_SIZE - 1))
+        else {
+            return 4;
+        };
+        let data = unsafe {
+            mmap(
+                ptr::null_mut(),
+                mapping_size,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if data as isize == -1 {
+            return 4;
+        }
+        unsafe {
+            ptr::write_bytes(
+                data.cast::<u8>(),
+                if clear as u8 != 0 { 0 } else { 0xcd },
+                size as usize,
+            );
+        }
+        let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        let flags = 2 | i32::from(pixel_format as u32 != 0x6267_7261);
+        definition[abi::LAYER_WORLD_FLAGS_OFFSET..abi::LAYER_WORLD_FLAGS_OFFSET + 4]
+            .copy_from_slice(&flags.to_le_bytes());
+        definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&(data as u64).to_le_bytes());
+        definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&(rowbytes as i32).to_le_bytes());
+        definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&width.to_le_bytes());
+        definition[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&height.to_le_bytes());
+        for (index, value) in [0, 0, width, height].into_iter().enumerate() {
+            let offset = abi::LAYER_EXTENT_HINT_OFFSET + index * 4;
+            definition[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        definition[88..92].copy_from_slice(&1i32.to_le_bytes());
+        definition[92..96].copy_from_slice(&1u32.to_le_bytes());
+        unsafe {
+            ptr::copy_nonoverlapping(
+                definition.as_ptr(),
+                world as *mut u8,
+                abi::PF_LAYER_DEF_SIZE,
+            );
+        }
+        state.worlds.insert(
+            world,
+            NativeWorld {
+                pixel_format,
+                size,
+                data: data as u64,
+                mapping_size,
+            },
+        );
+        0
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn dispose_world(_: u64, world: u64, _: u64, _: u64, _: u64, _: u64) -> u64 {
+    with_state(|state| {
+        if !native_world_descriptor_valid(state, world) {
+            return 4;
+        }
+        let Some(record) = state.worlds.get(&world).cloned() else {
+            return 4;
+        };
+        if unsafe { munmap(record.data as *mut c_void, record.mapping_size) } != 0 {
+            return 4;
+        }
+        unsafe {
+            ptr::write_bytes(world as *mut u8, 0, abi::PF_LAYER_DEF_SIZE);
+        }
+        state.worlds.remove(&world);
+        0
+    })
+    .unwrap_or(4)
+}
+
+unsafe extern "win64" fn get_world_pixel_format(
+    world: u64,
+    output: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    with_state(|state| {
+        if !native_guest_range_valid(state, output, std::mem::size_of::<i32>() as u64) {
+            return 4;
+        }
+        let pixel_format = state
+            .worlds
+            .get(&world)
+            .map(|record| record.pixel_format)
+            .or_else(|| {
+                (world != 0
+                    && (world == state.smart_input_world || world == state.smart_output_world))
+                    .then_some(0x6267_7261u32 as i32)
+            })
+            .or_else(|| {
+                if !native_world_descriptor_valid(state, world) {
+                    return None;
+                }
+                let width = unsafe {
+                    ptr::read_unaligned((world + abi::LAYER_WIDTH_OFFSET as u64) as *const i32)
+                };
+                let rowbytes = unsafe {
+                    ptr::read_unaligned((world + abi::LAYER_ROWBYTES_OFFSET as u64) as *const i32)
+                };
+                if width <= 0 || rowbytes <= 0 || rowbytes % width != 0 {
+                    return None;
+                }
+                match rowbytes / width {
+                    4 => Some(0x6267_7261u32 as i32),
+                    8 => Some(0x3631_6561u32 as i32),
+                    16 => Some(0x3233_6561u32 as i32),
+                    _ => None,
+                }
+            });
+        let Some(pixel_format) = pixel_format else {
+            return 4;
+        };
+        unsafe {
+            ptr::write_unaligned(output as *mut i32, pixel_format);
+        }
+        0
+    })
+    .unwrap_or(4)
 }
 
 unsafe extern "win64" fn color_param_value(
@@ -2009,6 +2263,100 @@ mod tests {
             ]
         );
         assert_eq!(state.dropped_unsupported_suite_calls, 0);
+    }
+
+    #[test]
+    fn pf_world_suite_v2_native_lifecycle_matches_unicorn() {
+        let mut arena = vec![0u8; 0x10000];
+        let arena_base = arena.as_mut_ptr() as u64;
+        let mut state = NativeState {
+            arena_next: arena_base,
+            arena_end: arena_base + arena.len() as u64,
+            world_suite: 0x1234,
+            ..NativeState::default()
+        };
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+        let mut world_storage = [0u8; abi::PF_LAYER_DEF_SIZE];
+        let world = world_storage.as_mut_ptr() as u64;
+        let suite_name = std::ffi::CString::new("PF World Suite").unwrap();
+        let mut suite = 0u64;
+        assert_eq!(
+            unsafe {
+                acquire_suite(
+                    suite_name.as_ptr() as u64,
+                    2,
+                    (&mut suite as *mut u64) as u64,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(suite, state.world_suite);
+
+        assert_eq!(unsafe { new_world(1, 3, 2, 1, 0xdead_beef, world) }, 4);
+        assert!(state.worlds.is_empty());
+        assert_eq!(unsafe { new_world(1, 3, 2, 1, 0x3631_6561, world) }, 0);
+        let data =
+            unsafe { ptr::read_unaligned((world + abi::LAYER_DATA_OFFSET as u64) as *const u64) };
+        assert_ne!(data, 0);
+        assert_eq!(
+            unsafe {
+                ptr::read_unaligned((world + abi::LAYER_ROWBYTES_OFFSET as u64) as *const i32)
+            },
+            24
+        );
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(data as *const u8, 48) },
+            &[0; 48]
+        );
+        assert_eq!(unsafe { new_world(1, 3, 2, 1, 0x3631_6561, world) }, 4);
+        assert_eq!(state.worlds.len(), 1);
+        let mut format = 0u32;
+        let format_output = (&mut format as *mut u32) as u64;
+        format = 0xfeed_beef;
+        assert_eq!(
+            unsafe { get_world_pixel_format(0, format_output, 0, 0, 0, 0) },
+            4
+        );
+        assert_eq!(format, 0xfeed_beef);
+        assert_eq!(
+            unsafe { get_world_pixel_format(world, format_output, 0, 0, 0, 0) },
+            0
+        );
+        assert_eq!(format, 0x3631_6561);
+        assert_eq!(unsafe { get_world_pixel_format(world, 0, 0, 0, 0, 0) }, 4);
+        assert_eq!(unsafe { dispose_world(1, world, 0, 0, 0, 0) }, 0);
+        assert!(state.worlds.is_empty());
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(world as *const u8, abi::PF_LAYER_DEF_SIZE) },
+            vec![0; abi::PF_LAYER_DEF_SIZE]
+        );
+        assert_eq!(unsafe { dispose_world(1, world, 0, 0, 0, 0) }, 4);
+        world_storage[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&2i32.to_le_bytes());
+        world_storage[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&8i32.to_le_bytes());
+        assert_eq!(
+            unsafe { get_world_pixel_format(world, format_output, 0, 0, 0, 0) },
+            0
+        );
+        assert_eq!(format, 0x6267_7261);
+        assert_eq!(unsafe { new_world(1, 1, 1, 0x100, 0x3233_6561, world) }, 0);
+        let float_data =
+            unsafe { ptr::read_unaligned((world + abi::LAYER_DATA_OFFSET as u64) as *const u64) };
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(float_data as *const u8, 16) },
+            &[0xcd; 16]
+        );
+        assert_eq!(unsafe { dispose_world(1, world, 0, 0, 0, 0) }, 0);
+        assert_eq!(
+            unsafe { new_world(1, i32::MAX as u64, i32::MAX as u64, 1, 0x6267_7261, world,) },
+            4
+        );
+        assert!(state.worlds.is_empty());
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
     }
 
     #[test]
