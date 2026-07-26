@@ -157,7 +157,7 @@ enum ResidentCommand {
 }
 
 struct ResidentSessionHandle {
-    aex: PathBuf,
+    plugin_path: PathBuf,
     input: PathBuf,
     sender: Sender<ResidentCommand>,
     receiver: Receiver<Result<RenderResult, String>>,
@@ -215,7 +215,7 @@ pub fn run() -> eframe::Result<()> {
 
 struct MacHarnessApp {
     repository: PathBuf,
-    aex: Option<PathBuf>,
+    plugin_path: Option<PathBuf>,
     input: Option<PathBuf>,
     output: Option<PathBuf>,
     input_texture: Option<egui::TextureHandle>,
@@ -243,7 +243,7 @@ impl MacHarnessApp {
     fn new(repository: PathBuf) -> Self {
         Self {
             repository,
-            aex: None,
+            plugin_path: None,
             input: None,
             output: None,
             input_texture: None,
@@ -286,14 +286,14 @@ impl MacHarnessApp {
                     );
                     self.report = report;
                     self.parameters = parameters;
-                    self.aex = Some(path);
+                    self.plugin_path = Some(path);
                     self.viewer_mode = ViewerMode::Input;
                 }
                 Err(error) => {
                     self.status = "Could not inspect AEX parameters.".into();
                     self.report = error;
                     self.parameters.clear();
-                    self.aex = None;
+                    self.plugin_path = None;
                 }
             }
             self.output = None;
@@ -336,7 +336,7 @@ impl MacHarnessApp {
     }
 
     fn render(&mut self) {
-        let (Some(aex), Some(input)) = (self.aex.clone(), self.input.clone()) else {
+        let (Some(aex), Some(input)) = (self.plugin_path.clone(), self.input.clone()) else {
             return;
         };
         let workers = match guest_worker_candidates(&self.repository) {
@@ -361,7 +361,7 @@ impl MacHarnessApp {
         let needs_session = self
             .resident
             .as_ref()
-            .is_none_or(|session| session.aex != aex || session.input != input);
+            .is_none_or(|session| session.plugin_path != aex || session.input != input);
         if needs_session {
             if let Err(error) = self.close_resident() {
                 self.status = "Could not cleanly replace the resident session.".into();
@@ -404,7 +404,7 @@ impl MacHarnessApp {
 
     fn dispatch_live_render(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
-        let ready = self.aex.is_some() && self.input.is_some();
+        let ready = self.plugin_path.is_some() && self.input.is_some();
         if self.live_render.take_due(now, self.busy, ready) {
             self.render();
         } else if ready
@@ -476,7 +476,7 @@ impl eframe::App for MacHarnessApp {
                 {
                     self.choose_input(ctx);
                 }
-                let ready = !self.busy && self.aex.is_some() && self.input.is_some();
+                let ready = !self.busy && self.plugin_path.is_some() && self.input.is_some();
                 if ui.add_enabled(ready, egui::Button::new("Render")).clicked() {
                     self.render();
                 }
@@ -507,7 +507,7 @@ impl eframe::App for MacHarnessApp {
                 .default_open(false)
                 .show(ui, |ui| {
                     for (label, path) in [
-                        ("AEX", self.aex.as_deref()),
+                        ("AEX", self.plugin_path.as_deref()),
                         ("Input", self.input.as_deref()),
                         ("Output", self.output.as_deref()),
                     ] {
@@ -553,7 +553,7 @@ impl MacHarnessApp {
             });
         });
         ui.label(
-            self.aex
+            self.plugin_path
                 .as_deref()
                 .and_then(Path::file_stem)
                 .and_then(|name| name.to_str())
@@ -1241,7 +1241,7 @@ fn start_resident_session(
         let _ = std::fs::remove_file(output_slot);
     });
     Ok(ResidentSessionHandle {
-        aex: aex.to_path_buf(),
+        plugin_path: aex.to_path_buf(),
         input: input.to_path_buf(),
         sender: command_sender,
         receiver: result_receiver,
