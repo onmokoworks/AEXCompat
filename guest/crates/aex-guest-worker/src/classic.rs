@@ -304,6 +304,11 @@ impl ClassicHost {
         );
         write_u64(
             &mut utility_bytes,
+            abi::UTILS_TRANSFER_RECT_OFFSET,
+            engine.transfer_rect8_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
             abi::UTILS_ANSI_STRCPY_OFFSET,
             engine.ansi_strcpy_callback_address(),
         );

@@ -318,6 +318,7 @@ int main() {
   field<decltype(PF_UtilCallbacks::get_callback_addr)>("utils.get_callback_addr", offsetof(PF_UtilCallbacks, get_callback_addr), first);
   field<decltype(PF_UtilCallbacks::new_world)>("utils.new_world", offsetof(PF_UtilCallbacks, new_world), first);
   field<decltype(PF_UtilCallbacks::dispose_world)>("utils.dispose_world", offsetof(PF_UtilCallbacks, dispose_world), first);
+  field<decltype(PF_UtilCallbacks::transfer_rect)>("utils.transfer_rect", offsetof(PF_UtilCallbacks, transfer_rect), first);
   field<decltype(PF_UtilCallbacks::transform_world)>("utils.transform_world", offsetof(PF_UtilCallbacks, transform_world), first);
   field<decltype(PF_UtilCallbacks::fill16)>("utils.fill16", offsetof(PF_UtilCallbacks, fill16), first);
   field<decltype(PF_UtilCallbacks::premultiply_color16)>("utils.premultiply_color16", offsetof(PF_UtilCallbacks, premultiply_color16), first);
