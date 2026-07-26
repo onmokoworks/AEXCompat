@@ -14,6 +14,8 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+import issue26_sdk_provenance as sdk_provenance
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "schemas" / "issue26-scene-probe-evidence.schema.json"
@@ -98,6 +100,8 @@ def host_summary(stdout: str) -> dict[str, Any] | None:
                 "schema_version",
                 "stage",
                 "status",
+                "driver_major_version",
+                "driver_minor_version",
                 "event_requested",
                 "init_error",
                 "event_error",
@@ -109,7 +113,15 @@ def host_summary(stdout: str) -> dict[str, Any] | None:
                 "boundary_regression_passed",
                 "effect_lifetimes_balanced",
                 "stream_lifetimes_balanced",
+                "collection_lifetimes_balanced",
+                "aegp_memory_lifetimes_balanced",
                 "suite_leases_balanced",
+                "suite_acquires",
+                "suite_releases",
+                "live_suite_reference_count",
+                "receipts_created",
+                "receipts_checked_in",
+                "live_receipts",
             )
             return {key: value[key] for key in keys}
     return None
@@ -158,6 +170,7 @@ def common_record(
             **artifacts(args, sample),
             "build_receipt": None,
             "fixture_metadata": None,
+            "raw_probe_report": None,
         },
         "probe_report": None,
         "host_report": None,
@@ -186,9 +199,251 @@ def coverage_complete(report: dict[str, Any]) -> bool:
             coverage["transaction"]["cancel_unchanged"],
             coverage["transaction"]["commit_observed"],
             coverage["transaction"]["commit_incremented"],
+            coverage["transaction"]["cleanup_observed"],
+            coverage["transaction"]["cleanup_restored"],
             coverage["generation"]["stale_owner_rejected"],
         )
     )
+
+
+def probe_readiness_errors(
+    report: dict[str, Any], target: str
+) -> list[str]:
+    errors: list[str] = []
+    identities = report["identities"]
+    streams = report["streams"]
+    coverage = report["coverage"]
+    cleanup = report["cleanup"]
+
+    identity_tokens = [value["token"] for value in identities]
+    if len(identity_tokens) != len(set(identity_tokens)):
+        errors.append("duplicate identity token")
+    identity_keys = [
+        (
+            value["kind"],
+            value["stable_id"],
+            value["owner_id"],
+            value["ordinal"],
+        )
+        for value in identities
+    ]
+    if len(identity_keys) != len(set(identity_keys)):
+        errors.append("duplicate identity position")
+    stable_ids = [value["stable_id"] for value in identities]
+    if target == "aexcompat" and len(stable_ids) != len(set(stable_ids)):
+        errors.append("duplicate stable identity")
+    by_kind: dict[str, list[dict[str, Any]]] = {}
+    for value in identities:
+        by_kind.setdefault(value["kind"], []).append(value)
+    minimums = (
+        {
+            "project": 2,
+            "folder": 3,
+            "footage": 1,
+            "comp": 3,
+            "layer": 3,
+            "effect": 1,
+        }
+        if target == "aexcompat"
+        else {
+            "project": 1,
+            "folder": 1,
+            "footage": 1,
+            "comp": 1,
+            "layer": 1,
+            "effect": 1,
+        }
+    )
+    identity_complete = all(
+        len(by_kind.get(kind, [])) >= minimum
+        for kind, minimum in minimums.items()
+    )
+    if not identity_complete:
+        errors.append("identity family coverage incomplete")
+    project_ids = {
+        value["stable_id"] for value in by_kind.get("project", [])
+    }
+    comp_ids = {value["stable_id"] for value in by_kind.get("comp", [])}
+    layer_ids = {value["stable_id"] for value in by_kind.get("layer", [])}
+    if any(
+        value["owner_id"] != -1
+        for value in by_kind.get("project", [])
+    ):
+        errors.append("project identity has owner")
+    for kind in ("folder", "footage", "comp"):
+        if any(
+            value["owner_id"] not in project_ids
+            for value in by_kind.get(kind, [])
+        ):
+            errors.append(f"{kind} identity has foreign project owner")
+    if any(
+        value["owner_id"] not in comp_ids
+        for value in by_kind.get("layer", [])
+    ):
+        errors.append("layer identity has foreign composition owner")
+    if any(
+        value["owner_id"] not in layer_ids
+        for value in by_kind.get("effect", [])
+    ):
+        errors.append("effect identity has foreign layer owner")
+
+    def require_total_ordinals(
+        values: list[dict[str, Any]], owner_key: str
+    ) -> bool:
+        groups: dict[int, list[int]] = {}
+        for value in values:
+            groups.setdefault(value[owner_key], []).append(value["ordinal"])
+        return all(
+            sorted(ordinals) == list(range(len(ordinals)))
+            for ordinals in groups.values()
+        )
+
+    item_values = [
+        value
+        for kind in ("folder", "footage", "comp")
+        for value in by_kind.get(kind, [])
+    ]
+    if sorted(
+        value["ordinal"] for value in by_kind.get("project", [])
+    ) != list(range(len(by_kind.get("project", [])))):
+        errors.append("project ordinals are not total")
+    if not require_total_ordinals(item_values, "owner_id"):
+        errors.append("project item ordinals are not total")
+    if not require_total_ordinals(by_kind.get("layer", []), "owner_id"):
+        errors.append("composition layer ordinals are not total")
+    if not require_total_ordinals(by_kind.get("effect", []), "owner_id"):
+        errors.append("layer effect ordinals are not total")
+    if coverage["identity_enumeration"] != identity_complete:
+        errors.append("identity coverage flag contradicts identities")
+
+    stream_tokens = [value["token"] for value in streams]
+    if not streams or len(stream_tokens) != len(set(stream_tokens)):
+        errors.append("stream identities are empty or duplicated")
+    effect_tokens = {
+        value["token"] for value in by_kind.get("effect", [])
+    }
+    stream_groups: dict[str, list[dict[str, Any]]] = {}
+    for value in streams:
+        if value["owner"] not in effect_tokens:
+            errors.append("stream has foreign effect owner")
+        stream_groups.setdefault(value["owner"], []).append(value)
+    streams_complete = bool(stream_groups)
+    for group in stream_groups.values():
+        ordinals = sorted(value["ordinal"] for value in group)
+        if ordinals != list(range(len(group))):
+            errors.append("effect stream ordinals are not total")
+            streams_complete = False
+        input_streams = [
+            value
+            for value in group
+            if value["ordinal"] == 0 and value["type"] == 9
+        ]
+        if len(input_streams) != 1:
+            errors.append("effect input-layer stream is missing")
+            streams_complete = False
+    if coverage["stream_metadata"] != streams_complete:
+        errors.append("stream metadata flag contradicts streams")
+
+    transaction = coverage["transaction"]
+    before = transaction["before"]
+    derived_transaction = {
+        "cancel_observed": transaction["after_cancel"] >= 0,
+        "cancel_unchanged": transaction["after_cancel"] == before,
+        "commit_observed": transaction["after_commit"] >= 0,
+        "commit_incremented": transaction["after_commit"] == before + 1,
+        "cleanup_observed": transaction["after_cleanup"] >= 0,
+        "cleanup_restored": transaction["after_cleanup"] == before,
+    }
+    if before < 0:
+        errors.append("transaction baseline is absent")
+    for key, derived in derived_transaction.items():
+        if transaction[key] != derived:
+            errors.append(f"transaction {key} contradicts counters")
+
+    cleanup_balanced = all(
+        (
+            cleanup["suite_acquires"] == cleanup["suite_releases"],
+            cleanup["stream_acquires"]
+            == cleanup["stream_releases"]
+            + cleanup["invalidated_children"],
+            cleanup["effect_acquires"] == cleanup["effect_releases"],
+            cleanup["applied_effects"]
+            == cleanup["removed_applied_effects"],
+            cleanup["keyframe_mutations_committed"]
+            == cleanup["keyframe_mutations_reverted"],
+            cleanup["keyframe_mutations_committed"] == 1,
+            cleanup["applied_effects"] == 1,
+            cleanup["invalidated_children"] >= 1,
+            cleanup["residual_scene_mutations"] == 0,
+            transaction["after_cleanup"] == before,
+        )
+    )
+    if cleanup["balanced"] != cleanup_balanced:
+        errors.append("cleanup balanced flag contradicts counters")
+    if not cleanup_balanced:
+        errors.append("cleanup counters are not balanced")
+
+    internally_ready = (
+        identity_complete
+        and streams_complete
+        and coverage_complete(report)
+        and cleanup_balanced
+        and not report["unsupported_slots"]
+        and not errors
+    )
+    if (report["status"] == "passed") != internally_ready:
+        errors.append("probe status contradicts derived readiness")
+    return errors
+
+
+def host_readiness_errors(
+    host: dict[str, Any], *, boundary: bool
+) -> list[str]:
+    errors: list[str] = []
+    lifetime_balanced = all(
+        (
+            host["entry_invoked"],
+            host["driver_major_version"] > 0,
+            host["effect_lifetimes_balanced"],
+            host["stream_lifetimes_balanced"],
+            host["collection_lifetimes_balanced"],
+            host["aegp_memory_lifetimes_balanced"],
+            host["suite_leases_balanced"],
+            host["suite_acquires"] > 0,
+            host["suite_acquires"] == host["suite_releases"],
+            host["live_suite_reference_count"] == 0,
+            host["receipts_created"] == host["receipts_checked_in"],
+            host["live_receipts"] == 0,
+        )
+    )
+    if not lifetime_balanced:
+        errors.append("host lifetime counters are not balanced")
+    if boundary:
+        if (
+            host["status"] != "initialization_failed"
+            or host["init_error"] == 0
+            or host["entry_fault"] != "cpp_exception"
+            or host["entry_exception_code"] != 0
+            or host["forced_suite_releases"] != 0
+            or not host["boundary_regression_mode"]
+            or not host["boundary_regression_passed"]
+            or host["event_requested"] != "none"
+            or host["event_error"] != 0
+        ):
+            errors.append("guarded C++ boundary fields are contradictory")
+    elif (
+        host["status"] not in {"event_completed", "initialized"}
+        or host["init_error"] != 0
+        or host["event_error"] != 0
+        or host["entry_fault"] != "none"
+        or host["entry_exception_code"] != 0
+        or host["forced_suite_releases"] != 0
+        or host["boundary_regression_mode"]
+        or host["boundary_regression_passed"]
+        or not host["event_requested"]
+    ):
+        errors.append("successful host fields are contradictory")
+    return errors
 
 
 def readiness_errors(record: dict[str, Any]) -> list[str]:
@@ -201,6 +456,8 @@ def readiness_errors(record: dict[str, Any]) -> list[str]:
     if record["status"] != "passed":
         errors.append(f"status={record['status']}")
         return errors
+    if not execution["stdout"]:
+        errors.append("passed record has empty stdout")
     if execution["exit_code"] != 0:
         errors.append(f"passed record exit_code={execution['exit_code']}")
     if execution["blocker"] is not None:
@@ -211,8 +468,8 @@ def readiness_errors(record: dict[str, Any]) -> list[str]:
         cleanup = record["cleanup"]
         if report is None or report["status"] != "passed":
             errors.append("passed probe record lacks passed probe_report")
-        elif not coverage_complete(report):
-            errors.append("required public probe coverage incomplete")
+        else:
+            errors.extend(probe_readiness_errors(report, target))
         if target == "aexcompat":
             host = record["host_report"]
             if (
@@ -221,6 +478,13 @@ def readiness_errors(record: dict[str, Any]) -> list[str]:
             ):
                 errors.append(
                     "passed AEXCompat record lacks successful host_report"
+                )
+            else:
+                derived_host = host_summary(execution["stdout"])
+                if derived_host != host:
+                    errors.append("host_report is not derived from stdout")
+                errors.extend(
+                    host_readiness_errors(host, boundary=False)
                 )
         elif record["fixture_report"] is None:
             errors.append("passed real-AE record lacks fixture_report")
@@ -246,12 +510,14 @@ def readiness_errors(record: dict[str, Any]) -> list[str]:
                 host is None
                 or host["status"] != "initialization_failed"
                 or not host["boundary_regression_passed"]
-                or host["entry_fault"] not in {"cpp_exception", "seh_exception"}
-                or not host["effect_lifetimes_balanced"]
-                or not host["stream_lifetimes_balanced"]
-                or not host["suite_leases_balanced"]
+                or host["entry_fault"] != "cpp_exception"
             ):
                 errors.append("Projector guarded-boundary proof is incomplete")
+            else:
+                derived_host = host_summary(execution["stdout"])
+                if derived_host != host:
+                    errors.append("Projector host_report is not derived")
+                errors.extend(host_readiness_errors(host, boundary=True))
         if not sample or not sample["sdk_source_unchanged"]:
             errors.append("SDK source unchanged proof is absent")
     return errors
@@ -298,6 +564,14 @@ def verify_record_environment_and_artifacts(
                 f"{path}: build receipt sample provenance is ambiguous"
             )
         receipt_sample = matches[0]
+        provenance_errors = sdk_provenance.validate_sample_receipt(
+            receipt_sample
+        )
+        if provenance_errors:
+            raise ValueError(
+                f"{path}: SDK provenance validation failed: "
+                + "; ".join(provenance_errors)
+            )
         if (
             sample_report["build_receipt_sha256"]
             != receipt_identity["sha256"]
@@ -306,10 +580,10 @@ def verify_record_environment_and_artifacts(
             or Path(receipt_sample["artifact"]).resolve(strict=True)
             != Path(sample_identity["path"]).resolve(strict=True)
             or not receipt_sample["sdk_source_unchanged"]
-            or receipt_sample["source_tree_sha256_before"]
-            != receipt_sample["source_tree_sha256_after"]
-            or sample_report["source_tree_sha256"]
-            != receipt_sample["source_tree_sha256_after"]
+            or receipt_sample["source_inputs_sha256_before"]
+            != receipt_sample["source_inputs_sha256_after"]
+            or sample_report["source_inputs_sha256"]
+            != receipt_sample["source_inputs_sha256_after"]
             or sample_report["sdk_source_unchanged"]
             != receipt_sample["sdk_source_unchanged"]
         ):
@@ -327,6 +601,15 @@ def verify_record_environment_and_artifacts(
         derived_fixture = load_json(Path(fixture_identity["path"]))
         if fixture_report != derived_fixture:
             raise ValueError(f"{path}: fixture_report is not derived")
+    raw_probe_identity = record["artifacts"]["raw_probe_report"]
+    if record["probe_report"] is None:
+        if raw_probe_identity is not None:
+            raise ValueError(f"{path}: unexpected raw probe report artifact")
+    else:
+        if raw_probe_identity is None:
+            raise ValueError(f"{path}: raw probe report artifact is absent")
+        if load_json(Path(raw_probe_identity["path"])) != record["probe_report"]:
+            raise ValueError(f"{path}: probe_report is not derived")
 
 
 def command_probe(args: argparse.Namespace) -> int:
@@ -387,6 +670,7 @@ def command_probe(args: argparse.Namespace) -> int:
     record["probe_report"] = report
     record["host_report"] = summary
     if report is not None:
+        record["artifacts"]["raw_probe_report"] = artifact(raw_output)
         record["unsupported_slots"] = report["unsupported_slots"]
         record["cleanup"] = report["cleanup"]
     write_record(record, Path(args.output))
@@ -426,6 +710,9 @@ def command_wrap_real(args: argparse.Namespace) -> int:
         blocker=blocker,
     )
     record["artifacts"]["fixture_metadata"] = artifact(fixture_path)
+    record["artifacts"]["raw_probe_report"] = artifact(
+        Path(args.raw_report)
+    )
     record["probe_report"] = report
     record["fixture_report"] = fixture_report
     record["unsupported_slots"] = report["unsupported_slots"]
@@ -469,14 +756,12 @@ def classify_sample(
         and host is not None
         and host["status"] == "initialization_failed"
         and host["boundary_regression_passed"]
-        and host["entry_fault"] in {"cpp_exception", "seh_exception"}
-        and (
-            "suite_acquire_failed" in combined
-            or (
-                "suite" in combined
-                and ("missing" in combined or "unsupported" in combined)
-            )
-        )
+        and host["entry_fault"] == "cpp_exception"
+        and host["entry_exception_code"] == 0
+        and host["forced_suite_releases"] == 0
+        and "stage:suite_acquire_failed" in combined
+        and "name=aegp file import manager suite" in combined
+        and "version=3" in combined
     ):
         return "guarded_initialization_failure"
     if returncode == 0:
@@ -506,14 +791,20 @@ def command_sample(args: argparse.Namespace) -> int:
             f"build receipt must contain exactly one {args.sample} entry"
         )
     receipt_sample = matches[0]
+    provenance_errors = sdk_provenance.validate_sample_receipt(receipt_sample)
+    if provenance_errors:
+        raise ValueError(
+            "SDK build receipt failed independent validation: "
+            + "; ".join(provenance_errors)
+        )
     sample_identity = artifact(sample)
     if (
         Path(receipt_sample["artifact"]).resolve(strict=True) != sample
         or receipt_sample["artifact_sha256"] != sample_identity["sha256"]
         or receipt_sample["artifact_size"] != sample_identity["size_bytes"]
         or not receipt_sample["sdk_source_unchanged"]
-        or receipt_sample["source_tree_sha256_before"]
-        != receipt_sample["source_tree_sha256_after"]
+        or receipt_sample["source_inputs_sha256_before"]
+        != receipt_sample["source_inputs_sha256_after"]
     ):
         raise ValueError(
             "sample artifact/source provenance does not match build receipt"
@@ -575,7 +866,9 @@ def command_sample(args: argparse.Namespace) -> int:
         "classification": classification,
         "sdk_source_unchanged": receipt_sample["sdk_source_unchanged"],
         "build_receipt_sha256": record["artifacts"]["build_receipt"]["sha256"],
-        "source_tree_sha256": receipt_sample["source_tree_sha256_after"],
+        "source_inputs_sha256": receipt_sample[
+            "source_inputs_sha256_after"
+        ],
     }
     write_record(record, Path(args.output))
     print(completed.stdout, end="")

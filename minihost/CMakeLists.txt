@@ -212,6 +212,16 @@ target_compile_definitions(worker_aegp_scene_model_selftest PRIVATE
 target_compile_options(worker_aegp_scene_model_selftest PRIVATE /UNDEBUG)
 target_include_directories(worker_aegp_scene_model_selftest PRIVATE src)
 
+add_executable(worker_aegp_entry_guard_selftest
+  ../tests/native/worker_aegp_entry_guard_selftest.cpp
+  src/worker_aegp_entry_guard.cpp
+)
+target_compile_features(worker_aegp_entry_guard_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_aegp_entry_guard_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(worker_aegp_entry_guard_selftest PRIVATE /UNDEBUG)
+target_include_directories(worker_aegp_entry_guard_selftest PRIVATE src)
+
 add_executable(aex_string_table_selftest
   ../tests/native/aex_string_table_selftest.cpp
   src/aex_string_table_impl.cpp

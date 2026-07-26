@@ -92,7 +92,9 @@ probe contains no host-name or process-name branch. Its oracle is structural:
 typed project/item/comp/layer/effect/stream traversal, total effect order,
 stream and keyframe metadata, parent/camera/zoom relationships, public
 transaction cancel/commit behavior, and rejection of a child stream after its
-effect owner is deleted. Pixel equality is not part of this oracle.
+effect owner is deleted. The committed probe keyframe is deleted before
+completion; its original key count and zero residual scene mutations are
+readiness requirements. Pixel equality is not part of this oracle.
 
 The committed records under `corpus/issue26-scene-probe` bind the selected
 After Effects executable, SDK guide and API version, probe, JSX fixture,
@@ -101,8 +103,14 @@ AEXCompat worker, and unchanged SDK sample hashes. The strict schema is
 returns nonzero for partial, blocked, failed, or crashed execution. A passing
 record requires exit zero, no blocker, balanced cleanup, complete structural
 coverage including spatial tangents, and no unsupported required operation.
-It verifies every bound environment/artifact hash and derives SDK-sample
-classification from retained stdout/stderr. A real-AE pass additionally
+It verifies every bound environment/artifact hash, derives the raw probe
+report from its content-addressed artifact, recomputes identity, ownership,
+stream-order, transaction, cleanup, and host-lifetime invariants, and derives
+SDK-sample classification from retained stdout/stderr. SDK sample receipts
+re-enumerate the sample tree, shared `Examples/Util`, SDK headers, injected
+properties, generated PiPL/resource files, actual compiler/linker/resource
+tools, MSBuild/vcvars/PiPLTool, command, text log, and binary log. A real-AE
+pass additionally
 requires strict fixture metadata derived from the JSX output; the real runner
 retains its redirected stdout/stderr even when they are empty. Missing
 real-host execution is a blocked record with its exact external-state reason,
@@ -114,9 +122,11 @@ verifies the copied AEX hash, captures the JSX and AEGP reports, and removes
 only that exact directory after After Effects exits. `Projector.aex` and
 `Resizer.aex` are built from the installed SDK with source hashes checked
 before and after, then run unchanged against AEXCompat as independent public
-plug-in evidence. External AEGP entrypoints execute behind a destructor-free
-Windows SEH leaf and an outer C++ exception boundary. The Projector regression
+plug-in evidence. External AEGP entrypoints execute through a synchronous C++
+boundary that unwinds plug-in frames, called from a destructor-free Windows
+SEH leaf. Only attributed access/in-page faults are handled; MSVC C++ EH and
+unrelated corruption continue search. The Projector regression
 requires a structured `initialization_failed` report, the original missing
 File Import Manager Suite v3 diagnostic, contained fault evidence, and
-balanced bounded cleanup; File Import Manager Suite v3 itself remains
-unsupported.
+balanced scoped suite cleanup with no forced release; File Import Manager
+Suite v3 itself remains unsupported.

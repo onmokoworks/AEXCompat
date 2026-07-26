@@ -24,5 +24,8 @@ Result invoke(EntryPoint entry, void* basic_suite, int32_t driver_major,
               int32_t driver_minor, int32_t plugin_id,
               void** global_refcon) noexcept;
 const char* fault_name(FaultKind fault) noexcept;
+int32_t seh_filter_disposition_for_test(
+    uint32_t code, const void* exception_address,
+    const void* entry_address) noexcept;
 
 }  // namespace aexcompat::worker_runtime::aegp_entry_guard

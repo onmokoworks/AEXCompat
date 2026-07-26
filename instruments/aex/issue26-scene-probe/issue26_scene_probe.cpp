@@ -74,10 +74,14 @@ struct Report {
   bool transaction_cancel_unchanged{};
   bool transaction_commit_observed{};
   bool transaction_commit_incremented{};
+  bool transaction_cleanup_observed{};
+  bool transaction_cleanup_restored{};
   bool stale_owner_rejected{};
   A_long transaction_before{-1};
   A_long transaction_after_cancel{-1};
   A_long transaction_after_commit{-1};
+  A_long transaction_after_cleanup{-1};
+  A_long committed_keyframe_index{-1};
   A_long suite_acquires{};
   A_long suite_releases{};
   A_long stream_acquires{};
@@ -87,6 +91,8 @@ struct Report {
   A_long invalidated_children{};
   A_long applied_effects{};
   A_long removed_applied_effects{};
+  A_long keyframe_mutations_committed{};
+  A_long keyframe_mutations_reverted{};
 };
 
 template <typename T>
@@ -202,7 +208,10 @@ std::string serialize(const Report& report) {
       report.stream_acquires == report.stream_releases +
           report.invalidated_children &&
       report.effect_acquires == report.effect_releases &&
-      report.applied_effects == report.removed_applied_effects;
+      report.applied_effects == report.removed_applied_effects &&
+      report.keyframe_mutations_committed ==
+          report.keyframe_mutations_reverted &&
+      report.transaction_after_cleanup == report.transaction_before;
   const bool behavioral_coverage =
       report.effect_order_observed && report.effect_order_total &&
       report.stream_metadata_observed && report.parent_observed &&
@@ -214,6 +223,8 @@ std::string serialize(const Report& report) {
       report.transaction_cancel_unchanged &&
       report.transaction_commit_observed &&
       report.transaction_commit_incremented &&
+      report.transaction_cleanup_observed &&
+      report.transaction_cleanup_restored &&
       report.stale_owner_rejected;
   const char* status =
       identity_coverage && behavioral_coverage && cleanup_balanced
@@ -273,9 +284,14 @@ std::string serialize(const Report& report) {
          << json_bool(report.transaction_commit_observed)
          << ",\"commit_incremented\":"
          << json_bool(report.transaction_commit_incremented)
+         << ",\"cleanup_observed\":"
+         << json_bool(report.transaction_cleanup_observed)
+         << ",\"cleanup_restored\":"
+         << json_bool(report.transaction_cleanup_restored)
          << ",\"before\":" << report.transaction_before
          << ",\"after_cancel\":" << report.transaction_after_cancel
-         << ",\"after_commit\":" << report.transaction_after_commit << "}"
+         << ",\"after_commit\":" << report.transaction_after_commit
+         << ",\"after_cleanup\":" << report.transaction_after_cleanup << "}"
          << ",\"generation\":{\"public_project_generation\":\"not_exposed\""
          << ",\"stale_owner_rejected\":"
          << json_bool(report.stale_owner_rejected) << "}"
@@ -299,6 +315,13 @@ std::string serialize(const Report& report) {
          << ",\"applied_effects\":" << report.applied_effects
          << ",\"removed_applied_effects\":"
          << report.removed_applied_effects
+         << ",\"keyframe_mutations_committed\":"
+         << report.keyframe_mutations_committed
+         << ",\"keyframe_mutations_reverted\":"
+         << report.keyframe_mutations_reverted
+         << ",\"residual_scene_mutations\":"
+         << (report.transaction_after_cleanup == report.transaction_before
+                 ? 0 : 1)
          << ",\"balanced\":" << json_bool(cleanup_balanced) << "}}\n";
   return output.str();
 }
@@ -391,6 +414,21 @@ void exercise_transactions(Report& report, AEGP_StreamSuite6* streams,
     }
     observed = true;
     keyframes->AEGP_GetStreamNumKFs(stream, &after);
+    if (commit) {
+      for (A_long candidate = 0; candidate < after; ++candidate) {
+        A_Time observed_time{};
+        if (!keyframes->AEGP_GetKeyframeTime(
+                stream, candidate, AEGP_LTimeMode_CompTime,
+                &observed_time) &&
+            observed_time.scale != 0 &&
+            static_cast<int64_t>(observed_time.value) * 30 ==
+                static_cast<int64_t>(frame) *
+                    static_cast<int64_t>(observed_time.scale)) {
+          report.committed_keyframe_index = candidate;
+          break;
+        }
+      }
+    }
   };
 
   run(FALSE, 7, report.transaction_after_cancel,
@@ -403,7 +441,30 @@ void exercise_transactions(Report& report, AEGP_StreamSuite6* streams,
   report.transaction_commit_incremented =
       report.transaction_commit_observed &&
       report.transaction_after_commit == report.transaction_before + 1;
+  if (report.transaction_commit_incremented)
+    ++report.keyframe_mutations_committed;
   streams->AEGP_DisposeStreamValue(&sample);
+}
+
+void cleanup_transaction_keyframe(
+    Report& report, AEGP_KeyframeSuite5* keyframes,
+    AEGP_StreamRefH stream) {
+  if (!keyframes || !stream || report.committed_keyframe_index < 0)
+    return;
+  const A_Err delete_error = keyframes->AEGP_DeleteKeyframe(
+      stream, report.committed_keyframe_index);
+  if (delete_error) {
+    note(report, kAEGPKeyframeSuite, kAEGPKeyframeSuiteVersion5, 3,
+         "AEGP_DeleteKeyframe(transaction cleanup)", delete_error);
+    return;
+  }
+  report.transaction_cleanup_observed = true;
+  ++report.keyframe_mutations_reverted;
+  if (keyframes->AEGP_GetStreamNumKFs(
+          stream, &report.transaction_after_cleanup) == A_Err_NONE) {
+    report.transaction_cleanup_restored =
+        report.transaction_after_cleanup == report.transaction_before;
+  }
 }
 
 void inspect_effects(Report& report, AEGP_LayerH layer, A_long layer_id,
@@ -904,6 +965,8 @@ Report observe(A_long driver_major, A_long driver_minor) {
                         transaction_stream);
   inspect_keyframes(report, streams.suite, keyframes.suite,
                     transaction_stream);
+  cleanup_transaction_keyframe(
+      report, keyframes.suite, transaction_stream);
   if (transaction_stream &&
       !streams.suite->AEGP_DisposeStream(transaction_stream)) {
     ++report.stream_releases;

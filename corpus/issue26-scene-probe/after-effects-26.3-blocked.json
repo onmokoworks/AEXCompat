@@ -2,13 +2,11 @@
   "schema_version": 1,
   "evidence_kind": "issue26-public-aegp-scene",
   "target": "after_effects",
-  "recorded_utc": "2026-07-26T22:32:54.858407Z",
+  "recorded_utc": "2026-07-26T23:16:41.336349Z",
   "status": "blocked",
   "execution": {
     "command": [
-      "C:\\Program Files\\Adobe\\Adobe After Effects 2026\\Support Files\\AfterFX.exe",
-      "-r",
-      "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\instruments\\aex\\issue26-scene-probe\\fixture.jsx"
+      "AfterFX.exe -r fixture.jsx"
     ],
     "exit_code": null,
     "stdout": "",
@@ -50,8 +48,8 @@
   "artifacts": {
     "probe": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-scene-probe-build\\Release\\issue26_scene_probe.aex",
-      "sha256": "578ef417db7ad4ed589dbf2c46a2d132abe9e5c69c1783abe272ecd735476437",
-      "size_bytes": 55808
+      "sha256": "b94075793457843b654891eccdc1f4d03830f6fbde72c10339872b3b57672e45",
+      "size_bytes": 56832
     },
     "fixture": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\instruments\\aex\\issue26-scene-probe\\fixture.jsx",
@@ -60,12 +58,13 @@
     },
     "worker": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
-      "sha256": "a027772e8951c477228a4ac60d245c96900e8f69a94be8889096f3ae04057486",
-      "size_bytes": 1838592
+      "sha256": "84945afb60c1403de9278b73068fda090c22b38511704fe20ee8d726c6227aa7",
+      "size_bytes": 1840128
     },
     "sample": null,
     "build_receipt": null,
-    "fixture_metadata": null
+    "fixture_metadata": null,
+    "raw_probe_report": null
   },
   "probe_report": null,
   "host_report": null,

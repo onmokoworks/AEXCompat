@@ -8,12 +8,37 @@ void record_error(int32_t error, int32_t& destination) {
   if (error != 0 && destination == 0) destination = error;
 }
 
+class EntrySuiteLeaseScope {
+ public:
+  EntrySuiteLeaseScope()
+      : baseline_(worker_runtime::suite_registry().snapshot()) {}
+
+  ~EntrySuiteLeaseScope() {
+    if (!release_new_leases_) return;
+    try {
+      worker_runtime::suite_registry().release_since(baseline_, nullptr);
+    } catch (...) {
+      // Completion reporting observes any remaining lease imbalance.
+    }
+  }
+
+  void finish(aegp_entry_guard::FaultKind fault) noexcept {
+    release_new_leases_ =
+        fault == aegp_entry_guard::FaultKind::cpp_exception;
+  }
+
+ private:
+  suite_runtime::SuiteLeaseSnapshot baseline_;
+  bool release_new_leases_{};
+};
+
 }  // namespace
 
 OrchestrationResult run_orchestration(
     const OrchestrationRequest& request,
     const RoundtripValidationHooks& validation) {
   OrchestrationResult result;
+  EntrySuiteLeaseScope entry_suite_leases;
   const auto entry_result = aegp_entry_guard::invoke(
       request.entry, request.basic_suite, 24, 0, 1,
       &result.global_refcon);
@@ -21,7 +46,8 @@ OrchestrationResult run_orchestration(
   result.entry_fault = entry_result.fault;
   result.entry_exception_code = entry_result.seh_code;
   result.entry_invoked = entry_result.invoked;
-  if (result.entry_fault != aegp_entry_guard::FaultKind::none)
+  entry_suite_leases.finish(result.entry_fault);
+  if (result.entry_fault == aegp_entry_guard::FaultKind::seh_exception)
     result.forced_suite_releases =
         worker_runtime::suite_registry().force_release_all();
 

@@ -91,6 +91,9 @@ class SuiteRegistry final {
   uint32_t release_count() const;
   std::string live_summary() const;
   suite_runtime::SuiteLeaseSnapshot snapshot() const;
+  uint32_t release_since(
+      const suite_runtime::SuiteLeaseSnapshot& baseline,
+      TraceWriter* trace_writer);
   uint32_t force_release_all() noexcept;
   std::string missing_suites_report_json() const;
   std::string unsupported_suite_calls_report_json() const;

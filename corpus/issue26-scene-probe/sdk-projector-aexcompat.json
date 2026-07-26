@@ -2,19 +2,19 @@
   "schema_version": 1,
   "evidence_kind": "issue26-public-aegp-scene",
   "target": "sdk_projector_aexcompat",
-  "recorded_utc": "2026-07-26T22:32:41.977218Z",
+  "recorded_utc": "2026-07-26T23:16:40.189169Z",
   "status": "passed",
   "execution": {
     "command": [
       "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
       "--aegp-init-boundary-test",
       "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-sdk-samples\\projector\\Projector.aex",
-      "b3fc16fa77f2eeed76b4e406b95864c66ae746ba2f1b81e35c313330de37b17b"
+      "d52ec22c1335f30b2d2aa9897f846ea7317affea55c1be485d2e54fb6b48b6e5"
     ],
     "exit_code": 0,
-    "stdout": "{\"schema_version\":1,\"stage\":\"aegp_init\",\"status\":\"initialization_failed\",\"identity_verified\":true,\"entrypoint\":\"EntryPointFunc\",\"driver_major_version\":24,\"driver_minor_version\":0,\"plugin_id\":1,\"init_error\":4,\"entry_invoked\":true,\"entry_fault\":\"seh_exception\",\"entry_exception_code\":3765269347,\"forced_suite_releases\":1,\"boundary_regression_mode\":true,\"boundary_regression_passed\":true,\"global_refcon_nonnull\":false,\"commands_created\":0,\"menu_commands_inserted\":0,\"command_hooks_registered\":0,\"update_menu_hooks_registered\":0,\"idle_hooks_registered\":0,\"death_hooks_registered\":1,\"death_hooks_invoked\":0,\"death_error\":0,\"event_requested\":\"none\",\"event_error\":0,\"hooks_invoked\":0,\"menu_hooks_invoked\":0,\"scene_first_observed_frame\":-1,\"scene_last_observed_frame\":-1,\"scene_current_frame\":1,\"scene_layer_count\":3,\"scene_selected_layer_count\":2,\"idle_max_sleep\":-1,\"command_hooks_invoked\":0,\"command_handled_count\":0,\"command_enable_calls\":0,\"command_check_calls\":0,\"command_checked_true_calls\":0,\"command_checked_false_calls\":0,\"item_current_time_calls\":0,\"item_set_current_time_calls\":0,\"item_last_set_time_value\":-1,\"item_last_set_time_scale\":0,\"item_name_calls\":0,\"item_duration_calls\":0,\"comp_from_item_calls\":0,\"comp_framerate_calls\":0,\"layer_count_calls\":0,\"layer_by_index_calls\":0,\"layer_source_item_calls\":0,\"layer_id_calls\":0,\"layer_attribute_calls\":0,\"layer_trim_set_calls\":0,\"layer_flag_set_calls\":0,\"layer_1_flags\":5,\"layer_2_flags\":5,\"layer_3_flags\":5,\"layer_1_in_point_value\":0,\"layer_1_in_point_scale\":30,\"layer_1_duration_value\":300,\"layer_1_duration_scale\":30,\"layer_name_calls\":0,\"effect_count_calls\":0,\"effect_acquires\":0,\"effect_disposes\":0,\"effect_metadata_calls\":0,\"effect_lifetimes_balanced\":true,\"stream_acquires\":0,\"stream_disposes\":0,\"stream_value_acquires\":0,\"stream_value_disposes\":0,\"stream_sampled_selector_mask\":0,\"stream_lifetimes_balanced\":true,\"effect_param_name_calls\":0,\"effect_param_value_calls\":0,\"effect_param_union_calls\":0,\"keyframe_count_calls\":0,\"keyframed_stream_reports\":0,\"keyframe_time_calls\":0,\"keyframe_value_calls\":0,\"keyframe_interpolation_calls\":0,\"keyframe_pipe_connected\":false,\"keyframe_pipe_request_sent\":false,\"keyframe_pipe_response_received\":false,\"keyframe_pipe_response_valid\":false,\"keyframe_pipe_response_bytes\":0,\"seek_pipe_connected\":false,\"seek_pipe_request_sent\":false,\"seek_pipe_ack_received\":false,\"seek_pipe_ack_valid\":false,\"trim_pipe_connected\":false,\"trim_pipe_request_sent\":false,\"trim_pipe_ack_received\":false,\"trim_pipe_ack_valid\":false,\"switch_pipe_connected\":false,\"switch_pipe_request_sent\":false,\"switch_pipe_ack_received\":false,\"switch_pipe_ack_valid\":false,\"collection_creates\":0,\"collection_disposes\":0,\"collection_item_reads\":0,\"collection_lifetimes_balanced\":true,\"aegp_memory_created\":0,\"aegp_memory_freed\":0,\"aegp_memory_lifetimes_balanced\":true,\"suite_acquires\":1,\"suite_releases\":1,\"live_suite_reference_count\":0,\"live_suite_leases\":\"\",\"suite_cache_reclaimed_at_process_exit\":false,\"suite_leases_balanced\":true,\"receipts_created\":0,\"receipts_checked_in\":0,\"live_receipts\":0,\"render_performed\":false,\"module_audit\":{\"schema\":1,\"status\":\"not_required\",\"post_load\":{\"status\":\"not_required\",\"unknown_count\":0,\"worker\":[],\"plugin\":[],\"system32\":[],\"winsxs\":[],\"driverstore\":[],\"policy\":[],\"unknown\":[]},\"pre_unload\":{\"status\":\"not_required\",\"unknown_count\":0,\"worker\":[],\"plugin\":[],\"system32\":[],\"winsxs\":[],\"driverstore\":[],\"policy\":[],\"unknown\":[]},\"observed_union\":{\"status\":\"not_required\",\"unknown_count\":0,\"worker\":[],\"plugin\":[],\"system32\":[],\"winsxs\":[],\"driverstore\":[],\"policy\":[],\"unknown\":[]},\"phase_count\":0,\"unknown_count\":0}}\n",
+    "stdout": "{\"schema_version\":1,\"stage\":\"aegp_init\",\"status\":\"initialization_failed\",\"identity_verified\":true,\"entrypoint\":\"EntryPointFunc\",\"driver_major_version\":24,\"driver_minor_version\":0,\"plugin_id\":1,\"init_error\":4,\"entry_invoked\":true,\"entry_fault\":\"cpp_exception\",\"entry_exception_code\":0,\"forced_suite_releases\":0,\"boundary_regression_mode\":true,\"boundary_regression_passed\":true,\"global_refcon_nonnull\":false,\"commands_created\":0,\"menu_commands_inserted\":0,\"command_hooks_registered\":0,\"update_menu_hooks_registered\":0,\"idle_hooks_registered\":0,\"death_hooks_registered\":1,\"death_hooks_invoked\":0,\"death_error\":0,\"event_requested\":\"none\",\"event_error\":0,\"hooks_invoked\":0,\"menu_hooks_invoked\":0,\"scene_first_observed_frame\":-1,\"scene_last_observed_frame\":-1,\"scene_current_frame\":1,\"scene_layer_count\":3,\"scene_selected_layer_count\":2,\"idle_max_sleep\":-1,\"command_hooks_invoked\":0,\"command_handled_count\":0,\"command_enable_calls\":0,\"command_check_calls\":0,\"command_checked_true_calls\":0,\"command_checked_false_calls\":0,\"item_current_time_calls\":0,\"item_set_current_time_calls\":0,\"item_last_set_time_value\":-1,\"item_last_set_time_scale\":0,\"item_name_calls\":0,\"item_duration_calls\":0,\"comp_from_item_calls\":0,\"comp_framerate_calls\":0,\"layer_count_calls\":0,\"layer_by_index_calls\":0,\"layer_source_item_calls\":0,\"layer_id_calls\":0,\"layer_attribute_calls\":0,\"layer_trim_set_calls\":0,\"layer_flag_set_calls\":0,\"layer_1_flags\":5,\"layer_2_flags\":5,\"layer_3_flags\":5,\"layer_1_in_point_value\":0,\"layer_1_in_point_scale\":30,\"layer_1_duration_value\":300,\"layer_1_duration_scale\":30,\"layer_name_calls\":0,\"effect_count_calls\":0,\"effect_acquires\":0,\"effect_disposes\":0,\"effect_metadata_calls\":0,\"effect_lifetimes_balanced\":true,\"stream_acquires\":0,\"stream_disposes\":0,\"stream_value_acquires\":0,\"stream_value_disposes\":0,\"stream_sampled_selector_mask\":0,\"stream_lifetimes_balanced\":true,\"effect_param_name_calls\":0,\"effect_param_value_calls\":0,\"effect_param_union_calls\":0,\"keyframe_count_calls\":0,\"keyframed_stream_reports\":0,\"keyframe_time_calls\":0,\"keyframe_value_calls\":0,\"keyframe_interpolation_calls\":0,\"keyframe_pipe_connected\":false,\"keyframe_pipe_request_sent\":false,\"keyframe_pipe_response_received\":false,\"keyframe_pipe_response_valid\":false,\"keyframe_pipe_response_bytes\":0,\"seek_pipe_connected\":false,\"seek_pipe_request_sent\":false,\"seek_pipe_ack_received\":false,\"seek_pipe_ack_valid\":false,\"trim_pipe_connected\":false,\"trim_pipe_request_sent\":false,\"trim_pipe_ack_received\":false,\"trim_pipe_ack_valid\":false,\"switch_pipe_connected\":false,\"switch_pipe_request_sent\":false,\"switch_pipe_ack_received\":false,\"switch_pipe_ack_valid\":false,\"collection_creates\":0,\"collection_disposes\":0,\"collection_item_reads\":0,\"collection_lifetimes_balanced\":true,\"aegp_memory_created\":0,\"aegp_memory_freed\":0,\"aegp_memory_lifetimes_balanced\":true,\"suite_acquires\":1,\"suite_releases\":1,\"live_suite_reference_count\":0,\"live_suite_leases\":\"\",\"suite_cache_reclaimed_at_process_exit\":false,\"suite_leases_balanced\":true,\"receipts_created\":0,\"receipts_checked_in\":0,\"live_receipts\":0,\"render_performed\":false,\"module_audit\":{\"schema\":1,\"status\":\"not_required\",\"post_load\":{\"status\":\"not_required\",\"unknown_count\":0,\"worker\":[],\"plugin\":[],\"system32\":[],\"winsxs\":[],\"driverstore\":[],\"policy\":[],\"unknown\":[]},\"pre_unload\":{\"status\":\"not_required\",\"unknown_count\":0,\"worker\":[],\"plugin\":[],\"system32\":[],\"winsxs\":[],\"driverstore\":[],\"policy\":[],\"unknown\":[]},\"observed_union\":{\"status\":\"not_required\",\"unknown_count\":0,\"worker\":[],\"plugin\":[],\"system32\":[],\"winsxs\":[],\"driverstore\":[],\"policy\":[],\"unknown\":[]},\"phase_count\":0,\"unknown_count\":0}}\n",
     "stderr": "stage:suite_acquire_failed name=AEGP File Import Manager Suite version=3\n",
-    "stdout_sha256": "44bf28fdd407839979af9510f4843e60d76a6dd3de86e88a5f00081e33c70556",
+    "stdout_sha256": "5933642bace1c9d93a7ebdcc47589f952907c5404860107de52597479eff755f",
     "stderr_sha256": "41e2e164f8b093d51649c53e5543d890cbdad96bd00c9ccbbb93e9c56437378b",
     "blocker": null
   },
@@ -40,8 +40,8 @@
   "artifacts": {
     "probe": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-scene-probe-build\\Release\\issue26_scene_probe.aex",
-      "sha256": "578ef417db7ad4ed589dbf2c46a2d132abe9e5c69c1783abe272ecd735476437",
-      "size_bytes": 55808
+      "sha256": "b94075793457843b654891eccdc1f4d03830f6fbde72c10339872b3b57672e45",
+      "size_bytes": 56832
     },
     "fixture": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\instruments\\aex\\issue26-scene-probe\\fixture.jsx",
@@ -50,38 +50,49 @@
     },
     "worker": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
-      "sha256": "a027772e8951c477228a4ac60d245c96900e8f69a94be8889096f3ae04057486",
-      "size_bytes": 1838592
+      "sha256": "84945afb60c1403de9278b73068fda090c22b38511704fe20ee8d726c6227aa7",
+      "size_bytes": 1840128
     },
     "sample": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-sdk-samples\\projector\\Projector.aex",
-      "sha256": "b3fc16fa77f2eeed76b4e406b95864c66ae746ba2f1b81e35c313330de37b17b",
+      "sha256": "d52ec22c1335f30b2d2aa9897f846ea7317affea55c1be485d2e54fb6b48b6e5",
       "size_bytes": 32768
     },
     "build_receipt": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-sdk-samples\\build-result.json",
-      "sha256": "ef6742e8b28e9434fe9c8a43631ae03956f42713168e0261be241175fb3eeba2",
-      "size_bytes": 2036
+      "sha256": "af3dbc1ea4f0238f3bfa49d7513ed25661c704c2dd263e41fc7fa8a07437ad0c",
+      "size_bytes": 122745
     },
-    "fixture_metadata": null
+    "fixture_metadata": null,
+    "raw_probe_report": null
   },
   "probe_report": null,
   "host_report": {
     "schema_version": 1,
     "stage": "aegp_init",
     "status": "initialization_failed",
+    "driver_major_version": 24,
+    "driver_minor_version": 0,
     "event_requested": "none",
     "init_error": 4,
     "event_error": 0,
     "entry_invoked": true,
-    "entry_fault": "seh_exception",
-    "entry_exception_code": 3765269347,
-    "forced_suite_releases": 1,
+    "entry_fault": "cpp_exception",
+    "entry_exception_code": 0,
+    "forced_suite_releases": 0,
     "boundary_regression_mode": true,
     "boundary_regression_passed": true,
     "effect_lifetimes_balanced": true,
     "stream_lifetimes_balanced": true,
-    "suite_leases_balanced": true
+    "collection_lifetimes_balanced": true,
+    "aegp_memory_lifetimes_balanced": true,
+    "suite_leases_balanced": true,
+    "suite_acquires": 1,
+    "suite_releases": 1,
+    "live_suite_reference_count": 0,
+    "receipts_created": 0,
+    "receipts_checked_in": 0,
+    "live_receipts": 0
   },
   "fixture_report": null,
   "sample_report": {
@@ -90,8 +101,8 @@
     "route": "aegp_init_boundary_test",
     "classification": "guarded_initialization_failure",
     "sdk_source_unchanged": true,
-    "build_receipt_sha256": "ef6742e8b28e9434fe9c8a43631ae03956f42713168e0261be241175fb3eeba2",
-    "source_tree_sha256": "f28d47edfe58b89ec9d83633b00a661894f04dfe3dc20caeabbc64310832da17"
+    "build_receipt_sha256": "af3dbc1ea4f0238f3bfa49d7513ed25661c704c2dd263e41fc7fa8a07437ad0c",
+    "source_inputs_sha256": "0bb46fa18052d026810c27fddf0a3c045923a4fb0ca26e2e47ebd2e74874a4c5"
   },
   "unsupported_slots": [],
   "cleanup": null

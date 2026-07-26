@@ -108,7 +108,8 @@
               "fixture": {"$ref": "#/$defs/artifact"},
               "worker": {"$ref": "#/$defs/artifact"},
               "sample": {"type": "null"},
-              "fixture_metadata": {"type": "null"}
+              "fixture_metadata": {"type": "null"},
+              "raw_probe_report": {"$ref": "#/$defs/artifact"}
             }
           }
         }
@@ -128,7 +129,8 @@
               "probe": {"$ref": "#/$defs/artifact"},
               "fixture": {"$ref": "#/$defs/artifact"},
               "worker": {"$ref": "#/$defs/artifact"},
-              "sample": {"type": "null"}
+              "sample": {"type": "null"},
+              "raw_probe_report": {"$ref": "#/$defs/nullable_artifact"}
             }
           }
         }
@@ -184,7 +186,8 @@
               "worker": {"$ref": "#/$defs/artifact"},
               "sample": {"$ref": "#/$defs/artifact"},
               "build_receipt": {"$ref": "#/$defs/artifact"},
-              "fixture_metadata": {"type": "null"}
+              "fixture_metadata": {"type": "null"},
+              "raw_probe_report": {"type": "null"}
             }
           }
         }
@@ -299,7 +302,8 @@
         "worker",
         "sample",
         "build_receipt",
-        "fixture_metadata"
+        "fixture_metadata",
+        "raw_probe_report"
       ],
       "properties": {
         "probe": {"$ref": "#/$defs/nullable_artifact"},
@@ -307,7 +311,8 @@
         "worker": {"$ref": "#/$defs/nullable_artifact"},
         "sample": {"$ref": "#/$defs/nullable_artifact"},
         "build_receipt": {"$ref": "#/$defs/nullable_artifact"},
-        "fixture_metadata": {"$ref": "#/$defs/nullable_artifact"}
+        "fixture_metadata": {"$ref": "#/$defs/nullable_artifact"},
+        "raw_probe_report": {"$ref": "#/$defs/nullable_artifact"}
       }
     },
     "fixture_report": {
@@ -409,6 +414,9 @@
         "invalidated_children",
         "applied_effects",
         "removed_applied_effects",
+        "keyframe_mutations_committed",
+        "keyframe_mutations_reverted",
+        "residual_scene_mutations",
         "balanced"
       ],
       "properties": {
@@ -421,6 +429,18 @@
         "invalidated_children": {"type": "integer", "minimum": 0},
         "applied_effects": {"type": "integer", "minimum": 0},
         "removed_applied_effects": {"type": "integer", "minimum": 0},
+        "keyframe_mutations_committed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "keyframe_mutations_reverted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "residual_scene_mutations": {
+          "type": "integer",
+          "minimum": 0
+        },
         "balanced": {"type": "boolean"}
       }
     },
@@ -528,18 +548,24 @@
             "cancel_unchanged",
             "commit_observed",
             "commit_incremented",
+            "cleanup_observed",
+            "cleanup_restored",
             "before",
             "after_cancel",
-            "after_commit"
+            "after_commit",
+            "after_cleanup"
           ],
           "properties": {
             "cancel_observed": {"type": "boolean"},
             "cancel_unchanged": {"type": "boolean"},
             "commit_observed": {"type": "boolean"},
             "commit_incremented": {"type": "boolean"},
+            "cleanup_observed": {"type": "boolean"},
+            "cleanup_restored": {"type": "boolean"},
             "before": {"type": "integer", "minimum": -1},
             "after_cancel": {"type": "integer", "minimum": -1},
-            "after_commit": {"type": "integer", "minimum": -1}
+            "after_commit": {"type": "integer", "minimum": -1},
+            "after_cleanup": {"type": "integer", "minimum": -1}
           }
         },
         "generation": {
@@ -560,6 +586,8 @@
         "schema_version",
         "stage",
         "status",
+        "driver_major_version",
+        "driver_minor_version",
         "event_requested",
         "init_error",
         "event_error",
@@ -571,12 +599,22 @@
         "boundary_regression_passed",
         "effect_lifetimes_balanced",
         "stream_lifetimes_balanced",
-        "suite_leases_balanced"
+        "collection_lifetimes_balanced",
+        "aegp_memory_lifetimes_balanced",
+        "suite_leases_balanced",
+        "suite_acquires",
+        "suite_releases",
+        "live_suite_reference_count",
+        "receipts_created",
+        "receipts_checked_in",
+        "live_receipts"
       ],
       "properties": {
         "schema_version": {"const": 1},
         "stage": {"const": "aegp_init"},
         "status": {"enum": ["event_completed", "initialization_failed"]},
+        "driver_major_version": {"type": "integer", "minimum": 0},
+        "driver_minor_version": {"type": "integer", "minimum": 0},
         "event_requested": {"type": "string"},
         "init_error": {"type": "integer"},
         "event_error": {"type": "integer"},
@@ -590,7 +628,15 @@
         "boundary_regression_passed": {"type": "boolean"},
         "effect_lifetimes_balanced": {"type": "boolean"},
         "stream_lifetimes_balanced": {"type": "boolean"},
-        "suite_leases_balanced": {"type": "boolean"}
+        "collection_lifetimes_balanced": {"type": "boolean"},
+        "aegp_memory_lifetimes_balanced": {"type": "boolean"},
+        "suite_leases_balanced": {"type": "boolean"},
+        "suite_acquires": {"type": "integer", "minimum": 0},
+        "suite_releases": {"type": "integer", "minimum": 0},
+        "live_suite_reference_count": {"type": "integer", "minimum": 0},
+        "receipts_created": {"type": "integer", "minimum": 0},
+        "receipts_checked_in": {"type": "integer", "minimum": 0},
+        "live_receipts": {"type": "integer", "minimum": 0}
       }
     },
     "sample_report": {
@@ -603,7 +649,7 @@
         "classification",
         "sdk_source_unchanged",
         "build_receipt_sha256",
-        "source_tree_sha256"
+        "source_inputs_sha256"
       ],
       "properties": {
         "sample": {"enum": ["Projector", "Resizer"]},
@@ -620,7 +666,7 @@
         },
         "sdk_source_unchanged": {"const": true},
         "build_receipt_sha256": {"$ref": "#/$defs/sha256"},
-        "source_tree_sha256": {"$ref": "#/$defs/sha256"}
+        "source_inputs_sha256": {"$ref": "#/$defs/sha256"}
       }
     }
   }

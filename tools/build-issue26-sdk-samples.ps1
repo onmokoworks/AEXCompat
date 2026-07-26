@@ -15,34 +15,26 @@ $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
 $msbuild = Join-Path $vsRoot 'MSBuild\Current\Bin\MSBuild.exe'
 $pipTool = Join-Path $SdkRoot 'Examples\Resources\PiPLTool.exe'
 $headers = Join-Path $SdkRoot 'Examples\Headers'
+$provenanceTool = Join-Path $PSScriptRoot 'issue26_sdk_provenance.py'
 
-foreach ($required in @($vcvars, $msbuild, $pipTool)) {
+foreach ($required in @($vcvars, $msbuild, $pipTool, $provenanceTool)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required Issue #26 SDK build input is missing: $required"
     }
 }
 
-function Get-SourceTreeHash {
-    param([System.IO.FileInfo[]]$Files)
-    $normalizedSdkRoot = [System.IO.Path]::GetFullPath($SdkRoot).TrimEnd('\')
-    $lines = foreach ($file in ($Files | Sort-Object FullName)) {
-        $fullName = [System.IO.Path]::GetFullPath($file.FullName)
-        if (-not $fullName.StartsWith(
-                $normalizedSdkRoot + '\',
-                [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw "SDK source escaped reviewed root: $fullName"
-        }
-        $relative = $fullName.Substring($normalizedSdkRoot.Length + 1).Replace('\', '/')
-        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        "$relative`0$hash"
+function Get-BuildToolPath {
+    param(
+        [string]$BuildLog,
+        [string]$Executable
+    )
+    $logText = Get-Content -LiteralPath $BuildLog -Raw
+    $pattern = "(?im)^\s*(?<path>[A-Za-z]:\\.+?\\$([regex]::Escape($Executable))\.exe)\s"
+    $match = [regex]::Match($logText, $pattern)
+    if (-not $match.Success) {
+        throw "Build log does not identify $Executable.exe: $BuildLog"
     }
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
-    } finally {
-        $sha.Dispose()
-    }
+    return (Resolve-Path -LiteralPath $match.Groups['path'].Value).Path
 }
 
 function Build-Sample {
@@ -73,14 +65,18 @@ function Build-Sample {
     $artifact = Join-Path $target "$Name.aex"
     $log = Join-Path $target 'build.log'
     $batch = Join-Path $target "build-$($Name.ToLowerInvariant()).cmd"
+    $binlog = Join-Path $target 'build.binlog'
+    $sourceSnapshot = Join-Path $target 'source-inputs-before.json'
+    $sampleReceipt = Join-Path $target 'sample-provenance.json'
 
-    $sourceFiles = Get-ChildItem -LiteralPath $sourceRoot -Recurse -File |
-        Where-Object { $_.FullName -notmatch '\\(Debug|Release)\\|\\x64\\' }
-    $before = @{}
-    foreach ($file in $sourceFiles) {
-        $before[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+    & python $provenanceTool snapshot `
+        --sdk-root $SdkRoot `
+        --source-root $sourceRoot `
+        --props $props `
+        --output $sourceSnapshot
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Name transitive source snapshot failed"
     }
-    $sourceTreeHashBefore = Get-SourceTreeHash $sourceFiles
 
     $targetMsBuild = ($target -replace '\\', '/') + '/'
     $intermediateMsBuild = ($intermediate -replace '\\', '/') + '/'
@@ -89,7 +85,7 @@ function Build-Sample {
         "cl.exe /nologo /I `"$headers`" /EP `"$pipSource`" > `"$rr`"",
         "`"$pipTool`" `"$rr`" `"$rrc`"",
         "cl.exe /nologo /D MSWindows /EP `"$rrc`" > `"$pipRc`"",
-        "`"$msbuild`" `"$project`" /nologo /m /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:ForceImportBeforeCppTargets=`"$props`" /p:AEXCompatIssue26PiPLRc=`"$pipRc`" /p:OutDir=`"$targetMsBuild`" /p:IntDir=`"$intermediateMsBuild`" /p:AE_PLUGIN_BUILD_DIR=`"$target`" /bl:`"$target\build.binlog`""
+        "`"$msbuild`" `"$project`" /nologo /m /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:ForceImportBeforeCppTargets=`"$props`" /p:AEXCompatIssue26PiPLRc=`"$pipRc`" /p:OutDir=`"$targetMsBuild`" /p:IntDir=`"$intermediateMsBuild`" /p:AE_PLUGIN_BUILD_DIR=`"$target`" /bl:`"$binlog`""
     )
     @('@echo off', 'setlocal', ($commands -join ' && ')) |
         Set-Content -LiteralPath $batch -Encoding ascii
@@ -104,31 +100,43 @@ function Build-Sample {
         throw "$Name v143 build failed with exit code $buildExitCode. See $log"
     }
 
-    foreach ($entry in $before.GetEnumerator()) {
-        $after = (Get-FileHash -LiteralPath $entry.Key -Algorithm SHA256).Hash
-        if ($after -ne $entry.Value) {
-            throw "SDK source changed during $Name build: $($entry.Key)"
-        }
-    }
-    $sourceTreeHashAfter = Get-SourceTreeHash $sourceFiles
-    if ($sourceTreeHashAfter -ne $sourceTreeHashBefore) {
-        throw "SDK source tree hash changed during $Name build"
-    }
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         throw "$Name build did not produce $artifact"
     }
-    return [ordered]@{
-        sample = $Name
-        source_project = $project
-        platform_toolset = 'v143'
-        configuration = 'Release|x64'
-        artifact = $artifact
-        artifact_size = (Get-Item -LiteralPath $artifact).Length
-        artifact_sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
-        source_tree_sha256_before = $sourceTreeHashBefore
-        source_tree_sha256_after = $sourceTreeHashAfter
-        sdk_source_unchanged = $true
+
+    $compiler = Get-BuildToolPath $log 'cl'
+    $linker = Get-BuildToolPath $log 'link'
+    $resourceCompiler = Get-BuildToolPath $log 'rc'
+    $receiptArguments = @(
+        $provenanceTool,
+        'receipt',
+        '--sample', $Name,
+        '--sdk-root', $SdkRoot,
+        '--source-root', $sourceRoot,
+        '--source-project', $project,
+        '--props', $props,
+        '--snapshot-before', $sourceSnapshot,
+        '--artifact', $artifact,
+        '--generated', "pipl_preprocessed=$rr",
+        '--generated', "pipl_compiled=$rrc",
+        '--generated', "pipl_resource=$pipRc",
+        '--tool', "vcvars=$vcvars",
+        '--tool', "msbuild=$msbuild",
+        '--tool', "compiler=$compiler",
+        '--tool', "linker=$linker",
+        '--tool', "resource_compiler=$resourceCompiler",
+        '--tool', "pipl_tool=$pipTool",
+        '--build-command', $batch,
+        '--build-log', $log,
+        '--build-binlog', $binlog,
+        '--output', $sampleReceipt
+    )
+    & python @receiptArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Name provenance receipt failed"
     }
+    return Get-Content -LiteralPath $sampleReceipt -Raw |
+        ConvertFrom-Json
 }
 
 New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
@@ -143,7 +151,7 @@ if ($Sample -in @('All', 'Resizer')) {
     $results += Build-Sample 'Resizer' 'Examples\Effect\Resizer' 'Resizer' 'ResizerPiPL.r' 'resizer-v143.props'
 }
 $manifest = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     status = 'built'
     samples = $results
 }

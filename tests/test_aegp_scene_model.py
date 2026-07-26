@@ -266,22 +266,40 @@ def test_external_aegp_entry_boundary_contains_faults_and_reclaims_leases() -> N
     routing = read(
         ROOT / "minihost" / "src" / "worker_invocation_orchestration.cpp"
     )
+    native = read(
+        ROOT / "tests" / "native" / "worker_aegp_entry_guard_selftest.cpp"
+    )
     for marker in (
         "__try",
         "__except",
+        "kMsvcCppException",
+        "EXCEPTION_CONTINUE_SEARCH",
+        "EXCEPTION_ACCESS_VIOLATION",
+        "same_module",
+        "invoke_with_cpp_boundary",
         "catch (...)",
         "FaultKind::seh_exception",
+        "EntrySuiteLeaseScope",
+        "release_since",
         "force_release_all()",
         "forced_suite_releases",
         "boundary_regression_passed",
         'L"--aegp-init-boundary-test"',
+        "counters.releases == 1",
+        "STATUS_STACK_BUFFER_OVERRUN",
+        "run_unrelated_child",
     ):
         assert (
             marker in guard
             or marker in orchestration
             or marker in report
             or marker in routing
+            or marker in native
         )
+    assert (
+        "result.entry_fault == "
+        "aegp_entry_guard::FaultKind::seh_exception"
+    ) in orchestration
 
 
 def test_published_worker_suites_cover_phase_3_to_5_mutations() -> None:

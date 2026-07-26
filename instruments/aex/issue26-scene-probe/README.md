@@ -7,7 +7,8 @@ AEXCompat. It contains no host detection. The host-independent input is the
 The probe enumerates public project/item/comp/layer/effect/stream identities,
 records effect and stream order, observes parent/camera/zoom and keyframe
 metadata including spatial tangents, exercises public batch-keyframe
-cancel/commit, and verifies that a stream borrowed from a duplicated effect is
+cancel/commit, deletes the committed keyframe and verifies the original count
+is restored, and verifies that a stream borrowed from a duplicated effect is
 rejected after that owner is deleted. Effect parameter stream index zero is
 verified as the public input-layer stream and matched to the layer ID. Every
 unavailable suite or operation is emitted with suite, version, slot, operation,

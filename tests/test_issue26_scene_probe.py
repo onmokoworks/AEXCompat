@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import subprocess
 import sys
@@ -38,6 +39,59 @@ def strict_load(path: Path):
     )
 
 
+def write_json(path: Path, value) -> None:
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def artifact_identity(path: Path):
+    payload = path.read_bytes()
+    return {
+        "path": str(path.resolve()),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size_bytes": len(payload),
+    }
+
+
+def provenance_sha256(value) -> str:
+    payload = {
+        key: item
+        for key, item in value.items()
+        if key != "provenance_sha256"
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def bind_probe_report(tmp_path: Path, name: str, record) -> None:
+    raw = tmp_path / f"{name}-raw-probe.json"
+    write_json(raw, record["probe_report"])
+    record["artifacts"]["raw_probe_report"] = artifact_identity(raw)
+    record["cleanup"] = record["probe_report"]["cleanup"]
+    record["unsupported_slots"] = record["probe_report"][
+        "unsupported_slots"
+    ]
+
+
+def bind_stdout(record, host) -> None:
+    stdout = json.dumps(host, separators=(",", ":")) + "\n"
+    record["execution"]["stdout"] = stdout
+    record["execution"]["stdout_sha256"] = hashlib.sha256(
+        stdout.encode("utf-8")
+    ).hexdigest()
+    record["host_report"] = {
+        key: host[key] for key in record["host_report"]
+    }
+
+
 def test_issue26_evidence_schema_is_strict_and_valid():
     schema = strict_load(SCHEMA_PATH)
     Draft202012Validator.check_schema(schema)
@@ -46,6 +100,26 @@ def test_issue26_evidence_schema_is_strict_and_valid():
     assert schema["$defs"]["coverage"]["additionalProperties"] is False
     assert schema["$defs"]["cleanup"]["additionalProperties"] is False
     assert schema["$defs"]["fixture_report"]["additionalProperties"] is False
+
+
+def test_evidence_validator_rejects_duplicate_keys(tmp_path: Path):
+    source = (CORPUS / "aexcompat.json").read_text(encoding="utf-8")
+    duplicate = source.replace(
+        '"status": "passed",',
+        '"status": "passed",\n  "status": "passed",',
+        1,
+    )
+    path = tmp_path / "duplicate-key.json"
+    path.write_text(duplicate, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(TOOL), "validate", str(path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "duplicate JSON key: status" in completed.stderr
 
 
 def test_probe_is_host_neutral_and_uses_only_public_aegp_surfaces():
@@ -67,6 +141,7 @@ def test_probe_is_host_neutral_and_uses_only_public_aegp_surfaces():
         "AEGP_GetNewKeyframeSpatialTangents",
         "AEGP_StartAddKeyframes",
         "AEGP_EndAddKeyframes",
+        "AEGP_DeleteKeyframe",
         "AEGP_DuplicateEffect",
         "AEGP_DeleteLayerEffect",
     ):
@@ -180,7 +255,12 @@ def test_corpus_is_strict_schema_valid_and_derived():
     )
     assert projector["host_report"]["status"] == "initialization_failed"
     assert projector["host_report"]["boundary_regression_passed"] is True
-    assert projector["host_report"]["forced_suite_releases"] >= 1
+    assert projector["host_report"]["entry_fault"] == "cpp_exception"
+    assert projector["host_report"]["entry_exception_code"] == 0
+    assert projector["host_report"]["forced_suite_releases"] == 0
+    assert projector["host_report"]["suite_acquires"] == 1
+    assert projector["host_report"]["suite_releases"] == 1
+    assert projector["host_report"]["live_suite_reference_count"] == 0
     assert projector["execution"]["exit_code"] == 0
     assert "0xC0000409" not in (
         projector["execution"]["stdout"] + projector["execution"]["stderr"]
@@ -194,6 +274,48 @@ def test_corpus_is_strict_schema_valid_and_derived():
         )
         assert record["execution"]["stdout"]
         assert record["execution"]["stdout_sha256"]
+        assert record["sample_report"]["source_inputs_sha256"]
+        receipt = strict_load(
+            Path(record["artifacts"]["build_receipt"]["path"])
+        )
+        sample = next(
+            value
+            for value in receipt["samples"]
+            if value["sample"] == record["sample_report"]["sample"]
+        )
+        assert {value["role"] for value in sample["source_inputs"]} == {
+            "sample_source",
+            "shared_util",
+            "sdk_header",
+            "injected_props",
+        }
+        assert {value["role"] for value in sample["generated_inputs"]} == {
+            "pipl_preprocessed",
+            "pipl_compiled",
+            "pipl_resource",
+        }
+        assert {value["role"] for value in sample["toolchain"]} == {
+            "vcvars",
+            "msbuild",
+            "compiler",
+            "linker",
+            "resource_compiler",
+            "pipl_tool",
+        }
+        for role in (
+            "msbuild",
+            "compiler",
+            "linker",
+            "resource_compiler",
+        ):
+            identity = next(
+                value
+                for value in sample["toolchain"]
+                if value["role"] == role
+            )
+            assert identity["file_version"]
+        assert sample["build_log"]["size_bytes"] > 0
+        assert sample["build_binlog"]["size_bytes"] > 0
 
 
 def test_readiness_validator_rejects_semantically_incomplete_records(
@@ -242,11 +364,73 @@ def test_readiness_validator_rejects_semantically_incomplete_records(
     cases.append(("unsupported", unsupported))
 
     for name, record in cases:
+        if record["probe_report"] is not None:
+            bind_probe_report(tmp_path, name, record)
         path = tmp_path / f"{name}.json"
-        path.write_text(
-            json.dumps(record, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        write_json(path, record)
+        completed = subprocess.run(
+            [sys.executable, str(TOOL), "validate", str(path)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
         )
+        assert completed.returncode != 0, name
+
+
+def test_readiness_validator_rejects_adversarial_internal_contradictions(
+    tmp_path: Path,
+):
+    source = strict_load(CORPUS / "aexcompat.json")
+    cases = []
+
+    duplicate_identity = copy.deepcopy(source)
+    duplicate_identity["probe_report"]["identities"][1]["token"] = (
+        duplicate_identity["probe_report"]["identities"][0]["token"]
+    )
+    cases.append(("duplicate-identity", duplicate_identity))
+
+    foreign_owner = copy.deepcopy(source)
+    effect = next(
+        value
+        for value in foreign_owner["probe_report"]["identities"]
+        if value["kind"] == "effect"
+    )
+    effect["owner_id"] = 999999
+    cases.append(("foreign-owner", foreign_owner))
+
+    impossible_streams = copy.deepcopy(source)
+    impossible_streams["probe_report"]["streams"][1]["ordinal"] = 0
+    cases.append(("stream-order", impossible_streams))
+
+    transaction = copy.deepcopy(source)
+    transaction["probe_report"]["coverage"]["transaction"][
+        "after_cleanup"
+    ] += 1
+    cases.append(("transaction", transaction))
+
+    cleanup = copy.deepcopy(source)
+    cleanup["probe_report"]["cleanup"]["residual_scene_mutations"] = 1
+    cases.append(("residual-mutation", cleanup))
+
+    empty_output = copy.deepcopy(source)
+    empty_output["execution"]["stdout"] = ""
+    empty_output["execution"]["stdout_sha256"] = hashlib.sha256(
+        b""
+    ).hexdigest()
+    cases.append(("empty-stdout", empty_output))
+
+    bad_host = copy.deepcopy(source)
+    raw_host = json.loads(source["execution"]["stdout"])
+    raw_host["suite_releases"] = raw_host["suite_acquires"] - 1
+    raw_host["suite_leases_balanced"] = True
+    bind_stdout(bad_host, raw_host)
+    cases.append(("host-lifetime", bad_host))
+
+    for name, record in cases:
+        bind_probe_report(tmp_path, name, record)
+        path = tmp_path / f"{name}.json"
+        write_json(path, record)
         completed = subprocess.run(
             [sys.executable, str(TOOL), "validate", str(path)],
             cwd=ROOT,
@@ -273,16 +457,38 @@ def test_readiness_validator_rejects_missing_or_mismatched_provenance(
     receipt_mismatch = copy.deepcopy(projector)
     receipt_mismatch["sample_report"]["build_receipt_sha256"] = "0" * 64
 
+    receipt_tamper = copy.deepcopy(projector)
+    original_receipt = strict_load(
+        Path(receipt_tamper["artifacts"]["build_receipt"]["path"])
+    )
+    tampered_receipt = copy.deepcopy(original_receipt)
+    projector_entry = next(
+        value
+        for value in tampered_receipt["samples"]
+        if value["sample"] == "Projector"
+    )
+    projector_entry["source_inputs"] = projector_entry[
+        "source_inputs"
+    ][1:]
+    projector_entry["provenance_sha256"] = provenance_sha256(
+        projector_entry
+    )
+    tampered_path = tmp_path / "tampered-build-receipt.json"
+    write_json(tampered_path, tampered_receipt)
+    tampered_identity = artifact_identity(tampered_path)
+    receipt_tamper["artifacts"]["build_receipt"] = tampered_identity
+    receipt_tamper["sample_report"]["build_receipt_sha256"] = (
+        tampered_identity["sha256"]
+    )
+
     for name, record in (
         ("missing", missing),
         ("mismatched", mismatched),
         ("receipt", receipt_mismatch),
+        ("transitive-receipt", receipt_tamper),
     ):
         path = tmp_path / f"{name}.json"
-        path.write_text(
-            json.dumps(record, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json(path, record)
         completed = subprocess.run(
             [sys.executable, str(TOOL), "validate", str(path)],
             cwd=ROOT,

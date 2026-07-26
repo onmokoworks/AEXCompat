@@ -275,6 +275,28 @@ std::string SuiteRegistry::live_summary() const {
 suite_runtime::SuiteLeaseSnapshot SuiteRegistry::snapshot() const {
   return lease_tracker_.snapshot();
 }
+uint32_t SuiteRegistry::release_since(
+    const suite_runtime::SuiteLeaseSnapshot& baseline,
+    TraceWriter* trace_writer) {
+  const auto current = lease_tracker_.snapshot();
+  uint32_t released = 0;
+  for (const auto& [key, count] : current.live_leases) {
+    uint32_t baseline_count = 0;
+    for (const auto& [baseline_key, candidate] :
+         baseline.live_leases) {
+      if (baseline_key == key) {
+        baseline_count = candidate;
+        break;
+      }
+    }
+    for (uint32_t index = baseline_count; index < count; ++index) {
+      if (release(key.first.c_str(), key.second, trace_writer) != 0)
+        return released;
+      ++released;
+    }
+  }
+  return released;
+}
 uint32_t SuiteRegistry::force_release_all() noexcept {
   return lease_tracker_.force_release_all();
 }
