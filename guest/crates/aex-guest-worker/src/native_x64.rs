@@ -163,6 +163,7 @@ struct NativeState {
     pre_checkout_requests: Vec<[i32; 4]>,
     checkout_pixels_calls: u32,
     checkout_output_calls: u32,
+    input_parameter_definition: u64,
     parameter_definitions: Vec<u64>,
     handles: HashMap<u64, NativeHandle>,
     worlds: HashMap<u64, NativeWorld>,
@@ -577,8 +578,16 @@ impl GuestEngine<'static> {
 
     pub fn configure_parameter_definitions(
         &mut self,
+        input_definition: u64,
         definitions: Vec<u64>,
     ) -> Result<(), GuestError> {
+        if input_definition == 0
+            || !self.contains_readable(input_definition, abi::PF_PARAM_DEF_SIZE)
+        {
+            return Err(GuestError::Callback(
+                "active input parameter definition is invalid".into(),
+            ));
+        }
         if definitions.len() != self.state.params.len() {
             return Err(GuestError::Callback(
                 "active parameter definition count differs from setup".into(),
@@ -596,6 +605,7 @@ impl GuestEngine<'static> {
                     .copy_from_slice(&color);
             }
         }
+        self.state.input_parameter_definition = input_definition;
         self.state.parameter_definitions = definitions;
         Ok(())
     }
@@ -1974,11 +1984,15 @@ unsafe extern "win64" fn checkout_param(
     destination: u64,
 ) -> u64 {
     with_state(|state| {
-        let Some(source) = (index as usize)
-            .checked_sub(1)
-            .and_then(|offset| state.parameter_definitions.get(offset))
-            .copied()
-        else {
+        let Some(source) = (if index == 0 {
+            Some(state.input_parameter_definition)
+        } else {
+            (index as usize)
+                .checked_sub(1)
+                .and_then(|offset| state.parameter_definitions.get(offset))
+                .copied()
+        })
+        .filter(|source| *source != 0) else {
             state.callback_error =
                 Some(format!("checkout-param index outside definitions: {index}"));
             return 4;

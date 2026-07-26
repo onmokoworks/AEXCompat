@@ -1238,7 +1238,7 @@ impl ClassicHost {
                 .write_u64(params + ((index + 1) * 8) as u64, parameter)?;
         }
         self.engine
-            .configure_parameter_definitions(resources.parameter_definitions)?;
+            .configure_parameter_definitions(input_param, resources.parameter_definitions)?;
         if applied_requests.len() != parameter_values.len() {
             return Err(ClassicError::Input(format!(
                 "parameter application count mismatch: requested {}, applied {}",
