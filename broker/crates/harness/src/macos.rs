@@ -5,8 +5,9 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +19,7 @@ const NATIVE_SETUP_DEADLINE: Duration = Duration::from_secs(2);
 const RESIDENT_START_DEADLINE: Duration = Duration::from_secs(10);
 const RESIDENT_RENDER_DEADLINE: Duration = Duration::from_secs(30);
 const RESIDENT_CLOSE_DEADLINE: Duration = Duration::from_secs(2);
+const RESIDENT_RESPONSE_POLL: Duration = Duration::from_millis(10);
 
 struct RenderResult {
     report: String,
@@ -163,6 +165,8 @@ struct ResidentSessionHandle {
     sender: Sender<ResidentCommand>,
     receiver: Receiver<Result<RenderResult, String>>,
     next_frame: u64,
+    worker_pid: u32,
+    shutdown_requested: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
 }
 
@@ -195,25 +199,38 @@ impl ResidentState {
 
 impl ResidentSessionHandle {
     fn shutdown(&mut self) -> Result<(), String> {
+        self.shutdown_with_deadline(RESIDENT_CLOSE_DEADLINE)
+    }
+
+    fn shutdown_with_deadline(&mut self, deadline: Duration) -> Result<(), String> {
         let Some(join) = self.join.take() else {
             return Ok(());
         };
+        self.shutdown_requested.store(true, Ordering::Release);
         let (reply_sender, reply_receiver) = mpsc::channel();
-        let send_result = self
-            .sender
-            .send(ResidentCommand::Close(reply_sender))
-            .map_err(|error| format!("request resident close: {error}"));
-        let join_result = join
-            .join()
-            .map_err(|_| "resident session thread panicked during close".to_string());
-        if let Err(error) = send_result {
-            join_result?;
-            return Err(error);
+        if let Err(error) = self.sender.send(ResidentCommand::Close(reply_sender)) {
+            terminate_resident_pid(self.worker_pid);
+            enqueue_resident_join(join);
+            return Err(format!("request resident close: {error}"));
         }
-        join_result?;
-        reply_receiver
-            .recv()
-            .map_err(|error| format!("resident close result was lost: {error}"))?
+        match reply_receiver.recv_timeout(deadline) {
+            Ok(result) => {
+                // The close outcome is sent only after protocol cleanup and child
+                // ownership have been settled. Joining is never allowed to block
+                // the GUI thread, even for that normally-complete case.
+                enqueue_resident_join(join);
+                result
+            }
+            Err(error) => {
+                terminate_resident_pid(self.worker_pid);
+                enqueue_resident_join(join);
+                Err(format!(
+                    "resident close exceeded the {} ms shutdown deadline: {error}; worker {} was terminated and cleanup continues in background",
+                    deadline.as_millis(),
+                    self.worker_pid
+                ))
+            }
+        }
     }
 }
 
@@ -1142,7 +1159,7 @@ fn close_probe_worker(mut worker: StartedResidentWorker) -> Result<(), String> {
         },
         Err(error) => errors.push(error),
     }
-    if let Err(error) = wait_or_kill_resident_child(&mut worker.child, RESIDENT_CLOSE_DEADLINE) {
+    if let Err(error) = wait_or_kill_resident_child(worker.child, RESIDENT_CLOSE_DEADLINE) {
         errors.push(error);
     }
     let stderr = worker
@@ -1160,7 +1177,7 @@ fn close_probe_worker(mut worker: StartedResidentWorker) -> Result<(), String> {
 }
 
 fn wait_or_kill_resident_child(
-    child: &mut Child,
+    mut child: Child,
     deadline: Duration,
 ) -> Result<std::process::ExitStatus, String> {
     let started = Instant::now();
@@ -1174,11 +1191,15 @@ fn wait_or_kill_resident_child(
                 thread::sleep(Duration::from_millis(5));
             }
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                let reaped = kill_and_reap_or_transfer(child, NATIVE_DEADLINE_REAP_BUDGET);
                 return Err(format!(
-                    "resident worker exceeded the {} ms close deadline and was terminated",
-                    deadline.as_millis()
+                    "resident worker exceeded the {} ms close deadline and was terminated{}",
+                    deadline.as_millis(),
+                    if reaped {
+                        ""
+                    } else {
+                        " (child cleanup still pending)"
+                    }
                 ));
             }
         }
@@ -1215,6 +1236,41 @@ fn begin_resident_admission(
         plugin_path,
         input: admission_input,
         receiver,
+    }
+}
+
+fn recv_resident_response(
+    receiver: &Receiver<Result<Option<Value>, String>>,
+    child: &mut Child,
+    shutdown_requested: &AtomicBool,
+    deadline: Duration,
+) -> Result<Option<Value>, String> {
+    let started = Instant::now();
+    loop {
+        if shutdown_requested.load(Ordering::Acquire) {
+            let _ = child.kill();
+            return Err("resident render cancelled for session shutdown".into());
+        }
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            let _ = child.kill();
+            return Err(format!(
+                "resident render response timeout after {} ms",
+                deadline.as_millis()
+            ));
+        }
+        match receiver.recv_timeout(remaining.min(RESIDENT_RESPONSE_POLL)) {
+            Ok(Ok(response)) => return Ok(response),
+            Ok(Err(error)) => {
+                let _ = child.kill();
+                return Err(error);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = child.kill();
+                return Err("resident response reader disconnected".into());
+            }
+        }
     }
 }
 
@@ -1260,6 +1316,8 @@ fn start_resident_session(
     let stderr_receiver = started.stderr_receiver;
     let (command_sender, command_receiver) = mpsc::channel();
     let (result_sender, result_receiver) = mpsc::channel();
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let worker_shutdown_requested = Arc::clone(&shutdown_requested);
     let join = thread::spawn(move || {
         let mut running = true;
         let mut close_reply = None;
@@ -1280,10 +1338,12 @@ fn start_resident_session(
                         });
                         write_control_message(&mut stdin, &request)
                     }).and_then(|()| {
-                        let response = response_receiver
-                            .recv_timeout(RESIDENT_RENDER_DEADLINE)
-                            .map_err(|error| format!("resident render response timeout: {error}"))?
-                            .map_err(|error| format!("resident response reader: {error}"))?
+                        let response = recv_resident_response(
+                            &response_receiver,
+                            &mut child,
+                            &worker_shutdown_requested,
+                            RESIDENT_RENDER_DEADLINE,
+                        )?
                             .ok_or_else(|| "resident worker closed stdout".to_string())?;
                         let expected_checksum =
                             validate_resident_frame(&response, frame_index, width, height)?;
@@ -1335,7 +1395,7 @@ fn start_resident_session(
             },
             Err(error) => close_errors.push(error),
         }
-        if let Err(error) = wait_or_kill_resident_child(&mut child, RESIDENT_CLOSE_DEADLINE) {
+        if let Err(error) = wait_or_kill_resident_child(child, RESIDENT_CLOSE_DEADLINE) {
             close_errors.push(error);
         }
         let stderr = stderr_receiver
@@ -1347,6 +1407,13 @@ fn start_resident_session(
                 stderr.trim()
             ));
         }
+        for slot in [&input_slot, &output_slot] {
+            if let Err(error) = std::fs::remove_file(slot)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                close_errors.push(format!("remove resident slot {}: {error}", slot.display()));
+            }
+        }
         let close_outcome = if close_errors.is_empty() {
             Ok(())
         } else {
@@ -1357,8 +1424,6 @@ fn start_resident_session(
         } else if let Err(error) = close_outcome {
             let _ = result_sender.send(Err(error));
         }
-        let _ = std::fs::remove_file(input_slot);
-        let _ = std::fs::remove_file(output_slot);
     });
     Ok(ResidentSessionHandle {
         plugin_path: aex.to_path_buf(),
@@ -1366,6 +1431,8 @@ fn start_resident_session(
         sender: command_sender,
         receiver: result_receiver,
         next_frame: 0,
+        worker_pid,
+        shutdown_requested,
         join: Some(join),
     })
 }
@@ -1561,6 +1628,42 @@ fn run_guest_workers(
 }
 
 const NATIVE_DEADLINE_REAP_BUDGET: Duration = Duration::from_millis(20);
+
+fn terminate_resident_pid(worker_pid: u32) {
+    let Ok(pid) = libc::pid_t::try_from(worker_pid) else {
+        return;
+    };
+    // SAFETY: kill(2) does not dereference memory. The PID is captured from
+    // the still-owned Child at session launch, and this is used only after the
+    // resident controller misses its bounded shutdown deadline.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+}
+
+fn resident_join_reaper() -> &'static Sender<thread::JoinHandle<()>> {
+    static REAPER: OnceLock<Sender<thread::JoinHandle<()>>> = OnceLock::new();
+    REAPER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<thread::JoinHandle<()>>();
+        thread::Builder::new()
+            .name("aexcompat-resident-thread-reaper".into())
+            .spawn(move || {
+                while let Ok(join) = receiver.recv() {
+                    let _ = join.join();
+                }
+            })
+            .expect("start resident thread reaper");
+        sender
+    })
+}
+
+fn enqueue_resident_join(join: thread::JoinHandle<()>) {
+    if let Err(error) = resident_join_reaper().send(join) {
+        // The receiver can disappear only after its reaper panics. Dropping
+        // the recovered handle still detaches it without blocking the caller.
+        drop(error.0);
+    }
+}
 
 struct BackgroundReapRequest {
     child: Child,
@@ -1962,11 +2065,138 @@ mod tests {
 
     #[test]
     fn resident_close_timeout_terminates_the_worker() {
-        let mut child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        let child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
         let started = Instant::now();
-        assert!(wait_or_kill_resident_child(&mut child, Duration::from_millis(20)).is_err());
+        assert!(wait_or_kill_resident_child(child, Duration::from_millis(20)).is_err());
         assert!(started.elapsed() < Duration::from_millis(500));
-        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn resident_shutdown_preserves_normal_clean_close() {
+        let (command_sender, command_receiver) = mpsc::channel();
+        let (_result_sender, result_receiver) = mpsc::channel();
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let join = thread::spawn(move || match command_receiver.recv().unwrap() {
+            ResidentCommand::Close(reply) => reply.send(Ok(())).unwrap(),
+            ResidentCommand::Render { .. } => panic!("unexpected render"),
+        });
+        let mut session = ResidentSessionHandle {
+            plugin_path: PathBuf::new(),
+            input: PathBuf::new(),
+            sender: command_sender,
+            receiver: result_receiver,
+            next_frame: 0,
+            worker_pid: u32::MAX,
+            shutdown_requested,
+            join: Some(join),
+        };
+
+        session
+            .shutdown_with_deadline(Duration::from_millis(100))
+            .unwrap();
+        assert!(session.join.is_none());
+    }
+
+    #[test]
+    fn resident_shutdown_cancels_an_active_render_before_close() {
+        let (command_sender, command_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let worker_shutdown_requested = Arc::clone(&shutdown_requested);
+        let (pid_sender, pid_receiver) = mpsc::channel();
+        let join = thread::spawn(move || {
+            let mut child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+            pid_sender.send(child.id()).unwrap();
+            let (_response_sender, response_receiver) = mpsc::channel();
+            match command_receiver.recv().unwrap() {
+                ResidentCommand::Render { .. } => {
+                    let result = recv_resident_response(
+                        &response_receiver,
+                        &mut child,
+                        &worker_shutdown_requested,
+                        Duration::from_secs(5),
+                    );
+                    result_sender.send(result.map(|_| unreachable!())).unwrap();
+                }
+                ResidentCommand::Close(_) => panic!("render must be queued first"),
+            }
+            match command_receiver.recv().unwrap() {
+                ResidentCommand::Close(reply) => {
+                    let status = child.wait().unwrap();
+                    assert!(!status.success());
+                    reply.send(Ok(())).unwrap();
+                }
+                ResidentCommand::Render { .. } => panic!("close must follow render"),
+            }
+        });
+        let worker_pid = pid_receiver.recv().unwrap();
+        let mut session = ResidentSessionHandle {
+            plugin_path: PathBuf::new(),
+            input: PathBuf::new(),
+            sender: command_sender,
+            receiver: result_receiver,
+            next_frame: 0,
+            worker_pid,
+            shutdown_requested,
+            join: Some(join),
+        };
+        session
+            .sender
+            .send(ResidentCommand::Render {
+                frame_index: 0,
+                parameters: Vec::new(),
+                output: PathBuf::new(),
+            })
+            .unwrap();
+
+        let started = Instant::now();
+        session
+            .shutdown_with_deadline(Duration::from_millis(250))
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(
+            session
+                .receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn resident_shutdown_terminates_a_hung_worker_without_joining_on_gui_thread() {
+        let (command_sender, _command_receiver) = mpsc::channel();
+        let (_result_sender, result_receiver) = mpsc::channel();
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let (pid_sender, pid_receiver) = mpsc::channel();
+        let (status_sender, status_receiver) = mpsc::channel();
+        let join = thread::spawn(move || {
+            let mut child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+            pid_sender.send(child.id()).unwrap();
+            thread::sleep(Duration::from_millis(150));
+            status_sender.send(child.wait().unwrap()).unwrap();
+        });
+        let worker_pid = pid_receiver.recv().unwrap();
+        let mut session = ResidentSessionHandle {
+            plugin_path: PathBuf::new(),
+            input: PathBuf::new(),
+            sender: command_sender,
+            receiver: result_receiver,
+            next_frame: 0,
+            worker_pid,
+            shutdown_requested,
+            join: Some(join),
+        };
+
+        let started = Instant::now();
+        let error = session
+            .shutdown_with_deadline(Duration::from_millis(20))
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(error.contains("cleanup continues in background"));
+        let status = status_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(!status.success());
     }
 
     #[test]
