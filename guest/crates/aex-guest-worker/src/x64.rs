@@ -4402,6 +4402,13 @@ impl GuestEngine<'static> {
         } else {
             String::new()
         };
+        let runtime_target = self
+            .unicorn
+            .get_data()
+            .latest_runtime_target
+            .as_ref()
+            .filter(|target| target.source_address == rip || target.effective_target == Some(rip))
+            .cloned();
         let snapshot = TraceCrashSnapshot {
             reason: reason.clone(),
             registers,
@@ -4412,7 +4419,7 @@ impl GuestEngine<'static> {
                 .contains(&rip)
                 .then(|| rip - self.image_base),
             instruction_bytes,
-            runtime_target: self.unicorn.get_data().latest_runtime_target.clone(),
+            runtime_target,
             handle_allocations: self.unicorn.get_data().handle_allocations.clone(),
             handle_allocation_failures: self.unicorn.get_data().handle_allocation_failures.clone(),
             live_handle_count: self.unicorn.get_data().handles.len(),
@@ -12733,6 +12740,23 @@ mod tests {
         assert_eq!(target.transfer_kind, "tail_call");
         assert_eq!(target.operand_kind, "register");
         assert_eq!(target.target.kind, "null");
+    }
+
+    #[test]
+    fn crash_snapshot_omits_stale_runtime_target_after_completed_call() {
+        const CODE: u64 = 0x1000_0000;
+        // call the ret at +7; then fail later on ud2 at +5.
+        let mut engine = test_engine(&[0xe8, 2, 0, 0, 0, 0x0f, 0x0b, 0xc3]);
+        engine.begin_execution_trace("RENDER", CODE).unwrap();
+        let error = engine.call_win64(CODE, [0; 6]).unwrap_err();
+        let GuestError::ExecutionCrash { snapshot, .. } = error else {
+            panic!("expected structured crash snapshot");
+        };
+        assert_eq!(snapshot.instruction_rva, Some(5));
+        assert!(
+            snapshot.runtime_target.is_none(),
+            "completed call must not be reported as the cause of a later fault"
+        );
     }
 
     #[test]
