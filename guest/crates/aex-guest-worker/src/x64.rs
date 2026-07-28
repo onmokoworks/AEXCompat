@@ -1445,7 +1445,7 @@ fn synchronize_one_ymm(unicorn: &mut Unicorn<'_, GuestState>, index: usize, zero
     let Some(register) = unicorn_ymm_register(index) else {
         return;
     };
-    let mut value = [0u8; 32];
+    let mut value = aex_unicorn_buffer::YmmValue::zeroed();
     if !zero_all {
         // reg_read_long() allocates a boxed buffer.  These synchronization
         // hooks run for every native VEX.128 write (and 16 times for
@@ -1453,11 +1453,11 @@ fn synchronize_one_ymm(unicorn: &mut Unicorn<'_, GuestState>, index: usize, zero
         if aex_unicorn_buffer::read_ymm(unicorn, register, &mut value).is_err() {
             return;
         }
-        value[16..].fill(0);
+        value.as_mut_bytes()[16..].fill(0);
     }
     // Code hooks run before the native instruction. Clear the upper half now;
     // Unicorn then computes the lower XMM result without reintroducing it.
-    if unicorn.reg_write_long(register, &value).is_ok() {
+    if unicorn.reg_write_long(register, value.as_bytes()).is_ok() {
         unicorn.get_data_mut().avx_defined_ymm[index] = true;
     }
 }
