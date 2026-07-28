@@ -1412,6 +1412,9 @@ fn discover_avx_state_sync_points(bytes: &[u8], address: u64) -> Vec<(u64, AvxSt
         let sync = match instruction.mnemonic() {
             Mnemonic::Vzeroupper => Some(AvxStateSync::AllUpper),
             Mnemonic::Vzeroall => Some(AvxStateSync::AllRegisters),
+            // The invalid-instruction fallback must observe the complete YMM
+            // source before it writes an aliased XMM destination.
+            Mnemonic::Vextractf128 => None,
             _ if instruction.op0_kind() == OpKind::Register
                 && matches!(
                     info_factory.info(&instruction).op_access(0),
@@ -11289,6 +11292,26 @@ mod tests {
         engine.unicorn.mem_read(destination, &mut memory).unwrap();
         assert_eq!(memory, expected[..16]);
         assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 3);
+    }
+
+    #[test]
+    fn avx_fallback_preserves_an_aliased_extract_source_until_emulation() {
+        const CODE: u64 = 0x1000_0000;
+        let source = DATA_BASE;
+        let mut engine = test_engine(&[
+            0xc5, 0xfc, 0x10, 0x09, // vmovups ymm1,[rcx]
+            0xc4, 0xe3, 0x7d, 0x19, 0xc9, 0x01, // vextractf128 xmm1,ymm1,1
+            0xc3,
+        ]);
+        let expected = std::array::from_fn::<_, 32, _>(|index| index as u8);
+        engine.write(source, &expected).unwrap();
+
+        engine.call_win64(CODE, [source, 0, 0, 0, 0, 0]).unwrap();
+
+        let register = engine.unicorn.reg_read_long(RegisterX86::YMM1).unwrap();
+        assert_eq!(&register[..16], &expected[16..]);
+        assert_eq!(&register[16..], [0; 16]);
+        assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 2);
     }
 
     #[test]
