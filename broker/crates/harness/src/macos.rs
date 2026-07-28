@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::OnceLock;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1440,6 +1441,76 @@ fn run_guest_workers(
     ))
 }
 
+const NATIVE_DEADLINE_REAP_BUDGET: Duration = Duration::from_millis(20);
+
+struct BackgroundReapRequest {
+    child: Child,
+    #[cfg(test)]
+    completion: Option<Sender<u32>>,
+}
+
+fn background_reaper() -> &'static Sender<BackgroundReapRequest> {
+    static REAPER: OnceLock<Sender<BackgroundReapRequest>> = OnceLock::new();
+    REAPER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<BackgroundReapRequest>();
+        thread::Builder::new()
+            .name("aexcompat-native-child-reaper".into())
+            .spawn(move || {
+                let mut pending = Vec::new();
+                loop {
+                    match receiver.recv_timeout(Duration::from_millis(10)) {
+                        Ok(request) => pending.push(request),
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) if pending.is_empty() => break,
+                        Err(RecvTimeoutError::Disconnected) => {}
+                    }
+                    pending.retain_mut(|request| match request.child.try_wait() {
+                        Ok(Some(_)) => {
+                            #[cfg(test)]
+                            if let Some(completion) = request.completion.take() {
+                                let _ = completion.send(request.child.id());
+                            }
+                            false
+                        }
+                        Ok(None) | Err(_) => true,
+                    });
+                }
+            })
+            .expect("start native child reaper");
+        sender
+    })
+}
+
+fn enqueue_background_reap(child: Child, #[cfg(test)] completion: Option<Sender<u32>>) {
+    let request = BackgroundReapRequest {
+        child,
+        #[cfg(test)]
+        completion,
+    };
+    background_reaper()
+        .send(request)
+        .expect("native child reaper remains available");
+}
+
+fn kill_and_reap_or_transfer(mut child: Child, budget: Duration) -> bool {
+    let _ = child.kill();
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if started.elapsed() < budget => thread::yield_now(),
+            Ok(None) | Err(_) => {
+                enqueue_background_reap(
+                    child,
+                    #[cfg(test)]
+                    None,
+                );
+                return false;
+            }
+        }
+    }
+}
+
 fn run_worker(
     worker: &Path,
     arguments: &[String],
@@ -1463,10 +1534,20 @@ fn run_worker(
                     thread::sleep(Duration::from_millis(5));
                 }
                 None => {
-                    let _ = child.kill();
+                    // Reap a normally interruptible native child without ever
+                    // turning Rosetta admission failure into an unbounded wait.
+                    // If SIGKILL cannot complete within this small budget,
+                    // transfer the handle to the background reaper and let the
+                    // Unicorn candidate start at once.
+                    let reaped = kill_and_reap_or_transfer(child, NATIVE_DEADLINE_REAP_BUDGET);
                     return Err(format!(
-                        "native worker exceeded {} ms and was terminated",
-                        deadline.as_millis()
+                        "native worker exceeded {} ms and was terminated{}",
+                        deadline.as_millis(),
+                        if reaped {
+                            ""
+                        } else {
+                            " (child cleanup still pending)"
+                        }
                     ));
                 }
             }
@@ -1552,6 +1633,29 @@ mod tests {
             run_guest_workers(&workers, &["1".to_string()], Duration::from_millis(20)).unwrap();
         assert!(output.status.success());
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn native_deadline_cleanup_reaps_an_interruptible_child_within_a_bounded_budget() {
+        let child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        let started = Instant::now();
+
+        assert!(kill_and_reap_or_transfer(
+            child,
+            NATIVE_DEADLINE_REAP_BUDGET
+        ));
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn native_deadline_cleanup_transfers_slow_reap_ownership() {
+        let child = Command::new("/bin/sleep").arg("0.05").spawn().unwrap();
+        let pid = child.id();
+        let (completion, completed) = mpsc::channel();
+
+        enqueue_background_reap(child, Some(completion));
+
+        assert_eq!(completed.recv_timeout(Duration::from_secs(1)).unwrap(), pid);
     }
 
     #[test]
