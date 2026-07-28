@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/aex-abi", "crates/aex-guest-worker"]
+members = [
+    "crates/aex-abi",
+    "crates/aex-guest-worker",
+    "crates/aex-unicorn-buffer",
+]
 resolver = "2"
 
 [workspace.package]

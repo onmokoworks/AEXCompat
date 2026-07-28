@@ -1447,10 +1447,13 @@ fn synchronize_one_ymm(unicorn: &mut Unicorn<'_, GuestState>, index: usize, zero
     };
     let mut value = [0u8; 32];
     if !zero_all {
-        let Ok(current) = unicorn.reg_read_long(register) else {
+        // reg_read_long() allocates a boxed buffer.  These synchronization
+        // hooks run for every native VEX.128 write (and 16 times for
+        // VZEROUPPER), so read directly into the fixed-size stack buffer.
+        if aex_unicorn_buffer::read_ymm(unicorn, register, &mut value).is_err() {
             return;
-        };
-        value[..16].copy_from_slice(&current.as_ref()[..16]);
+        }
+        value[16..].fill(0);
     }
     // Code hooks run before the native instruction. Clear the upper half now;
     // Unicorn then computes the lower XMM result without reintroducing it.

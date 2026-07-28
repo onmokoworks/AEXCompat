@@ -17,6 +17,7 @@ name = "aex-guest-worker"
 version = "0.1.0"
 dependencies = [
  "aex-abi",
+ "aex-unicorn-buffer",
  "goblin",
  "iced-x86",
  "image",
@@ -24,6 +25,13 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "unicorn-engine",
+]
+
+[[package]]
+name = "aex-unicorn-buffer"
+version = "0.1.0"
+dependencies = [
  "unicorn-engine",
 ]
 
