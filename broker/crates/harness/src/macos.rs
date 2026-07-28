@@ -5,8 +5,9 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +19,7 @@ const NATIVE_SETUP_DEADLINE: Duration = Duration::from_secs(2);
 const RESIDENT_START_DEADLINE: Duration = Duration::from_secs(10);
 const RESIDENT_RENDER_DEADLINE: Duration = Duration::from_secs(30);
 const RESIDENT_CLOSE_DEADLINE: Duration = Duration::from_secs(2);
+const RESIDENT_RESPONSE_POLL: Duration = Duration::from_millis(10);
 
 struct RenderResult {
     report: String,
@@ -163,30 +165,78 @@ struct ResidentSessionHandle {
     sender: Sender<ResidentCommand>,
     receiver: Receiver<Result<RenderResult, String>>,
     next_frame: u64,
+    child: SharedResidentChild,
+    shutdown_requested: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
+}
+
+type SharedResidentChild = Arc<Mutex<Option<Child>>>;
+
+struct PendingResidentRender {
+    parameters: Vec<GuiParameter>,
+    output: PathBuf,
+}
+
+struct ResidentAdmissionHandle {
+    plugin_path: PathBuf,
+    input: PathBuf,
+    receiver: Receiver<Result<ResidentSessionHandle, String>>,
+}
+
+enum ResidentState {
+    Idle,
+    Starting {
+        admission: ResidentAdmissionHandle,
+        pending: PendingResidentRender,
+    },
+    Ready(ResidentSessionHandle),
+    Failed,
+}
+
+impl ResidentState {
+    fn is_starting(&self) -> bool {
+        matches!(self, Self::Starting { .. })
+    }
 }
 
 impl ResidentSessionHandle {
     fn shutdown(&mut self) -> Result<(), String> {
+        self.shutdown_with_deadline(RESIDENT_CLOSE_DEADLINE)
+    }
+
+    fn shutdown_with_deadline(&mut self, deadline: Duration) -> Result<(), String> {
         let Some(join) = self.join.take() else {
             return Ok(());
         };
+        self.shutdown_requested.store(true, Ordering::Release);
         let (reply_sender, reply_receiver) = mpsc::channel();
-        let send_result = self
-            .sender
-            .send(ResidentCommand::Close(reply_sender))
-            .map_err(|error| format!("request resident close: {error}"));
-        let join_result = join
-            .join()
-            .map_err(|_| "resident session thread panicked during close".to_string());
-        if let Err(error) = send_result {
-            join_result?;
-            return Err(error);
+        if let Err(error) = self.sender.send(ResidentCommand::Close(reply_sender)) {
+            terminate_shared_resident_child(&self.child);
+            enqueue_resident_join(join);
+            return Err(format!("request resident close: {error}"));
         }
-        join_result?;
-        reply_receiver
-            .recv()
-            .map_err(|error| format!("resident close result was lost: {error}"))?
+        match reply_receiver.recv_timeout(deadline) {
+            Ok(result) => {
+                // The close outcome is sent only after protocol cleanup and child
+                // ownership have been settled. Joining is never allowed to block
+                // the GUI thread, even for that normally-complete case.
+                enqueue_resident_join(join);
+                result
+            }
+            Err(error) => {
+                let ownership_transferred = terminate_shared_resident_child(&self.child);
+                enqueue_resident_join(join);
+                Err(format!(
+                    "resident close exceeded the {} ms shutdown deadline: {error}; child termination {} and cleanup continues in background",
+                    deadline.as_millis(),
+                    if ownership_transferred {
+                        "was transferred from the owner"
+                    } else {
+                        "remains with the controller"
+                    }
+                ))
+            }
+        }
     }
 }
 
@@ -229,7 +279,7 @@ struct MacHarnessApp {
     viewer_zoom: f32,
     viewer_pan: egui::Vec2,
     busy: bool,
-    resident: Option<ResidentSessionHandle>,
+    resident: ResidentState,
 }
 
 impl Drop for MacHarnessApp {
@@ -257,15 +307,22 @@ impl MacHarnessApp {
             viewer_zoom: 1.0,
             viewer_pan: egui::Vec2::ZERO,
             busy: false,
-            resident: None,
+            resident: ResidentState::Idle,
         }
     }
 
     fn close_resident(&mut self) -> Result<(), String> {
-        let Some(mut session) = self.resident.take() else {
-            return Ok(());
-        };
-        session.shutdown()
+        match std::mem::replace(&mut self.resident, ResidentState::Idle) {
+            ResidentState::Ready(mut session) => session.shutdown(),
+            // Dropping the receiver is the cancellation boundary. The detached
+            // admission thread owns any worker it creates and closes it if the
+            // GUI no longer accepts the result.
+            ResidentState::Idle | ResidentState::Starting { .. } | ResidentState::Failed => Ok(()),
+        }
+    }
+
+    fn occupied(&self) -> bool {
+        self.busy || self.resident.is_starting()
     }
 
     fn choose_aex(&mut self) {
@@ -359,37 +416,59 @@ impl MacHarnessApp {
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
         let output = output_directory.join(format!("mac-aex-{nonce}.png"));
-        let needs_session = self
-            .resident
-            .as_ref()
-            .is_none_or(|session| session.plugin_path != aex || session.input != input);
-        if needs_session {
+        let same_ready = matches!(
+            &self.resident,
+            ResidentState::Ready(session)
+                if session.plugin_path == aex && session.input == input
+        );
+        let same_starting = matches!(
+            &self.resident,
+            ResidentState::Starting { admission, .. }
+                if admission.plugin_path == aex && admission.input == input
+        );
+        let pending = PendingResidentRender {
+            parameters: self.parameters.clone(),
+            output,
+        };
+        if same_starting {
+            if let ResidentState::Starting {
+                pending: queued, ..
+            } = &mut self.resident
+            {
+                *queued = pending;
+            }
+            self.status = "Waiting for resident x64 guest admission...".into();
+            return;
+        }
+        if !same_ready {
             if let Err(error) = self.close_resident() {
                 self.status = "Could not cleanly replace the resident session.".into();
                 self.report = error;
                 return;
             }
-            match start_resident_session(&workers, &aex, &input, &output_directory) {
-                Ok(session) => self.resident = Some(session),
-                Err(error) => {
-                    self.status = "Could not start resident guest session.".into();
-                    self.report = error;
-                    return;
-                }
-            }
+            self.resident = ResidentState::Starting {
+                admission: begin_resident_admission(workers, aex, input, output_directory),
+                pending,
+            };
+            self.status = "Starting and probing resident x64 guest...".into();
+            self.report.clear();
+            return;
         }
-        let session = self
-            .resident
-            .as_mut()
-            .expect("resident session was created");
+        self.dispatch_resident_render(pending);
+    }
+
+    fn dispatch_resident_render(&mut self, pending: PendingResidentRender) {
+        let ResidentState::Ready(session) = &mut self.resident else {
+            return;
+        };
         let frame_index = session.next_frame;
         session.next_frame += 1;
         if let Err(error) = session.sender.send(ResidentCommand::Render {
             frame_index,
-            parameters: self.parameters.clone(),
-            output,
+            parameters: pending.parameters,
+            output: pending.output,
         }) {
-            self.resident.take();
+            self.resident = ResidentState::Failed;
             self.status = "Resident guest session stopped.".into();
             self.report = error.to_string();
             return;
@@ -406,10 +485,11 @@ impl MacHarnessApp {
     fn dispatch_live_render(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         let ready = self.plugin_path.is_some() && self.input.is_some();
-        if self.live_render.take_due(now, self.busy, ready) {
+        let occupied = self.occupied();
+        if self.live_render.take_due(now, occupied, ready) {
             self.render();
         } else if ready
-            && !self.busy
+            && !occupied
             && let Some(remaining) = self.live_render.remaining(now)
         {
             ctx.request_repaint_after(remaining.min(Duration::from_millis(60)));
@@ -417,12 +497,39 @@ impl MacHarnessApp {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
-        let result = self
-            .resident
-            .as_ref()
-            .and_then(|session| session.receiver.try_recv().ok());
+        let admission_result = match &self.resident {
+            ResidentState::Starting { admission, .. } => match admission.receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                    "resident admission thread stopped without a result".into(),
+                )),
+            },
+            _ => None,
+        };
+        if let Some(result) = admission_result {
+            let state = std::mem::replace(&mut self.resident, ResidentState::Idle);
+            let ResidentState::Starting { pending, .. } = state else {
+                unreachable!("only a starting admission can produce an admission result");
+            };
+            match result {
+                Ok(session) => {
+                    self.resident = ResidentState::Ready(session);
+                    self.dispatch_resident_render(pending);
+                }
+                Err(error) => {
+                    self.status = "Could not start resident guest session.".into();
+                    self.report = error.clone();
+                    self.resident = ResidentState::Failed;
+                }
+            }
+        }
+        let result = match &self.resident {
+            ResidentState::Ready(session) => session.receiver.try_recv().ok(),
+            _ => None,
+        };
         let Some(result) = result else {
-            if self.busy {
+            if self.busy || self.resident.is_starting() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(50));
             }
             return;
@@ -465,19 +572,20 @@ impl eframe::App for MacHarnessApp {
                 ui.heading(RichText::new("AEXCompat").size(22.0));
                 ui.weak("EFFECT LAB · APPLE SILICON X64 GUEST");
                 ui.separator();
+                let occupied = self.occupied();
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("AEX..."))
+                    .add_enabled(!occupied, egui::Button::new("AEX..."))
                     .clicked()
                 {
                     self.choose_aex();
                 }
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("PNG..."))
+                    .add_enabled(!occupied, egui::Button::new("PNG..."))
                     .clicked()
                 {
                     self.choose_input(ctx);
                 }
-                let ready = !self.busy && self.plugin_path.is_some() && self.input.is_some();
+                let ready = !occupied && self.plugin_path.is_some() && self.input.is_some();
                 if ui.add_enabled(ready, egui::Button::new("Render")).clicked() {
                     self.render();
                 }
@@ -486,7 +594,7 @@ impl eframe::App for MacHarnessApp {
                 if ui.checkbox(&mut live_render, "Auto Update").changed() {
                     self.live_render.set_enabled(live_render);
                 }
-                if self.busy {
+                if occupied {
                     ui.spinner();
                 }
                 ui.label(&self.status);
@@ -535,12 +643,13 @@ impl eframe::App for MacHarnessApp {
 impl MacHarnessApp {
     fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
+        let occupied = self.occupied();
         ui.horizontal(|ui| {
             ui.heading(RichText::new("Effect Controls").size(20.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(
-                        !self.busy
+                        !occupied
                             && self
                                 .parameters
                                 .iter()
@@ -572,7 +681,7 @@ impl MacHarnessApp {
                         ui.label(RichText::new(&parameter.name).small());
                         if ui
                             .add_enabled(
-                                !self.busy && !parameter.is_default(),
+                                !occupied && !parameter.is_default(),
                                 egui::Button::new("Reset").small(),
                             )
                             .clicked()
@@ -582,7 +691,7 @@ impl MacHarnessApp {
                     });
                     let previous_value = parameter.value;
                     let previous_color = parameter.color;
-                    ui.add_enabled_ui(!self.busy, |ui| match parameter.param_type {
+                    ui.add_enabled_ui(!occupied, |ui| match parameter.param_type {
                         4 => {
                             let mut checked = parameter.value != 0.0;
                             if ui.checkbox(&mut checked, "Enabled").changed() {
@@ -645,7 +754,7 @@ impl MacHarnessApp {
                     self.viewer_pan = egui::Vec2::ZERO;
                 }
                 ui.monospace(format!("{:.0}%", self.viewer_zoom * 100.0));
-                if self.busy {
+                if self.occupied() {
                     ui.spinner();
                     ui.weak("Rendering...");
                 }
@@ -1056,7 +1165,7 @@ fn close_probe_worker(mut worker: StartedResidentWorker) -> Result<(), String> {
         },
         Err(error) => errors.push(error),
     }
-    if let Err(error) = wait_or_kill_resident_child(&mut worker.child, RESIDENT_CLOSE_DEADLINE) {
+    if let Err(error) = wait_or_kill_resident_child(worker.child, RESIDENT_CLOSE_DEADLINE) {
         errors.push(error);
     }
     let stderr = worker
@@ -1074,7 +1183,7 @@ fn close_probe_worker(mut worker: StartedResidentWorker) -> Result<(), String> {
 }
 
 fn wait_or_kill_resident_child(
-    child: &mut Child,
+    mut child: Child,
     deadline: Duration,
 ) -> Result<std::process::ExitStatus, String> {
     let started = Instant::now();
@@ -1088,12 +1197,84 @@ fn wait_or_kill_resident_child(
                 thread::sleep(Duration::from_millis(5));
             }
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                let reaped = kill_and_reap_or_transfer(child, NATIVE_DEADLINE_REAP_BUDGET);
                 return Err(format!(
-                    "resident worker exceeded the {} ms close deadline and was terminated",
-                    deadline.as_millis()
+                    "resident worker exceeded the {} ms close deadline and was terminated{}",
+                    deadline.as_millis(),
+                    if reaped {
+                        ""
+                    } else {
+                        " (child cleanup still pending)"
+                    }
                 ));
+            }
+        }
+    }
+}
+
+fn spawn_resident_admission<T, F>(start: F) -> Receiver<Result<T, String>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        // If the GUI has moved to another AEX/input while admission was in
+        // flight, send failure drops the completed session here. Its Drop
+        // implementation performs the normal bounded cleanup.
+        let _ = sender.send(start());
+    });
+    receiver
+}
+
+fn begin_resident_admission(
+    candidates: Vec<GuestWorkerCandidate>,
+    aex: PathBuf,
+    input: PathBuf,
+    output_directory: PathBuf,
+) -> ResidentAdmissionHandle {
+    let plugin_path = aex.clone();
+    let admission_input = input.clone();
+    let receiver = spawn_resident_admission(move || {
+        start_resident_session(&candidates, &aex, &input, &output_directory)
+    });
+    ResidentAdmissionHandle {
+        plugin_path,
+        input: admission_input,
+        receiver,
+    }
+}
+
+fn recv_resident_response(
+    receiver: &Receiver<Result<Option<Value>, String>>,
+    child: &SharedResidentChild,
+    shutdown_requested: &AtomicBool,
+    deadline: Duration,
+) -> Result<Option<Value>, String> {
+    let started = Instant::now();
+    loop {
+        if shutdown_requested.load(Ordering::Acquire) {
+            terminate_shared_resident_child(child);
+            return Err("resident render cancelled for session shutdown".into());
+        }
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            terminate_shared_resident_child(child);
+            return Err(format!(
+                "resident render response timeout after {} ms",
+                deadline.as_millis()
+            ));
+        }
+        match receiver.recv_timeout(remaining.min(RESIDENT_RESPONSE_POLL)) {
+            Ok(Ok(response)) => return Ok(response),
+            Ok(Err(error)) => {
+                terminate_shared_resident_child(child);
+                return Err(error);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                terminate_shared_resident_child(child);
+                return Err("resident response reader disconnected".into());
             }
         }
     }
@@ -1134,13 +1315,16 @@ fn start_resident_session(
             return Err(error);
         }
     };
-    let mut child = started.child;
+    let child = Arc::new(Mutex::new(Some(started.child)));
+    let controller_child = Arc::clone(&child);
     let worker_pid = started.worker_pid;
     let mut stdin = started.stdin;
     let response_receiver = started.response_receiver;
     let stderr_receiver = started.stderr_receiver;
     let (command_sender, command_receiver) = mpsc::channel();
     let (result_sender, result_receiver) = mpsc::channel();
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let worker_shutdown_requested = Arc::clone(&shutdown_requested);
     let join = thread::spawn(move || {
         let mut running = true;
         let mut close_reply = None;
@@ -1161,10 +1345,12 @@ fn start_resident_session(
                         });
                         write_control_message(&mut stdin, &request)
                     }).and_then(|()| {
-                        let response = response_receiver
-                            .recv_timeout(RESIDENT_RENDER_DEADLINE)
-                            .map_err(|error| format!("resident render response timeout: {error}"))?
-                            .map_err(|error| format!("resident response reader: {error}"))?
+                        let response = recv_resident_response(
+                            &response_receiver,
+                            &controller_child,
+                            &worker_shutdown_requested,
+                            RESIDENT_RENDER_DEADLINE,
+                        )?
                             .ok_or_else(|| "resident worker closed stdout".to_string())?;
                         let expected_checksum =
                             validate_resident_frame(&response, frame_index, width, height)?;
@@ -1216,7 +1402,9 @@ fn start_resident_session(
             },
             Err(error) => close_errors.push(error),
         }
-        if let Err(error) = wait_or_kill_resident_child(&mut child, RESIDENT_CLOSE_DEADLINE) {
+        if let Some(child) = take_shared_resident_child(&controller_child)
+            && let Err(error) = wait_or_kill_resident_child(child, RESIDENT_CLOSE_DEADLINE)
+        {
             close_errors.push(error);
         }
         let stderr = stderr_receiver
@@ -1228,6 +1416,13 @@ fn start_resident_session(
                 stderr.trim()
             ));
         }
+        for slot in [&input_slot, &output_slot] {
+            if let Err(error) = std::fs::remove_file(slot)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                close_errors.push(format!("remove resident slot {}: {error}", slot.display()));
+            }
+        }
         let close_outcome = if close_errors.is_empty() {
             Ok(())
         } else {
@@ -1238,8 +1433,6 @@ fn start_resident_session(
         } else if let Err(error) = close_outcome {
             let _ = result_sender.send(Err(error));
         }
-        let _ = std::fs::remove_file(input_slot);
-        let _ = std::fs::remove_file(output_slot);
     });
     Ok(ResidentSessionHandle {
         plugin_path: aex.to_path_buf(),
@@ -1247,6 +1440,8 @@ fn start_resident_session(
         sender: command_sender,
         receiver: result_receiver,
         next_frame: 0,
+        child,
+        shutdown_requested,
         join: Some(join),
     })
 }
@@ -1442,6 +1637,46 @@ fn run_guest_workers(
 }
 
 const NATIVE_DEADLINE_REAP_BUDGET: Duration = Duration::from_millis(20);
+
+fn take_shared_resident_child(child: &SharedResidentChild) -> Option<Child> {
+    match child.try_lock() {
+        Ok(mut child) => child.take(),
+        Err(TryLockError::Poisoned(error)) => error.into_inner().take(),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
+fn terminate_shared_resident_child(child: &SharedResidentChild) -> bool {
+    let Some(child) = take_shared_resident_child(child) else {
+        return false;
+    };
+    kill_and_reap_or_transfer(child, NATIVE_DEADLINE_REAP_BUDGET);
+    true
+}
+
+fn resident_join_reaper() -> &'static Sender<thread::JoinHandle<()>> {
+    static REAPER: OnceLock<Sender<thread::JoinHandle<()>>> = OnceLock::new();
+    REAPER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<thread::JoinHandle<()>>();
+        thread::Builder::new()
+            .name("aexcompat-resident-thread-reaper".into())
+            .spawn(move || {
+                while let Ok(join) = receiver.recv() {
+                    let _ = join.join();
+                }
+            })
+            .expect("start resident thread reaper");
+        sender
+    })
+}
+
+fn enqueue_resident_join(join: thread::JoinHandle<()>) {
+    if let Err(error) = resident_join_reaper().send(join) {
+        // The receiver can disappear only after its reaper panics. Dropping
+        // the recovered handle still detaches it without blocking the caller.
+        drop(error.0);
+    }
+}
 
 struct BackgroundReapRequest {
     child: Child,
@@ -1843,11 +2078,185 @@ mod tests {
 
     #[test]
     fn resident_close_timeout_terminates_the_worker() {
-        let mut child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        let child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
         let started = Instant::now();
-        assert!(wait_or_kill_resident_child(&mut child, Duration::from_millis(20)).is_err());
+        assert!(wait_or_kill_resident_child(child, Duration::from_millis(20)).is_err());
         assert!(started.elapsed() < Duration::from_millis(500));
-        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn resident_shutdown_preserves_normal_clean_close() {
+        let (command_sender, command_receiver) = mpsc::channel();
+        let (_result_sender, result_receiver) = mpsc::channel();
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let child = Arc::new(Mutex::new(None));
+        let join = thread::spawn(move || match command_receiver.recv().unwrap() {
+            ResidentCommand::Close(reply) => reply.send(Ok(())).unwrap(),
+            ResidentCommand::Render { .. } => panic!("unexpected render"),
+        });
+        let mut session = ResidentSessionHandle {
+            plugin_path: PathBuf::new(),
+            input: PathBuf::new(),
+            sender: command_sender,
+            receiver: result_receiver,
+            next_frame: 0,
+            child,
+            shutdown_requested,
+            join: Some(join),
+        };
+
+        session
+            .shutdown_with_deadline(Duration::from_millis(100))
+            .unwrap();
+        assert!(session.join.is_none());
+    }
+
+    #[test]
+    fn resident_shutdown_cancels_an_active_render_before_close() {
+        let (command_sender, command_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let worker_shutdown_requested = Arc::clone(&shutdown_requested);
+        let child = Arc::new(Mutex::new(Some(
+            Command::new("/bin/sleep").arg("5").spawn().unwrap(),
+        )));
+        let worker_child = Arc::clone(&child);
+        let join = thread::spawn(move || {
+            let (_response_sender, response_receiver) = mpsc::channel();
+            match command_receiver.recv().unwrap() {
+                ResidentCommand::Render { .. } => {
+                    let result = recv_resident_response(
+                        &response_receiver,
+                        &worker_child,
+                        &worker_shutdown_requested,
+                        Duration::from_secs(5),
+                    );
+                    result_sender.send(result.map(|_| unreachable!())).unwrap();
+                }
+                ResidentCommand::Close(_) => panic!("render must be queued first"),
+            }
+            match command_receiver.recv().unwrap() {
+                ResidentCommand::Close(reply) => {
+                    assert!(worker_child.lock().unwrap().is_none());
+                    reply.send(Ok(())).unwrap();
+                }
+                ResidentCommand::Render { .. } => panic!("close must follow render"),
+            }
+        });
+        let mut session = ResidentSessionHandle {
+            plugin_path: PathBuf::new(),
+            input: PathBuf::new(),
+            sender: command_sender,
+            receiver: result_receiver,
+            next_frame: 0,
+            child,
+            shutdown_requested,
+            join: Some(join),
+        };
+        session
+            .sender
+            .send(ResidentCommand::Render {
+                frame_index: 0,
+                parameters: Vec::new(),
+                output: PathBuf::new(),
+            })
+            .unwrap();
+
+        let started = Instant::now();
+        session
+            .shutdown_with_deadline(Duration::from_millis(250))
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(
+            session
+                .receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn resident_shutdown_terminates_a_hung_worker_without_joining_on_gui_thread() {
+        let (command_sender, _command_receiver) = mpsc::channel();
+        let (_result_sender, result_receiver) = mpsc::channel();
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let child = Arc::new(Mutex::new(Some(
+            Command::new("/bin/sleep").arg("5").spawn().unwrap(),
+        )));
+        let observer_child = Arc::clone(&child);
+        let (finished_sender, finished_receiver) = mpsc::channel();
+        let join = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            assert!(observer_child.lock().unwrap().is_none());
+            finished_sender.send(()).unwrap();
+        });
+        let mut session = ResidentSessionHandle {
+            plugin_path: PathBuf::new(),
+            input: PathBuf::new(),
+            sender: command_sender,
+            receiver: result_receiver,
+            next_frame: 0,
+            child,
+            shutdown_requested,
+            join: Some(join),
+        };
+
+        let started = Instant::now();
+        let error = session
+            .shutdown_with_deadline(Duration::from_millis(20))
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(error.contains("cleanup continues in background"));
+        finished_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+    }
+
+    #[test]
+    fn resident_shutdown_has_no_raw_cached_pid_kill_authority() {
+        let source = include_str!("macos.rs");
+        assert!(!source.contains(&["libc", "::kill"].concat()));
+        assert!(!source.contains(&["terminate_resident", "_pid"].concat()));
+    }
+
+    #[test]
+    fn resident_admission_returns_promptly_and_delivers_readiness_later() {
+        let (release, blocked) = mpsc::channel();
+        let started = Instant::now();
+        let admission = spawn_resident_admission(move || {
+            blocked.recv().unwrap();
+            Ok::<_, String>(42)
+        });
+
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(matches!(
+            admission.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        assert_eq!(
+            admission.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok(42)
+        );
+    }
+
+    #[test]
+    fn resident_admission_delivers_failure_after_a_blocked_probe() {
+        let (release, blocked) = mpsc::channel();
+        let admission = spawn_resident_admission(move || {
+            blocked.recv().unwrap();
+            Err::<(), _>("probe rejected worker".to_string())
+        });
+
+        assert!(matches!(
+            admission.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        assert_eq!(
+            admission.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err("probe rejected worker".to_string())
+        );
     }
 
     #[test]
