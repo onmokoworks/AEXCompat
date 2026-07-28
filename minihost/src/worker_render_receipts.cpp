@@ -262,9 +262,12 @@ bool snapshot(void* handle, ReceiptSnapshot& output) {
   return true;
 }
 
-std::size_t invalidate_scene_generation(uint64_t project_id,
-                                        uint32_t valid_generation) {
-  if (project_id == 0 || valid_generation == 0) return 0;
+namespace {
+
+std::size_t invalidate_scene_receipts(uint64_t project_id,
+                                      uint32_t valid_generation,
+                                      bool all_projects) {
+  if ((!all_projects && project_id == 0) || valid_generation == 0) return 0;
   std::size_t invalidated = 0;
   for (;;) {
     decltype(g_receipts)::node_type receipt;
@@ -274,7 +277,8 @@ std::size_t invalidate_scene_generation(uint64_t project_id,
           g_receipts.begin(), g_receipts.end(), [&](const auto& value) {
             const auto& draft = *value.second->draft;
             return value.second->published && draft.scene_bound &&
-                draft.scene_item.project_id == project_id &&
+                (all_projects ||
+                 draft.scene_item.project_id == project_id) &&
                 draft.project_generation != valid_generation;
           });
       if (found == g_receipts.end()) break;
@@ -301,6 +305,18 @@ std::size_t invalidate_scene_generation(uint64_t project_id,
     }
   }
   return invalidated;
+}
+
+}  // namespace
+
+std::size_t invalidate_scene_generation(uint64_t project_id,
+                                        uint32_t valid_generation) {
+  return invalidate_scene_receipts(
+      project_id, valid_generation, false);
+}
+
+std::size_t invalidate_all_scene_generations(uint32_t valid_generation) {
+  return invalidate_scene_receipts(0, valid_generation, true);
 }
 
 Statistics statistics() {

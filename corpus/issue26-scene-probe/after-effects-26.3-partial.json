@@ -2,7 +2,7 @@
   "schema_version": 1,
   "evidence_kind": "issue26-public-aegp-scene",
   "target": "after_effects",
-  "recorded_utc": "2026-07-28T04:59:55.048716Z",
+  "recorded_utc": "2026-07-28T05:18:50.926857Z",
   "status": "partial",
   "execution": {
     "command": [
@@ -48,8 +48,8 @@
     },
     "worker": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
-      "sha256": "84945afb60c1403de9278b73068fda090c22b38511704fe20ee8d726c6227aa7",
-      "size_bytes": 1840128
+      "sha256": "f4473af161f1cb51d4baaf9e023cdc44e19c49a72f20a054ad0ac0f54fe89f18",
+      "size_bytes": 1843200
     },
     "sample": null,
     "build_receipt": null,

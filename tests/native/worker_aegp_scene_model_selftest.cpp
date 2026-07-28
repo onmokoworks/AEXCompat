@@ -3,11 +3,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <thread>
 #include <type_traits>
 
 using aexcompat::scene_model::Identity;
@@ -30,6 +33,14 @@ struct FixtureStorage {
 struct alignas(std::max_align_t) ForgedBorrowedToken {
   uint64_t lease_identity{};
 };
+
+std::atomic<uint32_t> g_transaction_generation{41};
+std::atomic<uint32_t> g_generation_reads{};
+
+uint32_t read_transaction_generation() noexcept {
+  ++g_generation_reads;
+  return g_transaction_generation.load();
+}
 
 bool initialize(Registry& registry, FixtureStorage& storage) {
   return registry.initialize_fixture(
@@ -325,10 +336,30 @@ int main() {
   assert(mutation_registry.snapshot(key_identity, key_before));
   const uint64_t fingerprint_before_cancel =
       mutation_registry.fingerprint();
-  uint32_t project_generation = 41;
+  g_transaction_generation.store(40);
+  g_generation_reads.store(0);
+  std::atomic<bool> waiter_started{};
+  uint32_t locked_baseline = 0;
+  {
+    std::unique_lock<std::mutex> held(
+        aexcompat::scene_transaction::mutation_mutex());
+    std::thread waiter([&]() {
+      waiter_started.store(true);
+      aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+          mutation_registry, 1, &read_transaction_generation);
+      locked_baseline = transaction.baseline_project_generation();
+      transaction.cancel();
+    });
+    while (!waiter_started.load()) std::this_thread::yield();
+    g_transaction_generation.store(41);
+    held.unlock();
+    waiter.join();
+  }
+  assert(locked_baseline == 41);
+  assert(g_generation_reads.load() == 1);
   {
     aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-        mutation_registry, 1, project_generation);
+        mutation_registry, 1, &read_transaction_generation);
     assert(transaction.stage());
     transaction.cancel();
   }
@@ -338,15 +369,33 @@ int main() {
   assert(std::memcmp(
       &key_before, &key_after_cancel, sizeof(key_before)) == 0);
   assert(mutation_registry.fingerprint() == fingerprint_before_cancel);
-  assert(project_generation == 41);
+  assert(g_transaction_generation.load() == 41);
   {
     aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-        mutation_registry, 1, project_generation);
+        mutation_registry, 1, &read_transaction_generation);
     assert(transaction.stage());
     assert(!transaction.validate(false));
   }
   assert(mutation_registry.fingerprint() == fingerprint_before_cancel);
-  assert(project_generation == 41);
+  assert(g_transaction_generation.load() == 41);
+
+  bool stale_apply_invoked = false;
+  {
+    aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+        mutation_registry, 1, &read_transaction_generation);
+    assert(transaction.stage());
+    assert(transaction.validate(true));
+    g_transaction_generation.store(42);
+    assert(!transaction.commit(
+        [&]() noexcept {
+          stale_apply_invoked = true;
+          return true;
+        },
+        []() noexcept { ++g_transaction_generation; }));
+  }
+  assert(!stale_apply_invoked);
+  assert(mutation_registry.fingerprint() == fingerprint_before_cancel);
+  g_transaction_generation.store(41);
 
   ObjectSnapshot key_candidate = key_before;
   key_candidate.keyframe.label = 11;
@@ -358,18 +407,17 @@ int main() {
   Identity replacement_key{};
   {
     aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-        mutation_registry, 1, project_generation);
+        mutation_registry, 1, &read_transaction_generation);
     assert(transaction.stage());
     assert(transaction.validate(true));
     assert(transaction.commit(
-        project_generation,
         [&]() noexcept {
           return mutation_registry.replace_snapshot(
               key_identity, key_candidate, replacement_key);
         },
-        [&]() noexcept { ++project_generation; }));
+        []() noexcept { ++g_transaction_generation; }));
   }
-  assert(project_generation == 42);
+  assert(g_transaction_generation.load() == 42);
   assert(replacement_key.generation == key_identity.generation + 1);
   assert(!mutation_registry.resolve_possessed(
       key_handle, ObjectKind::keyframe, 7, unchanged, 1));
@@ -430,6 +478,8 @@ int main() {
       "\"relationships_propagated\":true,\"stale_rejected\":true,"
       "\"effect_stream_value_keyframe_registry\":true,"
       "\"stream_kinds\":[\"scalar\",\"color\",\"layer\",\"mask\",\"arbitrary\"],"
+      "\"generation_read_under_lock\":true,"
+      "\"commit_generation_rechecked\":true,"
       "\"transaction_cancel_byte_invariant\":true,"
       "\"transaction_commit_generation_once\":true,"
       "\"keyframe_bezier_ease_identity\":true,"

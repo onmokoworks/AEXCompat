@@ -136,7 +136,9 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << ",\"old_stage_invalidated\":"
         << json_bool(report.stage_invalidated)
         << ",\"old_receipt_invalidated\":"
-        << json_bool(report.receipt_invalidated) << "}"
+        << json_bool(report.receipt_invalidated)
+        << ",\"direct_bump_receipt_invalidated\":"
+        << json_bool(report.direct_bump_receipt_invalidated) << "}"
         << ",\"hashes\":{\"stage_identity\":\""
         << hex64(report.stage_identity_hash)
         << "\",\"trace\":\"" << hex64(report.trace_hash)

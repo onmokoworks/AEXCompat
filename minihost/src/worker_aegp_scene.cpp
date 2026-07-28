@@ -1058,13 +1058,11 @@ int32_t __cdecl aegp_set_layer_parent(void* layer, void* parent) {
   aexcompat::scene_model::Registry::MutationCheckpoint checkpoint{};
   if (!registry.capture_mutation_checkpoint(checkpoint)) return 4;
   const auto parents_before = g_aegp_layer_parent_indices;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      registry, resolved_layer.identity.project_id, generation);
+      registry, resolved_layer.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         if (!registry.set_parent_layer(
                 resolved_layer.identity,
@@ -1096,13 +1094,11 @@ int32_t __cdecl aegp_create_camera_in_comp(
   const std::u16string_view camera_name{name, name_length};
   Identity camera_identity{};
   void* published = nullptr;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      scene_registry(), resolved_comp.identity.project_id, generation);
+      scene_registry(), resolved_comp.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   if (!transaction.commit(
-          generation,
           [&]() noexcept {
             if (!scene_registry().create_child(
                     ObjectKind::layer, resolved_comp.identity,
@@ -1134,13 +1130,11 @@ int32_t __cdecl aegp_delete_layer(void* layer) {
       (g_aegp_transform_stream.live &&
        g_aegp_transform_stream.layer == layer))
     return 4;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      scene_registry(), resolved.identity.project_id, generation);
+      scene_registry(), resolved.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         if (!scene_registry().erase_tree(resolved.identity)) return false;
         state().dynamic_camera_live = false;
@@ -1317,13 +1311,11 @@ int32_t __cdecl aegp_set_effect_flags(void* effect, uint32_t set_mask, uint32_t 
   auto candidate = g_aegp_effect_instances;
   candidate[instance_index].flags =
       (candidate[instance_index].flags & ~set_mask) | flags;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      scene_registry(), identity.identity.project_id, generation);
+      scene_registry(), identity.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         g_aegp_effect_instances = candidate;
         return true;
@@ -1355,13 +1347,11 @@ int32_t __cdecl aegp_reorder_effect(void* effect, int32_t target_order) {
         --value.stack_order;
   }
   instance.stack_order = target_order;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      scene_registry(), identity.identity.project_id, generation);
+      scene_registry(), identity.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         g_aegp_effect_instances = candidate;
         return true;
@@ -1414,18 +1404,15 @@ int32_t __cdecl aegp_apply_effect(
                instance_generation, true};
   initialize_effect_parameter_values(candidate);
   auto candidate_leases = g_aegp_effect_leases;
-  const uint32_t project_generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       scene_registry(), layer_identity.identity.project_id,
-      project_generation);
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() ||
       !transaction.validate(scene_registry().can_create_child(
           layer_identity.identity)))
     return 4;
   void* published = nullptr;
   const bool committed = transaction.commit(
-      project_generation,
       [&]() noexcept {
         Identity created{};
         if (!scene_registry().create_child_borrowed(
@@ -1492,13 +1479,11 @@ int32_t __cdecl aegp_delete_layer_effect(void* effect) {
       if (stream.value_live) ++invalidated_values;
       stream = {};
     }
-  const uint32_t project_generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      scene_registry(), identity.identity.project_id, project_generation);
+      scene_registry(), identity.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      project_generation,
       [&]() noexcept {
         if (!scene_registry().erase_tree(identity.identity)) return false;
         g_aegp_effect_instances = candidate_instances;
@@ -1548,18 +1533,15 @@ int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
   candidate.parameter_values = source->parameter_values;
   const std::size_t lease_index = static_cast<std::size_t>(
       std::distance(g_aegp_effect_leases.begin(), lease_slot));
-  const uint32_t project_generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       scene_registry(), source_identity.identity.project_id,
-      project_generation);
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() ||
       !transaction.validate(scene_registry().can_create_child(
           source_identity.owner)))
     return 4;
   void* published = nullptr;
   const bool committed = transaction.commit(
-      project_generation,
       [&]() noexcept {
         Identity created{};
         if (!scene_registry().create_child_borrowed(
@@ -2036,13 +2018,11 @@ int32_t __cdecl aegp_set_effect_stream_value(
   auto candidate_instances = g_aegp_effect_instances;
   candidate_instances[g_aegp_transform_stream.effect_instance_index]
       .parameter_values[selector - 1] = candidate;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      scene_registry(), stream_identity.identity.project_id, generation);
+      scene_registry(), stream_identity.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         g_aegp_effect_instances = candidate_instances;
         return true;
@@ -2569,13 +2549,11 @@ int32_t __cdecl aegp_set_stream_value_v2(
   candidate_instances[value->effect_instance_index]
       .parameter_values[static_cast<std::size_t>(value->param_index - 1)] =
           candidate;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      scene_registry(), value->identity.project_id, generation);
+      scene_registry(), value->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         g_aegp_effect_instances = candidate_instances;
         return true;
@@ -2606,13 +2584,11 @@ int32_t __cdecl aegp_set_dynamic_stream_flag_v2(
   if (!value || !legacy_effect_stream_parent_live(*value) ||
       one_flag != kHidden || undoable > 1 || set > 1) return 4;
   const bool hidden = set != 0;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      scene_registry(), value->identity.project_id, generation);
+      scene_registry(), value->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         value->hidden = hidden;
         return true;

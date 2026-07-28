@@ -221,12 +221,22 @@ def test_common_scene_transaction_has_explicit_atomic_lifecycle() -> None:
     mask = read(ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp")
     native = read(NATIVE_SELFTEST)
     compat = read(COMPAT_SELFTEST)
+    external = read(
+        ROOT
+        / "minihost"
+        / "src"
+        / "worker_aegp_external_render_runtime.cpp"
+    )
+    routing = read(CUSTOM_ROUTING)
     for marker in (
         "class AtomicSceneTransaction",
+        "using GenerationReader = uint32_t(*)() noexcept",
         "bool stage() noexcept",
         "bool validate(bool condition) noexcept",
-        "bool commit(uint32_t current_project_generation",
+        "bool commit(Apply&& apply, Bump&& bump) noexcept",
         "void cancel() noexcept",
+        "generation_reader_ ? generation_reader_() : 0",
+        "generation_reader_() != baseline_project_generation_",
         "registry_.fingerprint() != baseline_fingerprint_",
         "record_commit",
         "record_cancel",
@@ -240,6 +250,10 @@ def test_common_scene_transaction_has_explicit_atomic_lifecycle() -> None:
         "registry.handle_table_fingerprint() == handles_before_rollback",
         "transaction_cancel_byte_invariant",
         "transaction_commit_generation_once",
+        "generation_read_under_lock",
+        "commit_generation_rechecked",
+        "invalidate_all_scene_generations(next)",
+        "direct_bump_receipt_invalidated",
         "std::memcmp(",
         "bump_render_project_timestamp()",
     ):
@@ -250,6 +264,8 @@ def test_common_scene_transaction_has_explicit_atomic_lifecycle() -> None:
             or marker in mask
             or marker in native
             or marker in compat
+            or marker in external
+            or marker in routing
         )
 
 

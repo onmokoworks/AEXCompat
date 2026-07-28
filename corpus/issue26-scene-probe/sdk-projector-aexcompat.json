@@ -2,7 +2,7 @@
   "schema_version": 1,
   "evidence_kind": "issue26-public-aegp-scene",
   "target": "sdk_projector_aexcompat",
-  "recorded_utc": "2026-07-28T05:00:51.487871Z",
+  "recorded_utc": "2026-07-28T05:17:21.903030Z",
   "status": "passed",
   "execution": {
     "command": [
@@ -50,8 +50,8 @@
     },
     "worker": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
-      "sha256": "84945afb60c1403de9278b73068fda090c22b38511704fe20ee8d726c6227aa7",
-      "size_bytes": 1840128
+      "sha256": "f4473af161f1cb51d4baaf9e023cdc44e19c49a72f20a054ad0ac0f54fe89f18",
+      "size_bytes": 1843200
     },
     "sample": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-sdk-samples\\projector\\Projector.aex",

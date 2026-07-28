@@ -83,12 +83,13 @@
     "generation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["before", "after", "old_stage_invalidated", "old_receipt_invalidated"],
+      "required": ["before", "after", "old_stage_invalidated", "old_receipt_invalidated", "direct_bump_receipt_invalidated"],
       "properties": {
         "before": {"type": "integer", "minimum": 1},
         "after": {"type": "integer", "minimum": 2},
         "old_stage_invalidated": {"const": true},
-        "old_receipt_invalidated": {"const": true}
+        "old_receipt_invalidated": {"const": true},
+        "direct_bump_receipt_invalidated": {"const": true}
       }
     },
     "hashes": {

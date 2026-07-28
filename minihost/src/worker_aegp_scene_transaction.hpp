@@ -20,6 +20,7 @@ struct Diagnostics {
 
 using GenerationInvalidator = void(*)(uint64_t project_id,
                                       uint32_t valid_generation) noexcept;
+using GenerationReader = uint32_t(*)() noexcept;
 
 std::mutex& mutation_mutex() noexcept;
 void configure_generation_invalidator(GenerationInvalidator callback) noexcept;
@@ -37,14 +38,16 @@ class AtomicSceneTransaction {
  public:
   AtomicSceneTransaction(scene_model::Registry& registry,
                          uint64_t project_id,
-                         uint32_t project_generation) noexcept
+                         GenerationReader generation_reader) noexcept
       : registry_(registry),
         lock_(mutation_mutex()),
         project_id_(project_id),
-        baseline_project_generation_(project_generation),
-        baseline_fingerprint_(registry.fingerprint()),
-        active_(project_id != 0 && project_generation != 0 &&
-                project_generation != UINT32_MAX) {
+        generation_reader_(generation_reader) {
+    baseline_project_generation_ =
+        generation_reader_ ? generation_reader_() : 0;
+    baseline_fingerprint_ = registry_.fingerprint();
+    active_ = project_id_ != 0 && baseline_project_generation_ != 0 &&
+        baseline_project_generation_ != UINT32_MAX;
     record_begin();
   }
 
@@ -74,18 +77,17 @@ class AtomicSceneTransaction {
   }
 
   template <typename Apply, typename Bump>
-  bool commit(uint32_t current_project_generation,
-              Apply&& apply, Bump&& bump) noexcept {
+  bool commit(Apply&& apply, Bump&& bump) noexcept {
     return commit(
-        current_project_generation, std::forward<Apply>(apply),
+        std::forward<Apply>(apply),
         []() noexcept { return true; }, std::forward<Bump>(bump));
   }
 
   template <typename Apply, typename Rollback, typename Bump>
-  bool commit(uint32_t current_project_generation,
-              Apply&& apply, Rollback&& rollback, Bump&& bump) noexcept {
+  bool commit(Apply&& apply, Rollback&& rollback, Bump&& bump) noexcept {
     if (!active_ || !staged_ || !validated_ ||
-        current_project_generation != baseline_project_generation_ ||
+        !generation_reader_ ||
+        generation_reader_() != baseline_project_generation_ ||
         registry_.fingerprint() != baseline_fingerprint_) {
       cancel();
       return false;
@@ -124,6 +126,7 @@ class AtomicSceneTransaction {
   scene_model::Registry& registry_;
   std::unique_lock<std::mutex> lock_;
   uint64_t project_id_{};
+  GenerationReader generation_reader_{};
   uint32_t baseline_project_generation_{};
   uint64_t baseline_fingerprint_{};
   bool active_{};

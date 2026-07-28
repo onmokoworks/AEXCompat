@@ -72,6 +72,7 @@ void bump_project_generation() noexcept {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_cache.clear();
       }
+      render_receipts::invalidate_all_scene_generations(current);
       if (g_hooks.invalidate_staged_items) g_hooks.invalidate_staged_items();
       return;
     }
@@ -80,6 +81,7 @@ void bump_project_generation() noexcept {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_cache.clear();
       }
+      render_receipts::invalidate_all_scene_generations(next);
       if (g_hooks.invalidate_staged_items) g_hooks.invalidate_staged_items();
       return;
     }

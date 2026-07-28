@@ -19,6 +19,7 @@ struct AegpSceneModelSelftestReport {
   bool duplicate_order_receipt_unchanged{};
   bool stage_invalidated{};
   bool receipt_invalidated{};
+  bool direct_bump_receipt_invalidated{};
   bool invalid_handle_distinguished{};
   bool cleanup_balanced{};
   bool fixture_lookup{};

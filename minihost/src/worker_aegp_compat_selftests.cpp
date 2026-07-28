@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -2195,6 +2196,56 @@ AegpSceneModelSelftestReport verify_aegp_scene_model() {
       render_receipts::statistics().invalid_handle_operations >
           receipt_stats_after.invalid_handle_operations;
 
+  Identity direct_project{};
+  std::unique_ptr<render_receipts::ReceiptDraft> direct_draft;
+  try {
+    direct_draft = std::make_unique<render_receipts::ReceiptDraft>();
+    direct_draft->pixels.resize(4);
+  } catch (...) {
+    direct_draft.reset();
+  }
+  void* direct_receipt = nullptr;
+  const uint32_t direct_generation_before =
+      aegp_external_render_runtime::project_generation();
+  const auto direct_stats_before = render_receipts::statistics();
+  bool direct_registered = direct_draft &&
+      registry.project_identity(active.project_id, direct_project);
+  if (direct_registered) {
+    direct_draft->pixel_format = world_registry::kPixelFormatArgb32;
+    direct_draft->world.data = direct_draft->pixels.data();
+    direct_draft->world.rowbytes = 4;
+    direct_draft->world.width = 1;
+    direct_draft->world.height = 1;
+    direct_draft->world.extent_hint = {0, 0, 1, 1};
+    direct_draft->world.pix_aspect_ratio = {1, 1};
+    direct_draft->scene_bound = true;
+    direct_draft->scene_item = active;
+    direct_draft->scene_project = direct_project;
+    direct_draft->project_generation = direct_generation_before;
+    direct_registered = render_receipts::register_receipt(
+        std::move(direct_draft), &direct_receipt) == 0 &&
+        direct_receipt;
+  }
+  const AegpTime direct_time{1, 30};
+  const bool direct_mutation = direct_registered &&
+      aegp_set_item_current_time(
+          active_item.legacy_handle, &direct_time) == 0;
+  const auto direct_stats_after = render_receipts::statistics();
+  render_receipts::ReceiptSnapshot direct_snapshot{};
+  void** direct_world =
+      reinterpret_cast<void**>(static_cast<uintptr_t>(0x2620));
+  report.direct_bump_receipt_invalidated =
+      direct_mutation &&
+      aegp_external_render_runtime::project_generation() ==
+          direct_generation_before + 1 &&
+      !render_receipts::snapshot(direct_receipt, direct_snapshot) &&
+      direct_stats_after.stale_invalidations >
+          direct_stats_before.stale_invalidations &&
+      render_receipts::get_world(direct_receipt, &direct_world) != 0 &&
+      direct_world == nullptr;
+  if (direct_receipt)
+    render_receipts::checkin_if_live(direct_receipt);
+
   if (stream && dispose_stream) ok = dispose_stream(stream) == 0 && ok;
   if (mask && dispose_mask) ok = dispose_mask(mask) == 0 && ok;
   if (keyframe_suite_raw)
@@ -2227,6 +2278,7 @@ AegpSceneModelSelftestReport verify_aegp_scene_model() {
       report.duplicate_order_receipt_unchanged &&
       report.unsupported_slots_preserved &&
       report.stage_invalidated && report.receipt_invalidated &&
+      report.direct_bump_receipt_invalidated &&
       report.invalid_handle_distinguished && report.cleanup_balanced &&
       report.stage_identity_hash != 0 && report.trace_hash != 0;
   return report;

@@ -488,14 +488,11 @@ int32_t __cdecl set_stream_value(int32_t plugin_id, void* stream, StreamValue* v
     static_cast<OutlineData&>(candidate) = *outline_candidate;
   }
   candidate.dynamic_modified = true;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       aexcompat::scene_model::registry(), record->identity.project_id,
-      generation);
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         *record->mask = std::move(candidate);
         ++g_dynamic_stream_mutations;
@@ -528,14 +525,11 @@ int32_t __cdecl reject_expression_state(int32_t plugin_id, void* stream, uint8_t
     ++g_invalid_stream_operations; return 4;
   }
   const bool candidate_enabled = enabled != 0;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       aexcompat::scene_model::registry(), record->identity.project_id,
-      generation);
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         record->mask->expression_enabled[static_cast<std::size_t>(index)] =
             candidate_enabled;
@@ -558,14 +552,11 @@ int32_t __cdecl unsupported_set_expression(int32_t plugin_id, void* stream, cons
   if (length > 4096) { ++g_invalid_stream_operations; return 4; }
   std::u16string candidate(
       reinterpret_cast<const char16_t*>(expression), length);
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       aexcompat::scene_model::registry(), record->identity.project_id,
-      generation);
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         record->mask->expressions[static_cast<std::size_t>(index)] =
             std::move(candidate);
@@ -715,13 +706,11 @@ bool commit_keyframe_candidate(HostStreamRef* stream, HostKeyframe* key,
   if (!registry.snapshot(key->identity, identity)) return false;
   auto staged_identity = identity;
   staged_identity.keyframe = keyframe_state(candidate);
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      registry, stream->identity.project_id, generation);
+      registry, stream->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return false;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         aexcompat::scene_model::Identity replacement{};
         if (!registry.replace_snapshot(
@@ -792,13 +781,11 @@ int32_t __cdecl insert_keyframe(void* stream, int16_t time_mode, const HostTime*
     ++g_invalid_keyframe_operations;
     return 4;
   }
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      registry, record->identity.project_id, generation);
+      registry, record->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   const bool committed = transaction.commit(
-      generation,
       [&]() noexcept {
         if (!registry.create_child(
                 aexcompat::scene_model::ObjectKind::keyframe,
@@ -915,14 +902,11 @@ int32_t __cdecl delete_keyframe(void* stream, int32_t index) {
   }
   auto position = record->mask->keyframes.begin(); std::advance(position, index);
   const auto identity = key->identity;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       aexcompat::scene_model::registry(), record->identity.project_id,
-      generation);
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
-      generation,
       [&]() noexcept {
         if (!aexcompat::scene_model::registry().erase_tree(identity))
           return false;
@@ -1251,10 +1235,9 @@ int32_t __cdecl end_add_keyframes(uint8_t add, void* handle) {
   }
   auto staged = transaction->staged;
   auto& registry = aexcompat::scene_model::registry();
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction atomic(
-      registry, stream->identity.project_id, generation);
+      registry, stream->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!atomic.stage()) return 4;
   if (!add) {
     atomic.cancel();
@@ -1286,7 +1269,6 @@ int32_t __cdecl end_add_keyframes(uint8_t add, void* handle) {
     const uint32_t mutations_before_apply = g_keyframe_mutations;
     std::size_t applied_count = 0;
     if (!atomic.commit(
-            generation,
             [&]() noexcept {
               for (auto& candidate : staged) {
                 auto position = stream->mask->keyframes.begin();
@@ -1391,14 +1373,12 @@ uint32_t* dynamic_flags(HostStreamRef* stream) {
 template <typename Apply>
 bool commit_dynamic_stream_mutation(HostStreamRef* stream, Apply&& apply) {
   if (!stream || stream->identity.project_id == 0) return false;
-  const uint32_t generation =
-      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       aexcompat::scene_model::registry(), stream->identity.project_id,
-      generation);
+      &aexcompat::aegp_external_render_runtime::project_generation);
   if (!transaction.stage() || !transaction.validate(true)) return false;
   return transaction.commit(
-      generation, std::forward<Apply>(apply),
+      std::forward<Apply>(apply),
       []() noexcept { bump_render_project_timestamp(); });
 }
 int32_t __cdecl get_new_dynamic_stream_for_layer(int32_t plugin_id, void* layer, void** stream) {

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "evidence_kind": "issue26-public-aegp-scene",
   "target": "aexcompat",
-  "recorded_utc": "2026-07-28T05:00:35.671874Z",
+  "recorded_utc": "2026-07-28T05:17:21.245069Z",
   "status": "passed",
   "execution": {
     "command": [
@@ -50,15 +50,15 @@
     },
     "worker": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",
-      "sha256": "84945afb60c1403de9278b73068fda090c22b38511704fe20ee8d726c6227aa7",
-      "size_bytes": 1840128
+      "sha256": "f4473af161f1cb51d4baaf9e023cdc44e19c49a72f20a054ad0ac0f54fe89f18",
+      "size_bytes": 1843200
     },
     "sample": null,
     "build_receipt": null,
     "fixture_metadata": null,
     "raw_probe_report": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-scene-probe-aexcompat-raw.json",
-      "sha256": "fdb2f5c902ae7cfda7adef46d89d40da675633feb29e8809e340eebe303c8bfd",
+      "sha256": "e9b39e2b4d4c8d3e29262cf90336fe384f40356bbe3f15cd62d3c46dfabb88da",
       "size_bytes": 2886
     }
   },
@@ -75,7 +75,7 @@
     "identities": [
       {
         "kind": "project",
-        "token": "803913a7a0793f21",
+        "token": "499eb2b3913ffc90",
         "stable_id": 0,
         "owner_id": -1,
         "ordinal": 0,
@@ -83,7 +83,7 @@
       },
       {
         "kind": "folder",
-        "token": "40bd29c52ef29849",
+        "token": "5ccbe34c44931728",
         "stable_id": 100,
         "owner_id": 0,
         "ordinal": 0,
@@ -91,7 +91,7 @@
       },
       {
         "kind": "folder",
-        "token": "c25c8dd16362adb1",
+        "token": "3131414d6f10fb20",
         "stable_id": 101,
         "owner_id": 0,
         "ordinal": 1,
@@ -99,7 +99,7 @@
       },
       {
         "kind": "footage",
-        "token": "5c8aa423cb1a90d9",
+        "token": "49c69c5e89cfcdb8",
         "stable_id": 200,
         "owner_id": 0,
         "ordinal": 2,
@@ -107,7 +107,7 @@
       },
       {
         "kind": "comp",
-        "token": "f8bc0206b7255641",
+        "token": "c1ec9f3a883589b0",
         "stable_id": 1001,
         "owner_id": 0,
         "ordinal": 3,
@@ -115,7 +115,7 @@
       },
       {
         "kind": "comp",
-        "token": "f12e9bb006f18369",
+        "token": "9023e01295958ec8",
         "stable_id": 1002,
         "owner_id": 0,
         "ordinal": 4,
@@ -123,7 +123,7 @@
       },
       {
         "kind": "project",
-        "token": "8694273ac338a9d1",
+        "token": "a97f2dd466068840",
         "stable_id": 1,
         "owner_id": -1,
         "ordinal": 1,
@@ -131,7 +131,7 @@
       },
       {
         "kind": "folder",
-        "token": "e775053246607af9",
+        "token": "87c688786f592358",
         "stable_id": 1100,
         "owner_id": 1,
         "ordinal": 0,
@@ -139,7 +139,7 @@
       },
       {
         "kind": "comp",
-        "token": "a890bc63b919b2e1",
+        "token": "bd144218059b43d0",
         "stable_id": 1101,
         "owner_id": 1,
         "ordinal": 1,
@@ -147,7 +147,7 @@
       },
       {
         "kind": "layer",
-        "token": "cb9f8bc1dc151c71",
+        "token": "aa0efb2a4ad7fa60",
         "stable_id": 2001,
         "owner_id": 1001,
         "ordinal": 0,
@@ -155,7 +155,7 @@
       },
       {
         "kind": "layer",
-        "token": "c4c17fd2bd7fe899",
+        "token": "bd3c2bc2fe2b14f8",
         "stable_id": 2002,
         "owner_id": 1001,
         "ordinal": 1,
@@ -163,7 +163,7 @@
       },
       {
         "kind": "layer",
-        "token": "c34d55c830f10401",
+        "token": "35622e9efc90d0f0",
         "stable_id": 2003,
         "owner_id": 1001,
         "ordinal": 2,
@@ -171,7 +171,7 @@
       },
       {
         "kind": "effect",
-        "token": "10c79812ab7f0aa1",
+        "token": "2b4a0ca14cdb6510",
         "stable_id": 3001,
         "owner_id": 2001,
         "ordinal": 0,
@@ -180,36 +180,36 @@
     ],
     "streams": [
       {
-        "token": "aaf5ae651336edc9",
-        "owner": "10c79812ab7f0aa1",
+        "token": "3e773d3a002e7fa8",
+        "owner": "2b4a0ca14cdb6510",
         "ordinal": 0,
         "type": 9,
         "keyframes": 0
       },
       {
-        "token": "2c95127147a70331",
-        "owner": "10c79812ab7f0aa1",
+        "token": "1d848a8ebf3341a0",
+        "owner": "2b4a0ca14cdb6510",
         "ordinal": 1,
         "type": 5,
         "keyframes": 0
       },
       {
-        "token": "ed19288ed6205c59",
-        "owner": "10c79812ab7f0aa1",
+        "token": "3619e59fd9f21438",
+        "owner": "2b4a0ca14cdb6510",
         "ordinal": 2,
         "type": 4,
         "keyframes": 0
       },
       {
-        "token": "a25f441a292e9052",
-        "owner": "10c79812ab7f0aa1",
+        "token": "c50365fd616dcb5b",
+        "owner": "2b4a0ca14cdb6510",
         "ordinal": 3,
         "type": 2,
         "keyframes": 0
       },
       {
-        "token": "4df573721a6481da",
-        "owner": "10c79812ab7f0aa1",
+        "token": "4666739defea7913",
+        "owner": "2b4a0ca14cdb6510",
         "ordinal": 4,
         "type": 6,
         "keyframes": 0

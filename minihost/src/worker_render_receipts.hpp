@@ -101,6 +101,7 @@ bool checkin_if_live(void* receipt);
 bool snapshot(void* receipt, ReceiptSnapshot& output);
 std::size_t invalidate_scene_generation(uint64_t project_id,
                                         uint32_t valid_generation);
+std::size_t invalidate_all_scene_generations(uint32_t valid_generation);
 Statistics statistics();
 bool lifetimes_balanced();
 
