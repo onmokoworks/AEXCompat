@@ -1440,6 +1440,20 @@ fn run_guest_workers(
     ))
 }
 
+const NATIVE_DEADLINE_REAP_BUDGET: Duration = Duration::from_millis(20);
+
+fn kill_and_try_reap(child: &mut Child, budget: Duration) -> bool {
+    let _ = child.kill();
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if started.elapsed() < budget => thread::yield_now(),
+            Ok(None) | Err(_) => return false,
+        }
+    }
+}
+
 fn run_worker(
     worker: &Path,
     arguments: &[String],
@@ -1463,10 +1477,19 @@ fn run_worker(
                     thread::sleep(Duration::from_millis(5));
                 }
                 None => {
-                    let _ = child.kill();
+                    // Reap a normally interruptible native child without ever
+                    // turning Rosetta admission failure into an unbounded wait.
+                    // If SIGKILL cannot complete within this small budget, drop
+                    // the handle and let the Unicorn candidate start at once.
+                    let reaped = kill_and_try_reap(&mut child, NATIVE_DEADLINE_REAP_BUDGET);
                     return Err(format!(
-                        "native worker exceeded {} ms and was terminated",
-                        deadline.as_millis()
+                        "native worker exceeded {} ms and was terminated{}",
+                        deadline.as_millis(),
+                        if reaped {
+                            ""
+                        } else {
+                            " (child cleanup still pending)"
+                        }
                     ));
                 }
             }
@@ -1552,6 +1575,16 @@ mod tests {
             run_guest_workers(&workers, &["1".to_string()], Duration::from_millis(20)).unwrap();
         assert!(output.status.success());
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn native_deadline_cleanup_reaps_an_interruptible_child_within_a_bounded_budget() {
+        let mut child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        let started = Instant::now();
+
+        assert!(kill_and_try_reap(&mut child, NATIVE_DEADLINE_REAP_BUDGET));
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]
