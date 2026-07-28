@@ -717,6 +717,9 @@ impl GuestEngine<'static> {
     pub fn iterate8_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
+    pub fn iterate16_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
     pub fn iterate8_origin_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
