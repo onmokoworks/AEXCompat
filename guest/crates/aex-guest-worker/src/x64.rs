@@ -1751,11 +1751,12 @@ fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> boo
         return false;
     }
     let byte_count = usize::try_from((image_end - rip).min(15)).unwrap_or(15);
-    let mut bytes = vec![0u8; byte_count];
-    if unicorn.mem_read(rip, &mut bytes).is_err() {
+    let mut bytes = [0u8; 15];
+    if unicorn.mem_read(rip, &mut bytes[..byte_count]).is_err() {
         return false;
     }
-    let instruction = Decoder::with_ip(64, &bytes, rip, DecoderOptions::NONE).decode();
+    let instruction =
+        Decoder::with_ip(64, &bytes[..byte_count], rip, DecoderOptions::NONE).decode();
     if instruction.is_invalid()
         || !matches!(bytes[0], 0xc4 | 0xc5)
         || instruction.segment_prefix() != Register::None
