@@ -143,12 +143,24 @@ def test_eligibility_excludes_audio_prefix_and_non_product_entries():
         "Adobe After Effects 2025",
         "Adobe After Effects 2025 Beta",
     )
+    nested_release = entry("nested-release", "5" * 64, 10, "v1")
+    nested_release["canonical_path"] = str(nested_release["canonical_path"]).replace(
+        "Adobe After Effects 2025",
+        "Adobe After Effects 2024",
+    ).replace(
+        "Effects\\nested-release.aex",
+        "Effects\\Adobe After Effects 2025\\nested-release.aex",
+    )
+    wrong_root_category = entry("wrong-root", "6" * 64, 10, "v1")
+    wrong_root_category["root_category"] = "config_discovered"
 
     assert SELECT.is_eligible(entry("release", "0" * 64, 10, "v1")) is True
     assert SELECT.is_eligible(audio) is False
     assert SELECT.is_eligible(fixture) is False
     assert SELECT.is_eligible(missing_root_category) is False
     assert SELECT.is_eligible(beta) is False
+    assert SELECT.is_eligible(nested_release) is False
+    assert SELECT.is_eligible(wrong_root_category) is False
 
 
 def test_ambiguous_registration_exports_fail_closed():

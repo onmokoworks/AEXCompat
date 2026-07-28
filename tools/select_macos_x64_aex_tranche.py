@@ -122,6 +122,27 @@ def is_eligible(entry: dict[str, object]) -> bool:
         if isinstance(canonical_path, str)
         else []
     )
+    relative_components = (
+        relative_path.replace("/", "\\").split("\\")
+        if isinstance(relative_path, str)
+        else []
+    )
+    expected_suffix = [
+        "Adobe After Effects 2025",
+        "Support Files",
+        "Plug-ins",
+        *relative_components,
+    ]
+    canonical_suffix_matches = len(canonical_components) >= len(
+        expected_suffix
+    ) and all(
+        actual.casefold() == expected.casefold()
+        for actual, expected in zip(
+            canonical_components[-len(expected_suffix) :],
+            expected_suffix,
+            strict=True,
+        )
+    )
     if (
         entry.get("architecture") != "x64"
         or entry.get("valid_pe") is not True
@@ -129,14 +150,11 @@ def is_eligible(entry: dict[str, object]) -> bool:
         or entry.get("fixture_hint") is not False
         or entry.get("backup_hint") is not False
         or entry.get("source_category") != "adobe_installed"
-        or not isinstance(entry.get("root_category"), str)
+        or entry.get("root_category") != "adobe_ae_plugins"
         or not isinstance(canonical_path, str)
-        or not any(
-            component.casefold() == "adobe after effects 2025"
-            for component in canonical_components
-        )
         or not isinstance(relative_path, str)
         or not relative_path.casefold().startswith("effects\\")
+        or not canonical_suffix_matches
         or not isinstance(size, int)
         or isinstance(size, bool)
         or size <= 0
