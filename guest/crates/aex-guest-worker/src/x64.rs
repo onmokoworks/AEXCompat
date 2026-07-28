@@ -7896,39 +7896,56 @@ fn is_msvc_i32_throw_info(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) ->
 }
 
 fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
+    if try_emulate_selector_abort(unicorn) {
+        return;
+    }
+    // `_CxxThrowException` is noreturn. Returning through the import stub for
+    // an exception we cannot faithfully dispatch would execute compiler
+    // unreachable code and can corrupt selector/session state. Keep all
+    // non-selector, stale, malformed, differently typed, and unrelated throws
+    // fail-closed instead.
+    if unicorn.get_data().callback_error.is_none() {
+        unicorn.get_data_mut().callback_error = Some(
+            "guest called _CxxThrowException outside the supported selector-abort contract".into(),
+        );
+    }
+    let _ = unicorn.emu_stop();
+}
+
+fn try_emulate_selector_abort(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
     if !unicorn.get_data().selector_dispatch_active
         || unicorn.get_data().pending_unsupported_suite.is_none()
     {
-        return;
+        return false;
     }
     let exception = match unicorn.reg_read(RegisterX86::RCX) {
         Ok(exception) if exception != 0 => exception,
-        _ => return,
+        _ => return false,
     };
     let mut bytes = [0u8; 4];
     if unicorn.mem_read(exception, &mut bytes).is_err() {
-        return;
+        return false;
     }
     let error = i32::from_le_bytes(bytes);
     // PF_Err is an A_long. Keep this trap deliberately narrower than the
     // language exception ABI: only a small, positive host error thrown after
     // an unsupported AcquireSuite is a selector-level abort.
     if !(1..=0x7fff).contains(&error) {
-        return;
+        return false;
     }
     if !unicorn
         .reg_read(RegisterX86::RDX)
         .is_ok_and(|throw_info| is_msvc_i32_throw_info(unicorn, throw_info))
     {
-        return;
+        return false;
     }
     let caller_rsp = match unicorn.reg_read(RegisterX86::RSP) {
         Ok(caller_rsp) => caller_rsp,
-        _ => return,
+        _ => return false,
     };
     let mut return_bytes = [0u8; 8];
     if unicorn.mem_read(caller_rsp, &mut return_bytes).is_err() {
-        return;
+        return false;
     }
     let return_address = u64::from_le_bytes(return_bytes);
     let pending = unicorn
@@ -7942,13 +7959,14 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
             .checked_sub(pending.return_address)
             .is_some_and(|distance| (1..=0x400).contains(&distance));
     if !close_same_frame_throw {
-        return;
+        return false;
     }
     let Some(suite) = unicorn.get_data_mut().pending_unsupported_suite.take() else {
-        return;
+        return false;
     };
     unicorn.get_data_mut().selector_abort = Some(SelectorAbortRecord { error, suite });
     let _ = unicorn.emu_stop();
+    true
 }
 
 fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
@@ -10428,7 +10446,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_suite_does_not_convert_a_different_typed_exception() {
+    fn failed_suite_keeps_a_different_typed_exception_fail_closed() {
         let error_pointer = DATA_BASE + 0x300;
         let code = selector_throw_fixture(true, error_pointer, TEST_THROW_INFO, 0);
         let mut engine = test_engine(&code);
@@ -10443,11 +10461,15 @@ mod tests {
             .write(TEST_CODE + 0x850 + 16, b".?AVfailure@@\0")
             .unwrap();
 
-        assert_eq!(engine.call_selector_win64(TEST_CODE, [0; 6]).unwrap(), 77);
+        assert!(matches!(
+            engine.call_selector_win64(TEST_CODE, [0; 6]),
+            Err(GuestError::Callback(message))
+                if message.contains("_CxxThrowException")
+        ));
     }
 
     #[test]
-    fn failed_suite_provenance_expires_before_a_distant_i32_throw() {
+    fn failed_suite_provenance_expires_and_distant_i32_throw_fails_closed() {
         let error_pointer = DATA_BASE + 0x300;
         let code = selector_throw_fixture(true, error_pointer, TEST_THROW_INFO, 0x401);
         let mut engine = test_engine(&code);
@@ -10458,7 +10480,11 @@ mod tests {
             .unwrap();
         engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
 
-        assert_eq!(engine.call_selector_win64(TEST_CODE, [0; 6]).unwrap(), 77);
+        assert!(matches!(
+            engine.call_selector_win64(TEST_CODE, [0; 6]),
+            Err(GuestError::Callback(message))
+                if message.contains("_CxxThrowException")
+        ));
     }
 
     #[test]
@@ -10500,7 +10526,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_suite_without_throw_falls_back_and_does_not_leak_to_next_selector() {
+    fn unsupported_suite_without_throw_falls_back_but_does_not_mask_next_selector_throw() {
         const CODE: u64 = 0x1000_0000;
         let error_pointer = DATA_BASE + 0x300;
         let code = unsupported_acquire_fallback_fixture();
@@ -10517,21 +10543,30 @@ mod tests {
         engine.write(second_selector, &code).unwrap();
         engine.unicorn.get_data_mut().image_executable_ranges =
             vec![(second_selector, second_selector + code.len() as u64)];
-        assert_eq!(
-            engine.call_selector_win64(second_selector, [0; 6]).unwrap(),
-            77
-        );
+        assert!(matches!(
+            engine.call_selector_win64(second_selector, [0; 6]),
+            Err(GuestError::Callback(message))
+                if message.contains("_CxxThrowException")
+        ));
     }
 
     #[test]
-    fn cxx_throw_without_pending_suite_or_readable_error_uses_normal_fallback() {
+    fn cxx_throw_without_pending_suite_or_readable_error_fails_closed() {
         const CODE: u64 = 0x1000_0000;
         let code = selector_throw_fixture(false, 0xdead_beef, TEST_THROW_INFO, 0);
         let mut engine = test_engine(&code);
         install_test_cxx_throw(&mut engine);
 
-        assert_eq!(engine.call_selector_win64(CODE, [0; 6]).unwrap(), 77);
-        assert_eq!(engine.call_win64(CODE, [0; 6]).unwrap(), 77);
+        assert!(matches!(
+            engine.call_selector_win64(CODE, [0; 6]),
+            Err(GuestError::Callback(message))
+                if message.contains("_CxxThrowException")
+        ));
+        assert!(matches!(
+            engine.call_win64(CODE, [0; 6]),
+            Err(GuestError::Callback(message))
+                if message.contains("_CxxThrowException")
+        ));
     }
 
     #[test]

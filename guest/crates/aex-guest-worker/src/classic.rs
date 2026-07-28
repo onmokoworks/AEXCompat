@@ -846,18 +846,28 @@ impl ClassicHost {
                 ));
             }
         };
+        let before = self.trace_state_snapshot()?;
         self.engine
             .begin_execution_trace(selector_name, self.entry)?;
-        let before = self.trace_state_snapshot()?;
         let selector_label = match selector {
             CMD_GLOBAL_SETUP => "GLOBAL_SETUP",
             CMD_PARAMS_SETUP => "PARAMS_SETUP",
             _ => unreachable!("validated setup trace selector"),
         };
-        let return_value = self
-            .invoke(selector)
-            .map_err(|source| selector_guest_error(selector_label, source))?;
-        let after = self.trace_state_snapshot()?;
+        let return_value = match self.invoke(selector) {
+            Ok(return_value) => return_value,
+            Err(source) => {
+                self.engine.discard_execution_trace()?;
+                return Err(selector_guest_error(selector_label, source));
+            }
+        };
+        let after = match self.trace_state_snapshot() {
+            Ok(after) => after,
+            Err(error) => {
+                self.engine.discard_execution_trace()?;
+                return Err(error.into());
+            }
+        };
         let mut trace = self
             .engine
             .finish_execution_trace(return_value)
