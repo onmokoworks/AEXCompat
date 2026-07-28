@@ -1503,7 +1503,7 @@ unsafe extern "win64" fn pre_checkout_layer(
         let index = index as u32 as i32;
         let checkout_id = checkout_id as u32 as i32;
         if result == 0
-            || time_step as u32 as i32 <= 0
+            || (time_step as u32 as i32) < 0
             || time_scale as u32 == 0
             || state.smart_checkout_ids.contains_key(&checkout_id)
             || state.smart_checkout_ids.len() >= MAX_SMART_CHECKOUT_IDS

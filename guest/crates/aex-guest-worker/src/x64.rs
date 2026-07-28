@@ -6295,7 +6295,9 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
         unicorn
             .mem_read(rsp + 0x38, &mut time_scale)
             .map_err(|error| format!("pre-checkout time scale: {error}"))?;
-        if time_step <= 0 || u32::from_le_bytes(time_scale) == 0 {
+        // A zero step is used by still-frame SmartFX callers. Negative steps
+        // and a zero scale cannot describe a valid host time.
+        if time_step < 0 || u32::from_le_bytes(time_scale) == 0 {
             return Err(format!(
                 "invalid pre-checkout time step={time_step} scale={}",
                 u32::from_le_bytes(time_scale)
@@ -10270,7 +10272,7 @@ mod tests {
             engine
                 .call_win64_with_timeout(
                     HOST_PRE_CHECKOUT_LAYER,
-                    &[1, 1, 10000, request, 0, 1, 1, result],
+                    &[1, 1, 10000, request, 0, 0, 1, result],
                     TIMEOUT_MICROSECONDS,
                 )
                 .unwrap(),

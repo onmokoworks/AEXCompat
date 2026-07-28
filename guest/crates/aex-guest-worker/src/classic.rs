@@ -30,6 +30,7 @@ pub(crate) const PARAM_COLOR: i32 = 5;
 pub(crate) const PARAM_POINT: i32 = 6;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
+const LAYER_DEFAULT_OFFSET: usize = 116;
 const ANGLE_DEFAULT_OFFSET: usize = 4;
 const POINT_DEFAULT_X_OFFSET: usize = 12;
 const POINT_DEFAULT_Y_OFFSET: usize = 16;
@@ -1226,7 +1227,9 @@ impl ClassicHost {
         for (index, captured) in captured_params.into_iter().enumerate() {
             let mut definition = captured.bytes;
             materialize_default(&mut definition, captured.param_type, width, height);
-            materialize_layer_world(&mut definition, captured.param_type, &input_world);
+            if smart_render {
+                materialize_layer_world(&mut definition, captured.param_type, &input_world);
+            }
             if let Some((request_index, requested)) =
                 parameter_values
                     .iter()
@@ -2023,6 +2026,7 @@ fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, heigh
 fn materialize_layer_world(definition: &mut [u8], param_type: i32, input_world: &[u8]) {
     if param_type == PARAM_LAYER
         && definition.len() >= abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE
+        && read_i32(definition, abi::PARAM_U_OFFSET + LAYER_DEFAULT_OFFSET) == -1
         && input_world.len() == abi::PF_LAYER_DEF_SIZE
     {
         definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
@@ -2466,6 +2470,9 @@ mod tests {
     fn declared_layer_parameters_inherit_the_active_input_world() {
         let input_world = (0..abi::PF_LAYER_DEF_SIZE as u8).collect::<Vec<_>>();
         let mut definition = vec![0xa5; abi::PF_PARAM_DEF_SIZE];
+        definition[abi::PARAM_U_OFFSET + LAYER_DEFAULT_OFFSET
+            ..abi::PARAM_U_OFFSET + LAYER_DEFAULT_OFFSET + 4]
+            .copy_from_slice(&(-1i32).to_le_bytes());
         materialize_layer_world(&mut definition, PARAM_LAYER, &input_world);
         assert_eq!(
             &definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE],
@@ -2477,6 +2484,17 @@ mod tests {
         assert_eq!(
             &scalar[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE],
             vec![0xa5; abi::PF_LAYER_DEF_SIZE]
+        );
+
+        let mut explicit_none = vec![0xa5; abi::PF_PARAM_DEF_SIZE];
+        explicit_none[abi::PARAM_U_OFFSET + LAYER_DEFAULT_OFFSET
+            ..abi::PARAM_U_OFFSET + LAYER_DEFAULT_OFFSET + 4]
+            .copy_from_slice(&0i32.to_le_bytes());
+        let explicit_before = explicit_none.clone();
+        materialize_layer_world(&mut explicit_none, PARAM_LAYER, &input_world);
+        assert_eq!(
+            &explicit_none[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE],
+            &explicit_before[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
         );
     }
 }
