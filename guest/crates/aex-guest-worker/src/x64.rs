@@ -3178,7 +3178,7 @@ impl GuestEngine<'static> {
                             "unsupported VCOMP import: {name}"
                         )));
                     }
-                    name if cpp_object_return_import(name) => {
+                    name if msvc_udt_by_value_return_import(name) => {
                         install_unsupported_import_trap(
                             &mut unicorn,
                             stub,
@@ -5248,7 +5248,7 @@ fn deterministic_i32_stub(value: i32) -> [u8; 6] {
     [0xb8, bytes[0], bytes[1], bytes[2], bytes[3], 0xc3]
 }
 
-fn cpp_object_return_import(symbol: &str) -> bool {
+pub(super) fn msvc_udt_by_value_return_import(symbol: &str) -> bool {
     // These MSVC decorations identify a class/struct returned by value. Win64
     // passes hidden return storage for nontrivial objects, so the scalar-zero
     // fallback cannot initialize the result and must not let execution continue.
@@ -10910,41 +10910,47 @@ mod tests {
     #[test]
     fn cpp_object_returns_are_not_treated_as_scalar_zero_imports() {
         const GET_ENTRY: &str = "?GetEntry@DebugDatabase@debug@dvacore@@QEBA?AV?$basic_string@EU?$char_traits@E@std@@U?$STLAllocator@E@allocator@dvacore@@@std@@AEBV45@0@Z";
-        assert!(cpp_object_return_import(GET_ENTRY));
-        assert!(cpp_object_return_import(
+        assert!(msvc_udt_by_value_return_import(GET_ENTRY));
+        assert!(msvc_udt_by_value_return_import(
             "?Create@ImmutableString@utility@dvacore@@SA?AV123@AEBV?$basic_string_view@D@std@@@Z"
         ));
-        assert!(cpp_object_return_import(
+        assert!(msvc_udt_by_value_return_import(
             "?FormatErrorMessage@dva_exception@config@dvacore@@MEBA?AV?$basic_string@EU?$char_traits@E@std@@@Z"
         ));
-        assert!(cpp_object_return_import(
+        assert!(msvc_udt_by_value_return_import(
             "?GetUnion@Thing@@QEBA?ATPayload@@XZ"
         ));
-        assert!(cpp_object_return_import(
+        assert!(msvc_udt_by_value_return_import(
             "?GetConstClass@Thing@@QEBA?BVPayload@@XZ"
         ));
-        assert!(cpp_object_return_import(
+        assert!(msvc_udt_by_value_return_import(
             "?GetVolatileStruct@Thing@@QEBA?CUPoint@@XZ"
         ));
-        assert!(cpp_object_return_import(
+        assert!(msvc_udt_by_value_return_import(
             "?GetConstVolatileUnion@Thing@@QEBA?DTPayload@@XZ"
         ));
-        assert!(cpp_object_return_import(
+        assert!(msvc_udt_by_value_return_import(
             "?GetQualifiedClass@Thing@@QEBA?ABVPayload@@XZ"
         ));
-        assert!(!cpp_object_return_import(
+        assert!(!msvc_udt_by_value_return_import(
+            "?Consume@Thing@@QEBAHVPayload@@@Z"
+        ));
+        assert!(!msvc_udt_by_value_return_import(
+            "?Consume@@YAHUPayload@@@Z"
+        ));
+        assert!(!msvc_udt_by_value_return_import(
             "??0dva_exception@config@dvacore@@QEAA@PEBDH@Z"
         ));
-        assert!(!cpp_object_return_import(
+        assert!(!msvc_udt_by_value_return_import(
             "?GetValue@Thing@@QEBAHAEBVOther@@@Z"
         ));
-        assert!(!cpp_object_return_import(
+        assert!(!msvc_udt_by_value_return_import(
             "?GetValue@Thing@@QEBAHV?$vector@VPayload@@V?$allocator@VPayload@@@std@@@std@@XZ"
         ));
-        assert!(!cpp_object_return_import(
+        assert!(!msvc_udt_by_value_return_import(
             "?GetInvalidTag@Thing@@QEBA?AEPayload@@XZ"
         ));
-        assert!(!cpp_object_return_import("GetLastError"));
+        assert!(!msvc_udt_by_value_return_import("GetLastError"));
     }
 
     #[test]

@@ -39,7 +39,10 @@ use crate::plugin_data::{
 pub use crate::x64::{
     ExecutionTrace, GuestCensus, GuestParam, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
 };
-use crate::x64::{record_suite_request, record_unsupported_suite_call, utility_suite_layout};
+use crate::x64::{
+    msvc_udt_by_value_return_import, record_suite_request, record_unsupported_suite_call,
+    utility_suite_layout,
+};
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
 #[cfg(test)]
@@ -974,7 +977,32 @@ fn validate_native_import(name: &str) -> Result<(), GuestError> {
             name: name.to_string(),
         });
     }
+    if native_import_is_implemented(name) {
+        return Ok(());
+    }
+    if name.starts_with("_vcomp_") || msvc_udt_by_value_return_import(name) {
+        return Err(GuestError::UnsupportedImport {
+            name: name.to_string(),
+        });
+    }
     Ok(())
+}
+
+fn native_import_is_implemented(name: &str) -> bool {
+    matches!(
+        name,
+        "malloc"
+            | "calloc"
+            | "free"
+            | "_callnewh"
+            | "strncpy"
+            | "memset"
+            | "expf"
+            | "floorf"
+            | "powf"
+            | "pow"
+            | "omp_get_max_threads"
+    )
 }
 
 fn native_import_callback(name: &str) -> u64 {
@@ -3929,6 +3957,30 @@ mod tests {
             native_import_callback("omp_get_max_threads"),
             callback_address!(native_omp_get_max_threads)
         );
+
+        for name in [
+            "?GetEntry@DebugDatabase@debug@dvacore@@QEBA?AVstring@std@@XZ",
+            "_vcomp_for_dynamic_init",
+            "_vcomp_future_runtime_entry",
+        ] {
+            assert!(matches!(
+                validate_native_import(name),
+                Err(GuestError::UnsupportedImport { name: rejected }) if rejected == name
+            ));
+        }
+
+        // UDTs behind references/pointers retain scalar ABI, as do ordinary
+        // decorated scalar functions and unrelated similarly named imports.
+        for name in [
+            "?GetValue@Thing@@QEBAHAEBVOther@@@Z",
+            "?GetValue@Thing@@QEBAHPEBVOther@@@Z",
+            "?Consume@Thing@@QEBAHVPayload@@@Z",
+            "?Consume@@YAHUPayload@@@Z",
+            "?GetValue@Thing@@QEBAHXZ",
+            "my_vcomp_helper",
+        ] {
+            assert!(validate_native_import(name).is_ok(), "{name}");
+        }
     }
 
     #[test]
