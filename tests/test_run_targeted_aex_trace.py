@@ -405,6 +405,50 @@ def test_preexisting_output_symlink_replaces_link_not_unrelated_victim(
     assert json.loads(report_path.read_text(encoding="utf-8")) == report
 
 
+def test_parent_symlink_swap_cannot_redirect_report_replace(
+    tmp_path, monkeypatch
+):
+    worker, _, _, manifest = _fixture(tmp_path)
+    original_parent = tmp_path / "original"
+    unrelated_parent = tmp_path / "unrelated"
+    original_parent.mkdir()
+    unrelated_parent.mkdir()
+    parent_link = tmp_path / "report-parent"
+    parent_link.symlink_to(original_parent, target_is_directory=True)
+    requested_report = parent_link / "report.json"
+
+    def fake_run(command, timeout_seconds):
+        Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(command[4], "PNG")
+        parent_link.unlink()
+        parent_link.symlink_to(unrelated_parent, target_is_directory=True)
+        return (
+            subprocess.CompletedProcess(
+                command,
+                0,
+                b'{"execution_traces":[{"selector":"RENDER"}]}',
+                b"",
+            ),
+            False,
+            None,
+        )
+
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", fake_run)
+    report = RUNNER.run(
+        argparse.Namespace(
+            manifest=manifest,
+            worker=worker,
+            expected_worker_sha256=_sha(worker),
+            output=requested_report,
+            timeout=10,
+            run_parent=tmp_path,
+        )
+    )
+
+    canonical_report = original_parent / "report.json"
+    assert json.loads(canonical_report.read_text(encoding="utf-8")) == report
+    assert not (unrelated_parent / "report.json").exists()
+
+
 def test_late_output_symlink_is_replaced_without_touching_target(
     tmp_path, monkeypatch
 ):

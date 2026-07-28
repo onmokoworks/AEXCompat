@@ -543,10 +543,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "worker",
     )
     cases = load_manifest(manifest_path)
-    # Keep the final path component lexical.  Resolving it here would turn a
-    # pre-existing symlink into its victim and make the later atomic replace
-    # overwrite that victim's directory entry.
-    output = Path(os.path.abspath(os.fspath(args.output.expanduser())))
+    # Canonicalize the parent once but keep the final component lexical.  This
+    # pins temp creation/replacement to one directory even if a parent symlink
+    # is swapped later, without following a pre-existing final symlink victim.
+    output_candidate = Path(
+        os.path.abspath(os.fspath(args.output.expanduser()))
+    )
+    output_candidate.parent.mkdir(parents=True, exist_ok=True)
+    output_parent = output_candidate.parent.resolve(strict=True)
+    if not output_parent.is_dir():
+        raise TraceRunnerError("output parent must be a directory")
+    output = output_parent / output_candidate.name
     protected = [("manifest", manifest_path), ("worker", worker)]
     for case in cases:
         protected.extend(
@@ -556,7 +563,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ]
         )
     reject_output_alias(output, protected)
-    output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix="aex-targeted-trace-", dir=args.run_parent
     ) as temporary:
