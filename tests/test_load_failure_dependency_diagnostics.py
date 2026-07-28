@@ -1,13 +1,12 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESOLVER = (
     ROOT / "broker/crates/broker/src/plugin_dependency_closure.rs"
 ).read_text(encoding="utf-8")
-BROKER = (ROOT / "broker/crates/broker/src/image_render.rs").read_text(
-    encoding="utf-8"
-)
+BROKER = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
 SWEEP = (
     ROOT / "bridges/aviutl2-multifilter/examples/discover_sweep.rs"
 ).read_text(encoding="utf-8")

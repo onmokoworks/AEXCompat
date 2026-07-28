@@ -24,6 +24,16 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "minihost" / "src"
 
 L2_MAIN = SRC / "l2_main.cpp"
+L2_TRANSLATION_UNIT_FILES = (
+    L2_MAIN,
+    SRC / "l2_main_support.inc",
+    SRC / "l2_main_entry.inc",
+)
+
+
+def l2_translation_unit_text() -> str:
+    """Return l2_main's textual translation unit in include order."""
+    return "\n".join(path.read_text(encoding="utf-8") for path in L2_TRANSLATION_UNIT_FILES)
 
 # l2_main.cpp から抽出された実装の owner 群。TU 抽出のたびにここへ追記する。
 # 宣言→定義の出現順を前提にする slice (index の 2 回目参照など) が
@@ -31,6 +41,8 @@ L2_MAIN = SRC / "l2_main.cpp"
 WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_l2_render_abi.hpp",
     "minihost/src/l2_main.cpp",
+    "minihost/src/l2_main_support.inc",
+    "minihost/src/l2_main_entry.inc",
     "minihost/src/worker_aegp_utility_suite.hpp",
     "minihost/src/worker_aegp_utility_suite.cpp",
     "minihost/src/worker_pf_pixel_data_suite.hpp",
@@ -77,10 +89,56 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_entry_wiring.cpp",
 )
 
+HARNESS_WINDOWS_OWNERS = (
+    "broker/crates/harness/src/windows/preflight.rs",
+    "broker/crates/harness/src/windows/render_contract.rs",
+    "broker/crates/harness/src/windows/live_session.rs",
+    "broker/crates/harness/src/windows/app.rs",
+    "broker/crates/harness/src/windows/cli.rs",
+    "broker/crates/harness/src/windows/tests.rs",
+)
+
+IMAGE_RENDER_OWNERS = (
+    "broker/crates/broker/src/image_render.rs",
+    "broker/crates/broker/src/image_render/diagnostics.rs",
+    "broker/crates/broker/src/image_render/types_and_transport.rs",
+    "broker/crates/broker/src/image_render/render_operations.rs",
+    "broker/crates/broker/src/image_render/inspection_and_probes.rs",
+    "broker/crates/broker/src/image_render/session.rs",
+    "broker/crates/broker/src/image_render/tests.rs",
+)
+
+RENDER_SESSION_OWNERS = (
+    "broker/crates/broker/src/render_session.rs",
+    "broker/crates/broker/src/render_session/audio.rs",
+    "broker/crates/broker/src/render_session/discovery.rs",
+    "broker/crates/broker/src/render_session/tests.rs",
+)
+
+
+class CombinedSource:
+    """Path-like source-contract reader spanning one split Rust module."""
+
+    def __init__(self, owners):
+        self._owners = owners
+
+    def read_text(self, encoding="utf-8"):
+        return "\n".join(
+            (ROOT / relative).read_text(encoding=encoding)
+            for relative in self._owners
+        )
+
+
+IMAGE_RENDER_SOURCE = CombinedSource(IMAGE_RENDER_OWNERS)
+RENDER_SESSION_SOURCE = CombinedSource(RENDER_SESSION_OWNERS)
+HARNESS_WINDOWS_SOURCE = CombinedSource(HARNESS_WINDOWS_OWNERS)
+
 # 契約名 → owner ファイル群 (repo ルート相対)。
 CONTRACTS = {
     "l2_family": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/l2_main_support.inc",
+        "minihost/src/l2_main_entry.inc",
         "minihost/src/worker_aegp_utility_suite.hpp",
         "minihost/src/worker_aegp_utility_suite.cpp",
         "minihost/src/worker_pf_pixel_data_suite.hpp",
@@ -409,3 +467,10 @@ def worker_files():
 def worker_text():
     return "\n".join(
         path.read_text(encoding="utf-8") for path in worker_files())
+
+
+def harness_windows_text():
+    return "".join(
+        (ROOT / relative).read_text(encoding="utf-8")
+        for relative in HARNESS_WINDOWS_OWNERS
+    )

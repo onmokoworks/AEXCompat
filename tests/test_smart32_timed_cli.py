@@ -1,3 +1,5 @@
+from tests import source_owners
+
 from pathlib import Path
 
 
@@ -6,7 +8,7 @@ HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def test_smart32_cpu_cli_accepts_explicit_frame_and_fps():
-    source = HARNESS.read_text(encoding="utf-8")
+    source = source_owners.harness_windows_text()
     assert '"--render-experimental-smart-32-cpu-time"' in source
     assert "current_time: frame" in source
     assert "total_time: frame.saturating_add(1)" in source

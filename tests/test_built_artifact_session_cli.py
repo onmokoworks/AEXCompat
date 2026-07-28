@@ -1,3 +1,5 @@
+from tests import source_owners
+
 from pathlib import Path
 
 
@@ -6,7 +8,7 @@ HARNESS_SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def test_built_artifact_probes_have_a_supported_session_only_entrypoint():
-    source = HARNESS_SOURCE.read_text(encoding="utf-8")
+    source = source_owners.harness_windows_text()
     assert 'session_command == Some("--render-experimental-session")' in source
     assert 'session_command == Some("--render-experimental-session-param")' in source
     assert '"--render-experimental-session-animation"' in source

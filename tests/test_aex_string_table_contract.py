@@ -1,10 +1,11 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PARSER = (ROOT / "minihost/src/aex_string_table_impl.cpp").read_text(encoding="utf-8")
 HEADER = (ROOT / "minihost/src/aex_string_table.hpp").read_text(encoding="utf-8")
-L2 = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+L2 = source_owners.l2_translation_unit_text()
 CMAKE = (ROOT / "minihost/CMakeLists.txt").read_text(encoding="utf-8")
 
 

@@ -1,11 +1,12 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT = (ROOT / "minihost" / "src" / "worker_report.cpp").read_text(encoding="utf-8")
 HEADER = (ROOT / "minihost" / "src" / "worker_report.hpp").read_text(encoding="utf-8")
-L2 = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
-BROKER = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
+L2 = source_owners.l2_translation_unit_text()
+BROKER = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
 SELECTOR = (ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp").read_text(
     encoding="utf-8"
 )

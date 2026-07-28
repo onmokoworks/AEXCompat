@@ -51,8 +51,8 @@ def test_worker_checks_admission_before_source_availability():
     fixture = (ROOT / "instruments" / "pf-visual-audio-probe" / "pf_visual_audio_probe.cpp").read_text(encoding="utf-8")
     assert "PF_CHECKOUT_LAYER_AUDIO" in fixture
     assert "PF_GET_AUDIO_DATA" in fixture
-    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
-    harness = (ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs").read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     assert "render_experimental_image_with_audio_sidecar" in broker
     assert "audio sidecar contains a non-finite sample" in broker
     assert "--render-experimental-image-audio-sidecar" in harness
@@ -102,7 +102,7 @@ def test_audio_checkout_windows_are_bounded_owned_and_time_scaled():
     # it). The session negotiates the rate at open and threads it through, so
     # the span call takes it as a parameter.
     assert "&captured, rate);" in worker
-    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     assert '"last_audio_window_sample_count"' in broker
     assert '"last_audio_window_silence_samples"' in broker
     assert '"last_audio_output_channels"' in broker

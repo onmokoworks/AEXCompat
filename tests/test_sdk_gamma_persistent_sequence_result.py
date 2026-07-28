@@ -41,8 +41,8 @@ def test_gamma_sequence_handle_survives_both_frames_and_is_disposed_once():
 
 def test_persistent_sequence_route_is_isolated_and_user_accessible():
     worker = source_owners.worker_text()
-    broker = BROKER.read_text(encoding="utf-8")
-    harness = HARNESS.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     for marker in (
         'case_id == "persistent_sequence"',
         "begin_frame_lifecycle",

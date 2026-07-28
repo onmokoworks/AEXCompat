@@ -26,9 +26,7 @@ def test_production_worker_reports_bounded_missing_suites():
 
 
 def test_broker_uses_structured_report_not_stderr_for_missing_suites():
-    source = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(
-        encoding="utf-8"
-    )
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     # The slice used to end at fn diagnostics_contains_gpu_stage, which existed
     # only to infer a GPU failure for the one-shot CPU retry and went with the
     # one-shot transport (#365). fn failed_module_audit_summary is the next
@@ -69,9 +67,7 @@ def test_unsupported_suite_slots_flow_from_worker_report_to_broker_diagnostics()
     smart = (ROOT / "minihost" / "src" / "worker_smart_report.cpp").read_text(
         encoding="utf-8"
     )
-    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(
-        encoding="utf-8"
-    )
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
 
     assert "unsupported_suite_slot()" in header
     assert "constexpr std::size_t kMaxUnsupportedSuiteCalls = 32" in registry

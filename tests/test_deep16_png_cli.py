@@ -1,3 +1,5 @@
+from tests import source_owners
+
 import importlib.util
 import json
 import subprocess
@@ -19,12 +21,12 @@ SPEC.loader.exec_module(PNG)
 
 
 def test_deep16_png_routes_are_explicit_opt_ins():
-    harness = HARNESS_SOURCE.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     assert '"--render-experimental-16-deep"' in harness
     assert '"--render-experimental-smart-16-deep"' in harness
     assert "render_experimental_image_at_time_with_deep16_png" in harness
 
-    broker = BROKER_SOURCE.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     # The deep route is opt-in and refuses non-Argb16 formats fail-closed.
     assert "deep_png_output: bool" in broker
     assert "16-bit deep PNG output requires the Argb16 render format" in broker

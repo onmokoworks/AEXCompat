@@ -39,8 +39,8 @@ def test_dialog_boundary_is_abi_bound_isolated_and_exposed():
     evidence = result()
     worker = source_owners.worker_text()
     mode_execution = MODE_EXECUTION.read_text(encoding="utf-8")
-    broker = BROKER.read_text(encoding="utf-8")
-    harness = HARNESS.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     assert evidence["abi"] == {
         "selector": 9,
         "i_do_dialog_flag": 32,

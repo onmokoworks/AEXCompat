@@ -1,4 +1,5 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +43,7 @@ def test_utility_table_wires_handle_callbacks_at_sdk_offsets():
 def test_native_utility_hooks_match_generated_middle_slot_order():
     # Keep this source-level guard in addition to the C++ length static_assert:
     # a same-length insertion in the middle must not silently shift later hooks.
-    l2 = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+    l2 = source_owners.l2_translation_unit_text()
     assert (
         "reinterpret_cast<void*>(&fill_world16), "
         "reinterpret_cast<void*>(&premultiply_color16),\n"

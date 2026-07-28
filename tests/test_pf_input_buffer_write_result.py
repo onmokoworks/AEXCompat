@@ -68,8 +68,8 @@ def test_input_write_boundary_is_cleanroom_abi_bound_and_exposed():
     evidence = result()
     worker = source_owners.worker_text()
     pixel_buffer = PIXEL_BUFFER.read_text(encoding="utf-8")
-    broker = BROKER.read_text(encoding="utf-8")
-    harness = HARNESS.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     fixture = FIXTURE.read_text(encoding="utf-8")
     assert evidence["abi"]["i_write_input_buffer_flag"] == 2048
     assert "PF_OutFlag_I_WRITE_INPUT_BUFFER" in fixture

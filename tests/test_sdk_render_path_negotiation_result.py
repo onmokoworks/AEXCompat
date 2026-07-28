@@ -43,7 +43,7 @@ def test_smart_positive_control_still_completes_all_depths_and_paths():
 def test_worker_and_harness_enforce_the_render_path_gate():
     minihost = source_owners.worker_text()
     report = RENDER_REPORT.read_text(encoding="utf-8")
-    harness = HARNESS.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
 
     assert "constexpr uint32_t kOutFlag2SupportsSmartRender = 1u << 10;" in minihost
     assert (

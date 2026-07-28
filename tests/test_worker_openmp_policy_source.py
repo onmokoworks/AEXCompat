@@ -1,4 +1,5 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,7 +10,7 @@ SOURCE = (ROOT / "minihost/src/worker_openmp_policy.cpp").read_text(
     encoding="utf-8"
 )
 L1 = (ROOT / "minihost/src/main.cpp").read_text(encoding="utf-8")
-L2 = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+L2 = source_owners.l2_translation_unit_text()
 CMAKE = (ROOT / "minihost/CMakeLists.txt").read_text(encoding="utf-8")
 SELFTEST = (ROOT / "tests/native/worker_openmp_policy_selftest.cpp").read_text(
     encoding="utf-8"

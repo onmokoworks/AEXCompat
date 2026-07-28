@@ -1,3 +1,5 @@
+from tests import source_owners
+
 from pathlib import Path
 
 
@@ -6,7 +8,7 @@ HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def test_harness_exposes_machine_readable_agent_cli_contract():
-    source = HARNESS.read_text(encoding="utf-8")
+    source = source_owners.harness_windows_text()
 
     assert 'const CLI_CONTRACT_SCHEMA: &str = "aexcompat.harness-cli-contract";' in source
     assert 'args[1] == "--print-cli-contract"' in source
@@ -40,7 +42,7 @@ def test_harness_exposes_machine_readable_agent_cli_contract():
 
 
 def test_contract_payload_literal_is_json_serializable():
-    source = HARNESS.read_text(encoding="utf-8")
+    source = source_owners.harness_windows_text()
     assert "fn cli_contract() -> serde_json::Value" in source
     assert '"aexcompat.harness-cli-contract"' in source
     # The contract is emitted with serde_json rather than a hand-built JSON

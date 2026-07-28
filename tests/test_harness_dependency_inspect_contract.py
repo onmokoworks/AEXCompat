@@ -1,3 +1,5 @@
+from tests import source_owners
+
 from pathlib import Path
 
 
@@ -6,7 +8,7 @@ HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def test_harness_exposes_approved_dependency_inspect_cli():
-    source = HARNESS.read_text(encoding="utf-8")
+    source = source_owners.harness_windows_text()
     command = 'args[1] == "--inspect-experimental-with-deps"'
 
     assert command in source
@@ -23,7 +25,7 @@ def test_harness_exposes_approved_dependency_inspect_cli():
 
 
 def test_dependency_inspect_cli_requires_explicit_roots_and_keeps_default_route():
-    source = HARNESS.read_text(encoding="utf-8")
+    source = source_owners.harness_windows_text()
     dependency_route = source.index(
         'args[1] == "--inspect-experimental-with-deps"'
     )

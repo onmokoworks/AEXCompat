@@ -33,7 +33,7 @@ def test_world_dump_and_checksum_detail_are_opt_in_and_fail_closed():
     for extension in ('"rgba32f-le"', '"rgba16le"', '"rgba8"'):
         assert extension in worker
 
-    broker = BROKER_SOURCE.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     assert '"AEXCOMPAT_DUMP_WORLDS_DIR"' in broker
     assert '"AEXCOMPAT_CHECKSUM_DETAIL"' in broker
     assert "world dump directory must stay under the repository target tree" in broker

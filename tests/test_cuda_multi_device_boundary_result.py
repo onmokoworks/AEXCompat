@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +42,6 @@ def test_cuda_device_enumeration_is_bounded_and_worlds_keep_their_ordinal():
     ):
         assert marker in source
 
-    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     assert '"cuda_device_count"' in broker
     assert '"cuda_device_index"' in broker

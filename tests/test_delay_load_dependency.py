@@ -1,3 +1,4 @@
+from tests import source_owners
 from pathlib import Path
 
 
@@ -41,7 +42,7 @@ def test_generic_delay_load_fixture_covers_a_transitive_dependency():
 
 
 def test_auto_render_approves_adjacent_delay_load_dependencies_before_dispatch():
-    harness = (ROOT / "broker/crates/harness/src/windows.rs").read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     assert "fn approved_adjacent_dependencies(" in harness
     assert "discover_adjacent_imports(&aex_path)?" in harness
     assert "inspect_experimental_with_approved_dependencies_and_diagnostics" in harness

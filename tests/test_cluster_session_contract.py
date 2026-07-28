@@ -26,7 +26,7 @@ MINIHOST = ROOT / "minihost" / "src"
 
 MANIFEST = (BROKER / "cluster_manifest.rs").read_text(encoding="utf-8")
 DISPATCH = (BROKER / "secure_image_dispatch.rs").read_text(encoding="utf-8")
-SESSION = (BROKER / "render_session.rs").read_text(encoding="utf-8")
+SESSION = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
 AUDIT = (BROKER / "worker_module_audit.rs").read_text(encoding="utf-8")
 
 WORKER = source_owners.worker_text()
@@ -43,7 +43,7 @@ WORKER_MODULE_AUDIT = (MINIHOST / "runtime_module_audit.cpp").read_text(
     encoding="utf-8"
 )
 CLI_DISPATCH = (MINIHOST / "l2_cli_dispatch.cpp").read_text(encoding="utf-8")
-L2_MAIN = (MINIHOST / "l2_main.cpp").read_text(encoding="utf-8")
+L2_MAIN = source_owners.l2_translation_unit_text()
 CMAKE = (MINIHOST.parent / "CMakeLists.txt").read_text(encoding="utf-8")
 
 BRIDGE = (

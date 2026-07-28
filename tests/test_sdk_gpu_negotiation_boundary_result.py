@@ -62,7 +62,7 @@ def test_gpu_abi_and_suite_table_are_explicit():
 
 def test_gpu_cleanup_error_is_a_hard_failure_and_forwarded():
     source = SOURCE.read_text(encoding="utf-8") + SMART_FINALIZE.read_text(encoding="utf-8")
-    broker = BROKER.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     assert "invoke_entry_seh" in source
     assert "smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0" in source
     assert "result.render_error == 0 && !result.output_pixels_valid" in source

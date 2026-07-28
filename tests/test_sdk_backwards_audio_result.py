@@ -49,8 +49,8 @@ def test_audio_selector_and_checkout_lifetimes_are_balanced():
 def test_audio_abi_is_instrumented_and_runtime_boundaries_are_explicit():
     probe = PROBE.read_text(encoding="utf-8")
     worker = "\n".join(path.read_text(encoding="utf-8") for path in WORKER_SOURCES)
-    broker = BROKER.read_text(encoding="utf-8")
-    harness = HARNESS.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
 
     for marker in (
         "PF_SoundFormatInfo",
@@ -92,7 +92,7 @@ def test_audio_only_effect_is_never_dispatched_through_an_image_selector():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     gate = result["image_media_negotiation"]
     worker = "\n".join(path.read_text(encoding="utf-8") for path in WORKER_SOURCES)
-    harness = HARNESS.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
 
     assert gate["advertisement_flag"] == "PF_OutFlag_AUDIO_EFFECT_ONLY"
     assert gate["advertisement_bit"] == 31

@@ -1,6 +1,7 @@
 import json
 import unittest
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +17,7 @@ class ClassicRenderContractTests(unittest.TestCase):
 
     def test_registered_image_render_uses_the_v2_allowlist_and_load_tree(self):
         render = (ROOT / "broker" / "crates" / "broker" / "src" / "render.rs").read_text(encoding="utf-8")
-        image = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
+        image = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
         self.assertNotIn("ApprovedArtifact, load", render)
         self.assertNotIn("pub(crate) fn entry", render)
         self.assertIn("pub(crate) fn secure_entry", render)
