@@ -347,6 +347,11 @@ impl ClassicHost {
             abi::UTILS_ITERATE_ORIGIN_OFFSET,
             engine.iterate8_origin_callback_address(),
         );
+        write_u64(
+            &mut utility_bytes,
+            abi::UTILS_ITERATE16_OFFSET,
+            engine.iterate16_callback_address(),
+        );
         for (offset, callback) in [
             (
                 abi::UTILS_ANSI_CEIL_OFFSET,
@@ -2437,5 +2442,11 @@ mod tests {
             cleanup_error_code(Err(ClassicError::Input("fixture failure".into()))),
             CLEANUP_GUEST_ERROR
         );
+    }
+
+    #[test]
+    fn public_iterate16_callback_uses_the_observed_utility_slot() {
+        assert_eq!(abi::UTILS_ITERATE16_OFFSET, 0x1f8);
+        assert_eq!(abi::UTILS_ITERATE16_SIZE, std::mem::size_of::<u64>());
     }
 }

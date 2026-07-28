@@ -90,6 +90,8 @@ const HOST_ZERO_PIXEL: u64 = STUB_BASE + 0x803f0;
 const HOST_SUBPIXEL_SAMPLE8: u64 = STUB_BASE + 0x80400;
 const HOST_AREA_SAMPLE8: u64 = STUB_BASE + 0x80410;
 const HOST_TRANSFER_RECT8: u64 = STUB_BASE + 0x80420;
+const HOST_ITERATE16: u64 = STUB_BASE + 0x80430;
+const HOST_ITERATE16_CONTINUE: u64 = STUB_BASE + 0x80440;
 const MAX_SMART_CHECKOUT_IDS: usize = 64;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
@@ -119,6 +121,7 @@ const CRT_HEAP_END: u64 = CRT_HEAP_BASE + MAX_CRT_HEAP_BYTES;
 const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_WORLD_COUNT: usize = 256;
 const MAX_WORLD_DIMENSION: i32 = 32_768;
+const MAX_ITERATE_PIXELS: i64 = 16_777_216;
 // A nonzero Unicorn instruction limit enables instruction counting across the
 // whole run, which is prohibitively expensive for image kernels. The wall-clock
 // timeout and return-sentinel check still bound and validate guest execution.
@@ -2287,7 +2290,7 @@ struct GuestState {
     trace: Option<TraceCapture>,
     trace_labels: HashMap<u64, TraceLabel>,
     trace_watches: Vec<TraceWatchSpec>,
-    pending_iterate8: Option<PendingIterate8>,
+    pending_iterate: Option<PendingIterate>,
     vcomp_dynamic_loop: Option<VcompDynamicLoop>,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
@@ -2308,7 +2311,7 @@ struct VcompDynamicLoop {
 }
 
 #[derive(Clone, Debug)]
-struct PendingIterate8 {
+struct PendingIterate {
     caller_rsp: u64,
     return_address: u64,
     refcon: u64,
@@ -2327,6 +2330,9 @@ struct PendingIterate8 {
     y: i32,
     origin_x: i32,
     origin_y: i32,
+    pixel_bytes: u64,
+    continuation: u64,
+    callback_name: &'static str,
 }
 
 #[derive(Clone, Debug)]
@@ -3190,6 +3196,8 @@ impl GuestEngine<'static> {
             ("write SubpixelSample8 callback", HOST_SUBPIXEL_SAMPLE8),
             ("write AreaSample8 callback", HOST_AREA_SAMPLE8),
             ("write TransferRect8 callback", HOST_TRANSFER_RECT8),
+            ("write Iterate16 callback", HOST_ITERATE16),
+            ("write Iterate16 continuation", HOST_ITERATE16_CONTINUE),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -3324,7 +3332,19 @@ impl GuestEngine<'static> {
             unicorn.add_code_hook(
                 HOST_ITERATE8_CONTINUE,
                 HOST_ITERATE8_CONTINUE,
-                continue_iterate8,
+                continue_iterate,
+            ),
+        )?;
+        uc(
+            "install Iterate16 callback",
+            unicorn.add_code_hook(HOST_ITERATE16, HOST_ITERATE16, emulate_iterate16),
+        )?;
+        uc(
+            "install Iterate16 continuation",
+            unicorn.add_code_hook(
+                HOST_ITERATE16_CONTINUE,
+                HOST_ITERATE16_CONTINUE,
+                continue_iterate,
             ),
         )?;
         uc(
@@ -3605,6 +3625,8 @@ impl GuestEngine<'static> {
             (HOST_FILL8, "fill8"),
             (HOST_NEW_WORLD8, "new_world8"),
             (HOST_GET_CALLBACK_ADDR, "get_callback_addr"),
+            (HOST_ITERATE16, "iterate16"),
+            (HOST_ITERATE16_CONTINUE, "iterate16_continue"),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -4470,6 +4492,10 @@ impl GuestEngine<'static> {
 
     pub fn iterate8_origin_callback_address(&self) -> u64 {
         HOST_ITERATE8_ORIGIN
+    }
+
+    pub fn iterate16_callback_address(&self) -> u64 {
+        HOST_ITERATE16
     }
 
     pub fn fill8_callback_address(&self) -> u64 {
@@ -6303,13 +6329,13 @@ fn read_guest_i32(
     Ok(i32::from_le_bytes(bytes))
 }
 
-fn schedule_iterate8_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), String> {
+fn schedule_iterate_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), String> {
     let pending = unicorn
         .get_data()
-        .pending_iterate8
+        .pending_iterate
         .as_ref()
         .cloned()
-        .ok_or_else(|| "Iterate8 continuation has no pending call".to_string())?;
+        .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?;
     let input = if pending.zero_outside_source
         && (pending.source_data == 0
             || pending.x < 0
@@ -6321,21 +6347,28 @@ fn schedule_iterate8_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), 
     } else if pending.source_data == 0 {
         0
     } else {
-        pending.source_data + pending.y as u64 * pending.source_rowbytes + pending.x as u64 * 4
+        pending.source_data
+            + pending.y as u64 * pending.source_rowbytes
+            + pending.x as u64 * pending.pixel_bytes
     };
     let output = pending.destination_data
         + pending.y as u64 * pending.destination_rowbytes
-        + pending.x as u64 * 4;
+        + pending.x as u64 * pending.pixel_bytes;
     let callback_rsp = pending
         .caller_rsp
         .checked_sub(0x30)
-        .ok_or_else(|| "Iterate8 callback stack underflow".to_string())?;
+        .ok_or_else(|| format!("{} callback stack underflow", pending.callback_name))?;
     unicorn
-        .mem_write(callback_rsp, &HOST_ITERATE8_CONTINUE.to_le_bytes())
-        .map_err(|error| format!("Iterate8 callback return address: {error}"))?;
+        .mem_write(callback_rsp, &pending.continuation.to_le_bytes())
+        .map_err(|error| format!("{} callback return address: {error}", pending.callback_name))?;
     unicorn
         .mem_write(callback_rsp + 0x28, &output.to_le_bytes())
-        .map_err(|error| format!("Iterate8 callback output argument: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "{} callback output argument: {error}",
+                pending.callback_name
+            )
+        })?;
     for (register, value) in [
         (RegisterX86::RSP, callback_rsp),
         (RegisterX86::RCX, pending.refcon),
@@ -6352,17 +6385,17 @@ fn schedule_iterate8_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), 
     ] {
         unicorn
             .reg_write(register, value)
-            .map_err(|error| format!("Iterate8 callback register: {error}"))?;
+            .map_err(|error| format!("{} callback register: {error}", pending.callback_name))?;
     }
     Ok(())
 }
 
-fn finish_iterate8(unicorn: &mut Unicorn<'_, GuestState>, result: u64) -> Result<(), String> {
+fn finish_iterate(unicorn: &mut Unicorn<'_, GuestState>, result: u64) -> Result<(), String> {
     let pending = unicorn
         .get_data_mut()
-        .pending_iterate8
+        .pending_iterate
         .take()
-        .ok_or_else(|| "Iterate8 completion has no pending call".to_string())?;
+        .ok_or_else(|| "PF iterate completion has no pending call".to_string())?;
     for (register, value) in [
         (RegisterX86::RSP, pending.caller_rsp + 8),
         (RegisterX86::RIP, pending.return_address),
@@ -6370,38 +6403,52 @@ fn finish_iterate8(unicorn: &mut Unicorn<'_, GuestState>, result: u64) -> Result
     ] {
         unicorn
             .reg_write(register, value)
-            .map_err(|error| format!("Iterate8 completion register: {error}"))?;
+            .map_err(|error| format!("{} completion register: {error}", pending.callback_name))?;
     }
     Ok(())
 }
 
 fn emulate_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
-    emulate_iterate8_common(unicorn, false);
+    emulate_iterate_common(unicorn, false, 4, HOST_ITERATE8_CONTINUE, "Iterate8");
 }
 
 fn emulate_iterate8_origin(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
-    emulate_iterate8_common(unicorn, true);
+    emulate_iterate_common(unicorn, true, 4, HOST_ITERATE8_CONTINUE, "Iterate8 origin");
 }
 
-fn emulate_iterate8_common(unicorn: &mut Unicorn<'_, GuestState>, has_origin: bool) {
+fn emulate_iterate16(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    emulate_iterate_common(unicorn, false, 8, HOST_ITERATE16_CONTINUE, "Iterate16");
+}
+
+fn emulate_iterate_common(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    has_origin: bool,
+    pixel_bytes: i32,
+    continuation: u64,
+    callback_name: &'static str,
+) {
     let result = (|| {
-        if unicorn.get_data().pending_iterate8.is_some() {
-            return Err("nested PF Iterate8 calls are unsupported".to_string());
+        if unicorn.get_data().pending_iterate.is_some() {
+            return Err("nested PF iterate calls are unsupported".to_string());
         }
         let caller_rsp = unicorn
             .reg_read(RegisterX86::RSP)
-            .map_err(|error| format!("Iterate8 stack: {error}"))?;
-        let return_address = read_guest_u64(unicorn, caller_rsp, "Iterate8 return address")?;
+            .map_err(|error| format!("{callback_name} stack: {error}"))?;
+        let return_address = read_guest_u64(
+            unicorn,
+            caller_rsp,
+            &format!("{callback_name} return address"),
+        )?;
         let source_world = unicorn
             .reg_read(RegisterX86::R9)
-            .map_err(|error| format!("Iterate8 source world: {error}"))?;
-        let area = read_guest_u64(unicorn, caller_rsp + 0x28, "Iterate8 area")?;
+            .map_err(|error| format!("{callback_name} source world: {error}"))?;
+        let area = read_guest_u64(unicorn, caller_rsp + 0x28, &format!("{callback_name} area"))?;
         let (origin_x, origin_y, stack_shift) = if has_origin {
             let origin = read_guest_u64(unicorn, caller_rsp + 0x30, "Iterate8 origin")?;
             if origin == 0 {
                 unicorn
                     .reg_write(RegisterX86::RAX, 4)
-                    .map_err(|error| format!("Iterate8 invalid-origin return: {error}"))?;
+                    .map_err(|error| format!("{callback_name} invalid-origin return: {error}"))?;
                 return Ok(());
             }
             (
@@ -6426,7 +6473,7 @@ fn emulate_iterate8_common(unicorn: &mut Unicorn<'_, GuestState>, has_origin: bo
         if pixel_function == 0 || destination_world == 0 {
             unicorn
                 .reg_write(RegisterX86::RAX, 4)
-                .map_err(|error| format!("Iterate8 invalid-call return: {error}"))?;
+                .map_err(|error| format!("{callback_name} invalid-call return: {error}"))?;
             return Ok(());
         }
         let destination_data = read_guest_u64(
@@ -6484,15 +6531,15 @@ fn emulate_iterate8_common(unicorn: &mut Unicorn<'_, GuestState>, has_origin: bo
         };
         if destination_data == 0
             || source_world != 0 && source_data == 0
-            || source_world != 0 && source_rowbytes < source_width.saturating_mul(4)
-            || destination_rowbytes < destination_width.saturating_mul(4)
+            || source_world != 0 && source_rowbytes < source_width.saturating_mul(pixel_bytes)
+            || destination_rowbytes < destination_width.saturating_mul(pixel_bytes)
             || source_world != 0 && (source_width <= 0 || source_height <= 0)
             || width <= 0
             || height <= 0
         {
             unicorn
                 .reg_write(RegisterX86::RAX, 4)
-                .map_err(|error| format!("Iterate8 invalid-world return: {error}"))?;
+                .map_err(|error| format!("{callback_name} invalid-world return: {error}"))?;
             return Ok(());
         }
         let mut bounds = [0, 0, width, height];
@@ -6508,10 +6555,17 @@ fn emulate_iterate8_common(unicorn: &mut Unicorn<'_, GuestState>, has_origin: bo
         if bounds[0] >= bounds[2] || bounds[1] >= bounds[3] {
             unicorn
                 .reg_write(RegisterX86::RAX, 4)
-                .map_err(|error| format!("Iterate8 empty-area return: {error}"))?;
+                .map_err(|error| format!("{callback_name} empty-area return: {error}"))?;
             return Ok(());
         }
-        unicorn.get_data_mut().pending_iterate8 = Some(PendingIterate8 {
+        let iterations = i64::from(bounds[2] - bounds[0]) * i64::from(bounds[3] - bounds[1]);
+        if iterations <= 0 || iterations > MAX_ITERATE_PIXELS {
+            unicorn
+                .reg_write(RegisterX86::RAX, 4)
+                .map_err(|error| format!("{callback_name} iteration-budget return: {error}"))?;
+            return Ok(());
+        }
+        unicorn.get_data_mut().pending_iterate = Some(PendingIterate {
             caller_rsp,
             return_address,
             refcon,
@@ -6530,8 +6584,11 @@ fn emulate_iterate8_common(unicorn: &mut Unicorn<'_, GuestState>, has_origin: bo
             y: bounds[1],
             origin_x,
             origin_y,
+            pixel_bytes: pixel_bytes as u64,
+            continuation,
+            callback_name,
         });
-        schedule_iterate8_pixel(unicorn)
+        schedule_iterate_pixel(unicorn)
     })();
     if let Err(error) = result {
         unicorn.get_data_mut().callback_error = Some(error);
@@ -6539,28 +6596,28 @@ fn emulate_iterate8_common(unicorn: &mut Unicorn<'_, GuestState>, has_origin: bo
     }
 }
 
-fn continue_iterate8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+fn continue_iterate(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let result = (|| {
         let callback_error = unicorn
             .reg_read(RegisterX86::RAX)
-            .map_err(|error| format!("Iterate8 callback return: {error}"))?;
+            .map_err(|error| format!("PF iterate callback return: {error}"))?;
         if callback_error as u32 != 0 {
-            return finish_iterate8(unicorn, callback_error as u32 as u64);
+            return finish_iterate(unicorn, callback_error as u32 as u64);
         }
         let pending = unicorn
             .get_data_mut()
-            .pending_iterate8
+            .pending_iterate
             .as_mut()
-            .ok_or_else(|| "Iterate8 continuation has no pending call".to_string())?;
+            .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?;
         pending.x += 1;
         if pending.x >= pending.right {
             pending.x = pending.left;
             pending.y += 1;
         }
         if pending.y >= pending.bottom {
-            finish_iterate8(unicorn, 0)
+            finish_iterate(unicorn, 0)
         } else {
-            schedule_iterate8_pixel(unicorn)
+            schedule_iterate_pixel(unicorn)
         }
     })();
     if let Err(error) = result {
@@ -8268,6 +8325,8 @@ mod tests {
             HOST_PRE_CHECKOUT_LAYER,
             HOST_CHECKOUT_LAYER_PIXELS,
             HOST_CHECKIN_LAYER_PIXELS,
+            HOST_ITERATE16,
+            HOST_ITERATE16_CONTINUE,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -8365,7 +8424,17 @@ mod tests {
             .add_code_hook(
                 HOST_ITERATE8_CONTINUE,
                 HOST_ITERATE8_CONTINUE,
-                continue_iterate8,
+                continue_iterate,
+            )
+            .unwrap();
+        unicorn
+            .add_code_hook(HOST_ITERATE16, HOST_ITERATE16, emulate_iterate16)
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_ITERATE16_CONTINUE,
+                HOST_ITERATE16_CONTINUE,
+                continue_iterate,
             )
             .unwrap();
         unicorn
@@ -9973,6 +10042,157 @@ mod tests {
         let mut output = [0xffu8; 4];
         engine.read(destination_pixels, &mut output).unwrap();
         assert_eq!(output, [0; 4]);
+    }
+
+    #[test]
+    fn iterate16_calls_guest_pixel_callback_for_each_argb16_pixel() {
+        const CODE: u64 = 0x1000_0000;
+        // mov rax,[rsp+0x28]; mov rdx,[r9]; mov [rax],rdx; xor eax,eax; ret
+        let mut engine = test_engine(&[
+            0x48, 0x8b, 0x44, 0x24, 0x28, 0x49, 0x8b, 0x11, 0x48, 0x89, 0x10, 0x31, 0xc0, 0xc3,
+        ]);
+        let source_pixels = engine.allocate(16, 8).unwrap();
+        let destination_pixels = engine.allocate(16, 8).unwrap();
+        let source_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let pixels = [
+            0x7fff_u16, 0x1111, 0x2222, 0x3333, 0x1234, 0x4567, 0x5abc, 0x6def,
+        ]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+        engine.write(source_pixels, &pixels).unwrap();
+        for (world, data) in [
+            (source_world, source_pixels),
+            (destination_world, destination_pixels),
+        ] {
+            let mut bytes = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+            bytes[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                .copy_from_slice(&data.to_le_bytes());
+            bytes[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                .copy_from_slice(&16i32.to_le_bytes());
+            bytes[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+                .copy_from_slice(&2i32.to_le_bytes());
+            bytes[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+                .copy_from_slice(&1i32.to_le_bytes());
+            engine.write(world, &bytes).unwrap();
+        }
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_ITERATE16,
+                    &[0, 0, 1, source_world, 0, 0, CODE, destination_world],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        let mut output = [0u8; 16];
+        engine.read(destination_pixels, &mut output).unwrap();
+        assert_eq!(output.as_slice(), pixels);
+    }
+
+    #[test]
+    fn iterate16_preserves_null_source_pixel_for_generators() {
+        const CODE: u64 = 0x1000_0000;
+        // mov rax,[rsp+0x28]; xor edx,edx; test r9,r9; setne dl;
+        // mov [rax],rdx; xor eax,eax; ret
+        let mut engine = test_engine(&[
+            0x48, 0x8b, 0x44, 0x24, 0x28, 0x31, 0xd2, 0x4d, 0x85, 0xc9, 0x0f, 0x95, 0xc2, 0x48,
+            0x89, 0x10, 0x31, 0xc0, 0xc3,
+        ]);
+        let destination_pixels = engine.allocate(8, 8).unwrap();
+        engine.write(destination_pixels, &[0xff; 8]).unwrap();
+        let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let mut world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        world[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&destination_pixels.to_le_bytes());
+        world[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&8i32.to_le_bytes());
+        world[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&1i32.to_le_bytes());
+        world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&1i32.to_le_bytes());
+        engine.write(destination_world, &world).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_ITERATE16,
+                    &[0, 0, 1, 0, 0, 0, CODE, destination_world],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        let mut output = [0xffu8; 8];
+        engine.read(destination_pixels, &mut output).unwrap();
+        assert_eq!(output, [0; 8]);
+    }
+
+    #[test]
+    fn iterate16_fails_closed_for_short_rows_and_oversized_walks() {
+        const CODE: u64 = 0x1000_0000;
+        // mov eax,17; ret
+        let mut engine = test_engine(&[0xb8, 17, 0, 0, 0, 0xc3]);
+        let destination_pixels = engine.allocate(8, 8).unwrap();
+        let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let mut world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        world[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&destination_pixels.to_le_bytes());
+        world[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&4i32.to_le_bytes());
+        world[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&1i32.to_le_bytes());
+        world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&1i32.to_le_bytes());
+        engine.write(destination_world, &world).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_ITERATE16,
+                    &[0, 0, 1, 0, 0, 0, CODE, destination_world],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            4
+        );
+
+        world[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&(4097i32 * 8).to_le_bytes());
+        world[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&4097i32.to_le_bytes());
+        world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&4097i32.to_le_bytes());
+        engine.write(destination_world, &world).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_ITERATE16,
+                    &[0, 0, 1, 0, 0, 0, CODE, destination_world],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            4
+        );
+        assert!(engine.unicorn.get_data().pending_iterate.is_none());
+
+        world[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&8i32.to_le_bytes());
+        world[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&1i32.to_le_bytes());
+        world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&1i32.to_le_bytes());
+        engine.write(destination_world, &world).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_ITERATE16,
+                    &[0, 0, 1, 0, 0, 0, CODE, destination_world],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            17
+        );
     }
 
     #[test]

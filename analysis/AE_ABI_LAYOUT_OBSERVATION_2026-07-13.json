@@ -158,6 +158,7 @@
     "utils.transform_world":{"offset":152,"size":8},
     "utils.fill16":{"offset":488,"size":8},
     "utils.premultiply_color16":{"offset":496,"size":8},
+    "utils.iterate16":{"offset":504,"size":8},
     "utils.get_platform_data":{"offset":432,"size":8},
     "utils.get_pixel_data8":{"offset":528,"size":8},
     "utils.get_pixel_data16":{"offset":536,"size":8},
