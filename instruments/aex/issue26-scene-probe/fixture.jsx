@@ -3,6 +3,59 @@
         return $.getenv(name);
     }
 
+    function jsonString(value) {
+        return "\"" + String(value)
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, "\\\"")
+            .replace(/\r/g, "\\r")
+            .replace(/\n/g, "\\n")
+            .replace(/\t/g, "\\t") + "\"";
+    }
+
+    function describeError(error) {
+        var description = error && error.message
+            ? error.message
+            : String(error);
+        if (error && error.line) {
+            description += " (line " + error.line + ")";
+        }
+        return description;
+    }
+
+    function writeUtf8File(path, contents) {
+        var output = new File(path);
+        var opened = false;
+        var failure = null;
+        try {
+            output.encoding = "UTF-8";
+            opened = output.open("w");
+            if (!opened) {
+                throw new Error("Unable to open output file: " + path);
+            }
+            if (!output.write(contents)) {
+                throw new Error("Unable to write output file: " + path);
+            }
+        } catch (error) {
+            failure = error;
+        } finally {
+            if (opened) {
+                try {
+                    if (!output.close() && !failure) {
+                        failure = new Error(
+                            "Unable to close output file: " + path);
+                    }
+                } catch (closeError) {
+                    if (!failure) {
+                        failure = closeError;
+                    }
+                }
+            }
+        }
+        if (failure) {
+            throw failure;
+        }
+    }
+
     app.beginUndoGroup("Issue26 Scene Probe Fixture");
     if (app.project) {
         app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);
@@ -30,11 +83,10 @@
     var position = solid.property("ADBE Transform Group").property("ADBE Position");
     position.setInterpolationTypeAtKey(
         1, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER);
+    // Spatial streams expose one temporal speed/ease value even when their
+    // coordinate value has multiple dimensions.
     position.setTemporalEaseAtKey(
-        1, [new KeyframeEase(0, 33), new KeyframeEase(0, 33),
-            new KeyframeEase(0, 33)],
-        [new KeyframeEase(0, 33), new KeyframeEase(0, 33),
-            new KeyframeEase(0, 33)]);
+        1, [new KeyframeEase(0, 33)], [new KeyframeEase(0, 33)]);
 
     var parent = comp.layers.addNull(10.0);
     parent.name = "Issue26 Parent";
@@ -71,30 +123,55 @@
     solid.selected = true;
     app.endUndoGroup();
 
+    var projectPath = env("ISSUE26_SCENE_FIXTURE_PROJECT");
+    if (!projectPath) {
+        throw new Error("ISSUE26_SCENE_FIXTURE_PROJECT is required");
+    }
+    if (!app.project.save(new File(projectPath))) {
+        throw new Error("Unable to save fixture project: " + projectPath);
+    }
+
     var metadataPath = env("ISSUE26_SCENE_FIXTURE_METADATA");
     if (metadataPath) {
-        var file = new File(metadataPath);
-        file.encoding = "UTF-8";
-        if (file.open("w")) {
-            file.write(JSON.stringify({
-                schema_version: 1,
-                fixture: "issue26-scene-probe",
-                project_count: 1,
-                folder_count: 1,
-                footage_count: 2,
-                comp_count: 2,
-                layer_count: 4,
-                effect_count: 2,
-                mask_count: 1,
-                position_keyframes: 2,
-                mask_keyframes: 2,
-                camera_zoom_keyframes: 2
-            }));
-            file.close();
+        var metadataContents = [
+            "{",
+            "\"schema_version\":1,",
+            "\"fixture\":\"issue26-scene-probe\",",
+            "\"project_count\":1,",
+            "\"folder_count\":1,",
+            "\"footage_count\":2,",
+            "\"comp_count\":2,",
+            "\"layer_count\":4,",
+            "\"effect_count\":2,",
+            "\"mask_count\":1,",
+            "\"position_keyframes\":2,",
+            "\"mask_keyframes\":2,",
+            "\"camera_zoom_keyframes\":2",
+            "}"
+        ].join("");
+        var diagnosticPath = metadataPath + ".error.json";
+        try {
+            writeUtf8File(metadataPath, metadataContents);
+        } catch (metadataError) {
+            var metadataErrorText = describeError(metadataError);
+            $.writeln(
+                "ISSUE26_FIXTURE_METADATA_ERROR " + metadataErrorText);
+            try {
+                writeUtf8File(diagnosticPath, [
+                    "{",
+                    "\"schema_version\":1,",
+                    "\"fixture\":\"issue26-scene-probe\",",
+                    "\"status\":\"metadata_write_failed\",",
+                    "\"error\":", jsonString(metadataErrorText),
+                    "}"
+                ].join(""));
+            } catch (diagnosticError) {
+                $.writeln(
+                    "ISSUE26_FIXTURE_DIAGNOSTIC_ERROR " +
+                    describeError(diagnosticError));
+            }
+            throw metadataError;
         }
     }
 
-    app.scheduleTask(
-        "app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES); app.quit();",
-        12000, false);
 }());

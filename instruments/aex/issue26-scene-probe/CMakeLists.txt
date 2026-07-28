@@ -28,4 +28,5 @@ set_target_properties(issue26_scene_probe PROPERTIES
 )
 if(MSVC)
   target_compile_options(issue26_scene_probe PRIVATE /W4 /wd4103)
+  target_link_options(issue26_scene_probe PRIVATE /SUBSYSTEM:WINDOWS)
 endif()

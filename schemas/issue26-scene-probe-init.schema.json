@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.dev/schemas/issue26-scene-probe-init.schema.json",
+  "title": "Issue 26 public AEGP scene probe init artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "probe",
+    "run_id",
+    "stage",
+    "error",
+    "command_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "probe": {
+      "const": "issue26-public-aegp-scene"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "stage": {
+      "enum": [
+        "entry",
+        "acquire_command",
+        "acquire_registration",
+        "unique_command",
+        "command_enabled",
+        "registered",
+        "command_entered",
+        "idle_entered",
+        "idle_waiting_for_comp",
+        "report_written",
+        "report_write_failed",
+        "shutdown_scheduled",
+        "shutdown_schedule_failed"
+      ]
+    },
+    "error": {
+      "type": "integer"
+    },
+    "command_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    }
+  }
+}

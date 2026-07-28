@@ -12,8 +12,8 @@ BEGIN
   "MIB8",
   "eman",
   0, 0x0,
-  24, 0x0,
-  "\x13Issue26 Scene Probe\0\0\0\0",
+  20, 0x0,
+  "\x13Issue26 Scene Probe",
 
   "MIB8",
   "gtac",

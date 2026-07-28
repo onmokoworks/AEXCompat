@@ -2,7 +2,7 @@
   "schema_version": 1,
   "evidence_kind": "issue26-public-aegp-scene",
   "target": "sdk_projector_aexcompat",
-  "recorded_utc": "2026-07-26T23:16:40.189169Z",
+  "recorded_utc": "2026-07-28T05:00:51.487871Z",
   "status": "passed",
   "execution": {
     "command": [
@@ -40,13 +40,13 @@
   "artifacts": {
     "probe": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\target\\issue26-scene-probe-build\\Release\\issue26_scene_probe.aex",
-      "sha256": "b94075793457843b654891eccdc1f4d03830f6fbde72c10339872b3b57672e45",
-      "size_bytes": 56832
+      "sha256": "bf9ac2e1291a2d7e3f6efea7a50793d5b42d39c81990afad7a2f4292901d6178",
+      "size_bytes": 59904
     },
     "fixture": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\instruments\\aex\\issue26-scene-probe\\fixture.jsx",
-      "sha256": "6bc8c7cea2c0950cc916f8f68d6dc4dd0261477d39430d709be0b41f7b64286b",
-      "size_bytes": 3784
+      "sha256": "0055f2c4f4e7e90f6c259740134dd61206558a264b38369f5b4a11058c5fd581",
+      "size_bytes": 6378
     },
     "worker": {
       "path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat-issue26-scene-model\\build\\issue26-scene-model\\Release\\aex_l2_worker.exe",

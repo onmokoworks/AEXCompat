@@ -26,6 +26,9 @@ SPBasicSuite* g_basic = nullptr;
 AEGP_PluginID g_plugin_id = 0;
 AEGP_Command g_command = 0;
 bool g_written = false;
+bool g_idle_seen = false;
+bool g_waiting_for_comp_written = false;
+bool g_shutdown_scheduled = false;
 A_long g_driver_major = 0;
 A_long g_driver_minor = 0;
 
@@ -197,6 +200,15 @@ std::wstring evidence_path() {
   return std::wstring(path.data(), count);
 }
 
+std::string probe_run_id() {
+  std::array<char, 64> value{};
+  const DWORD count = GetEnvironmentVariableA(
+      "ISSUE26_SCENE_PROBE_RUN_ID", value.data(),
+      static_cast<DWORD>(value.size()));
+  if (!count || count >= value.size()) return {};
+  return std::string(value.data(), count);
+}
+
 std::string serialize(const Report& report) {
   const bool identity_coverage =
       has_kind(report, "project") && has_kind(report, "folder") &&
@@ -345,6 +357,50 @@ bool write_atomic(const std::wstring& path, const std::string& payload) {
     return false;
   }
   return true;
+}
+
+void write_init_trace(const char* stage, A_Err error) {
+  const std::wstring path = evidence_path();
+  if (path.empty()) return;
+  std::ostringstream output;
+  output << "{\"schema_version\":1"
+         << ",\"probe\":\"issue26-public-aegp-scene\""
+         << ",\"run_id\":\"" << escape_json(probe_run_id()) << "\""
+         << ",\"stage\":\"" << escape_json(stage) << "\""
+         << ",\"error\":" << error
+         << ",\"command_id\":" << g_command << "}\n";
+  write_atomic(path + L".init.json", output.str());
+}
+
+bool schedule_shutdown() {
+  const void* raw = nullptr;
+  A_Err error =
+      g_basic && g_basic->AcquireSuite
+          ? g_basic->AcquireSuite(
+                kAEGPUtilitySuite, kAEGPUtilitySuiteVersion6, &raw)
+          : A_Err_GENERIC;
+  const auto* utility =
+      static_cast<const AEGP_UtilitySuite6*>(raw);
+  A_Boolean scripting_available = FALSE;
+  if (!error && utility)
+    error = utility->AEGP_IsScriptingAvailable(&scripting_available);
+  if (!error && !scripting_available) error = A_Err_GENERIC;
+  if (!error) {
+    error = utility->AEGP_ExecuteScript(
+        g_plugin_id,
+        "app.scheduleTask("
+        "\"app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES); app.quit();\","
+        "1000, false);",
+        FALSE, nullptr, nullptr);
+  }
+  if (raw && g_basic && g_basic->ReleaseSuite) {
+    const A_Err release_error = g_basic->ReleaseSuite(
+        kAEGPUtilitySuite, kAEGPUtilitySuiteVersion6);
+    if (!error) error = release_error;
+  }
+  write_init_trace(
+      error ? "shutdown_schedule_failed" : "shutdown_scheduled", error);
+  return error == A_Err_NONE;
 }
 
 void inspect_keyframes(Report& report, AEGP_StreamSuite6* streams,
@@ -753,6 +809,9 @@ Report observe(A_long driver_major, A_long driver_minor) {
   streams.acquire(kAEGPStreamSuite, kAEGPStreamSuiteVersion6, report);
   keyframes.acquire(kAEGPKeyframeSuite, kAEGPKeyframeSuiteVersion5, report);
 
+  AEGP_ItemH fallback_comp_item = nullptr;
+  A_long fallback_comp_item_id = -1;
+  A_long fallback_comp_project_index = -1;
   if (projects.suite) {
     A_long project_count = 0;
     const A_Err count_error =
@@ -782,8 +841,13 @@ Report observe(A_long driver_major, A_long driver_minor) {
           const char* kind = type == AEGP_ItemType_FOLDER ? "folder"
               : type == AEGP_ItemType_COMP ? "comp"
               : type == AEGP_ItemType_FOOTAGE ? "footage" : "item";
-          add_identity(report, kind, token_for(item), item_id, project_index,
-                       ordinal, type);
+           add_identity(report, kind, token_for(item), item_id, project_index,
+                        ordinal, type);
+          if (!fallback_comp_item && type == AEGP_ItemType_COMP) {
+            fallback_comp_item = item;
+            fallback_comp_item_id = item_id;
+            fallback_comp_project_index = project_index;
+          }
         }
         AEGP_ItemH next = nullptr;
         item_error =
@@ -799,17 +863,30 @@ Report observe(A_long driver_major, A_long driver_minor) {
   AEGP_ItemH active_item = nullptr;
   AEGP_ItemType active_type = AEGP_ItemType_NONE;
   A_long active_item_id = -1;
-  if (items.suite->AEGP_GetActiveItem(&active_item) || !active_item ||
-      items.suite->AEGP_GetItemType(active_item, &active_type) ||
-      active_type != AEGP_ItemType_COMP ||
-      items.suite->AEGP_GetItemID(active_item, &active_item_id)) {
+  A_long active_project_index = -1;
+  const A_Err active_error =
+      items.suite->AEGP_GetActiveItem(&active_item);
+  const bool active_is_comp =
+      !active_error && active_item &&
+      !items.suite->AEGP_GetItemType(active_item, &active_type) &&
+      active_type == AEGP_ItemType_COMP &&
+      !items.suite->AEGP_GetItemID(active_item, &active_item_id);
+  if (!active_is_comp) {
+    active_item = fallback_comp_item;
+    active_type = static_cast<AEGP_ItemType>(
+        fallback_comp_item ? AEGP_ItemType_COMP : AEGP_ItemType_NONE);
+    active_item_id = fallback_comp_item_id;
+    active_project_index = fallback_comp_project_index;
+  }
+  if (!active_item || active_type != AEGP_ItemType_COMP ||
+      active_item_id < 0) {
     release_suites();
     return report;
   }
   report.active_comp = true;
   if (!has_kind(report, "comp"))
-    add_identity(report, "comp", token_for(active_item), active_item_id, -1,
-                 0, active_type);
+    add_identity(report, "comp", token_for(active_item), active_item_id,
+                 active_project_index, 0, active_type);
   if (!comps.suite || !layers.suite) {
     release_suites();
     return report;
@@ -990,20 +1067,40 @@ Report observe(A_long driver_major, A_long driver_minor) {
 }
 
 A_Err write_observation(A_long driver_major, A_long driver_minor) {
-  if (g_written) return A_Err_NONE;
+  if (g_written) {
+    if (!g_shutdown_scheduled)
+      g_shutdown_scheduled = schedule_shutdown();
+    return A_Err_NONE;
+  }
   const std::wstring path = evidence_path();
   if (path.empty()) return A_Err_NONE;
   Report report = observe(driver_major, driver_minor);
   // After Effects can invoke idle hooks before the JSX fixture has opened its
   // authored comp. Keep polling without publishing a premature blocker record.
-  if (!report.active_comp) return A_Err_NONE;
+  if (!report.active_comp) {
+    if (!g_waiting_for_comp_written) {
+      write_init_trace("idle_waiting_for_comp", A_Err_NONE);
+      g_waiting_for_comp_written = true;
+    }
+    return A_Err_NONE;
+  }
   const bool written = write_atomic(path, serialize(report));
-  if (written) g_written = true;
+  write_init_trace(
+      written ? "report_written" : "report_write_failed",
+      written ? A_Err_NONE : A_Err_GENERIC);
+  if (written) {
+    g_written = true;
+    g_shutdown_scheduled = schedule_shutdown();
+  }
   return written ? A_Err_NONE : A_Err_GENERIC;
 }
 
 A_Err IdleHook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long* max_sleep) {
   if (max_sleep) *max_sleep = 0;
+  if (!g_idle_seen) {
+    write_init_trace("idle_entered", A_Err_NONE);
+    g_idle_seen = true;
+  }
   return write_observation(g_driver_major, g_driver_minor);
 }
 
@@ -1013,10 +1110,15 @@ A_Err UpdateMenuHook(AEGP_GlobalRefcon, AEGP_UpdateMenuRefcon,
 }
 
 A_Err CommandHook(AEGP_GlobalRefcon, AEGP_CommandRefcon,
-                  AEGP_Command command, AEGP_HookPriority,
-                  A_Boolean, A_Boolean* handled) {
-  if (handled) *handled = command == g_command ? TRUE : FALSE;
-  return A_Err_NONE;
+                   AEGP_Command command, AEGP_HookPriority,
+                   A_Boolean, A_Boolean* handled) {
+  if (command != g_command) {
+    if (handled) *handled = FALSE;
+    return A_Err_NONE;
+  }
+  if (handled) *handled = TRUE;
+  write_init_trace("command_entered", A_Err_NONE);
+  return write_observation(g_driver_major, g_driver_minor);
 }
 
 A_Err DeathHook(AEGP_GlobalRefcon, AEGP_DeathRefcon) {
@@ -1030,6 +1132,7 @@ extern "C" DllExport AEGP_PluginInitFuncPrototype EntryPointFunc;
 A_Err EntryPointFunc(SPBasicSuite* pica_basic, A_long major_version,
                      A_long minor_version, AEGP_PluginID plugin_id,
                      AEGP_GlobalRefcon* global_refcon) {
+  write_init_trace("entry", A_Err_NONE);
   if (!pica_basic || !global_refcon) return A_Err_GENERIC;
   g_basic = pica_basic;
   g_plugin_id = plugin_id;
@@ -1042,16 +1145,22 @@ A_Err EntryPointFunc(SPBasicSuite* pica_basic, A_long major_version,
   A_Err error = pica_basic->AcquireSuite(
       kAEGPCommandSuite, kAEGPCommandSuiteVersion1,
       reinterpret_cast<const void**>(&commands));
+  write_init_trace("acquire_command", error);
   if (!error)
     error = pica_basic->AcquireSuite(
         kAEGPRegisterSuite, kAEGPRegisterSuiteVersion5,
         reinterpret_cast<const void**>(&registration));
+  write_init_trace("acquire_registration", error);
   if (!error && (!commands || !registration)) error = A_Err_GENERIC;
   if (!error) error = commands->AEGP_GetUniqueCommand(&g_command);
+  write_init_trace("unique_command", error);
   if (!error)
     error = commands->AEGP_InsertMenuCommand(
         g_command, "Issue26 Scene Probe", AEGP_Menu_EDIT,
         AEGP_MENU_INSERT_AT_BOTTOM);
+  if (!error)
+    error = commands->AEGP_EnableCommand(g_command);
+  write_init_trace("command_enabled", error);
   if (!error)
     error = registration->AEGP_RegisterCommandHook(
         plugin_id, AEGP_HP_BeforeAE, AEGP_Command_ALL, CommandHook, nullptr);
@@ -1064,6 +1173,7 @@ A_Err EntryPointFunc(SPBasicSuite* pica_basic, A_long major_version,
   if (!error)
     error = registration->AEGP_RegisterDeathHook(
         plugin_id, DeathHook, nullptr);
+  write_init_trace("registered", error);
 
   if (registration)
     pica_basic->ReleaseSuite(
