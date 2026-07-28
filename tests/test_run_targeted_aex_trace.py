@@ -3,6 +3,8 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -76,17 +78,21 @@ def test_success_report_is_portable_sha_pinned_and_deterministic(
     worker, plugin, input_png, manifest = _fixture(tmp_path)
     output = tmp_path / "report.json"
 
-    def fake_run(command, **kwargs):
+    def fake_run(command, timeout_seconds):
         Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(command[4], "PNG")
         worker_report = {
             "execution_traces": [{"selector": "RENDER", "note": str(plugin)}],
             "classification": "ok",
         }
-        return subprocess.CompletedProcess(
-            command, 0, json.dumps(worker_report).encode(), b""
+        return (
+            subprocess.CompletedProcess(
+                command, 0, json.dumps(worker_report).encode(), b""
+            ),
+            False,
+            None,
         )
 
-    monkeypatch.setattr(RUNNER.subprocess, "run", fake_run)
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", fake_run)
     args = argparse.Namespace(
         manifest=manifest,
         worker=worker,
@@ -120,24 +126,28 @@ def test_failure_extracts_structured_crash_and_redacts_paths(tmp_path, monkeypat
         "module": str(plugin),
     }
 
-    def fake_run(command, **kwargs):
+    def fake_run(command, timeout_seconds):
         stderr = (
             f"aex_guest_error: guest execution failed at {plugin}; "
             f"crash_snapshot={json.dumps(snapshot)}\n"
         ).encode()
-        return subprocess.CompletedProcess(
-            command,
-            1,
-            json.dumps(
-                {
-                    "setup": {"execution_backend": "unicorn-x86_64"},
-                    "output_png": str(tmp_path / "must-not-leak.png"),
-                }
-            ).encode(),
-            stderr,
+        return (
+            subprocess.CompletedProcess(
+                command,
+                1,
+                json.dumps(
+                    {
+                        "setup": {"execution_backend": "unicorn-x86_64"},
+                        "output_png": str(tmp_path / "must-not-leak.png"),
+                    }
+                ).encode(),
+                stderr,
+            ),
+            False,
+            None,
         )
 
-    monkeypatch.setattr(RUNNER.subprocess, "run", fake_run)
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", fake_run)
     report = RUNNER.run(
         argparse.Namespace(
             manifest=manifest,
@@ -167,13 +177,95 @@ def test_strict_json_rejects_duplicate_keys():
         RUNNER.strict_json_bytes(b'{"a":1,"a":2}', "test")
 
 
+@pytest.mark.parametrize("stream_name", ["stdout", "stderr"])
+def test_bounded_capture_stops_oversized_stream(stream_name, monkeypatch):
+    monkeypatch.setattr(RUNNER, "MAX_CAPTURE_BYTES", 1024)
+    monkeypatch.setattr(RUNNER, "MAX_COMBINED_CAPTURE_BYTES", 1024)
+    code = (
+        "import os\n"
+        f"fd = {1 if stream_name == 'stdout' else 2}\n"
+        "while True:\n"
+        " os.write(fd, b'x' * 4096)\n"
+    )
+    completed, timed_out, reason = RUNNER._run_bounded_process(
+        [sys.executable, "-c", code], 5
+    )
+    assert not timed_out
+    assert reason == "capture_limit"
+    assert len(completed.stdout) <= 1024
+    assert len(completed.stderr) <= 1024
+    assert len(completed.stdout) + len(completed.stderr) <= 1024
+
+
+def test_bounded_capture_enforces_combined_limit(monkeypatch):
+    monkeypatch.setattr(RUNNER, "MAX_CAPTURE_BYTES", 1024)
+    monkeypatch.setattr(RUNNER, "MAX_COMBINED_CAPTURE_BYTES", 1200)
+    code = (
+        "import os\n"
+        "os.write(1, b'o' * 700)\n"
+        "os.write(2, b'e' * 700)\n"
+    )
+    completed, timed_out, reason = RUNNER._run_bounded_process(
+        [sys.executable, "-c", code], 5
+    )
+    assert not timed_out
+    assert reason == "capture_limit"
+    assert len(completed.stdout) <= 1024
+    assert len(completed.stderr) <= 1024
+    assert len(completed.stdout) + len(completed.stderr) == 1200
+
+
+def test_bounded_capture_timeout_cleans_up_descendant(tmp_path):
+    marker = tmp_path / "descendant-survived"
+    child_code = (
+        "import pathlib,time\n"
+        "time.sleep(1)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('alive')\n"
+    )
+    parent_code = (
+        "import subprocess,sys,time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        "time.sleep(30)\n"
+    )
+    completed, timed_out, reason = RUNNER._run_bounded_process(
+        [sys.executable, "-c", parent_code], 0.1
+    )
+    assert timed_out
+    assert reason == "timeout"
+    assert completed.returncode is not None
+    time.sleep(1.1)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_bounded_capture_preserves_normal_success_and_failure(exit_code):
+    code = (
+        "import sys\n"
+        "sys.stdout.buffer.write(b'{\"execution_traces\":[{}]}')\n"
+        "sys.stderr.buffer.write(b'bounded diagnostic')\n"
+        f"raise SystemExit({exit_code})\n"
+    )
+    completed, timed_out, reason = RUNNER._run_bounded_process(
+        [sys.executable, "-c", code], 5
+    )
+    assert completed.returncode == exit_code
+    assert completed.stdout == b'{"execution_traces":[{}]}'
+    assert completed.stderr == b"bounded diagnostic"
+    assert not timed_out
+    assert reason is None
+
+
 def test_success_requires_a_trace_payload(tmp_path, monkeypatch):
     worker, _, _, manifest = _fixture(tmp_path)
     monkeypatch.setattr(
-        RUNNER.subprocess,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 0, b'{"classification":"ok"}', b""
+        RUNNER,
+        "_run_bounded_process",
+        lambda command, timeout_seconds: (
+            subprocess.CompletedProcess(
+                command, 0, b'{"classification":"ok"}', b""
+            ),
+            False,
+            None,
         ),
     )
     with pytest.raises(RUNNER.TraceRunnerError, match="no execution_traces"):
@@ -195,20 +287,24 @@ def test_success_requires_a_valid_regular_output_png(
 ):
     worker, _, _, manifest = _fixture(tmp_path)
 
-    def fake_run(command, **kwargs):
+    def fake_run(command, timeout_seconds):
         output = Path(command[4])
         if artifact == "invalid":
             output.write_bytes(b"not a png")
         elif artifact == "directory":
             output.mkdir()
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            b'{"execution_traces":[{"selector":"RENDER"}]}',
-            b"",
+        return (
+            subprocess.CompletedProcess(
+                command,
+                0,
+                b'{"execution_traces":[{"selector":"RENDER"}]}',
+                b"",
+            ),
+            False,
+            None,
         )
 
-    monkeypatch.setattr(RUNNER.subprocess, "run", fake_run)
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", fake_run)
     with pytest.raises(
         RUNNER.TraceRunnerError,
         match="missing or unreadable|bounded regular PNG|valid readable PNG",

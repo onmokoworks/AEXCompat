@@ -13,10 +13,13 @@ import io
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +29,7 @@ from PIL import Image, UnidentifiedImageError
 SCHEMA_VERSION = 1
 MAX_CASES = 8
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
+MAX_COMBINED_CAPTURE_BYTES = 8 * 1024 * 1024
 MAX_ERROR_BYTES = 4096
 MAX_OUTPUT_PNG_BYTES = 64 * 1024 * 1024
 CASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -35,6 +39,178 @@ PIXEL_FORMATS = {"argb8", "argb16", "argb32f"}
 
 class TraceRunnerError(RuntimeError):
     pass
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Best-effort termination of the worker and descendants it spawned."""
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except OSError:
+            if process.poll() is None:
+                process.terminate()
+        try:
+            process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        # The leader may have exited while a descendant ignored SIGTERM.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            if process.poll() is None:
+                process.kill()
+        if process.poll() is None:
+            process.wait()
+        return
+    elif os.name == "nt":
+        if process.poll() is not None:
+            return
+        # CREATE_NEW_PROCESS_GROUP makes CTRL_BREAK address the group.  taskkill
+        # is the reliable fallback for descendants which do not handle it.
+        try:
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        except (OSError, ValueError):
+            pass
+    else:
+        if process.poll() is not None:
+            return
+        process.terminate()
+    try:
+        process.wait(timeout=0.5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except OSError:
+            process.kill()
+    elif os.name == "nt":
+        try:
+            subprocess.Popen(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+    else:
+        process.kill()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def _run_bounded_process(
+    command: list[str], timeout_seconds: float
+) -> tuple[subprocess.CompletedProcess[bytes], bool, str | None]:
+    """Drain both pipes concurrently while retaining at most the declared bounds."""
+    popen_options: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    }
+    if os.name == "posix":
+        popen_options["start_new_session"] = True
+    elif os.name == "nt":
+        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(command, **popen_options)
+    assert process.stdout is not None and process.stderr is not None
+
+    captures = {"stdout": bytearray(), "stderr": bytearray()}
+    total = 0
+    lock = threading.Lock()
+    overflow = threading.Event()
+    stream_errors: list[BaseException] = []
+
+    def drain(name: str, stream: Any) -> None:
+        nonlocal total
+        try:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    return
+                with lock:
+                    per_stream_remaining = MAX_CAPTURE_BYTES - len(captures[name])
+                    combined_remaining = MAX_COMBINED_CAPTURE_BYTES - total
+                    accepted = min(len(chunk), per_stream_remaining, combined_remaining)
+                    if accepted > 0:
+                        captures[name].extend(chunk[:accepted])
+                        total += accepted
+                    if accepted != len(chunk):
+                        overflow.set()
+                        return
+        except (OSError, ValueError) as error:
+            # Closing pipes during forced cleanup is expected.
+            if process.poll() is None:
+                stream_errors.append(error)
+
+    threads = [
+        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+
+    deadline = time.monotonic() + timeout_seconds
+    timed_out = False
+    while process.poll() is None:
+        if overflow.is_set():
+            _terminate_process_group(process)
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            _terminate_process_group(process)
+            break
+        try:
+            process.wait(timeout=min(remaining, 0.05))
+        except subprocess.TimeoutExpired:
+            pass
+
+    for stream in (process.stdout, process.stderr):
+        if overflow.is_set() or timed_out:
+            try:
+                stream.close()
+            except OSError:
+                pass
+    for thread in threads:
+        thread.join(timeout=2)
+    if any(thread.is_alive() for thread in threads):
+        # A descendant may have inherited a pipe after the direct worker exited.
+        _terminate_process_group(process)
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+        for thread in threads:
+            thread.join(timeout=2)
+        if any(thread.is_alive() for thread in threads):
+            raise TraceRunnerError("worker capture threads did not stop")
+    if stream_errors:
+        raise TraceRunnerError(f"worker pipe capture failed: {stream_errors[0]}")
+    completed = subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        bytes(captures["stdout"]),
+        bytes(captures["stderr"]),
+    )
+    reason = (
+        "timeout"
+        if timed_out
+        else ("capture_limit" if overflow.is_set() else None)
+    )
+    return completed, timed_out, reason
 
 
 def _object_without_duplicate_keys(
@@ -283,16 +459,15 @@ def run_case(
         os.fspath(run_root): "<run-root>",
         os.fspath(Path.home()): "<home>",
     }
-    try:
-        completed = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
+    completed, timed_out, stop_reason = _run_bounded_process(
+        command, timeout_seconds
+    )
+    if timed_out:
         return {"kind": "timeout"}
+    if stop_reason == "capture_limit":
+        raise TraceRunnerError(
+            f"worker output for {case['id']} exceeds bounded capture limit"
+        )
     if completed.returncode != 0:
         return _parse_failure(completed, replacements)
     report = strict_json_bytes(completed.stdout, f"worker output for {case['id']}")
