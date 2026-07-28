@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a SHA-addressed Windows inventory subset through both macOS x64 guests."""
+"""Run a SHA-addressed Windows inventory subset through selected macOS x64 guests."""
 
 from __future__ import annotations
 
@@ -784,6 +784,60 @@ def validate_source_pair(
         raise SweepError("Windows summary does not bind the supplied inventory")
 
 
+def requested_backends(args: argparse.Namespace) -> list[str]:
+    return args.backend or ["native", "unicorn"]
+
+
+def resolve_workers(
+    args: argparse.Namespace,
+) -> dict[str, tuple[Path, str, dict[str, str]]]:
+    selected = requested_backends(args)
+    worker_arguments = {
+        "native": args.native_worker,
+        "unicorn": args.unicorn_worker,
+    }
+    missing = [name for name in selected if worker_arguments[name] is None]
+    if missing:
+        raise SweepError(
+            "worker path is required for selected backend(s): "
+            + ", ".join(missing)
+        )
+    definitions = {
+        "native": (
+            "native-x86_64-carrier",
+            (
+                {"AEXCOMPAT_NATIVE_RUN_DLLMAIN": "1"}
+                if args.native_run_dllmain
+                else {}
+            ),
+        ),
+        "unicorn": ("unicorn-x86_64", {}),
+    }
+    workers = {}
+    for name in selected:
+        worker_argument = worker_arguments[name]
+        assert worker_argument is not None
+        worker = worker_argument.resolve(strict=True)
+        if not worker.is_file():
+            raise SweepError(f"{name} worker is not a file: {worker}")
+        expected_backend, extra_environment = definitions[name]
+        workers[name] = (worker, expected_backend, extra_environment)
+    return workers
+
+
+def source_worker_identity(
+    workers: dict[str, tuple[Path, str, dict[str, str]]],
+    native_run_dllmain: bool,
+) -> dict[str, object]:
+    identity: dict[str, object] = {}
+    if "native" in workers:
+        identity["native_worker_sha256"] = sha256_file(workers["native"][0])
+        identity["native_run_dllmain"] = native_run_dllmain
+    if "unicorn" in workers:
+        identity["unicorn_worker_sha256"] = sha256_file(workers["unicorn"][0])
+    return identity
+
+
 def run_sweep(args: argparse.Namespace) -> dict[str, object]:
     inventory_path = args.inventory.resolve(strict=True)
     summary_path = args.windows_summary.resolve(strict=True)
@@ -800,27 +854,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
     input_png = args.input_png.resolve(strict=True)
     mapped = map_corpus(inventory, corpus_roots)
     width, height, argb8 = png_to_argb8(input_png)
-    available_workers = {
-        "native": (
-            args.native_worker.resolve(strict=True),
-            "native-x86_64-carrier",
-            (
-                {"AEXCOMPAT_NATIVE_RUN_DLLMAIN": "1"}
-                if args.native_run_dllmain
-                else {}
-            ),
-        ),
-        "unicorn": (
-            args.unicorn_worker.resolve(strict=True),
-            "unicorn-x86_64",
-            {},
-        ),
-    }
-    requested_backends = args.backend or ["native", "unicorn"]
-    workers = {name: available_workers[name] for name in requested_backends}
-    for name, (worker, _, _) in workers.items():
-        if not worker.is_file():
-            raise SweepError(f"{name} worker is not a file: {worker}")
+    workers = resolve_workers(args)
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     run_root = output.parent / f"{output.stem}-runs"
@@ -837,7 +871,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
         },
         **{
             os.fspath(worker): f"<{name}-worker>"
-            for name, (worker, _, _) in available_workers.items()
+            for name, (worker, _, _) in workers.items()
         },
     }
     entries = []
@@ -903,10 +937,8 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
             "mapped_entries": len(mapped),
             "input_png_sha256": sha256_file(input_png),
             "input_dimensions": [width, height],
-            "native_worker_sha256": sha256_file(available_workers["native"][0]),
-            "unicorn_worker_sha256": sha256_file(available_workers["unicorn"][0]),
-            "native_run_dllmain": args.native_run_dllmain,
-        },
+        }
+        | source_worker_identity(workers, args.native_run_dllmain),
         "summary": {
             "entry_count": len(entries),
             "backend_attempts": len(entries) * len(workers),
@@ -921,14 +953,14 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
     return report
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--windows-summary", type=Path, required=True)
     parser.add_argument("--corpus-root", type=Path, action="append", required=True)
     parser.add_argument("--input-png", type=Path, required=True)
-    parser.add_argument("--native-worker", type=Path, required=True)
-    parser.add_argument("--unicorn-worker", type=Path, required=True)
+    parser.add_argument("--native-worker", type=Path)
+    parser.add_argument("--unicorn-worker", type=Path)
     parser.add_argument(
         "--backend",
         action="append",
@@ -943,7 +975,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="explicitly opt the isolated native carrier into DLL_PROCESS_ATTACH",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    selected = requested_backends(args)
+    for backend in selected:
+        if getattr(args, f"{backend}_worker") is None:
+            parser.error(f"--{backend}-worker is required for {backend} backend")
+    return args
 
 
 def main() -> int:

@@ -2,6 +2,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -341,6 +342,75 @@ def test_report_json_has_no_duplicate_keys(tmp_path):
     report.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
 
     assert SWEEP.load_json_strict(report)["schema_version"] == 1
+
+
+def _required_cli_args(tmp_path):
+    return [
+        "--inventory",
+        str(tmp_path / "inventory.json"),
+        "--windows-summary",
+        str(tmp_path / "summary.json"),
+        "--corpus-root",
+        str(tmp_path / "corpus"),
+        "--input-png",
+        str(tmp_path / "input.png"),
+        "--output",
+        str(tmp_path / "report.json"),
+        "--expected-inventory-sha256",
+        "0" * 64,
+        "--expected-summary-sha256",
+        "1" * 64,
+    ]
+
+
+def test_unicorn_only_cli_does_not_require_native_worker(tmp_path):
+    unicorn = tmp_path / "unicorn-worker"
+
+    args = SWEEP.parse_args(
+        _required_cli_args(tmp_path)
+        + ["--backend", "unicorn", "--unicorn-worker", str(unicorn)]
+    )
+
+    assert args.backend == ["unicorn"]
+    assert args.unicorn_worker == unicorn
+    assert args.native_worker is None
+
+
+def test_default_both_mode_rejects_missing_native_worker(tmp_path, capsys):
+    with pytest.raises(SystemExit) as captured:
+        SWEEP.parse_args(
+            _required_cli_args(tmp_path)
+            + ["--unicorn-worker", str(tmp_path / "unicorn-worker")]
+        )
+
+    assert captured.value.code == 2
+    assert "--native-worker is required for native backend" in capsys.readouterr().err
+
+
+def test_unicorn_only_resolves_and_hashes_only_selected_worker(tmp_path, monkeypatch):
+    unicorn = tmp_path / "unicorn-worker"
+    unicorn.write_bytes(b"unicorn")
+    missing_native = tmp_path / "missing-native-worker"
+    args = Namespace(
+        backend=["unicorn"],
+        native_worker=missing_native,
+        unicorn_worker=unicorn,
+        native_run_dllmain=False,
+    )
+    hashed = []
+    original_sha256_file = SWEEP.sha256_file
+
+    def record_sha256(path):
+        hashed.append(path)
+        return original_sha256_file(path)
+
+    workers = SWEEP.resolve_workers(args)
+    monkeypatch.setattr(SWEEP, "sha256_file", record_sha256)
+    identity = SWEEP.source_worker_identity(workers, args.native_run_dllmain)
+
+    assert set(workers) == {"unicorn"}
+    assert identity == {"unicorn_worker_sha256": original_sha256_file(unicorn)}
+    assert hashed == [unicorn.resolve()]
 
 
 def test_spawn_worker_uses_an_isolated_process_group(tmp_path):
