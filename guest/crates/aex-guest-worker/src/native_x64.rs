@@ -696,6 +696,12 @@ impl GuestEngine<'static> {
     pub fn ansi_strcpy_callback_address(&self) -> u64 {
         callback_address!(native_strcpy)
     }
+    pub fn ansi_sprintf_callback_address(&self) -> u64 {
+        callback_address!(native_ansi_sprintf)
+    }
+    pub fn blend_callback_address(&self) -> u64 {
+        callback_address!(blend_world)
+    }
     pub fn copy_callback_address(&self) -> u64 {
         callback_address!(copy_world)
     }
@@ -1095,6 +1101,64 @@ unsafe extern "win64" fn native_strcpy(
     0
 }
 
+unsafe extern "win64" fn native_ansi_sprintf(
+    destination: u64,
+    format: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    with_state(|state| {
+        if destination == 0 || format == 0 {
+            return u32::MAX as u64;
+        }
+        let mut output = Vec::new();
+        let mut cursor = 0u64;
+        while cursor < 256 {
+            let Some(address) = format.checked_add(cursor) else {
+                return u32::MAX as u64;
+            };
+            if !native_guest_range_valid(state, address, 1) {
+                return u32::MAX as u64;
+            }
+            let byte = unsafe { *(address as *const u8) };
+            if byte == 0 {
+                if !native_guest_range_valid(state, destination, output.len() as u64 + 1) {
+                    return u32::MAX as u64;
+                }
+                unsafe {
+                    ptr::copy_nonoverlapping(output.as_ptr(), destination as *mut u8, output.len());
+                    *((destination + output.len() as u64) as *mut u8) = 0;
+                }
+                return output.len() as u64;
+            }
+            if byte == b'%' {
+                let next = cursor + 1;
+                let Some(next_address) = format.checked_add(next) else {
+                    return u32::MAX as u64;
+                };
+                if next >= 256 || !native_guest_range_valid(state, next_address, 1) {
+                    return u32::MAX as u64;
+                }
+                if unsafe { *(next_address as *const u8) } != b'%' {
+                    // Rust cannot safely consume an arbitrary Win64 C vararg
+                    // list. Keep conversion formats fail-closed; literal
+                    // diagnostics and escaped percent signs remain supported.
+                    return u32::MAX as u64;
+                }
+                output.push(b'%');
+                cursor += 2;
+                continue;
+            }
+            output.push(byte);
+            cursor += 1;
+        }
+        u32::MAX as u64
+    })
+    .unwrap_or(u32::MAX as u64)
+}
+
 unsafe extern "win64" fn native_expf(value: f32) -> f32 {
     value.exp()
 }
@@ -1167,6 +1231,216 @@ unsafe extern "win64" fn copy_world(
         }
     }
     0
+}
+
+#[derive(Clone, Copy)]
+struct NativeBlendWorld {
+    data: u64,
+    rowbytes: usize,
+    width: i32,
+    height: i32,
+    pixel_format: i32,
+    pixel_bytes: usize,
+}
+
+fn native_world_pixel_format(state: &NativeState, world: u64) -> Option<i32> {
+    state
+        .worlds
+        .get(&world)
+        .map(|record| record.pixel_format)
+        .or_else(|| {
+            (world != 0 && (world == state.smart_input_world || world == state.smart_output_world))
+                .then_some(state.smart_pixel_format)
+        })
+        .or_else(|| {
+            if !native_world_descriptor_valid(state, world) {
+                return None;
+            }
+            let width = unsafe {
+                ptr::read_unaligned((world + abi::LAYER_WIDTH_OFFSET as u64) as *const i32)
+            };
+            let rowbytes = unsafe {
+                ptr::read_unaligned((world + abi::LAYER_ROWBYTES_OFFSET as u64) as *const i32)
+            };
+            if width <= 0 || rowbytes <= 0 || rowbytes % width != 0 {
+                return None;
+            }
+            match rowbytes / width {
+                4 => Some(crate::pixel::PF_PIXEL_FORMAT_ARGB32),
+                8 => Some(crate::pixel::PF_PIXEL_FORMAT_ARGB64),
+                16 => Some(crate::pixel::PF_PIXEL_FORMAT_ARGB128),
+                _ => None,
+            }
+        })
+}
+
+fn native_blend_world(state: &NativeState, world: u64) -> Option<NativeBlendWorld> {
+    if !native_world_descriptor_valid(state, world) {
+        return None;
+    }
+    let data =
+        unsafe { ptr::read_unaligned((world + abi::LAYER_DATA_OFFSET as u64) as *const u64) };
+    let rowbytes = usize::try_from(unsafe {
+        ptr::read_unaligned((world + abi::LAYER_ROWBYTES_OFFSET as u64) as *const i32)
+    })
+    .ok()?;
+    let width =
+        unsafe { ptr::read_unaligned((world + abi::LAYER_WIDTH_OFFSET as u64) as *const i32) };
+    let height =
+        unsafe { ptr::read_unaligned((world + abi::LAYER_HEIGHT_OFFSET as u64) as *const i32) };
+    if data == 0 || width <= 0 || height <= 0 || width > 4096 || height > 4096 {
+        return None;
+    }
+    let pixel_format = native_world_pixel_format(state, world)?;
+    let pixel_bytes = usize::try_from(native_world_pixel_bytes(pixel_format)?).ok()?;
+    if rowbytes < usize::try_from(width).ok()?.checked_mul(pixel_bytes)? {
+        return None;
+    }
+    let byte_count = rowbytes.checked_mul(usize::try_from(height).ok()?)?;
+    if !native_guest_range_valid(state, data, byte_count as u64) {
+        return None;
+    }
+    Some(NativeBlendWorld {
+        data,
+        rowbytes,
+        width,
+        height,
+        pixel_format,
+        pixel_bytes,
+    })
+}
+
+unsafe extern "win64" fn blend_world(
+    _: u64,
+    source_world1: u64,
+    source_world2: u64,
+    ratio: i32,
+    destination_world: u64,
+    _: u64,
+) -> u64 {
+    if !(0..=65_536).contains(&ratio) {
+        return 4;
+    }
+    with_state(|state| {
+        let Some(first) = native_blend_world(state, source_world1) else {
+            return 4;
+        };
+        let Some(second) = native_blend_world(state, source_world2) else {
+            return 4;
+        };
+        let Some(destination) = native_blend_world(state, destination_world) else {
+            return 4;
+        };
+        if first.pixel_format != second.pixel_format
+            || first.pixel_format != destination.pixel_format
+            || first.width != second.width
+            || first.width != destination.width
+            || first.height != second.height
+            || first.height != destination.height
+        {
+            return 4;
+        }
+        let Some(packed_row) = usize::try_from(first.width)
+            .ok()
+            .and_then(|width| width.checked_mul(first.pixel_bytes))
+        else {
+            return 4;
+        };
+        let Some(packed_size) = usize::try_from(first.height)
+            .ok()
+            .and_then(|height| packed_row.checked_mul(height))
+        else {
+            return 4;
+        };
+        let mut first_copy = Vec::new();
+        let mut second_copy = Vec::new();
+        if first_copy.try_reserve_exact(packed_size).is_err()
+            || second_copy.try_reserve_exact(packed_size).is_err()
+        {
+            return 4;
+        }
+        first_copy.resize(packed_size, 0);
+        second_copy.resize(packed_size, 0);
+        for row in 0..first.height as usize {
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    (first.data as *const u8).add(row * first.rowbytes),
+                    first_copy.as_mut_ptr().add(row * packed_row),
+                    packed_row,
+                );
+                ptr::copy_nonoverlapping(
+                    (second.data as *const u8).add(row * second.rowbytes),
+                    second_copy.as_mut_ptr().add(row * packed_row),
+                    packed_row,
+                );
+            }
+        }
+        let inverse = 65_536 - ratio;
+        let fraction = f64::from(ratio) / 65_536.0;
+        for row in 0..first.height as usize {
+            for column in 0..first.width as usize {
+                let packed_offset = row * packed_row + column * first.pixel_bytes;
+                let destination_offset = row * destination.rowbytes + column * first.pixel_bytes;
+                let first_pixel = &first_copy[packed_offset..packed_offset + first.pixel_bytes];
+                let second_pixel = &second_copy[packed_offset..packed_offset + first.pixel_bytes];
+                let output = (destination.data as usize + destination_offset) as *mut u8;
+                match first.pixel_format {
+                    crate::pixel::PF_PIXEL_FORMAT_ARGB32 => {
+                        for channel in 0..4 {
+                            let value = (i32::from(first_pixel[channel]) * inverse
+                                + i32::from(second_pixel[channel]) * ratio
+                                + 32_768)
+                                >> 16;
+                            unsafe { *output.add(channel) = value.clamp(0, 255) as u8 };
+                        }
+                    }
+                    crate::pixel::PF_PIXEL_FORMAT_ARGB64 => {
+                        for channel in 0..4 {
+                            let offset = channel * 2;
+                            let first_value = u16::from_le_bytes(
+                                first_pixel[offset..offset + 2].try_into().unwrap(),
+                            );
+                            let second_value = u16::from_le_bytes(
+                                second_pixel[offset..offset + 2].try_into().unwrap(),
+                            );
+                            let value = (i64::from(first_value) * i64::from(inverse)
+                                + i64::from(second_value) * i64::from(ratio)
+                                + 32_768)
+                                >> 16;
+                            unsafe {
+                                ptr::write_unaligned(
+                                    output.add(offset) as *mut u16,
+                                    value.clamp(0, 32_768) as u16,
+                                )
+                            };
+                        }
+                    }
+                    crate::pixel::PF_PIXEL_FORMAT_ARGB128 => {
+                        for channel in 0..4 {
+                            let offset = channel * 4;
+                            let first_value = f32::from_le_bytes(
+                                first_pixel[offset..offset + 4].try_into().unwrap(),
+                            );
+                            let second_value = f32::from_le_bytes(
+                                second_pixel[offset..offset + 4].try_into().unwrap(),
+                            );
+                            unsafe {
+                                ptr::write_unaligned(
+                                    output.add(offset) as *mut f32,
+                                    (f64::from(first_value) * (1.0 - fraction)
+                                        + f64::from(second_value) * fraction)
+                                        as f32,
+                                )
+                            };
+                        }
+                    }
+                    _ => return 4,
+                }
+            }
+        }
+        0
+    })
+    .unwrap_or(4)
 }
 
 #[derive(Clone, Copy)]
@@ -2337,35 +2611,7 @@ unsafe extern "win64" fn get_world_pixel_format(
         if !native_guest_range_valid(state, output, std::mem::size_of::<i32>() as u64) {
             return 4;
         }
-        let pixel_format = state
-            .worlds
-            .get(&world)
-            .map(|record| record.pixel_format)
-            .or_else(|| {
-                (world != 0
-                    && (world == state.smart_input_world || world == state.smart_output_world))
-                    .then_some(state.smart_pixel_format)
-            })
-            .or_else(|| {
-                if !native_world_descriptor_valid(state, world) {
-                    return None;
-                }
-                let width = unsafe {
-                    ptr::read_unaligned((world + abi::LAYER_WIDTH_OFFSET as u64) as *const i32)
-                };
-                let rowbytes = unsafe {
-                    ptr::read_unaligned((world + abi::LAYER_ROWBYTES_OFFSET as u64) as *const i32)
-                };
-                if width <= 0 || rowbytes <= 0 || rowbytes % width != 0 {
-                    return None;
-                }
-                match rowbytes / width {
-                    4 => Some(0x6267_7261u32 as i32),
-                    8 => Some(0x3631_6561u32 as i32),
-                    16 => Some(0x3233_6561u32 as i32),
-                    _ => None,
-                }
-            });
+        let pixel_format = native_world_pixel_format(state, world);
         let Some(pixel_format) = pixel_format else {
             return 4;
         };
@@ -2716,6 +2962,228 @@ unsafe extern "win64" fn resize_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_blend_world(
+        arena: &mut [u8],
+        descriptor_offset: usize,
+        data: u64,
+        rowbytes: i32,
+        width: i32,
+        height: i32,
+    ) -> u64 {
+        let descriptor = descriptor_offset;
+        arena[descriptor + abi::LAYER_DATA_OFFSET..descriptor + abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&data.to_le_bytes());
+        arena[descriptor + abi::LAYER_ROWBYTES_OFFSET..descriptor + abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&rowbytes.to_le_bytes());
+        arena[descriptor + abi::LAYER_WIDTH_OFFSET..descriptor + abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&width.to_le_bytes());
+        arena[descriptor + abi::LAYER_HEIGHT_OFFSET..descriptor + abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&height.to_le_bytes());
+        arena.as_ptr() as u64 + descriptor_offset as u64
+    }
+
+    #[test]
+    fn blend_world_matches_windows_formats_and_is_alias_safe() {
+        for (pixel_format, pixel_bytes) in [
+            (crate::pixel::PF_PIXEL_FORMAT_ARGB32, 4usize),
+            (crate::pixel::PF_PIXEL_FORMAT_ARGB64, 8usize),
+            (crate::pixel::PF_PIXEL_FORMAT_ARGB128, 16usize),
+        ] {
+            let mut arena = vec![0u8; 4096];
+            let base = arena.as_mut_ptr() as u64;
+            let first_data = base + 1024;
+            let second_data = base + 1152;
+            let destination_data = base + 1280;
+            let first =
+                write_blend_world(&mut arena, 0, first_data, (2 * pixel_bytes) as i32, 2, 1);
+            let second =
+                write_blend_world(&mut arena, 256, second_data, (2 * pixel_bytes) as i32, 2, 1);
+            let destination = write_blend_world(
+                &mut arena,
+                512,
+                destination_data,
+                (2 * pixel_bytes) as i32,
+                2,
+                1,
+            );
+            let (first_bytes, second_bytes, expected) = match pixel_format {
+                crate::pixel::PF_PIXEL_FORMAT_ARGB32 => (
+                    vec![255, 10, 20, 30, 128, 40, 50, 60],
+                    vec![0, 110, 120, 130, 64, 140, 150, 160],
+                    vec![128, 60, 70, 80, 96, 90, 100, 110],
+                ),
+                crate::pixel::PF_PIXEL_FORMAT_ARGB64 => {
+                    let encode = |values: [u16; 8]| {
+                        values
+                            .into_iter()
+                            .flat_map(u16::to_le_bytes)
+                            .collect::<Vec<_>>()
+                    };
+                    (
+                        encode([32768, 1000, 2000, 3000, 16384, 4000, 5000, 6000]),
+                        encode([0, 11000, 12000, 13000, 8192, 14000, 15000, 16000]),
+                        encode([16384, 6000, 7000, 8000, 12288, 9000, 10000, 11000]),
+                    )
+                }
+                crate::pixel::PF_PIXEL_FORMAT_ARGB128 => {
+                    let encode = |values: [f32; 8]| {
+                        values
+                            .into_iter()
+                            .flat_map(f32::to_le_bytes)
+                            .collect::<Vec<_>>()
+                    };
+                    let first = [1.0, 0.1, 0.2, 0.3, 0.5, 0.4, 0.5, 0.6];
+                    let second = [0.0, 1.1, 1.2, 1.3, 0.25, 1.4, 1.5, 1.6];
+                    let mut blended = [0.0f32; 8];
+                    for index in 0..blended.len() {
+                        blended[index] =
+                            (f64::from(first[index]) * 0.5 + f64::from(second[index]) * 0.5) as f32;
+                    }
+                    (encode(first), encode(second), encode(blended))
+                }
+                _ => unreachable!(),
+            };
+            arena[1024..1024 + first_bytes.len()].copy_from_slice(&first_bytes);
+            arena[1152..1152 + second_bytes.len()].copy_from_slice(&second_bytes);
+            let mut state = NativeState {
+                arena_next: base,
+                arena_end: base + arena.len() as u64,
+                ..NativeState::default()
+            };
+            for (world, data) in [
+                (first, first_data),
+                (second, second_data),
+                (destination, destination_data),
+            ] {
+                state.worlds.insert(
+                    world,
+                    NativeWorld {
+                        pixel_format,
+                        size: (2 * pixel_bytes) as u64,
+                        data,
+                        mapping_size: 2 * pixel_bytes,
+                    },
+                );
+            }
+            ACTIVE_STATE.with(|slot| slot.set(&mut state));
+
+            assert_eq!(
+                unsafe { blend_world(1, first, second, 32_768, destination, 0) },
+                0
+            );
+            assert_eq!(&arena[1280..1280 + expected.len()], expected.as_slice());
+            arena[1024..1024 + first_bytes.len()].copy_from_slice(&first_bytes);
+            assert_eq!(
+                unsafe { blend_world(1, first, second, 32_768, first, 0) },
+                0
+            );
+            assert_eq!(&arena[1024..1024 + expected.len()], expected.as_slice());
+            arena[1024..1024 + first_bytes.len()].copy_from_slice(&first_bytes);
+            arena[1152..1152 + second_bytes.len()].copy_from_slice(&second_bytes);
+            assert_eq!(
+                unsafe { blend_world(1, first, second, 32_768, second, 0) },
+                0
+            );
+            assert_eq!(&arena[1152..1152 + expected.len()], expected.as_slice());
+            ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+        }
+    }
+
+    #[test]
+    fn blend_world_rejects_invalid_ratio_and_mismatch_without_writes() {
+        let mut arena = vec![0u8; 2048];
+        let base = arena.as_mut_ptr() as u64;
+        let first = write_blend_world(&mut arena, 0, base + 1024, 4, 1, 1);
+        let second = write_blend_world(&mut arena, 256, base + 1088, 4, 1, 1);
+        let destination = write_blend_world(&mut arena, 512, base + 1152, 4, 1, 1);
+        arena[1024..1028].copy_from_slice(&[255, 1, 2, 3]);
+        arena[1088..1092].copy_from_slice(&[0, 4, 5, 6]);
+        arena[1152..1156].copy_from_slice(&[0x5a; 4]);
+        let mut state = NativeState {
+            arena_next: base,
+            arena_end: base + arena.len() as u64,
+            ..NativeState::default()
+        };
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+
+        assert_eq!(
+            unsafe { blend_world(1, first, second, 65_537, destination, 0) },
+            4
+        );
+        assert_eq!(&arena[1152..1156], &[0x5a; 4]);
+        arena[256 + abi::LAYER_WIDTH_OFFSET..256 + abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&2i32.to_le_bytes());
+        assert_eq!(
+            unsafe { blend_world(1, first, second, 32_768, destination, 0) },
+            4
+        );
+        assert_eq!(&arena[1152..1156], &[0x5a; 4]);
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
+
+    #[test]
+    fn ansi_sprintf_copies_bounded_literals_and_rejects_conversions() {
+        let mut state = NativeState::default();
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+        let literal = b"Not able to acquire AEFX Suite.\0";
+        let escaped = b"progress 100%%\0";
+        let conversion = b"value=%d\0";
+        let mut output = [0x5au8; 64];
+        state.image_start = literal
+            .as_ptr()
+            .min(escaped.as_ptr())
+            .min(conversion.as_ptr()) as u64;
+        state.image_end = (literal.as_ptr() as u64 + literal.len() as u64)
+            .max(escaped.as_ptr() as u64 + escaped.len() as u64)
+            .max(conversion.as_ptr() as u64 + conversion.len() as u64);
+
+        assert_eq!(
+            unsafe {
+                native_ansi_sprintf(
+                    output.as_mut_ptr() as u64,
+                    literal.as_ptr() as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            (literal.len() - 1) as u64
+        );
+        assert_eq!(&output[..literal.len()], literal);
+        output.fill(0x5a);
+        assert_eq!(
+            unsafe {
+                native_ansi_sprintf(
+                    output.as_mut_ptr() as u64,
+                    escaped.as_ptr() as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            13
+        );
+        assert_eq!(&output[..14], b"progress 100%\0");
+        output.fill(0x5a);
+        assert_eq!(
+            unsafe {
+                native_ansi_sprintf(
+                    output.as_mut_ptr() as u64,
+                    conversion.as_ptr() as u64,
+                    7,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            u32::MAX as u64
+        );
+        assert_eq!(output, [0x5a; 64]);
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
 
     #[test]
     fn transfer_rect8_applies_mask_world_and_rejects_invalid_mask_without_writes() {
