@@ -2,6 +2,8 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -81,7 +83,9 @@ def test_success_report_is_portable_sha_pinned_and_deterministic(
     def fake_run(command, timeout_seconds):
         Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(command[4], "PNG")
         worker_report = {
-            "execution_traces": [{"selector": "RENDER", "note": str(plugin)}],
+            "execution_traces": [
+                {"selector": "RENDER", "note": command[2]}
+            ],
             "classification": "ok",
         }
         return (
@@ -118,17 +122,16 @@ def test_success_report_is_portable_sha_pinned_and_deterministic(
 
 
 def test_failure_extracts_structured_crash_and_redacts_paths(tmp_path, monkeypatch):
-    worker, plugin, _, manifest = _fixture(tmp_path)
+    worker, _, _, manifest = _fixture(tmp_path)
     output = tmp_path / "report.json"
-    snapshot = {
-        "reason": "UC_ERR_FETCH_PROT",
-        "registers": {"rip": 0},
-        "module": str(plugin),
-    }
-
     def fake_run(command, timeout_seconds):
+        snapshot = {
+            "reason": "UC_ERR_FETCH_PROT",
+            "registers": {"rip": 0},
+            "module": command[2],
+        }
         stderr = (
-            f"aex_guest_error: guest execution failed at {plugin}; "
+            f"aex_guest_error: guest execution failed at {command[2]}; "
             f"crash_snapshot={json.dumps(snapshot)}\n"
         ).encode()
         return (
@@ -557,6 +560,94 @@ def test_main_returns_nonzero_but_keeps_mixed_failure_report(
     assert [
         case["result"]["kind"] for case in persisted["cases"]
     ] == ["trace", failure_kind]
+
+
+def test_worker_launch_uses_verified_private_staged_sources(
+    tmp_path, monkeypatch
+):
+    worker, plugin, input_png, manifest = _fixture(tmp_path)
+    original_bytes = {
+        "worker": worker.read_bytes(),
+        "plugin": plugin.read_bytes(),
+        "input": input_png.read_bytes(),
+    }
+    output = tmp_path / "report.json"
+
+    def fake_run(command, timeout_seconds):
+        worker.write_bytes(b"replaced worker")
+        plugin.write_bytes(b"replaced plugin")
+        input_png.write_bytes(b"replaced input")
+
+        staged_worker = Path(command[0])
+        staged_plugin = Path(command[2])
+        staged_input = Path(command[3])
+        assert staged_worker != worker
+        assert staged_plugin != plugin
+        assert staged_input != input_png
+        assert staged_worker.read_bytes() == original_bytes["worker"]
+        assert staged_plugin.read_bytes() == original_bytes["plugin"]
+        assert staged_input.read_bytes() == original_bytes["input"]
+        assert stat.S_IMODE(staged_worker.stat().st_mode) == 0o500
+        assert stat.S_IMODE(staged_plugin.stat().st_mode) == 0o400
+        assert stat.S_IMODE(staged_input.stat().st_mode) == 0o400
+        Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(command[4], "PNG")
+        return (
+            subprocess.CompletedProcess(
+                command,
+                0,
+                b'{"execution_traces":[{"selector":"RENDER"}]}',
+                b"",
+            ),
+            False,
+            None,
+        )
+
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", fake_run)
+    report = RUNNER.run(
+        _main_args(worker, manifest, output, tmp_path)
+    )
+
+    assert report["worker_sha256"] == hashlib.sha256(
+        original_bytes["worker"]
+    ).hexdigest()
+    assert report["cases"][0]["plugin_sha256"] == hashlib.sha256(
+        original_bytes["plugin"]
+    ).hexdigest()
+    assert report["cases"][0]["input_png_sha256"] == hashlib.sha256(
+        original_bytes["input"]
+    ).hexdigest()
+    assert str(tmp_path) not in output.read_text(encoding="utf-8")
+
+
+def test_source_mutation_during_staging_fails_before_worker_launch(
+    tmp_path, monkeypatch
+):
+    worker, plugin, _, manifest = _fixture(tmp_path)
+    output = tmp_path / "report.json"
+    real_copyfile = shutil.copyfile
+    launched = False
+
+    def racing_copyfile(source, destination):
+        if Path(source) == plugin:
+            plugin.write_bytes(b"plugin changed after initial pin")
+        return real_copyfile(source, destination)
+
+    def must_not_launch(*args, **kwargs):
+        nonlocal launched
+        launched = True
+        raise AssertionError("worker must not launch after staged SHA mismatch")
+
+    monkeypatch.setattr(RUNNER.shutil, "copyfile", racing_copyfile)
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", must_not_launch)
+    with pytest.raises(
+        RUNNER.TraceRunnerError, match="staged plugin .* SHA-256 mismatch"
+    ):
+        RUNNER.run(
+            _main_args(worker, manifest, output, tmp_path)
+        )
+
+    assert not launched
+    assert not output.exists()
 
 
 def test_late_output_symlink_is_replaced_without_touching_target(

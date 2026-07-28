@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -424,6 +425,66 @@ def write_report_atomic(output: Path, report: dict[str, Any]) -> None:
                 pass
 
 
+def _stage_verified_file(
+    source: Path,
+    destination: Path,
+    expected_sha256: str,
+    mode: int,
+    label: str,
+) -> Path:
+    try:
+        shutil.copyfile(source, destination)
+        os.chmod(destination, mode)
+        actual_sha256 = sha256_file(destination)
+    except OSError as error:
+        raise TraceRunnerError(f"stage {label} failed") from error
+    if actual_sha256 != expected_sha256:
+        try:
+            destination.unlink()
+        except FileNotFoundError:
+            pass
+        raise TraceRunnerError(f"staged {label} SHA-256 mismatch")
+    return destination
+
+
+def stage_sources(
+    run_root: Path,
+    worker: Path,
+    worker_sha256: str,
+    cases: list[dict[str, Any]],
+) -> tuple[Path, list[dict[str, Any]]]:
+    source_root = run_root / "sources"
+    source_root.mkdir(mode=0o700)
+    staged_worker = _stage_verified_file(
+        worker,
+        source_root / "worker",
+        worker_sha256,
+        0o500,
+        "worker",
+    )
+    staged_cases = []
+    for index, case in enumerate(cases):
+        case_root = source_root / f"case-{index:02d}"
+        case_root.mkdir(mode=0o700)
+        staged_case = dict(case)
+        staged_case["plugin"] = _stage_verified_file(
+            case["plugin"],
+            case_root / "plugin.aex",
+            case["plugin_sha256"],
+            0o400,
+            f"plugin for case {case['id']}",
+        )
+        staged_case["input_png"] = _stage_verified_file(
+            case["input_png"],
+            case_root / "input.png",
+            case["input_png_sha256"],
+            0o400,
+            f"input PNG for case {case['id']}",
+        )
+        staged_cases.append(staged_case)
+    return staged_worker, staged_cases
+
+
 def _redact_text(value: str, replacements: dict[str, str]) -> str:
     for source, token in sorted(
         replacements.items(), key=lambda item: len(item[0]), reverse=True
@@ -567,6 +628,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         prefix="aex-targeted-trace-", dir=args.run_parent
     ) as temporary:
         run_root = Path(temporary)
+        staged_worker, staged_cases = stage_sources(
+            run_root, worker, worker_sha, cases
+        )
         results = [
             {
                 "id": case["id"],
@@ -574,9 +638,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "input_png_sha256": case["input_png_sha256"],
                 "pixel_format": case["pixel_format"],
                 "parameters": case["parameters"],
-                "result": run_case(worker, case, run_root, args.timeout),
+                "result": run_case(
+                    staged_worker, case, run_root, args.timeout
+                ),
             }
-            for case in cases
+            for case in staged_cases
         ]
     report = {
         "schema_version": SCHEMA_VERSION,
