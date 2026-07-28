@@ -319,3 +319,83 @@ def test_success_requires_a_valid_regular_output_png(
                 run_parent=tmp_path,
             )
         )
+
+
+@pytest.mark.parametrize("protected_name", ["manifest", "worker", "plugin", "input"])
+@pytest.mark.parametrize("alias_kind", ["direct", "hardlink"])
+def test_output_cannot_alias_a_pinned_input_before_worker_launch(
+    tmp_path, monkeypatch, protected_name, alias_kind
+):
+    worker, plugin, input_png, manifest = _fixture(tmp_path)
+    protected = {
+        "manifest": manifest,
+        "worker": worker,
+        "plugin": plugin,
+        "input": input_png,
+    }[protected_name]
+    before = protected.read_bytes()
+    if alias_kind == "direct":
+        output = protected
+    else:
+        output = tmp_path / f"{protected_name}-report-hardlink.json"
+        output.hardlink_to(protected)
+    launched = False
+
+    def must_not_launch(*args, **kwargs):
+        nonlocal launched
+        launched = True
+        raise AssertionError("worker must not launch for an aliased output")
+
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", must_not_launch)
+    with pytest.raises(RUNNER.TraceRunnerError, match="output aliases protected"):
+        RUNNER.run(
+            argparse.Namespace(
+                manifest=manifest,
+                worker=worker,
+                expected_worker_sha256=_sha(worker),
+                output=output,
+                timeout=10,
+                run_parent=tmp_path,
+            )
+        )
+
+    assert not launched
+    assert protected.read_bytes() == before
+
+
+def test_late_output_symlink_is_replaced_without_touching_target(
+    tmp_path, monkeypatch
+):
+    worker, plugin, _, manifest = _fixture(tmp_path)
+    report_path = tmp_path / "report.json"
+    plugin_before = plugin.read_bytes()
+
+    def fake_run(command, timeout_seconds):
+        Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(command[4], "PNG")
+        report_path.symlink_to(plugin)
+        return (
+            subprocess.CompletedProcess(
+                command,
+                0,
+                b'{"execution_traces":[{"selector":"RENDER"}]}',
+                b"",
+            ),
+            False,
+            None,
+        )
+
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", fake_run)
+    report = RUNNER.run(
+        argparse.Namespace(
+            manifest=manifest,
+            worker=worker,
+            expected_worker_sha256=_sha(worker),
+            output=report_path,
+            timeout=10,
+            run_parent=tmp_path,
+        )
+    )
+
+    assert plugin.read_bytes() == plugin_before
+    assert not report_path.is_symlink()
+    assert json.loads(report_path.read_text(encoding="utf-8")) == report

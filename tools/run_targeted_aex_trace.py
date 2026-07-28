@@ -371,6 +371,59 @@ def load_manifest(path: Path) -> list[dict[str, Any]]:
     return normalized
 
 
+def reject_output_alias(
+    output: Path,
+    protected: list[tuple[str, Path]],
+) -> None:
+    """Reject path and inode aliases before any worker or report write."""
+    protected_identities: dict[tuple[int, int], str] = {}
+    for label, path in protected:
+        metadata = path.stat()
+        protected_identities[(metadata.st_dev, metadata.st_ino)] = label
+        if output == path:
+            raise TraceRunnerError(f"output aliases protected {label}")
+    try:
+        output_metadata = output.stat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise TraceRunnerError("output identity cannot be inspected safely") from error
+    label = protected_identities.get(
+        (output_metadata.st_dev, output_metadata.st_ino)
+    )
+    if label is not None:
+        raise TraceRunnerError(f"output aliases protected {label}")
+
+
+def write_report_atomic(output: Path, report: dict[str, Any]) -> None:
+    """Replace the output directory entry without following a late symlink."""
+    payload = (
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    )
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def _redact_text(value: str, replacements: dict[str, str]) -> str:
     for source, token in sorted(
         replacements.items(), key=lambda item: len(item[0]), reverse=True
@@ -491,6 +544,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     cases = load_manifest(manifest_path)
     output = args.output.resolve()
+    protected = [("manifest", manifest_path), ("worker", worker)]
+    for case in cases:
+        protected.extend(
+            [
+                (f"plugin for case {case['id']}", case["plugin"]),
+                (f"input PNG for case {case['id']}", case["input_png"]),
+            ]
+        )
+    reject_output_alias(output, protected)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix="aex-targeted-trace-", dir=args.run_parent
@@ -514,10 +576,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "case_count": len(results),
         "cases": results,
     }
-    output.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    write_report_atomic(output, report)
     return report
 
 
