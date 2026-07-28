@@ -5796,9 +5796,6 @@ fn read_blend_world(
 
 fn emulate_blend(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<bool, String> {
-        let effect_ref = unicorn
-            .reg_read(RegisterX86::RCX)
-            .map_err(|error| format!("blend effect ref: {error}"))?;
         let first_world = unicorn
             .reg_read(RegisterX86::RDX)
             .map_err(|error| format!("blend first world: {error}"))?;
@@ -5813,7 +5810,7 @@ fn emulate_blend(unicorn: &mut Unicorn<'_, GuestState>) {
         let Some(pixel_bytes) = world_pixel_bytes(pixel_format).map(|value| value as usize) else {
             return Ok(false);
         };
-        if effect_ref == 0 || !(0..=65_536).contains(&ratio) {
+        if !(0..=65_536).contains(&ratio) {
             return Ok(false);
         }
         let Some(first) = read_blend_world(unicorn, first_world, pixel_bytes, "first source")?
@@ -5892,7 +5889,7 @@ fn emulate_blend(unicorn: &mut Unicorn<'_, GuestState>) {
                     }
                 }
                 16 => {
-                    let fraction = ratio as f32 / 65_536.0;
+                    let fraction = f64::from(ratio) / 65_536.0;
                     for index in 0..first.width * 4 {
                         let byte = index * 4;
                         let first = f32::from_le_bytes(
@@ -5906,7 +5903,9 @@ fn emulate_blend(unicorn: &mut Unicorn<'_, GuestState>) {
                                 .expect("float channel is four bytes"),
                         );
                         output[byte..byte + 4].copy_from_slice(
-                            &(first * (1.0 - fraction) + second * fraction).to_le_bytes(),
+                            &((f64::from(first) * (1.0 - fraction) + f64::from(second) * fraction)
+                                as f32)
+                                .to_le_bytes(),
                         );
                     }
                 }
@@ -9685,6 +9684,28 @@ mod tests {
             engine.read(first_data, &mut output).unwrap();
             assert_eq!(output, expected);
         }
+
+        engine.configure_render_pixel_format(0x3233_6561u32 as i32);
+        let first_pixels = [-1.515_396_1f32; 4]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let second_pixels = [-0.089_762_6f32; 4]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let (first, first_data) = write_world(&mut engine, &first_pixels, 16);
+        let (second, _) = write_world(&mut engine, &second_pixels, 16);
+        assert_eq!(
+            engine
+                .call_win64(HOST_BLEND, [0, first, second, 33_817, first, 0])
+                .unwrap(),
+            0
+        );
+        let expected = f32::from_bits(0xbf47_9e5a).to_le_bytes().repeat(4);
+        let mut output = vec![0u8; 16];
+        engine.read(first_data, &mut output).unwrap();
+        assert_eq!(output, expected);
 
         engine.configure_render_pixel_format(0x6267_7261u32 as i32);
         let (first, first_data) = write_world(&mut engine, &[1, 2, 3, 4], 4);
