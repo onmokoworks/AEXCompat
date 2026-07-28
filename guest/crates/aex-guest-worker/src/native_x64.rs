@@ -2307,19 +2307,14 @@ unsafe extern "win64" fn dispose_handle(
     _: u64,
 ) -> u64 {
     with_state(|state| {
-        let Some(record) = state.handles.get(&handle).cloned() else {
+        let Some(record) = state.handles.remove(&handle) else {
             state.callback_error = Some(format!(
-                "PF Handle dispose received stale handle {handle:#x}"
+                "PF Handle dispose received stale or foreign handle {handle:#x}"
             ));
             return;
         };
-        if record.locks != 0 {
-            state.callback_error = Some(format!(
-                "PF Handle dispose received locked handle {handle:#x}"
-            ));
-            return;
-        }
-        state.handles.remove(&handle);
+        // Disposal is the terminal ownership operation and consumes any
+        // outstanding locks held by the plug-in.
         unsafe {
             munmap(record.data as *mut c_void, record.data_mapping_size);
             munmap(handle as *mut c_void, PAGE_SIZE);
@@ -2839,6 +2834,29 @@ mod tests {
                 .callback_error
                 .as_deref()
                 .is_some_and(|message| message.contains("unknown handle"))
+        );
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
+
+    #[test]
+    fn pf_handle_dispose_consumes_outstanding_locks_and_rejects_stale_handles() {
+        let mut state = NativeState::default();
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+        let handle = unsafe { new_handle(4096, 0, 0, 0, 0, 0) };
+        assert_ne!(handle, 0);
+        assert_ne!(unsafe { lock_handle(handle, 0, 0, 0, 0, 0) }, 0);
+        assert_eq!(state.handles[&handle].locks, 1);
+
+        assert_eq!(unsafe { dispose_handle(handle, 0, 0, 0, 0, 0) }, 0);
+        assert!(state.handles.is_empty());
+        assert!(state.callback_error.is_none());
+
+        assert_eq!(unsafe { dispose_handle(handle, 0, 0, 0, 0, 0) }, 0);
+        assert!(
+            state
+                .callback_error
+                .as_deref()
+                .is_some_and(|message| message.contains("stale or foreign handle"))
         );
         ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
     }
