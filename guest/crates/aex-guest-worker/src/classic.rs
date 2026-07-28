@@ -316,8 +316,18 @@ impl ClassicHost {
         );
         write_u64(
             &mut utility_bytes,
+            abi::UTILS_ANSI_SPRINTF_OFFSET,
+            engine.ansi_sprintf_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
             abi::UTILS_COPY_OFFSET,
             engine.copy_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
+            abi::UTILS_BLEND_OFFSET,
+            engine.blend_callback_address(),
         );
         write_u64(
             &mut utility_bytes,
@@ -1278,6 +1288,8 @@ impl ClassicHost {
         write_i32(&mut world, abi::LAYER_HEIGHT_OFFSET, height as i32);
         write_rect(&mut world, abi::LAYER_EXTENT_HINT_OFFSET, width, height);
         self.engine.write(output_world, &world)?;
+        self.engine
+            .configure_render_pixel_format(format.pf_pixel_format());
         let mut input_data = vec![0u8; abi::PF_IN_DATA_SIZE];
         self.engine.read(self.input, &mut input_data)?;
         write_i32(&mut input_data, abi::IN_WIDTH_OFFSET, width as i32);

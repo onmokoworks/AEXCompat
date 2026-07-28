@@ -92,6 +92,7 @@ const HOST_AREA_SAMPLE8: u64 = STUB_BASE + 0x80410;
 const HOST_TRANSFER_RECT8: u64 = STUB_BASE + 0x80420;
 const HOST_ITERATE16: u64 = STUB_BASE + 0x80430;
 const HOST_ITERATE16_CONTINUE: u64 = STUB_BASE + 0x80440;
+const HOST_BLEND: u64 = STUB_BASE + 0x80450;
 const MAX_SMART_CHECKOUT_IDS: usize = 64;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
@@ -2271,6 +2272,7 @@ struct GuestState {
     smart_width: u32,
     smart_height: u32,
     smart_pixel_format: i32,
+    render_pixel_format: i32,
     smart_current_time: i32,
     smart_current_time_scale: u32,
     suite_requests: Vec<String>,
@@ -3173,6 +3175,10 @@ impl GuestEngine<'static> {
         )?;
         uc("write copy callback", unicorn.mem_write(HOST_COPY, &[0xc3]))?;
         uc(
+            "write blend callback",
+            unicorn.mem_write(HOST_BLEND, &[0xc3]),
+        )?;
+        uc(
             "write no-op callback",
             unicorn.mem_write(HOST_NOOP, &[0x31, 0xc0, 0xc3]),
         )?;
@@ -3254,6 +3260,12 @@ impl GuestEngine<'static> {
             "install copy callback",
             unicorn.add_code_hook(HOST_COPY, HOST_COPY, |unicorn, _, _| {
                 emulate_copy(unicorn);
+            }),
+        )?;
+        uc(
+            "install blend callback",
+            unicorn.add_code_hook(HOST_BLEND, HOST_BLEND, |unicorn, _, _| {
+                emulate_blend(unicorn);
             }),
         )?;
         uc(
@@ -3600,6 +3612,7 @@ impl GuestEngine<'static> {
             (HOST_POISON, "unsupported_callback"),
             (HOST_ANSI_STRCPY, "ansi_strcpy"),
             (HOST_COPY, "copy"),
+            (HOST_BLEND, "blend"),
             (HOST_NOOP, "noop"),
             (HOST_PRE_CHECKOUT_LAYER, "pre_checkout_layer"),
             (HOST_CHECKOUT_LAYER_PIXELS, "checkout_layer_pixels"),
@@ -4496,8 +4509,16 @@ impl GuestEngine<'static> {
         HOST_ANSI_STRCPY
     }
 
+    pub fn ansi_sprintf_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_SPRINTF
+    }
+
     pub fn copy_callback_address(&self) -> u64 {
         HOST_COPY
+    }
+
+    pub fn blend_callback_address(&self) -> u64 {
+        HOST_BLEND
     }
 
     pub fn noop_callback_address(&self) -> u64 {
@@ -4744,8 +4765,13 @@ impl GuestEngine<'static> {
         state.smart_width = width;
         state.smart_height = height;
         state.smart_pixel_format = pixel_format;
+        state.render_pixel_format = pixel_format;
         state.smart_current_time = current_time;
         state.smart_current_time_scale = current_time_scale;
+    }
+
+    pub fn configure_render_pixel_format(&mut self, pixel_format: i32) {
+        self.unicorn.get_data_mut().render_pixel_format = pixel_format;
     }
 
     pub fn finish_smart_checkout_scope(&mut self) -> bool {
@@ -5550,6 +5576,295 @@ fn emulate_ansi_strcpy_bounded(unicorn: &mut Unicorn<'_, GuestState>) {
     match result {
         Ok(error) => {
             let _ = unicorn.reg_write(RegisterX86::RAX, error);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_ansi_sprintf_literal(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<Option<Vec<u8>>, String> {
+        let destination = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("PF ANSI sprintf destination: {error}"))?;
+        let format = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("PF ANSI sprintf format: {error}"))?;
+        if destination == 0 || format == 0 {
+            return Ok(None);
+        }
+        let mut output = Vec::new();
+        let mut index = 0u64;
+        while index < 256 {
+            let mut byte = [0u8; 1];
+            let address = format
+                .checked_add(index)
+                .ok_or_else(|| "PF ANSI sprintf format range overflow".to_string())?;
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|error| format!("PF ANSI sprintf format read: {error}"))?;
+            match byte[0] {
+                0 => {
+                    output.push(0);
+                    return Ok(Some(output));
+                }
+                b'%' => {
+                    index += 1;
+                    if index >= 256 {
+                        return Ok(None);
+                    }
+                    let address = format
+                        .checked_add(index)
+                        .ok_or_else(|| "PF ANSI sprintf format range overflow".to_string())?;
+                    unicorn
+                        .mem_read(address, &mut byte)
+                        .map_err(|error| format!("PF ANSI sprintf format read: {error}"))?;
+                    if byte[0] != b'%' {
+                        return Ok(None);
+                    }
+                    output.push(b'%');
+                }
+                value => output.push(value),
+            }
+            if output.len() > 4096 {
+                return Ok(None);
+            }
+            index += 1;
+        }
+        Ok(None)
+    })();
+    match result {
+        Ok(Some(output)) => {
+            let written = output.len() - 1;
+            if let Err(error) = unicorn.mem_write(
+                unicorn.reg_read(RegisterX86::RCX).unwrap_or_default(),
+                &output,
+            ) {
+                if unicorn.get_data().callback_error.is_none() {
+                    unicorn.get_data_mut().callback_error =
+                        Some(format!("PF ANSI sprintf destination write: {error}"));
+                }
+                let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+                let _ = unicorn.emu_stop();
+            } else {
+                let _ = unicorn.reg_write(RegisterX86::RAX, written as u64);
+            }
+        }
+        Ok(None) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BlendWorld {
+    data: u64,
+    rowbytes: usize,
+    width: usize,
+    height: usize,
+}
+
+fn read_blend_world(
+    unicorn: &Unicorn<'_, GuestState>,
+    world: u64,
+    pixel_bytes: usize,
+    name: &str,
+) -> Result<Option<BlendWorld>, String> {
+    if world == 0 {
+        return Ok(None);
+    }
+    let data = read_guest_u64(
+        unicorn,
+        world + abi::LAYER_DATA_OFFSET as u64,
+        &format!("blend {name} data"),
+    )?;
+    let rowbytes = read_guest_i32(
+        unicorn,
+        world + abi::LAYER_ROWBYTES_OFFSET as u64,
+        &format!("blend {name} rowbytes"),
+    )?;
+    let width = read_guest_i32(
+        unicorn,
+        world + abi::LAYER_WIDTH_OFFSET as u64,
+        &format!("blend {name} width"),
+    )?;
+    let height = read_guest_i32(
+        unicorn,
+        world + abi::LAYER_HEIGHT_OFFSET as u64,
+        &format!("blend {name} height"),
+    )?;
+    if data == 0
+        || rowbytes <= 0
+        || width <= 0
+        || height <= 0
+        || width > MAX_WORLD_DIMENSION
+        || height > MAX_WORLD_DIMENSION
+    {
+        return Ok(None);
+    }
+    let width = width as usize;
+    let height = height as usize;
+    let rowbytes = rowbytes as usize;
+    let Some(packed_row) = width.checked_mul(pixel_bytes) else {
+        return Ok(None);
+    };
+    let Some(mapped_bytes) = rowbytes.checked_mul(height) else {
+        return Ok(None);
+    };
+    if rowbytes < packed_row || mapped_bytes > MAX_WORLD_SIZE as usize {
+        return Ok(None);
+    }
+    Ok(Some(BlendWorld {
+        data,
+        rowbytes,
+        width,
+        height,
+    }))
+}
+
+fn emulate_blend(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<bool, String> {
+        let effect_ref = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("blend effect ref: {error}"))?;
+        let first_world = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("blend first world: {error}"))?;
+        let second_world = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("blend second world: {error}"))?;
+        let ratio = unicorn
+            .reg_read(RegisterX86::R9)
+            .map_err(|error| format!("blend ratio: {error}"))? as u32 as i32;
+        let destination_world = aegp_stack_arg(unicorn, 0x28)?;
+        let pixel_format = unicorn.get_data().render_pixel_format;
+        let Some(pixel_bytes) = world_pixel_bytes(pixel_format).map(|value| value as usize) else {
+            return Ok(false);
+        };
+        if effect_ref == 0 || !(0..=65_536).contains(&ratio) {
+            return Ok(false);
+        }
+        let Some(first) = read_blend_world(unicorn, first_world, pixel_bytes, "first source")?
+        else {
+            return Ok(false);
+        };
+        let Some(second) = read_blend_world(unicorn, second_world, pixel_bytes, "second source")?
+        else {
+            return Ok(false);
+        };
+        let Some(destination) =
+            read_blend_world(unicorn, destination_world, pixel_bytes, "destination")?
+        else {
+            return Ok(false);
+        };
+        if first.width != second.width
+            || first.width != destination.width
+            || first.height != second.height
+            || first.height != destination.height
+        {
+            return Ok(false);
+        }
+        let packed_row = first
+            .width
+            .checked_mul(pixel_bytes)
+            .ok_or_else(|| "blend packed row overflow".to_string())?;
+        let snapshot_size = packed_row
+            .checked_mul(first.height)
+            .filter(|size| *size <= MAX_WORLD_SIZE as usize)
+            .ok_or_else(|| "blend snapshot exceeds worker bound".to_string())?;
+        let mut first_snapshot = vec![0u8; snapshot_size];
+        let mut second_snapshot = vec![0u8; snapshot_size];
+        for row in 0..first.height {
+            let first_address = first
+                .data
+                .checked_add((row * first.rowbytes) as u64)
+                .ok_or_else(|| "blend first source address overflow".to_string())?;
+            let second_address = second
+                .data
+                .checked_add((row * second.rowbytes) as u64)
+                .ok_or_else(|| "blend second source address overflow".to_string())?;
+            let range = row * packed_row..(row + 1) * packed_row;
+            unicorn
+                .mem_read(first_address, &mut first_snapshot[range.clone()])
+                .map_err(|error| format!("blend first source pixels: {error}"))?;
+            unicorn
+                .mem_read(second_address, &mut second_snapshot[range])
+                .map_err(|error| format!("blend second source pixels: {error}"))?;
+        }
+        let mut output = vec![0u8; packed_row];
+        for row in 0..first.height {
+            let row_start = row * packed_row;
+            let first_row = &first_snapshot[row_start..row_start + packed_row];
+            let second_row = &second_snapshot[row_start..row_start + packed_row];
+            match pixel_bytes {
+                4 => {
+                    for index in 0..packed_row {
+                        let value = (i32::from(first_row[index]) * (65_536 - ratio)
+                            + i32::from(second_row[index]) * ratio
+                            + 32_768)
+                            >> 16;
+                        output[index] = value.clamp(0, 255) as u8;
+                    }
+                }
+                8 => {
+                    for index in 0..first.width * 4 {
+                        let byte = index * 2;
+                        let first = u16::from_le_bytes([first_row[byte], first_row[byte + 1]]);
+                        let second = u16::from_le_bytes([second_row[byte], second_row[byte + 1]]);
+                        let value = (i64::from(first) * i64::from(65_536 - ratio)
+                            + i64::from(second) * i64::from(ratio)
+                            + 32_768)
+                            >> 16;
+                        output[byte..byte + 2]
+                            .copy_from_slice(&(value.clamp(0, 32_768) as u16).to_le_bytes());
+                    }
+                }
+                16 => {
+                    let fraction = ratio as f32 / 65_536.0;
+                    for index in 0..first.width * 4 {
+                        let byte = index * 4;
+                        let first = f32::from_le_bytes(
+                            first_row[byte..byte + 4]
+                                .try_into()
+                                .expect("float channel is four bytes"),
+                        );
+                        let second = f32::from_le_bytes(
+                            second_row[byte..byte + 4]
+                                .try_into()
+                                .expect("float channel is four bytes"),
+                        );
+                        output[byte..byte + 4].copy_from_slice(
+                            &(first * (1.0 - fraction) + second * fraction).to_le_bytes(),
+                        );
+                    }
+                }
+                _ => return Ok(false),
+            }
+            let destination_address = destination
+                .data
+                .checked_add((row * destination.rowbytes) as u64)
+                .ok_or_else(|| "blend destination address overflow".to_string())?;
+            unicorn
+                .mem_write(destination_address, &output)
+                .map_err(|error| format!("blend destination pixels: {error}"))?;
+        }
+        Ok(true)
+    })();
+    match result {
+        Ok(valid) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, if valid { 0 } else { 4 });
         }
         Err(error) => {
             if unicorn.get_data().callback_error.is_none() {
@@ -7380,14 +7695,7 @@ fn install_pf_ansi_suite_v2(unicorn: &mut Unicorn<'static, GuestState>) -> Resul
         unicorn.add_code_hook(
             HOST_PF_ANSI_SPRINTF,
             HOST_PF_ANSI_SPRINTF,
-            |unicorn, _, _| {
-                if unicorn.get_data().callback_error.is_none() {
-                    unicorn.get_data_mut().callback_error =
-                        Some("PF ANSI Suite v2 sprintf is unsupported".into());
-                }
-                let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
-                let _ = unicorn.emu_stop();
-            },
+            |unicorn, _, _| emulate_ansi_sprintf_literal(unicorn),
         ),
     )?;
     uc(
@@ -9142,6 +9450,108 @@ mod tests {
                 .call_win64(HOST_EXTENDED_LOOKUP, [0, 999, 0, 0, 0, 0])
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn legacy_blend_is_typed_alias_safe_and_fails_closed() {
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.mem_write(HOST_BLEND, &[0xc3]).unwrap();
+        engine
+            .unicorn
+            .add_code_hook(HOST_BLEND, HOST_BLEND, |unicorn, _, _| {
+                emulate_blend(unicorn);
+            })
+            .unwrap();
+
+        fn write_world(
+            engine: &mut GuestEngine<'static>,
+            pixels: &[u8],
+            pixel_bytes: usize,
+        ) -> (u64, u64) {
+            let data = engine.allocate(pixels.len(), 8).unwrap();
+            let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+            engine.write(data, pixels).unwrap();
+            let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+            definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                .copy_from_slice(&data.to_le_bytes());
+            definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                .copy_from_slice(&(pixel_bytes as i32).to_le_bytes());
+            definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+                .copy_from_slice(&1i32.to_le_bytes());
+            definition[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+                .copy_from_slice(&1i32.to_le_bytes());
+            engine.write(world, &definition).unwrap();
+            (world, data)
+        }
+
+        let cases = [
+            (
+                0x6267_7261u32 as i32,
+                vec![255, 10, 20, 30],
+                vec![0, 110, 120, 130],
+                vec![128, 60, 70, 80],
+            ),
+            (
+                0x3631_6561u32 as i32,
+                [32_768u16, 1024, 2048, 4096]
+                    .into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+                [0u16, 3072, 4096, 6144]
+                    .into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+                [16_384u16, 2048, 3072, 5120]
+                    .into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+            ),
+            (
+                0x3233_6561u32 as i32,
+                [1.0f32, 0.1, 0.2, 0.3]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+                [0.0f32, 0.5, 0.6, 0.7]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+                [0.5f32, 0.3, 0.4, 0.5]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+            ),
+        ];
+        for (pixel_format, first_pixels, second_pixels, expected) in cases {
+            engine.configure_render_pixel_format(pixel_format);
+            let pixel_bytes = first_pixels.len();
+            let (first, first_data) = write_world(&mut engine, &first_pixels, pixel_bytes);
+            let (second, _) = write_world(&mut engine, &second_pixels, pixel_bytes);
+            assert_eq!(
+                engine
+                    .call_win64(HOST_BLEND, [1, first, second, 32_768, first, 0])
+                    .unwrap(),
+                0
+            );
+            let mut output = vec![0u8; pixel_bytes];
+            engine.read(first_data, &mut output).unwrap();
+            assert_eq!(output, expected);
+        }
+
+        engine.configure_render_pixel_format(0x6267_7261u32 as i32);
+        let (first, first_data) = write_world(&mut engine, &[1, 2, 3, 4], 4);
+        let (second, _) = write_world(&mut engine, &[5, 6, 7, 8], 4);
+        let before = engine.unicorn.mem_read_as_vec(first_data, 4).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_BLEND, [1, first, second, 65_537, first, 0])
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(first_data, 4).unwrap(),
+            before
         );
     }
 
@@ -11477,6 +11887,44 @@ mod tests {
         assert_eq!(
             engine.unicorn.mem_read_as_vec(destination, 8).unwrap(),
             b"bounded\0"
+        );
+
+        let literal_format = DATA_BASE + 0x300;
+        engine
+            .unicorn
+            .mem_write(literal_format, b"Gaussian Blur %% fallback\0")
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    callback(&engine, 15),
+                    [destination, literal_format, 0, 0, 0, 0],
+                )
+                .unwrap(),
+            24
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 25).unwrap(),
+            b"Gaussian Blur % fallback\0"
+        );
+        let unsupported_format = DATA_BASE + 0x380;
+        engine
+            .unicorn
+            .mem_write(unsupported_format, b"value=%d\0")
+            .unwrap();
+        let before = engine.unicorn.mem_read_as_vec(destination, 25).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    callback(&engine, 15),
+                    [destination, unsupported_format, 7, 0, 0, 0],
+                )
+                .unwrap(),
+            u32::MAX as u64
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 25).unwrap(),
+            before
         );
     }
 
