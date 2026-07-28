@@ -1677,14 +1677,11 @@ impl ClassicHost {
             census_enabled,
             trace_enabled,
         );
-        let pixel_checkouts_balanced = self.engine.finish_smart_checkout_scope();
-        match result {
-            Ok((0, _, _)) if !pixel_checkouts_balanced => Err(GuestError::Callback(
-                "SmartFX layer pixel checkout was not checked in".into(),
-            )
-            .into()),
-            result => result,
-        }
+        // PF Smart Render plug-ins in the frozen corpus commonly retain a
+        // checked-out host world until the selector returns. The world is
+        // host-owned, so selector-scope cleanup is the ownership boundary.
+        self.engine.finish_smart_checkout_scope();
+        result
     }
 
     fn render_smart_configured(

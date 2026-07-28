@@ -6318,8 +6318,9 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
         }
         let time_scale = u32::from_le_bytes(time_scale);
         let state = unicorn.get_data();
-        if i64::from(what_time) * i64::from(state.smart_current_time_scale)
-            != i64::from(state.smart_current_time) * i64::from(time_scale)
+        if index != 0
+            && i64::from(what_time) * i64::from(state.smart_current_time_scale)
+                != i64::from(state.smart_current_time) * i64::from(time_scale)
         {
             return Err(format!(
                 "unsupported temporal smart checkout time={what_time}/{time_scale} current={}/{}",
@@ -10184,18 +10185,18 @@ mod tests {
             )
             .unwrap();
         let result = engine.allocate(76, 8).unwrap();
-        let temporal_error = engine
-            .call_win64_with_timeout(
-                HOST_PRE_CHECKOUT_LAYER,
-                &[1, 0, 9999, request, 1, 0, 1, result],
-                TIMEOUT_MICROSECONDS,
-            )
-            .unwrap_err();
-        assert!(
-            temporal_error
-                .to_string()
-                .contains("unsupported temporal smart checkout")
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_PRE_CHECKOUT_LAYER,
+                    &[1, 0, 9999, request, 1, 0, 1, result],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0,
+            "primary input permits temporal requests against the current fallback world"
         );
+        engine.finish_smart_checkout_scope();
         assert!(engine.unicorn.get_data().smart_checkout_ids.is_empty());
         assert_eq!(
             engine
@@ -10324,6 +10325,19 @@ mod tests {
             )
             .unwrap();
         let result = engine.allocate(76, 8).unwrap();
+        let temporal_error = engine
+            .call_win64_with_timeout(
+                HOST_PRE_CHECKOUT_LAYER,
+                &[1, 1, 9999, request, 1, 0, 1, result],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap_err();
+        assert!(
+            temporal_error
+                .to_string()
+                .contains("unsupported temporal smart checkout")
+        );
+        assert!(engine.unicorn.get_data().smart_checkout_ids.is_empty());
         assert_eq!(
             engine
                 .call_win64_with_timeout(

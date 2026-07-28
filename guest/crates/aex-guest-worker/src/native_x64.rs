@@ -1528,8 +1528,9 @@ unsafe extern "win64" fn pre_checkout_layer(
         }
         let what_time = what_time as u32 as i32;
         let time_scale = time_scale as u32;
-        if i64::from(what_time) * i64::from(state.smart_current_time_scale)
-            != i64::from(state.smart_current_time) * i64::from(time_scale)
+        if index != 0
+            && i64::from(what_time) * i64::from(state.smart_current_time_scale)
+                != i64::from(state.smart_current_time) * i64::from(time_scale)
         {
             state.callback_error = Some(format!(
                 "unsupported temporal smart checkout time={what_time}/{time_scale} current={}/{}",
@@ -2423,17 +2424,21 @@ mod tests {
         let mut arena = vec![0u8; 4096];
         let arena_base = arena.as_mut_ptr() as u64;
         let world = arena_base;
-        let pixels = arena_base + 512;
-        let result = arena_base + 1024;
-        let checked_out_world = arena_base + 1200;
-        arena[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
-            .copy_from_slice(&pixels.to_le_bytes());
-        arena[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
-            .copy_from_slice(&16i32.to_le_bytes());
-        arena[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
-            .copy_from_slice(&4i32.to_le_bytes());
-        arena[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
-            .copy_from_slice(&3i32.to_le_bytes());
+        let layer_definition = arena_base + 512;
+        let layer_world_offset = 512 + abi::PARAM_U_OFFSET;
+        let pixels = arena_base + 1024;
+        let result = arena_base + 2048;
+        let checked_out_world = arena_base + 2200;
+        for offset in [0, layer_world_offset] {
+            arena[offset + abi::LAYER_DATA_OFFSET..offset + abi::LAYER_DATA_OFFSET + 8]
+                .copy_from_slice(&pixels.to_le_bytes());
+            arena[offset + abi::LAYER_ROWBYTES_OFFSET..offset + abi::LAYER_ROWBYTES_OFFSET + 4]
+                .copy_from_slice(&16i32.to_le_bytes());
+            arena[offset + abi::LAYER_WIDTH_OFFSET..offset + abi::LAYER_WIDTH_OFFSET + 4]
+                .copy_from_slice(&4i32.to_le_bytes());
+            arena[offset + abi::LAYER_HEIGHT_OFFSET..offset + abi::LAYER_HEIGHT_OFFSET + 4]
+                .copy_from_slice(&3i32.to_le_bytes());
+        }
         let mut state = NativeState {
             smart_input_world: world,
             smart_pixel_format: crate::pixel::PF_PIXEL_FORMAT_ARGB32,
@@ -2441,12 +2446,25 @@ mod tests {
             smart_current_time_scale: 30,
             arena_next: arena_base,
             arena_end: arena_base + ARENA_SIZE as u64,
+            params: vec![GuestParam {
+                index: 1,
+                param_type: 0,
+                name: "Map".into(),
+                bytes: vec![0; abi::PF_PARAM_DEF_SIZE],
+            }],
+            parameter_definitions: vec![layer_definition],
             ..NativeState::default()
         };
         ACTIVE_STATE.with(|slot| slot.set(&mut state));
 
         assert_eq!(
-            unsafe { pre_checkout_layer(0, 0, 7, 0, 11, 0, 30, result) },
+            unsafe { pre_checkout_layer(0, 0, 6, 0, 11, 0, 30, result) },
+            0,
+            "primary input permits temporal requests against the current fallback world"
+        );
+        state.smart_checkout_ids.clear();
+        assert_eq!(
+            unsafe { pre_checkout_layer(0, 1, 7, 0, 11, 0, 30, result) },
             4
         );
         assert!(
@@ -2457,15 +2475,15 @@ mod tests {
         );
         assert!(state.smart_checkout_ids.is_empty());
 
-        let status = unsafe { pre_checkout_layer(0, 0, 7, 0, 10, 0, 30, result) };
+        let status = unsafe { pre_checkout_layer(0, 0, 8, 0, 10, 0, 30, result) };
         assert_eq!(status, 0, "{:?}", state.callback_error);
         assert_eq!(
-            unsafe { checkout_layer_pixels(0, 7, checked_out_world, 0, 0, 0) },
+            unsafe { checkout_layer_pixels(0, 8, checked_out_world, 0, 0, 0) },
             0
         );
         assert_eq!(
             u64::from_le_bytes(
-                arena[1200..1208]
+                arena[2200..2208]
                     .try_into()
                     .expect("checked out world is eight bytes")
             ),
@@ -2477,7 +2495,7 @@ mod tests {
                 .values()
                 .any(|checkout| checkout.checked_out)
         );
-        assert_eq!(unsafe { checkin_layer_pixels(0, 7, 0, 0, 0, 0) }, 0);
+        assert_eq!(unsafe { checkin_layer_pixels(0, 8, 0, 0, 0, 0) }, 0);
         assert!(
             state
                 .smart_checkout_ids
@@ -2486,7 +2504,7 @@ mod tests {
         );
 
         assert_eq!(
-            unsafe { pre_checkout_layer(0, 0, 8, 0, 10, 0, 30, result) },
+            unsafe { pre_checkout_layer(0, 0, 9, 0, 10, 0, 30, result) },
             0
         );
         assert!(

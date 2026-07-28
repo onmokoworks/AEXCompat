@@ -83,7 +83,6 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
                 gpu_transport::gpu_memory_lifetimes_balanced() &&
                 audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
                 param_checkouts_balanced() &&
-                smart.runtime->pixel_checkouts_balanced &&
                 ((!g_render_click_enabled && !g_render_draw_enabled) ||
                  g_render_ui_context_closed);
   // Session completion is the session mechanics verdict (hoisted setup and

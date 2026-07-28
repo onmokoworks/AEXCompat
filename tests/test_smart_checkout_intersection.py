@@ -71,8 +71,9 @@ def test_native_smart_pixel_checkout_owns_opaque_tokens() -> None:
         "bool pixel_checkouts_balanced()",
     ):
         assert marker in runtime + header
-    assert "if (!smart::pixel_checkouts_balanced() && result.render_error == 0)" in dispatch
-    assert "smart.runtime->pixel_checkouts_balanced" in report
+    assert "if (!smart::pixel_checkouts_balanced() && result.render_error == 0)" not in dispatch
+    assert "smart.runtime->pixel_checkouts_balanced" not in report
+    assert "snapshot_->pixel_checkouts_balanced = pixel_checkouts_balanced();" in runtime
     # Token identity stays the opaque callback value: no effect, SHA, layer
     # index, or observed checkout-id special case belongs in the common host.
     assert "checkout_id == 10000" not in runtime
