@@ -660,7 +660,17 @@ fn trace_instruction(
         }
     }
     if mnemonic == Mnemonic::Call {
-        let target = resolve_runtime_target(unicorn, &instruction);
+        let instruction_bytes = bytes_to_hex(&bytes[..instruction.len().min(bytes.len())]);
+        let runtime_target = capture_runtime_target(
+            unicorn,
+            &instruction,
+            address,
+            instruction_bytes.clone(),
+            image_base,
+            image_end,
+        );
+        let target = runtime_target.effective_target;
+        unicorn.get_data_mut().latest_runtime_target = Some(runtime_target);
         let target_rva = (image_base..image_end)
             .contains(&target.unwrap_or(0))
             .then(|| target.expect("range-checked target") - image_base);
@@ -712,9 +722,7 @@ fn trace_instruction(
                             "indirect"
                         },
                     ),
-                    instruction_bytes: Some(bytes_to_hex(
-                        &bytes[..instruction.len().min(bytes.len())],
-                    )),
+                    instruction_bytes: Some(instruction_bytes),
                 },
             );
             capture.return_stack.push(return_address);
@@ -753,7 +761,16 @@ fn trace_instruction(
             capture.watch_stack.push(pending);
         }
     } else if mnemonic == Mnemonic::Jmp {
-        let target = resolve_runtime_target(unicorn, &instruction);
+        let instruction_bytes = bytes_to_hex(&bytes[..instruction.len().min(bytes.len())]);
+        let runtime_target = capture_runtime_target(
+            unicorn,
+            &instruction,
+            address,
+            instruction_bytes.clone(),
+            image_base,
+            image_end,
+        );
+        let target = runtime_target.effective_target;
         let target_rva = target
             .filter(|target| (image_base..image_end).contains(target))
             .map(|target| target - image_base);
@@ -770,6 +787,9 @@ fn trace_instruction(
                             .any(|spec| spec.function_rva == Some(rva))
                 })
             });
+        let mut runtime_target = runtime_target;
+        runtime_target.transfer_kind = if is_tail_target { "tail_call" } else { "jump" };
+        unicorn.get_data_mut().latest_runtime_target = Some(runtime_target);
         let matching_watches = unicorn
             .get_data_mut()
             .trace
@@ -802,9 +822,7 @@ fn trace_instruction(
                     return_value: None,
                     exemplars: TraceExemplars::default(),
                     call_kind: Some("runtime_jmp"),
-                    instruction_bytes: Some(bytes_to_hex(
-                        &bytes[..instruction.len().min(bytes.len())],
-                    )),
+                    instruction_bytes: Some(instruction_bytes),
                 },
             );
             if let Some(target_rva) = target_rva
@@ -1217,29 +1235,198 @@ fn append_trace_witnesses(
     }
 }
 
-fn resolve_runtime_target(
+#[derive(Clone, Debug)]
+struct RuntimeTargetResolution {
+    target: Option<u64>,
+    operand_kind: &'static str,
+    register: Option<TraceTargetRegister>,
+    memory: Option<TraceTargetMemory>,
+}
+
+fn iced_register_name(register: Register) -> String {
+    format!("{register:?}").to_ascii_lowercase()
+}
+
+fn resolve_runtime_target_provenance(
     unicorn: &Unicorn<'_, GuestState>,
     instruction: &iced_x86::Instruction,
-) -> Option<u64> {
+) -> RuntimeTargetResolution {
     match instruction.op0_kind() {
         OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
-            Some(instruction.near_branch_target())
+            RuntimeTargetResolution {
+                target: Some(instruction.near_branch_target()),
+                operand_kind: "direct",
+                register: None,
+                memory: None,
+            }
         }
-        OpKind::Register => read_iced_register(unicorn, instruction.op0_register()),
+        OpKind::Register => {
+            let register = instruction.op0_register();
+            let value = read_iced_register(unicorn, register);
+            RuntimeTargetResolution {
+                target: value,
+                operand_kind: "register",
+                register: value.map(|value| TraceTargetRegister {
+                    name: iced_register_name(register),
+                    value,
+                }),
+                memory: None,
+            }
+        }
         OpKind::Memory => {
+            let base_register = instruction.memory_base();
+            let index_register = instruction.memory_index();
+            let base_value = read_iced_register(unicorn, base_register);
+            let index_value = read_iced_register(unicorn, index_register);
             let address = if instruction.is_ip_rel_memory_operand() {
-                instruction.ip_rel_memory_address()
+                Some(instruction.ip_rel_memory_address())
             } else {
-                let base = read_iced_register(unicorn, instruction.memory_base()).unwrap_or(0);
-                let index = read_iced_register(unicorn, instruction.memory_index()).unwrap_or(0);
-                base.wrapping_add(index.wrapping_mul(instruction.memory_index_scale() as u64))
-                    .wrapping_add(instruction.memory_displacement64())
+                base_value.zip(index_value).map(|(base, index)| {
+                    base.wrapping_add(index.wrapping_mul(instruction.memory_index_scale() as u64))
+                        .wrapping_add(instruction.memory_displacement64())
+                })
             };
             let mut bytes = [0u8; 8];
-            unicorn.mem_read(address, &mut bytes).ok()?;
-            Some(u64::from_le_bytes(bytes))
+            let target = address.and_then(|address| {
+                unicorn
+                    .mem_read(address, &mut bytes)
+                    .ok()
+                    .map(|()| u64::from_le_bytes(bytes))
+            });
+            RuntimeTargetResolution {
+                target,
+                operand_kind: "memory",
+                register: None,
+                memory: Some(TraceTargetMemory {
+                    address,
+                    base_register: (base_register != Register::None)
+                        .then(|| iced_register_name(base_register)),
+                    base_value,
+                    index_register: (index_register != Register::None)
+                        .then(|| iced_register_name(index_register)),
+                    index_value,
+                    scale: instruction.memory_index_scale() as u32,
+                    displacement: instruction.memory_displacement64(),
+                    dereferenced_target: target,
+                }),
+            }
         }
-        _ => None,
+        _ => RuntimeTargetResolution {
+            target: None,
+            operand_kind: "unsupported",
+            register: None,
+            memory: None,
+        },
+    }
+}
+
+fn is_suite_address(address: u64) -> bool {
+    (HOST_AEGP_UTILITY_TABLES..HOST_AEGP_UTILITY_TABLES + 0x400).contains(&address)
+        || (HOST_AEGP_UNSUPPORTED_STUBS..HOST_AEGP_UNSUPPORTED_STUBS + 0x4000).contains(&address)
+        || (HOST_ITERATE8_UNSUPPORTED_STUBS..HOST_ITERATE8_UNSUPPORTED_STUBS + 0x1000)
+            .contains(&address)
+        || [
+            HOST_HANDLE_SUITE,
+            HOST_ITERATE8_SUITE,
+            HOST_COLOR_PARAM_SUITE,
+            HOST_POINT_PARAM_SUITE,
+            HOST_AEGP_MEMORY_SUITE,
+            HOST_WORLD_SUITE,
+            HOST_PF_ANSI_SUITE_V2,
+        ]
+        .into_iter()
+        .any(|start| (start..start + 0x100).contains(&address))
+}
+
+fn classify_runtime_target(
+    unicorn: &Unicorn<'_, GuestState>,
+    target: Option<u64>,
+) -> TraceTargetClassification {
+    let Some(target) = target else {
+        return TraceTargetClassification {
+            kind: "unresolved",
+            name: None,
+        };
+    };
+    if target == 0 {
+        return TraceTargetClassification {
+            kind: "null",
+            name: None,
+        };
+    }
+    if let Some(label) = unicorn.get_data().trace_labels.get(&target) {
+        return TraceTargetClassification {
+            kind: match label.kind {
+                TraceLabelKind::Import => "import",
+                TraceLabelKind::HostCallback => "callback",
+            },
+            name: Some(label.name.clone()),
+        };
+    }
+    if is_suite_address(target) {
+        return TraceTargetClassification {
+            kind: "suite",
+            name: None,
+        };
+    }
+    if unicorn
+        .get_data()
+        .image_executable_ranges
+        .iter()
+        .any(|(start, end)| (*start..*end).contains(&target))
+    {
+        return TraceTargetClassification {
+            kind: "image_executable",
+            name: None,
+        };
+    }
+    if unicorn
+        .get_data()
+        .image_region
+        .is_some_and(|(start, end)| (start..end).contains(&target))
+    {
+        return TraceTargetClassification {
+            kind: "image_nonexec",
+            name: None,
+        };
+    }
+    let mut byte = [0u8; 1];
+    TraceTargetClassification {
+        kind: if unicorn.mem_read(target, &mut byte).is_ok() {
+            "other_mapped"
+        } else {
+            "unmapped"
+        },
+        name: None,
+    }
+}
+
+fn capture_runtime_target(
+    unicorn: &Unicorn<'_, GuestState>,
+    instruction: &iced_x86::Instruction,
+    source_address: u64,
+    instruction_bytes: String,
+    image_base: u64,
+    image_end: u64,
+) -> TraceRuntimeTarget {
+    let resolution = resolve_runtime_target_provenance(unicorn, instruction);
+    let classification = classify_runtime_target(unicorn, resolution.target);
+    TraceRuntimeTarget {
+        source_address,
+        source_rva: (image_base..image_end)
+            .contains(&source_address)
+            .then(|| source_address - image_base),
+        transfer_kind: match instruction.mnemonic() {
+            Mnemonic::Call => "call",
+            Mnemonic::Jmp => "tail_call",
+            _ => "branch",
+        },
+        operand_kind: resolution.operand_kind,
+        instruction_bytes,
+        effective_target: resolution.target,
+        target: classification,
+        register: resolution.register,
+        memory: resolution.memory,
     }
 }
 
@@ -2086,6 +2273,8 @@ struct GuestState {
     next_handle_data: u64,
     next_pf_handle_data: u64,
     image_region: Option<(u64, u64)>,
+    image_executable_ranges: Vec<(u64, u64)>,
+    latest_runtime_target: Option<TraceRuntimeTarget>,
     handles: HashMap<u64, GuestHandle>,
     worlds: HashMap<u64, GuestWorld>,
     aegp_memory_handles: HashMap<u64, AegpMemoryHandle>,
@@ -2391,6 +2580,54 @@ pub struct TraceCrashFrame {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct TraceTargetClassification {
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceTargetRegister {
+    pub name: String,
+    pub value: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceTargetMemory {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_register: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_value: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_register: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_value: Option<u64>,
+    pub scale: u32,
+    pub displacement: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dereferenced_target: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TraceRuntimeTarget {
+    pub source_address: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_rva: Option<u64>,
+    pub transfer_kind: &'static str,
+    pub operand_kind: &'static str,
+    pub instruction_bytes: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_target: Option<u64>,
+    pub target: TraceTargetClassification,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub register: Option<TraceTargetRegister>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<TraceTargetMemory>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct TraceCrashSnapshot {
     pub reason: String,
     pub registers: BTreeMap<String, u64>,
@@ -2400,6 +2637,8 @@ pub struct TraceCrashSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_rva: Option<u64>,
     pub instruction_bytes: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_target: Option<TraceRuntimeTarget>,
     pub handle_allocations: Vec<u64>,
     pub handle_allocation_failures: Vec<String>,
     pub live_handle_count: usize,
@@ -2655,6 +2894,18 @@ impl GuestEngine<'static> {
                 .checked_add(image_size)
                 .ok_or(GuestError::DataCapacity)?,
         ));
+        unicorn.get_data_mut().image_executable_ranges = image
+            .section_protections()
+            .iter()
+            .filter(|section| section.executable)
+            .filter_map(|section| {
+                let start = image
+                    .image_base()
+                    .checked_add(section.virtual_address as u64)?;
+                let end = start.checked_add(section.virtual_size as u64)?;
+                Some((start, end))
+            })
+            .collect();
         if image.image_base() % PAGE_SIZE != 0 || image_size % PAGE_SIZE != 0 {
             return Err(GuestError::ImageAlignment);
         }
@@ -3988,6 +4239,7 @@ impl GuestEngine<'static> {
         }
         self.unicorn.get_data_mut().avx_fallback_instructions = 0;
         self.unicorn.get_data_mut().avx_defined_ymm = [false; 16];
+        self.unicorn.get_data_mut().latest_runtime_target = None;
         let stack_top = STACK_BASE + STACK_SIZE;
         // Win64 function entry observes RSP % 16 == 8. Reserve a return
         // address, 32-byte shadow space, bounded stack arguments, and scratch.
@@ -4124,6 +4376,7 @@ impl GuestEngine<'static> {
                 .contains(&rip)
                 .then(|| rip - self.image_base),
             instruction_bytes,
+            runtime_target: self.unicorn.get_data().latest_runtime_target.clone(),
             handle_allocations: self.unicorn.get_data().handle_allocations.clone(),
             handle_allocation_failures: self.unicorn.get_data().handle_allocation_failures.clone(),
             live_handle_count: self.unicorn.get_data().handles.len(),
@@ -7952,6 +8205,7 @@ mod tests {
                 next_handle_data: HANDLE_DATA_BASE,
                 next_aegp_memory_handle: AEGP_MEMORY_HANDLE_BASE,
                 image_region: Some((CODE, CODE + PAGE_SIZE)),
+                image_executable_ranges: vec![(CODE, CODE + code.len() as u64)],
                 ..GuestState::default()
             },
         )
@@ -11816,6 +12070,111 @@ mod tests {
         assert_eq!(snapshot.xmm_registers.len(), 16);
         assert_eq!(snapshot.instruction_rva, Some(0));
         assert!(!snapshot.instruction_bytes.is_empty());
+    }
+
+    #[test]
+    fn crash_snapshot_captures_null_register_call_provenance() {
+        const CODE: u64 = 0x1000_0000;
+        // xor eax,eax; call rax; ret
+        let mut engine = test_engine(&[0x31, 0xc0, 0xff, 0xd0, 0xc3]);
+        engine.begin_execution_trace("RENDER", CODE).unwrap();
+        let error = engine.call_win64(CODE, [0; 6]).unwrap_err();
+        let GuestError::ExecutionCrash { snapshot, .. } = error else {
+            panic!("expected structured crash snapshot");
+        };
+        let target = snapshot.runtime_target.expect("runtime target provenance");
+        assert_eq!(target.source_rva, Some(2));
+        assert_eq!(target.transfer_kind, "call");
+        assert_eq!(target.operand_kind, "register");
+        assert_eq!(target.effective_target, Some(0));
+        assert_eq!(target.target.kind, "null");
+        let register = target.register.expect("register provenance");
+        assert_eq!(register.name, "rax");
+        assert_eq!(register.value, 0);
+        assert!(target.memory.is_none());
+    }
+
+    #[test]
+    fn crash_snapshot_captures_memory_indirect_nonexec_target_provenance() {
+        const CODE: u64 = 0x1000_0000;
+        // call qword ptr [rip+2]; ret; pad; qword target
+        let mut code = vec![0xff, 0x15, 0x02, 0, 0, 0, 0xc3, 0x90];
+        code.extend_from_slice(&DATA_BASE.to_le_bytes());
+        let mut engine = test_engine(&code);
+        engine.begin_execution_trace("RENDER", CODE).unwrap();
+        let error = engine.call_win64(CODE, [0; 6]).unwrap_err();
+        let GuestError::ExecutionCrash { snapshot, .. } = error else {
+            panic!("expected structured crash snapshot");
+        };
+        let target = snapshot.runtime_target.expect("runtime target provenance");
+        assert_eq!(target.source_rva, Some(0));
+        assert_eq!(target.operand_kind, "memory");
+        assert_eq!(target.effective_target, Some(DATA_BASE));
+        assert_eq!(target.target.kind, "other_mapped");
+        let memory = target.memory.expect("memory provenance");
+        assert_eq!(memory.address, Some(CODE + 8));
+        assert_eq!(memory.base_register.as_deref(), Some("rip"));
+        assert_eq!(memory.dereferenced_target, Some(DATA_BASE));
+    }
+
+    #[test]
+    fn crash_snapshot_marks_external_register_jump_as_tail_call() {
+        const CODE: u64 = 0x1000_0000;
+        // xor eax,eax; jmp rax
+        let mut engine = test_engine(&[0x31, 0xc0, 0xff, 0xe0]);
+        engine.begin_execution_trace("RENDER", CODE).unwrap();
+        let error = engine.call_win64(CODE, [0; 6]).unwrap_err();
+        let GuestError::ExecutionCrash { snapshot, .. } = error else {
+            panic!("expected structured crash snapshot");
+        };
+        let target = snapshot.runtime_target.expect("runtime target provenance");
+        assert_eq!(target.source_rva, Some(2));
+        assert_eq!(target.transfer_kind, "tail_call");
+        assert_eq!(target.operand_kind, "register");
+        assert_eq!(target.target.kind, "null");
+    }
+
+    #[test]
+    fn runtime_target_classification_distinguishes_image_permissions_and_labels() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            classify_runtime_target(&engine.unicorn, Some(CODE)).kind,
+            "image_executable"
+        );
+        assert_eq!(
+            classify_runtime_target(&engine.unicorn, Some(CODE + 0x100)).kind,
+            "image_nonexec"
+        );
+        engine.unicorn.get_data_mut().trace_labels.insert(
+            STUB_BASE,
+            TraceLabel {
+                kind: TraceLabelKind::Import,
+                name: "fixture!entry".into(),
+            },
+        );
+        let import = classify_runtime_target(&engine.unicorn, Some(STUB_BASE));
+        assert_eq!(import.kind, "import");
+        assert_eq!(import.name.as_deref(), Some("fixture!entry"));
+        engine.unicorn.get_data_mut().trace_labels.insert(
+            HOST_NOOP,
+            TraceLabel {
+                kind: TraceLabelKind::HostCallback,
+                name: "noop".into(),
+            },
+        );
+        assert_eq!(
+            classify_runtime_target(&engine.unicorn, Some(HOST_NOOP)).kind,
+            "callback"
+        );
+        assert_eq!(
+            classify_runtime_target(&engine.unicorn, Some(HOST_AEGP_UTILITY_TABLES)).kind,
+            "suite"
+        );
+        assert_eq!(
+            classify_runtime_target(&engine.unicorn, Some(0xdead_beef)).kind,
+            "unmapped"
+        );
     }
 
     #[test]
