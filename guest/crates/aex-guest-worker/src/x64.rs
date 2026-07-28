@@ -5255,14 +5255,26 @@ fn cpp_object_return_import(symbol: &str) -> bool {
     let Some((_, signature)) = symbol.split_once("@@") else {
         return false;
     };
-    ["?AV", "?AU"].iter().any(|marker| {
-        signature.find(marker).is_some_and(|return_offset| {
-            return_offset != 0
-                && signature[..return_offset]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_uppercase())
-        })
-    })
+    let Some(return_offset) = signature.find('?') else {
+        return false;
+    };
+    if return_offset == 0
+        || !signature[..return_offset]
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase())
+    {
+        return false;
+    }
+    let mut return_type = signature[return_offset + 1..].bytes();
+    let mut qualifiers = 0usize;
+    for byte in return_type.by_ref() {
+        if matches!(byte, b'A'..=b'D') {
+            qualifiers += 1;
+            continue;
+        }
+        return qualifiers != 0 && matches!(byte, b'T' | b'U' | b'V');
+    }
+    false
 }
 
 fn install_unsupported_import_trap(
@@ -10905,11 +10917,32 @@ mod tests {
         assert!(cpp_object_return_import(
             "?FormatErrorMessage@dva_exception@config@dvacore@@MEBA?AV?$basic_string@EU?$char_traits@E@std@@@Z"
         ));
+        assert!(cpp_object_return_import(
+            "?GetUnion@Thing@@QEBA?ATPayload@@XZ"
+        ));
+        assert!(cpp_object_return_import(
+            "?GetConstClass@Thing@@QEBA?BVPayload@@XZ"
+        ));
+        assert!(cpp_object_return_import(
+            "?GetVolatileStruct@Thing@@QEBA?CUPoint@@XZ"
+        ));
+        assert!(cpp_object_return_import(
+            "?GetConstVolatileUnion@Thing@@QEBA?DTPayload@@XZ"
+        ));
+        assert!(cpp_object_return_import(
+            "?GetQualifiedClass@Thing@@QEBA?ABVPayload@@XZ"
+        ));
         assert!(!cpp_object_return_import(
             "??0dva_exception@config@dvacore@@QEAA@PEBDH@Z"
         ));
         assert!(!cpp_object_return_import(
             "?GetValue@Thing@@QEBAHAEBVOther@@@Z"
+        ));
+        assert!(!cpp_object_return_import(
+            "?GetValue@Thing@@QEBAHV?$vector@VPayload@@V?$allocator@VPayload@@@std@@@std@@XZ"
+        ));
+        assert!(!cpp_object_return_import(
+            "?GetInvalidTag@Thing@@QEBA?AEPayload@@XZ"
         ));
         assert!(!cpp_object_return_import("GetLastError"));
     }
