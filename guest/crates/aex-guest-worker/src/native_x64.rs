@@ -729,6 +729,10 @@ impl GuestEngine<'static> {
     pub fn checkin_param_callback_address(&self) -> u64 {
         callback_address!(noop_import)
     }
+    pub fn configure_render_pixel_format(&mut self, _: i32) {
+        // Native classic worlds carry enough row-byte information for
+        // native_world_pixel_format() to recover ARGB8/16/32F directly.
+    }
     // The extended Inter callbacks are implemented only by the Unicorn
     // backend in this issue. Keep the native carrier buildable without
     // advertising silent success at an unimplemented callback boundary.
