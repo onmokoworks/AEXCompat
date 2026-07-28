@@ -2200,4 +2200,3 @@ fn emulate_get_world_pixel_format(unicorn: &mut Unicorn<'_, GuestState>, _: u64,
     };
     let _ = unicorn.reg_write(RegisterX86::RAX, result);
 }
-

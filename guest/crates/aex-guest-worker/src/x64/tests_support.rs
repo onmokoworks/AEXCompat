@@ -2672,4 +2672,3 @@
         engine.read(destination_pixels, &mut output).unwrap();
         assert_eq!(output.as_slice(), pixels);
     }
-

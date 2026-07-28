@@ -87,4 +87,3 @@ fn coalesce_census_extents(
     extents.sort_by_key(|extent| std::cmp::Reverse(extent.dynamic_instructions));
     extents
 }
-

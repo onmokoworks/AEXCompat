@@ -2127,4 +2127,3 @@ fn emulate_checkout_output(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
     })();
     finish_callback(unicorn, result);
 }
-
