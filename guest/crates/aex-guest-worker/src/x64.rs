@@ -203,6 +203,15 @@ pub enum GuestError {
     AvxStateCapacity,
     #[error("guest callback failed: {0}")]
     Callback(String),
+    #[error(
+        "guest selector aborted with {error} after unsupported suite {suite_name} v{suite_version} (acquire error {acquire_error})"
+    )]
+    SelectorAbort {
+        error: i32,
+        suite_name: String,
+        suite_version: u64,
+        acquire_error: i32,
+    },
     #[error("DLL process attach returned FALSE")]
     DllProcessAttach,
     #[error("guest execution failed: {reason}; crash_snapshot={snapshot_json}")]
@@ -221,6 +230,7 @@ impl GuestError {
             Self::StubCapacity | Self::IatRange => "import",
             Self::DataCapacity => "memory",
             Self::Callback(_) => "callback",
+            Self::SelectorAbort { .. } => "selector",
             Self::DllProcessAttach => "dllmain",
             Self::ExecutionCrash { .. } => "crash",
         }
@@ -2278,6 +2288,9 @@ struct GuestState {
     suite_requests: Vec<String>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
+    selector_dispatch_active: bool,
+    pending_unsupported_suite: Option<PendingUnsupportedSuite>,
+    selector_abort: Option<SelectorAbortRecord>,
     pre_checkout_calls: u32,
     pre_checkout_requests: Vec<[i32; 4]>,
     smart_checkout_ids: HashMap<i32, SmartCheckout>,
@@ -2313,6 +2326,19 @@ struct GuestState {
     extended_string_table_valid: bool,
     avx_fallback_instructions: u64,
     avx_defined_ymm: [bool; 16],
+}
+
+#[derive(Clone, Debug)]
+struct PendingUnsupportedSuite {
+    name: String,
+    version: u64,
+    acquire_error: i32,
+}
+
+#[derive(Clone, Debug)]
+struct SelectorAbortRecord {
+    error: i32,
+    suite: PendingUnsupportedSuite,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3055,6 +3081,15 @@ impl GuestEngine<'static> {
                             "install CRT memory-copy import",
                             unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                                 emulate_crt_memory_copy(unicorn);
+                            }),
+                        )?;
+                    }
+                    "_CxxThrowException" => {
+                        uc("write C++ throw trap", unicorn.mem_write(stub, &[0xc3]))?;
+                        uc(
+                            "install C++ throw trap",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_cxx_throw_exception(unicorn);
                             }),
                         )?;
                     }
@@ -4295,6 +4330,23 @@ impl GuestEngine<'static> {
         self.call_win64_with_timeout(address, &args, TIMEOUT_MICROSECONDS)
     }
 
+    pub fn call_selector_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
+        {
+            let state = self.unicorn.get_data_mut();
+            state.selector_dispatch_active = true;
+            state.pending_unsupported_suite = None;
+            state.selector_abort = None;
+        }
+        let result = self.call_win64_with_timeout(address, &args, TIMEOUT_MICROSECONDS);
+        {
+            let state = self.unicorn.get_data_mut();
+            state.selector_dispatch_active = false;
+            state.pending_unsupported_suite = None;
+            state.selector_abort = None;
+        }
+        result
+    }
+
     fn call_win64_with_timeout(
         &mut self,
         address: u64,
@@ -4344,6 +4396,14 @@ impl GuestEngine<'static> {
             MAX_INSTRUCTIONS,
         ) {
             return Err(self.execution_crash(format!("emulation error: {error}")));
+        }
+        if let Some(abort) = self.unicorn.get_data_mut().selector_abort.take() {
+            return Err(GuestError::SelectorAbort {
+                error: abort.error,
+                suite_name: abort.suite.name,
+                suite_version: abort.suite.version,
+                acquire_error: abort.suite.acquire_error,
+            });
         }
         let rip = uc(
             "read instruction pointer",
@@ -7747,6 +7807,39 @@ fn install_pf_ansi_suite_v2(unicorn: &mut Unicorn<'static, GuestState>) -> Resul
     Ok(())
 }
 
+fn finish_acquire_suite_success(unicorn: &mut Unicorn<'_, GuestState>) {
+    unicorn.get_data_mut().pending_unsupported_suite = None;
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+}
+
+fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
+    if !unicorn.get_data().selector_dispatch_active
+        || unicorn.get_data().pending_unsupported_suite.is_none()
+    {
+        return;
+    }
+    let exception = match unicorn.reg_read(RegisterX86::RCX) {
+        Ok(exception) if exception != 0 => exception,
+        _ => return,
+    };
+    let mut bytes = [0u8; 4];
+    if unicorn.mem_read(exception, &mut bytes).is_err() {
+        return;
+    }
+    let error = i32::from_le_bytes(bytes);
+    // PF_Err is an A_long. Keep this trap deliberately narrower than the
+    // language exception ABI: only a small, positive host error thrown after
+    // an unsupported AcquireSuite is a selector-level abort.
+    if !(1..=0x7fff).contains(&error) {
+        return;
+    }
+    let Some(suite) = unicorn.get_data_mut().pending_unsupported_suite.take() else {
+        return;
+    };
+    unicorn.get_data_mut().selector_abort = Some(SelectorAbortRecord { error, suite });
+    let _ = unicorn.emu_stop();
+}
+
 fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let name_pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let version = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
@@ -7776,7 +7869,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_HANDLE_SUITE.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "AEGP Memory Suite"
@@ -7786,7 +7879,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_AEGP_MEMORY_SUITE.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "PF World Suite"
@@ -7796,7 +7889,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_WORLD_SUITE.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "PF ANSI Suite"
@@ -7806,7 +7899,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_PF_ANSI_SUITE_V2.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "PF Iterate8 Suite"
@@ -7814,7 +7907,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         && let Some(table) = iterate8_suite_table_address(version)
         && unicorn.mem_write(output, &table.to_le_bytes()).is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "PF ColorParamSuite"
@@ -7824,7 +7917,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_COLOR_PARAM_SUITE.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "PF PointParamSuite"
@@ -7834,7 +7927,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_POINT_PARAM_SUITE.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "AEGP Utility Suite"
@@ -7844,8 +7937,15 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .and_then(utility_suite_table_address)
         && unicorn.mem_write(output, &table.to_le_bytes()).is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
+    }
+    if unicorn.get_data().selector_dispatch_active {
+        unicorn.get_data_mut().pending_unsupported_suite = Some(PendingUnsupportedSuite {
+            name: name.into_owned(),
+            version,
+            acquire_error: -1,
+        });
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
 }
@@ -9005,6 +9105,8 @@ fn coalesce_census_extents(
 mod tests {
     use super::*;
 
+    const TEST_CXX_THROW: u64 = STUB_BASE + 0x80460;
+
     fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         const CODE: u64 = 0x1000_0000;
         let mut unicorn = Unicorn::new_with_data(
@@ -9332,6 +9434,51 @@ mod tests {
                 symbols: vec!["fixture_entry".into()],
             }],
         }
+    }
+
+    fn install_test_cxx_throw(engine: &mut GuestEngine<'static>) {
+        engine.unicorn.mem_write(TEST_CXX_THROW, &[0xc3]).unwrap();
+        engine
+            .unicorn
+            .add_code_hook(TEST_CXX_THROW, TEST_CXX_THROW, |unicorn, _, _| {
+                emulate_cxx_throw_exception(unicorn);
+            })
+            .unwrap();
+    }
+
+    fn push_mov_imm64(code: &mut Vec<u8>, register_opcode: [u8; 2], value: u64) {
+        code.extend_from_slice(&register_opcode);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn selector_throw_fixture(
+        include_unsupported_acquire: bool,
+        throw_error_pointer: u64,
+    ) -> Vec<u8> {
+        let mut code = Vec::new();
+        if include_unsupported_acquire {
+            push_mov_imm64(&mut code, [0x48, 0xb9], DATA_BASE + 0x100); // mov rcx, suite name
+            code.extend_from_slice(&[0xba, 1, 0, 0, 0]); // mov edx, 1
+            push_mov_imm64(&mut code, [0x49, 0xb8], DATA_BASE + 0x200); // mov r8, output
+            push_mov_imm64(&mut code, [0x48, 0xb8], HOST_ACQUIRE_SUITE); // mov rax, callback
+            code.extend_from_slice(&[0xff, 0xd0]); // call rax
+        }
+        push_mov_imm64(&mut code, [0x48, 0xb9], throw_error_pointer); // mov rcx, exception object
+        code.extend_from_slice(&[0x31, 0xd2]); // xor edx, edx
+        push_mov_imm64(&mut code, [0x48, 0xb8], TEST_CXX_THROW); // mov rax, callback
+        code.extend_from_slice(&[0xff, 0xd0]); // call rax
+        code.extend_from_slice(&[0xb8, 77, 0, 0, 0, 0xc3]); // fallback: mov eax, 77; ret
+        code
+    }
+
+    fn unsupported_acquire_fallback_fixture() -> Vec<u8> {
+        let mut code = Vec::new();
+        push_mov_imm64(&mut code, [0x48, 0xb9], DATA_BASE + 0x100);
+        code.extend_from_slice(&[0xba, 1, 0, 0, 0]);
+        push_mov_imm64(&mut code, [0x49, 0xb8], DATA_BASE + 0x200);
+        push_mov_imm64(&mut code, [0x48, 0xb8], HOST_ACQUIRE_SUITE);
+        code.extend_from_slice(&[0xff, 0xd0, 0x31, 0xc0, 0xc3]);
+        code
     }
 
     #[test]
@@ -10070,6 +10217,71 @@ mod tests {
         // mov rax, rcx; add rax, rdx; ret
         let mut engine = test_engine(&[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3]);
         assert_eq!(engine.call_win64(CODE, [40, 2, 0, 0, 0, 0]).unwrap(), 42);
+    }
+
+    #[test]
+    fn selector_call_converts_unsupported_suite_cxx_throw_to_selector_abort() {
+        const CODE: u64 = 0x1000_0000;
+        let error_pointer = DATA_BASE + 0x300;
+        let code = selector_throw_fixture(true, error_pointer);
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+        engine
+            .write(DATA_BASE + 0x100, b"FLT Blur Suite\0")
+            .unwrap();
+        engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
+
+        let error = engine.call_selector_win64(CODE, [0; 6]).unwrap_err();
+        match error {
+            GuestError::SelectorAbort {
+                error,
+                suite_name,
+                suite_version,
+                acquire_error,
+            } => {
+                assert_eq!(error, 13);
+                assert_eq!(suite_name, "FLT Blur Suite");
+                assert_eq!(suite_version, 1);
+                assert_eq!(acquire_error, -1);
+            }
+            other => panic!("expected selector abort, got {other:?}"),
+        }
+        assert_eq!(engine.suite_requests(), ["FLT Blur Suite v1"]);
+    }
+
+    #[test]
+    fn unsupported_suite_without_throw_falls_back_and_does_not_leak_to_next_selector() {
+        const CODE: u64 = 0x1000_0000;
+        let error_pointer = DATA_BASE + 0x300;
+        let code = unsupported_acquire_fallback_fixture();
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+        engine
+            .write(DATA_BASE + 0x100, b"Optional Missing Suite\0")
+            .unwrap();
+        engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
+        assert_eq!(engine.call_selector_win64(CODE, [0; 6]).unwrap(), 0);
+
+        let code = selector_throw_fixture(false, error_pointer);
+        let second_selector = CODE + 0x100;
+        engine.write(second_selector, &code).unwrap();
+        engine.unicorn.get_data_mut().image_executable_ranges =
+            vec![(second_selector, second_selector + code.len() as u64)];
+        assert_eq!(
+            engine.call_selector_win64(second_selector, [0; 6]).unwrap(),
+            77
+        );
+    }
+
+    #[test]
+    fn cxx_throw_without_pending_suite_or_readable_error_uses_normal_fallback() {
+        const CODE: u64 = 0x1000_0000;
+        let code = selector_throw_fixture(false, 0xdead_beef);
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+
+        assert_eq!(engine.call_selector_win64(CODE, [0; 6]).unwrap(), 77);
+        assert_eq!(engine.call_win64(CODE, [0; 6]).unwrap(), 77);
     }
 
     #[test]

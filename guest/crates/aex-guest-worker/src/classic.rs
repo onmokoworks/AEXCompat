@@ -455,10 +455,7 @@ impl ClassicHost {
         }
         let global_setup_error =
             self.invoke(CMD_GLOBAL_SETUP)
-                .map_err(|source| ClassicError::SelectorGuest {
-                    selector: "GLOBAL_SETUP",
-                    source,
-                })? as i32;
+                .map_err(|source| selector_guest_error("GLOBAL_SETUP", source))? as i32;
         if global_setup_error != 0 {
             return Err(ClassicError::Selector {
                 selector: "GLOBAL_SETUP",
@@ -475,10 +472,7 @@ impl ClassicHost {
         self.engine.write(self.input, &input)?;
         let params_setup_error =
             self.invoke(CMD_PARAMS_SETUP)
-                .map_err(|source| ClassicError::SelectorGuest {
-                    selector: "PARAMS_SETUP",
-                    source,
-                })? as i32;
+                .map_err(|source| selector_guest_error("PARAMS_SETUP", source))? as i32;
         if params_setup_error != 0 {
             return Err(ClassicError::Selector {
                 selector: "PARAMS_SETUP",
@@ -567,7 +561,7 @@ impl ClassicHost {
                 Ok(result) => result as i32,
                 Err(error) => {
                     let _ = self.end_global();
-                    return Err(error.into());
+                    return Err(selector_guest_error("SEQUENCE_SETUP", error));
                 }
             };
             if result != 0 {
@@ -827,7 +821,10 @@ impl ClassicHost {
         let selector = match selector_name {
             "GLOBAL_SETUP" => CMD_GLOBAL_SETUP,
             "PARAMS_SETUP" => {
-                let error = self.invoke(CMD_GLOBAL_SETUP)? as i32;
+                let error = self
+                    .invoke(CMD_GLOBAL_SETUP)
+                    .map_err(|source| selector_guest_error("GLOBAL_SETUP", source))?
+                    as i32;
                 if error != 0 {
                     return Err(ClassicError::Selector {
                         selector: "GLOBAL_SETUP",
@@ -852,7 +849,14 @@ impl ClassicHost {
         self.engine
             .begin_execution_trace(selector_name, self.entry)?;
         let before = self.trace_state_snapshot()?;
-        let return_value = self.invoke(selector)?;
+        let selector_label = match selector {
+            CMD_GLOBAL_SETUP => "GLOBAL_SETUP",
+            CMD_PARAMS_SETUP => "PARAMS_SETUP",
+            _ => unreachable!("validated setup trace selector"),
+        };
+        let return_value = self
+            .invoke(selector)
+            .map_err(|source| selector_guest_error(selector_label, source))?;
         let after = self.trace_state_snapshot()?;
         let mut trace = self
             .engine
@@ -1548,7 +1552,7 @@ impl ClassicHost {
 
     fn invoke(&mut self, selector: u64) -> Result<u64, GuestError> {
         self.engine
-            .call_win64(self.entry, [selector, self.input, self.output, 0, 0, 0])
+            .call_selector_win64(self.entry, [selector, self.input, self.output, 0, 0, 0])
     }
 
     fn write_frame_context(
@@ -1608,7 +1612,7 @@ impl ClassicHost {
             }
             Err(error) => {
                 let _ = clear;
-                Err(error.into())
+                Err(selector_guest_error("GLOBAL_SETDOWN", error))
             }
         }
     }
@@ -1626,12 +1630,10 @@ impl ClassicHost {
             self.engine
                 .begin_execution_trace(selector_name, self.entry)?;
         }
-        let return_value = self.engine.call_win64(self.entry, args).map_err(|source| {
-            ClassicError::SelectorGuest {
-                selector: selector_name,
-                source,
-            }
-        })?;
+        let return_value = self
+            .engine
+            .call_selector_win64(self.entry, args)
+            .map_err(|source| selector_guest_error(selector_name, source))?;
         let after = trace_enabled
             .then(|| self.trace_state_snapshot())
             .transpose()?;
@@ -2245,6 +2247,13 @@ fn selector_failure(selector: &'static str, error: i32) -> Option<ClassicError> 
     (error != 0).then_some(ClassicError::Selector { selector, error })
 }
 
+fn selector_guest_error(selector: &'static str, source: GuestError) -> ClassicError {
+    match source {
+        GuestError::SelectorAbort { error, .. } => ClassicError::Selector { selector, error },
+        source => ClassicError::SelectorGuest { selector, source },
+    }
+}
+
 fn bounded_failure_text(value: &str) -> String {
     bounded_text(value, MAX_FAILURE_TEXT_BYTES)
 }
@@ -2310,6 +2319,26 @@ mod tests {
             }
         ));
         assert!(selector_failure("FRAME_SETDOWN", 0).is_none());
+    }
+
+    #[test]
+    fn unsupported_suite_throw_maps_to_the_active_selector_error() {
+        let failure = selector_guest_error(
+            "SMART_RENDER",
+            GuestError::SelectorAbort {
+                error: 13,
+                suite_name: "FLT Blur Suite".into(),
+                suite_version: 1,
+                acquire_error: -1,
+            },
+        );
+        assert!(matches!(
+            failure,
+            ClassicError::Selector {
+                selector: "SMART_RENDER",
+                error: 13
+            }
+        ));
     }
 
     #[test]
