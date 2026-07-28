@@ -82,7 +82,7 @@ def l2_family_source():
 
 class MinihostL2SourceTests(unittest.TestCase):
     def test_effect_entrypoint_is_discovered_from_bounded_pipl_kind_and_code(self):
-        text = SOURCE.read_text(encoding="utf-8")
+        text = source_owners.l2_translation_unit_text()
         for marker in (
             "discover_pipl_entrypoint(module)",
             "EnumResourceLanguagesW(module",
@@ -122,7 +122,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertEqual(report.count(r'\"max_result_rect\":'), 1)
 
     def test_parameter_selftest_routes_are_a_true_translation_unit(self):
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         routing = PARAMETER_SELFTEST_ROUTING_SOURCE.read_text(encoding="utf-8")
         header = (ROOT / "minihost" / "src" /
                   "worker_parameter_selftest_routing.hpp").read_text(encoding="utf-8")
@@ -138,7 +138,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertNotIn(marker, worker)
 
     def test_fixed_selftest_catalog_is_a_true_translation_unit(self):
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         routing = FIXED_SELFTEST_ROUTING_SOURCE.read_text(encoding="utf-8")
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
         self.assertIn("src/worker_fixed_selftest_routing.cpp", cmake)
@@ -160,7 +160,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertNotIn(marker, worker)
 
     def test_custom_selftest_routes_are_a_true_translation_unit(self):
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         routing = CUSTOM_SELFTEST_ROUTING_SOURCE.read_text(encoding="utf-8")
         header = (ROOT / "minihost" / "src" /
                   "worker_custom_selftest_routing.hpp").read_text(encoding="utf-8")
@@ -188,7 +188,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn("verify_pf_path_data_hardening(", routing)
 
     def test_aegp_compat_selftests_are_a_true_translation_unit(self):
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         implementation = AEGP_COMPAT_SELFTESTS_SOURCE.read_text(encoding="utf-8")
         self.assertIn("src/worker_aegp_compat_selftests.cpp", MINIHOST_CMAKE.read_text(encoding="utf-8"))
         for name in ("verify_legacy_effect_compat_suites",
@@ -211,7 +211,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("struct AegpCompatSelftestHooks", AEGP_COMPAT_SELFTEST_HEADER.read_text(encoding="utf-8"))
 
     def test_aegp_host_selftests_are_a_true_translation_unit(self):
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         implementation = AEGP_HOST_SELFTESTS_SOURCE.read_text(encoding="utf-8")
         self.assertIn("src/worker_aegp_host_selftests.cpp", MINIHOST_CMAKE.read_text(encoding="utf-8"))
         for name in (
@@ -224,7 +224,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             self.assertNotIn(f"bool {name}(", worker)
 
     def test_aegp_async_layer_queue_owns_state_and_threads(self):
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         runtime = AEGP_ASYNC_LAYER_RUNTIME.read_text(encoding="utf-8")
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
         self.assertIn("src/worker_aegp_async_layer_runtime.cpp", cmake)
@@ -235,7 +235,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn("g_async_layer_requests", worker)
 
     def test_mask_hardening_selftests_are_a_true_translation_unit(self):
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         implementation = MASK_SELFTESTS_SOURCE.read_text(encoding="utf-8")
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
         self.assertIn("src/worker_mask_selftests.cpp", cmake)
@@ -264,7 +264,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("configure_pf_sampling_runtime", suites)
 
     def test_aegp_render_selftests_are_a_true_translation_unit(self):
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         header = AEGP_RENDER_SELFTEST_HEADER.read_text(encoding="utf-8")
         implementation = AEGP_RENDER_SELFTEST_SOURCE.read_text(encoding="utf-8")
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
@@ -280,7 +280,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn("bool verify_aegp_item_staged_worlds()", worker)
 
     def test_render_worker_request_validation_is_extracted(self):
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         parser = REQUEST_PARSER_SOURCE.read_text(encoding="utf-8")
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
 
@@ -299,7 +299,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn("std::ifstream file(argv[5]", worker)
 
     def test_render_reports_are_snapshotted_before_stdout(self):
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         header = RENDER_REPORT_HEADER.read_text(encoding="utf-8")
         implementation = RENDER_REPORT_SOURCE.read_text(encoding="utf-8")
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
@@ -335,7 +335,7 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_aegp_scene_is_a_compiled_translation_unit_not_a_textual_shortcut(self):
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         scene = AEGP_SCENE_SOURCE.read_text(encoding="utf-8")
 
         self.assertFalse((ROOT / "minihost" / "src" /
@@ -361,7 +361,7 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_pf_suites_are_a_compiled_translation_unit_not_a_textual_shortcut(self):
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
         implementation = PF_SUITES_SOURCE.read_text(encoding="utf-8")
         declarations = PF_SUITES_INTERNAL.read_text(encoding="utf-8")
 
@@ -419,7 +419,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         header = REPORT_HEADER.read_text(encoding="utf-8")
         implementation = REPORT_SOURCE.read_text(encoding="utf-8")
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
-        worker = SOURCE.read_text(encoding="utf-8")
+        worker = source_owners.l2_translation_unit_text()
 
         self.assertIn("struct L2ReportContext", header)
         self.assertIn("struct ParameterSnapshot", header)
@@ -432,7 +432,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertNotIn('#include "l2_main.cpp"', implementation)
 
     def test_pf_suites_are_a_real_translation_unit_with_explicit_host_hooks(self):
-        l2 = SOURCE.read_text(encoding="utf-8")
+        l2 = source_owners.l2_translation_unit_text()
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
         internal = PF_SUITES_INTERNAL.read_text(encoding="utf-8")
         transform = PF_WORLD_TRANSFORM_HEADER.read_text(encoding="utf-8")
@@ -494,7 +494,7 @@ class MinihostL2SourceTests(unittest.TestCase):
 
     def test_worker_profiles_share_one_macro_neutral_runtime_core(self):
         text = l2_family_source()
-        main = SOURCE.read_text(encoding="utf-8")
+        main = source_owners.l2_translation_unit_text()
         cmake = MINIHOST_CMAKE.read_text(encoding="utf-8")
         target = (ROOT / "minihost" / "src" / "worker_target.hpp").read_text(
             encoding="utf-8"
@@ -537,7 +537,7 @@ class MinihostL2SourceTests(unittest.TestCase):
             encoding="utf-8")
         guards = (ROOT / "tests" / "native" / "worker_suite_registry_selftest.cpp").read_text(
             encoding="utf-8")
-        text = SOURCE.read_text(encoding="utf-8") + registry + dispatch + guards
+        text = source_owners.l2_translation_unit_text() + registry + dispatch + guards
         for marker in (
             "struct SuiteTimelineEvent",
             "kMaxSuiteTimeline = 512",
@@ -942,7 +942,7 @@ class MinihostL2SourceTests(unittest.TestCase):
         # The worker command line no longer carries a dump directory, and the
         # worker never opens a dump file by path. Assert on the exact former
         # owners so a reintroduction anywhere is caught.
-        self.assertNotIn("--minidump-v1", SOURCE.read_text(encoding="utf-8"))
+        self.assertNotIn("--minidump-v1", source_owners.l2_translation_unit_text())
         self.assertNotIn("--minidump-v1", runtime)
         self.assertNotIn("CreateFileW(dump_path", runtime)
         minidump = runtime[

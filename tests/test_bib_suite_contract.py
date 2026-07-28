@@ -1,4 +1,5 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,7 +61,7 @@ def test_pica_components_init_after_bib_with_bounded_loads_and_seh_guards():
     assert "bravo_init_seh_filter" in SOURCE
     assert "LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR" in SOURCE
 
-L2_SOURCE = (ROOT / "minihost/src/l2_main.cpp").read_text(encoding="utf-8")
+L2_SOURCE = source_owners.l2_translation_unit_text()
 
 
 def test_case_id_rejection_runs_global_setdown_before_bib_termination():

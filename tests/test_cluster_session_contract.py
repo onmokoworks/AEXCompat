@@ -43,7 +43,7 @@ WORKER_MODULE_AUDIT = (MINIHOST / "runtime_module_audit.cpp").read_text(
     encoding="utf-8"
 )
 CLI_DISPATCH = (MINIHOST / "l2_cli_dispatch.cpp").read_text(encoding="utf-8")
-L2_MAIN = (MINIHOST / "l2_main.cpp").read_text(encoding="utf-8")
+L2_MAIN = source_owners.l2_translation_unit_text()
 CMAKE = (MINIHOST.parent / "CMakeLists.txt").read_text(encoding="utf-8")
 
 BRIDGE = (

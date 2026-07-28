@@ -24,6 +24,16 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "minihost" / "src"
 
 L2_MAIN = SRC / "l2_main.cpp"
+L2_TRANSLATION_UNIT_FILES = (
+    L2_MAIN,
+    SRC / "l2_main_support.inc",
+    SRC / "l2_main_entry.inc",
+)
+
+
+def l2_translation_unit_text() -> str:
+    """Return l2_main's textual translation unit in include order."""
+    return "\n".join(path.read_text(encoding="utf-8") for path in L2_TRANSLATION_UNIT_FILES)
 
 # l2_main.cpp から抽出された実装の owner 群。TU 抽出のたびにここへ追記する。
 # 宣言→定義の出現順を前提にする slice (index の 2 回目参照など) が
@@ -31,6 +41,8 @@ L2_MAIN = SRC / "l2_main.cpp"
 WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_l2_render_abi.hpp",
     "minihost/src/l2_main.cpp",
+    "minihost/src/l2_main_support.inc",
+    "minihost/src/l2_main_entry.inc",
     "minihost/src/worker_aegp_utility_suite.hpp",
     "minihost/src/worker_aegp_utility_suite.cpp",
     "minihost/src/worker_pf_pixel_data_suite.hpp",
@@ -90,6 +102,8 @@ HARNESS_WINDOWS_OWNERS = (
 CONTRACTS = {
     "l2_family": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/l2_main_support.inc",
+        "minihost/src/l2_main_entry.inc",
         "minihost/src/worker_aegp_utility_suite.hpp",
         "minihost/src/worker_aegp_utility_suite.cpp",
         "minihost/src/worker_pf_pixel_data_suite.hpp",
