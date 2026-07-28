@@ -100,6 +100,15 @@ pub enum GuestError {
     CensusUnavailable,
     #[error("detailed execution tracing is available only in the Unicorn worker")]
     TraceUnavailable,
+    #[error(
+        "guest selector aborted with {error} after unsupported suite {suite_name} v{suite_version} (acquire error {acquire_error})"
+    )]
+    SelectorAbort {
+        error: i32,
+        suite_name: String,
+        suite_version: u64,
+        acquire_error: i32,
+    },
 }
 
 impl GuestError {
@@ -110,6 +119,7 @@ impl GuestError {
             Self::DataCapacity => "memory",
             Self::DllProcessAttach => "dllmain",
             Self::CensusUnavailable | Self::TraceUnavailable => "capability",
+            Self::SelectorAbort { .. } => "selector",
         }
     }
 
@@ -509,6 +519,10 @@ impl GuestEngine<'static> {
         } else {
             Ok(result)
         }
+    }
+
+    pub fn call_selector_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
+        self.call_win64(address, args)
     }
 
     pub fn allocate(&mut self, size: usize, alignment: u64) -> Result<u64, GuestError> {
