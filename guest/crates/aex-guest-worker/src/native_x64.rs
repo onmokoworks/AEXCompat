@@ -208,7 +208,6 @@ struct NativeSmartCheckout {
     index: i32,
     world: u64,
     checked_out: bool,
-    result_rect: [i32; 4],
 }
 
 thread_local! {
@@ -2220,7 +2219,6 @@ unsafe extern "win64" fn pre_checkout_layer(
                 index,
                 world,
                 checked_out: false,
-                result_rect: rectangle,
             },
         );
         0
@@ -2243,10 +2241,10 @@ unsafe extern "win64" fn checkout_layer_pixels(
             state.callback_error = Some("invalid checkout-layer-pixels request".into());
             return 4;
         };
-        if checkout.checked_out
-            || !native_guest_range_valid(state, output, 8)
-            || checkout.result_rect == [0; 4]
-        {
+        // A legal empty PF_CheckoutResult describes pixel availability, not
+        // the lifetime of the host-owned PF_EffectWorld. Some effects still
+        // check the world out to inspect its descriptor before doing no work.
+        if checkout.checked_out || !native_guest_range_valid(state, output, 8) {
             state.callback_error = Some(format!(
                 "invalid checkout-layer-pixels index={} id={checkout_id}",
                 checkout.index
@@ -3522,6 +3520,31 @@ mod tests {
                 .all(|checkout| !checkout.checked_out),
             "a pre-checkout-only token is balanced"
         );
+
+        let empty_request = arena_base + 2300;
+        assert_eq!(
+            unsafe { pre_checkout_layer(0, 0, 10, empty_request, 10, 0, 30, result) },
+            0
+        );
+        assert_eq!(
+            &arena[2048..2064],
+            &[0; 16],
+            "an empty request has an empty availability rectangle"
+        );
+        assert_eq!(
+            unsafe { checkout_layer_pixels(0, 10, checked_out_world, 0, 0, 0) },
+            0,
+            "an empty availability rectangle does not invalidate the host-owned world"
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                arena[2200..2208]
+                    .try_into()
+                    .expect("checked out world is eight bytes")
+            ),
+            world
+        );
+        assert_eq!(unsafe { checkin_layer_pixels(0, 10, 0, 0, 0, 0) }, 0);
         ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
     }
 

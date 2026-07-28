@@ -197,6 +197,8 @@ pub enum GuestError {
     StubCapacity,
     #[error("IAT entry is outside the mapped image")]
     IatRange,
+    #[error("unsupported import with nontrivial C++ return: {library}!{symbol}")]
+    UnsupportedImport { library: String, symbol: String },
     #[error("guest data arena exhausted")]
     DataCapacity,
     #[error("native AVX state sync point capacity exceeded")]
@@ -227,7 +229,7 @@ impl GuestError {
         match self {
             Self::Unicorn { .. } => "emulation",
             Self::ImageAlignment | Self::AvxStateCapacity => "image",
-            Self::StubCapacity | Self::IatRange => "import",
+            Self::StubCapacity | Self::IatRange | Self::UnsupportedImport { .. } => "import",
             Self::DataCapacity => "memory",
             Self::Callback(_) => "callback",
             Self::SelectorAbort { .. } => "selector",
@@ -1985,7 +1987,14 @@ fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> boo
     if instruction.mnemonic() == Mnemonic::Vextractf128 {
         return emulate_vextractf128(unicorn, &instruction, rip);
     }
-    if instruction.mnemonic() != Mnemonic::Vmovups || instruction.op_count() != 2 {
+    // Unicorn executes most VEX.128 operations natively but currently rejects
+    // these 256-bit unaligned moves. VMOVUPS and VMOVDQU have identical
+    // bit-copy semantics here; the mnemonic only expresses the source type.
+    if !matches!(
+        instruction.mnemonic(),
+        Mnemonic::Vmovups | Mnemonic::Vmovdqu
+    ) || instruction.op_count() != 2
+    {
         return false;
     }
     if instruction.op1_kind() == OpKind::Register {
@@ -2277,6 +2286,7 @@ fn record_named_unsupported_suite_call(
 struct GuestState {
     params: Vec<GuestParam>,
     callback_error: Option<String>,
+    unsupported_import: Option<(String, String)>,
     smart_input_world: u64,
     smart_output_world: u64,
     smart_width: u32,
@@ -2348,7 +2358,6 @@ struct SmartCheckout {
     index: i32,
     world: u64,
     checked_out: bool,
-    result_rect: [i32; 4],
 }
 
 #[derive(Clone, Debug)]
@@ -3168,6 +3177,14 @@ impl GuestEngine<'static> {
                         return Err(GuestError::Callback(format!(
                             "unsupported VCOMP import: {name}"
                         )));
+                    }
+                    name if cpp_object_return_import(name) => {
+                        install_unsupported_import_trap(
+                            &mut unicorn,
+                            stub,
+                            library.name.clone(),
+                            name.to_string(),
+                        )?;
                     }
                     _ => {}
                 }
@@ -4382,6 +4399,7 @@ impl GuestEngine<'static> {
         self.unicorn.get_data_mut().avx_fallback_instructions = 0;
         self.unicorn.get_data_mut().avx_defined_ymm = [false; 16];
         self.unicorn.get_data_mut().latest_runtime_target = None;
+        self.unicorn.get_data_mut().unsupported_import = None;
         let stack_top = STACK_BASE + STACK_SIZE;
         // Win64 function entry observes RSP % 16 == 8. Reserve a return
         // address, 32-byte shadow space, bounded stack arguments, and scratch.
@@ -4424,6 +4442,9 @@ impl GuestEngine<'static> {
                 suite_version: abort.suite.version,
                 acquire_error: abort.suite.acquire_error,
             });
+        }
+        if let Some((library, symbol)) = self.unicorn.get_data_mut().unsupported_import.take() {
+            return Err(GuestError::UnsupportedImport { library, symbol });
         }
         let rip = uc(
             "read instruction pointer",
@@ -5225,6 +5246,53 @@ fn deterministic_import_i32(name: &str) -> Option<i32> {
 fn deterministic_i32_stub(value: i32) -> [u8; 6] {
     let bytes = value.to_le_bytes();
     [0xb8, bytes[0], bytes[1], bytes[2], bytes[3], 0xc3]
+}
+
+fn cpp_object_return_import(symbol: &str) -> bool {
+    // These MSVC decorations identify a class/struct returned by value. Win64
+    // passes hidden return storage for nontrivial objects, so the scalar-zero
+    // fallback cannot initialize the result and must not let execution continue.
+    let Some((_, signature)) = symbol.split_once("@@") else {
+        return false;
+    };
+    let Some(return_offset) = signature.find('?') else {
+        return false;
+    };
+    if return_offset == 0
+        || !signature[..return_offset]
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase())
+    {
+        return false;
+    }
+    let mut return_type = signature[return_offset + 1..].bytes();
+    let mut qualifiers = 0usize;
+    for byte in return_type.by_ref() {
+        if matches!(byte, b'A'..=b'D') {
+            qualifiers += 1;
+            continue;
+        }
+        return qualifiers != 0 && matches!(byte, b'T' | b'U' | b'V');
+    }
+    false
+}
+
+fn install_unsupported_import_trap(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    stub: u64,
+    library: String,
+    symbol: String,
+) -> Result<(), GuestError> {
+    uc(
+        "install unsupported C++ object-return import trap",
+        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+            if unicorn.get_data().unsupported_import.is_none() {
+                unicorn.get_data_mut().unsupported_import = Some((library.clone(), symbol.clone()));
+            }
+            let _ = unicorn.emu_stop();
+        }),
+    )?;
+    Ok(())
 }
 
 fn install_float_binary_import(
@@ -6858,7 +6926,6 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
                 index,
                 world,
                 checked_out: false,
-                result_rect: request_rect,
             },
         );
         Ok(())
@@ -6886,7 +6953,10 @@ fn emulate_checkout_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, 
                 "invalid checkout-pixels id={checkout_id} output={output:#x}"
             ));
         };
-        if checkout.checked_out || output == 0 || checkout.result_rect == [0; 4] {
+        // A legal empty PF_CheckoutResult describes pixel availability, not
+        // the lifetime of the host-owned PF_EffectWorld. Some effects still
+        // check the world out to inspect its descriptor before doing no work.
+        if checkout.checked_out || output == 0 {
             return Err(format!(
                 "invalid checkout-pixels id={checkout_id} index={} output={output:#x}",
                 checkout.index
@@ -10838,6 +10908,81 @@ mod tests {
     }
 
     #[test]
+    fn cpp_object_returns_are_not_treated_as_scalar_zero_imports() {
+        const GET_ENTRY: &str = "?GetEntry@DebugDatabase@debug@dvacore@@QEBA?AV?$basic_string@EU?$char_traits@E@std@@U?$STLAllocator@E@allocator@dvacore@@@std@@AEBV45@0@Z";
+        assert!(cpp_object_return_import(GET_ENTRY));
+        assert!(cpp_object_return_import(
+            "?Create@ImmutableString@utility@dvacore@@SA?AV123@AEBV?$basic_string_view@D@std@@@Z"
+        ));
+        assert!(cpp_object_return_import(
+            "?FormatErrorMessage@dva_exception@config@dvacore@@MEBA?AV?$basic_string@EU?$char_traits@E@std@@@Z"
+        ));
+        assert!(cpp_object_return_import(
+            "?GetUnion@Thing@@QEBA?ATPayload@@XZ"
+        ));
+        assert!(cpp_object_return_import(
+            "?GetConstClass@Thing@@QEBA?BVPayload@@XZ"
+        ));
+        assert!(cpp_object_return_import(
+            "?GetVolatileStruct@Thing@@QEBA?CUPoint@@XZ"
+        ));
+        assert!(cpp_object_return_import(
+            "?GetConstVolatileUnion@Thing@@QEBA?DTPayload@@XZ"
+        ));
+        assert!(cpp_object_return_import(
+            "?GetQualifiedClass@Thing@@QEBA?ABVPayload@@XZ"
+        ));
+        assert!(!cpp_object_return_import(
+            "??0dva_exception@config@dvacore@@QEAA@PEBDH@Z"
+        ));
+        assert!(!cpp_object_return_import(
+            "?GetValue@Thing@@QEBAHAEBVOther@@@Z"
+        ));
+        assert!(!cpp_object_return_import(
+            "?GetValue@Thing@@QEBAHV?$vector@VPayload@@V?$allocator@VPayload@@@std@@@std@@XZ"
+        ));
+        assert!(!cpp_object_return_import(
+            "?GetInvalidTag@Thing@@QEBA?AEPayload@@XZ"
+        ));
+        assert!(!cpp_object_return_import("GetLastError"));
+    }
+
+    #[test]
+    fn unsupported_cpp_object_return_import_stops_before_guest_uses_unwritten_sret() {
+        const IMPORT: u64 = STUB_BASE + 0x170;
+        const SYMBOL: &str = "?GetEntry@DebugDatabase@debug@dvacore@@QEBA?AVstring@std@@XZ";
+        let mut code = vec![0x48, 0xb8];
+        code.extend_from_slice(&IMPORT.to_le_bytes());
+        code.extend_from_slice(&[
+            0xff, 0xd0, // call rax
+            0x48, 0x8b, 0x02, // mov rax, [rdx] (must never execute)
+            0xc3,
+        ]);
+        let mut engine = test_engine(&code);
+        engine
+            .unicorn
+            .mem_write(IMPORT, &[0x31, 0xc0, 0xc3])
+            .unwrap();
+        install_unsupported_import_trap(
+            &mut engine.unicorn,
+            IMPORT,
+            "dvacore.dll".into(),
+            SYMBOL.into(),
+        )
+        .unwrap();
+
+        let error = engine
+            .call_win64(TEST_CODE, [0, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            GuestError::UnsupportedImport { library, symbol }
+                if library == "dvacore.dll" && symbol == SYMBOL
+        ));
+        assert_eq!(error.diagnostic_category(), "import");
+    }
+
+    #[test]
     fn pf_handle_suite_maps_large_allocations_outside_guest_data() {
         let mut engine = test_engine(&[0xc3]);
         let size = 333_294_848;
@@ -11421,6 +11566,46 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("invalid checkin-pixels id=0")
+        );
+        let empty_request = engine.allocate(16, 4).unwrap();
+        let empty_result = engine.allocate(76, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_PRE_CHECKOUT_LAYER,
+                    &[1, 0, 41, empty_request, 0, 0, 1, empty_result],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(empty_result, 16).unwrap(),
+            [0; 16],
+            "an empty request has an empty availability rectangle"
+        );
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_CHECKOUT_LAYER_PIXELS,
+                    [1, 41, checked_out_world, 0, 0, 0],
+                )
+                .unwrap(),
+            0,
+            "an empty availability rectangle does not invalidate the host-owned world"
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(checked_out_world, 8)
+                .unwrap(),
+            input_world.to_le_bytes()
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_CHECKIN_LAYER_PIXELS, [1, 41, 0, 0, 0, 0])
+                .unwrap(),
+            0
         );
         assert_eq!(
             engine
@@ -13748,6 +13933,31 @@ mod tests {
         engine.unicorn.mem_read(destination, &mut memory).unwrap();
         assert_eq!(memory, expected[..16]);
         assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 3);
+    }
+
+    #[test]
+    fn avx_fallback_moves_unaligned_integer_vectors_used_by_fractal_noise() {
+        const CODE: u64 = 0x1000_0000;
+        let source = DATA_BASE;
+        let destination = DATA_BASE + 65;
+        let mut engine = test_engine(&[
+            0xc5, 0xfe, 0x6f, 0x09, // vmovdqu ymm1,[rcx]
+            0x48, 0x8d, 0x6a, 0x29, // lea rbp,[rdx+0x29]
+            0xc5, 0xfe, 0x7f, 0x4d, 0xd7, // vmovdqu [rbp-0x29],ymm1
+            0xc3,
+        ]);
+        let expected =
+            std::array::from_fn::<_, 32, _>(|index| (index as u8).wrapping_mul(13).wrapping_add(7));
+        engine.write(source, &expected).unwrap();
+
+        engine
+            .call_win64(CODE, [source, destination, 0, 0, 0, 0])
+            .unwrap();
+
+        let mut actual = [0u8; 32];
+        engine.unicorn.mem_read(destination, &mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 2);
     }
 
     #[test]
