@@ -1985,7 +1985,14 @@ fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> boo
     if instruction.mnemonic() == Mnemonic::Vextractf128 {
         return emulate_vextractf128(unicorn, &instruction, rip);
     }
-    if instruction.mnemonic() != Mnemonic::Vmovups || instruction.op_count() != 2 {
+    // Unicorn executes most VEX.128 operations natively but currently rejects
+    // these 256-bit unaligned moves. VMOVUPS and VMOVDQU have identical
+    // bit-copy semantics here; the mnemonic only expresses the source type.
+    if !matches!(
+        instruction.mnemonic(),
+        Mnemonic::Vmovups | Mnemonic::Vmovdqu
+    ) || instruction.op_count() != 2
+    {
         return false;
     }
     if instruction.op1_kind() == OpKind::Register {
@@ -13748,6 +13755,31 @@ mod tests {
         engine.unicorn.mem_read(destination, &mut memory).unwrap();
         assert_eq!(memory, expected[..16]);
         assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 3);
+    }
+
+    #[test]
+    fn avx_fallback_moves_unaligned_integer_vectors_used_by_fractal_noise() {
+        const CODE: u64 = 0x1000_0000;
+        let source = DATA_BASE;
+        let destination = DATA_BASE + 65;
+        let mut engine = test_engine(&[
+            0xc5, 0xfe, 0x6f, 0x09, // vmovdqu ymm1,[rcx]
+            0x48, 0x8d, 0x6a, 0x29, // lea rbp,[rdx+0x29]
+            0xc5, 0xfe, 0x7f, 0x4d, 0xd7, // vmovdqu [rbp-0x29],ymm1
+            0xc3,
+        ]);
+        let expected =
+            std::array::from_fn::<_, 32, _>(|index| (index as u8).wrapping_mul(13).wrapping_add(7));
+        engine.write(source, &expected).unwrap();
+
+        engine
+            .call_win64(CODE, [source, destination, 0, 0, 0, 0])
+            .unwrap();
+
+        let mut actual = [0u8; 32];
+        engine.unicorn.mem_read(destination, &mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 2);
     }
 
     #[test]
