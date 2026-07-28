@@ -449,6 +449,116 @@ def test_parent_symlink_swap_cannot_redirect_report_replace(
     assert not (unrelated_parent / "report.json").exists()
 
 
+def _main_args(worker, manifest, output, tmp_path):
+    return argparse.Namespace(
+        manifest=manifest,
+        worker=worker,
+        expected_worker_sha256=_sha(worker),
+        output=output,
+        timeout=10,
+        run_parent=tmp_path,
+    )
+
+
+def test_main_returns_zero_when_every_case_traces(
+    tmp_path, monkeypatch, capsys
+):
+    worker, _, _, manifest = _fixture(tmp_path)
+    output = tmp_path / "report.json"
+
+    def fake_run(command, timeout_seconds):
+        Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(command[4], "PNG")
+        return (
+            subprocess.CompletedProcess(
+                command,
+                0,
+                b'{"execution_traces":[{"selector":"RENDER"}]}',
+                b"",
+            ),
+            False,
+            None,
+        )
+
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", fake_run)
+    monkeypatch.setattr(
+        RUNNER, "parse_args", lambda: _main_args(
+            worker, manifest, output, tmp_path
+        )
+    )
+
+    assert RUNNER.main() == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "case_count": 1,
+        "result_kinds": ["trace"],
+    }
+    assert json.loads(output.read_text(encoding="utf-8"))["cases"][0][
+        "result"
+    ]["kind"] == "trace"
+
+
+@pytest.mark.parametrize("failure_kind", ["timeout", "worker_error"])
+def test_main_returns_nonzero_but_keeps_mixed_failure_report(
+    tmp_path, monkeypatch, capsys, failure_kind
+):
+    worker, _, _, manifest = _fixture(tmp_path)
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    second = dict(manifest_value["cases"][0])
+    second["id"] = "argb8-b"
+    manifest_value["cases"].append(second)
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+    output = tmp_path / "report.json"
+    calls = 0
+
+    def fake_run(command, timeout_seconds):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(
+                command[4], "PNG"
+            )
+            return (
+                subprocess.CompletedProcess(
+                    command,
+                    0,
+                    b'{"execution_traces":[{"selector":"RENDER"}]}',
+                    b"",
+                ),
+                False,
+                None,
+            )
+        if failure_kind == "timeout":
+            return (
+                subprocess.CompletedProcess(command, -9, b"", b""),
+                True,
+                "timeout",
+            )
+        return (
+            subprocess.CompletedProcess(
+                command, 1, b"", b"aex_guest_error: failed"
+            ),
+            False,
+            None,
+        )
+
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", fake_run)
+    monkeypatch.setattr(
+        RUNNER, "parse_args", lambda: _main_args(
+            worker, manifest, output, tmp_path
+        )
+    )
+
+    assert RUNNER.main() == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary == {
+        "case_count": 2,
+        "result_kinds": ["trace", failure_kind],
+    }
+    persisted = json.loads(output.read_text(encoding="utf-8"))
+    assert [
+        case["result"]["kind"] for case in persisted["cases"]
+    ] == ["trace", failure_kind]
+
+
 def test_late_output_symlink_is_replaced_without_touching_target(
     tmp_path, monkeypatch
 ):

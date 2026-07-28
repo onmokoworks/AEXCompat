@@ -609,18 +609,19 @@ def main() -> int:
     except (OSError, TraceRunnerError) as error:
         print(f"targeted_aex_trace_error: {error}", file=sys.stderr)
         return 1
+    result_kinds = [
+        case["result"]["kind"] for case in report["cases"]
+    ]
     print(
         json.dumps(
             {
                 "case_count": report["case_count"],
-                "result_kinds": [
-                    case["result"]["kind"] for case in report["cases"]
-                ],
+                "result_kinds": result_kinds,
             },
             sort_keys=True,
         )
     )
-    return 0
+    return 0 if all(kind == "trace" for kind in result_kinds) else 1
 
 
 if __name__ == "__main__":
