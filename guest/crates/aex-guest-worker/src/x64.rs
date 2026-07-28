@@ -197,6 +197,8 @@ pub enum GuestError {
     StubCapacity,
     #[error("IAT entry is outside the mapped image")]
     IatRange,
+    #[error("unsupported import with nontrivial C++ return: {library}!{symbol}")]
+    UnsupportedImport { library: String, symbol: String },
     #[error("guest data arena exhausted")]
     DataCapacity,
     #[error("native AVX state sync point capacity exceeded")]
@@ -227,7 +229,7 @@ impl GuestError {
         match self {
             Self::Unicorn { .. } => "emulation",
             Self::ImageAlignment | Self::AvxStateCapacity => "image",
-            Self::StubCapacity | Self::IatRange => "import",
+            Self::StubCapacity | Self::IatRange | Self::UnsupportedImport { .. } => "import",
             Self::DataCapacity => "memory",
             Self::Callback(_) => "callback",
             Self::SelectorAbort { .. } => "selector",
@@ -2284,6 +2286,7 @@ fn record_named_unsupported_suite_call(
 struct GuestState {
     params: Vec<GuestParam>,
     callback_error: Option<String>,
+    unsupported_import: Option<(String, String)>,
     smart_input_world: u64,
     smart_output_world: u64,
     smart_width: u32,
@@ -3175,6 +3178,14 @@ impl GuestEngine<'static> {
                         return Err(GuestError::Callback(format!(
                             "unsupported VCOMP import: {name}"
                         )));
+                    }
+                    name if cpp_object_return_import(name) => {
+                        install_unsupported_import_trap(
+                            &mut unicorn,
+                            stub,
+                            library.name.clone(),
+                            name.to_string(),
+                        )?;
                     }
                     _ => {}
                 }
@@ -4389,6 +4400,7 @@ impl GuestEngine<'static> {
         self.unicorn.get_data_mut().avx_fallback_instructions = 0;
         self.unicorn.get_data_mut().avx_defined_ymm = [false; 16];
         self.unicorn.get_data_mut().latest_runtime_target = None;
+        self.unicorn.get_data_mut().unsupported_import = None;
         let stack_top = STACK_BASE + STACK_SIZE;
         // Win64 function entry observes RSP % 16 == 8. Reserve a return
         // address, 32-byte shadow space, bounded stack arguments, and scratch.
@@ -4431,6 +4443,9 @@ impl GuestEngine<'static> {
                 suite_version: abort.suite.version,
                 acquire_error: abort.suite.acquire_error,
             });
+        }
+        if let Some((library, symbol)) = self.unicorn.get_data_mut().unsupported_import.take() {
+            return Err(GuestError::UnsupportedImport { library, symbol });
         }
         let rip = uc(
             "read instruction pointer",
@@ -5232,6 +5247,41 @@ fn deterministic_import_i32(name: &str) -> Option<i32> {
 fn deterministic_i32_stub(value: i32) -> [u8; 6] {
     let bytes = value.to_le_bytes();
     [0xb8, bytes[0], bytes[1], bytes[2], bytes[3], 0xc3]
+}
+
+fn cpp_object_return_import(symbol: &str) -> bool {
+    // These MSVC decorations identify a class/struct returned by value. Win64
+    // passes hidden return storage for nontrivial objects, so the scalar-zero
+    // fallback cannot initialize the result and must not let execution continue.
+    let Some((_, signature)) = symbol.split_once("@@") else {
+        return false;
+    };
+    ["?AV", "?AU"].iter().any(|marker| {
+        signature.find(marker).is_some_and(|return_offset| {
+            return_offset != 0
+                && signature[..return_offset]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase())
+        })
+    })
+}
+
+fn install_unsupported_import_trap(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    stub: u64,
+    library: String,
+    symbol: String,
+) -> Result<(), GuestError> {
+    uc(
+        "install unsupported C++ object-return import trap",
+        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+            if unicorn.get_data().unsupported_import.is_none() {
+                unicorn.get_data_mut().unsupported_import = Some((library.clone(), symbol.clone()));
+            }
+            let _ = unicorn.emu_stop();
+        }),
+    )?;
+    Ok(())
 }
 
 fn install_float_binary_import(
@@ -10842,6 +10892,60 @@ mod tests {
         assert_eq!(deterministic_i32_stub(1), [0xb8, 1, 0, 0, 0, 0xc3]);
         let mut engine = test_engine(&deterministic_i32_stub(1));
         assert_eq!(engine.call_win64(CODE, [0; 6]).unwrap(), 1);
+    }
+
+    #[test]
+    fn cpp_object_returns_are_not_treated_as_scalar_zero_imports() {
+        const GET_ENTRY: &str = "?GetEntry@DebugDatabase@debug@dvacore@@QEBA?AV?$basic_string@EU?$char_traits@E@std@@U?$STLAllocator@E@allocator@dvacore@@@std@@AEBV45@0@Z";
+        assert!(cpp_object_return_import(GET_ENTRY));
+        assert!(cpp_object_return_import(
+            "?Create@ImmutableString@utility@dvacore@@SA?AV123@AEBV?$basic_string_view@D@std@@@Z"
+        ));
+        assert!(cpp_object_return_import(
+            "?FormatErrorMessage@dva_exception@config@dvacore@@MEBA?AV?$basic_string@EU?$char_traits@E@std@@@Z"
+        ));
+        assert!(!cpp_object_return_import(
+            "??0dva_exception@config@dvacore@@QEAA@PEBDH@Z"
+        ));
+        assert!(!cpp_object_return_import(
+            "?GetValue@Thing@@QEBAHAEBVOther@@@Z"
+        ));
+        assert!(!cpp_object_return_import("GetLastError"));
+    }
+
+    #[test]
+    fn unsupported_cpp_object_return_import_stops_before_guest_uses_unwritten_sret() {
+        const IMPORT: u64 = STUB_BASE + 0x170;
+        const SYMBOL: &str = "?GetEntry@DebugDatabase@debug@dvacore@@QEBA?AVstring@std@@XZ";
+        let mut code = vec![0x48, 0xb8];
+        code.extend_from_slice(&IMPORT.to_le_bytes());
+        code.extend_from_slice(&[
+            0xff, 0xd0, // call rax
+            0x48, 0x8b, 0x02, // mov rax, [rdx] (must never execute)
+            0xc3,
+        ]);
+        let mut engine = test_engine(&code);
+        engine
+            .unicorn
+            .mem_write(IMPORT, &[0x31, 0xc0, 0xc3])
+            .unwrap();
+        install_unsupported_import_trap(
+            &mut engine.unicorn,
+            IMPORT,
+            "dvacore.dll".into(),
+            SYMBOL.into(),
+        )
+        .unwrap();
+
+        let error = engine
+            .call_win64(TEST_CODE, [0, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            GuestError::UnsupportedImport { library, symbol }
+                if library == "dvacore.dll" && symbol == SYMBOL
+        ));
+        assert_eq!(error.diagnostic_category(), "import");
     }
 
     #[test]
