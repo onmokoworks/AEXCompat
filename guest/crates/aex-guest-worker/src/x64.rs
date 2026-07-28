@@ -1433,6 +1433,15 @@ fn capture_runtime_target(
     }
 }
 
+fn advance_runtime_target_lifecycle(state: &mut GuestState, block_address: u64) {
+    let should_clear = state.latest_runtime_target.as_ref().is_some_and(|target| {
+        block_address != target.source_address && Some(block_address) != target.effective_target
+    });
+    if should_clear {
+        state.latest_runtime_target = None;
+    }
+}
+
 fn read_iced_register(unicorn: &Unicorn<'_, GuestState>, register: Register) -> Option<u64> {
     let register = match register {
         Register::RAX => RegisterX86::RAX,
@@ -3867,6 +3876,7 @@ impl GuestEngine<'static> {
                 image_base,
                 image_end - 1,
                 move |unicorn, address, size| {
+                    advance_runtime_target_lifecycle(unicorn.get_data_mut(), address);
                     if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
                         let block_key = (address, size);
                         if let Some(observed) = capture.basic_blocks.get_mut(&block_key) {
@@ -12756,6 +12766,35 @@ mod tests {
         assert!(
             snapshot.runtime_target.is_none(),
             "completed call must not be reported as the cause of a later fault"
+        );
+    }
+
+    #[test]
+    fn crash_snapshot_does_not_reuse_call_provenance_after_conditional_reentry() {
+        const CODE: u64 = 0x1000_0000;
+        // call T with rcx=0; set rcx=1; conditionally re-enter T. The first
+        // visit returns, while the second reaches an unrelated ud2.
+        let code = [
+            0xe8, 0x0b, 0, 0, 0, // call T (+16)
+            0xb9, 1, 0, 0, 0, // mov ecx,1
+            0x85, 0xc9, // test ecx,ecx
+            0x75, 0x02, // jne T
+            0x0f, 0x0b, // unreachable ud2
+            0x85, 0xc9, // T: test ecx,ecx
+            0x75, 0x01, // jne fault
+            0xc3, // ret
+            0x0f, 0x0b, // fault: ud2
+        ];
+        let mut engine = test_engine(&code);
+        engine.begin_execution_trace("RENDER", CODE).unwrap();
+        let error = engine.call_win64(CODE, [0; 6]).unwrap_err();
+        let GuestError::ExecutionCrash { snapshot, .. } = error else {
+            panic!("expected structured crash snapshot");
+        };
+        assert_eq!(snapshot.instruction_rva, Some(21));
+        assert!(
+            snapshot.runtime_target.is_none(),
+            "the completed call to T must expire before later re-entry"
         );
     }
 
