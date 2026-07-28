@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/aex-abi", "crates/aex-guest-worker"]
+members = [
+    "crates/aex-abi",
+    "crates/aex-guest-worker",
+    "crates/aex-unicorn-buffer",
+]
 resolver = "2"
 
 [workspace.package]
@@ -8,7 +12,7 @@ license = "MIT"
 
 [workspace.dependencies]
 goblin = { version = "0.10.7", default-features = false, features = ["std", "pe64"] }
-iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "std"] }
+iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "instr_info", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
