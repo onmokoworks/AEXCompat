@@ -39,7 +39,7 @@ def test_only_native_one_shot_admission_has_a_deadline_and_falls_through():
     assert "candidate.native.then_some(native_deadline)" in routing
     assert "for candidate in candidates" in routing
     assert "Ok(output) if output.status.success() => return Ok(output)" in routing
-    assert "kill_and_try_reap" in worker
+    assert "kill_and_reap_or_transfer" in worker
     assert "NATIVE_DEADLINE_REAP_BUDGET" in worker
     assert ".wait()" not in worker
 
