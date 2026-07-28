@@ -361,6 +361,10 @@ impl ClassicHost {
                 engine.ansi_fabs_callback_address(),
             ),
             (
+                abi::UTILS_ANSI_HYPOT_OFFSET,
+                engine.ansi_hypot_callback_address(),
+            ),
+            (
                 abi::UTILS_ANSI_POW_OFFSET,
                 engine.ansi_pow_callback_address(),
             ),

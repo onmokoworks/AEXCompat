@@ -135,6 +135,7 @@
     "utils.ansi_ceil":{"offset":224,"size":8},
     "utils.ansi_cos":{"offset":232,"size":8},
     "utils.ansi_fabs":{"offset":248,"size":8},
+    "utils.ansi_hypot":{"offset":272,"size":8},
     "utils.ansi_pow":{"offset":296,"size":8},
     "utils.ansi_sqrt":{"offset":312,"size":8},
     "utils.ansi_sprintf":{"offset":328,"size":8},

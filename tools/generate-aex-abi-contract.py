@@ -145,6 +145,7 @@ CALLBACK_TABLES = {
         "utils.transform_world",
         "utils.ansi_ceil",
         "utils.ansi_fabs",
+        "utils.ansi_hypot",
         "utils.ansi_pow",
         "utils.ansi_sin",
         "utils.ansi_sprintf",

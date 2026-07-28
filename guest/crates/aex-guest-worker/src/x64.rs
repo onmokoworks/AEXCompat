@@ -4512,6 +4512,10 @@ impl GuestEngine<'static> {
         HOST_PF_ANSI_FABS
     }
 
+    pub fn ansi_hypot_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_HYPOT
+    }
+
     pub fn ansi_pow_callback_address(&self) -> u64 {
         HOST_PF_ANSI_POW
     }
@@ -10311,9 +10315,33 @@ mod tests {
         assert_eq!(ansi_asin(2.0), 0.0);
         assert_eq!(ansi_fmod(4.0, 0.0), 0.0);
         assert_eq!(ansi_pow(f64::NAN, 2.0), 0.0);
+        assert_eq!(ansi_hypot(f64::INFINITY, 1.0), 0.0);
+        assert_eq!(ansi_hypot(1.0, f64::NAN), 0.0);
         assert_eq!(ansi_exp(1000.0), 0.0);
         assert_eq!(ansi_pow(2.0, 3.0), 8.0);
         assert_eq!(ansi_hypot(3.0, 4.0), 5.0);
+    }
+
+    #[test]
+    fn pf_util_hypot_callback_uses_win64_xmm_arguments_and_fails_closed() {
+        fn call_hypot(engine: &mut GuestEngine<'static>, left: f64, right: f64) -> f64 {
+            for (register, value) in [(RegisterX86::XMM0, left), (RegisterX86::XMM1, right)] {
+                let mut xmm = [0u8; 16];
+                xmm[..8].copy_from_slice(&value.to_le_bytes());
+                engine.unicorn.reg_write_long(register, &xmm).unwrap();
+            }
+            engine.call_win64(HOST_PF_ANSI_HYPOT, [0; 6]).unwrap();
+            let xmm0 = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+            f64::from_le_bytes(xmm0[..8].try_into().unwrap())
+        }
+
+        assert_eq!(abi::UTILS_ANSI_HYPOT_OFFSET, 0x110);
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(engine.ansi_hypot_callback_address(), HOST_PF_ANSI_HYPOT);
+        assert_eq!(call_hypot(&mut engine, 5.0, 12.0), 13.0);
+        assert_eq!(call_hypot(&mut engine, f64::INFINITY, 12.0), 0.0);
+        assert_eq!(call_hypot(&mut engine, 5.0, f64::NAN), 0.0);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
     }
 
     #[test]

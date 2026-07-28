@@ -294,6 +294,8 @@ int main() {
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, cos), first);
   field<decltype(PF_ANSICallbacks::fabs)>("utils.ansi_fabs",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, fabs), first);
+  field<decltype(PF_ANSICallbacks::hypot)>("utils.ansi_hypot",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, hypot), first);
   field<decltype(PF_ANSICallbacks::pow)>("utils.ansi_pow",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, pow), first);
   field<decltype(PF_ANSICallbacks::sqrt)>("utils.ansi_sqrt",

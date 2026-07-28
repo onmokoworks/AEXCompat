@@ -750,6 +750,9 @@ impl GuestEngine<'static> {
     pub fn ansi_fabs_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
+    pub fn ansi_hypot_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
     pub fn ansi_pow_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
