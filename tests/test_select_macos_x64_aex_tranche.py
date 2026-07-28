@@ -138,10 +138,17 @@ def test_eligibility_excludes_audio_prefix_and_non_product_entries():
     fixture["fixture_hint"] = True
     missing_root_category = entry("missing-root", "3" * 64, 10, "v1")
     del missing_root_category["root_category"]
+    beta = entry("beta", "4" * 64, 10, "v1")
+    beta["canonical_path"] = str(beta["canonical_path"]).replace(
+        "Adobe After Effects 2025",
+        "Adobe After Effects 2025 Beta",
+    )
 
+    assert SELECT.is_eligible(entry("release", "0" * 64, 10, "v1")) is True
     assert SELECT.is_eligible(audio) is False
     assert SELECT.is_eligible(fixture) is False
     assert SELECT.is_eligible(missing_root_category) is False
+    assert SELECT.is_eligible(beta) is False
 
 
 def test_ambiguous_registration_exports_fail_closed():

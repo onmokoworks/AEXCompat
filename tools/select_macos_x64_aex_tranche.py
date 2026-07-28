@@ -117,6 +117,11 @@ def is_eligible(entry: dict[str, object]) -> bool:
     canonical_path = entry.get("canonical_path")
     relative_path = entry.get("relative_to_root")
     size = entry.get("size")
+    canonical_components = (
+        canonical_path.replace("/", "\\").split("\\")
+        if isinstance(canonical_path, str)
+        else []
+    )
     if (
         entry.get("architecture") != "x64"
         or entry.get("valid_pe") is not True
@@ -126,7 +131,10 @@ def is_eligible(entry: dict[str, object]) -> bool:
         or entry.get("source_category") != "adobe_installed"
         or not isinstance(entry.get("root_category"), str)
         or not isinstance(canonical_path, str)
-        or "after effects 2025" not in canonical_path.casefold()
+        or not any(
+            component.casefold() == "adobe after effects 2025"
+            for component in canonical_components
+        )
         or not isinstance(relative_path, str)
         or not relative_path.casefold().startswith("effects\\")
         or not isinstance(size, int)
