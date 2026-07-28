@@ -166,6 +166,33 @@ struct ResidentSessionHandle {
     join: Option<thread::JoinHandle<()>>,
 }
 
+struct PendingResidentRender {
+    parameters: Vec<GuiParameter>,
+    output: PathBuf,
+}
+
+struct ResidentAdmissionHandle {
+    plugin_path: PathBuf,
+    input: PathBuf,
+    receiver: Receiver<Result<ResidentSessionHandle, String>>,
+}
+
+enum ResidentState {
+    Idle,
+    Starting {
+        admission: ResidentAdmissionHandle,
+        pending: PendingResidentRender,
+    },
+    Ready(ResidentSessionHandle),
+    Failed,
+}
+
+impl ResidentState {
+    fn is_starting(&self) -> bool {
+        matches!(self, Self::Starting { .. })
+    }
+}
+
 impl ResidentSessionHandle {
     fn shutdown(&mut self) -> Result<(), String> {
         let Some(join) = self.join.take() else {
@@ -229,7 +256,7 @@ struct MacHarnessApp {
     viewer_zoom: f32,
     viewer_pan: egui::Vec2,
     busy: bool,
-    resident: Option<ResidentSessionHandle>,
+    resident: ResidentState,
 }
 
 impl Drop for MacHarnessApp {
@@ -257,15 +284,22 @@ impl MacHarnessApp {
             viewer_zoom: 1.0,
             viewer_pan: egui::Vec2::ZERO,
             busy: false,
-            resident: None,
+            resident: ResidentState::Idle,
         }
     }
 
     fn close_resident(&mut self) -> Result<(), String> {
-        let Some(mut session) = self.resident.take() else {
-            return Ok(());
-        };
-        session.shutdown()
+        match std::mem::replace(&mut self.resident, ResidentState::Idle) {
+            ResidentState::Ready(mut session) => session.shutdown(),
+            // Dropping the receiver is the cancellation boundary. The detached
+            // admission thread owns any worker it creates and closes it if the
+            // GUI no longer accepts the result.
+            ResidentState::Idle | ResidentState::Starting { .. } | ResidentState::Failed => Ok(()),
+        }
+    }
+
+    fn occupied(&self) -> bool {
+        self.busy || self.resident.is_starting()
     }
 
     fn choose_aex(&mut self) {
@@ -359,37 +393,59 @@ impl MacHarnessApp {
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
         let output = output_directory.join(format!("mac-aex-{nonce}.png"));
-        let needs_session = self
-            .resident
-            .as_ref()
-            .is_none_or(|session| session.plugin_path != aex || session.input != input);
-        if needs_session {
+        let same_ready = matches!(
+            &self.resident,
+            ResidentState::Ready(session)
+                if session.plugin_path == aex && session.input == input
+        );
+        let same_starting = matches!(
+            &self.resident,
+            ResidentState::Starting { admission, .. }
+                if admission.plugin_path == aex && admission.input == input
+        );
+        let pending = PendingResidentRender {
+            parameters: self.parameters.clone(),
+            output,
+        };
+        if same_starting {
+            if let ResidentState::Starting {
+                pending: queued, ..
+            } = &mut self.resident
+            {
+                *queued = pending;
+            }
+            self.status = "Waiting for resident x64 guest admission...".into();
+            return;
+        }
+        if !same_ready {
             if let Err(error) = self.close_resident() {
                 self.status = "Could not cleanly replace the resident session.".into();
                 self.report = error;
                 return;
             }
-            match start_resident_session(&workers, &aex, &input, &output_directory) {
-                Ok(session) => self.resident = Some(session),
-                Err(error) => {
-                    self.status = "Could not start resident guest session.".into();
-                    self.report = error;
-                    return;
-                }
-            }
+            self.resident = ResidentState::Starting {
+                admission: begin_resident_admission(workers, aex, input, output_directory),
+                pending,
+            };
+            self.status = "Starting and probing resident x64 guest...".into();
+            self.report.clear();
+            return;
         }
-        let session = self
-            .resident
-            .as_mut()
-            .expect("resident session was created");
+        self.dispatch_resident_render(pending);
+    }
+
+    fn dispatch_resident_render(&mut self, pending: PendingResidentRender) {
+        let ResidentState::Ready(session) = &mut self.resident else {
+            return;
+        };
         let frame_index = session.next_frame;
         session.next_frame += 1;
         if let Err(error) = session.sender.send(ResidentCommand::Render {
             frame_index,
-            parameters: self.parameters.clone(),
-            output,
+            parameters: pending.parameters,
+            output: pending.output,
         }) {
-            self.resident.take();
+            self.resident = ResidentState::Failed;
             self.status = "Resident guest session stopped.".into();
             self.report = error.to_string();
             return;
@@ -406,10 +462,11 @@ impl MacHarnessApp {
     fn dispatch_live_render(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         let ready = self.plugin_path.is_some() && self.input.is_some();
-        if self.live_render.take_due(now, self.busy, ready) {
+        let occupied = self.occupied();
+        if self.live_render.take_due(now, occupied, ready) {
             self.render();
         } else if ready
-            && !self.busy
+            && !occupied
             && let Some(remaining) = self.live_render.remaining(now)
         {
             ctx.request_repaint_after(remaining.min(Duration::from_millis(60)));
@@ -417,12 +474,39 @@ impl MacHarnessApp {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
-        let result = self
-            .resident
-            .as_ref()
-            .and_then(|session| session.receiver.try_recv().ok());
+        let admission_result = match &self.resident {
+            ResidentState::Starting { admission, .. } => match admission.receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                    "resident admission thread stopped without a result".into(),
+                )),
+            },
+            _ => None,
+        };
+        if let Some(result) = admission_result {
+            let state = std::mem::replace(&mut self.resident, ResidentState::Idle);
+            let ResidentState::Starting { pending, .. } = state else {
+                unreachable!("only a starting admission can produce an admission result");
+            };
+            match result {
+                Ok(session) => {
+                    self.resident = ResidentState::Ready(session);
+                    self.dispatch_resident_render(pending);
+                }
+                Err(error) => {
+                    self.status = "Could not start resident guest session.".into();
+                    self.report = error.clone();
+                    self.resident = ResidentState::Failed;
+                }
+            }
+        }
+        let result = match &self.resident {
+            ResidentState::Ready(session) => session.receiver.try_recv().ok(),
+            _ => None,
+        };
         let Some(result) = result else {
-            if self.busy {
+            if self.busy || self.resident.is_starting() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(50));
             }
             return;
@@ -465,19 +549,20 @@ impl eframe::App for MacHarnessApp {
                 ui.heading(RichText::new("AEXCompat").size(22.0));
                 ui.weak("EFFECT LAB · APPLE SILICON X64 GUEST");
                 ui.separator();
+                let occupied = self.occupied();
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("AEX..."))
+                    .add_enabled(!occupied, egui::Button::new("AEX..."))
                     .clicked()
                 {
                     self.choose_aex();
                 }
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("PNG..."))
+                    .add_enabled(!occupied, egui::Button::new("PNG..."))
                     .clicked()
                 {
                     self.choose_input(ctx);
                 }
-                let ready = !self.busy && self.plugin_path.is_some() && self.input.is_some();
+                let ready = !occupied && self.plugin_path.is_some() && self.input.is_some();
                 if ui.add_enabled(ready, egui::Button::new("Render")).clicked() {
                     self.render();
                 }
@@ -486,7 +571,7 @@ impl eframe::App for MacHarnessApp {
                 if ui.checkbox(&mut live_render, "Auto Update").changed() {
                     self.live_render.set_enabled(live_render);
                 }
-                if self.busy {
+                if occupied {
                     ui.spinner();
                 }
                 ui.label(&self.status);
@@ -535,12 +620,13 @@ impl eframe::App for MacHarnessApp {
 impl MacHarnessApp {
     fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
+        let occupied = self.occupied();
         ui.horizontal(|ui| {
             ui.heading(RichText::new("Effect Controls").size(20.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(
-                        !self.busy
+                        !occupied
                             && self
                                 .parameters
                                 .iter()
@@ -572,7 +658,7 @@ impl MacHarnessApp {
                         ui.label(RichText::new(&parameter.name).small());
                         if ui
                             .add_enabled(
-                                !self.busy && !parameter.is_default(),
+                                !occupied && !parameter.is_default(),
                                 egui::Button::new("Reset").small(),
                             )
                             .clicked()
@@ -582,7 +668,7 @@ impl MacHarnessApp {
                     });
                     let previous_value = parameter.value;
                     let previous_color = parameter.color;
-                    ui.add_enabled_ui(!self.busy, |ui| match parameter.param_type {
+                    ui.add_enabled_ui(!occupied, |ui| match parameter.param_type {
                         4 => {
                             let mut checked = parameter.value != 0.0;
                             if ui.checkbox(&mut checked, "Enabled").changed() {
@@ -645,7 +731,7 @@ impl MacHarnessApp {
                     self.viewer_pan = egui::Vec2::ZERO;
                 }
                 ui.monospace(format!("{:.0}%", self.viewer_zoom * 100.0));
-                if self.busy {
+                if self.occupied() {
                     ui.spinner();
                     ui.weak("Rendering...");
                 }
@@ -1096,6 +1182,39 @@ fn wait_or_kill_resident_child(
                 ));
             }
         }
+    }
+}
+
+fn spawn_resident_admission<T, F>(start: F) -> Receiver<Result<T, String>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        // If the GUI has moved to another AEX/input while admission was in
+        // flight, send failure drops the completed session here. Its Drop
+        // implementation performs the normal bounded cleanup.
+        let _ = sender.send(start());
+    });
+    receiver
+}
+
+fn begin_resident_admission(
+    candidates: Vec<GuestWorkerCandidate>,
+    aex: PathBuf,
+    input: PathBuf,
+    output_directory: PathBuf,
+) -> ResidentAdmissionHandle {
+    let plugin_path = aex.clone();
+    let admission_input = input.clone();
+    let receiver = spawn_resident_admission(move || {
+        start_resident_session(&candidates, &aex, &input, &output_directory)
+    });
+    ResidentAdmissionHandle {
+        plugin_path,
+        input: admission_input,
+        receiver,
     }
 }
 
@@ -1848,6 +1967,46 @@ mod tests {
         assert!(wait_or_kill_resident_child(&mut child, Duration::from_millis(20)).is_err());
         assert!(started.elapsed() < Duration::from_millis(500));
         assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn resident_admission_returns_promptly_and_delivers_readiness_later() {
+        let (release, blocked) = mpsc::channel();
+        let started = Instant::now();
+        let admission = spawn_resident_admission(move || {
+            blocked.recv().unwrap();
+            Ok::<_, String>(42)
+        });
+
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(matches!(
+            admission.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        assert_eq!(
+            admission.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok(42)
+        );
+    }
+
+    #[test]
+    fn resident_admission_delivers_failure_after_a_blocked_probe() {
+        let (release, blocked) = mpsc::channel();
+        let admission = spawn_resident_admission(move || {
+            blocked.recv().unwrap();
+            Err::<(), _>("probe rejected worker".to_string())
+        });
+
+        assert!(matches!(
+            admission.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        assert_eq!(
+            admission.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err("probe rejected worker".to_string())
+        );
     }
 
     #[test]
