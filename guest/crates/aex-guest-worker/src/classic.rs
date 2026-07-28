@@ -1649,12 +1649,24 @@ impl ClassicHost {
         trace_enabled: bool,
     ) -> Result<(i32, Option<GuestCensus>, Vec<ExecutionTrace>), ClassicError> {
         let input_world = input_param + abi::PARAM_U_OFFSET as u64;
+        let mut current_time = [0u8; 4];
+        let mut current_time_scale = [0u8; 4];
+        self.engine.read(
+            self.input + abi::IN_CURRENT_TIME_OFFSET as u64,
+            &mut current_time,
+        )?;
+        self.engine.read(
+            self.input + abi::IN_TIME_SCALE_OFFSET as u64,
+            &mut current_time_scale,
+        )?;
         self.engine.configure_smart_render(
             input_world,
             output_world,
             width,
             height,
             format.pf_pixel_format(),
+            i32::from_le_bytes(current_time),
+            u32::from_le_bytes(current_time_scale),
         );
         let result = self.render_smart_configured(
             params,
@@ -1665,8 +1677,14 @@ impl ClassicHost {
             census_enabled,
             trace_enabled,
         );
-        self.engine.finish_smart_checkout_scope();
-        result
+        let pixel_checkouts_balanced = self.engine.finish_smart_checkout_scope();
+        match result {
+            Ok((0, _, _)) if !pixel_checkouts_balanced => Err(GuestError::Callback(
+                "SmartFX layer pixel checkout was not checked in".into(),
+            )
+            .into()),
+            result => result,
+        }
     }
 
     fn render_smart_configured(

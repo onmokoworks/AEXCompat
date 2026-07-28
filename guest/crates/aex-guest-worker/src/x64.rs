@@ -2271,6 +2271,8 @@ struct GuestState {
     smart_width: u32,
     smart_height: u32,
     smart_pixel_format: i32,
+    smart_current_time: i32,
+    smart_current_time_scale: u32,
     suite_requests: Vec<String>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
@@ -4730,6 +4732,8 @@ impl GuestEngine<'static> {
         width: u32,
         height: u32,
         pixel_format: i32,
+        current_time: i32,
+        current_time_scale: u32,
     ) {
         let state = self.unicorn.get_data_mut();
         state.pre_checkout_requests.clear();
@@ -4739,10 +4743,18 @@ impl GuestEngine<'static> {
         state.smart_width = width;
         state.smart_height = height;
         state.smart_pixel_format = pixel_format;
+        state.smart_current_time = current_time;
+        state.smart_current_time_scale = current_time_scale;
     }
 
-    pub fn finish_smart_checkout_scope(&mut self) {
-        self.unicorn.get_data_mut().smart_checkout_ids.clear();
+    pub fn finish_smart_checkout_scope(&mut self) -> bool {
+        let state = self.unicorn.get_data_mut();
+        let balanced = state
+            .smart_checkout_ids
+            .values()
+            .all(|checkout| !checkout.checked_out);
+        state.smart_checkout_ids.clear();
+        balanced
     }
 
     pub fn parameters(&self) -> &[GuestParam] {
@@ -6291,6 +6303,7 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
             return Err("pre-checkout result is null".to_string());
         }
         let time_step = read_guest_i32(unicorn, rsp + 0x30, "pre-checkout time step")?;
+        let what_time = read_guest_i32(unicorn, rsp + 0x28, "pre-checkout time")?;
         let mut time_scale = [0u8; 4];
         unicorn
             .mem_read(rsp + 0x38, &mut time_scale)
@@ -6301,6 +6314,16 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
             return Err(format!(
                 "invalid pre-checkout time step={time_step} scale={}",
                 u32::from_le_bytes(time_scale)
+            ));
+        }
+        let time_scale = u32::from_le_bytes(time_scale);
+        let state = unicorn.get_data();
+        if i64::from(what_time) * i64::from(state.smart_current_time_scale)
+            != i64::from(state.smart_current_time) * i64::from(time_scale)
+        {
+            return Err(format!(
+                "unsupported temporal smart checkout time={what_time}/{time_scale} current={}/{}",
+                state.smart_current_time, state.smart_current_time_scale
             ));
         }
         let (world, width, height) = smart_checkout_world(unicorn, index)?;
@@ -9882,6 +9905,8 @@ mod tests {
             3,
             2,
             crate::pixel::PF_PIXEL_FORMAT_ARGB128,
+            0,
+            1,
         );
         for smart_world in [smart_input, smart_output] {
             assert_eq!(
@@ -10145,6 +10170,8 @@ mod tests {
             8,
             6,
             crate::pixel::PF_PIXEL_FORMAT_ARGB32,
+            0,
+            1,
         );
         let request = engine.allocate(16, 4).unwrap();
         engine
@@ -10157,6 +10184,19 @@ mod tests {
             )
             .unwrap();
         let result = engine.allocate(76, 8).unwrap();
+        let temporal_error = engine
+            .call_win64_with_timeout(
+                HOST_PRE_CHECKOUT_LAYER,
+                &[1, 0, 9999, request, 1, 0, 1, result],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap_err();
+        assert!(
+            temporal_error
+                .to_string()
+                .contains("unsupported temporal smart checkout")
+        );
+        assert!(engine.unicorn.get_data().smart_checkout_ids.is_empty());
         assert_eq!(
             engine
                 .call_win64_with_timeout(
@@ -10211,7 +10251,7 @@ mod tests {
                 .unwrap(),
             0
         );
-        engine.finish_smart_checkout_scope();
+        assert!(!engine.finish_smart_checkout_scope());
         assert!(engine.unicorn.get_data().smart_checkout_ids.is_empty());
         assert!(
             engine
@@ -10219,6 +10259,20 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("invalid checkin-pixels id=0")
+        );
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_PRE_CHECKOUT_LAYER,
+                    &[1, 0, 42, request, 0, 0, 1, result],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        assert!(
+            engine.finish_smart_checkout_scope(),
+            "a pre-checkout-only token is balanced"
         );
     }
 
@@ -10256,6 +10310,8 @@ mod tests {
             8,
             6,
             crate::pixel::PF_PIXEL_FORMAT_ARGB32,
+            0,
+            1,
         );
         let request = engine.allocate(16, 4).unwrap();
         engine
@@ -10308,7 +10364,7 @@ mod tests {
                 .unwrap(),
             0
         );
-        engine.finish_smart_checkout_scope();
+        assert!(!engine.finish_smart_checkout_scope());
         assert!(engine.unicorn.get_data().smart_checkout_ids.is_empty());
     }
 
@@ -10334,6 +10390,8 @@ mod tests {
             8,
             6,
             crate::pixel::PF_PIXEL_FORMAT_ARGB32,
+            0,
+            1,
         );
         let result = engine.allocate(76, 8).unwrap();
         let error = engine
