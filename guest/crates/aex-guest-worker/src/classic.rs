@@ -316,8 +316,18 @@ impl ClassicHost {
         );
         write_u64(
             &mut utility_bytes,
+            abi::UTILS_ANSI_SPRINTF_OFFSET,
+            engine.ansi_sprintf_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
             abi::UTILS_COPY_OFFSET,
             engine.copy_callback_address(),
+        );
+        write_u64(
+            &mut utility_bytes,
+            abi::UTILS_BLEND_OFFSET,
+            engine.blend_callback_address(),
         );
         write_u64(
             &mut utility_bytes,
@@ -445,10 +455,7 @@ impl ClassicHost {
         }
         let global_setup_error =
             self.invoke(CMD_GLOBAL_SETUP)
-                .map_err(|source| ClassicError::SelectorGuest {
-                    selector: "GLOBAL_SETUP",
-                    source,
-                })? as i32;
+                .map_err(|source| selector_guest_error("GLOBAL_SETUP", source))? as i32;
         if global_setup_error != 0 {
             return Err(ClassicError::Selector {
                 selector: "GLOBAL_SETUP",
@@ -465,10 +472,7 @@ impl ClassicHost {
         self.engine.write(self.input, &input)?;
         let params_setup_error =
             self.invoke(CMD_PARAMS_SETUP)
-                .map_err(|source| ClassicError::SelectorGuest {
-                    selector: "PARAMS_SETUP",
-                    source,
-                })? as i32;
+                .map_err(|source| selector_guest_error("PARAMS_SETUP", source))? as i32;
         if params_setup_error != 0 {
             return Err(ClassicError::Selector {
                 selector: "PARAMS_SETUP",
@@ -557,7 +561,7 @@ impl ClassicHost {
                 Ok(result) => result as i32,
                 Err(error) => {
                     let _ = self.end_global();
-                    return Err(error.into());
+                    return Err(selector_guest_error("SEQUENCE_SETUP", error));
                 }
             };
             if result != 0 {
@@ -817,7 +821,10 @@ impl ClassicHost {
         let selector = match selector_name {
             "GLOBAL_SETUP" => CMD_GLOBAL_SETUP,
             "PARAMS_SETUP" => {
-                let error = self.invoke(CMD_GLOBAL_SETUP)? as i32;
+                let error = self
+                    .invoke(CMD_GLOBAL_SETUP)
+                    .map_err(|source| selector_guest_error("GLOBAL_SETUP", source))?
+                    as i32;
                 if error != 0 {
                     return Err(ClassicError::Selector {
                         selector: "GLOBAL_SETUP",
@@ -839,11 +846,28 @@ impl ClassicHost {
                 ));
             }
         };
+        let before = self.trace_state_snapshot()?;
         self.engine
             .begin_execution_trace(selector_name, self.entry)?;
-        let before = self.trace_state_snapshot()?;
-        let return_value = self.invoke(selector)?;
-        let after = self.trace_state_snapshot()?;
+        let selector_label = match selector {
+            CMD_GLOBAL_SETUP => "GLOBAL_SETUP",
+            CMD_PARAMS_SETUP => "PARAMS_SETUP",
+            _ => unreachable!("validated setup trace selector"),
+        };
+        let return_value = match self.invoke(selector) {
+            Ok(return_value) => return_value,
+            Err(source) => {
+                self.engine.discard_execution_trace()?;
+                return Err(selector_guest_error(selector_label, source));
+            }
+        };
+        let after = match self.trace_state_snapshot() {
+            Ok(after) => after,
+            Err(error) => {
+                self.engine.discard_execution_trace()?;
+                return Err(error.into());
+            }
+        };
         let mut trace = self
             .engine
             .finish_execution_trace(return_value)
@@ -1278,6 +1302,8 @@ impl ClassicHost {
         write_i32(&mut world, abi::LAYER_HEIGHT_OFFSET, height as i32);
         write_rect(&mut world, abi::LAYER_EXTENT_HINT_OFFSET, width, height);
         self.engine.write(output_world, &world)?;
+        self.engine
+            .configure_render_pixel_format(format.pf_pixel_format());
         let mut input_data = vec![0u8; abi::PF_IN_DATA_SIZE];
         self.engine.read(self.input, &mut input_data)?;
         write_i32(&mut input_data, abi::IN_WIDTH_OFFSET, width as i32);
@@ -1536,7 +1562,7 @@ impl ClassicHost {
 
     fn invoke(&mut self, selector: u64) -> Result<u64, GuestError> {
         self.engine
-            .call_win64(self.entry, [selector, self.input, self.output, 0, 0, 0])
+            .call_selector_win64(self.entry, [selector, self.input, self.output, 0, 0, 0])
     }
 
     fn write_frame_context(
@@ -1596,7 +1622,7 @@ impl ClassicHost {
             }
             Err(error) => {
                 let _ = clear;
-                Err(error.into())
+                Err(selector_guest_error("GLOBAL_SETDOWN", error))
             }
         }
     }
@@ -1614,12 +1640,15 @@ impl ClassicHost {
             self.engine
                 .begin_execution_trace(selector_name, self.entry)?;
         }
-        let return_value = self.engine.call_win64(self.entry, args).map_err(|source| {
-            ClassicError::SelectorGuest {
-                selector: selector_name,
-                source,
+        let return_value = match self.engine.call_selector_win64(self.entry, args) {
+            Ok(return_value) => return_value,
+            Err(source) => {
+                if trace_enabled {
+                    self.engine.discard_execution_trace()?;
+                }
+                return Err(selector_guest_error(selector_name, source));
             }
-        })?;
+        };
         let after = trace_enabled
             .then(|| self.trace_state_snapshot())
             .transpose()?;
@@ -2233,6 +2262,13 @@ fn selector_failure(selector: &'static str, error: i32) -> Option<ClassicError> 
     (error != 0).then_some(ClassicError::Selector { selector, error })
 }
 
+fn selector_guest_error(selector: &'static str, source: GuestError) -> ClassicError {
+    match source {
+        GuestError::SelectorAbort { error, .. } => ClassicError::Selector { selector, error },
+        source => ClassicError::SelectorGuest { selector, source },
+    }
+}
+
 fn bounded_failure_text(value: &str) -> String {
     bounded_text(value, MAX_FAILURE_TEXT_BYTES)
 }
@@ -2298,6 +2334,26 @@ mod tests {
             }
         ));
         assert!(selector_failure("FRAME_SETDOWN", 0).is_none());
+    }
+
+    #[test]
+    fn unsupported_suite_throw_maps_to_the_active_selector_error() {
+        let failure = selector_guest_error(
+            "SMART_RENDER",
+            GuestError::SelectorAbort {
+                error: 13,
+                suite_name: "FLT Blur Suite".into(),
+                suite_version: 1,
+                acquire_error: -1,
+            },
+        );
+        assert!(matches!(
+            failure,
+            ClassicError::Selector {
+                selector: "SMART_RENDER",
+                error: 13
+            }
+        ));
     }
 
     #[test]

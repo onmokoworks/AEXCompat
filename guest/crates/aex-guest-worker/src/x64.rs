@@ -92,6 +92,7 @@ const HOST_AREA_SAMPLE8: u64 = STUB_BASE + 0x80410;
 const HOST_TRANSFER_RECT8: u64 = STUB_BASE + 0x80420;
 const HOST_ITERATE16: u64 = STUB_BASE + 0x80430;
 const HOST_ITERATE16_CONTINUE: u64 = STUB_BASE + 0x80440;
+const HOST_BLEND: u64 = STUB_BASE + 0x80450;
 const MAX_SMART_CHECKOUT_IDS: usize = 64;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
@@ -202,6 +203,15 @@ pub enum GuestError {
     AvxStateCapacity,
     #[error("guest callback failed: {0}")]
     Callback(String),
+    #[error(
+        "guest selector aborted with {error} after unsupported suite {suite_name} v{suite_version} (acquire error {acquire_error})"
+    )]
+    SelectorAbort {
+        error: i32,
+        suite_name: String,
+        suite_version: u64,
+        acquire_error: i32,
+    },
     #[error("DLL process attach returned FALSE")]
     DllProcessAttach,
     #[error("guest execution failed: {reason}; crash_snapshot={snapshot_json}")]
@@ -220,6 +230,7 @@ impl GuestError {
             Self::StubCapacity | Self::IatRange => "import",
             Self::DataCapacity => "memory",
             Self::Callback(_) => "callback",
+            Self::SelectorAbort { .. } => "selector",
             Self::DllProcessAttach => "dllmain",
             Self::ExecutionCrash { .. } => "crash",
         }
@@ -2271,11 +2282,15 @@ struct GuestState {
     smart_width: u32,
     smart_height: u32,
     smart_pixel_format: i32,
+    render_pixel_format: i32,
     smart_current_time: i32,
     smart_current_time_scale: u32,
     suite_requests: Vec<String>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
+    selector_dispatch_active: bool,
+    pending_unsupported_suite: Option<PendingUnsupportedSuite>,
+    selector_abort: Option<SelectorAbortRecord>,
     pre_checkout_calls: u32,
     pre_checkout_requests: Vec<[i32; 4]>,
     smart_checkout_ids: HashMap<i32, SmartCheckout>,
@@ -2311,6 +2326,21 @@ struct GuestState {
     extended_string_table_valid: bool,
     avx_fallback_instructions: u64,
     avx_defined_ymm: [bool; 16],
+}
+
+#[derive(Clone, Debug)]
+struct PendingUnsupportedSuite {
+    name: String,
+    version: u64,
+    acquire_error: i32,
+    caller_rsp: u64,
+    return_address: u64,
+}
+
+#[derive(Clone, Debug)]
+struct SelectorAbortRecord {
+    error: i32,
+    suite: PendingUnsupportedSuite,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3056,6 +3086,15 @@ impl GuestEngine<'static> {
                             }),
                         )?;
                     }
+                    "_CxxThrowException" => {
+                        uc("write C++ throw trap", unicorn.mem_write(stub, &[0xc3]))?;
+                        uc(
+                            "install C++ throw trap",
+                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                                emulate_cxx_throw_exception(unicorn);
+                            }),
+                        )?;
+                    }
                     "expf" => install_float_import(&mut unicorn, stub, "expf", f32::exp)?,
                     "floorf" => install_float_import(&mut unicorn, stub, "floorf", f32::floor)?,
                     "powf" => install_float_binary_import(&mut unicorn, stub, "powf", f32::powf)?,
@@ -3173,6 +3212,10 @@ impl GuestEngine<'static> {
         )?;
         uc("write copy callback", unicorn.mem_write(HOST_COPY, &[0xc3]))?;
         uc(
+            "write blend callback",
+            unicorn.mem_write(HOST_BLEND, &[0xc3]),
+        )?;
+        uc(
             "write no-op callback",
             unicorn.mem_write(HOST_NOOP, &[0x31, 0xc0, 0xc3]),
         )?;
@@ -3254,6 +3297,12 @@ impl GuestEngine<'static> {
             "install copy callback",
             unicorn.add_code_hook(HOST_COPY, HOST_COPY, |unicorn, _, _| {
                 emulate_copy(unicorn);
+            }),
+        )?;
+        uc(
+            "install blend callback",
+            unicorn.add_code_hook(HOST_BLEND, HOST_BLEND, |unicorn, _, _| {
+                emulate_blend(unicorn);
             }),
         )?;
         uc(
@@ -3600,6 +3649,7 @@ impl GuestEngine<'static> {
             (HOST_POISON, "unsupported_callback"),
             (HOST_ANSI_STRCPY, "ansi_strcpy"),
             (HOST_COPY, "copy"),
+            (HOST_BLEND, "blend"),
             (HOST_NOOP, "noop"),
             (HOST_PRE_CHECKOUT_LAYER, "pre_checkout_layer"),
             (HOST_CHECKOUT_LAYER_PIXELS, "checkout_layer_pixels"),
@@ -4120,6 +4170,24 @@ impl GuestEngine<'static> {
         })
     }
 
+    pub fn discard_execution_trace(&mut self) -> Result<(), GuestError> {
+        let mut first_error = None;
+        for hook in self.trace_hooks.drain(..) {
+            if let Err(error) = self.unicorn.remove_hook(hook)
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        self.unicorn.get_data_mut().trace = None;
+        if let Some(error) = first_error {
+            return Err(GuestError::Callback(format!(
+                "remove aborted guest execution trace hook: {error}"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn configure_trace_watches(&mut self, watches: Vec<TraceWatchSpec>) {
         self.unicorn.get_data_mut().trace_watches = watches;
     }
@@ -4282,6 +4350,23 @@ impl GuestEngine<'static> {
         self.call_win64_with_timeout(address, &args, TIMEOUT_MICROSECONDS)
     }
 
+    pub fn call_selector_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
+        {
+            let state = self.unicorn.get_data_mut();
+            state.selector_dispatch_active = true;
+            state.pending_unsupported_suite = None;
+            state.selector_abort = None;
+        }
+        let result = self.call_win64_with_timeout(address, &args, TIMEOUT_MICROSECONDS);
+        {
+            let state = self.unicorn.get_data_mut();
+            state.selector_dispatch_active = false;
+            state.pending_unsupported_suite = None;
+            state.selector_abort = None;
+        }
+        result
+    }
+
     fn call_win64_with_timeout(
         &mut self,
         address: u64,
@@ -4331,6 +4416,14 @@ impl GuestEngine<'static> {
             MAX_INSTRUCTIONS,
         ) {
             return Err(self.execution_crash(format!("emulation error: {error}")));
+        }
+        if let Some(abort) = self.unicorn.get_data_mut().selector_abort.take() {
+            return Err(GuestError::SelectorAbort {
+                error: abort.error,
+                suite_name: abort.suite.name,
+                suite_version: abort.suite.version,
+                acquire_error: abort.suite.acquire_error,
+            });
         }
         let rip = uc(
             "read instruction pointer",
@@ -4496,8 +4589,16 @@ impl GuestEngine<'static> {
         HOST_ANSI_STRCPY
     }
 
+    pub fn ansi_sprintf_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_SPRINTF
+    }
+
     pub fn copy_callback_address(&self) -> u64 {
         HOST_COPY
+    }
+
+    pub fn blend_callback_address(&self) -> u64 {
+        HOST_BLEND
     }
 
     pub fn noop_callback_address(&self) -> u64 {
@@ -4744,8 +4845,13 @@ impl GuestEngine<'static> {
         state.smart_width = width;
         state.smart_height = height;
         state.smart_pixel_format = pixel_format;
+        state.render_pixel_format = pixel_format;
         state.smart_current_time = current_time;
         state.smart_current_time_scale = current_time_scale;
+    }
+
+    pub fn configure_render_pixel_format(&mut self, pixel_format: i32) {
+        self.unicorn.get_data_mut().render_pixel_format = pixel_format;
     }
 
     pub fn finish_smart_checkout_scope(&mut self) -> bool {
@@ -5550,6 +5656,294 @@ fn emulate_ansi_strcpy_bounded(unicorn: &mut Unicorn<'_, GuestState>) {
     match result {
         Ok(error) => {
             let _ = unicorn.reg_write(RegisterX86::RAX, error);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_ansi_sprintf_literal(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<Option<Vec<u8>>, String> {
+        let destination = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("PF ANSI sprintf destination: {error}"))?;
+        let format = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("PF ANSI sprintf format: {error}"))?;
+        if destination == 0 || format == 0 {
+            return Ok(None);
+        }
+        let mut output = Vec::new();
+        let mut index = 0u64;
+        while index < 256 {
+            let mut byte = [0u8; 1];
+            let address = format
+                .checked_add(index)
+                .ok_or_else(|| "PF ANSI sprintf format range overflow".to_string())?;
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|error| format!("PF ANSI sprintf format read: {error}"))?;
+            match byte[0] {
+                0 => {
+                    output.push(0);
+                    return Ok(Some(output));
+                }
+                b'%' => {
+                    index += 1;
+                    if index >= 256 {
+                        return Ok(None);
+                    }
+                    let address = format
+                        .checked_add(index)
+                        .ok_or_else(|| "PF ANSI sprintf format range overflow".to_string())?;
+                    unicorn
+                        .mem_read(address, &mut byte)
+                        .map_err(|error| format!("PF ANSI sprintf format read: {error}"))?;
+                    if byte[0] != b'%' {
+                        return Ok(None);
+                    }
+                    output.push(b'%');
+                }
+                value => output.push(value),
+            }
+            if output.len() > 4096 {
+                return Ok(None);
+            }
+            index += 1;
+        }
+        Ok(None)
+    })();
+    match result {
+        Ok(Some(output)) => {
+            let written = output.len() - 1;
+            if let Err(error) = unicorn.mem_write(
+                unicorn.reg_read(RegisterX86::RCX).unwrap_or_default(),
+                &output,
+            ) {
+                if unicorn.get_data().callback_error.is_none() {
+                    unicorn.get_data_mut().callback_error =
+                        Some(format!("PF ANSI sprintf destination write: {error}"));
+                }
+                let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+                let _ = unicorn.emu_stop();
+            } else {
+                let _ = unicorn.reg_write(RegisterX86::RAX, written as u64);
+            }
+        }
+        Ok(None) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BlendWorld {
+    data: u64,
+    rowbytes: usize,
+    width: usize,
+    height: usize,
+}
+
+fn read_blend_world(
+    unicorn: &Unicorn<'_, GuestState>,
+    world: u64,
+    pixel_bytes: usize,
+    name: &str,
+) -> Result<Option<BlendWorld>, String> {
+    if world == 0 {
+        return Ok(None);
+    }
+    let data = read_guest_u64(
+        unicorn,
+        world + abi::LAYER_DATA_OFFSET as u64,
+        &format!("blend {name} data"),
+    )?;
+    let rowbytes = read_guest_i32(
+        unicorn,
+        world + abi::LAYER_ROWBYTES_OFFSET as u64,
+        &format!("blend {name} rowbytes"),
+    )?;
+    let width = read_guest_i32(
+        unicorn,
+        world + abi::LAYER_WIDTH_OFFSET as u64,
+        &format!("blend {name} width"),
+    )?;
+    let height = read_guest_i32(
+        unicorn,
+        world + abi::LAYER_HEIGHT_OFFSET as u64,
+        &format!("blend {name} height"),
+    )?;
+    if data == 0
+        || rowbytes <= 0
+        || width <= 0
+        || height <= 0
+        || width > MAX_WORLD_DIMENSION
+        || height > MAX_WORLD_DIMENSION
+    {
+        return Ok(None);
+    }
+    let width = width as usize;
+    let height = height as usize;
+    let rowbytes = rowbytes as usize;
+    let Some(packed_row) = width.checked_mul(pixel_bytes) else {
+        return Ok(None);
+    };
+    let Some(mapped_bytes) = rowbytes.checked_mul(height) else {
+        return Ok(None);
+    };
+    if rowbytes < packed_row || mapped_bytes > MAX_WORLD_SIZE as usize {
+        return Ok(None);
+    }
+    Ok(Some(BlendWorld {
+        data,
+        rowbytes,
+        width,
+        height,
+    }))
+}
+
+fn emulate_blend(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<bool, String> {
+        let first_world = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("blend first world: {error}"))?;
+        let second_world = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("blend second world: {error}"))?;
+        let ratio = unicorn
+            .reg_read(RegisterX86::R9)
+            .map_err(|error| format!("blend ratio: {error}"))? as u32 as i32;
+        let destination_world = aegp_stack_arg(unicorn, 0x28)?;
+        let pixel_format = unicorn.get_data().render_pixel_format;
+        let Some(pixel_bytes) = world_pixel_bytes(pixel_format).map(|value| value as usize) else {
+            return Ok(false);
+        };
+        if !(0..=65_536).contains(&ratio) {
+            return Ok(false);
+        }
+        let Some(first) = read_blend_world(unicorn, first_world, pixel_bytes, "first source")?
+        else {
+            return Ok(false);
+        };
+        let Some(second) = read_blend_world(unicorn, second_world, pixel_bytes, "second source")?
+        else {
+            return Ok(false);
+        };
+        let Some(destination) =
+            read_blend_world(unicorn, destination_world, pixel_bytes, "destination")?
+        else {
+            return Ok(false);
+        };
+        if first.width != second.width
+            || first.width != destination.width
+            || first.height != second.height
+            || first.height != destination.height
+        {
+            return Ok(false);
+        }
+        let packed_row = first
+            .width
+            .checked_mul(pixel_bytes)
+            .ok_or_else(|| "blend packed row overflow".to_string())?;
+        let snapshot_size = packed_row
+            .checked_mul(first.height)
+            .filter(|size| *size <= MAX_WORLD_SIZE as usize)
+            .ok_or_else(|| "blend snapshot exceeds worker bound".to_string())?;
+        let mut first_snapshot = vec![0u8; snapshot_size];
+        let mut second_snapshot = vec![0u8; snapshot_size];
+        for row in 0..first.height {
+            let first_address = first
+                .data
+                .checked_add((row * first.rowbytes) as u64)
+                .ok_or_else(|| "blend first source address overflow".to_string())?;
+            let second_address = second
+                .data
+                .checked_add((row * second.rowbytes) as u64)
+                .ok_or_else(|| "blend second source address overflow".to_string())?;
+            let range = row * packed_row..(row + 1) * packed_row;
+            unicorn
+                .mem_read(first_address, &mut first_snapshot[range.clone()])
+                .map_err(|error| format!("blend first source pixels: {error}"))?;
+            unicorn
+                .mem_read(second_address, &mut second_snapshot[range])
+                .map_err(|error| format!("blend second source pixels: {error}"))?;
+        }
+        let mut output = vec![0u8; packed_row];
+        for row in 0..first.height {
+            let row_start = row * packed_row;
+            let first_row = &first_snapshot[row_start..row_start + packed_row];
+            let second_row = &second_snapshot[row_start..row_start + packed_row];
+            match pixel_bytes {
+                4 => {
+                    for index in 0..packed_row {
+                        let value = (i32::from(first_row[index]) * (65_536 - ratio)
+                            + i32::from(second_row[index]) * ratio
+                            + 32_768)
+                            >> 16;
+                        output[index] = value.clamp(0, 255) as u8;
+                    }
+                }
+                8 => {
+                    for index in 0..first.width * 4 {
+                        let byte = index * 2;
+                        let first = u16::from_le_bytes([first_row[byte], first_row[byte + 1]]);
+                        let second = u16::from_le_bytes([second_row[byte], second_row[byte + 1]]);
+                        let value = (i64::from(first) * i64::from(65_536 - ratio)
+                            + i64::from(second) * i64::from(ratio)
+                            + 32_768)
+                            >> 16;
+                        output[byte..byte + 2]
+                            .copy_from_slice(&(value.clamp(0, 32_768) as u16).to_le_bytes());
+                    }
+                }
+                16 => {
+                    let fraction = f64::from(ratio) / 65_536.0;
+                    for index in 0..first.width * 4 {
+                        let byte = index * 4;
+                        let first = f32::from_le_bytes(
+                            first_row[byte..byte + 4]
+                                .try_into()
+                                .expect("float channel is four bytes"),
+                        );
+                        let second = f32::from_le_bytes(
+                            second_row[byte..byte + 4]
+                                .try_into()
+                                .expect("float channel is four bytes"),
+                        );
+                        output[byte..byte + 4].copy_from_slice(
+                            &((f64::from(first) * (1.0 - fraction) + f64::from(second) * fraction)
+                                as f32)
+                                .to_le_bytes(),
+                        );
+                    }
+                }
+                _ => return Ok(false),
+            }
+            let destination_address = destination
+                .data
+                .checked_add((row * destination.rowbytes) as u64)
+                .ok_or_else(|| "blend destination address overflow".to_string())?;
+            unicorn
+                .mem_write(destination_address, &output)
+                .map_err(|error| format!("blend destination pixels: {error}"))?;
+        }
+        Ok(true)
+    })();
+    match result {
+        Ok(valid) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, if valid { 0 } else { 4 });
         }
         Err(error) => {
             if unicorn.get_data().callback_error.is_none() {
@@ -7380,14 +7774,7 @@ fn install_pf_ansi_suite_v2(unicorn: &mut Unicorn<'static, GuestState>) -> Resul
         unicorn.add_code_hook(
             HOST_PF_ANSI_SPRINTF,
             HOST_PF_ANSI_SPRINTF,
-            |unicorn, _, _| {
-                if unicorn.get_data().callback_error.is_none() {
-                    unicorn.get_data_mut().callback_error =
-                        Some("PF ANSI Suite v2 sprintf is unsupported".into());
-                }
-                let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
-                let _ = unicorn.emu_stop();
-            },
+            |unicorn, _, _| emulate_ansi_sprintf_literal(unicorn),
         ),
     )?;
     uc(
@@ -7439,6 +7826,149 @@ fn install_pf_ansi_suite_v2(unicorn: &mut Unicorn<'static, GuestState>) -> Resul
     Ok(())
 }
 
+fn finish_acquire_suite_success(unicorn: &mut Unicorn<'_, GuestState>) {
+    unicorn.get_data_mut().pending_unsupported_suite = None;
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+}
+
+fn image_executable_address(state: &GuestState, address: u64) -> bool {
+    state
+        .image_executable_ranges
+        .iter()
+        .any(|(start, end)| (*start..*end).contains(&address))
+}
+
+fn read_guest_u32(unicorn: &Unicorn<'_, GuestState>, address: u64) -> Option<u32> {
+    let mut bytes = [0u8; 4];
+    unicorn.mem_read(address, &mut bytes).ok()?;
+    Some(u32::from_le_bytes(bytes))
+}
+
+fn image_rva_address(unicorn: &Unicorn<'_, GuestState>, rva: u32, byte_count: u64) -> Option<u64> {
+    let (image_start, image_end) = unicorn.get_data().image_region?;
+    let address = image_start.checked_add(u64::from(rva))?;
+    let end = address.checked_add(byte_count)?;
+    (address >= image_start && end <= image_end).then_some(address)
+}
+
+fn is_msvc_i32_throw_info(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) -> bool {
+    let Some((image_start, image_end)) = unicorn.get_data().image_region else {
+        return false;
+    };
+    let Some(throw_info_end) = throw_info.checked_add(16) else {
+        return false;
+    };
+    if throw_info < image_start || throw_info_end > image_end {
+        return false;
+    }
+
+    // Win64 MSVC exception metadata stores image-relative 32-bit pointers.
+    // Require one simple, four-byte catchable type whose TypeDescriptor is
+    // exactly the built-in `int` encoding. PF_Err is an A_long/int32.
+    let Some(catchable_array_rva) = read_guest_u32(unicorn, throw_info + 12) else {
+        return false;
+    };
+    let Some(catchable_array) = image_rva_address(unicorn, catchable_array_rva, 8) else {
+        return false;
+    };
+    if read_guest_u32(unicorn, catchable_array) != Some(1) {
+        return false;
+    }
+    let Some(catchable_type_rva) = read_guest_u32(unicorn, catchable_array + 4) else {
+        return false;
+    };
+    let Some(catchable_type) = image_rva_address(unicorn, catchable_type_rva, 28) else {
+        return false;
+    };
+    if read_guest_u32(unicorn, catchable_type) != Some(1)
+        || read_guest_u32(unicorn, catchable_type + 20) != Some(4)
+    {
+        return false;
+    }
+    let Some(type_descriptor_rva) = read_guest_u32(unicorn, catchable_type + 4) else {
+        return false;
+    };
+    let Some(type_name) = image_rva_address(unicorn, type_descriptor_rva, 19) else {
+        return false;
+    };
+    let mut name = [0u8; 3];
+    unicorn.mem_read(type_name + 16, &mut name).is_ok() && name == *b".H\0"
+}
+
+fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
+    if try_emulate_selector_abort(unicorn) {
+        return;
+    }
+    // `_CxxThrowException` is noreturn. Returning through the import stub for
+    // an exception we cannot faithfully dispatch would execute compiler
+    // unreachable code and can corrupt selector/session state. Keep all
+    // non-selector, stale, malformed, differently typed, and unrelated throws
+    // fail-closed instead.
+    if unicorn.get_data().callback_error.is_none() {
+        unicorn.get_data_mut().callback_error = Some(
+            "guest called _CxxThrowException outside the supported selector-abort contract".into(),
+        );
+    }
+    let _ = unicorn.emu_stop();
+}
+
+fn try_emulate_selector_abort(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
+    if !unicorn.get_data().selector_dispatch_active
+        || unicorn.get_data().pending_unsupported_suite.is_none()
+    {
+        return false;
+    }
+    let exception = match unicorn.reg_read(RegisterX86::RCX) {
+        Ok(exception) if exception != 0 => exception,
+        _ => return false,
+    };
+    let mut bytes = [0u8; 4];
+    if unicorn.mem_read(exception, &mut bytes).is_err() {
+        return false;
+    }
+    let error = i32::from_le_bytes(bytes);
+    // PF_Err is an A_long. Keep this trap deliberately narrower than the
+    // language exception ABI: only a small, positive host error thrown after
+    // an unsupported AcquireSuite is a selector-level abort.
+    if !(1..=0x7fff).contains(&error) {
+        return false;
+    }
+    if !unicorn
+        .reg_read(RegisterX86::RDX)
+        .is_ok_and(|throw_info| is_msvc_i32_throw_info(unicorn, throw_info))
+    {
+        return false;
+    }
+    let caller_rsp = match unicorn.reg_read(RegisterX86::RSP) {
+        Ok(caller_rsp) => caller_rsp,
+        _ => return false,
+    };
+    let mut return_bytes = [0u8; 8];
+    if unicorn.mem_read(caller_rsp, &mut return_bytes).is_err() {
+        return false;
+    }
+    let return_address = u64::from_le_bytes(return_bytes);
+    let pending = unicorn
+        .get_data()
+        .pending_unsupported_suite
+        .as_ref()
+        .expect("checked above");
+    let close_same_frame_throw = caller_rsp == pending.caller_rsp
+        && image_executable_address(unicorn.get_data(), return_address)
+        && return_address
+            .checked_sub(pending.return_address)
+            .is_some_and(|distance| (1..=0x400).contains(&distance));
+    if !close_same_frame_throw {
+        return false;
+    }
+    let Some(suite) = unicorn.get_data_mut().pending_unsupported_suite.take() else {
+        return false;
+    };
+    unicorn.get_data_mut().selector_abort = Some(SelectorAbortRecord { error, suite });
+    let _ = unicorn.emu_stop();
+    true
+}
+
 fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let name_pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let version = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
@@ -7468,7 +7998,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_HANDLE_SUITE.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "AEGP Memory Suite"
@@ -7478,7 +8008,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_AEGP_MEMORY_SUITE.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "PF World Suite"
@@ -7488,7 +8018,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_WORLD_SUITE.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "PF ANSI Suite"
@@ -7498,7 +8028,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_PF_ANSI_SUITE_V2.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "PF Iterate8 Suite"
@@ -7506,7 +8036,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         && let Some(table) = iterate8_suite_table_address(version)
         && unicorn.mem_write(output, &table.to_le_bytes()).is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "PF ColorParamSuite"
@@ -7516,7 +8046,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_COLOR_PARAM_SUITE.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "PF PointParamSuite"
@@ -7526,7 +8056,7 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .mem_write(output, &HOST_POINT_PARAM_SUITE.to_le_bytes())
             .is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
     }
     if name == "AEGP Utility Suite"
@@ -7536,8 +8066,28 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
             .and_then(utility_suite_table_address)
         && unicorn.mem_write(output, &table.to_le_bytes()).is_ok()
     {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        finish_acquire_suite_success(unicorn);
         return;
+    }
+    if unicorn.get_data().selector_dispatch_active {
+        let caller_rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or_default();
+        let mut return_bytes = [0u8; 8];
+        let return_address = if unicorn.mem_read(caller_rsp, &mut return_bytes).is_ok() {
+            u64::from_le_bytes(return_bytes)
+        } else {
+            0
+        };
+        if !image_executable_address(unicorn.get_data(), return_address) {
+            let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+            return;
+        }
+        unicorn.get_data_mut().pending_unsupported_suite = Some(PendingUnsupportedSuite {
+            name: name.into_owned(),
+            version,
+            acquire_error: -1,
+            caller_rsp,
+            return_address,
+        });
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
 }
@@ -8697,22 +9247,25 @@ fn coalesce_census_extents(
 mod tests {
     use super::*;
 
+    const TEST_CODE: u64 = 0x1000_0000;
+    const TEST_CXX_THROW: u64 = STUB_BASE + 0x80460;
+    const TEST_THROW_INFO: u64 = TEST_CODE + 0x800;
+
     fn test_engine(code: &[u8]) -> GuestEngine<'static> {
-        const CODE: u64 = 0x1000_0000;
         let mut unicorn = Unicorn::new_with_data(
             Arch::X86,
             Mode::MODE_64,
             GuestState {
                 next_handle_data: HANDLE_DATA_BASE,
                 next_aegp_memory_handle: AEGP_MEMORY_HANDLE_BASE,
-                image_region: Some((CODE, CODE + PAGE_SIZE)),
-                image_executable_ranges: vec![(CODE, CODE + code.len() as u64)],
+                image_region: Some((TEST_CODE, TEST_CODE + PAGE_SIZE)),
+                image_executable_ranges: vec![(TEST_CODE, TEST_CODE + code.len() as u64)],
                 ..GuestState::default()
             },
         )
         .unwrap();
         install_avx_fallback(&mut unicorn).unwrap();
-        unicorn.mem_map(CODE, PAGE_SIZE, Prot::ALL).unwrap();
+        unicorn.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
         unicorn
             .mem_map(DATA_BASE, PAGE_SIZE, Prot::READ | Prot::WRITE)
             .unwrap();
@@ -8723,10 +9276,10 @@ mod tests {
         unicorn
             .mem_map(STACK_BASE, STACK_SIZE, Prot::READ | Prot::WRITE)
             .unwrap();
-        unicorn.mem_write(CODE, code).unwrap();
+        unicorn.mem_write(TEST_CODE, code).unwrap();
         install_avx_state_sync_points(
             &mut unicorn,
-            discover_avx_state_sync_points(code, CODE).unwrap(),
+            discover_avx_state_sync_points(code, TEST_CODE).unwrap(),
         )
         .unwrap();
         unicorn.mem_write(RETURN_ADDRESS, &[0xcc]).unwrap();
@@ -8996,7 +9549,7 @@ mod tests {
             .unwrap();
         install_aegp_utility_suites(&mut unicorn).unwrap();
         let mut trace_points = Vec::new();
-        let mut decoder = Decoder::with_ip(64, code, CODE, DecoderOptions::NONE);
+        let mut decoder = Decoder::with_ip(64, code, TEST_CODE, DecoderOptions::NONE);
         while decoder.can_decode() {
             let instruction = decoder.decode();
             if instruction.mnemonic() == Mnemonic::Call
@@ -9010,8 +9563,8 @@ mod tests {
         GuestEngine {
             unicorn,
             next_data: DATA_BASE,
-            image_base: CODE,
-            image_end: CODE + PAGE_SIZE,
+            image_base: TEST_CODE,
+            image_end: TEST_CODE + PAGE_SIZE,
             census_hook: None,
             trace_hooks: Vec::new(),
             trace_points,
@@ -9024,6 +9577,81 @@ mod tests {
                 symbols: vec!["fixture_entry".into()],
             }],
         }
+    }
+
+    fn install_test_cxx_throw(engine: &mut GuestEngine<'static>) {
+        engine.unicorn.mem_write(TEST_CXX_THROW, &[0xc3]).unwrap();
+        engine
+            .unicorn
+            .add_code_hook(TEST_CXX_THROW, TEST_CXX_THROW, |unicorn, _, _| {
+                emulate_cxx_throw_exception(unicorn);
+            })
+            .unwrap();
+    }
+
+    fn install_test_i32_throw_info(engine: &mut GuestEngine<'static>) {
+        const CATCHABLE_ARRAY: u64 = TEST_CODE + 0x820;
+        const CATCHABLE_TYPE: u64 = TEST_CODE + 0x830;
+        const TYPE_DESCRIPTOR: u64 = TEST_CODE + 0x850;
+        let rva = |address: u64| u32::try_from(address - TEST_CODE).unwrap();
+
+        let mut throw_info = [0u8; 16];
+        throw_info[12..16].copy_from_slice(&rva(CATCHABLE_ARRAY).to_le_bytes());
+        engine.write(TEST_THROW_INFO, &throw_info).unwrap();
+
+        let mut catchable_array = [0u8; 8];
+        catchable_array[0..4].copy_from_slice(&1u32.to_le_bytes());
+        catchable_array[4..8].copy_from_slice(&rva(CATCHABLE_TYPE).to_le_bytes());
+        engine.write(CATCHABLE_ARRAY, &catchable_array).unwrap();
+
+        let mut catchable_type = [0u8; 28];
+        catchable_type[0..4].copy_from_slice(&1u32.to_le_bytes());
+        catchable_type[4..8].copy_from_slice(&rva(TYPE_DESCRIPTOR).to_le_bytes());
+        catchable_type[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        catchable_type[20..24].copy_from_slice(&4u32.to_le_bytes());
+        engine.write(CATCHABLE_TYPE, &catchable_type).unwrap();
+
+        let mut type_descriptor = [0u8; 19];
+        type_descriptor[16..19].copy_from_slice(b".H\0");
+        engine.write(TYPE_DESCRIPTOR, &type_descriptor).unwrap();
+    }
+
+    fn push_mov_imm64(code: &mut Vec<u8>, register_opcode: [u8; 2], value: u64) {
+        code.extend_from_slice(&register_opcode);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn selector_throw_fixture(
+        include_unsupported_acquire: bool,
+        throw_error_pointer: u64,
+        throw_info_pointer: u64,
+        instructions_after_acquire: usize,
+    ) -> Vec<u8> {
+        let mut code = Vec::new();
+        if include_unsupported_acquire {
+            push_mov_imm64(&mut code, [0x48, 0xb9], DATA_BASE + 0x100); // mov rcx, suite name
+            code.extend_from_slice(&[0xba, 1, 0, 0, 0]); // mov edx, 1
+            push_mov_imm64(&mut code, [0x49, 0xb8], DATA_BASE + 0x200); // mov r8, output
+            push_mov_imm64(&mut code, [0x48, 0xb8], HOST_ACQUIRE_SUITE); // mov rax, callback
+            code.extend_from_slice(&[0xff, 0xd0]); // call rax
+            code.resize(code.len() + instructions_after_acquire, 0x90);
+        }
+        push_mov_imm64(&mut code, [0x48, 0xb9], throw_error_pointer); // mov rcx, exception object
+        push_mov_imm64(&mut code, [0x48, 0xba], throw_info_pointer); // mov rdx, ThrowInfo
+        push_mov_imm64(&mut code, [0x48, 0xb8], TEST_CXX_THROW); // mov rax, callback
+        code.extend_from_slice(&[0xff, 0xd0]); // call rax
+        code.extend_from_slice(&[0xb8, 77, 0, 0, 0, 0xc3]); // fallback: mov eax, 77; ret
+        code
+    }
+
+    fn unsupported_acquire_fallback_fixture() -> Vec<u8> {
+        let mut code = Vec::new();
+        push_mov_imm64(&mut code, [0x48, 0xb9], DATA_BASE + 0x100);
+        code.extend_from_slice(&[0xba, 1, 0, 0, 0]);
+        push_mov_imm64(&mut code, [0x49, 0xb8], DATA_BASE + 0x200);
+        push_mov_imm64(&mut code, [0x48, 0xb8], HOST_ACQUIRE_SUITE);
+        code.extend_from_slice(&[0xff, 0xd0, 0x31, 0xc0, 0xc3]);
+        code
     }
 
     #[test]
@@ -9142,6 +9770,130 @@ mod tests {
                 .call_win64(HOST_EXTENDED_LOOKUP, [0, 999, 0, 0, 0, 0])
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn legacy_blend_is_typed_alias_safe_and_fails_closed() {
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.mem_write(HOST_BLEND, &[0xc3]).unwrap();
+        engine
+            .unicorn
+            .add_code_hook(HOST_BLEND, HOST_BLEND, |unicorn, _, _| {
+                emulate_blend(unicorn);
+            })
+            .unwrap();
+
+        fn write_world(
+            engine: &mut GuestEngine<'static>,
+            pixels: &[u8],
+            pixel_bytes: usize,
+        ) -> (u64, u64) {
+            let data = engine.allocate(pixels.len(), 8).unwrap();
+            let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+            engine.write(data, pixels).unwrap();
+            let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+            definition[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                .copy_from_slice(&data.to_le_bytes());
+            definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                .copy_from_slice(&(pixel_bytes as i32).to_le_bytes());
+            definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+                .copy_from_slice(&1i32.to_le_bytes());
+            definition[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+                .copy_from_slice(&1i32.to_le_bytes());
+            engine.write(world, &definition).unwrap();
+            (world, data)
+        }
+
+        let cases = [
+            (
+                0x6267_7261u32 as i32,
+                vec![255, 10, 20, 30],
+                vec![0, 110, 120, 130],
+                vec![128, 60, 70, 80],
+            ),
+            (
+                0x3631_6561u32 as i32,
+                [32_768u16, 1024, 2048, 4096]
+                    .into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+                [0u16, 3072, 4096, 6144]
+                    .into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+                [16_384u16, 2048, 3072, 5120]
+                    .into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+            ),
+            (
+                0x3233_6561u32 as i32,
+                [1.0f32, 0.1, 0.2, 0.3]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+                [0.0f32, 0.5, 0.6, 0.7]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+                [0.5f32, 0.3, 0.4, 0.5]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+            ),
+        ];
+        for (pixel_format, first_pixels, second_pixels, expected) in cases {
+            engine.configure_render_pixel_format(pixel_format);
+            let pixel_bytes = first_pixels.len();
+            let (first, first_data) = write_world(&mut engine, &first_pixels, pixel_bytes);
+            let (second, _) = write_world(&mut engine, &second_pixels, pixel_bytes);
+            assert_eq!(
+                engine
+                    .call_win64(HOST_BLEND, [1, first, second, 32_768, first, 0])
+                    .unwrap(),
+                0
+            );
+            let mut output = vec![0u8; pixel_bytes];
+            engine.read(first_data, &mut output).unwrap();
+            assert_eq!(output, expected);
+        }
+
+        engine.configure_render_pixel_format(0x3233_6561u32 as i32);
+        let first_pixels = [-1.515_396_1f32; 4]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let second_pixels = [-0.089_762_6f32; 4]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let (first, first_data) = write_world(&mut engine, &first_pixels, 16);
+        let (second, _) = write_world(&mut engine, &second_pixels, 16);
+        assert_eq!(
+            engine
+                .call_win64(HOST_BLEND, [0, first, second, 33_817, first, 0])
+                .unwrap(),
+            0
+        );
+        let expected = f32::from_bits(0xbf47_9e5a).to_le_bytes().repeat(4);
+        let mut output = vec![0u8; 16];
+        engine.read(first_data, &mut output).unwrap();
+        assert_eq!(output, expected);
+
+        engine.configure_render_pixel_format(0x6267_7261u32 as i32);
+        let (first, first_data) = write_world(&mut engine, &[1, 2, 3, 4], 4);
+        let (second, _) = write_world(&mut engine, &[5, 6, 7, 8], 4);
+        let before = engine.unicorn.mem_read_as_vec(first_data, 4).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_BLEND, [1, first, second, 65_537, first, 0])
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(first_data, 4).unwrap(),
+            before
         );
     }
 
@@ -9660,6 +10412,161 @@ mod tests {
         // mov rax, rcx; add rax, rdx; ret
         let mut engine = test_engine(&[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3]);
         assert_eq!(engine.call_win64(CODE, [40, 2, 0, 0, 0, 0]).unwrap(), 42);
+    }
+
+    #[test]
+    fn selector_call_converts_unsupported_suite_cxx_throw_to_selector_abort() {
+        const CODE: u64 = 0x1000_0000;
+        let error_pointer = DATA_BASE + 0x300;
+        let code = selector_throw_fixture(true, error_pointer, TEST_THROW_INFO, 0);
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+        install_test_i32_throw_info(&mut engine);
+        engine
+            .write(DATA_BASE + 0x100, b"FLT Blur Suite\0")
+            .unwrap();
+        engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
+
+        let error = engine.call_selector_win64(CODE, [0; 6]).unwrap_err();
+        match error {
+            GuestError::SelectorAbort {
+                error,
+                suite_name,
+                suite_version,
+                acquire_error,
+            } => {
+                assert_eq!(error, 13);
+                assert_eq!(suite_name, "FLT Blur Suite");
+                assert_eq!(suite_version, 1);
+                assert_eq!(acquire_error, -1);
+            }
+            other => panic!("expected selector abort, got {other:?}"),
+        }
+        assert_eq!(engine.suite_requests(), ["FLT Blur Suite v1"]);
+    }
+
+    #[test]
+    fn failed_suite_keeps_a_different_typed_exception_fail_closed() {
+        let error_pointer = DATA_BASE + 0x300;
+        let code = selector_throw_fixture(true, error_pointer, TEST_THROW_INFO, 0);
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+        install_test_i32_throw_info(&mut engine);
+        engine
+            .write(DATA_BASE + 0x100, b"Optional Missing Suite\0")
+            .unwrap();
+        engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
+        // Replace the built-in int TypeDescriptor with a different MSVC type.
+        engine
+            .write(TEST_CODE + 0x850 + 16, b".?AVfailure@@\0")
+            .unwrap();
+
+        assert!(matches!(
+            engine.call_selector_win64(TEST_CODE, [0; 6]),
+            Err(GuestError::Callback(message))
+                if message.contains("_CxxThrowException")
+        ));
+    }
+
+    #[test]
+    fn failed_suite_provenance_expires_and_distant_i32_throw_fails_closed() {
+        let error_pointer = DATA_BASE + 0x300;
+        let code = selector_throw_fixture(true, error_pointer, TEST_THROW_INFO, 0x401);
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+        install_test_i32_throw_info(&mut engine);
+        engine
+            .write(DATA_BASE + 0x100, b"Optional Missing Suite\0")
+            .unwrap();
+        engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
+
+        assert!(matches!(
+            engine.call_selector_win64(TEST_CODE, [0; 6]),
+            Err(GuestError::Callback(message))
+                if message.contains("_CxxThrowException")
+        ));
+    }
+
+    #[test]
+    fn selector_abort_trace_can_be_discarded_before_cleanup_and_next_trace() {
+        let error_pointer = DATA_BASE + 0x300;
+        let code = selector_throw_fixture(true, error_pointer, TEST_THROW_INFO, 0);
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+        install_test_i32_throw_info(&mut engine);
+        engine
+            .write(DATA_BASE + 0x100, b"FLT Blur Suite\0")
+            .unwrap();
+        engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
+
+        engine
+            .begin_execution_trace("SMART_RENDER", TEST_CODE)
+            .unwrap();
+        assert!(matches!(
+            engine.call_selector_win64(TEST_CODE, [0; 6]),
+            Err(GuestError::SelectorAbort { error: 13, .. })
+        ));
+        engine.discard_execution_trace().unwrap();
+        assert!(engine.trace_hooks.is_empty());
+        assert!(engine.unicorn.get_data().trace.is_none());
+
+        let cleanup = TEST_CODE + 0x100;
+        engine.write(cleanup, &[0xb8, 0, 0, 0, 0, 0xc3]).unwrap();
+        engine.unicorn.get_data_mut().image_executable_ranges = vec![
+            (TEST_CODE, TEST_CODE + code.len() as u64),
+            (cleanup, cleanup + 6),
+        ];
+        engine
+            .begin_execution_trace("FRAME_SETDOWN", cleanup)
+            .unwrap();
+        let cleanup_result = engine.call_selector_win64(cleanup, [0; 6]).unwrap();
+        let trace = engine.finish_execution_trace(cleanup_result).unwrap();
+        assert_eq!(cleanup_result, 0);
+        assert_eq!(trace.selector, "FRAME_SETDOWN");
+    }
+
+    #[test]
+    fn unsupported_suite_without_throw_falls_back_but_does_not_mask_next_selector_throw() {
+        const CODE: u64 = 0x1000_0000;
+        let error_pointer = DATA_BASE + 0x300;
+        let code = unsupported_acquire_fallback_fixture();
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+        engine
+            .write(DATA_BASE + 0x100, b"Optional Missing Suite\0")
+            .unwrap();
+        engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
+        assert_eq!(engine.call_selector_win64(CODE, [0; 6]).unwrap(), 0);
+
+        let code = selector_throw_fixture(false, error_pointer, TEST_THROW_INFO, 0);
+        let second_selector = CODE + 0x100;
+        engine.write(second_selector, &code).unwrap();
+        engine.unicorn.get_data_mut().image_executable_ranges =
+            vec![(second_selector, second_selector + code.len() as u64)];
+        assert!(matches!(
+            engine.call_selector_win64(second_selector, [0; 6]),
+            Err(GuestError::Callback(message))
+                if message.contains("_CxxThrowException")
+        ));
+    }
+
+    #[test]
+    fn cxx_throw_without_pending_suite_or_readable_error_fails_closed() {
+        const CODE: u64 = 0x1000_0000;
+        let code = selector_throw_fixture(false, 0xdead_beef, TEST_THROW_INFO, 0);
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+
+        assert!(matches!(
+            engine.call_selector_win64(CODE, [0; 6]),
+            Err(GuestError::Callback(message))
+                if message.contains("_CxxThrowException")
+        ));
+        assert!(matches!(
+            engine.call_win64(CODE, [0; 6]),
+            Err(GuestError::Callback(message))
+                if message.contains("_CxxThrowException")
+        ));
     }
 
     #[test]
@@ -11477,6 +12384,44 @@ mod tests {
         assert_eq!(
             engine.unicorn.mem_read_as_vec(destination, 8).unwrap(),
             b"bounded\0"
+        );
+
+        let literal_format = DATA_BASE + 0x300;
+        engine
+            .unicorn
+            .mem_write(literal_format, b"Gaussian Blur %% fallback\0")
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    callback(&engine, 15),
+                    [destination, literal_format, 0, 0, 0, 0],
+                )
+                .unwrap(),
+            24
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 25).unwrap(),
+            b"Gaussian Blur % fallback\0"
+        );
+        let unsupported_format = DATA_BASE + 0x380;
+        engine
+            .unicorn
+            .mem_write(unsupported_format, b"value=%d\0")
+            .unwrap();
+        let before = engine.unicorn.mem_read_as_vec(destination, 25).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    callback(&engine, 15),
+                    [destination, unsupported_format, 7, 0, 0, 0],
+                )
+                .unwrap(),
+            u32::MAX as u64
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 25).unwrap(),
+            before
         );
     }
 
