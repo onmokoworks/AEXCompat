@@ -543,7 +543,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "worker",
     )
     cases = load_manifest(manifest_path)
-    output = args.output.resolve()
+    # Keep the final path component lexical.  Resolving it here would turn a
+    # pre-existing symlink into its victim and make the later atomic replace
+    # overwrite that victim's directory entry.
+    output = Path(os.path.abspath(os.fspath(args.output.expanduser())))
     protected = [("manifest", manifest_path), ("worker", worker)]
     for case in cases:
         protected.extend(

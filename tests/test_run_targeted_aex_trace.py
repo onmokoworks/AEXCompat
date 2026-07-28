@@ -322,7 +322,7 @@ def test_success_requires_a_valid_regular_output_png(
 
 
 @pytest.mark.parametrize("protected_name", ["manifest", "worker", "plugin", "input"])
-@pytest.mark.parametrize("alias_kind", ["direct", "hardlink"])
+@pytest.mark.parametrize("alias_kind", ["direct", "hardlink", "symlink"])
 def test_output_cannot_alias_a_pinned_input_before_worker_launch(
     tmp_path, monkeypatch, protected_name, alias_kind
 ):
@@ -336,9 +336,12 @@ def test_output_cannot_alias_a_pinned_input_before_worker_launch(
     before = protected.read_bytes()
     if alias_kind == "direct":
         output = protected
-    else:
+    elif alias_kind == "hardlink":
         output = tmp_path / f"{protected_name}-report-hardlink.json"
         output.hardlink_to(protected)
+    else:
+        output = tmp_path / f"{protected_name}-report-symlink.json"
+        output.symlink_to(protected)
     launched = False
 
     def must_not_launch(*args, **kwargs):
@@ -361,6 +364,45 @@ def test_output_cannot_alias_a_pinned_input_before_worker_launch(
 
     assert not launched
     assert protected.read_bytes() == before
+
+
+def test_preexisting_output_symlink_replaces_link_not_unrelated_victim(
+    tmp_path, monkeypatch
+):
+    worker, _, _, manifest = _fixture(tmp_path)
+    victim = tmp_path / "unrelated-victim.txt"
+    victim.write_bytes(b"do not overwrite")
+    report_path = tmp_path / "report.json"
+    report_path.symlink_to(victim)
+
+    def fake_run(command, timeout_seconds):
+        Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(command[4], "PNG")
+        return (
+            subprocess.CompletedProcess(
+                command,
+                0,
+                b'{"execution_traces":[{"selector":"RENDER"}]}',
+                b"",
+            ),
+            False,
+            None,
+        )
+
+    monkeypatch.setattr(RUNNER, "_run_bounded_process", fake_run)
+    report = RUNNER.run(
+        argparse.Namespace(
+            manifest=manifest,
+            worker=worker,
+            expected_worker_sha256=_sha(worker),
+            output=report_path,
+            timeout=10,
+            run_parent=tmp_path,
+        )
+    )
+
+    assert victim.read_bytes() == b"do not overwrite"
+    assert not report_path.is_symlink()
+    assert json.loads(report_path.read_text(encoding="utf-8")) == report
 
 
 def test_late_output_symlink_is_replaced_without_touching_target(
