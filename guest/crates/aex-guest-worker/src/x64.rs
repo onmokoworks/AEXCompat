@@ -1385,7 +1385,10 @@ enum AvxStateSync {
     AllRegisters,
 }
 
-fn discover_avx_state_sync_points(bytes: &[u8], address: u64) -> Vec<(u64, AvxStateSync)> {
+fn discover_avx_state_sync_points(
+    bytes: &[u8],
+    address: u64,
+) -> Result<Vec<(u64, AvxStateSync)>, GuestError> {
     // A PE executable section can contain inline data or multiple entry points,
     // so a single linear decode is not sufficient. In 64-bit mode every C4/C5
     // byte is a potential VEX prefix. Decode each candidate independently;
@@ -1429,10 +1432,13 @@ fn discover_avx_state_sync_points(bytes: &[u8], address: u64) -> Vec<(u64, AvxSt
             _ => None,
         };
         if let Some(sync) = sync {
+            if points.len() >= MAX_AVX_STATE_SYNC_POINTS {
+                return Err(GuestError::AvxStateCapacity);
+            }
             points.push((instruction.ip(), sync));
         }
     }
-    points
+    Ok(points)
 }
 
 fn synchronize_one_ymm(unicorn: &mut Unicorn<'_, GuestState>, index: usize, zero_all: bool) {
@@ -1471,9 +1477,8 @@ fn synchronize_native_avx_state(unicorn: &mut Unicorn<'_, GuestState>, sync: Avx
 
 fn install_avx_state_sync_points(
     unicorn: &mut Unicorn<'static, GuestState>,
-    points: impl IntoIterator<Item = (u64, AvxStateSync)>,
+    points: Vec<(u64, AvxStateSync)>,
 ) -> Result<(), GuestError> {
-    let points = points.into_iter().collect::<Vec<_>>();
     if points.len() > MAX_AVX_STATE_SYNC_POINTS {
         return Err(GuestError::AvxStateCapacity);
     }
@@ -1807,7 +1812,9 @@ fn install_avx_fallback(unicorn: &mut Unicorn<'static, GuestState>) -> Result<()
     Ok(())
 }
 
-fn discover_image_avx_state_sync_points(image: &PeImage) -> Vec<(u64, AvxStateSync)> {
+fn discover_image_avx_state_sync_points(
+    image: &PeImage,
+) -> Result<Vec<(u64, AvxStateSync)>, GuestError> {
     let mut points = Vec::new();
     for section in image
         .section_protections()
@@ -1821,14 +1828,18 @@ fn discover_image_avx_state_sync_points(image: &PeImage) -> Vec<(u64, AvxStateSy
         if start >= end {
             continue;
         }
-        points.extend(discover_avx_state_sync_points(
+        let section_points = discover_avx_state_sync_points(
             &image.mapped_bytes()[start..end],
             image.image_base() + start as u64,
-        ));
+        )?;
+        if points.len().saturating_add(section_points.len()) > MAX_AVX_STATE_SYNC_POINTS {
+            return Err(GuestError::AvxStateCapacity);
+        }
+        points.extend(section_points);
     }
     points.sort_unstable_by_key(|(address, _)| *address);
     points.dedup_by_key(|(address, _)| *address);
-    points
+    Ok(points)
 }
 
 fn classify_trace_value(raw: u64, image_base: u64, image_end: u64) -> TraceValue {
@@ -2644,7 +2655,7 @@ impl GuestEngine<'static> {
             "write PE image",
             unicorn.mem_write(image.image_base(), image.mapped_bytes()),
         )?;
-        install_avx_state_sync_points(&mut unicorn, discover_image_avx_state_sync_points(image))?;
+        install_avx_state_sync_points(&mut unicorn, discover_image_avx_state_sync_points(image)?)?;
         uc(
             "map import stubs",
             unicorn.mem_map(STUB_BASE, STUB_SIZE, Prot::ALL),
@@ -7946,8 +7957,11 @@ mod tests {
             .mem_map(STACK_BASE, STACK_SIZE, Prot::READ | Prot::WRITE)
             .unwrap();
         unicorn.mem_write(CODE, code).unwrap();
-        install_avx_state_sync_points(&mut unicorn, discover_avx_state_sync_points(code, CODE))
-            .unwrap();
+        install_avx_state_sync_points(
+            &mut unicorn,
+            discover_avx_state_sync_points(code, CODE).unwrap(),
+        )
+        .unwrap();
         unicorn.mem_write(RETURN_ADDRESS, &[0xcc]).unwrap();
         for address in [
             HOST_ACQUIRE_SUITE,
@@ -11548,13 +11562,26 @@ mod tests {
     #[test]
     fn avx_state_sync_hook_count_is_bounded() {
         const CODE: u64 = 0x1000_0000;
+        let mut code = Vec::with_capacity((MAX_AVX_STATE_SYNC_POINTS + 1) * 4);
+        for _ in 0..=MAX_AVX_STATE_SYNC_POINTS {
+            code.extend_from_slice(&[0xc5, 0xf8, 0x58, 0xc0]); // vaddps xmm0,xmm0,xmm0
+        }
+        let discovery_error = discover_avx_state_sync_points(&code, CODE).unwrap_err();
+        assert!(
+            discovery_error
+                .to_string()
+                .contains("native AVX state sync point capacity exceeded"),
+            "{discovery_error}"
+        );
+
         let mut engine = test_engine(&[0xc3]);
         let error = install_avx_state_sync_points(
             &mut engine.unicorn,
             std::iter::repeat_n(
                 (CODE, AvxStateSync::RegisterUpper(0)),
                 MAX_AVX_STATE_SYNC_POINTS + 1,
-            ),
+            )
+            .collect(),
         )
         .unwrap_err();
 
