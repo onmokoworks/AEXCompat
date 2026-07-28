@@ -21,6 +21,7 @@ const CMD_RENDER: u64 = 11;
 const CMD_FRAME_SETDOWN: u64 = 12;
 const CMD_SMART_PRE_RENDER: u64 = 23;
 const CMD_SMART_RENDER: u64 = 24;
+const PARAM_LAYER: i32 = 0;
 const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
 const PARAM_ANGLE: i32 = 3;
@@ -1225,6 +1226,7 @@ impl ClassicHost {
         for (index, captured) in captured_params.into_iter().enumerate() {
             let mut definition = captured.bytes;
             materialize_default(&mut definition, captured.param_type, width, height);
+            materialize_layer_world(&mut definition, captured.param_type, &input_world);
             if let Some((request_index, requested)) =
                 parameter_values
                     .iter()
@@ -2018,6 +2020,16 @@ fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, heigh
     }
 }
 
+fn materialize_layer_world(definition: &mut [u8], param_type: i32, input_world: &[u8]) {
+    if param_type == PARAM_LAYER
+        && definition.len() >= abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE
+        && input_world.len() == abi::PF_LAYER_DEF_SIZE
+    {
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
+            .copy_from_slice(input_world);
+    }
+}
+
 fn apply_parameter_value(
     definition: &mut [u8],
     param_type: i32,
@@ -2448,5 +2460,23 @@ mod tests {
     fn public_iterate16_callback_uses_the_observed_utility_slot() {
         assert_eq!(abi::UTILS_ITERATE16_OFFSET, 0x1f8);
         assert_eq!(abi::UTILS_ITERATE16_SIZE, std::mem::size_of::<u64>());
+    }
+
+    #[test]
+    fn declared_layer_parameters_inherit_the_active_input_world() {
+        let input_world = (0..abi::PF_LAYER_DEF_SIZE as u8).collect::<Vec<_>>();
+        let mut definition = vec![0xa5; abi::PF_PARAM_DEF_SIZE];
+        materialize_layer_world(&mut definition, PARAM_LAYER, &input_world);
+        assert_eq!(
+            &definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE],
+            input_world
+        );
+
+        let mut scalar = vec![0xa5; abi::PF_PARAM_DEF_SIZE];
+        materialize_layer_world(&mut scalar, PARAM_SLIDER, &input_world);
+        assert_eq!(
+            &scalar[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE],
+            vec![0xa5; abi::PF_LAYER_DEF_SIZE]
+        );
     }
 }
