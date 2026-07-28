@@ -51,6 +51,33 @@ def test_l2_source_intersects_checkout_requests() -> None:
     assert "void write_checkout_result(void* destination, int32_t width" not in source
 
 
+def test_native_smart_pixel_checkout_owns_opaque_tokens() -> None:
+    runtime = (ROOT / "minihost" / "src" /
+               "worker_smart_runtime.cpp").read_text(encoding="utf-8")
+    header = (ROOT / "minihost" / "src" /
+              "worker_smart_runtime.hpp").read_text(encoding="utf-8")
+    dispatch = (ROOT / "minihost" / "src" /
+                "worker_smart_dispatch.cpp").read_text(encoding="utf-8")
+    report = (ROOT / "minihost" / "src" /
+              "worker_smart_report.cpp").read_text(encoding="utf-8")
+    for marker in (
+        "struct PixelCheckout",
+        "std::vector<PixelCheckout> pixel_checkouts;",
+        "constexpr std::size_t kMaxPixelCheckouts = 64;",
+        "bool checkout_id_registered(const State& runtime, int32_t checkout_id)",
+        "if (checkout_id_registered(runtime, checkout_id) ||",
+        "checkout->checked_out = true;",
+        "checkout->checked_out = false;",
+        "bool pixel_checkouts_balanced()",
+    ):
+        assert marker in runtime + header
+    assert "if (!smart::pixel_checkouts_balanced() && result.render_error == 0)" in dispatch
+    assert "smart.runtime->pixel_checkouts_balanced" in report
+    # Token identity stays the opaque callback value: no effect, SHA, layer
+    # index, or observed checkout-id special case belongs in the common host.
+    assert "checkout_id == 10000" not in runtime
+
+
 def test_native_intersection_self_test_passes_all_three_workers() -> None:
     expected = {"pf_checkout_intersection": "passed"}
     for name in ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe"):

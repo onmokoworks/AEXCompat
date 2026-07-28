@@ -22,6 +22,14 @@ struct HostedLayer {
   std::array<int32_t, 4> checkout_rect{-1, -1, -1, -1};
 };
 
+struct PixelCheckout {
+  int32_t id{};
+  void* world{};
+  void* view_world{};
+  std::array<int32_t, 4> rect{-1, -1, -1, -1};
+  bool checked_out{};
+};
+
 struct State {
   void* input_world{};
   void* output_world{};
@@ -29,6 +37,7 @@ struct State {
   void* input_checkout_view_world{};
   void* map_checkout_view_world{};
   std::vector<HostedLayer> hosted_layers;
+  std::vector<PixelCheckout> pixel_checkouts;
   int32_t width{16};
   int32_t height{12};
   int32_t map_width{};
@@ -77,6 +86,7 @@ struct Snapshot {
   std::array<int32_t, 4> map_checkout_result_rect{-1, -1, -1, -1};
   uint32_t malformed_checkout_requests{};
   uint32_t empty_checkout_pixel_denials{};
+  bool pixel_checkouts_balanced{true};
 };
 
 State& state();
@@ -122,6 +132,7 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
 int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world);
 int32_t __cdecl checkin_pixels(void*, int32_t checkout_id);
 int32_t __cdecl checkout_output(void*, void** world);
+bool pixel_checkouts_balanced();
 bool concurrency_self_test();
 bool checkout_intersection_self_test();
 

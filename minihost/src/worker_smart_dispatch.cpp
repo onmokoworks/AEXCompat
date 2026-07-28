@@ -258,6 +258,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
   std::cerr << "stage:"
             << (result.gpu_render_dispatched ? "smart_render_gpu" : "smart_render_cpu")
             << "_end error=" << result.render_error << "\n" << std::flush;
+  if (!smart::pixel_checkouts_balanced() && result.render_error == 0)
+    result.render_error = -6;
 
   if (plan.gpu_negotiation && result.gpu_setup_error == 0) {
     std::array<std::byte, 16> setdown_input{};
