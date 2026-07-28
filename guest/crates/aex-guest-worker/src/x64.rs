@@ -1,5 +1,8 @@
 use aex_abi::x86_64_windows as abi;
-use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
+use iced_x86::{
+    Decoder, DecoderOptions, EncodingKind, InstructionInfoFactory, Mnemonic, OpAccess, OpKind,
+    Register,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1383,21 +1386,43 @@ enum AvxStateSync {
 }
 
 fn discover_avx_state_sync_points(bytes: &[u8], address: u64) -> Vec<(u64, AvxStateSync)> {
-    // Hook only the native VEX instructions whose architectural upper-half
-    // effect Unicorn does not expose reliably; avoid a per-instruction hook.
+    // A PE executable section can contain inline data or multiple entry points,
+    // so a single linear decode is not sufficient. In 64-bit mode every C4/C5
+    // byte is a potential VEX prefix. Decode each candidate independently;
+    // false positives only install a hook at an address that is never executed.
     let mut points = Vec::new();
-    let mut decoder = Decoder::with_ip(64, bytes, address, DecoderOptions::NONE);
-    while decoder.can_decode() {
+    let mut info_factory = InstructionInfoFactory::new();
+    for (offset, prefix) in bytes.iter().copied().enumerate() {
+        if !matches!(prefix, 0xc4 | 0xc5) {
+            continue;
+        }
+        let Some(instruction_address) = address.checked_add(offset as u64) else {
+            continue;
+        };
+        let mut decoder = Decoder::with_ip(
+            64,
+            &bytes[offset..],
+            instruction_address,
+            DecoderOptions::NONE,
+        );
         let instruction = decoder.decode();
-        if instruction.is_invalid() {
+        if instruction.is_invalid() || instruction.encoding() != EncodingKind::VEX {
             continue;
         }
         let sync = match instruction.mnemonic() {
-            Mnemonic::Vpxor | Mnemonic::Vxorpd | Mnemonic::Vxorps => {
-                iced_xmm_index(instruction.op0_register()).map(AvxStateSync::RegisterUpper)
-            }
             Mnemonic::Vzeroupper => Some(AvxStateSync::AllUpper),
             Mnemonic::Vzeroall => Some(AvxStateSync::AllRegisters),
+            _ if instruction.op0_kind() == OpKind::Register
+                && matches!(
+                    info_factory.info(&instruction).op_access(0),
+                    OpAccess::Write
+                        | OpAccess::CondWrite
+                        | OpAccess::ReadWrite
+                        | OpAccess::ReadCondWrite
+                ) =>
+            {
+                iced_xmm_index(instruction.op0_register()).map(AvxStateSync::RegisterUpper)
+            }
             _ => None,
         };
         if let Some(sync) = sync {
@@ -11357,6 +11382,91 @@ mod tests {
             .unwrap();
         assert_eq!(destination, [0; 32]);
         assert!(engine.unicorn.get_data().avx_defined_ymm[0]);
+    }
+
+    #[test]
+    fn avx_fallback_synchronizes_every_executed_vex128_register_write() {
+        const CODE: u64 = 0x1000_0000;
+        let source = DATA_BASE;
+        let destination = DATA_BASE + 64;
+        let mut engine = test_engine(&[
+            0xc5, 0xfc, 0x10, 0x01, // vmovups ymm0,[rcx]
+            0xc5, 0xf8, 0x58, 0xc0, // vaddps xmm0,xmm0,xmm0
+            0xc5, 0xfc, 0x11, 0x02, // vmovups [rdx],ymm0
+            0xc3,
+        ]);
+        let mut input = [0x5a; 32];
+        for (lane, value) in [1.0f32, 2.0, 3.0, 4.0].into_iter().enumerate() {
+            input[lane * 4..lane * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        engine.write(source, &input).unwrap();
+
+        engine
+            .call_win64(CODE, [source, destination, 0, 0, 0, 0])
+            .unwrap();
+
+        let mut output = [0u8; 32];
+        engine.unicorn.mem_read(destination, &mut output).unwrap();
+        for (lane, expected) in [2.0f32, 4.0, 6.0, 8.0].into_iter().enumerate() {
+            assert_eq!(&output[lane * 4..lane * 4 + 4], &expected.to_le_bytes());
+        }
+        assert_eq!(&output[16..], [0; 16]);
+        assert!(engine.unicorn.get_data().avx_defined_ymm[0]);
+    }
+
+    #[test]
+    fn avx_state_sync_discovers_vex_at_a_non_linear_entry_boundary() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[
+            0xeb, 0x01, // jmp over inline byte
+            0x04, // inline data that changes a linear decoder's boundary
+            0xc5, 0xf9, 0xef, 0xc0, // vpxor xmm0,xmm0,xmm0
+            0xc5, 0xfc, 0x11, 0x01, // vmovups [rcx],ymm0
+            0xc3,
+        ]);
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::YMM0, &[0x5a; 32])
+            .unwrap();
+
+        engine.call_win64(CODE, [DATA_BASE, 0, 0, 0, 0, 0]).unwrap();
+
+        let mut output = [0u8; 32];
+        engine.unicorn.mem_read(DATA_BASE, &mut output).unwrap();
+        assert_eq!(output, [0; 32]);
+    }
+
+    #[test]
+    fn avx_state_sync_applies_vzeroupper_and_vzeroall_to_all_registers() {
+        const CODE: u64 = 0x1000_0000;
+        for (code, zero_all) in [
+            (&[0xc5, 0xf8, 0x77, 0xc3][..], false), // vzeroupper; ret
+            (&[0xc5, 0xfc, 0x77, 0xc3][..], true),  // vzeroall; ret
+        ] {
+            let mut engine = test_engine(code);
+            for index in 0..16 {
+                engine
+                    .unicorn
+                    .reg_write_long(unicorn_ymm_register(index).unwrap(), &[index as u8 + 1; 32])
+                    .unwrap();
+            }
+
+            engine.call_win64(CODE, [0; 6]).unwrap();
+
+            for index in 0..16 {
+                let value = engine
+                    .unicorn
+                    .reg_read_long(unicorn_ymm_register(index).unwrap())
+                    .unwrap();
+                if zero_all {
+                    assert_eq!(&value[..], [0; 32], "YMM{index}");
+                } else {
+                    assert_eq!(&value[..16], [index as u8 + 1; 16], "YMM{index}");
+                    assert_eq!(&value[16..], [0; 16], "YMM{index}");
+                }
+            }
+            assert_eq!(engine.unicorn.get_data().avx_defined_ymm, [true; 16]);
+        }
     }
 
     #[test]
