@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -165,10 +165,12 @@ struct ResidentSessionHandle {
     sender: Sender<ResidentCommand>,
     receiver: Receiver<Result<RenderResult, String>>,
     next_frame: u64,
-    worker_pid: u32,
+    child: SharedResidentChild,
     shutdown_requested: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
 }
+
+type SharedResidentChild = Arc<Mutex<Option<Child>>>;
 
 struct PendingResidentRender {
     parameters: Vec<GuiParameter>,
@@ -209,7 +211,7 @@ impl ResidentSessionHandle {
         self.shutdown_requested.store(true, Ordering::Release);
         let (reply_sender, reply_receiver) = mpsc::channel();
         if let Err(error) = self.sender.send(ResidentCommand::Close(reply_sender)) {
-            terminate_resident_pid(self.worker_pid);
+            terminate_shared_resident_child(&self.child);
             enqueue_resident_join(join);
             return Err(format!("request resident close: {error}"));
         }
@@ -222,12 +224,16 @@ impl ResidentSessionHandle {
                 result
             }
             Err(error) => {
-                terminate_resident_pid(self.worker_pid);
+                let ownership_transferred = terminate_shared_resident_child(&self.child);
                 enqueue_resident_join(join);
                 Err(format!(
-                    "resident close exceeded the {} ms shutdown deadline: {error}; worker {} was terminated and cleanup continues in background",
+                    "resident close exceeded the {} ms shutdown deadline: {error}; child termination {} and cleanup continues in background",
                     deadline.as_millis(),
-                    self.worker_pid
+                    if ownership_transferred {
+                        "was transferred from the owner"
+                    } else {
+                        "remains with the controller"
+                    }
                 ))
             }
         }
@@ -1241,19 +1247,19 @@ fn begin_resident_admission(
 
 fn recv_resident_response(
     receiver: &Receiver<Result<Option<Value>, String>>,
-    child: &mut Child,
+    child: &SharedResidentChild,
     shutdown_requested: &AtomicBool,
     deadline: Duration,
 ) -> Result<Option<Value>, String> {
     let started = Instant::now();
     loop {
         if shutdown_requested.load(Ordering::Acquire) {
-            let _ = child.kill();
+            terminate_shared_resident_child(child);
             return Err("resident render cancelled for session shutdown".into());
         }
         let remaining = deadline.saturating_sub(started.elapsed());
         if remaining.is_zero() {
-            let _ = child.kill();
+            terminate_shared_resident_child(child);
             return Err(format!(
                 "resident render response timeout after {} ms",
                 deadline.as_millis()
@@ -1262,12 +1268,12 @@ fn recv_resident_response(
         match receiver.recv_timeout(remaining.min(RESIDENT_RESPONSE_POLL)) {
             Ok(Ok(response)) => return Ok(response),
             Ok(Err(error)) => {
-                let _ = child.kill();
+                terminate_shared_resident_child(child);
                 return Err(error);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
-                let _ = child.kill();
+                terminate_shared_resident_child(child);
                 return Err("resident response reader disconnected".into());
             }
         }
@@ -1309,7 +1315,8 @@ fn start_resident_session(
             return Err(error);
         }
     };
-    let mut child = started.child;
+    let child = Arc::new(Mutex::new(Some(started.child)));
+    let controller_child = Arc::clone(&child);
     let worker_pid = started.worker_pid;
     let mut stdin = started.stdin;
     let response_receiver = started.response_receiver;
@@ -1340,7 +1347,7 @@ fn start_resident_session(
                     }).and_then(|()| {
                         let response = recv_resident_response(
                             &response_receiver,
-                            &mut child,
+                            &controller_child,
                             &worker_shutdown_requested,
                             RESIDENT_RENDER_DEADLINE,
                         )?
@@ -1395,7 +1402,9 @@ fn start_resident_session(
             },
             Err(error) => close_errors.push(error),
         }
-        if let Err(error) = wait_or_kill_resident_child(child, RESIDENT_CLOSE_DEADLINE) {
+        if let Some(child) = take_shared_resident_child(&controller_child)
+            && let Err(error) = wait_or_kill_resident_child(child, RESIDENT_CLOSE_DEADLINE)
+        {
             close_errors.push(error);
         }
         let stderr = stderr_receiver
@@ -1431,7 +1440,7 @@ fn start_resident_session(
         sender: command_sender,
         receiver: result_receiver,
         next_frame: 0,
-        worker_pid,
+        child,
         shutdown_requested,
         join: Some(join),
     })
@@ -1629,16 +1638,20 @@ fn run_guest_workers(
 
 const NATIVE_DEADLINE_REAP_BUDGET: Duration = Duration::from_millis(20);
 
-fn terminate_resident_pid(worker_pid: u32) {
-    let Ok(pid) = libc::pid_t::try_from(worker_pid) else {
-        return;
-    };
-    // SAFETY: kill(2) does not dereference memory. The PID is captured from
-    // the still-owned Child at session launch, and this is used only after the
-    // resident controller misses its bounded shutdown deadline.
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
+fn take_shared_resident_child(child: &SharedResidentChild) -> Option<Child> {
+    match child.try_lock() {
+        Ok(mut child) => child.take(),
+        Err(TryLockError::Poisoned(error)) => error.into_inner().take(),
+        Err(TryLockError::WouldBlock) => None,
     }
+}
+
+fn terminate_shared_resident_child(child: &SharedResidentChild) -> bool {
+    let Some(child) = take_shared_resident_child(child) else {
+        return false;
+    };
+    kill_and_reap_or_transfer(child, NATIVE_DEADLINE_REAP_BUDGET);
+    true
 }
 
 fn resident_join_reaper() -> &'static Sender<thread::JoinHandle<()>> {
@@ -2076,6 +2089,7 @@ mod tests {
         let (command_sender, command_receiver) = mpsc::channel();
         let (_result_sender, result_receiver) = mpsc::channel();
         let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let child = Arc::new(Mutex::new(None));
         let join = thread::spawn(move || match command_receiver.recv().unwrap() {
             ResidentCommand::Close(reply) => reply.send(Ok(())).unwrap(),
             ResidentCommand::Render { .. } => panic!("unexpected render"),
@@ -2086,7 +2100,7 @@ mod tests {
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,
-            worker_pid: u32::MAX,
+            child,
             shutdown_requested,
             join: Some(join),
         };
@@ -2103,16 +2117,17 @@ mod tests {
         let (result_sender, result_receiver) = mpsc::channel();
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let worker_shutdown_requested = Arc::clone(&shutdown_requested);
-        let (pid_sender, pid_receiver) = mpsc::channel();
+        let child = Arc::new(Mutex::new(Some(
+            Command::new("/bin/sleep").arg("5").spawn().unwrap(),
+        )));
+        let worker_child = Arc::clone(&child);
         let join = thread::spawn(move || {
-            let mut child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
-            pid_sender.send(child.id()).unwrap();
             let (_response_sender, response_receiver) = mpsc::channel();
             match command_receiver.recv().unwrap() {
                 ResidentCommand::Render { .. } => {
                     let result = recv_resident_response(
                         &response_receiver,
-                        &mut child,
+                        &worker_child,
                         &worker_shutdown_requested,
                         Duration::from_secs(5),
                     );
@@ -2122,21 +2137,19 @@ mod tests {
             }
             match command_receiver.recv().unwrap() {
                 ResidentCommand::Close(reply) => {
-                    let status = child.wait().unwrap();
-                    assert!(!status.success());
+                    assert!(worker_child.lock().unwrap().is_none());
                     reply.send(Ok(())).unwrap();
                 }
                 ResidentCommand::Render { .. } => panic!("close must follow render"),
             }
         });
-        let worker_pid = pid_receiver.recv().unwrap();
         let mut session = ResidentSessionHandle {
             plugin_path: PathBuf::new(),
             input: PathBuf::new(),
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,
-            worker_pid,
+            child,
             shutdown_requested,
             join: Some(join),
         };
@@ -2167,22 +2180,23 @@ mod tests {
         let (command_sender, _command_receiver) = mpsc::channel();
         let (_result_sender, result_receiver) = mpsc::channel();
         let shutdown_requested = Arc::new(AtomicBool::new(false));
-        let (pid_sender, pid_receiver) = mpsc::channel();
-        let (status_sender, status_receiver) = mpsc::channel();
+        let child = Arc::new(Mutex::new(Some(
+            Command::new("/bin/sleep").arg("5").spawn().unwrap(),
+        )));
+        let observer_child = Arc::clone(&child);
+        let (finished_sender, finished_receiver) = mpsc::channel();
         let join = thread::spawn(move || {
-            let mut child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
-            pid_sender.send(child.id()).unwrap();
             thread::sleep(Duration::from_millis(150));
-            status_sender.send(child.wait().unwrap()).unwrap();
+            assert!(observer_child.lock().unwrap().is_none());
+            finished_sender.send(()).unwrap();
         });
-        let worker_pid = pid_receiver.recv().unwrap();
         let mut session = ResidentSessionHandle {
             plugin_path: PathBuf::new(),
             input: PathBuf::new(),
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,
-            worker_pid,
+            child,
             shutdown_requested,
             join: Some(join),
         };
@@ -2193,10 +2207,16 @@ mod tests {
             .unwrap_err();
         assert!(started.elapsed() < Duration::from_millis(100));
         assert!(error.contains("cleanup continues in background"));
-        let status = status_receiver
+        finished_receiver
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
-        assert!(!status.success());
+    }
+
+    #[test]
+    fn resident_shutdown_has_no_raw_cached_pid_kill_authority() {
+        let source = include_str!("macos.rs");
+        assert!(!source.contains(&["libc", "::kill"].concat()));
+        assert!(!source.contains(&["terminate_resident", "_pid"].concat()));
     }
 
     #[test]

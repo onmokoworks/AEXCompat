@@ -140,7 +140,6 @@ dependencies = [
  "eframe",
  "goblin",
  "image",
- "libc",
  "rfd",
  "serde",
  "serde_json",
