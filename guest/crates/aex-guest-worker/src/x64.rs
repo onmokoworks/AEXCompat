@@ -3658,6 +3658,7 @@ impl GuestEngine<'static> {
             (HOST_FILL8, "fill8"),
             (HOST_NEW_WORLD8, "new_world8"),
             (HOST_GET_CALLBACK_ADDR, "get_callback_addr"),
+            (HOST_TRANSFER_RECT8, "transfer_rect8"),
             (HOST_ITERATE16, "iterate16"),
             (HOST_ITERATE16_CONTINUE, "iterate16_continue"),
         ] {
