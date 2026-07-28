@@ -19,6 +19,16 @@ auto& host_smart_state() { return aexcompat::worker_runtime::smart::state(); }
 bool configure_mask_scene(const std::string&);
 bool mask_lifetimes_balanced();
 constexpr std::size_t kCheckoutResultBytes = 76;
+
+constexpr std::size_t utility_callback_index(std::size_t offset) noexcept {
+  const auto& offsets =
+      aexcompat::abi::x86_64_windows::UTILITY_CALLBACK_OFFSETS;
+  for (std::size_t index = 0; index < offsets.size(); ++index) {
+    if (offsets[index] == offset) return index;
+  }
+  return offsets.size();
+}
+
 bool verify_pre_checkout_result_case(int32_t expected_par_numerator,
                                      int32_t expected_par_denominator,
                                      int32_t expected_reference_width,
@@ -86,38 +96,64 @@ bool verify_handle_resize_while_locked_rejected() {
 
 bool verify_utils_handle_callbacks_wired() {
   namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  constexpr std::size_t kNewHandle =
+      utility_callback_index(contract::UTILS_HOST_NEW_HANDLE_OFFSET);
+  constexpr std::size_t kLockHandle =
+      utility_callback_index(contract::UTILS_HOST_LOCK_HANDLE_OFFSET);
+  constexpr std::size_t kUnlockHandle =
+      utility_callback_index(contract::UTILS_HOST_UNLOCK_HANDLE_OFFSET);
+  constexpr std::size_t kDisposeHandle =
+      utility_callback_index(contract::UTILS_HOST_DISPOSE_HANDLE_OFFSET);
+  constexpr std::size_t kGetHandleSize =
+      utility_callback_index(contract::UTILS_HOST_GET_HANDLE_SIZE_OFFSET);
+  constexpr std::size_t kResizeHandle =
+      utility_callback_index(contract::UTILS_HOST_RESIZE_HANDLE_OFFSET);
+  static_assert(kNewHandle < contract::UTILITY_CALLBACK_OFFSETS.size());
+  static_assert(kLockHandle < contract::UTILITY_CALLBACK_OFFSETS.size());
+  static_assert(kUnlockHandle < contract::UTILITY_CALLBACK_OFFSETS.size());
+  static_assert(kDisposeHandle < contract::UTILITY_CALLBACK_OFFSETS.size());
+  static_assert(kGetHandleSize < contract::UTILITY_CALLBACK_OFFSETS.size());
+  static_assert(kResizeHandle < contract::UTILITY_CALLBACK_OFFSETS.size());
+
   boot::State state{};
   boot::AbiHooks abi{};
-  // The handle callbacks occupy the tail of the utility table, index-aligned
-  // with kUtilityCallbackOffsets (160/168/176/184/440/464). transfer_rect at
-  // index 15 shifts these host callbacks to indices 26..31. Mirror the exact
-  // functions l2_main installs so this drives the production write path.
-  abi.utility_callbacks[26] = reinterpret_cast<void*>(&new_handle);
-  abi.utility_callbacks[27] = reinterpret_cast<void*>(&lock_handle);
-  abi.utility_callbacks[28] = reinterpret_cast<void*>(&unlock_handle);
-  abi.utility_callbacks[29] = reinterpret_cast<void*>(&dispose_handle);
-  abi.utility_callbacks[30] = reinterpret_cast<void*>(&handle_size);
-  abi.utility_callbacks[31] = reinterpret_cast<void*>(&resize_handle);
+  // Resolve indices from the generated ABI offsets rather than mirroring
+  // positional integers. Inserting any utility slot in the middle therefore
+  // keeps this behavioral test aligned with the production installer.
+  abi.utility_callbacks[kNewHandle] = reinterpret_cast<void*>(&new_handle);
+  abi.utility_callbacks[kLockHandle] = reinterpret_cast<void*>(&lock_handle);
+  abi.utility_callbacks[kUnlockHandle] = reinterpret_cast<void*>(&unlock_handle);
+  abi.utility_callbacks[kDisposeHandle] = reinterpret_cast<void*>(&dispose_handle);
+  abi.utility_callbacks[kGetHandleSize] = reinterpret_cast<void*>(&handle_size);
+  abi.utility_callbacks[kResizeHandle] = reinterpret_cast<void*>(&resize_handle);
   boot::install_callback_tables(state, abi);
 
   // A plug-in reaches these as in_data->utils->host_*; recover the utility
-  // block through the in_data+176 link install writes, then read each callback
-  // at its SDK offset. Reading via the offsets (not the AbiHooks array) is what
-  // catches an offset/index misalignment in the production wiring.
-  std::byte* utils = *reinterpret_cast<std::byte**>(state.input.data() + 176);
+  // block through the generated in_data link offset, then read each callback
+  // at its generated SDK offset. Reading via the offsets (not the AbiHooks
+  // array) is what catches an offset/index misalignment in production wiring.
+  std::byte* utils = *reinterpret_cast<std::byte**>(
+      state.input.data() + contract::IN_UTILS_OFFSET);
   if (!utils) return false;
   auto slot = [&](std::size_t offset) {
     void* value{};
     std::memcpy(&value, utils + offset, sizeof(value));
     return value;
   };
-  auto new_fn = reinterpret_cast<void** (__cdecl*)(std::uint64_t)>(slot(160));
-  auto lock_fn = reinterpret_cast<void* (__cdecl*)(void**)>(slot(168));
-  auto unlock_fn = reinterpret_cast<void (__cdecl*)(void**)>(slot(176));
-  auto dispose_fn = reinterpret_cast<void (__cdecl*)(void**)>(slot(184));
-  auto size_fn = reinterpret_cast<std::uint64_t (__cdecl*)(void**)>(slot(440));
+  auto new_fn = reinterpret_cast<void** (__cdecl*)(std::uint64_t)>(
+      slot(contract::UTILS_HOST_NEW_HANDLE_OFFSET));
+  auto lock_fn = reinterpret_cast<void* (__cdecl*)(void**)>(
+      slot(contract::UTILS_HOST_LOCK_HANDLE_OFFSET));
+  auto unlock_fn = reinterpret_cast<void (__cdecl*)(void**)>(
+      slot(contract::UTILS_HOST_UNLOCK_HANDLE_OFFSET));
+  auto dispose_fn = reinterpret_cast<void (__cdecl*)(void**)>(
+      slot(contract::UTILS_HOST_DISPOSE_HANDLE_OFFSET));
+  auto size_fn = reinterpret_cast<std::uint64_t (__cdecl*)(void**)>(
+      slot(contract::UTILS_HOST_GET_HANDLE_SIZE_OFFSET));
   auto resize_fn =
-      reinterpret_cast<std::int32_t (__cdecl*)(std::uint64_t, void***)>(slot(464));
+      reinterpret_cast<std::int32_t (__cdecl*)(std::uint64_t, void***)>(
+          slot(contract::UTILS_HOST_RESIZE_HANDLE_OFFSET));
   if (reinterpret_cast<void*>(new_fn) != reinterpret_cast<void*>(&new_handle) ||
       reinterpret_cast<void*>(lock_fn) != reinterpret_cast<void*>(&lock_handle) ||
       reinterpret_cast<void*>(unlock_fn) != reinterpret_cast<void*>(&unlock_handle) ||

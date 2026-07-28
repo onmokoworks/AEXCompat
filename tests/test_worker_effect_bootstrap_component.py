@@ -29,7 +29,7 @@ def test_utility_table_wires_handle_callbacks_at_sdk_offsets():
     # generated into UTILITY_CALLBACK_OFFSETS from the ABI observation.
     assert "contract::UTILITY_CALLBACK_OFFSETS" in SOURCE
     assert "UTILITY_CALLBACK_OFFSETS.size()>" in HEADER
-    assert "std::array<std::size_t, 33> UTILITY_CALLBACK_OFFSETS" in CONTRACT
+    assert "std::array<std::size_t, 35> UTILITY_CALLBACK_OFFSETS" in CONTRACT
     for offset in ("160", "168", "176", "184", "440", "464", "200"):
         assert offset in CONTRACT
     assert "UTILS_APP_OFFSET = 200" in CONTRACT
@@ -37,6 +37,25 @@ def test_utility_table_wires_handle_callbacks_at_sdk_offsets():
     # behavioral self-test can drive the exact production write path.
     assert "void install_callback_tables(State& state, const AbiHooks& abi)" in SOURCE
     assert "install_callback_tables(state, abi)" in SOURCE
+
+
+def test_native_utility_hooks_match_generated_middle_slot_order():
+    # Keep this source-level guard in addition to the C++ length static_assert:
+    # a same-length insertion in the middle must not silently shift later hooks.
+    l2 = (ROOT / "minihost" / "src" / "l2_main.cpp").read_text(encoding="utf-8")
+    assert (
+        "reinterpret_cast<void*>(&fill_world16), "
+        "reinterpret_cast<void*>(&premultiply_color16),\n"
+        "    reinterpret_cast<void*>(&iterate_world16), "
+        "reinterpret_cast<void*>(&iterate_world8)"
+    ) in l2
+    assert (
+        "reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs),\n"
+        "    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_hypot),\n"
+        "    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_pow)"
+    ) in l2
+    assert "utility_callbacks.size() ==" in l2
+    assert "UTILITY_CALLBACK_OFFSETS.size()" in l2
 
 
 def test_selector_order_and_error_priority_remain_explicit():

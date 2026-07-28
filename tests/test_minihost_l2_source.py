@@ -744,6 +744,21 @@ class MinihostL2SourceTests(unittest.TestCase):
         self.assertIn("--self-test-pf-utils-handle-callbacks", text)
         self.assertIn("pf_utils_handle_callbacks", text)
 
+    def test_utils_handle_self_test_derives_indices_from_generated_offsets(self):
+        text = AEGP_HOST_SELFTESTS_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("utility_callback_index", text)
+        self.assertIn("contract::UTILITY_CALLBACK_OFFSETS.size()", text)
+        for marker in (
+            "contract::UTILS_HOST_NEW_HANDLE_OFFSET",
+            "contract::UTILS_HOST_LOCK_HANDLE_OFFSET",
+            "contract::UTILS_HOST_UNLOCK_HANDLE_OFFSET",
+            "contract::UTILS_HOST_DISPOSE_HANDLE_OFFSET",
+            "contract::UTILS_HOST_GET_HANDLE_SIZE_OFFSET",
+            "contract::UTILS_HOST_RESIZE_HANDLE_OFFSET",
+        ):
+            self.assertIn(marker, text)
+        self.assertNotRegex(text, r"abi\.utility_callbacks\[\d+\]")
+
     def test_render_exposes_bounded_suite_adapters_for_path_effects(self):
         text = l2_family_source()
         for marker in (
