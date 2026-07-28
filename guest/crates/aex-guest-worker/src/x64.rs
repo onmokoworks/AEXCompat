@@ -2333,6 +2333,8 @@ struct PendingUnsupportedSuite {
     name: String,
     version: u64,
     acquire_error: i32,
+    caller_rsp: u64,
+    return_address: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -4166,6 +4168,24 @@ impl GuestEngine<'static> {
             truncation,
             timeline,
         })
+    }
+
+    pub fn discard_execution_trace(&mut self) -> Result<(), GuestError> {
+        let mut first_error = None;
+        for hook in self.trace_hooks.drain(..) {
+            if let Err(error) = self.unicorn.remove_hook(hook)
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        self.unicorn.get_data_mut().trace = None;
+        if let Some(error) = first_error {
+            return Err(GuestError::Callback(format!(
+                "remove aborted guest execution trace hook: {error}"
+            )));
+        }
+        Ok(())
     }
 
     pub fn configure_trace_watches(&mut self, watches: Vec<TraceWatchSpec>) {
@@ -7811,6 +7831,70 @@ fn finish_acquire_suite_success(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
+fn image_executable_address(state: &GuestState, address: u64) -> bool {
+    state
+        .image_executable_ranges
+        .iter()
+        .any(|(start, end)| (*start..*end).contains(&address))
+}
+
+fn read_guest_u32(unicorn: &Unicorn<'_, GuestState>, address: u64) -> Option<u32> {
+    let mut bytes = [0u8; 4];
+    unicorn.mem_read(address, &mut bytes).ok()?;
+    Some(u32::from_le_bytes(bytes))
+}
+
+fn image_rva_address(unicorn: &Unicorn<'_, GuestState>, rva: u32, byte_count: u64) -> Option<u64> {
+    let (image_start, image_end) = unicorn.get_data().image_region?;
+    let address = image_start.checked_add(u64::from(rva))?;
+    let end = address.checked_add(byte_count)?;
+    (address >= image_start && end <= image_end).then_some(address)
+}
+
+fn is_msvc_i32_throw_info(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) -> bool {
+    let Some((image_start, image_end)) = unicorn.get_data().image_region else {
+        return false;
+    };
+    let Some(throw_info_end) = throw_info.checked_add(16) else {
+        return false;
+    };
+    if throw_info < image_start || throw_info_end > image_end {
+        return false;
+    }
+
+    // Win64 MSVC exception metadata stores image-relative 32-bit pointers.
+    // Require one simple, four-byte catchable type whose TypeDescriptor is
+    // exactly the built-in `int` encoding. PF_Err is an A_long/int32.
+    let Some(catchable_array_rva) = read_guest_u32(unicorn, throw_info + 12) else {
+        return false;
+    };
+    let Some(catchable_array) = image_rva_address(unicorn, catchable_array_rva, 8) else {
+        return false;
+    };
+    if read_guest_u32(unicorn, catchable_array) != Some(1) {
+        return false;
+    }
+    let Some(catchable_type_rva) = read_guest_u32(unicorn, catchable_array + 4) else {
+        return false;
+    };
+    let Some(catchable_type) = image_rva_address(unicorn, catchable_type_rva, 28) else {
+        return false;
+    };
+    if read_guest_u32(unicorn, catchable_type) != Some(1)
+        || read_guest_u32(unicorn, catchable_type + 20) != Some(4)
+    {
+        return false;
+    }
+    let Some(type_descriptor_rva) = read_guest_u32(unicorn, catchable_type + 4) else {
+        return false;
+    };
+    let Some(type_name) = image_rva_address(unicorn, type_descriptor_rva, 19) else {
+        return false;
+    };
+    let mut name = [0u8; 3];
+    unicorn.mem_read(type_name + 16, &mut name).is_ok() && name == *b".H\0"
+}
+
 fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
     if !unicorn.get_data().selector_dispatch_active
         || unicorn.get_data().pending_unsupported_suite.is_none()
@@ -7830,6 +7914,34 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
     // language exception ABI: only a small, positive host error thrown after
     // an unsupported AcquireSuite is a selector-level abort.
     if !(1..=0x7fff).contains(&error) {
+        return;
+    }
+    if !unicorn
+        .reg_read(RegisterX86::RDX)
+        .is_ok_and(|throw_info| is_msvc_i32_throw_info(unicorn, throw_info))
+    {
+        return;
+    }
+    let caller_rsp = match unicorn.reg_read(RegisterX86::RSP) {
+        Ok(caller_rsp) => caller_rsp,
+        _ => return,
+    };
+    let mut return_bytes = [0u8; 8];
+    if unicorn.mem_read(caller_rsp, &mut return_bytes).is_err() {
+        return;
+    }
+    let return_address = u64::from_le_bytes(return_bytes);
+    let pending = unicorn
+        .get_data()
+        .pending_unsupported_suite
+        .as_ref()
+        .expect("checked above");
+    let close_same_frame_throw = caller_rsp == pending.caller_rsp
+        && image_executable_address(unicorn.get_data(), return_address)
+        && return_address
+            .checked_sub(pending.return_address)
+            .is_some_and(|distance| (1..=0x400).contains(&distance));
+    if !close_same_frame_throw {
         return;
     }
     let Some(suite) = unicorn.get_data_mut().pending_unsupported_suite.take() else {
@@ -7940,10 +8052,23 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         return;
     }
     if unicorn.get_data().selector_dispatch_active {
+        let caller_rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or_default();
+        let mut return_bytes = [0u8; 8];
+        let return_address = if unicorn.mem_read(caller_rsp, &mut return_bytes).is_ok() {
+            u64::from_le_bytes(return_bytes)
+        } else {
+            0
+        };
+        if !image_executable_address(unicorn.get_data(), return_address) {
+            let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+            return;
+        }
         unicorn.get_data_mut().pending_unsupported_suite = Some(PendingUnsupportedSuite {
             name: name.into_owned(),
             version,
             acquire_error: -1,
+            caller_rsp,
+            return_address,
         });
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
@@ -9104,24 +9229,25 @@ fn coalesce_census_extents(
 mod tests {
     use super::*;
 
+    const TEST_CODE: u64 = 0x1000_0000;
     const TEST_CXX_THROW: u64 = STUB_BASE + 0x80460;
+    const TEST_THROW_INFO: u64 = TEST_CODE + 0x800;
 
     fn test_engine(code: &[u8]) -> GuestEngine<'static> {
-        const CODE: u64 = 0x1000_0000;
         let mut unicorn = Unicorn::new_with_data(
             Arch::X86,
             Mode::MODE_64,
             GuestState {
                 next_handle_data: HANDLE_DATA_BASE,
                 next_aegp_memory_handle: AEGP_MEMORY_HANDLE_BASE,
-                image_region: Some((CODE, CODE + PAGE_SIZE)),
-                image_executable_ranges: vec![(CODE, CODE + code.len() as u64)],
+                image_region: Some((TEST_CODE, TEST_CODE + PAGE_SIZE)),
+                image_executable_ranges: vec![(TEST_CODE, TEST_CODE + code.len() as u64)],
                 ..GuestState::default()
             },
         )
         .unwrap();
         install_avx_fallback(&mut unicorn).unwrap();
-        unicorn.mem_map(CODE, PAGE_SIZE, Prot::ALL).unwrap();
+        unicorn.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
         unicorn
             .mem_map(DATA_BASE, PAGE_SIZE, Prot::READ | Prot::WRITE)
             .unwrap();
@@ -9132,10 +9258,10 @@ mod tests {
         unicorn
             .mem_map(STACK_BASE, STACK_SIZE, Prot::READ | Prot::WRITE)
             .unwrap();
-        unicorn.mem_write(CODE, code).unwrap();
+        unicorn.mem_write(TEST_CODE, code).unwrap();
         install_avx_state_sync_points(
             &mut unicorn,
-            discover_avx_state_sync_points(code, CODE).unwrap(),
+            discover_avx_state_sync_points(code, TEST_CODE).unwrap(),
         )
         .unwrap();
         unicorn.mem_write(RETURN_ADDRESS, &[0xcc]).unwrap();
@@ -9405,7 +9531,7 @@ mod tests {
             .unwrap();
         install_aegp_utility_suites(&mut unicorn).unwrap();
         let mut trace_points = Vec::new();
-        let mut decoder = Decoder::with_ip(64, code, CODE, DecoderOptions::NONE);
+        let mut decoder = Decoder::with_ip(64, code, TEST_CODE, DecoderOptions::NONE);
         while decoder.can_decode() {
             let instruction = decoder.decode();
             if instruction.mnemonic() == Mnemonic::Call
@@ -9419,8 +9545,8 @@ mod tests {
         GuestEngine {
             unicorn,
             next_data: DATA_BASE,
-            image_base: CODE,
-            image_end: CODE + PAGE_SIZE,
+            image_base: TEST_CODE,
+            image_end: TEST_CODE + PAGE_SIZE,
             census_hook: None,
             trace_hooks: Vec::new(),
             trace_points,
@@ -9445,6 +9571,33 @@ mod tests {
             .unwrap();
     }
 
+    fn install_test_i32_throw_info(engine: &mut GuestEngine<'static>) {
+        const CATCHABLE_ARRAY: u64 = TEST_CODE + 0x820;
+        const CATCHABLE_TYPE: u64 = TEST_CODE + 0x830;
+        const TYPE_DESCRIPTOR: u64 = TEST_CODE + 0x850;
+        let rva = |address: u64| u32::try_from(address - TEST_CODE).unwrap();
+
+        let mut throw_info = [0u8; 16];
+        throw_info[12..16].copy_from_slice(&rva(CATCHABLE_ARRAY).to_le_bytes());
+        engine.write(TEST_THROW_INFO, &throw_info).unwrap();
+
+        let mut catchable_array = [0u8; 8];
+        catchable_array[0..4].copy_from_slice(&1u32.to_le_bytes());
+        catchable_array[4..8].copy_from_slice(&rva(CATCHABLE_TYPE).to_le_bytes());
+        engine.write(CATCHABLE_ARRAY, &catchable_array).unwrap();
+
+        let mut catchable_type = [0u8; 28];
+        catchable_type[0..4].copy_from_slice(&1u32.to_le_bytes());
+        catchable_type[4..8].copy_from_slice(&rva(TYPE_DESCRIPTOR).to_le_bytes());
+        catchable_type[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        catchable_type[20..24].copy_from_slice(&4u32.to_le_bytes());
+        engine.write(CATCHABLE_TYPE, &catchable_type).unwrap();
+
+        let mut type_descriptor = [0u8; 19];
+        type_descriptor[16..19].copy_from_slice(b".H\0");
+        engine.write(TYPE_DESCRIPTOR, &type_descriptor).unwrap();
+    }
+
     fn push_mov_imm64(code: &mut Vec<u8>, register_opcode: [u8; 2], value: u64) {
         code.extend_from_slice(&register_opcode);
         code.extend_from_slice(&value.to_le_bytes());
@@ -9453,6 +9606,8 @@ mod tests {
     fn selector_throw_fixture(
         include_unsupported_acquire: bool,
         throw_error_pointer: u64,
+        throw_info_pointer: u64,
+        instructions_after_acquire: usize,
     ) -> Vec<u8> {
         let mut code = Vec::new();
         if include_unsupported_acquire {
@@ -9461,9 +9616,10 @@ mod tests {
             push_mov_imm64(&mut code, [0x49, 0xb8], DATA_BASE + 0x200); // mov r8, output
             push_mov_imm64(&mut code, [0x48, 0xb8], HOST_ACQUIRE_SUITE); // mov rax, callback
             code.extend_from_slice(&[0xff, 0xd0]); // call rax
+            code.resize(code.len() + instructions_after_acquire, 0x90);
         }
         push_mov_imm64(&mut code, [0x48, 0xb9], throw_error_pointer); // mov rcx, exception object
-        code.extend_from_slice(&[0x31, 0xd2]); // xor edx, edx
+        push_mov_imm64(&mut code, [0x48, 0xba], throw_info_pointer); // mov rdx, ThrowInfo
         push_mov_imm64(&mut code, [0x48, 0xb8], TEST_CXX_THROW); // mov rax, callback
         code.extend_from_slice(&[0xff, 0xd0]); // call rax
         code.extend_from_slice(&[0xb8, 77, 0, 0, 0, 0xc3]); // fallback: mov eax, 77; ret
@@ -10244,9 +10400,10 @@ mod tests {
     fn selector_call_converts_unsupported_suite_cxx_throw_to_selector_abort() {
         const CODE: u64 = 0x1000_0000;
         let error_pointer = DATA_BASE + 0x300;
-        let code = selector_throw_fixture(true, error_pointer);
+        let code = selector_throw_fixture(true, error_pointer, TEST_THROW_INFO, 0);
         let mut engine = test_engine(&code);
         install_test_cxx_throw(&mut engine);
+        install_test_i32_throw_info(&mut engine);
         engine
             .write(DATA_BASE + 0x100, b"FLT Blur Suite\0")
             .unwrap();
@@ -10271,6 +10428,78 @@ mod tests {
     }
 
     #[test]
+    fn failed_suite_does_not_convert_a_different_typed_exception() {
+        let error_pointer = DATA_BASE + 0x300;
+        let code = selector_throw_fixture(true, error_pointer, TEST_THROW_INFO, 0);
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+        install_test_i32_throw_info(&mut engine);
+        engine
+            .write(DATA_BASE + 0x100, b"Optional Missing Suite\0")
+            .unwrap();
+        engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
+        // Replace the built-in int TypeDescriptor with a different MSVC type.
+        engine
+            .write(TEST_CODE + 0x850 + 16, b".?AVfailure@@\0")
+            .unwrap();
+
+        assert_eq!(engine.call_selector_win64(TEST_CODE, [0; 6]).unwrap(), 77);
+    }
+
+    #[test]
+    fn failed_suite_provenance_expires_before_a_distant_i32_throw() {
+        let error_pointer = DATA_BASE + 0x300;
+        let code = selector_throw_fixture(true, error_pointer, TEST_THROW_INFO, 0x401);
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+        install_test_i32_throw_info(&mut engine);
+        engine
+            .write(DATA_BASE + 0x100, b"Optional Missing Suite\0")
+            .unwrap();
+        engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
+
+        assert_eq!(engine.call_selector_win64(TEST_CODE, [0; 6]).unwrap(), 77);
+    }
+
+    #[test]
+    fn selector_abort_trace_can_be_discarded_before_cleanup_and_next_trace() {
+        let error_pointer = DATA_BASE + 0x300;
+        let code = selector_throw_fixture(true, error_pointer, TEST_THROW_INFO, 0);
+        let mut engine = test_engine(&code);
+        install_test_cxx_throw(&mut engine);
+        install_test_i32_throw_info(&mut engine);
+        engine
+            .write(DATA_BASE + 0x100, b"FLT Blur Suite\0")
+            .unwrap();
+        engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
+
+        engine
+            .begin_execution_trace("SMART_RENDER", TEST_CODE)
+            .unwrap();
+        assert!(matches!(
+            engine.call_selector_win64(TEST_CODE, [0; 6]),
+            Err(GuestError::SelectorAbort { error: 13, .. })
+        ));
+        engine.discard_execution_trace().unwrap();
+        assert!(engine.trace_hooks.is_empty());
+        assert!(engine.unicorn.get_data().trace.is_none());
+
+        let cleanup = TEST_CODE + 0x100;
+        engine.write(cleanup, &[0xb8, 0, 0, 0, 0, 0xc3]).unwrap();
+        engine.unicorn.get_data_mut().image_executable_ranges = vec![
+            (TEST_CODE, TEST_CODE + code.len() as u64),
+            (cleanup, cleanup + 6),
+        ];
+        engine
+            .begin_execution_trace("FRAME_SETDOWN", cleanup)
+            .unwrap();
+        let cleanup_result = engine.call_selector_win64(cleanup, [0; 6]).unwrap();
+        let trace = engine.finish_execution_trace(cleanup_result).unwrap();
+        assert_eq!(cleanup_result, 0);
+        assert_eq!(trace.selector, "FRAME_SETDOWN");
+    }
+
+    #[test]
     fn unsupported_suite_without_throw_falls_back_and_does_not_leak_to_next_selector() {
         const CODE: u64 = 0x1000_0000;
         let error_pointer = DATA_BASE + 0x300;
@@ -10283,7 +10512,7 @@ mod tests {
         engine.write(error_pointer, &13i32.to_le_bytes()).unwrap();
         assert_eq!(engine.call_selector_win64(CODE, [0; 6]).unwrap(), 0);
 
-        let code = selector_throw_fixture(false, error_pointer);
+        let code = selector_throw_fixture(false, error_pointer, TEST_THROW_INFO, 0);
         let second_selector = CODE + 0x100;
         engine.write(second_selector, &code).unwrap();
         engine.unicorn.get_data_mut().image_executable_ranges =
@@ -10297,7 +10526,7 @@ mod tests {
     #[test]
     fn cxx_throw_without_pending_suite_or_readable_error_uses_normal_fallback() {
         const CODE: u64 = 0x1000_0000;
-        let code = selector_throw_fixture(false, 0xdead_beef);
+        let code = selector_throw_fixture(false, 0xdead_beef, TEST_THROW_INFO, 0);
         let mut engine = test_engine(&code);
         install_test_cxx_throw(&mut engine);
 

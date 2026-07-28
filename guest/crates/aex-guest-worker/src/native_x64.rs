@@ -600,6 +600,10 @@ impl GuestEngine<'static> {
         Err(GuestError::TraceUnavailable)
     }
 
+    pub fn discard_execution_trace(&mut self) -> Result<(), GuestError> {
+        Ok(())
+    }
+
     pub fn configure_trace_watches(&mut self, _: Vec<TraceWatchSpec>) {}
 
     pub fn add_trace_watch(&mut self, _: TraceWatchSpec) {}

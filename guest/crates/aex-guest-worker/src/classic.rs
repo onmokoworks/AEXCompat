@@ -1630,10 +1630,15 @@ impl ClassicHost {
             self.engine
                 .begin_execution_trace(selector_name, self.entry)?;
         }
-        let return_value = self
-            .engine
-            .call_selector_win64(self.entry, args)
-            .map_err(|source| selector_guest_error(selector_name, source))?;
+        let return_value = match self.engine.call_selector_win64(self.entry, args) {
+            Ok(return_value) => return_value,
+            Err(source) => {
+                if trace_enabled {
+                    self.engine.discard_execution_trace()?;
+                }
+                return Err(selector_guest_error(selector_name, source));
+            }
+        };
         let after = trace_enabled
             .then(|| self.trace_state_snapshot())
             .transpose()?;
