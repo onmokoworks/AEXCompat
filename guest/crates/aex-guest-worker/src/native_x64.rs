@@ -92,6 +92,10 @@ pub enum GuestError {
     Mapping(String),
     #[error("native carrier callback failed: {0}")]
     Callback(String),
+    #[error(
+        "native carrier cannot safely dispatch imported function {name}; use the Unicorn worker"
+    )]
+    UnsupportedImport { name: String },
     #[error("native carrier data arena exhausted")]
     DataCapacity,
     #[error("DLL process attach returned FALSE")]
@@ -116,6 +120,7 @@ impl GuestError {
         match self {
             Self::Mapping(_) => "mapping",
             Self::Callback(_) => "callback",
+            Self::UnsupportedImport { .. } => "import",
             Self::DataCapacity => "memory",
             Self::DllProcessAttach => "dllmain",
             Self::CensusUnavailable | Self::TraceUnavailable => "capability",
@@ -464,6 +469,7 @@ impl GuestEngine<'static> {
     fn install_imports(&mut self, image: &PeImage) -> Result<(), GuestError> {
         for library in image.imports() {
             for symbol in &library.symbols {
+                validate_native_import(&symbol.name)?;
                 let callback = native_import_callback(&symbol.name);
                 self.write_u64(image.image_base() + symbol.iat_rva as u64, callback)?;
             }
@@ -956,6 +962,20 @@ unsafe extern "win64" fn native_omp_get_max_threads(
     _: u64,
 ) -> u64 {
     1
+}
+
+fn validate_native_import(name: &str) -> Result<(), GuestError> {
+    // PeImage records the export name from the PE import directory. The
+    // compiler-side COFF `__imp__CxxThrowException` alias is not an imported
+    // function name, and x86 stdcall decoration cannot occur in the AMD64-only
+    // images accepted by PeImage. Match the actual x64 runtime export exactly
+    // so similarly named plugin functions are not rejected.
+    if name == "_CxxThrowException" {
+        return Err(GuestError::UnsupportedImport {
+            name: name.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn native_import_callback(name: &str) -> u64 {
@@ -3863,6 +3883,29 @@ mod tests {
         let unknown_callback: unsafe extern "win64" fn(u64, u64, u64, u64, u64, u64) -> u64 =
             unsafe { std::mem::transmute(native_import_callback("unknown_import")) };
         assert_eq!(unsafe { unknown_callback(0, 0, 0, 0, 0, 0) }, 0);
+    }
+
+    #[test]
+    fn native_imports_reject_cxx_exception_dispatch_but_preserve_ordinary_callbacks() {
+        assert!(matches!(
+            validate_native_import("_CxxThrowException"),
+            Err(GuestError::UnsupportedImport { name }) if name == "_CxxThrowException"
+        ));
+        // These are object-file aliases/decorations rather than names emitted
+        // by the AMD64 PE import directory and must not broaden the match.
+        assert!(validate_native_import("__imp__CxxThrowException").is_ok());
+        assert!(validate_native_import("__CxxThrowException@8").is_ok());
+
+        assert!(validate_native_import("malloc").is_ok());
+        assert_eq!(
+            native_import_callback("malloc"),
+            callback_address!(native_crt_malloc)
+        );
+        assert!(validate_native_import("omp_get_max_threads").is_ok());
+        assert_eq!(
+            native_import_callback("omp_get_max_threads"),
+            callback_address!(native_omp_get_max_threads)
+        );
     }
 
     #[test]
