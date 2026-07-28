@@ -9,6 +9,7 @@ namespace aexcompat::worker_runtime::smart {
 namespace {
 
 constexpr std::size_t kCheckoutResultBytes = 76;
+constexpr std::size_t kMaxPixelCheckouts = 64;
 thread_local State g_default_state;
 thread_local State* g_active_state{};
 
@@ -67,6 +68,13 @@ bool checkout_promised_no_pixels(const std::array<int32_t, 4>& rect) {
   return rect != sentinel && empty_checkout_rect(rect);
 }
 
+bool checkout_id_registered(const State& runtime, int32_t checkout_id) {
+  return std::any_of(runtime.pixel_checkouts.begin(),
+      runtime.pixel_checkouts.end(), [checkout_id](const auto& checkout) {
+        return checkout.id == checkout_id;
+      });
+}
+
 }  // namespace
 
 void State::clear_transient() {
@@ -76,6 +84,7 @@ void State::clear_transient() {
   input_checkout_view_world = nullptr;
   map_checkout_view_world = nullptr;
   hosted_layers.clear();
+  pixel_checkouts.clear();
   map_width = 0;
   map_height = 0;
   secondary_checkout_id = -1;
@@ -119,6 +128,7 @@ Session::~Session() {
   snapshot_->map_checkout_result_rect = state_.map_checkout_result_rect;
   snapshot_->malformed_checkout_requests = state_.malformed_checkout_requests;
   snapshot_->empty_checkout_pixel_denials = state_.empty_checkout_pixel_denials;
+  snapshot_->pixel_checkouts_balanced = pixel_checkouts_balanced();
   state_.clear_transient();
   g_active_state = previous_;
 }
@@ -160,17 +170,21 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
         ? intersect_checkout_rect(request_rect, width, height)
         : std::array<int32_t, 4>{0, 0, width, height};
   };
+  if (checkout_id_registered(runtime, checkout_id) ||
+      runtime.pixel_checkouts.size() >= kMaxPixelCheckouts) return 4;
   if (hosted != runtime.hosted_layers.end()) {
+    if (!result || !hosted->world) return 4;
     if (request)
       std::memcpy(runtime.map_checkout_request.data(), request,
                   sizeof(runtime.map_checkout_request));
-    hosted->checkout_id = checkout_id;
-    if (!result) return 4;
     hosted->checkout_rect = answer_rect(hosted->width, hosted->height);
     write_world_extent_hint(hosted->view_world, hosted->checkout_rect);
     write_checkout_result(result, hosted->checkout_rect,
                           {0, 0, hosted->width, hosted->height},
                           hosted->width, hosted->height);
+    hosted->checkout_id = checkout_id;
+    runtime.pixel_checkouts.push_back({checkout_id, hosted->world,
+        hosted->view_world, hosted->checkout_rect, false});
     return 0;
   }
   if (timed_slot) return 4;
@@ -180,7 +194,6 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   if (request && index == runtime.secondary_layer_slot) {
     std::memcpy(runtime.map_checkout_request.data(), request,
                 sizeof(runtime.map_checkout_request));
-    runtime.secondary_checkout_id = checkout_id;
   }
   if (index == 0 && checkout_id == 0) {
     runtime.checkout_time = what_time;
@@ -189,6 +202,7 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   }
   if (!result) return 4;
   if (index == 0 && checkout_id == 0) {
+    if (!runtime.input_world) return 4;
     const int32_t reference_width = runtime.full_resolution_width > 0
         ? runtime.full_resolution_width : runtime.width;
     const int32_t reference_height = runtime.full_resolution_height > 0
@@ -199,16 +213,22 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
     write_checkout_result(result, runtime.input_checkout_result_rect,
                           {0, 0, runtime.width, runtime.height},
                           reference_width, reference_height);
+    runtime.pixel_checkouts.push_back({checkout_id, runtime.input_world,
+        runtime.input_checkout_view_world,
+        runtime.input_checkout_result_rect, false});
     return 0;
   }
   if (index == runtime.secondary_layer_slot && runtime.map_world) {
-    runtime.secondary_checkout_id = checkout_id;
     runtime.map_checkout_result_rect = answer_rect(runtime.map_width, runtime.map_height);
     write_world_extent_hint(runtime.map_checkout_view_world,
                             runtime.map_checkout_result_rect);
     write_checkout_result(result, runtime.map_checkout_result_rect,
                           {0, 0, runtime.map_width, runtime.map_height},
                           runtime.map_width, runtime.map_height);
+    runtime.secondary_checkout_id = checkout_id;
+    runtime.pixel_checkouts.push_back({checkout_id, runtime.map_world,
+        runtime.map_checkout_view_world, runtime.map_checkout_result_rect,
+        false});
     return 0;
   }
   return 4;
@@ -218,38 +238,42 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
   if (!world || !g_active_state) return 4;
   auto& runtime = *g_active_state;
   const bool use_views = !runtime.gpu_render_dispatched;
-  const auto hosted = std::find_if(runtime.hosted_layers.begin(),
-      runtime.hosted_layers.end(), [checkout_id](const auto& layer) {
-        return layer.checkout_id == checkout_id;
+  auto checkout = std::find_if(runtime.pixel_checkouts.begin(),
+      runtime.pixel_checkouts.end(), [checkout_id](const auto& candidate) {
+        return candidate.id == checkout_id;
       });
-  if (hosted != runtime.hosted_layers.end() && hosted->world) {
-    if (checkout_promised_no_pixels(hosted->checkout_rect)) {
-      ++runtime.empty_checkout_pixel_denials;
-      return 4;
-    }
-    *world = use_views && hosted->view_world ? hosted->view_world : hosted->world;
-    return 0;
+  if (checkout == runtime.pixel_checkouts.end() || !checkout->world ||
+      checkout->checked_out) return 4;
+  if (checkout_promised_no_pixels(checkout->rect)) {
+    ++runtime.empty_checkout_pixel_denials;
+    return 4;
   }
-  if (checkout_id == 0 && runtime.input_world) {
-    if (checkout_promised_no_pixels(runtime.input_checkout_result_rect)) {
-      ++runtime.empty_checkout_pixel_denials;
-      return 4;
-    }
-    *world = use_views && runtime.input_checkout_view_world
-        ? runtime.input_checkout_view_world : runtime.input_world;
-  } else if (checkout_id == runtime.secondary_checkout_id && runtime.map_world) {
-    if (checkout_promised_no_pixels(runtime.map_checkout_result_rect)) {
-      ++runtime.empty_checkout_pixel_denials;
-      return 4;
-    }
-    *world = use_views && runtime.map_checkout_view_world
-        ? runtime.map_checkout_view_world : runtime.map_world;
-  }
-  else return 4;
+  *world = use_views && checkout->view_world
+      ? checkout->view_world : checkout->world;
+  checkout->checked_out = true;
   return 0;
 }
 
-int32_t __cdecl checkin_pixels(void*, int32_t) { return g_active_state ? 0 : 4; }
+int32_t __cdecl checkin_pixels(void*, int32_t checkout_id) {
+  if (!g_active_state) return 4;
+  auto& runtime = *g_active_state;
+  auto checkout = std::find_if(runtime.pixel_checkouts.begin(),
+      runtime.pixel_checkouts.end(), [checkout_id](const auto& candidate) {
+        return candidate.id == checkout_id;
+      });
+  if (checkout == runtime.pixel_checkouts.end() || !checkout->checked_out)
+    return 4;
+  checkout->checked_out = false;
+  return 0;
+}
+
+bool pixel_checkouts_balanced() {
+  if (!g_active_state) return true;
+  const auto& runtime = *g_active_state;
+  return std::none_of(runtime.pixel_checkouts.begin(),
+      runtime.pixel_checkouts.end(),
+      [](const auto& checkout) { return checkout.checked_out; });
+}
 
 int32_t __cdecl checkout_output(void*, void** world) {
   if (!world || !g_active_state) return 4;
@@ -324,6 +348,8 @@ bool checkout_intersection_self_test() {
   const auto verify = [&](const std::array<int32_t, 4>* requested,
                           int32_t expected_status,
                           const std::array<int32_t, 4>& expected) {
+    // Each geometry case represents a fresh PreRender callback scope.
+    runtime.pixel_checkouts.clear();
     std::array<std::byte, 44> request{};
     if (requested) std::memcpy(request.data(), requested->data(), sizeof(*requested));
     std::array<std::byte, kCheckoutResultBytes> result{};
@@ -366,21 +392,48 @@ bool checkout_intersection_self_test() {
   passed = hosted_answer == std::array<int32_t, 4>{10, 10, 50, 40} &&
       hosted_maximum == std::array<int32_t, 4>{0, 0, 50, 40} &&
       runtime.hosted_layers.front().checkout_rect == hosted_answer && passed;
-  runtime.hosted_layers.clear();
-  runtime.input_checkout_result_rect = {0, 0, 0, 0};
-  const uint32_t denials_before = runtime.empty_checkout_pixel_denials;
   void* checked_out{};
+  passed = pre_checkout_layer(nullptr, 3, 7, hosted_request.data(), 7, 1, 30,
+                              hosted_result.data()) == 4 &&
+      pre_checkout_layer(nullptr, 3, 8, hosted_request.data(), 7, 1, 30,
+                         hosted_result.data()) == 0 &&
+      checkout_pixels(nullptr, 999, &checked_out) == 4 &&
+      checkin_pixels(nullptr, 999) == 4 &&
+      checkout_pixels(nullptr, 7, &checked_out) == 0 &&
+      checked_out == hosted_view.data() &&
+      checkout_pixels(nullptr, 7, &checked_out) == 4 &&
+      !pixel_checkouts_balanced() &&
+      checkin_pixels(nullptr, 7) == 0 &&
+      pixel_checkouts_balanced() &&
+      checkin_pixels(nullptr, 7) == 4 &&
+      checkout_pixels(nullptr, 7, &checked_out) == 0 &&
+      checkin_pixels(nullptr, 7) == 0 &&
+      checkout_pixels(nullptr, 8, &checked_out) == 0 &&
+      checkin_pixels(nullptr, 8) == 0 && passed;
+  runtime.hosted_layers.clear();
+  passed = pre_checkout_layer(nullptr, 0, 0, nullptr, 7, 1, 30,
+                              hosted_result.data()) == 0 && passed;
+  runtime.input_checkout_result_rect = {0, 0, 0, 0};
+  runtime.pixel_checkouts.back().rect = runtime.input_checkout_result_rect;
+  const uint32_t denials_before = runtime.empty_checkout_pixel_denials;
+  checked_out = nullptr;
   passed = checkout_pixels(nullptr, 0, &checked_out) == 4 && !checked_out &&
       runtime.empty_checkout_pixel_denials == denials_before + 1 && passed;
   runtime.input_checkout_result_rect = partial;
+  runtime.pixel_checkouts.back().rect = runtime.input_checkout_result_rect;
   write_world_extent_hint(runtime.input_checkout_view_world, partial);
   checked_out = nullptr;
   passed = checkout_pixels(nullptr, 0, &checked_out) == 0 &&
-      checked_out == input_view.data() && passed;
+      checked_out == input_view.data() &&
+      !pixel_checkouts_balanced() &&
+      checkin_pixels(nullptr, 0) == 0 &&
+      pixel_checkouts_balanced() && passed;
   runtime.gpu_render_dispatched = true;
   checked_out = nullptr;
   passed = checkout_pixels(nullptr, 0, &checked_out) == 0 &&
-      checked_out == input_world.data() && passed;
+      checked_out == input_world.data() &&
+      checkin_pixels(nullptr, 0) == 0 &&
+      pixel_checkouts_balanced() && passed;
   return passed;
 }
 

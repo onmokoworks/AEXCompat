@@ -49,6 +49,7 @@ const MAX_PF_HANDLE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_PF_HANDLE_COUNT: usize = 16_384;
 const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_WORLD_COUNT: usize = 256;
+const MAX_WORLD_DIMENSION: i32 = 32_768;
 const MAX_SMART_CHECKOUT_IDS: usize = 64;
 const PROT_READ: c_int = 0x1;
 const PROT_WRITE: c_int = 0x2;
@@ -155,6 +156,8 @@ struct NativeState {
     smart_width: u32,
     smart_height: u32,
     smart_pixel_format: i32,
+    smart_current_time: i32,
+    smart_current_time_scale: u32,
     suite_requests: Vec<String>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
@@ -162,7 +165,7 @@ struct NativeState {
     iterate8_suite: u64,
     pre_checkout_calls: u32,
     pre_checkout_requests: Vec<[i32; 4]>,
-    smart_checkout_ids: HashMap<i32, bool>,
+    smart_checkout_ids: HashMap<i32, NativeSmartCheckout>,
     checkout_pixels_calls: u32,
     checkin_pixels_calls: u32,
     checkout_output_calls: u32,
@@ -183,6 +186,14 @@ struct NativeState {
     image_end: u64,
     plugin_data_registry: EffectRegistry,
     crt_heap: CrtHeap,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NativeSmartCheckout {
+    index: i32,
+    world: u64,
+    checked_out: bool,
+    result_rect: [i32; 4],
 }
 
 thread_local! {
@@ -620,6 +631,8 @@ impl GuestEngine<'static> {
         width: u32,
         height: u32,
         pixel_format: i32,
+        current_time: i32,
+        current_time_scale: u32,
     ) {
         self.state.pre_checkout_requests.clear();
         self.state.smart_checkout_ids.clear();
@@ -628,10 +641,18 @@ impl GuestEngine<'static> {
         self.state.smart_width = width;
         self.state.smart_height = height;
         self.state.smart_pixel_format = pixel_format;
+        self.state.smart_current_time = current_time;
+        self.state.smart_current_time_scale = current_time_scale;
     }
 
-    pub fn finish_smart_checkout_scope(&mut self) {
+    pub fn finish_smart_checkout_scope(&mut self) -> bool {
+        let balanced = self
+            .state
+            .smart_checkout_ids
+            .values()
+            .all(|checkout| !checkout.checked_out);
         self.state.smart_checkout_ids.clear();
+        balanced
     }
 
     pub fn parameters(&self) -> &[GuestParam] {
@@ -1439,22 +1460,64 @@ unsafe extern "win64" fn iterate_generic(iterations: i32, refcon: u64, callback:
     0
 }
 
+fn native_smart_checkout_world(state: &NativeState, index: i32) -> Option<(u64, i32, i32)> {
+    let world = if index == 0 {
+        state.smart_input_world
+    } else {
+        let offset = usize::try_from(index).ok()?.checked_sub(1)?;
+        if state.params.get(offset)?.param_type != 0 {
+            return None;
+        }
+        state
+            .parameter_definitions
+            .get(offset)
+            .copied()
+            .filter(|definition| *definition != 0)?
+            .checked_add(abi::PARAM_U_OFFSET as u64)?
+    };
+    if !native_world_descriptor_valid(state, world) {
+        return None;
+    }
+    let read_u64 = |offset| unsafe { ptr::read_unaligned((world + offset as u64) as *const u64) };
+    let read_i32 = |offset| unsafe { ptr::read_unaligned((world + offset as u64) as *const i32) };
+    let data = read_u64(abi::LAYER_DATA_OFFSET);
+    let rowbytes = read_i32(abi::LAYER_ROWBYTES_OFFSET);
+    let width = read_i32(abi::LAYER_WIDTH_OFFSET);
+    let height = read_i32(abi::LAYER_HEIGHT_OFFSET);
+    let pixel_bytes = native_world_pixel_bytes(state.smart_pixel_format)?;
+    let byte_count = u64::try_from(rowbytes)
+        .ok()?
+        .checked_mul(u64::try_from(height).ok()?)?;
+    if data == 0
+        || width <= 0
+        || height <= 0
+        || width > MAX_WORLD_DIMENSION
+        || height > MAX_WORLD_DIMENSION
+        || u64::try_from(rowbytes).ok()? < u64::try_from(width).ok()?.checked_mul(pixel_bytes)?
+        || !native_guest_range_valid(state, data, byte_count)
+    {
+        return None;
+    }
+    Some((world, width, height))
+}
+
 unsafe extern "win64" fn pre_checkout_layer(
     _: u64,
     index: u64,
     checkout_id: u64,
     request: u64,
-    _: u64,
-    _: u64,
-    _: u64,
+    what_time: u64,
+    time_step: u64,
+    time_scale: u64,
     result: u64,
 ) -> u64 {
     with_state(|state| {
         state.pre_checkout_calls += 1;
+        let index = index as u32 as i32;
         let checkout_id = checkout_id as u32 as i32;
-        if index != 0
-            || request == 0
-            || result == 0
+        if result == 0
+            || (time_step as u32 as i32) < 0
+            || time_scale as u32 == 0
             || state.smart_checkout_ids.contains_key(&checkout_id)
             || state.smart_checkout_ids.len() >= MAX_SMART_CHECKOUT_IDS
         {
@@ -1463,19 +1526,61 @@ unsafe extern "win64" fn pre_checkout_layer(
             ));
             return 4;
         }
-        let mut rectangle = [0i32; 4];
-        unsafe {
-            ptr::copy_nonoverlapping(request as *const i32, rectangle.as_mut_ptr(), 4);
+        let what_time = what_time as u32 as i32;
+        let time_scale = time_scale as u32;
+        if index != 0
+            && i64::from(what_time) * i64::from(state.smart_current_time_scale)
+                != i64::from(state.smart_current_time) * i64::from(time_scale)
+        {
+            state.callback_error = Some(format!(
+                "unsupported temporal smart checkout time={what_time}/{time_scale} current={}/{}",
+                state.smart_current_time, state.smart_current_time_scale
+            ));
+            return 4;
         }
-        state.pre_checkout_requests.push(rectangle);
-        let width = state.smart_width as i32;
-        let height = state.smart_height as i32;
+        let Some((world, width, height)) = native_smart_checkout_world(state, index) else {
+            state.callback_error = Some(format!(
+                "absent or non-layer smart checkout index={index} id={checkout_id}"
+            ));
+            return 4;
+        };
+        if !native_guest_range_valid(state, result, 76) {
+            state.callback_error = Some("invalid pre-checkout result pointer".into());
+            return 4;
+        }
+        let mut rectangle = [0, 0, width, height];
+        let mut observed_request = rectangle;
+        if request != 0 {
+            if !native_guest_range_valid(state, request, 16) {
+                state.callback_error = Some("invalid pre-checkout request pointer".into());
+                return 4;
+            }
+            unsafe {
+                ptr::copy_nonoverlapping(request as *const i32, rectangle.as_mut_ptr(), 4);
+            }
+            if rectangle[2] < rectangle[0] || rectangle[3] < rectangle[1] {
+                state.callback_error =
+                    Some(format!("malformed pre-checkout rectangle={rectangle:?}"));
+                return 4;
+            }
+            observed_request = rectangle;
+            rectangle = [
+                rectangle[0].max(0),
+                rectangle[1].max(0),
+                rectangle[2].min(width),
+                rectangle[3].min(height),
+            ];
+            if rectangle[0] >= rectangle[2] || rectangle[1] >= rectangle[3] {
+                rectangle = [0; 4];
+            }
+        }
+        state.pre_checkout_requests.push(observed_request);
         let mut bytes = [0u8; 76];
-        for (offset, value) in [
-            (0, 0),
-            (4, 0),
-            (8, width),
-            (12, height),
+        for (offset, value) in rectangle
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| (index * 4, value))
+            .chain([
             (16, 0),
             (20, 0),
             (24, width),
@@ -1484,13 +1589,21 @@ unsafe extern "win64" fn pre_checkout_layer(
             (36, 1),
             (44, width),
             (48, height),
-        ] {
+        ]) {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
         unsafe {
             write_pointer(result, &bytes);
         }
-        state.smart_checkout_ids.insert(checkout_id, false);
+        state.smart_checkout_ids.insert(
+            checkout_id,
+            NativeSmartCheckout {
+                index,
+                world,
+                checked_out: false,
+                result_rect: rectangle,
+            },
+        );
         0
     })
     .unwrap_or(4)
@@ -1507,17 +1620,28 @@ unsafe extern "win64" fn checkout_layer_pixels(
     with_state(|state| {
         state.checkout_pixels_calls += 1;
         let checkout_id = checkout_id as u32 as i32;
-        if state.smart_checkout_ids.get(&checkout_id) != Some(&false)
-            || output == 0
-            || state.smart_input_world == 0
-        {
+        let Some(checkout) = state.smart_checkout_ids.get(&checkout_id).copied() else {
             state.callback_error = Some("invalid checkout-layer-pixels request".into());
+            return 4;
+        };
+        if checkout.checked_out
+            || !native_guest_range_valid(state, output, 8)
+            || checkout.result_rect == [0; 4]
+        {
+            state.callback_error = Some(format!(
+                "invalid checkout-layer-pixels index={} id={checkout_id}",
+                checkout.index
+            ));
             4
         } else {
             unsafe {
-                *(output as *mut u64) = state.smart_input_world;
+                *(output as *mut u64) = checkout.world;
             }
-            state.smart_checkout_ids.insert(checkout_id, true);
+            state
+                .smart_checkout_ids
+                .get_mut(&checkout_id)
+                .expect("checkout token remains present")
+                .checked_out = true;
             0
         }
     })
@@ -1535,11 +1659,19 @@ unsafe extern "win64" fn checkin_layer_pixels(
     with_state(|state| {
         state.checkin_pixels_calls += 1;
         let checkout_id = checkout_id as u32 as i32;
-        if state.smart_checkout_ids.get(&checkout_id) != Some(&true) {
+        if state
+            .smart_checkout_ids
+            .get(&checkout_id)
+            .is_none_or(|checkout| !checkout.checked_out)
+        {
             state.callback_error = Some("invalid checkin-layer-pixels request".into());
             4
         } else {
-            state.smart_checkout_ids.insert(checkout_id, false);
+            state
+                .smart_checkout_ids
+                .get_mut(&checkout_id)
+                .expect("checkout token remains present")
+                .checked_out = false;
             0
         }
     })
@@ -2286,6 +2418,104 @@ unsafe extern "win64" fn resize_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smart_checkout_rejects_other_times_and_tracks_pixel_balance() {
+        let mut arena = vec![0u8; 4096];
+        let arena_base = arena.as_mut_ptr() as u64;
+        let world = arena_base;
+        let layer_definition = arena_base + 512;
+        let layer_world_offset = 512 + abi::PARAM_U_OFFSET;
+        let pixels = arena_base + 1024;
+        let result = arena_base + 2048;
+        let checked_out_world = arena_base + 2200;
+        for offset in [0, layer_world_offset] {
+            arena[offset + abi::LAYER_DATA_OFFSET..offset + abi::LAYER_DATA_OFFSET + 8]
+                .copy_from_slice(&pixels.to_le_bytes());
+            arena[offset + abi::LAYER_ROWBYTES_OFFSET..offset + abi::LAYER_ROWBYTES_OFFSET + 4]
+                .copy_from_slice(&16i32.to_le_bytes());
+            arena[offset + abi::LAYER_WIDTH_OFFSET..offset + abi::LAYER_WIDTH_OFFSET + 4]
+                .copy_from_slice(&4i32.to_le_bytes());
+            arena[offset + abi::LAYER_HEIGHT_OFFSET..offset + abi::LAYER_HEIGHT_OFFSET + 4]
+                .copy_from_slice(&3i32.to_le_bytes());
+        }
+        let mut state = NativeState {
+            smart_input_world: world,
+            smart_pixel_format: crate::pixel::PF_PIXEL_FORMAT_ARGB32,
+            smart_current_time: 10,
+            smart_current_time_scale: 30,
+            arena_next: arena_base,
+            arena_end: arena_base + ARENA_SIZE as u64,
+            params: vec![GuestParam {
+                index: 1,
+                param_type: 0,
+                name: "Map".into(),
+                bytes: vec![0; abi::PF_PARAM_DEF_SIZE],
+            }],
+            parameter_definitions: vec![layer_definition],
+            ..NativeState::default()
+        };
+        ACTIVE_STATE.with(|slot| slot.set(&mut state));
+
+        assert_eq!(
+            unsafe { pre_checkout_layer(0, 0, 6, 0, 11, 0, 30, result) },
+            0,
+            "primary input permits temporal requests against the current fallback world"
+        );
+        state.smart_checkout_ids.clear();
+        assert_eq!(
+            unsafe { pre_checkout_layer(0, 1, 7, 0, 11, 0, 30, result) },
+            4
+        );
+        assert!(
+            state
+                .callback_error
+                .take()
+                .is_some_and(|message| message.contains("unsupported temporal smart checkout"))
+        );
+        assert!(state.smart_checkout_ids.is_empty());
+
+        let status = unsafe { pre_checkout_layer(0, 0, 8, 0, 10, 0, 30, result) };
+        assert_eq!(status, 0, "{:?}", state.callback_error);
+        assert_eq!(
+            unsafe { checkout_layer_pixels(0, 8, checked_out_world, 0, 0, 0) },
+            0
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                arena[2200..2208]
+                    .try_into()
+                    .expect("checked out world is eight bytes")
+            ),
+            world
+        );
+        assert!(
+            state
+                .smart_checkout_ids
+                .values()
+                .any(|checkout| checkout.checked_out)
+        );
+        assert_eq!(unsafe { checkin_layer_pixels(0, 8, 0, 0, 0, 0) }, 0);
+        assert!(
+            state
+                .smart_checkout_ids
+                .values()
+                .all(|checkout| !checkout.checked_out)
+        );
+
+        assert_eq!(
+            unsafe { pre_checkout_layer(0, 0, 9, 0, 10, 0, 30, result) },
+            0
+        );
+        assert!(
+            state
+                .smart_checkout_ids
+                .values()
+                .all(|checkout| !checkout.checked_out),
+            "a pre-checkout-only token is balanced"
+        );
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+    }
 
     #[test]
     fn crt_heap_imports_allocate_zero_and_reject_invalid_free() {

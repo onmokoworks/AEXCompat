@@ -21,6 +21,7 @@ const CMD_RENDER: u64 = 11;
 const CMD_FRAME_SETDOWN: u64 = 12;
 const CMD_SMART_PRE_RENDER: u64 = 23;
 const CMD_SMART_RENDER: u64 = 24;
+const PARAM_LAYER: i32 = 0;
 const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
 const PARAM_ANGLE: i32 = 3;
@@ -29,6 +30,7 @@ pub(crate) const PARAM_COLOR: i32 = 5;
 pub(crate) const PARAM_POINT: i32 = 6;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
+const LAYER_DEFAULT_OFFSET: usize = 116;
 const ANGLE_DEFAULT_OFFSET: usize = 4;
 const POINT_DEFAULT_X_OFFSET: usize = 12;
 const POINT_DEFAULT_Y_OFFSET: usize = 16;
@@ -1225,6 +1227,9 @@ impl ClassicHost {
         for (index, captured) in captured_params.into_iter().enumerate() {
             let mut definition = captured.bytes;
             materialize_default(&mut definition, captured.param_type, width, height);
+            if smart_render {
+                materialize_layer_world(&mut definition, captured.param_type, &input_world);
+            }
             if let Some((request_index, requested)) =
                 parameter_values
                     .iter()
@@ -1644,12 +1649,24 @@ impl ClassicHost {
         trace_enabled: bool,
     ) -> Result<(i32, Option<GuestCensus>, Vec<ExecutionTrace>), ClassicError> {
         let input_world = input_param + abi::PARAM_U_OFFSET as u64;
+        let mut current_time = [0u8; 4];
+        let mut current_time_scale = [0u8; 4];
+        self.engine.read(
+            self.input + abi::IN_CURRENT_TIME_OFFSET as u64,
+            &mut current_time,
+        )?;
+        self.engine.read(
+            self.input + abi::IN_TIME_SCALE_OFFSET as u64,
+            &mut current_time_scale,
+        )?;
         self.engine.configure_smart_render(
             input_world,
             output_world,
             width,
             height,
             format.pf_pixel_format(),
+            i32::from_le_bytes(current_time),
+            u32::from_le_bytes(current_time_scale),
         );
         let result = self.render_smart_configured(
             params,
@@ -1660,6 +1677,9 @@ impl ClassicHost {
             census_enabled,
             trace_enabled,
         );
+        // PF Smart Render plug-ins in the frozen corpus commonly retain a
+        // checked-out host world until the selector returns. The world is
+        // host-owned, so selector-scope cleanup is the ownership boundary.
         self.engine.finish_smart_checkout_scope();
         result
     }
@@ -2015,6 +2035,17 @@ fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, heigh
             definition[union + 4..union + 8].copy_from_slice(&y.to_le_bytes());
         }
         _ => {}
+    }
+}
+
+fn materialize_layer_world(definition: &mut [u8], param_type: i32, input_world: &[u8]) {
+    if param_type == PARAM_LAYER
+        && definition.len() >= abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE
+        && read_i32(definition, abi::PARAM_U_OFFSET + LAYER_DEFAULT_OFFSET) == -1
+        && input_world.len() == abi::PF_LAYER_DEF_SIZE
+    {
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
+            .copy_from_slice(input_world);
     }
 }
 
@@ -2448,5 +2479,37 @@ mod tests {
     fn public_iterate16_callback_uses_the_observed_utility_slot() {
         assert_eq!(abi::UTILS_ITERATE16_OFFSET, 0x1f8);
         assert_eq!(abi::UTILS_ITERATE16_SIZE, std::mem::size_of::<u64>());
+    }
+
+    #[test]
+    fn declared_layer_parameters_inherit_the_active_input_world() {
+        let input_world = (0..abi::PF_LAYER_DEF_SIZE as u8).collect::<Vec<_>>();
+        let mut definition = vec![0xa5; abi::PF_PARAM_DEF_SIZE];
+        definition[abi::PARAM_U_OFFSET + LAYER_DEFAULT_OFFSET
+            ..abi::PARAM_U_OFFSET + LAYER_DEFAULT_OFFSET + 4]
+            .copy_from_slice(&(-1i32).to_le_bytes());
+        materialize_layer_world(&mut definition, PARAM_LAYER, &input_world);
+        assert_eq!(
+            &definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE],
+            input_world
+        );
+
+        let mut scalar = vec![0xa5; abi::PF_PARAM_DEF_SIZE];
+        materialize_layer_world(&mut scalar, PARAM_SLIDER, &input_world);
+        assert_eq!(
+            &scalar[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE],
+            vec![0xa5; abi::PF_LAYER_DEF_SIZE]
+        );
+
+        let mut explicit_none = vec![0xa5; abi::PF_PARAM_DEF_SIZE];
+        explicit_none[abi::PARAM_U_OFFSET + LAYER_DEFAULT_OFFSET
+            ..abi::PARAM_U_OFFSET + LAYER_DEFAULT_OFFSET + 4]
+            .copy_from_slice(&0i32.to_le_bytes());
+        let explicit_before = explicit_none.clone();
+        materialize_layer_world(&mut explicit_none, PARAM_LAYER, &input_world);
+        assert_eq!(
+            &explicit_none[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE],
+            &explicit_before[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
+        );
     }
 }
