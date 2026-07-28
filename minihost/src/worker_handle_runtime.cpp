@@ -118,10 +118,15 @@ void __cdecl dispose_handle(void** handle) {
   auto* record = reinterpret_cast<HandleRecord*>(handle);
   {
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (!record || !g_handles.count(record) || record->lock_count != 0) {
+    if (!record || !g_handles.count(record)) {
       invalid_operation();
       return;
     }
+    // PF's dispose callback is void, so unlike resize it has no channel for
+    // rejecting a live-but-locked handle. Reclaim the host-owned allocation
+    // and account for its outstanding locks; unknown, stale and foreign
+    // pointers remain fail-closed above.
+    g_statistics.locks_released_on_dispose += record->lock_count;
     g_handles.erase(record);
     ++g_statistics.disposed;
     g_statistics.live_bytes -= record->size;
@@ -174,7 +179,8 @@ std::int32_t __cdecl resize_handle(std::uint64_t size, void*** handle) {
 bool handle_lifetimes_balanced() {
   std::lock_guard<std::mutex> lock(g_mutex);
   return g_handles.empty() && g_statistics.created == g_statistics.disposed &&
-         g_statistics.locks == g_statistics.unlocks;
+         g_statistics.locks ==
+             g_statistics.unlocks + g_statistics.locks_released_on_dispose;
 }
 
 bool host_handle_is_live(const void* handle) {

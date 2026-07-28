@@ -16,6 +16,7 @@ struct Statistics {
   std::uint32_t disposed{};
   std::uint32_t locks{};
   std::uint32_t unlocks{};
+  std::uint32_t locks_released_on_dispose{};
   std::uint32_t invalid_operations{};
   std::uint32_t automatic_pre_render_disposals{};
   std::size_t live_count{};

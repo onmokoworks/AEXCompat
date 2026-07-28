@@ -21,13 +21,14 @@ def test_pf_handle_ownership_is_bounded_and_hidden_behind_snapshots():
         "Statistics statistics()",
         "bool host_handle_is_live(const void* handle)",
         "void record_automatic_pre_render_disposal()",
+        "locks_released_on_dispose",
     ):
         assert marker in HEADER
     for marker in (
         "std::unordered_set<HandleRecord*> g_handles",
-        "record->lock_count != 0",
+        "g_statistics.locks_released_on_dispose += record->lock_count",
         "g_statistics.live_bytes > kMaxHandleBytes - size",
-        "g_statistics.locks == g_statistics.unlocks",
+        "g_statistics.unlocks + g_statistics.locks_released_on_dispose",
         "callback:new_handle_failed reason=budget",
         "callback:resize_handle_failed reason=data",
     ):
@@ -46,6 +47,8 @@ def test_pf_handle_ownership_is_bounded_and_hidden_behind_snapshots():
         "resized != stable_handle",
         "replacement[31] != 0x78",
         "handle_lifetimes_balanced()",
+        "dispose_handle(locked_dispose)",
+        "dispose_handle(&foreign_data)",
     ):
         assert marker in SELFTEST
     for schema_name in (

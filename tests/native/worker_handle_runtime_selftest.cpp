@@ -51,14 +51,35 @@ int main() {
   }
   for (void** handle : regression_handles) dispose_handle(handle);
 
+  // PF host_dispose_handle is a void callback. A live locked handle therefore
+  // has to be reclaimed by the host rather than rejected with an error the
+  // plug-in cannot observe. The outstanding lock is accounted separately from
+  // an explicit host_unlock_handle callback.
+  void** locked_dispose = new_handle(16);
+  if (!locked_dispose || !lock_handle(locked_dispose)) return 8;
+  dispose_handle(locked_dispose);
+  if (host_handle_is_live(locked_dispose)) return 9;
+
+  const Statistics before_invalid = statistics();
+  dispose_handle(locked_dispose);  // stale / double dispose
+  dispose_handle(nullptr);
+  void* foreign_data = nullptr;
+  dispose_handle(&foreign_data);
+  const Statistics after_invalid = statistics();
+  if (after_invalid.invalid_operations != before_invalid.invalid_operations + 3 ||
+      after_invalid.disposed != before_invalid.disposed)
+    return 10;
+
   const Statistics after = statistics();
   return handle_lifetimes_balanced() &&
-          after.created == before.created + 1027 &&
-          after.disposed == before.disposed + 1027 &&
-          after.locks == before.locks + 3 &&
+          after.created == before.created + 1028 &&
+          after.disposed == before.disposed + 1028 &&
+          after.locks == before.locks + 4 &&
           after.unlocks == before.unlocks + 3 &&
-          after.invalid_operations == before.invalid_operations &&
+          after.locks_released_on_dispose ==
+              before.locks_released_on_dispose + 1 &&
+          after.invalid_operations == before.invalid_operations + 3 &&
           after.live_count == 0 && after.live_bytes == 0
       ? 0
-      : 8;
+      : 11;
 }
