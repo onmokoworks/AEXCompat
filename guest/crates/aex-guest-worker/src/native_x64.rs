@@ -1398,6 +1398,46 @@ unsafe extern "win64" fn transfer_rect8(
         let Some(snapshot_size) = pixel_count.checked_mul(abi::PF_PIXEL_SIZE) else {
             return PF_BAD_CALLBACK_PARAM;
         };
+        let mask_coverage = if let Some(mask) = mask {
+            let mut coverage = Vec::new();
+            if coverage.try_reserve_exact(pixel_count).is_err() {
+                return PF_BAD_CALLBACK_PARAM;
+            }
+            for row in 0..height {
+                let mask_y = i64::from(clipped_top) + row as i64 - i64::from(mask.offset_y);
+                for column in 0..width {
+                    let mask_x = i64::from(clipped_left) + column as i64 - i64::from(mask.offset_x);
+                    let mut value = if mask_x < 0
+                        || mask_y < 0
+                        || mask_x >= i64::from(mask.width)
+                        || mask_y >= i64::from(mask.height)
+                    {
+                        0.0
+                    } else {
+                        let address = mask.data
+                            + mask_y as u64 * mask.rowbytes as u64
+                            + mask_x as u64 * abi::PF_PIXEL_SIZE as u64;
+                        let pixel = unsafe { ptr::read_unaligned(address as *const [u8; 4]) };
+                        if mask.flags & 2 != 0 {
+                            (0.299 * f64::from(pixel[1])
+                                + 0.587 * f64::from(pixel[2])
+                                + 0.114 * f64::from(pixel[3]))
+                                / 255.0
+                        } else {
+                            f64::from(pixel[0]) / 255.0
+                        }
+                    };
+                    value = value.clamp(0.0, 1.0);
+                    if mask.flags & 1 != 0 {
+                        value = 1.0 - value;
+                    }
+                    coverage.push(value);
+                }
+            }
+            Some(coverage)
+        } else {
+            None
+        };
         let mut snapshot = Vec::new();
         if snapshot.try_reserve_exact(snapshot_size).is_err() {
             return PF_BAD_CALLBACK_PARAM;
@@ -1431,36 +1471,9 @@ unsafe extern "win64" fn transfer_rect8(
                     + output_y as u64 * destination.rowbytes as u64
                     + output_x as u64 * abi::PF_PIXEL_SIZE as u64;
                 let mut output = unsafe { ptr::read_unaligned(output_address as *const [u8; 4]) };
-                let coverage = mask.map_or(1.0, |mask| {
-                    let mask_x = source_x - mask.offset_x;
-                    let mask_y = source_y - mask.offset_y;
-                    let mut value = if mask_x < 0
-                        || mask_y < 0
-                        || mask_x >= mask.width
-                        || mask_y >= mask.height
-                    {
-                        0.0
-                    } else {
-                        let address = mask.data
-                            + mask_y as u64 * mask.rowbytes as u64
-                            + mask_x as u64 * abi::PF_PIXEL_SIZE as u64;
-                        let pixel = unsafe { ptr::read_unaligned(address as *const [u8; 4]) };
-                        if mask.flags & 2 != 0 {
-                            (0.299 * f64::from(pixel[1])
-                                + 0.587 * f64::from(pixel[2])
-                                + 0.114 * f64::from(pixel[3]))
-                                / 255.0
-                        } else {
-                            f64::from(pixel[0]) / 255.0
-                        }
-                    };
-                    value = value.clamp(0.0, 1.0);
-                    if mask.flags & 1 != 0 {
-                        1.0 - value
-                    } else {
-                        value
-                    }
-                });
+                let coverage = mask_coverage
+                    .as_ref()
+                    .map_or(1.0, |coverage| coverage[row * width + column]);
                 let effective_opacity = opacity_fraction * coverage;
                 if transfer_mode == 0 {
                     for channel in if rgb_only == 0 { 0 } else { 1 }..4 {
@@ -2841,6 +2854,66 @@ mod tests {
         assert_eq!(arena[1089], 120);
         assert_eq!(arena[1093], 120);
         assert_eq!(arena[1097], 120);
+
+        // Freeze mask coverage before destination writes: the mask begins one
+        // pixel before the destination and therefore overlaps pixels 0 and 1.
+        arena[512 + abi::LAYER_DATA_OFFSET..512 + abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&(destination_data - abi::PF_PIXEL_SIZE as u64).to_le_bytes());
+        arena[512 + abi::PF_LAYER_DEF_SIZE + 8..512 + abi::PF_LAYER_DEF_SIZE + 12]
+            .copy_from_slice(&2u32.to_le_bytes());
+        arena[1084..1088].copy_from_slice(&[255, 255, 255, 255]);
+        arena[1088..1100].copy_from_slice(&[255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
+        arena[1216..1220].copy_from_slice(&0i32.to_le_bytes());
+        arena[1224] = 255;
+        assert_eq!(
+            unsafe {
+                transfer_rect8(
+                    1,
+                    0,
+                    0,
+                    0,
+                    bounds,
+                    source_world,
+                    composite,
+                    mask_world,
+                    0,
+                    0,
+                    destination_world,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            &arena[1088..1100],
+            &[255, 200, 0, 0, 255, 200, 0, 0, 0, 0, 0, 0]
+        );
+
+        // Extreme guest-provided offsets remain an empty mask intersection
+        // instead of overflowing native coordinate arithmetic.
+        arena[512 + abi::PF_LAYER_DEF_SIZE..512 + abi::PF_LAYER_DEF_SIZE + 4]
+            .copy_from_slice(&i32::MIN.to_le_bytes());
+        arena[512 + abi::PF_LAYER_DEF_SIZE + 8..512 + abi::PF_LAYER_DEF_SIZE + 12]
+            .copy_from_slice(&0u32.to_le_bytes());
+        arena[1088..1100].fill(0x5a);
+        assert_eq!(
+            unsafe {
+                transfer_rect8(
+                    1,
+                    0,
+                    0,
+                    0,
+                    bounds,
+                    source_world,
+                    composite,
+                    mask_world,
+                    0,
+                    0,
+                    destination_world,
+                )
+            },
+            0
+        );
+        assert_eq!(&arena[1088..1100], &[0x5a; 12]);
         ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
     }
 
