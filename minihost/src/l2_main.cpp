@@ -2626,6 +2626,42 @@ int32_t __cdecl timeline_get_audio_data(
 }
 
 aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks() {
+  // Deduce the native table length from its initializers, then compare it with
+  // the generated ABI contract. std::array's ordinary aggregate initialization
+  // silently zero-fills a short list, which previously let new middle slots
+  // shift every callback that followed them.
+  const std::array utility_callbacks{
+    reinterpret_cast<void*>(&begin_sampling8), reinterpret_cast<void*>(&subpixel_sample8),
+    reinterpret_cast<void*>(&area_sample8), reinterpret_cast<void*>(&end_sampling8),
+    reinterpret_cast<void*>(&blend_world), reinterpret_cast<void*>(&convolve_world),
+    reinterpret_cast<void*>(&copy_world8), reinterpret_cast<void*>(&fill_world8),
+    reinterpret_cast<void*>(&premultiply_world8), reinterpret_cast<void*>(&premultiply_color8),
+    reinterpret_cast<void*>(&fill_world16), reinterpret_cast<void*>(&premultiply_color16),
+    reinterpret_cast<void*>(&iterate_world16), reinterpret_cast<void*>(&iterate_world8),
+    reinterpret_cast<void*>(&legacy_new_world),
+    reinterpret_cast<void*>(&dispose_world), reinterpret_cast<void*>(&transfer_rect),
+    reinterpret_cast<void*>(&transform_world),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_ceil),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_hypot),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_pow),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sin),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy),
+    reinterpret_cast<void*>(&get_platform_data), reinterpret_cast<void*>(&get_pixel_data8),
+    reinterpret_cast<void*>(&get_pixel_data16),
+    // Handle callbacks in in_data->utils (issue #220): a conformant AE host
+    // provides host_new_handle/lock/unlock/dispose/get_size/resize through the
+    // utility block, not only through the PF Handle Suite.
+    reinterpret_cast<void*>(&new_handle), reinterpret_cast<void*>(&lock_handle),
+    reinterpret_cast<void*>(&unlock_handle), reinterpret_cast<void*>(&dispose_handle),
+    reinterpret_cast<void*>(&handle_size), reinterpret_cast<void*>(&resize_handle),
+    reinterpret_cast<void*>(&host_app_callback)};
+  static_assert(
+      utility_callbacks.size() ==
+          aexcompat::abi::x86_64_windows::UTILITY_CALLBACK_OFFSETS.size(),
+      "native utility hooks must match the generated ABI table one-to-one");
+
   return {{reinterpret_cast<void*>(&timeline_checkout_param),
     reinterpret_cast<void*>(&timeline_checkin_param),
     reinterpret_cast<void*>(&timeline_add_param),
@@ -2639,33 +2675,7 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
     reinterpret_cast<void*>(&host_extended_alloc),
     reinterpret_cast<void*>(&host_extended_lookup),
     reinterpret_cast<void*>(&host_extended_free)},
-   {reinterpret_cast<void*>(&begin_sampling8), reinterpret_cast<void*>(&subpixel_sample8),
-    reinterpret_cast<void*>(&area_sample8), reinterpret_cast<void*>(&end_sampling8),
-    reinterpret_cast<void*>(&blend_world), reinterpret_cast<void*>(&convolve_world),
-    reinterpret_cast<void*>(&copy_world8), reinterpret_cast<void*>(&fill_world8),
-    reinterpret_cast<void*>(&premultiply_world8), reinterpret_cast<void*>(&premultiply_color8),
-    reinterpret_cast<void*>(&fill_world16), reinterpret_cast<void*>(&premultiply_color16),
-    reinterpret_cast<void*>(&iterate_world8), reinterpret_cast<void*>(&legacy_new_world),
-    reinterpret_cast<void*>(&dispose_world), reinterpret_cast<void*>(&transfer_rect),
-    reinterpret_cast<void*>(&transform_world),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_ceil),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_pow),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sin),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy),
-    reinterpret_cast<void*>(&get_platform_data), reinterpret_cast<void*>(&get_pixel_data8),
-    reinterpret_cast<void*>(&get_pixel_data16),
-    // Handle callbacks in in_data->utils (issue #220): a conformant AE host
-    // provides host_new_handle/lock/unlock/dispose/get_handle_size/resize
-    // through the utility block, not only through the PF Handle Suite. The
-    // index order here must match the tail of the generated
-    // UTILITY_CALLBACK_OFFSETS (160/168/176/184/440/464/200, see
-    // tools/generate-aex-abi-contract.py).
-    reinterpret_cast<void*>(&new_handle), reinterpret_cast<void*>(&lock_handle),
-    reinterpret_cast<void*>(&unlock_handle), reinterpret_cast<void*>(&dispose_handle),
-    reinterpret_cast<void*>(&handle_size), reinterpret_cast<void*>(&resize_handle),
-    reinterpret_cast<void*>(&host_app_callback)},
+   utility_callbacks,
    &g_color_suite8, sizeof(g_color_suite8),
    &g_basic_suite, &g_effect};
 }
