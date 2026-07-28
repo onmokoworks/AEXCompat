@@ -2358,7 +2358,6 @@ struct SmartCheckout {
     index: i32,
     world: u64,
     checked_out: bool,
-    result_rect: [i32; 4],
 }
 
 #[derive(Clone, Debug)]
@@ -6915,7 +6914,6 @@ fn emulate_pre_checkout_layer(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: 
                 index,
                 world,
                 checked_out: false,
-                result_rect: request_rect,
             },
         );
         Ok(())
@@ -6943,7 +6941,10 @@ fn emulate_checkout_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, 
                 "invalid checkout-pixels id={checkout_id} output={output:#x}"
             ));
         };
-        if checkout.checked_out || output == 0 || checkout.result_rect == [0; 4] {
+        // A legal empty PF_CheckoutResult describes pixel availability, not
+        // the lifetime of the host-owned PF_EffectWorld. Some effects still
+        // check the world out to inspect its descriptor before doing no work.
+        if checkout.checked_out || output == 0 {
             return Err(format!(
                 "invalid checkout-pixels id={checkout_id} index={} output={output:#x}",
                 checkout.index
@@ -11532,6 +11533,46 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("invalid checkin-pixels id=0")
+        );
+        let empty_request = engine.allocate(16, 4).unwrap();
+        let empty_result = engine.allocate(76, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    HOST_PRE_CHECKOUT_LAYER,
+                    &[1, 0, 41, empty_request, 0, 0, 1, empty_result],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(empty_result, 16).unwrap(),
+            [0; 16],
+            "an empty request has an empty availability rectangle"
+        );
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_CHECKOUT_LAYER_PIXELS,
+                    [1, 41, checked_out_world, 0, 0, 0],
+                )
+                .unwrap(),
+            0,
+            "an empty availability rectangle does not invalidate the host-owned world"
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(checked_out_world, 8)
+                .unwrap(),
+            input_world.to_le_bytes()
+        );
+        assert_eq!(
+            engine
+                .call_win64(HOST_CHECKIN_LAYER_PIXELS, [1, 41, 0, 0, 0, 0])
+                .unwrap(),
+            0
         );
         assert_eq!(
             engine
