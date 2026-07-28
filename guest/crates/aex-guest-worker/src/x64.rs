@@ -8174,10 +8174,12 @@ fn emulate_unlock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
 
 fn emulate_dispose_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
-    let record = unicorn.get_data().handles.get(&handle).cloned();
-    match record {
-        Some(record) if record.locks == 0 => {
-            unicorn.get_data_mut().handles.remove(&handle);
+    match unicorn.get_data_mut().handles.remove(&handle) {
+        Some(record) => {
+            // PF_DisposeHandle is the terminal ownership operation. Real AE
+            // plug-ins may dispose a handle while its data pointer is still
+            // locked; disposal consumes those outstanding locks together with
+            // the handle instead of requiring a separate unlock first.
             if let Err(error) = unicorn.mem_unmap(record.data_region, record.data_mapped_size) {
                 unicorn.get_data_mut().callback_error =
                     Some(format!("PF Handle data unmap failed: {error}"));
@@ -8191,7 +8193,7 @@ fn emulate_dispose_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
         }
         _ => {
             unicorn.get_data_mut().callback_error = Some(format!(
-                "PF Handle dispose received stale or locked handle {handle:#x}"
+                "PF Handle dispose received stale or foreign handle {handle:#x}"
             ));
             let _ = unicorn.emu_stop();
         }
@@ -10018,6 +10020,32 @@ mod tests {
             .call_win64(HOST_LOCK_HANDLE, [0xdead_beef, 0, 0, 0, 0, 0])
             .unwrap_err();
         assert!(error.to_string().contains("unknown handle"));
+    }
+
+    #[test]
+    fn pf_handle_dispose_consumes_outstanding_locks_and_rejects_stale_handles() {
+        let mut engine = test_engine(&[0xc3]);
+        let handle = engine
+            .call_win64(HOST_NEW_HANDLE, [4096, 0, 0, 0, 0, 0])
+            .unwrap();
+        let data = engine
+            .call_win64(HOST_LOCK_HANDLE, [handle, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_ne!(data, 0);
+        assert_eq!(engine.unicorn.get_data().handles[&handle].locks, 1);
+
+        assert_eq!(
+            engine
+                .call_win64(HOST_DISPOSE_HANDLE, [handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert!(!engine.unicorn.get_data().handles.contains_key(&handle));
+
+        let error = engine
+            .call_win64(HOST_DISPOSE_HANDLE, [handle, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("stale or foreign handle"));
     }
 
     #[test]
