@@ -158,7 +158,7 @@ def test_compute_cache_report_and_broker_wiring_are_bounded_and_exact_key():
     report_header = REPORT_HEADER.read_text(encoding="utf-8")
     report_source = REPORT_SOURCE.read_text(encoding="utf-8")
     l2_main = source_owners.l2_translation_unit_text()
-    broker = BROKER.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     discover = DISCOVER_SWEEP.read_text(encoding="utf-8")
     assert "compute_cache_timeline_json" in report_header
     assert "c.compute_cache_timeline_json" in report_source

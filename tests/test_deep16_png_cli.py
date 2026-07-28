@@ -26,7 +26,7 @@ def test_deep16_png_routes_are_explicit_opt_ins():
     assert '"--render-experimental-smart-16-deep"' in harness
     assert "render_experimental_image_at_time_with_deep16_png" in harness
 
-    broker = BROKER_SOURCE.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     # The deep route is opt-in and refuses non-Argb16 formats fail-closed.
     assert "deep_png_output: bool" in broker
     assert "16-bit deep PNG output requires the Argb16 render format" in broker

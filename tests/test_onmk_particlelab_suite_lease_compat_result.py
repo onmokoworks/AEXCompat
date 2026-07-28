@@ -36,7 +36,7 @@ def test_ownership_and_guard_failures_remain_hard_failures():
 
 
 def test_suite_warning_is_forwarded_to_the_ui_report():
-    broker = BROKER.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     for field in (
         "suite_lease_warning",
         "suite_leases_balanced",

@@ -1,4 +1,5 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -7,7 +8,7 @@ SESSION = SOURCE.parent / "render_session.rs"
 
 
 def render_function() -> str:
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     start = source.index("fn render_with_artifact(")
     return source[start:source.index("\n#[cfg(test)]", start + 1)]
 
@@ -20,7 +21,7 @@ def session_open() -> str:
     assemble all live here. The slice ends at the next `pub fn` so it covers the
     whole of `open` and nothing after it.
     """
-    session = SESSION.read_text(encoding="utf-8")
+    session = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
     start = session.index(
         "    pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {"
     )
@@ -28,7 +29,7 @@ def session_open() -> str:
 
 
 def test_render_workers_admit_the_local_build_through_dispatch_only():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     dispatch = (SOURCE.parent / "secure_image_dispatch.rs").read_text(encoding="utf-8")
 
     # Frozen worker trust constants are retired; render/smart/L2 image dispatch
@@ -54,8 +55,8 @@ def test_render_workers_admit_the_local_build_through_dispatch_only():
 
 
 def test_plugin_identity_is_strictly_decoded_and_size_bound():
-    source = SOURCE.read_text(encoding="utf-8")
-    session = SESSION.read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
+    session = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
     assert "value.len() != 64" in source
     assert "byte.is_ascii_hexdigit()" in source
     # Both session launches (image and audio) pin the plug-in by decoded digest
@@ -72,7 +73,7 @@ def test_the_session_is_the_only_image_transport():
     session cannot carry has to become an explicit error from
     `RenderSession::open` instead of being silently rerouted.
     """
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     body = render_function()
     dispatch = (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text(encoding="utf-8")
 
@@ -117,7 +118,7 @@ def test_a_gpu_session_requires_a_policy_and_never_retries_on_cpu():
     with a policy is a GPU session with no retry, and an explicit GPU backend
     without a policy fails closed before any transport work.
     """
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     body = session_open()
 
     assert "pub struct GpuRuntimePolicyInput<'a>" in source
@@ -149,7 +150,7 @@ def test_a_gpu_session_requires_a_policy_and_never_retries_on_cpu():
 
 
 def test_gpu_backend_mapping_is_explicit_and_auto_preflights_as_cuda():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     start = source.index("fn runtime_backend(")
     end = source.index("\n}\n", start) + 2
     mapping = source[start:end]
@@ -161,7 +162,7 @@ def test_gpu_backend_mapping_is_explicit_and_auto_preflights_as_cuda():
 
 
 def test_gpu_policy_render_routes_through_the_session_and_a_preflight_producer():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     # The wrapper carries the policy into the session instead of hard-coding None.
     assert "gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>," in source
     assert "gpu_runtime_policy: request.gpu_runtime_policy," in source
@@ -173,7 +174,7 @@ def test_gpu_policy_render_routes_through_the_session_and_a_preflight_producer()
 
 
 def test_all_other_image_routes_use_secure_dispatch_without_isolated_fallback():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     assert "windows_process::run_isolated" not in source
     assert "run_isolated(" not in source
     # 32, not 33: the one-shot `--render-audio` dispatch went with #365. The rest
@@ -188,7 +189,7 @@ def test_all_other_image_routes_use_secure_dispatch_without_isolated_fallback():
 
 
 def test_shared_dispatch_preserves_cli_order_and_empty_dependency_approval():
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     start = source.index("fn dispatch_approved_image(")
     end = source.index("\npub(crate) fn decode_sha256_hex", start)
     helper = source[start:end]
@@ -202,8 +203,8 @@ def test_gpu_render_manifests_carry_the_preflight_session_identity():
     """A render manifest must embed the identity its report was authenticated
     against. Minting a fresh identity per render lets a prepared report authorize
     a manifest from another session, defeating the anti-replay binding."""
-    source = SOURCE.read_text(encoding="utf-8")
-    session = SESSION.read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
+    session = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
 
     assert (
         "pub(crate) fn prepare_runtime_authorization_transport_with_identity(" in source
@@ -226,7 +227,7 @@ def test_gpu_preflight_seals_the_same_dependencies_as_the_render():
     """The preflight loads the staged plug-in natively, so a plug-in importing an
     approved helper DLL only resolves if the preflight seals the render's
     dependency artifacts alongside the authorization manifest."""
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     start = source.index("pub fn prepare_gpu_runtime_policy(")
     body = source[start : source.index("\n}\n", start) + 2]
 
@@ -250,7 +251,7 @@ def test_smart_sessions_carry_static_context_trailers():
     render onto the one-shot transport. There is no such transport now, so what
     remains is the peel order itself.
     """
-    session = SESSION.read_text(encoding="utf-8")
+    session = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
     dispatch = (
         ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
     ).read_text(encoding="utf-8")
@@ -310,7 +311,7 @@ def test_a_policy_below_float32_or_on_classic_does_not_exclude_a_render():
     session-eligibility gate as well; #365 deleted the gate, so `open` is the
     only place the claim can be broken now.
     """
-    session = SESSION.read_text(encoding="utf-8")
+    session = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
     assert "if !request.smart && request.gpu_runtime_policy.is_some()" not in session
     assert (
         "let gpu_capable = request.smart && request.pixel_format == RenderPixelFormat::Argb32f"

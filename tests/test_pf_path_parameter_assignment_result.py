@@ -24,7 +24,7 @@ def test_path_parameter_assignment_resolves_only_connected_masks():
 
 def test_path_assignment_is_slot_bound_across_ui_broker_and_worker():
     worker = source_owners.contract_text("path_parameter_assignment")
-    broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     harness = source_owners.harness_windows_text()
     assert "descriptor.type == 7 || descriptor.type == 12" in worker
     assert "hooks().active_mask_count()" in worker

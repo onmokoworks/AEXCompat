@@ -14,7 +14,7 @@ INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"
 
 
 def test_render_path_auto_selection_is_wired_and_explicit_flags_stay_explicit():
-    broker = BROKER_SOURCE.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     # The declaration comes from the AEX itself: out_flags2 bit 10
     # (PF_OutFlag2_SUPPORTS_SMART_RENDER) observed after GLOBAL_SETUP.
     assert "pub const PF_OUTFLAG2_SUPPORTS_SMART_RENDER: u64 = 1 << 10;" in broker

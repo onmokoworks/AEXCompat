@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import source_owners
 
 import pytest
 
@@ -29,7 +30,7 @@ GENERATOR = ROOT / "tools" / "generate-oracle-rgba-input.py"
 
 
 def test_render_session_broker_wiring_is_fail_closed():
-    source = BROKER_SOURCE.read_text(encoding="utf-8")
+    source = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
     # Transport handles are inherited and advertised by number; the worker
     # never receives a session path (issue #18 lesson).
     assert "SessionChildHandles" in source

@@ -43,7 +43,7 @@ def test_host_and_plugin_each_dispose_their_owned_handle_once():
 def test_modern_sequence_save_selector_is_abi_bound_and_user_accessible():
     evidence = result()
     worker = source_owners.worker_text()
-    broker = BROKER.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     harness = source_owners.harness_windows_text()
     probe = PROBE.read_text(encoding="utf-8")
     assert evidence["abi"]["get_flattened_sequence_data_selector"] == 28

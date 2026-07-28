@@ -26,7 +26,7 @@ MINIHOST = ROOT / "minihost" / "src"
 
 MANIFEST = (BROKER / "cluster_manifest.rs").read_text(encoding="utf-8")
 DISPATCH = (BROKER / "secure_image_dispatch.rs").read_text(encoding="utf-8")
-SESSION = (BROKER / "render_session.rs").read_text(encoding="utf-8")
+SESSION = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
 AUDIT = (BROKER / "worker_module_audit.rs").read_text(encoding="utf-8")
 
 WORKER = source_owners.worker_text()

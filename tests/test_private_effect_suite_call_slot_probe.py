@@ -1,4 +1,5 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,9 +18,7 @@ SELECTOR = (ROOT / "minihost/src/worker_selector_dispatch.cpp").read_text(
 NATIVE = (ROOT / "tests/native/worker_suite_registry_selftest.cpp").read_text(
     encoding="utf-8"
 )
-BROKER = (ROOT / "broker/crates/broker/src/image_render.rs").read_text(
-    encoding="utf-8"
-)
+BROKER = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
 
 
 def test_private_effect_v3_v5_probe_is_explicit_bounded_and_not_a_provider():

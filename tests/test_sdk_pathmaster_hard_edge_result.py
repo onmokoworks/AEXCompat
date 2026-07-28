@@ -45,7 +45,7 @@ def test_pf_path_checkout_mask_and_lifecycle_ownership_are_balanced():
 
 def test_worker_and_broker_keep_the_path_boundary_explicit_and_observable():
     worker = "\n".join(path.read_text(encoding="utf-8") for path in WORKER_SOURCES)
-    broker = BROKER.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
 
     for marker in (
         '{"PF Path Query Suite", 1, nullptr, &provide_path_query1',

@@ -38,7 +38,7 @@ def test_job_object_enforces_memory_and_lifetime_bounds():
 
 
 def test_nested_failure_stage_and_parameterized_cli_are_fixed():
-    renderer = IMAGE_RENDER.read_text(encoding="utf-8")
+    renderer = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     harness = source_owners.harness_windows_text()
     assert "let mut active_stages: Vec<String>" in renderer
     assert 'failure_stage = active_stage.clone()' in renderer
@@ -47,7 +47,7 @@ def test_nested_failure_stage_and_parameterized_cli_are_fixed():
 
 
 def test_selector_failure_is_checked_before_output_read():
-    renderer = IMAGE_RENDER.read_text(encoding="utf-8")
+    renderer = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     # The gate lives in validate_interactive_worker_report (issue #98 W2
     # extraction); the ordering contract is that its call site rejects a
     # failed worker before any output bytes are read.

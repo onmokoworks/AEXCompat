@@ -1,4 +1,5 @@
 from pathlib import Path
+import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -6,7 +7,7 @@ SOURCE = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
 
 def test_alpha_mode_is_wired_to_primary_and_all_secondary_transports():
-    text = SOURCE.read_text(encoding="utf-8")
+    text = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     assert text.count("apply_conformance_premultiplication(&mut rgba, mode);") == 2
     assert text.count("apply_conformance_premultiplication(&mut layer_rgba, mode);") == 1
 

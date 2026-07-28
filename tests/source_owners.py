@@ -98,6 +98,41 @@ HARNESS_WINDOWS_OWNERS = (
     "broker/crates/harness/src/windows/tests.rs",
 )
 
+IMAGE_RENDER_OWNERS = (
+    "broker/crates/broker/src/image_render.rs",
+    "broker/crates/broker/src/image_render/diagnostics.rs",
+    "broker/crates/broker/src/image_render/types_and_transport.rs",
+    "broker/crates/broker/src/image_render/render_operations.rs",
+    "broker/crates/broker/src/image_render/inspection_and_probes.rs",
+    "broker/crates/broker/src/image_render/session.rs",
+    "broker/crates/broker/src/image_render/tests.rs",
+)
+
+RENDER_SESSION_OWNERS = (
+    "broker/crates/broker/src/render_session.rs",
+    "broker/crates/broker/src/render_session/audio.rs",
+    "broker/crates/broker/src/render_session/discovery.rs",
+    "broker/crates/broker/src/render_session/tests.rs",
+)
+
+
+class CombinedSource:
+    """Path-like source-contract reader spanning one split Rust module."""
+
+    def __init__(self, owners):
+        self._owners = owners
+
+    def read_text(self, encoding="utf-8"):
+        return "\n".join(
+            (ROOT / relative).read_text(encoding=encoding)
+            for relative in self._owners
+        )
+
+
+IMAGE_RENDER_SOURCE = CombinedSource(IMAGE_RENDER_OWNERS)
+RENDER_SESSION_SOURCE = CombinedSource(RENDER_SESSION_OWNERS)
+HARNESS_WINDOWS_SOURCE = CombinedSource(HARNESS_WINDOWS_OWNERS)
+
 # 契約名 → owner ファイル群 (repo ルート相対)。
 CONTRACTS = {
     "l2_family": (

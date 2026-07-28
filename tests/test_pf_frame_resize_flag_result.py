@@ -44,7 +44,7 @@ class PfFrameResizeFlagResultTest(unittest.TestCase):
         self.assertIn("PF_Err_INTERNAL_STRUCT_DAMAGED", fixture)
 
     def test_broker_and_harness_expose_isolated_resize_probes(self):
-        broker = (ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs").read_text(encoding="utf-8")
+        broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
         harness = source_owners.harness_windows_text()
         for direction in ("expand", "shrink"):
             self.assertIn(f"probe_experimental_{direction}_buffer", broker)

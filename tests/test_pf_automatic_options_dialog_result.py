@@ -42,7 +42,7 @@ def test_dialog_capability_alone_does_not_trigger_automatic_dispatch():
 def test_automatic_dialog_is_cleanroom_abi_bound_isolated_and_exposed():
     evidence = result()
     worker = source_owners.worker_text()
-    broker = BROKER.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     harness = source_owners.harness_windows_text()
     fixture = FIXTURE.read_text(encoding="utf-8")
     assert evidence["abi"]["send_do_dialog_flag"] == 128

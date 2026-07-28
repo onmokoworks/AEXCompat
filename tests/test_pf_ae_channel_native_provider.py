@@ -62,8 +62,8 @@ def test_native_provider_oracle_normalizes_8_16_float_and_pins_receipt():
 
 def test_broker_requires_explicit_coverage_contract():
     request = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(encoding="utf-8")
-    transport = (ROOT / "broker/crates/broker/src/image_render.rs").read_text(encoding="utf-8")
-    session = (ROOT / "broker/crates/broker/src/render_session.rs").read_text(encoding="utf-8")
+    transport = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
+    session = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
     assert "alpha_as_coverage_params" in request
     # The launch argv is built by the session since #365 deleted the one-shot
     # transport; the validation message stays where the shared helpers live.
@@ -83,7 +83,7 @@ def test_coverage_transport_follows_the_positional_trailers():
     positional tail is the layer trailer plus the mask/spatial/render/audio
     trailers.
     """
-    session = (ROOT / "broker/crates/broker/src/render_session.rs").read_text(encoding="utf-8")
+    session = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
     coverage = session.index('"--alpha-as-coverage-v1".to_owned()')
     for positional in (
         "args_after_plugin.push(mask.clone());",
@@ -94,7 +94,7 @@ def test_coverage_transport_follows_the_positional_trailers():
         assert session.index(positional) < coverage, positional
     # The click/draw grammar the UI trailer carried still lives in
     # encode_ui_field, which now feeds the per-frame `ui_action` attribute.
-    transport = (ROOT / "broker/crates/broker/src/image_render.rs").read_text(encoding="utf-8")
+    transport = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     assert "\"click:v1|" in transport
     assert '"draw:v1".into()' in transport
     assert '"ui_action".into()' in session

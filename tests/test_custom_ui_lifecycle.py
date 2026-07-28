@@ -18,9 +18,7 @@ def test_minihost_dispatches_a_bounded_custom_ui_lifecycle() -> None:
 
 
 def test_broker_validates_the_complete_lifecycle_contract() -> None:
-    source = (
-        ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-    ).read_text(encoding="utf-8")
+    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
 
     assert "probe_experimental_custom_ui_lifecycle" in source
     assert 'json!([0, 0, 0, 0])' in source

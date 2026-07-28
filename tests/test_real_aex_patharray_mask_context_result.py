@@ -33,7 +33,7 @@ def test_generic_mask_transport_reuses_bounded_cleanroom_context():
     assert result["negative_control"]["output_created"] is False
     assert result["negative_control"]["native_worker_started"] is False
     harness = source_owners.harness_windows_text()
-    broker = BROKER.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     worker = source_owners.worker_text() + REQUEST_PARSER.read_text(encoding="utf-8")
     assert "fn typed_request_host_context(" in harness
     assert "render_experimental_image_at_time_with_format_and_context" in harness

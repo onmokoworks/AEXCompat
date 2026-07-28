@@ -49,7 +49,7 @@ def test_audio_selector_and_checkout_lifetimes_are_balanced():
 def test_audio_abi_is_instrumented_and_runtime_boundaries_are_explicit():
     probe = PROBE.read_text(encoding="utf-8")
     worker = "\n".join(path.read_text(encoding="utf-8") for path in WORKER_SOURCES)
-    broker = BROKER.read_text(encoding="utf-8")
+    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     harness = source_owners.harness_windows_text()
 
     for marker in (
