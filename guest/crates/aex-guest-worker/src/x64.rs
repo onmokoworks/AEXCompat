@@ -134,6 +134,7 @@ const MAX_TRACE_WITNESSES: usize = 256;
 const MAX_UNSUPPORTED_SUITE_CALLS: usize = 256;
 const MAX_SUITE_REQUESTS: usize = 256;
 const MAX_AVX_FALLBACK_INSTRUCTIONS: u64 = 1_000_000;
+const MAX_AVX_STATE_SYNC_POINTS: usize = 4_096;
 const MAX_CRT_MEMORY_COPY_BYTES: u64 = 128 * 1024 * 1024;
 const CRT_MEMORY_COPY_CHUNK: usize = 64 * 1024;
 
@@ -191,6 +192,8 @@ pub enum GuestError {
     IatRange,
     #[error("guest data arena exhausted")]
     DataCapacity,
+    #[error("native AVX state sync point capacity exceeded")]
+    AvxStateCapacity,
     #[error("guest callback failed: {0}")]
     Callback(String),
     #[error("DLL process attach returned FALSE")]
@@ -207,7 +210,7 @@ impl GuestError {
     pub fn diagnostic_category(&self) -> &'static str {
         match self {
             Self::Unicorn { .. } => "emulation",
-            Self::ImageAlignment => "image",
+            Self::ImageAlignment | Self::AvxStateCapacity => "image",
             Self::StubCapacity | Self::IatRange => "import",
             Self::DataCapacity => "memory",
             Self::Callback(_) => "callback",
@@ -1306,6 +1309,28 @@ fn iced_xmm_register(register: Register) -> Option<RegisterX86> {
     })
 }
 
+fn iced_xmm_index(register: Register) -> Option<usize> {
+    match register {
+        Register::XMM0 => Some(0),
+        Register::XMM1 => Some(1),
+        Register::XMM2 => Some(2),
+        Register::XMM3 => Some(3),
+        Register::XMM4 => Some(4),
+        Register::XMM5 => Some(5),
+        Register::XMM6 => Some(6),
+        Register::XMM7 => Some(7),
+        Register::XMM8 => Some(8),
+        Register::XMM9 => Some(9),
+        Register::XMM10 => Some(10),
+        Register::XMM11 => Some(11),
+        Register::XMM12 => Some(12),
+        Register::XMM13 => Some(13),
+        Register::XMM14 => Some(14),
+        Register::XMM15 => Some(15),
+        _ => None,
+    }
+}
+
 fn iced_ymm_index(register: Register) -> Option<usize> {
     match register {
         Register::YMM0 => Some(0),
@@ -1326,6 +1351,113 @@ fn iced_ymm_index(register: Register) -> Option<usize> {
         Register::YMM15 => Some(15),
         _ => None,
     }
+}
+
+fn unicorn_ymm_register(index: usize) -> Option<RegisterX86> {
+    Some(match index {
+        0 => RegisterX86::YMM0,
+        1 => RegisterX86::YMM1,
+        2 => RegisterX86::YMM2,
+        3 => RegisterX86::YMM3,
+        4 => RegisterX86::YMM4,
+        5 => RegisterX86::YMM5,
+        6 => RegisterX86::YMM6,
+        7 => RegisterX86::YMM7,
+        8 => RegisterX86::YMM8,
+        9 => RegisterX86::YMM9,
+        10 => RegisterX86::YMM10,
+        11 => RegisterX86::YMM11,
+        12 => RegisterX86::YMM12,
+        13 => RegisterX86::YMM13,
+        14 => RegisterX86::YMM14,
+        15 => RegisterX86::YMM15,
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AvxStateSync {
+    RegisterUpper(usize),
+    AllUpper,
+    AllRegisters,
+}
+
+fn discover_avx_state_sync_points(bytes: &[u8], address: u64) -> Vec<(u64, AvxStateSync)> {
+    // Hook only the native VEX instructions whose architectural upper-half
+    // effect Unicorn does not expose reliably; avoid a per-instruction hook.
+    let mut points = Vec::new();
+    let mut decoder = Decoder::with_ip(64, bytes, address, DecoderOptions::NONE);
+    while decoder.can_decode() {
+        let instruction = decoder.decode();
+        if instruction.is_invalid() {
+            continue;
+        }
+        let sync = match instruction.mnemonic() {
+            Mnemonic::Vpxor | Mnemonic::Vxorpd | Mnemonic::Vxorps => {
+                iced_xmm_index(instruction.op0_register()).map(AvxStateSync::RegisterUpper)
+            }
+            Mnemonic::Vzeroupper => Some(AvxStateSync::AllUpper),
+            Mnemonic::Vzeroall => Some(AvxStateSync::AllRegisters),
+            _ => None,
+        };
+        if let Some(sync) = sync {
+            points.push((instruction.ip(), sync));
+        }
+    }
+    points
+}
+
+fn synchronize_one_ymm(unicorn: &mut Unicorn<'_, GuestState>, index: usize, zero_all: bool) {
+    let Some(register) = unicorn_ymm_register(index) else {
+        return;
+    };
+    let mut value = [0u8; 32];
+    if !zero_all {
+        let Ok(current) = unicorn.reg_read_long(register) else {
+            return;
+        };
+        value[..16].copy_from_slice(&current.as_ref()[..16]);
+    }
+    // Code hooks run before the native instruction. Clear the upper half now;
+    // Unicorn then computes the lower XMM result without reintroducing it.
+    if unicorn.reg_write_long(register, &value).is_ok() {
+        unicorn.get_data_mut().avx_defined_ymm[index] = true;
+    }
+}
+
+fn synchronize_native_avx_state(unicorn: &mut Unicorn<'_, GuestState>, sync: AvxStateSync) {
+    match sync {
+        AvxStateSync::RegisterUpper(index) => synchronize_one_ymm(unicorn, index, false),
+        AvxStateSync::AllUpper => {
+            for index in 0..16 {
+                synchronize_one_ymm(unicorn, index, false);
+            }
+        }
+        AvxStateSync::AllRegisters => {
+            for index in 0..16 {
+                synchronize_one_ymm(unicorn, index, true);
+            }
+        }
+    }
+}
+
+fn install_avx_state_sync_points(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    points: impl IntoIterator<Item = (u64, AvxStateSync)>,
+) -> Result<(), GuestError> {
+    let points = points.into_iter().collect::<Vec<_>>();
+    if points.len() > MAX_AVX_STATE_SYNC_POINTS {
+        return Err(GuestError::AvxStateCapacity);
+    }
+    for (address, sync) in points {
+        uc(
+            "install native AVX state sync",
+            unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+                synchronize_native_avx_state(unicorn, sync);
+            }),
+        )?;
+    }
+    Ok(())
 }
 
 fn iced_memory_address(
@@ -1414,10 +1546,67 @@ fn read_avx128_operand(
     Some(value)
 }
 
-fn emulate_vblendvps(
+fn write_avx128_operand(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    instruction: &iced_x86::Instruction,
+    kind: OpKind,
+    register: Register,
+    value: &[u8; 16],
+) -> bool {
+    match kind {
+        OpKind::Register => {
+            let Some(index) = iced_xmm_index(register) else {
+                return false;
+            };
+            let Some(destination) = unicorn_ymm_register(index) else {
+                return false;
+            };
+            let mut full = [0u8; 32];
+            full[..16].copy_from_slice(value);
+            if unicorn.reg_write_long(destination, &full).is_err() {
+                return false;
+            }
+            unicorn.get_data_mut().avx_defined_ymm[index] = true;
+            true
+        }
+        OpKind::Memory => {
+            let Some(address) = iced_memory_address(unicorn, instruction) else {
+                return false;
+            };
+            unicorn.mem_write(address, value).is_ok()
+        }
+        _ => false,
+    }
+}
+
+fn avx_fallback_budget_available(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
+    if unicorn.get_data().avx_fallback_instructions < MAX_AVX_FALLBACK_INSTRUCTIONS {
+        return true;
+    }
+    unicorn.get_data_mut().callback_error = Some(format!(
+        "AVX fallback instruction limit exceeded ({MAX_AVX_FALLBACK_INSTRUCTIONS})"
+    ));
+    let _ = unicorn.emu_stop();
+    false
+}
+
+fn finish_avx_fallback(
     unicorn: &mut Unicorn<'_, GuestState>,
     instruction: &iced_x86::Instruction,
     rip: u64,
+) -> bool {
+    let Some(next_rip) = rip.checked_add(instruction.len() as u64) else {
+        return false;
+    };
+    unicorn.get_data_mut().avx_fallback_instructions += 1;
+    unicorn.reg_write(RegisterX86::RIP, next_rip).is_ok()
+}
+
+fn emulate_vblendv(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    instruction: &iced_x86::Instruction,
+    rip: u64,
+    lane_bytes: usize,
 ) -> bool {
     if instruction.op_count() != 4
         || instruction.op0_kind() != OpKind::Register
@@ -1450,36 +1639,72 @@ fn emulate_vblendvps(
     ) else {
         return false;
     };
-    if unicorn.get_data().avx_fallback_instructions >= MAX_AVX_FALLBACK_INSTRUCTIONS {
-        unicorn.get_data_mut().callback_error = Some(format!(
-            "AVX fallback instruction limit exceeded ({MAX_AVX_FALLBACK_INSTRUCTIONS})"
-        ));
-        let _ = unicorn.emu_stop();
+    if !avx_fallback_budget_available(unicorn) {
         return true;
     }
     let mut output = [0u8; 16];
-    for lane in 0..4 {
-        let start = lane * 4;
-        let source = if mask[start + 3] & 0x80 != 0 {
+    for lane in 0..(16 / lane_bytes) {
+        let start = lane * lane_bytes;
+        let source = if mask[start + lane_bytes - 1] & 0x80 != 0 {
             &right
         } else {
             &left
         };
-        output[start..start + 4].copy_from_slice(&source[start..start + 4]);
+        output[start..start + lane_bytes].copy_from_slice(&source[start..start + lane_bytes]);
     }
-    let Some(destination) = iced_xmm_register(instruction.op0_register()) else {
+    if !write_avx128_operand(
+        unicorn,
+        instruction,
+        instruction.op0_kind(),
+        instruction.op0_register(),
+        &output,
+    ) {
+        return false;
+    }
+    finish_avx_fallback(unicorn, instruction, rip)
+}
+
+fn emulate_vextractf128(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    instruction: &iced_x86::Instruction,
+    rip: u64,
+) -> bool {
+    if instruction.op_count() != 3
+        || instruction.op1_kind() != OpKind::Register
+        || instruction.op2_kind() != OpKind::Immediate8
+    {
+        return false;
+    }
+    let Some(source_index) = iced_ymm_index(instruction.op1_register()) else {
         return false;
     };
-    if unicorn.reg_write_long(destination, &output).is_err() {
+    if !unicorn.get_data().avx_defined_ymm[source_index] {
         return false;
     }
-    let Some(next_rip) = rip.checked_add(instruction.len() as u64) else {
+    let Some(source) = read_avx256_operand(
+        unicorn,
+        instruction,
+        instruction.op1_kind(),
+        instruction.op1_register(),
+    ) else {
         return false;
     };
-    let state = unicorn.get_data_mut();
-    state.avx_fallback_instructions += 1;
-    state.avx_chain_next_rip = None;
-    unicorn.reg_write(RegisterX86::RIP, next_rip).is_ok()
+    if !avx_fallback_budget_available(unicorn) {
+        return true;
+    }
+    let start = usize::from(instruction.immediate8() & 1) * 16;
+    let mut value = [0u8; 16];
+    value.copy_from_slice(&source[start..start + 16]);
+    if !write_avx128_operand(
+        unicorn,
+        instruction,
+        instruction.op0_kind(),
+        instruction.op0_register(),
+        &value,
+    ) {
+        return false;
+    }
+    finish_avx_fallback(unicorn, instruction, rip)
 }
 
 fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
@@ -1498,7 +1723,13 @@ fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> boo
         return false;
     }
     if instruction.mnemonic() == Mnemonic::Vblendvps {
-        return emulate_vblendvps(unicorn, &instruction, rip);
+        return emulate_vblendv(unicorn, &instruction, rip, 4);
+    }
+    if instruction.mnemonic() == Mnemonic::Vblendvpd {
+        return emulate_vblendv(unicorn, &instruction, rip, 8);
+    }
+    if instruction.mnemonic() == Mnemonic::Vextractf128 {
+        return emulate_vextractf128(unicorn, &instruction, rip);
     }
     if instruction.mnemonic() != Mnemonic::Vmovups || instruction.op_count() != 2 {
         return false;
@@ -1507,8 +1738,7 @@ fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> boo
         let Some(source) = iced_ymm_index(instruction.op1_register()) else {
             return false;
         };
-        let state = unicorn.get_data();
-        if state.avx_chain_next_rip != Some(rip) || !state.avx_defined_ymm[source] {
+        if !unicorn.get_data().avx_defined_ymm[source] {
             return false;
         }
     }
@@ -1520,11 +1750,7 @@ fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> boo
     ) else {
         return false;
     };
-    if unicorn.get_data().avx_fallback_instructions >= MAX_AVX_FALLBACK_INSTRUCTIONS {
-        unicorn.get_data_mut().callback_error = Some(format!(
-            "AVX fallback instruction limit exceeded ({MAX_AVX_FALLBACK_INSTRUCTIONS})"
-        ));
-        let _ = unicorn.emu_stop();
+    if !avx_fallback_budget_available(unicorn) {
         return true;
     }
     if !write_avx256_operand(
@@ -1536,19 +1762,13 @@ fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> boo
     ) {
         return false;
     }
-    let Some(next_rip) = rip.checked_add(instruction.len() as u64) else {
-        return false;
-    };
-    let state = unicorn.get_data_mut();
-    state.avx_fallback_instructions += 1;
-    state.avx_chain_next_rip = Some(next_rip);
     if instruction.op0_kind() == OpKind::Register {
         let Some(destination) = iced_ymm_index(instruction.op0_register()) else {
             return false;
         };
-        state.avx_defined_ymm[destination] = true;
+        unicorn.get_data_mut().avx_defined_ymm[destination] = true;
     }
-    unicorn.reg_write(RegisterX86::RIP, next_rip).is_ok()
+    finish_avx_fallback(unicorn, &instruction, rip)
 }
 
 fn install_avx_fallback(unicorn: &mut Unicorn<'static, GuestState>) -> Result<(), GuestError> {
@@ -1557,6 +1777,30 @@ fn install_avx_fallback(unicorn: &mut Unicorn<'static, GuestState>) -> Result<()
         unicorn.add_insn_invalid_hook(emulate_avx_invalid_instruction),
     )?;
     Ok(())
+}
+
+fn discover_image_avx_state_sync_points(image: &PeImage) -> Vec<(u64, AvxStateSync)> {
+    let mut points = Vec::new();
+    for section in image
+        .section_protections()
+        .iter()
+        .filter(|section| section.executable)
+    {
+        let start = section.virtual_address.min(image.mapped_bytes().len());
+        let end = start
+            .saturating_add(section.virtual_size)
+            .min(image.mapped_bytes().len());
+        if start >= end {
+            continue;
+        }
+        points.extend(discover_avx_state_sync_points(
+            &image.mapped_bytes()[start..end],
+            image.image_base() + start as u64,
+        ));
+    }
+    points.sort_unstable_by_key(|(address, _)| *address);
+    points.dedup_by_key(|(address, _)| *address);
+    points
 }
 
 fn classify_trace_value(raw: u64, image_base: u64, image_end: u64) -> TraceValue {
@@ -1814,7 +2058,6 @@ struct GuestState {
     extended_string_table_valid: bool,
     avx_fallback_instructions: u64,
     avx_defined_ymm: [bool; 16],
-    avx_chain_next_rip: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -2373,6 +2616,7 @@ impl GuestEngine<'static> {
             "write PE image",
             unicorn.mem_write(image.image_base(), image.mapped_bytes()),
         )?;
+        install_avx_state_sync_points(&mut unicorn, discover_image_avx_state_sync_points(image))?;
         uc(
             "map import stubs",
             unicorn.mem_map(STUB_BASE, STUB_SIZE, Prot::ALL),
@@ -3694,7 +3938,6 @@ impl GuestEngine<'static> {
         }
         self.unicorn.get_data_mut().avx_fallback_instructions = 0;
         self.unicorn.get_data_mut().avx_defined_ymm = [false; 16];
-        self.unicorn.get_data_mut().avx_chain_next_rip = None;
         let stack_top = STACK_BASE + STACK_SIZE;
         // Win64 function entry observes RSP % 16 == 8. Reserve a return
         // address, 32-byte shadow space, bounded stack arguments, and scratch.
@@ -7675,6 +7918,8 @@ mod tests {
             .mem_map(STACK_BASE, STACK_SIZE, Prot::READ | Prot::WRITE)
             .unwrap();
         unicorn.mem_write(CODE, code).unwrap();
+        install_avx_state_sync_points(&mut unicorn, discover_avx_state_sync_points(code, CODE))
+            .unwrap();
         unicorn.mem_write(RETURN_ADDRESS, &[0xcc]).unwrap();
         for address in [
             HOST_ACQUIRE_SUITE,
@@ -10953,6 +11198,75 @@ mod tests {
     }
 
     #[test]
+    fn avx_fallback_blends_xmm_f64_lanes_and_zeroes_the_upper_half() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[
+            0xc4, 0xe3, 0x79, 0x4b, 0xc2, 0x30, // vblendvpd xmm0,xmm0,xmm2,xmm3
+            0xc3,
+        ]);
+        let lanes = |values: [f64; 2]| {
+            values
+                .into_iter()
+                .flat_map(f64::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::YMM0, &[0x5a; 32])
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM0, &lanes([1.0, 2.0]))
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM2, &lanes([10.0, 20.0]))
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write_long(
+                RegisterX86::XMM3,
+                &[0u64.to_le_bytes(), 0x8000_0000_0000_0000u64.to_le_bytes()].concat(),
+            )
+            .unwrap();
+
+        engine.call_win64(CODE, [0; 6]).unwrap();
+
+        let actual = engine.unicorn.reg_read_long(RegisterX86::YMM0).unwrap();
+        assert_eq!(&actual[..16], lanes([1.0, 20.0]));
+        assert_eq!(&actual[16..], [0; 16]);
+        assert!(engine.unicorn.get_data().avx_defined_ymm[0]);
+        assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 1);
+    }
+
+    #[test]
+    fn avx_fallback_extracts_either_128_bit_half_to_register_or_memory() {
+        const CODE: u64 = 0x1000_0000;
+        let source = DATA_BASE;
+        let destination = DATA_BASE + 64;
+        let mut engine = test_engine(&[
+            0xc5, 0xfc, 0x10, 0x09, // vmovups ymm1,[rcx]
+            0xc4, 0xe3, 0x7d, 0x19, 0xc8, 0x01, // vextractf128 xmm0,ymm1,1
+            0xc4, 0xe3, 0x7d, 0x19, 0x0a, 0x00, // vextractf128 [rdx],ymm1,0
+            0xc3,
+        ]);
+        let expected = std::array::from_fn::<_, 32, _>(|index| index as u8);
+        engine.write(source, &expected).unwrap();
+
+        engine
+            .call_win64(CODE, [source, destination, 0, 0, 0, 0])
+            .unwrap();
+
+        let register = engine.unicorn.reg_read_long(RegisterX86::YMM0).unwrap();
+        assert_eq!(&register[..16], &expected[16..]);
+        assert_eq!(&register[16..], [0; 16]);
+        let mut memory = [0u8; 16];
+        engine.unicorn.mem_read(destination, &mut memory).unwrap();
+        assert_eq!(memory, expected[..16]);
+        assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 3);
+    }
+
+    #[test]
     fn avx_fallback_keeps_unimplemented_instructions_fail_closed() {
         const CODE: u64 = 0x1000_0000;
         let mut engine = test_engine(&[
@@ -11013,20 +11327,19 @@ mod tests {
         let mut engine = test_engine(&[0xc3]);
         engine.unicorn.get_data_mut().avx_fallback_instructions = MAX_AVX_FALLBACK_INSTRUCTIONS;
         engine.unicorn.get_data_mut().avx_defined_ymm[0] = true;
-        engine.unicorn.get_data_mut().avx_chain_next_rip = Some(CODE);
 
         engine.call_win64(CODE, [0; 6]).unwrap();
 
         assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 0);
         assert_eq!(engine.unicorn.get_data().avx_defined_ymm, [false; 16]);
-        assert_eq!(engine.unicorn.get_data().avx_chain_next_rip, None);
     }
 
     #[test]
-    fn avx_fallback_rejects_register_source_after_unicorn_instruction_gap() {
+    fn avx_fallback_synchronizes_native_vex_state_across_scalar_instructions() {
         const CODE: u64 = 0x1000_0000;
         let mut engine = test_engine(&[
-            0xc5, 0xf8, 0x57, 0xc0, // vxorps xmm0,xmm0,xmm0
+            0xc5, 0xf9, 0xef, 0xc0, // vpxor xmm0,xmm0,xmm0
+            0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
             0xc5, 0xfc, 0x11, 0x01, // vmovups [rcx],ymm0
             0xc3,
         ]);
@@ -11034,6 +11347,26 @@ mod tests {
             .unicorn
             .reg_write_long(RegisterX86::YMM0, &[0x5a; 32])
             .unwrap();
+
+        engine.call_win64(CODE, [DATA_BASE, 0, 0, 0, 0, 0]).unwrap();
+
+        let mut destination = [0u8; 32];
+        engine
+            .unicorn
+            .mem_read(DATA_BASE, &mut destination)
+            .unwrap();
+        assert_eq!(destination, [0; 32]);
+        assert!(engine.unicorn.get_data().avx_defined_ymm[0]);
+    }
+
+    #[test]
+    fn avx_fallback_rejects_undefined_ymm_register_sources() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[
+            0xc5, 0xfc, 0x11, 0x01, // vmovups [rcx],ymm0
+            0xc4, 0xe3, 0x7d, 0x19, 0xc8, 0x01, // vextractf128 xmm0,ymm1,1
+            0xc3,
+        ]);
 
         let error = engine
             .call_win64(CODE, [DATA_BASE, 0, 0, 0, 0, 0])
@@ -11046,12 +11379,58 @@ mod tests {
                 .contains("invalid instruction"),
             "{error}"
         );
-        let mut destination = [0u8; 32];
-        engine
-            .unicorn
-            .mem_read(DATA_BASE, &mut destination)
-            .unwrap();
-        assert_eq!(destination, [0; 32]);
+        assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 0);
+    }
+
+    #[test]
+    fn avx_fallback_rejects_undefined_extract_and_unbounded_blend_width() {
+        const CODE: u64 = 0x1000_0000;
+        let mut undefined_extract = test_engine(&[
+            0xc4, 0xe3, 0x7d, 0x19, 0xc8, 0x01, // vextractf128 xmm0,ymm1,1
+            0xc3,
+        ]);
+        let extract_error = undefined_extract.call_win64(CODE, [0; 6]).unwrap_err();
+        assert!(
+            extract_error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("invalid instruction"),
+            "{extract_error}"
+        );
+
+        let mut wide_blend = test_engine(&[
+            0xc4, 0xe3, 0x7d, 0x4b, 0xc2, 0x30, // vblendvpd ymm0,ymm0,ymm2,ymm3
+            0xc3,
+        ]);
+        let blend_error = wide_blend.call_win64(CODE, [0; 6]).unwrap_err();
+        assert!(
+            blend_error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("invalid instruction"),
+            "{blend_error}"
+        );
+    }
+
+    #[test]
+    fn avx_state_sync_hook_count_is_bounded() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[0xc3]);
+        let error = install_avx_state_sync_points(
+            &mut engine.unicorn,
+            std::iter::repeat_n(
+                (CODE, AvxStateSync::RegisterUpper(0)),
+                MAX_AVX_STATE_SYNC_POINTS + 1,
+            ),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("native AVX state sync point capacity exceeded"),
+            "{error}"
+        );
     }
 
     #[test]
