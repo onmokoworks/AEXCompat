@@ -85,6 +85,17 @@ def load_excluded_shas(path: Path, expected_sha256: str) -> tuple[set[str], str]
     return result, actual_sha256
 
 
+def resolve_output_path(output: Path, provenance_inputs: tuple[Path, ...]) -> Path:
+    resolved_output = output.resolve()
+    for source in provenance_inputs:
+        resolved_source = source.resolve(strict=True)
+        if resolved_output == resolved_source:
+            raise SweepError("output path aliases a provenance input")
+        if resolved_output.exists() and resolved_output.samefile(resolved_source):
+            raise SweepError("output path aliases a provenance input")
+    return resolved_output
+
+
 def registration_abi(entry: dict[str, object]) -> str | None:
     exports = entry.get("export_names")
     if not isinstance(exports, list) or not all(
@@ -293,8 +304,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     try:
         args = parse_args()
+        output = resolve_output_path(
+            args.output,
+            (
+                args.inventory,
+                args.windows_summary,
+                args.exclude_sha_file,
+            ),
+        )
         manifest = build_manifest(args)
-        output = args.output.resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

@@ -108,6 +108,18 @@ def test_bound_json_rejects_duplicate_keys(tmp_path):
         )
 
 
+def test_output_path_rejects_provenance_aliases(tmp_path):
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text("inventory", encoding="utf-8")
+    hard_link = tmp_path / "manifest.json"
+    hard_link.hardlink_to(inventory)
+
+    with pytest.raises(SELECT.SweepError, match="aliases a provenance input"):
+        SELECT.resolve_output_path(inventory, (inventory,))
+    with pytest.raises(SELECT.SweepError, match="aliases a provenance input"):
+        SELECT.resolve_output_path(hard_link, (inventory,))
+
+
 def test_selection_rejects_insufficient_registration_abi():
     inventory = {
         "entries": [
