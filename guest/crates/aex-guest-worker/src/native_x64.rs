@@ -49,6 +49,7 @@ const MAX_PF_HANDLE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_PF_HANDLE_COUNT: usize = 16_384;
 const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_WORLD_COUNT: usize = 256;
+const MAX_WORLD_DIMENSION: i32 = 32_768;
 const MAX_SMART_CHECKOUT_IDS: usize = 64;
 const PROT_READ: c_int = 0x1;
 const PROT_WRITE: c_int = 0x2;
@@ -1501,11 +1502,11 @@ fn native_smart_checkout_world(state: &NativeState, index: i32) -> Option<(u64, 
 }
 
 unsafe extern "win64" fn pre_checkout_layer(
-    what_time: u64,
+    _: u64,
     index: u64,
     checkout_id: u64,
     request: u64,
-    _: u64,
+    what_time: u64,
     time_step: u64,
     time_scale: u64,
     result: u64,
@@ -2419,28 +2420,33 @@ mod tests {
 
     #[test]
     fn smart_checkout_rejects_other_times_and_tracks_pixel_balance() {
-        let mut pixels = [0u8; 4 * 3 * 4];
-        let mut world = [0u8; abi::PF_LAYER_DEF_SIZE];
-        world[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
-            .copy_from_slice(&(pixels.as_mut_ptr() as u64).to_le_bytes());
-        world[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+        let mut arena = vec![0u8; 4096];
+        let arena_base = arena.as_mut_ptr() as u64;
+        let world = arena_base;
+        let pixels = arena_base + 512;
+        let result = arena_base + 1024;
+        let checked_out_world = arena_base + 1200;
+        arena[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&pixels.to_le_bytes());
+        arena[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
             .copy_from_slice(&16i32.to_le_bytes());
-        world[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+        arena[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
             .copy_from_slice(&4i32.to_le_bytes());
-        world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+        arena[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
             .copy_from_slice(&3i32.to_le_bytes());
         let mut state = NativeState {
-            smart_input_world: world.as_mut_ptr() as u64,
+            smart_input_world: world,
             smart_pixel_format: crate::pixel::PF_PIXEL_FORMAT_ARGB32,
             smart_current_time: 10,
             smart_current_time_scale: 30,
+            arena_next: arena_base,
+            arena_end: arena_base + ARENA_SIZE as u64,
             ..NativeState::default()
         };
         ACTIVE_STATE.with(|slot| slot.set(&mut state));
-        let mut result = [0u8; 76];
 
         assert_eq!(
-            unsafe { pre_checkout_layer(0, 0, 7, 0, 11, 0, 30, result.as_mut_ptr() as u64,) },
+            unsafe { pre_checkout_layer(0, 0, 7, 0, 11, 0, 30, result) },
             4
         );
         assert!(
@@ -2451,18 +2457,20 @@ mod tests {
         );
         assert!(state.smart_checkout_ids.is_empty());
 
+        let status = unsafe { pre_checkout_layer(0, 0, 7, 0, 10, 0, 30, result) };
+        assert_eq!(status, 0, "{:?}", state.callback_error);
         assert_eq!(
-            unsafe { pre_checkout_layer(0, 0, 7, 0, 10, 0, 30, result.as_mut_ptr() as u64,) },
+            unsafe { checkout_layer_pixels(0, 7, checked_out_world, 0, 0, 0) },
             0
         );
-        let mut checked_out_world = 0u64;
         assert_eq!(
-            unsafe {
-                checkout_layer_pixels(0, 7, (&mut checked_out_world as *mut u64) as u64, 0, 0, 0)
-            },
-            0
+            u64::from_le_bytes(
+                arena[1200..1208]
+                    .try_into()
+                    .expect("checked out world is eight bytes")
+            ),
+            world
         );
-        assert_eq!(checked_out_world, world.as_mut_ptr() as u64);
         assert!(
             state
                 .smart_checkout_ids
@@ -2478,7 +2486,7 @@ mod tests {
         );
 
         assert_eq!(
-            unsafe { pre_checkout_layer(0, 0, 8, 0, 10, 0, 30, result.as_mut_ptr() as u64,) },
+            unsafe { pre_checkout_layer(0, 0, 8, 0, 10, 0, 30, result) },
             0
         );
         assert!(
