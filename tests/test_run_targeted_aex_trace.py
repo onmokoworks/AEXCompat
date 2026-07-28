@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,7 +77,7 @@ def test_success_report_is_portable_sha_pinned_and_deterministic(
     output = tmp_path / "report.json"
 
     def fake_run(command, **kwargs):
-        Path(command[4]).write_bytes(b"rendered png")
+        Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(command[4], "PNG")
         worker_report = {
             "execution_traces": [{"selector": "RENDER", "note": str(plugin)}],
             "classification": "ok",
@@ -176,6 +177,42 @@ def test_success_requires_a_trace_payload(tmp_path, monkeypatch):
         ),
     )
     with pytest.raises(RUNNER.TraceRunnerError, match="no execution_traces"):
+        RUNNER.run(
+            argparse.Namespace(
+                manifest=manifest,
+                worker=worker,
+                expected_worker_sha256=_sha(worker),
+                output=tmp_path / "report.json",
+                timeout=10,
+                run_parent=tmp_path,
+            )
+        )
+
+
+@pytest.mark.parametrize("artifact", ["missing", "invalid", "directory"])
+def test_success_requires_a_valid_regular_output_png(
+    tmp_path, monkeypatch, artifact
+):
+    worker, _, _, manifest = _fixture(tmp_path)
+
+    def fake_run(command, **kwargs):
+        output = Path(command[4])
+        if artifact == "invalid":
+            output.write_bytes(b"not a png")
+        elif artifact == "directory":
+            output.mkdir()
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            b'{"execution_traces":[{"selector":"RENDER"}]}',
+            b"",
+        )
+
+    monkeypatch.setattr(RUNNER.subprocess, "run", fake_run)
+    with pytest.raises(
+        RUNNER.TraceRunnerError,
+        match="missing or unreadable|bounded regular PNG|valid readable PNG",
+    ):
         RUNNER.run(
             argparse.Namespace(
                 manifest=manifest,

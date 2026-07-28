@@ -9,20 +9,25 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, UnidentifiedImageError
+
 
 SCHEMA_VERSION = 1
 MAX_CASES = 8
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 MAX_ERROR_BYTES = 4096
+MAX_OUTPUT_PNG_BYTES = 64 * 1024 * 1024
 CASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 PIXEL_FORMATS = {"argb8", "argb16", "argb32f"}
@@ -64,6 +69,39 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def pin_output_png(path: Path, case_id: str) -> str:
+    """Validate and hash the worker artifact without accepting links/non-files."""
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise TraceRunnerError(
+            f"worker output for {case_id} is missing or unreadable"
+        ) from error
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size <= 0
+        or metadata.st_size > MAX_OUTPUT_PNG_BYTES
+    ):
+        raise TraceRunnerError(
+            f"worker output for {case_id} is not a bounded regular PNG file"
+        )
+    try:
+        payload = path.read_bytes()
+        with Image.open(io.BytesIO(payload)) as image:
+            if image.format != "PNG" or image.width <= 0 or image.height <= 0:
+                raise TraceRunnerError(
+                    f"worker output for {case_id} is not a valid PNG"
+                )
+            image.verify()
+    except TraceRunnerError:
+        raise
+    except (OSError, UnidentifiedImageError, ValueError) as error:
+        raise TraceRunnerError(
+            f"worker output for {case_id} is not a valid readable PNG"
+        ) from error
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _require_file(value: Any, label: str) -> Path:
@@ -266,7 +304,7 @@ def run_case(
     return {
         "kind": "trace",
         "report": _sanitize(report, replacements),
-        "output_png_sha256": sha256_file(output) if output.is_file() else None,
+        "output_png_sha256": pin_output_png(output, case["id"]),
     }
 
 
