@@ -316,6 +316,7 @@ int main() {
   field<decltype(PF_UtilCallbacks::premultiply)>("utils.premultiply", offsetof(PF_UtilCallbacks, premultiply), first);
   field<decltype(PF_UtilCallbacks::premultiply_color)>("utils.premultiply_color", offsetof(PF_UtilCallbacks, premultiply_color), first);
   field<decltype(PF_UtilCallbacks::iterate)>("utils.iterate", offsetof(PF_UtilCallbacks, iterate), first);
+  field<decltype(PF_UtilCallbacks::iterate16)>("utils.iterate16", offsetof(PF_UtilCallbacks, iterate16), first);
   field<decltype(PF_UtilCallbacks::iterate_origin)>("utils.iterate_origin", offsetof(PF_UtilCallbacks, iterate_origin), first);
   field<decltype(PF_UtilCallbacks::get_callback_addr)>("utils.get_callback_addr", offsetof(PF_UtilCallbacks, get_callback_addr), first);
   field<decltype(PF_UtilCallbacks::new_world)>("utils.new_world", offsetof(PF_UtilCallbacks, new_world), first);
