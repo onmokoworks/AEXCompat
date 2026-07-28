@@ -1744,7 +1744,14 @@ fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> boo
     let Ok(rip) = unicorn.reg_read(RegisterX86::RIP) else {
         return false;
     };
-    let mut bytes = [0u8; 15];
+    let Some((image_base, image_end)) = unicorn.get_data().image_region else {
+        return false;
+    };
+    if !(image_base..image_end).contains(&rip) {
+        return false;
+    }
+    let byte_count = usize::try_from((image_end - rip).min(15)).unwrap_or(15);
+    let mut bytes = vec![0u8; byte_count];
     if unicorn.mem_read(rip, &mut bytes).is_err() {
         return false;
     }
@@ -7940,6 +7947,7 @@ mod tests {
             GuestState {
                 next_handle_data: HANDLE_DATA_BASE,
                 next_aegp_memory_handle: AEGP_MEMORY_HANDLE_BASE,
+                image_region: Some((CODE, CODE + PAGE_SIZE)),
                 ..GuestState::default()
             },
         )
@@ -11195,6 +11203,37 @@ mod tests {
         engine.unicorn.mem_read(destination, &mut actual).unwrap();
         assert_eq!(actual, expected);
         assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 2);
+    }
+
+    #[test]
+    fn avx_fallback_decodes_a_complete_instruction_at_the_mapped_image_end() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[0xc3]);
+        let instruction = CODE + PAGE_SIZE - 4;
+        let expected = [0x5a; 32];
+        engine.write(DATA_BASE, &expected).unwrap();
+        engine
+            .unicorn
+            .mem_write(instruction, &[0xc5, 0xfc, 0x10, 0x00]) // vmovups ymm0,[rax]
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RAX, DATA_BASE)
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RIP, instruction)
+            .unwrap();
+
+        assert!(emulate_avx_invalid_instruction(&mut engine.unicorn));
+
+        assert_eq!(
+            engine.unicorn.reg_read(RegisterX86::RIP).unwrap(),
+            CODE + PAGE_SIZE
+        );
+        let actual = engine.unicorn.reg_read_long(RegisterX86::YMM0).unwrap();
+        assert_eq!(&*actual, &expected);
+        assert!(engine.unicorn.get_data().avx_defined_ymm[0]);
     }
 
     #[test]
