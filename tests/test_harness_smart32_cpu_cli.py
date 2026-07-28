@@ -1,3 +1,5 @@
+from tests import source_owners
+
 import json
 import subprocess
 from pathlib import Path
@@ -11,7 +13,7 @@ INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"
 
 
 def test_smart32_cpu_cli_is_explicit_and_bypasses_gpu_authorization(tmp_path: Path) -> None:
-    source = SOURCE.read_text(encoding="utf-8")
+    source = source_owners.harness_windows_text()
     assert '"--render-experimental-smart-32-cpu"' in source
     assert "RenderGpuBackend::Cpu" in source
 

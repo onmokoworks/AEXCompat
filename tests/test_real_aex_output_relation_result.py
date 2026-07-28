@@ -1,3 +1,5 @@
+from tests import source_owners
+
 import json
 from pathlib import Path
 
@@ -25,7 +27,7 @@ def test_real_effect_matrix_distinguishes_changed_and_passthrough_outputs():
 
 
 def test_output_relation_is_computed_and_exposed_without_redefining_pass():
-    source = HARNESS.read_text(encoding="utf-8")
+    source = source_owners.harness_windows_text()
     assert 'case["output_relation"]' in source
     assert '"pixel_exact_passthrough"' in source
     assert '"pixels_changed"' in source

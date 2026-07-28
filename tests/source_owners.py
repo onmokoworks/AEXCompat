@@ -77,6 +77,15 @@ WORKER_RUNTIME_OWNERS = (
     "minihost/src/worker_entry_wiring.cpp",
 )
 
+HARNESS_WINDOWS_OWNERS = (
+    "broker/crates/harness/src/windows/preflight.rs",
+    "broker/crates/harness/src/windows/render_contract.rs",
+    "broker/crates/harness/src/windows/live_session.rs",
+    "broker/crates/harness/src/windows/app.rs",
+    "broker/crates/harness/src/windows/cli.rs",
+    "broker/crates/harness/src/windows/tests.rs",
+)
+
 # 契約名 → owner ファイル群 (repo ルート相対)。
 CONTRACTS = {
     "l2_family": (
@@ -409,3 +418,10 @@ def worker_files():
 def worker_text():
     return "\n".join(
         path.read_text(encoding="utf-8") for path in worker_files())
+
+
+def harness_windows_text():
+    return "".join(
+        (ROOT / relative).read_text(encoding="utf-8")
+        for relative in HARNESS_WINDOWS_OWNERS
+    )

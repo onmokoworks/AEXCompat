@@ -1,3 +1,5 @@
+from tests import source_owners
+
 import json
 from pathlib import Path
 
@@ -37,7 +39,7 @@ def test_job_object_enforces_memory_and_lifetime_bounds():
 
 def test_nested_failure_stage_and_parameterized_cli_are_fixed():
     renderer = IMAGE_RENDER.read_text(encoding="utf-8")
-    harness = HARNESS.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     assert "let mut active_stages: Vec<String>" in renderer
     assert 'failure_stage = active_stage.clone()' in renderer
     assert '"--render-experimental-param"' in harness

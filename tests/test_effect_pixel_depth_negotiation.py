@@ -46,7 +46,7 @@ def test_worker_gates_deep_worlds_on_the_observed_ae_capability_bits():
 
 
 def test_harness_reports_negotiation_without_fabricating_a_selector_error():
-    source = HARNESS.read_text(encoding="utf-8")
+    source = source_owners.harness_windows_text()
 
     assert '"unsupported_pixel_depth".to_owned()' in source
     assert 'Some("pixel_depth_negotiation".to_owned())' in source

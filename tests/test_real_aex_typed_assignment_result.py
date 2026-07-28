@@ -1,3 +1,5 @@
+from tests import source_owners
+
 import json
 from pathlib import Path
 
@@ -67,7 +69,7 @@ def test_particlelab_mixed_typed_assignment_reaches_classic_and_smartfx():
 
 
 def test_typed_assignment_surface_is_bounded_and_worker_observable():
-    harness = HARNESS.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     broker = BROKER.read_text(encoding="utf-8")
 
     assert "fn apply_typed_assignments(" in harness

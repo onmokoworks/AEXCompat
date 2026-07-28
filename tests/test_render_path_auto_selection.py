@@ -1,3 +1,5 @@
+from tests import source_owners
+
 import json
 import subprocess
 from pathlib import Path
@@ -22,7 +24,7 @@ def test_render_path_auto_selection_is_wired_and_explicit_flags_stay_explicit():
         "json!(smart_render_advertised(advertised_out_flags2));" in broker
     )
 
-    harness = HARNESS_SOURCE.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     # The GUI derives its default render path from the inspection diagnostics
     # and keeps the toggle as a manual override (issue #105).
     assert "fn advertised_smart_render(report: &serde_json::Value)" in harness

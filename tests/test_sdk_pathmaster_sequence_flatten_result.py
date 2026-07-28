@@ -48,7 +48,7 @@ def test_flatten_selector_is_abi_bound_isolated_and_exposed_to_the_harness():
     evidence = result()
     worker = source_owners.worker_text()
     broker = BROKER.read_text(encoding="utf-8")
-    harness = HARNESS.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     probe = PROBE.read_text(encoding="utf-8")
     assert evidence["abi"]["sequence_flatten_selector"] == 7
     assert "PF_Cmd_SEQUENCE_FLATTEN" in probe

@@ -1,3 +1,5 @@
+from tests import source_owners
+
 import json
 from pathlib import Path
 
@@ -30,7 +32,7 @@ def test_real_aex_classic_and_smartfx_accept_multiple_slot_bound_layers():
 
 
 def test_layer_cli_and_broker_keep_slot_binding_fail_closed():
-    harness = HARNESS.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     broker = BROKER.read_text(encoding="utf-8")
 
     assert '"--render-experimental-layer-slots"' in harness

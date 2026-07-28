@@ -22,7 +22,7 @@ def test_particlelab_standard_supervised_parameter_receives_current_value():
 
 
 def test_supervised_transport_is_typed_isolated_and_not_button_limited():
-    harness = HARNESS.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     broker = BROKER.read_text(encoding="utf-8")
     worker = WORKER.read_text(encoding="utf-8")
     assert '"--trigger-experimental-request"' in harness

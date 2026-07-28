@@ -62,7 +62,7 @@ def test_nop_render_is_cleanroom_abi_bound_and_exposed():
     evidence = result()
     worker = source_owners.worker_text()
     broker = BROKER.read_text(encoding="utf-8")
-    harness = HARNESS.read_text(encoding="utf-8")
+    harness = source_owners.harness_windows_text()
     fixture = FIXTURE.read_text(encoding="utf-8")
     assert evidence["abi"]["nop_render_flag"] == 262144
     assert "PF_OutFlag_NOP_RENDER" in fixture
