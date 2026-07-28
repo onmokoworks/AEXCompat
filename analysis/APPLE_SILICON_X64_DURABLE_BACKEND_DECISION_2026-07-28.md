@@ -57,7 +57,10 @@ RosettaはAVX/AVX2を変換するがAVX512は変換しない。
 4. `guest/crates/aex-guest-worker/src/x64.rs`
    - PE mapping、Win64 ABI、Suite/callback、resident session、structured diagnosticsを
      arm64 process内で提供する。
-   - 未対応命令、import、callback、selectorは推測で成功へ丸めずfail closedする。
+   - 未対応命令、危険と分類済みのimport、callback、selectorはfail closedする。
+   - ただし未分類のscalar-return importにはgeneric zero-return stubが残る。これは
+     arbitrary Win64 API semanticsを保証するものではなく、corpus拡大時に継続して
+     分類・typed実装・明示拒否する必要がある。
 
 `AEXCOMPAT_GUEST_WORKER`は一つのworkerを明示するexpert overrideであり、自動fallbackや
 native deadlineを提供する安全な製品routingではない。
