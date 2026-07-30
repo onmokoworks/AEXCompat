@@ -105,6 +105,22 @@ def test_verified_binding_rejects_missing_or_null_authoritative_evidence(field):
 
 
 @pytest.mark.parametrize(
+    "classification",
+    (
+        "missing_dll",
+        "disabled",
+        "untrusted_dll",
+        "registry_read_failure",
+    ),
+)
+def test_verified_binding_requires_identity_verified_candidate(classification):
+    validator = _validator()
+    report = _report()
+    report["bindings"][0]["candidate_classification"] = classification
+    assert list(validator.iter_errors(report))
+
+
+@pytest.mark.parametrize(
     "field,value",
     (
         ("candidate_path_basename", r"C:\Private\vendor-opencl.dll"),

@@ -131,6 +131,9 @@
           },
           "then": {
             "properties": {
+              "candidate_classification": {
+                "const": "identity_verified"
+              },
               "candidate_path_basename": {
                 "type": "string",
                 "minLength": 1,

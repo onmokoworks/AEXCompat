@@ -38,6 +38,102 @@ pub struct RuntimeModuleIdentityEvidence {
     pub signing_catalog_sha256: Option<[u8; 32]>,
 }
 
+const CATALOG_ENUMERATION_SUCCESS: u32 = 0;
+const CATALOG_ENUMERATION_EXHAUSTED: u32 = 1168; // ERROR_NOT_FOUND
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RawCatalogEnumeration<H> {
+    next: Option<H>,
+    previous_retained: Option<H>,
+    last_error: u32,
+}
+
+trait CatalogEnumerationBackend {
+    type Handle: Copy + Eq;
+
+    fn enumerate(
+        &mut self,
+        previous: Option<Self::Handle>,
+        member_hash: &[u8],
+    ) -> RawCatalogEnumeration<Self::Handle>;
+    fn release(&mut self, handle: Self::Handle);
+}
+
+struct CatalogEnumeration<B: CatalogEnumerationBackend> {
+    backend: B,
+    current: Option<B::Handle>,
+}
+
+impl<B: CatalogEnumerationBackend> CatalogEnumeration<B> {
+    fn new(backend: B) -> Self {
+        Self {
+            backend,
+            current: None,
+        }
+    }
+
+    fn advance(&mut self, member_hash: &[u8]) -> Result<Option<B::Handle>, u32> {
+        let previous = self.current.take();
+        let outcome = self.backend.enumerate(previous, member_hash);
+        if let Some(retained) = outcome.previous_retained {
+            self.backend.release(retained);
+        }
+        self.current = outcome.next;
+        if self.current.is_some() {
+            return Ok(self.current);
+        }
+        if matches!(
+            outcome.last_error,
+            CATALOG_ENUMERATION_SUCCESS | CATALOG_ENUMERATION_EXHAUSTED
+        ) {
+            Ok(None)
+        } else {
+            Err(outcome.last_error)
+        }
+    }
+}
+
+impl<B: CatalogEnumerationBackend> Drop for CatalogEnumeration<B> {
+    fn drop(&mut self) {
+        if let Some(current) = self.current.take() {
+            self.backend.release(current);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StableCatalogIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+    size: u64,
+    last_write_time: u64,
+}
+
+fn require_stable_catalog_evidence(
+    expected: StableCatalogIdentity,
+    observed: StableCatalogIdentity,
+    digest_before_trust: [u8; 32],
+    digest_after_trust: [u8; 32],
+) -> Result<(), IdentityEvidenceError> {
+    if expected != observed || digest_before_trust != digest_after_trust {
+        return Err(error(
+            IdentityEvidenceErrorKind::UnsafeFile,
+            "signing catalog identity or content changed during trust verification",
+        ));
+    }
+    Ok(())
+}
+
+fn unique_verified_catalog_digest(
+    verified_catalogs: &[[u8; 32]],
+    enumeration_incomplete: bool,
+) -> Option<[u8; 32]> {
+    match verified_catalogs {
+        [catalog_sha256] if !enumeration_incomplete => Some(*catalog_sha256),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityEvidenceErrorKind {
     InvalidPath,
@@ -178,6 +274,54 @@ fn verify_open_file_identity(
 }
 
 #[cfg(windows)]
+struct WindowsCatalogEnumerationBackend {
+    admin: isize,
+}
+
+#[cfg(windows)]
+impl CatalogEnumerationBackend for WindowsCatalogEnumerationBackend {
+    type Handle = isize;
+
+    fn enumerate(
+        &mut self,
+        previous: Option<Self::Handle>,
+        member_hash: &[u8],
+    ) -> RawCatalogEnumeration<Self::Handle> {
+        use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
+        use windows_sys::Win32::Security::Cryptography::Catalog::CryptCATAdminEnumCatalogFromHash;
+
+        let mut previous_raw = previous.unwrap_or(0);
+        unsafe { SetLastError(CATALOG_ENUMERATION_SUCCESS) };
+        let next = unsafe {
+            CryptCATAdminEnumCatalogFromHash(
+                self.admin,
+                member_hash.as_ptr(),
+                member_hash.len() as u32,
+                0,
+                if previous.is_some() {
+                    &mut previous_raw
+                } else {
+                    std::ptr::null_mut()
+                },
+            )
+        };
+        let last_error = unsafe { GetLastError() };
+        RawCatalogEnumeration {
+            next: (next != 0).then_some(next),
+            previous_retained: (previous_raw != 0).then_some(previous_raw),
+            last_error,
+        }
+    }
+
+    fn release(&mut self, handle: Self::Handle) {
+        use windows_sys::Win32::Security::Cryptography::Catalog::CryptCATAdminReleaseCatalogContext;
+        unsafe {
+            CryptCATAdminReleaseCatalogContext(self.admin, handle, 0);
+        }
+    }
+}
+
+#[cfg(windows)]
 fn verify_authenticode(
     file: &File,
     canonical_path: &Path,
@@ -186,7 +330,6 @@ fn verify_authenticode(
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Security::Cryptography::Catalog::{
         CATALOG_INFO, CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
-        CryptCATAdminEnumCatalogFromHash, CryptCATAdminReleaseCatalogContext,
         CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext,
     };
     use windows_sys::Win32::Security::WinTrust::{
@@ -215,32 +358,6 @@ fn verify_authenticode(
             unsafe { CryptCATAdminReleaseContext(self.0, 0) };
         }
     }
-    struct CatalogEnumeration {
-        admin: isize,
-        current: isize,
-    }
-    impl CatalogEnumeration {
-        fn advance(&mut self, hash: &[u8]) {
-            let mut previous = std::mem::replace(&mut self.current, 0);
-            self.current = unsafe {
-                CryptCATAdminEnumCatalogFromHash(
-                    self.admin,
-                    hash.as_ptr(),
-                    hash.len() as u32,
-                    0,
-                    &mut previous,
-                )
-            };
-        }
-    }
-    impl Drop for CatalogEnumeration {
-        fn drop(&mut self) {
-            if self.current != 0 {
-                unsafe { CryptCATAdminReleaseCatalogContext(self.admin, self.current, 0) };
-            }
-        }
-    }
-
     let mut admin = 0isize;
     if unsafe {
         CryptCATAdminAcquireContext2(
@@ -278,18 +395,18 @@ fn verify_authenticode(
         return Err(untrusted("failed to calculate the catalog member hash"));
     }
     hash.truncate(hash_len as usize);
-    let first_catalog = unsafe {
-        CryptCATAdminEnumCatalogFromHash(admin.0, hash.as_ptr(), hash_len, 0, std::ptr::null_mut())
-    };
-    if first_catalog == 0 {
+    let mut catalogs = CatalogEnumeration::new(WindowsCatalogEnumerationBackend { admin: admin.0 });
+    let mut current_catalog = catalogs.advance(&hash).map_err(|last_error| {
+        error(
+            IdentityEvidenceErrorKind::UntrustedSignature,
+            format!("catalog enumeration failed with Win32 error {last_error}"),
+        )
+    })?;
+    if current_catalog.is_none() {
         return Err(untrusted(
             "no verified embedded or catalog signature was found",
         ));
     }
-    let mut catalogs = CatalogEnumeration {
-        admin: admin.0,
-        current: first_catalog,
-    };
     let member_tag = hash
         .iter()
         .map(|byte| format!("{byte:02X}"))
@@ -299,7 +416,7 @@ fn verify_authenticode(
     let mut incomplete = false;
     let mut visited_catalogs = 0usize;
     const MAX_CATALOG_MEMBERSHIPS: usize = 256;
-    while catalogs.current != 0 {
+    while let Some(catalog_handle) = current_catalog {
         if visited_catalogs >= MAX_CATALOG_MEMBERSHIPS {
             incomplete = true;
             break;
@@ -307,73 +424,169 @@ fn verify_authenticode(
         visited_catalogs += 1;
         let mut catalog_path: CATALOG_INFO = unsafe { std::mem::zeroed() };
         catalog_path.cbStruct = std::mem::size_of::<CATALOG_INFO>() as u32;
-        if unsafe { CryptCATCatalogInfoFromContext(catalogs.current, &mut catalog_path, 0) } == 0 {
+        if unsafe { CryptCATCatalogInfoFromContext(catalog_handle, &mut catalog_path, 0) } == 0 {
             incomplete = true;
-            catalogs.advance(&hash);
+            current_catalog = match catalogs.advance(&hash) {
+                Ok(next) => next,
+                Err(_) => {
+                    incomplete = true;
+                    None
+                }
+            };
             continue;
         }
-        let mut catalog_info = WINTRUST_CATALOG_INFO {
-            cbStruct: std::mem::size_of::<WINTRUST_CATALOG_INFO>() as u32,
-            dwCatalogVersion: 0,
-            pcwszCatalogFilePath: catalog_path.wszCatalogFile.as_ptr(),
-            pcwszMemberTag: member_tag_wide.as_ptr(),
-            pcwszMemberFilePath: path_wide.as_ptr(),
-            hMemberFile: handle,
-            pbCalculatedFileHash: hash.as_mut_ptr(),
-            cbCalculatedFileHash: hash_len,
-            pcCatalogContext: std::ptr::null_mut(),
-            hCatAdmin: admin.0,
-        };
-        let mut catalog_data = trust_data(WTD_CHOICE_CATALOG);
-        catalog_data.Anonymous = WINTRUST_DATA_0 {
-            pCatalog: &mut catalog_info,
-        };
-        if verify_and_close(&mut catalog_data) == 0 {
-            let catalog_path = PathBuf::from(std::ffi::OsString::from_wide(nul_slice(
-                &catalog_path.wszCatalogFile,
-            )));
-            verified_catalogs.push(hash_regular_non_reparse_file(&catalog_path)?);
-        } else {
-            incomplete = true;
+        let catalog_path = PathBuf::from(std::ffi::OsString::from_wide(nul_slice(
+            &catalog_path.wszCatalogFile,
+        )));
+        match verified_catalog_digest(&catalog_path, |trusted_catalog_path| {
+            let trusted_catalog_path_wide = wide_null(trusted_catalog_path.as_os_str());
+            let mut catalog_info = WINTRUST_CATALOG_INFO {
+                cbStruct: std::mem::size_of::<WINTRUST_CATALOG_INFO>() as u32,
+                dwCatalogVersion: 0,
+                pcwszCatalogFilePath: trusted_catalog_path_wide.as_ptr(),
+                pcwszMemberTag: member_tag_wide.as_ptr(),
+                pcwszMemberFilePath: path_wide.as_ptr(),
+                hMemberFile: handle,
+                pbCalculatedFileHash: hash.as_mut_ptr(),
+                cbCalculatedFileHash: hash_len,
+                pcCatalogContext: std::ptr::null_mut(),
+                hCatAdmin: admin.0,
+            };
+            let mut catalog_data = trust_data(WTD_CHOICE_CATALOG);
+            catalog_data.Anonymous = WINTRUST_DATA_0 {
+                pCatalog: &mut catalog_info,
+            };
+            verify_and_close(&mut catalog_data) == 0
+        })? {
+            Some(digest) => verified_catalogs.push(digest),
+            None => incomplete = true,
         }
-        catalogs.advance(&hash);
+        current_catalog = match catalogs.advance(&hash) {
+            Ok(next) => next,
+            Err(_) => {
+                incomplete = true;
+                None
+            }
+        };
     }
-    match verified_catalogs.as_slice() {
-        [] => Err(untrusted("catalog member signature verification failed")),
-        [catalog_sha256] if !incomplete => {
-            Ok((AuthenticodeEvidence::Catalog, Some(*catalog_sha256)))
-        }
-        _ => Ok((AuthenticodeEvidence::Catalog, None)),
+    if verified_catalogs.is_empty() {
+        Err(untrusted("catalog member signature verification failed"))
+    } else {
+        Ok((
+            AuthenticodeEvidence::Catalog,
+            unique_verified_catalog_digest(&verified_catalogs, incomplete),
+        ))
     }
 }
 
 #[cfg(windows)]
-fn hash_regular_non_reparse_file(path: &Path) -> Result<[u8; 32], IdentityEvidenceError> {
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+struct OpenedCatalog {
+    canonical_path: PathBuf,
+    file: File,
+    opened_identity: StableCatalogIdentity,
+}
+
+#[cfg(windows)]
+impl OpenedCatalog {
+    fn open(path: &Path) -> Result<Self, IdentityEvidenceError> {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        };
+
+        validate_input_path(path)?;
+        reject_reparse_components(path)?;
+        let canonical_path = fs::canonicalize(path)?;
+        reject_reparse_components(&canonical_path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            // Excluding write/delete sharing prevents path replacement while
+            // WinVerifyTrust opens the same catalog by canonical path.
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&canonical_path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(error(
+                IdentityEvidenceErrorKind::UnsafeFile,
+                "signing catalog must be a regular non-reparse file",
+            ));
+        }
+        let opened_identity = observe_catalog_identity(&file)?;
+        Ok(Self {
+            canonical_path,
+            file,
+            opened_identity,
+        })
+    }
+
+    fn hash_and_observe(
+        &mut self,
+        source_path: &Path,
+    ) -> Result<([u8; 32], StableCatalogIdentity), IdentityEvidenceError> {
+        self.verify_path(source_path)?;
+        let before = observe_catalog_identity(&self.file)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut hash = Sha256::new();
+        io::copy(&mut self.file, &mut hash)?;
+        let after = observe_catalog_identity(&self.file)?;
+        require_stable_catalog_evidence(before, after, [0; 32], [0; 32])?;
+        Ok((hash.finalize().into(), after))
+    }
+
+    fn verify_path(&self, source_path: &Path) -> Result<(), IdentityEvidenceError> {
+        validate_input_path(source_path)?;
+        reject_reparse_components(source_path)?;
+        if fs::canonicalize(source_path)? != self.canonical_path {
+            return Err(error(
+                IdentityEvidenceErrorKind::UnsafeFile,
+                "signing catalog path changed during trust verification",
+            ));
+        }
+        reject_reparse_components(&self.canonical_path)?;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn observe_catalog_identity(file: &File) -> Result<StableCatalogIdentity, IdentityEvidenceError> {
+    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE,
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
 
-    validate_input_path(path)?;
-    reject_reparse_components(path)?;
-    let canonical = fs::canonicalize(path)?;
-    reject_reparse_components(&canonical)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(canonical)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(error(
-            IdentityEvidenceErrorKind::UnsafeFile,
-            "signing catalog must be a regular non-reparse file",
-        ));
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+        return Err(io::Error::last_os_error().into());
     }
-    let mut hash = Sha256::new();
-    io::copy(&mut file, &mut hash)?;
-    Ok(hash.finalize().into())
+    Ok(StableCatalogIdentity {
+        volume_serial_number: info.dwVolumeSerialNumber,
+        file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        size: (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
+        last_write_time: (u64::from(info.ftLastWriteTime.dwHighDateTime) << 32)
+            | u64::from(info.ftLastWriteTime.dwLowDateTime),
+    })
+}
+
+#[cfg(windows)]
+fn verified_catalog_digest(
+    catalog_path: &Path,
+    verify: impl FnOnce(&Path) -> bool,
+) -> Result<Option<[u8; 32]>, IdentityEvidenceError> {
+    let mut catalog = OpenedCatalog::open(catalog_path)?;
+    let (digest_before, identity_before) = catalog.hash_and_observe(catalog_path)?;
+    require_stable_catalog_evidence(
+        catalog.opened_identity,
+        identity_before,
+        digest_before,
+        digest_before,
+    )?;
+    if !verify(&catalog.canonical_path) {
+        return Ok(None);
+    }
+    let (digest_after, identity_after) = catalog.hash_and_observe(catalog_path)?;
+    require_stable_catalog_evidence(identity_before, identity_after, digest_before, digest_after)?;
+    Ok(Some(digest_after))
 }
 
 #[cfg(windows)]
@@ -505,5 +718,210 @@ fn error(kind: IdentityEvidenceErrorKind, message: impl Into<String>) -> Identit
     IdentityEvidenceError {
         kind,
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    #[derive(Default)]
+    struct MockCatalogState {
+        releases: Vec<u32>,
+        consumed_by_enumeration: Vec<u32>,
+    }
+
+    struct MockCatalogBackend {
+        outcomes: VecDeque<(Option<u32>, RawCatalogEnumeration<u32>)>,
+        state: Rc<RefCell<MockCatalogState>>,
+    }
+
+    impl CatalogEnumerationBackend for MockCatalogBackend {
+        type Handle = u32;
+
+        fn enumerate(
+            &mut self,
+            previous: Option<Self::Handle>,
+            _: &[u8],
+        ) -> RawCatalogEnumeration<Self::Handle> {
+            let (expected_previous, outcome) =
+                self.outcomes.pop_front().expect("unexpected enumeration");
+            assert_eq!(previous, expected_previous);
+            if let Some(previous) = previous {
+                if outcome.previous_retained.is_none() {
+                    self.state
+                        .borrow_mut()
+                        .consumed_by_enumeration
+                        .push(previous);
+                }
+            }
+            outcome
+        }
+
+        fn release(&mut self, handle: Self::Handle) {
+            self.state.borrow_mut().releases.push(handle);
+        }
+    }
+
+    fn mock_catalogs(
+        outcomes: impl IntoIterator<Item = (Option<u32>, RawCatalogEnumeration<u32>)>,
+    ) -> (
+        CatalogEnumeration<MockCatalogBackend>,
+        Rc<RefCell<MockCatalogState>>,
+    ) {
+        let state = Rc::new(RefCell::new(MockCatalogState::default()));
+        (
+            CatalogEnumeration::new(MockCatalogBackend {
+                outcomes: outcomes.into_iter().collect(),
+                state: state.clone(),
+            }),
+            state,
+        )
+    }
+
+    #[test]
+    fn catalog_enumeration_error_after_one_success_is_not_normal_completion() {
+        let (mut catalogs, state) = mock_catalogs([
+            (
+                None,
+                RawCatalogEnumeration {
+                    next: Some(11),
+                    previous_retained: None,
+                    last_error: CATALOG_ENUMERATION_SUCCESS,
+                },
+            ),
+            (
+                Some(11),
+                RawCatalogEnumeration {
+                    next: None,
+                    previous_retained: Some(11),
+                    last_error: 5,
+                },
+            ),
+        ]);
+        assert_eq!(catalogs.advance(&[1, 2]), Ok(Some(11)));
+        assert_eq!(catalogs.advance(&[1, 2]), Err(5));
+        assert_eq!(unique_verified_catalog_digest(&[[9; 32]], true), None);
+        drop(catalogs);
+        assert_eq!(state.borrow().releases, vec![11]);
+        assert!(state.borrow().consumed_by_enumeration.is_empty());
+    }
+
+    #[test]
+    fn catalog_contexts_are_released_exactly_once_on_end_advance_and_drop() {
+        let (mut normal, normal_state) = mock_catalogs([
+            (
+                None,
+                RawCatalogEnumeration {
+                    next: Some(21),
+                    previous_retained: None,
+                    last_error: CATALOG_ENUMERATION_SUCCESS,
+                },
+            ),
+            (
+                Some(21),
+                RawCatalogEnumeration {
+                    next: None,
+                    previous_retained: Some(21),
+                    last_error: CATALOG_ENUMERATION_EXHAUSTED,
+                },
+            ),
+        ]);
+        assert_eq!(normal.advance(&[]), Ok(Some(21)));
+        assert_eq!(normal.advance(&[]), Ok(None));
+        drop(normal);
+        assert_eq!(normal_state.borrow().releases, vec![21]);
+
+        let (mut advancing, advancing_state) = mock_catalogs([
+            (
+                None,
+                RawCatalogEnumeration {
+                    next: Some(31),
+                    previous_retained: None,
+                    last_error: CATALOG_ENUMERATION_SUCCESS,
+                },
+            ),
+            (
+                Some(31),
+                RawCatalogEnumeration {
+                    next: Some(32),
+                    previous_retained: None,
+                    last_error: CATALOG_ENUMERATION_SUCCESS,
+                },
+            ),
+        ]);
+        assert_eq!(advancing.advance(&[]), Ok(Some(31)));
+        assert_eq!(advancing.advance(&[]), Ok(Some(32)));
+        drop(advancing);
+        assert_eq!(advancing_state.borrow().consumed_by_enumeration, vec![31]);
+        assert_eq!(advancing_state.borrow().releases, vec![32]);
+
+        let (mut early, early_state) = mock_catalogs([(
+            None,
+            RawCatalogEnumeration {
+                next: Some(41),
+                previous_retained: None,
+                last_error: CATALOG_ENUMERATION_SUCCESS,
+            },
+        )]);
+        assert_eq!(early.advance(&[]), Ok(Some(41)));
+        drop(early);
+        assert_eq!(early_state.borrow().releases, vec![41]);
+    }
+
+    #[test]
+    fn catalog_identity_or_content_mismatch_is_fail_closed() {
+        let identity = StableCatalogIdentity {
+            volume_serial_number: 1,
+            file_index: 2,
+            size: 3,
+            last_write_time: 4,
+        };
+        require_stable_catalog_evidence(identity, identity, [5; 32], [5; 32]).unwrap();
+
+        let mut changed_identity = identity;
+        changed_identity.file_index += 1;
+        assert_eq!(
+            require_stable_catalog_evidence(identity, changed_identity, [5; 32], [5; 32])
+                .unwrap_err()
+                .kind,
+            IdentityEvidenceErrorKind::UnsafeFile
+        );
+        assert_eq!(
+            require_stable_catalog_evidence(identity, identity, [5; 32], [6; 32])
+                .unwrap_err()
+                .kind,
+            IdentityEvidenceErrorKind::UnsafeFile
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_catalog_handle_blocks_replacement_during_trust_callback() {
+        use sha2::{Digest, Sha256};
+        use std::cell::Cell;
+        use std::fs;
+
+        let path = std::env::temp_dir().join(format!(
+            "aexcompat-stable-catalog-{}-{}.cat",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let contents = b"signed catalog fixture";
+        fs::write(&path, contents).unwrap();
+        let replacement_succeeded = Cell::new(false);
+        let digest = verified_catalog_digest(&path, |trusted_path| {
+            replacement_succeeded.set(fs::write(trusted_path, b"replacement").is_ok());
+            true
+        })
+        .unwrap()
+        .unwrap();
+        fs::remove_file(path).unwrap();
+
+        assert!(!replacement_succeeded.get());
+        assert_eq!(digest.as_slice(), Sha256::digest(contents).as_slice());
     }
 }
