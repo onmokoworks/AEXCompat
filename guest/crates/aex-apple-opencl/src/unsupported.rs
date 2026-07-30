@@ -57,6 +57,16 @@ impl Session {
         Err(Error::UnsupportedPlatform)
     }
 
+    pub fn enqueue_nd_range_with_offset(
+        &self,
+        _kernel: &Kernel,
+        _global_offset: Option<&[usize]>,
+        _global: &[usize],
+        _local: Option<&[usize]>,
+    ) -> Result<(), Error> {
+        Err(Error::UnsupportedPlatform)
+    }
+
     pub fn finish(&self) -> Result<(), Error> {
         Err(Error::UnsupportedPlatform)
     }
@@ -88,6 +98,10 @@ impl Program {
 
 impl Kernel {
     pub fn set_scalar_arg<T: KernelScalar>(&mut self, _index: u32, _value: T) -> Result<(), Error> {
+        Err(Error::UnsupportedPlatform)
+    }
+
+    pub fn set_raw_arg(&mut self, _index: u32, _bytes: &[u8]) -> Result<(), Error> {
         Err(Error::UnsupportedPlatform)
     }
 

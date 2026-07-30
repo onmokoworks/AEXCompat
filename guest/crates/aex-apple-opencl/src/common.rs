@@ -12,6 +12,7 @@ pub const MAX_PROGRAM_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_BUILD_OPTIONS_BYTES: usize = 64 * 1024;
 pub const MAX_BUILD_LOG_BYTES: usize = 1024 * 1024;
 pub const MAX_KERNEL_NAME_BYTES: usize = 1024;
+pub const MAX_KERNEL_ARGUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_GLOBAL_WORK_ITEMS: usize = 1 << 34;
 #[cfg(target_os = "macos")]
 pub(crate) const MAX_INFO_BYTES: usize = 64 * 1024;
@@ -116,6 +117,9 @@ pub enum Error {
     #[error("program source must not be empty")]
     EmptyProgramSource,
 
+    #[error("kernel arguments must contain at least one byte")]
+    ZeroKernelArgumentSize,
+
     #[error("work dimensions must contain between 1 and 3 entries")]
     InvalidWorkDimensions,
 
@@ -124,6 +128,9 @@ pub enum Error {
 
     #[error("local work dimensions must match global work dimensions")]
     LocalWorkDimensionMismatch,
+
+    #[error("global offset dimensions must match global work dimensions")]
+    GlobalOffsetDimensionMismatch,
 
     #[error("local work size at dimension {dimension} must be non-zero")]
     ZeroLocalWorkSize { dimension: usize },

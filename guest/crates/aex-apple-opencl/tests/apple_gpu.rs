@@ -1,5 +1,6 @@
 use aex_apple_opencl::{
-    BufferAccess, Error, MAX_BUFFER_BYTES, ObjectCounts, Session, enumerate_gpu_devices,
+    BufferAccess, Error, MAX_BUFFER_BYTES, MAX_KERNEL_ARGUMENT_BYTES, ObjectCounts, Session,
+    enumerate_gpu_devices,
 };
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -66,11 +67,13 @@ fn executes_real_kernel_on_apple_gpu_and_releases_every_object() {
         kernel
             .set_buffer_arg(1, &output_buffer)
             .expect("set output");
-        kernel.set_scalar_arg(2, 2.5f32).expect("set scale");
+        kernel
+            .set_raw_arg(2, &2.5f32.to_ne_bytes())
+            .expect("set raw scale");
         kernel.set_scalar_arg(3, -3.0f32).expect("set bias");
 
         session
-            .enqueue_nd_range(&kernel, &[ITEM_COUNT], Some(&[64]))
+            .enqueue_nd_range_with_offset(&kernel, Some(&[0]), &[ITEM_COUNT], Some(&[64]))
             .expect("enqueue kernel");
         session.finish().expect("finish queue");
         session
@@ -162,6 +165,28 @@ fn rejects_bounds_and_build_errors_without_leaking_objects() {
     assert_eq!(counts.programs, 0);
     assert_eq!(counts.kernels, 0);
     assert_eq!(counts.release_errors, 0);
+
+    let program = session
+        .build_program("__kernel void one_arg(int value) {}", None)
+        .expect("build argument-bound test kernel");
+    let mut kernel = program.create_kernel("one_arg").expect("create kernel");
+    assert_eq!(
+        session
+            .enqueue_nd_range_with_offset(&kernel, Some(&[0, 0]), &[1], None)
+            .unwrap_err(),
+        Error::GlobalOffsetDimensionMismatch
+    );
+    assert_eq!(
+        kernel.set_raw_arg(0, &[]).unwrap_err(),
+        Error::ZeroKernelArgumentSize
+    );
+    assert!(matches!(
+        kernel.set_raw_arg(0, &vec![0; MAX_KERNEL_ARGUMENT_BYTES + 1]),
+        Err(Error::LimitExceeded {
+            resource: "kernel argument bytes",
+            ..
+        })
+    ));
 }
 
 #[cfg(not(target_os = "macos"))]

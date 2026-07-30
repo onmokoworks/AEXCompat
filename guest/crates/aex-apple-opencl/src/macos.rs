@@ -7,8 +7,9 @@ use std::{
 
 use crate::{
     BufferAccess, Error, GpuDevice, KernelScalar, MAX_BUFFER_BYTES, MAX_BUILD_LOG_BYTES,
-    MAX_BUILD_OPTIONS_BYTES, MAX_GLOBAL_WORK_ITEMS, MAX_GPU_DEVICE_COUNT, MAX_KERNEL_NAME_BYTES,
-    MAX_PLATFORM_COUNT, MAX_PROGRAM_SOURCE_BYTES, ObjectTracker,
+    MAX_BUILD_OPTIONS_BYTES, MAX_GLOBAL_WORK_ITEMS, MAX_GPU_DEVICE_COUNT,
+    MAX_KERNEL_ARGUMENT_BYTES, MAX_KERNEL_NAME_BYTES, MAX_PLATFORM_COUNT, MAX_PROGRAM_SOURCE_BYTES,
+    ObjectTracker,
     common::{MAX_INFO_BYTES, MAX_WORK_DIMENSIONS, ObjectCounters},
     ffi,
 };
@@ -313,8 +314,18 @@ impl Session {
         global: &[usize],
         local: Option<&[usize]>,
     ) -> Result<(), Error> {
+        self.enqueue_nd_range_with_offset(kernel, None, global, local)
+    }
+
+    pub fn enqueue_nd_range_with_offset(
+        &self,
+        kernel: &Kernel,
+        global_offset: Option<&[usize]>,
+        global: &[usize],
+        local: Option<&[usize]>,
+    ) -> Result<(), Error> {
         ensure_same_session(&self.state, &kernel.state, "kernel")?;
-        validate_work_sizes(global, local)?;
+        validate_work_sizes(global_offset, global, local)?;
         // SAFETY: work-size slices are validated and remain live for this
         // enqueue call. Kernel and queue belong to the same live context.
         let status = unsafe {
@@ -322,7 +333,7 @@ impl Session {
                 self.state.queue,
                 kernel.handle,
                 global.len() as ffi::ClUint,
-                ptr::null(),
+                global_offset.map_or(ptr::null(), <[usize]>::as_ptr),
                 global.as_ptr(),
                 local.map_or(ptr::null(), <[usize]>::as_ptr),
                 0,
@@ -411,17 +422,33 @@ impl Drop for Program {
 
 impl Kernel {
     pub fn set_scalar_arg<T: KernelScalar>(&mut self, index: u32, value: T) -> Result<(), Error> {
-        // SAFETY: KernelScalar is sealed to padding-free primitive values and
-        // OpenCL copies exactly size_of::<T>() bytes during the call.
-        let status = unsafe {
-            ffi::clSetKernelArg(
-                self.handle,
-                index,
-                size_of::<T>(),
-                (&value as *const T).cast(),
-            )
-        };
-        check("clSetKernelArg(scalar)", status)
+        // SAFETY: KernelScalar is sealed to padding-free primitive values.
+        let bytes =
+            unsafe { std::slice::from_raw_parts((&value as *const T).cast(), size_of::<T>()) };
+        self.set_raw_arg(index, bytes)
+    }
+
+    /// Copies an opaque, bounded argument value into the native kernel.
+    ///
+    /// This is the ABI-preserving path for a foreign OpenCL caller whose
+    /// scalar/vector argument type is not known to the host. Buffer handles
+    /// must still use [`Self::set_buffer_arg`] so session ownership is checked.
+    pub fn set_raw_arg(&mut self, index: u32, bytes: &[u8]) -> Result<(), Error> {
+        if bytes.is_empty() {
+            return Err(Error::ZeroKernelArgumentSize);
+        }
+        if bytes.len() > MAX_KERNEL_ARGUMENT_BYTES {
+            return Err(Error::LimitExceeded {
+                resource: "kernel argument bytes",
+                actual: bytes.len(),
+                maximum: MAX_KERNEL_ARGUMENT_BYTES,
+            });
+        }
+        // SAFETY: bytes is non-empty and bounded, and OpenCL copies exactly
+        // bytes.len() bytes during this synchronous call.
+        let status =
+            unsafe { ffi::clSetKernelArg(self.handle, index, bytes.len(), bytes.as_ptr().cast()) };
+        check("clSetKernelArg(raw)", status)
     }
 
     pub fn set_buffer_arg(&mut self, index: u32, buffer: &Buffer) -> Result<(), Error> {
@@ -704,9 +731,16 @@ fn checked_range(
     Ok(())
 }
 
-fn validate_work_sizes(global: &[usize], local: Option<&[usize]>) -> Result<(), Error> {
+fn validate_work_sizes(
+    global_offset: Option<&[usize]>,
+    global: &[usize],
+    local: Option<&[usize]>,
+) -> Result<(), Error> {
     if global.is_empty() || global.len() > MAX_WORK_DIMENSIONS {
         return Err(Error::InvalidWorkDimensions);
+    }
+    if global_offset.is_some_and(|offset| offset.len() != global.len()) {
+        return Err(Error::GlobalOffsetDimensionMismatch);
     }
     let mut total = 1usize;
     for (dimension, value) in global.iter().copied().enumerate() {
