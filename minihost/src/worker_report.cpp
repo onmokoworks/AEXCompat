@@ -1,12 +1,17 @@
 #include "worker_report.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <sstream>
 
 namespace aexcompat::worker_report {
 namespace {
 void boolean(std::ostringstream& o, bool value) { o << (value ? "true" : "false"); }
+void number(std::ostringstream& o, double value) {
+  if (std::isfinite(value)) o << std::setprecision(17) << value;
+  else o << "null";
+}
 void color(std::ostringstream& o, const std::array<unsigned char, 4>& v) {
   o << "{\"alpha\":" << static_cast<unsigned>(v[0]) << ",\"red\":"
     << static_cast<unsigned>(v[1]) << ",\"green\":" << static_cast<unsigned>(v[2])
@@ -62,15 +67,25 @@ std::string serialize_l2_report(const L2ReportContext& c) {
     o << "{\"index\":" << p.index << ",\"disk_id\":" << p.disk_id << ",\"type\":" << p.type
       << ",\"ui_flags\":" << p.ui_flags << ",\"ui_width\":" << p.ui_width << ",\"ui_height\":" << p.ui_height
       << ",\"flags\":" << p.flags << ",\"name\":\"" << bounded_diagnostic_text(p.name, 32) << '"';
-    if (p.has_numeric) o << ",\"valid_min\":" << p.valid_min << ",\"valid_max\":" << p.valid_max << ",\"slider_min\":" << p.slider_min << ",\"slider_max\":" << p.slider_max << ",\"default\":" << p.default_value;
+    if (p.has_numeric) {
+      o << ",\"valid_min\":"; number(o, p.valid_min);
+      o << ",\"valid_max\":"; number(o, p.valid_max);
+      o << ",\"slider_min\":"; number(o, p.slider_min);
+      o << ",\"slider_max\":"; number(o, p.slider_max);
+      o << ",\"default\":"; number(o, p.default_value);
+    }
     if (p.precision >= 0) o << ",\"precision\":" << p.precision;
-    if (p.has_current) { o << ",\"current\":" << p.current_value << ",\"current_default_mismatch\":"; boolean(o, p.current_value != p.default_value); }
+    if (p.has_current) {
+      o << ",\"current\":"; number(o, p.current_value);
+      o << ",\"current_default_mismatch\":";
+      boolean(o, p.current_value != p.default_value);
+    }
     if (p.has_color) { o << ",\"default_color\":"; color(o, p.default_color); o << ",\"current_color\":"; color(o, p.current_color); }
     if (p.component_count > 0) {
       o << ",\"default_components\":[";
-      for (int i = 0; i < p.component_count; ++i) { if (i) o << ','; o << std::setprecision(17) << p.default_components[i]; }
+      for (int i = 0; i < p.component_count; ++i) { if (i) o << ','; number(o, p.default_components[i]); }
       o << "],\"current_components\":[";
-      for (int i = 0; i < p.component_count; ++i) { if (i) o << ','; o << std::setprecision(17) << p.current_components[i]; }
+      for (int i = 0; i < p.component_count; ++i) { if (i) o << ','; number(o, p.current_components[i]); }
       o << ']';
     }
     if (!p.choices.empty()) o << ",\"choices\":\"" << bounded_diagnostic_text(p.choices, 4096) << '"';
