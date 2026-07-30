@@ -44,6 +44,12 @@ def _device():
         "max_mem_alloc_bytes": 1 << 30,
         "global_mem_bytes": 8 << 30,
         "local_mem_bytes": 64 << 10,
+        "compute": {
+            "stage": "passed",
+            "api_error": None,
+            "missing_symbols": [],
+            "build_log": None,
+        },
     }
 
 
@@ -63,6 +69,7 @@ def _aggregate(status="observed"):
                 }
             ],
             "diagnostics": [],
+            "compute_ready": True,
         }
     return {
         "status": status,
@@ -76,13 +83,14 @@ def _aggregate(status="observed"):
                 "device_index": None,
             }
         ],
+        "compute_ready": False,
     }
 
 
 def _report(status="observed"):
     observed = status == "observed"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "contract": "system_opencl_loader_probe",
         "candidate_evidence": {
             "legacy_registry_contract": "opencl_icd_registry_candidates",
@@ -99,6 +107,7 @@ def _report(status="observed"):
             "stderr_truncated": False,
             "memory_limit_reached": False,
         },
+        "compute_ready": observed,
         "backend_ready": False,
     }
 
@@ -122,7 +131,107 @@ def test_schema_accepts_fail_closed_aggregate_states(status):
     validator = _validator()
     report = _report()
     report["aggregate_loader_observation"] = _aggregate(status)
+    report["compute_ready"] = False
     validator.validate(report)
+
+
+@pytest.mark.parametrize(
+    "stage",
+    (
+        "context",
+        "queue",
+        "buffer",
+        "build",
+        "kernel",
+        "enqueue",
+        "finish",
+        "readback",
+        "mismatch",
+        "not_attempted",
+    ),
+)
+def test_compute_failure_stages_force_aggregate_not_ready(stage):
+    validator = _validator()
+    report = _report()
+    compute = report["aggregate_loader_observation"]["platforms"][0]["devices"][0][
+        "compute"
+    ]
+    compute["stage"] = stage
+    compute["api_error"] = -5 if stage not in ("mismatch", "not_attempted") else None
+    compute["missing_symbols"] = ["clCreateContext"] if stage == "not_attempted" else []
+    if stage == "build":
+        compute["build_log"] = {"status": "redacted", "sha256": "a" * 64}
+    report["aggregate_loader_observation"]["compute_ready"] = False
+    report["compute_ready"] = False
+    validator.validate(report)
+
+
+def test_partial_compute_success_cannot_claim_ready():
+    validator = _validator()
+    report = _report()
+    failed = copy.deepcopy(_device())
+    failed["compute"] = {
+        "stage": "readback",
+        "api_error": -5,
+        "missing_symbols": [],
+        "build_log": None,
+    }
+    report["aggregate_loader_observation"]["platforms"][0]["devices"].append(failed)
+    report["aggregate_loader_observation"]["compute_ready"] = False
+    report["compute_ready"] = False
+    validator.validate(report)
+    report["compute_ready"] = True
+    assert list(validator.iter_errors(report))
+
+
+@pytest.mark.parametrize(
+    "build_log",
+    (
+        {"status": "redacted", "sha256": None},
+        {"status": "overflow", "sha256": "a" * 64},
+        {"status": "redacted", "sha256": r"C:\Users\name"},
+        {"status": "redacted", "sha256": "/private/build.log"},
+        {"status": "redacted", "sha256": "raw compiler output"},
+    ),
+)
+def test_build_log_is_hash_only_and_privacy_bounded(build_log):
+    validator = _validator()
+    report = _report()
+    compute = report["aggregate_loader_observation"]["platforms"][0]["devices"][0][
+        "compute"
+    ]
+    compute["stage"] = "build"
+    compute["api_error"] = -11
+    compute["build_log"] = build_log
+    report["aggregate_loader_observation"]["compute_ready"] = False
+    report["compute_ready"] = False
+    assert list(validator.iter_errors(report))
+
+
+@pytest.mark.parametrize("status", ("overflow", "unavailable", "malformed"))
+def test_build_log_nonraw_failure_evidence_is_accepted(status):
+    validator = _validator()
+    report = _report()
+    compute = report["aggregate_loader_observation"]["platforms"][0]["devices"][0][
+        "compute"
+    ]
+    compute.update(
+        {
+            "stage": "build",
+            "api_error": -11,
+            "build_log": {"status": status, "sha256": None},
+        }
+    )
+    report["aggregate_loader_observation"]["compute_ready"] = False
+    report["compute_ready"] = False
+    validator.validate(report)
+
+
+def test_top_level_and_aggregate_compute_readiness_must_match():
+    validator = _validator()
+    report = _report()
+    report["compute_ready"] = False
+    assert list(validator.iter_errors(report))
 
 
 def test_candidate_evidence_cannot_claim_individual_binding_or_raw_identity():
@@ -212,10 +321,12 @@ def test_observed_launch_requires_aggregate_and_failures_forbid_it():
     validator = _validator()
     observed = _report()
     observed["aggregate_loader_observation"] = None
+    observed["compute_ready"] = False
     assert list(validator.iter_errors(observed))
 
     failed = _report("timeout")
     failed["aggregate_loader_observation"] = _aggregate()
+    failed["compute_ready"] = True
     assert list(validator.iter_errors(failed))
 
 
@@ -243,3 +354,31 @@ def test_worker_loads_only_the_system_opencl_loader_surface():
         assert symbol in source
     assert "LoadLibraryW(" not in source
     assert "candidate.path" not in source
+
+
+def test_worker_resolves_only_the_bounded_compute_surface():
+    source = WORKER_PATH.read_text(encoding="utf-8")
+    for symbol in (
+        "clCreateContext",
+        "clCreateCommandQueueWithProperties",
+        "clCreateCommandQueue",
+        "clCreateBuffer",
+        "clEnqueueWriteBuffer",
+        "clCreateProgramWithSource",
+        "clBuildProgram",
+        "clGetProgramBuildInfo",
+        "clCreateKernel",
+        "clSetKernelArg",
+        "clEnqueueNDRangeKernel",
+        "clFinish",
+        "clEnqueueReadBuffer",
+        "clReleaseKernel",
+        "clReleaseProgram",
+        "clReleaseMemObject",
+        "clReleaseCommandQueue",
+        "clReleaseContext",
+    ):
+        assert f'b"{symbol}\\0"' in source
+    assert "COMPUTE_ELEMENT_COUNT" in source
+    assert "input[i] * 3u + 7u" in source
+    assert "backend_ready: true" not in source

@@ -10,10 +10,11 @@
     "candidate_evidence",
     "aggregate_loader_observation",
     "launch",
+    "compute_ready",
     "backend_ready"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "contract": { "const": "system_opencl_loader_probe" },
     "candidate_evidence": { "$ref": "#/$defs/candidateEvidence" },
     "aggregate_loader_observation": {
@@ -23,6 +24,7 @@
       ]
     },
     "launch": { "$ref": "#/$defs/launch" },
+    "compute_ready": { "type": "boolean" },
     "backend_ready": { "const": false }
   },
   "allOf": [
@@ -43,8 +45,43 @@
       },
       "else": {
         "properties": {
-          "aggregate_loader_observation": { "type": "null" }
+          "aggregate_loader_observation": { "type": "null" },
+          "compute_ready": { "const": false }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": { "compute_ready": { "const": true } },
+        "required": ["compute_ready"]
+      },
+      "then": {
+        "properties": {
+          "aggregate_loader_observation": {
+            "allOf": [
+              { "$ref": "#/$defs/aggregate" },
+              {
+                "properties": { "compute_ready": { "const": true } },
+                "required": ["compute_ready"]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "aggregate_loader_observation": {
+            "type": "object",
+            "properties": { "compute_ready": { "const": true } },
+            "required": ["compute_ready"]
+          }
+        },
+        "required": ["aggregate_loader_observation"]
+      },
+      "then": {
+        "properties": { "compute_ready": { "const": true } }
       }
     }
   ],
@@ -132,7 +169,7 @@
     "aggregate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "platforms", "diagnostics"],
+      "required": ["status", "platforms", "diagnostics", "compute_ready"],
       "properties": {
         "status": {
           "enum": [
@@ -152,7 +189,8 @@
           "type": "array",
           "maxItems": 1040,
           "items": { "$ref": "#/$defs/diagnostic" }
-        }
+        },
+        "compute_ready": { "type": "boolean" }
       },
       "allOf": [
         {
@@ -191,6 +229,44 @@
           "then": {
             "properties": {
               "diagnostics": { "minItems": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "compute_ready": { "const": true } },
+            "required": ["compute_ready"]
+          },
+          "then": {
+            "properties": {
+              "status": { "const": "observed" },
+              "platforms": {
+                "minItems": 1,
+                "items": {
+                  "allOf": [
+                    { "$ref": "#/$defs/platform" },
+                    {
+                      "properties": {
+                        "devices": {
+                          "items": {
+                            "allOf": [
+                              { "$ref": "#/$defs/device" },
+                              {
+                                "properties": {
+                                  "compute": {
+                                    "properties": { "stage": { "const": "passed" } },
+                                    "required": ["stage"]
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
             }
           }
         }
@@ -259,6 +335,7 @@
         "max_mem_alloc_bytes",
         "global_mem_bytes",
         "local_mem_bytes"
+        ,"compute"
       ],
       "properties": {
         "device_type": {
@@ -328,8 +405,119 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 18446744073709551615
-        }
+        },
+        "compute": { "$ref": "#/$defs/compute" }
       }
+    },
+    "compute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "api_error", "missing_symbols", "build_log"],
+      "properties": {
+        "stage": {
+          "enum": [
+            "passed",
+            "context",
+            "queue",
+            "buffer",
+            "build",
+            "kernel",
+            "enqueue",
+            "finish",
+            "readback",
+            "mismatch",
+            "not_attempted"
+          ]
+        },
+        "api_error": {
+          "type": ["integer", "null"],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "missing_symbols": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 96,
+            "pattern": "^[A-Za-z0-9_|]+$"
+          }
+        },
+        "build_log": {
+          "oneOf": [
+            { "$ref": "#/$defs/buildLog" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "stage": { "const": "passed" } },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "api_error": { "type": "null" },
+              "missing_symbols": { "maxItems": 0 },
+              "build_log": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "stage": { "const": "not_attempted" } },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "api_error": { "type": "null" },
+              "build_log": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "stage": { "const": "build" } },
+            "required": ["stage"]
+          },
+          "else": {
+            "properties": { "build_log": { "type": "null" } }
+          }
+        }
+      ]
+    },
+    "buildLog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "sha256"],
+      "properties": {
+        "status": {
+          "enum": ["redacted", "overflow", "unavailable", "malformed"]
+        },
+        "sha256": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "redacted" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": { "sha256": { "type": "string" } }
+          },
+          "else": {
+            "properties": { "sha256": { "type": "null" } }
+          }
+        }
+      ]
     },
     "diagnostic": {
       "type": "object",
