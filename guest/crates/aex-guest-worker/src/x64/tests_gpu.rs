@@ -596,3 +596,92 @@ fn gpu_render_transport_swaps_bgra_tokens_and_restores_argb32f_worlds() {
     engine.end_opencl_gpu().unwrap();
     assert!(!engine.unicorn.get_data().gpu_runtime.is_active());
 }
+
+#[test]
+fn remaining_cuda_toolkit_dll_family_boundaries_are_bounded() {
+    for library in [
+        r"C:\CUDA\bin\NVJITLINK.DLL",
+        "nvFatbin.dll",
+        "nvblas.dll",
+        "nvjpeg64_12.dll",
+        "nppc64_12.dll",
+        "nppial64_12.dll",
+        "nppicom64_11.dll",
+        "npps64_13.dll",
+        "cufftw64_11.dll",
+        "cusolverMg64_11.dll",
+        "nvToolsExt64_1.dll",
+        "cupti64_2026.2.0.dll",
+        "cupti.dll",
+        "cufile.dll",
+        "cufile_rdma.dll",
+    ] {
+        assert_eq!(
+            dispatch_win64_import(library, "same_symbol"),
+            Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::Cuda),
+            "{library}"
+        );
+    }
+
+    for library in [
+        "nvjitlink_helper.dll",
+        "nvfatbinary.dll",
+        "nvblast.dll",
+        "nvjpeg64_beta.dll",
+        "nppfake64_12.dll",
+        "nppc64_12beta.dll",
+        "nvtoolsextension64_1.dll",
+        "cuptical64_2026.2.0.dll",
+        "cufile_helper.dll",
+    ] {
+        assert_eq!(
+            dispatch_win64_import(library, "same_symbol"),
+            Win64ImportDispatch::LegacyZero,
+            "{library}"
+        );
+    }
+}
+
+#[test]
+fn nvjitlink_npp_and_nvjpeg_imports_trap_instead_of_returning_zero_success() {
+    const IMPORT: u64 = STUB_BASE + 0x1e0;
+    for (library, normalized, symbol) in [
+        (
+            r"C:\CUDA\lib\x64\NVJITLINK.DLL",
+            "nvjitlink.dll",
+            "nvJitLinkCreate",
+        ),
+        (
+            r"C:\CUDA\bin\NPPC64_12.DLL",
+            "nppc64_12.dll",
+            "nppGetLibVersion",
+        ),
+        (
+            r"C:\CUDA\bin\NVJPEG64_12.DLL",
+            "nvjpeg64_12.dll",
+            "nvjpegCreateSimple",
+        ),
+    ] {
+        let mut code = vec![0x48, 0xb8];
+        code.extend_from_slice(&IMPORT.to_le_bytes());
+        code.extend_from_slice(&[0xff, 0xd0, 0xc3]);
+        let mut engine = test_engine(&code);
+        engine
+            .unicorn
+            .mem_write(IMPORT, &[0x31, 0xc0, 0xc3])
+            .unwrap();
+        assert_eq!(
+            install_win64_import(&mut engine.unicorn, IMPORT, library, symbol).unwrap(),
+            Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::Cuda)
+        );
+
+        let error = engine.call_win64(TEST_CODE, [0; 6]).unwrap_err();
+        assert!(matches!(
+            error,
+            GuestError::UnsupportedImport {
+                library,
+                symbol: trapped_symbol
+            } if library == normalized && trapped_symbol == symbol
+        ));
+    }
+}

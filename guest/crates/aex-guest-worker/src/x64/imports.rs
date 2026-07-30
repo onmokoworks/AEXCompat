@@ -51,6 +51,41 @@ enum Win64ImportDispatch {
 
 const MAX_WIN64_IMPORT_ARGUMENTS: usize = 12;
 
+// Keep CUDA classification on explicit DLL names and versioned family stems.
+// A broad `cu*`/`nv*` rule would turn unrelated imports into GPU traps.
+const EXACT_CUDA_DLLS: &[&str] = &[
+    "cuda.dll",
+    "nvcuda.dll",
+    "nvjitlink.dll",
+    "nvfatbin.dll",
+    "nvblas.dll",
+    "cupti.dll",
+    "cufile.dll",
+    "cufile_rdma.dll",
+];
+
+const VERSIONED_CUDA_64_DLL_FAMILIES: &[&str] = &[
+    "cudart",
+    "nvrtc",
+    "nvrtc-builtins",
+    "cublas",
+    "cublaslt",
+    "cufft",
+    "cufftw",
+    "curand",
+    "cusolver",
+    "cusolvermg",
+    "cusparse",
+    "nvjpeg",
+    "nvtoolsext",
+    "cupti",
+];
+
+const VERSIONED_NPP_64_DLL_FAMILIES: &[&str] = &[
+    "nppc", "nppial", "nppicc", "nppicom", "nppidei", "nppif", "nppig", "nppim", "nppist",
+    "nppisu", "nppitc", "npps",
+];
+
 fn normalize_import_library_name(library: &str) -> String {
     library
         .trim()
@@ -63,7 +98,7 @@ fn normalize_import_library_name(library: &str) -> String {
 fn version_suffix_is_numeric(version: &str) -> bool {
     !version.is_empty()
         && version
-            .split('_')
+            .split(['_', '.'])
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
@@ -101,21 +136,13 @@ fn classify_gpu_import_library(library: &str) -> Option<GpuImportLibrary> {
     if library == "opencl.dll" {
         return Some(GpuImportLibrary::OpenCl);
     }
-    if library == "nvcuda.dll"
-        || library == "cuda.dll"
-        || [
-            "cudart",
-            "nvrtc",
-            "nvrtc-builtins",
-            "cublas",
-            "cublaslt",
-            "cufft",
-            "curand",
-            "cusolver",
-            "cusparse",
-        ]
+    if EXACT_CUDA_DLLS.contains(&library.as_str())
+        || VERSIONED_CUDA_64_DLL_FAMILIES
         .iter()
         .any(|family| is_versioned_cuda_dll(&library, family))
+        || VERSIONED_NPP_64_DLL_FAMILIES
+            .iter()
+            .any(|family| is_versioned_cuda_dll(&library, family))
         || is_versioned_cudnn_dll(&library)
     {
         return Some(GpuImportLibrary::Cuda);
