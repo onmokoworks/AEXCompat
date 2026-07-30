@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,18 @@ def _visual_studio_installation() -> Path:
         check=True, capture_output=True, text=True, timeout=30,
     )
     return Path(result.stdout.strip())
+
+
+def _cleanup_with_windows_lock_retry(cleanup, attempts: int = 4) -> None:
+    """Retry only the short-lived Windows sharing violation after cl.exe exits."""
+    for attempt in range(attempts):
+        try:
+            cleanup()
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) != 32 or attempt == attempts - 1:
+                raise
+            time.sleep(0.1 * (attempt + 1))
 
 
 def test_sdk_header_compiled_x64_probe_fixes_v1_to_ten_ordered_slots():
@@ -57,8 +70,9 @@ int main() {
 '''
     installation = _visual_studio_installation()
     vcvars = installation / "VC/Auxiliary/Build/vcvars64.bat"
-    with tempfile.TemporaryDirectory(prefix="pf-adv-app-suite1-") as directory:
-        directory = Path(directory)
+    temporary_directory = tempfile.TemporaryDirectory(prefix="pf-adv-app-suite1-")
+    try:
+        directory = Path(temporary_directory.name)
         probe = directory / "probe.cpp"
         executable = directory / "probe.exe"
         build_script = directory / "build-probe.bat"
@@ -74,12 +88,41 @@ int main() {
                        cwd=directory, timeout=180)
         result = subprocess.run([str(executable)], check=True, capture_output=True,
                                 text=True, timeout=30)
+    finally:
+        _cleanup_with_windows_lock_retry(temporary_directory.cleanup)
     payload = json.loads(result.stdout)
     assert payload == {
         "pointer_size": 8,
         "suite_size": 80,
         "offsets": [index * 8 for index in range(10)],
     }
+
+
+def test_temp_cleanup_retries_only_windows_sharing_violations(monkeypatch):
+    calls = 0
+    sleeps = []
+
+    def cleanup():
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            error = PermissionError("sharing violation")
+            error.winerror = 32
+            raise error
+
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    _cleanup_with_windows_lock_retry(cleanup)
+
+    assert calls == 3
+    assert sleeps == [0.1, 0.2]
+
+
+def test_temp_cleanup_does_not_retry_other_permission_errors():
+    error = PermissionError("access denied")
+    error.winerror = 5
+
+    with pytest.raises(PermissionError, match="access denied"):
+        _cleanup_with_windows_lock_retry(lambda: (_ for _ in ()).throw(error))
 
 
 def test_worker_v1_v2_tables_are_independent_non_null_fail_closed_and_balanced():
