@@ -1,5 +1,6 @@
 use aex_apple_opencl::{
-    Buffer, BufferAccess, ObjectCounts, ObjectTracker, Session, MAX_BUFFER_BYTES,
+    Buffer, BufferAccess, Error as AppleOpenClError, Kernel, ObjectCounts, ObjectTracker, Program,
+    Session, MAX_BUFFER_BYTES,
 };
 #[cfg(test)]
 use std::cell::RefCell;
@@ -14,6 +15,26 @@ const GPU_TOKEN_KIND_STRIDE: u64 = 0x10;
 const GPU_TOKEN_OBJECT_STRIDE: u64 = 0x100;
 const MAX_GPU_DEVICE_ALLOCATIONS: usize = 256;
 const MAX_GPU_DEVICE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_OPENCL_PROGRAMS: usize = 256;
+const MAX_OPENCL_KERNELS: usize = 1_024;
+const MAX_OPENCL_EVIDENCE_ERROR_BYTES: usize = 4_096;
+pub(crate) const CL_SUCCESS: i32 = 0;
+pub(crate) const CL_OUT_OF_HOST_MEMORY: i32 = -6;
+pub(crate) const CL_INVALID_VALUE: i32 = -30;
+pub(crate) const CL_INVALID_DEVICE: i32 = -33;
+pub(crate) const CL_INVALID_CONTEXT: i32 = -34;
+pub(crate) const CL_INVALID_COMMAND_QUEUE: i32 = -36;
+pub(crate) const CL_INVALID_MEM_OBJECT: i32 = -38;
+pub(crate) const CL_INVALID_PROGRAM: i32 = -44;
+pub(crate) const CL_INVALID_PROGRAM_EXECUTABLE: i32 = -45;
+pub(crate) const CL_INVALID_KERNEL: i32 = -48;
+pub(crate) const CL_INVALID_ARG_VALUE: i32 = -50;
+pub(crate) const CL_INVALID_ARG_SIZE: i32 = -51;
+pub(crate) const CL_INVALID_WORK_DIMENSION: i32 = -53;
+pub(crate) const CL_INVALID_WORK_GROUP_SIZE: i32 = -54;
+pub(crate) const CL_INVALID_GLOBAL_OFFSET: i32 = -56;
+pub(crate) const CL_INVALID_EVENT_WAIT_LIST: i32 = -57;
+pub(crate) const CL_INVALID_GLOBAL_WORK_SIZE: i32 = -63;
 static NEXT_GPU_TOKEN_GENERATION: AtomicU32 = AtomicU32::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +93,97 @@ struct DeviceAllocation {
     backing: DeviceBufferBacking,
 }
 
+enum ProgramBacking {
+    OpenCl(Program),
+    #[cfg(test)]
+    Mock,
+}
+
+struct ProgramRecord {
+    source: String,
+    backing: Option<ProgramBacking>,
+}
+
+enum KernelBacking {
+    OpenCl(Kernel),
+    #[cfg(test)]
+    Mock(BTreeMap<u32, Vec<u8>>),
+}
+
+struct KernelRecord {
+    backing: KernelBacking,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OpenClRuntimeError {
+    pub(crate) status: i32,
+    pub(crate) detail: String,
+}
+
+impl OpenClRuntimeError {
+    fn new(status: i32, detail: impl Into<String>) -> Self {
+        Self {
+            status,
+            detail: detail.into(),
+        }
+    }
+
+    fn from_apple(error: AppleOpenClError, fallback_status: i32) -> Self {
+        let status = match &error {
+            AppleOpenClError::Api { code, .. }
+            | AppleOpenClError::ApiWithDetail { code, .. }
+            | AppleOpenClError::ProgramBuild { code, .. } => *code,
+            AppleOpenClError::InvalidWorkDimensions => CL_INVALID_WORK_DIMENSION,
+            AppleOpenClError::GlobalOffsetDimensionMismatch => CL_INVALID_GLOBAL_OFFSET,
+            AppleOpenClError::LocalWorkDimensionMismatch
+            | AppleOpenClError::ZeroLocalWorkSize { .. }
+            | AppleOpenClError::NonDivisibleLocalWorkSize { .. } => CL_INVALID_WORK_GROUP_SIZE,
+            AppleOpenClError::ZeroGlobalWorkSize { .. } => CL_INVALID_GLOBAL_WORK_SIZE,
+            _ => fallback_status,
+        };
+        Self::new(status, error.to_string())
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct OpenClErrorEvidence {
+    pub operation: String,
+    pub status: i32,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct OpenClBridgeEvidence {
+    pub device_index: Option<u32>,
+    pub platform: Option<String>,
+    pub device: Option<String>,
+    pub vendor: Option<String>,
+    pub compute_units: Option<u32>,
+    pub api_calls: BTreeMap<String, u64>,
+    pub source_strings: u64,
+    pub source_bytes: u64,
+    pub programs_built: u64,
+    pub kernels_created: u64,
+    pub kernels_released: u64,
+    pub scalar_arguments: u64,
+    pub scalar_argument_bytes: u64,
+    pub buffer_arguments: u64,
+    pub kernel_dispatches: u64,
+    pub dispatched_work_items: u64,
+    pub errors: u64,
+    pub last_error: Option<OpenClErrorEvidence>,
+    pub live_buffers: usize,
+    pub live_programs: usize,
+    pub live_kernels: usize,
+    pub native_contexts: usize,
+    pub native_command_queues: usize,
+    pub native_buffers: usize,
+    pub native_programs: usize,
+    pub native_kernels: usize,
+    pub native_release_errors: usize,
+    pub cleanup_balanced: bool,
+}
+
 pub(crate) struct GpuRuntime {
     backend: Option<GpuBackend>,
     device_index: Option<u32>,
@@ -79,7 +191,10 @@ pub(crate) struct GpuRuntime {
     next_token: u64,
     token_end: u64,
     buffers: HashMap<u64, DeviceAllocation>,
+    programs: HashMap<u64, ProgramRecord>,
+    kernels: HashMap<u64, KernelRecord>,
     live_buffer_bytes: usize,
+    opencl_evidence: OpenClBridgeEvidence,
 }
 
 impl Default for GpuRuntime {
@@ -94,7 +209,10 @@ impl Default for GpuRuntime {
             next_token: token_start,
             token_end: token_start + GPU_TOKEN_GENERATION_BYTES,
             buffers: HashMap::new(),
+            programs: HashMap::new(),
+            kernels: HashMap::new(),
             live_buffer_bytes: 0,
+            opencl_evidence: OpenClBridgeEvidence::default(),
         }
     }
 }
@@ -110,7 +228,16 @@ impl GpuRuntime {
         let session =
             Session::select_gpu(device_index as usize).map_err(|error| error.to_string())?;
         let tracker = session.object_tracker();
+        let device = session.device().clone();
         let tokens = self.allocate_device_tokens()?;
+        self.opencl_evidence = OpenClBridgeEvidence {
+            device_index: Some(device_index),
+            platform: Some(device.platform_name().to_string()),
+            device: Some(device.name().to_string()),
+            vendor: Some(device.vendor().to_string()),
+            compute_units: Some(device.compute_units()),
+            ..OpenClBridgeEvidence::default()
+        };
         self.backend = Some(GpuBackend::OpenCl { session, tracker });
         self.device_index = Some(device_index);
         self.device_tokens = Some(tokens);
@@ -123,6 +250,14 @@ impl GpuRuntime {
             return Err("GPU runtime is already active".into());
         }
         let tokens = self.allocate_device_tokens()?;
+        self.opencl_evidence = OpenClBridgeEvidence {
+            device_index: Some(device_index),
+            platform: Some("mock".into()),
+            device: Some("mock".into()),
+            vendor: Some("mock".into()),
+            compute_units: Some(1),
+            ..OpenClBridgeEvidence::default()
+        };
         self.backend = Some(GpuBackend::Mock);
         self.device_index = Some(device_index);
         self.device_tokens = Some(tokens);
@@ -330,6 +465,360 @@ impl GpuRuntime {
         }
     }
 
+    pub(crate) fn stage_opencl_program(
+        &mut self,
+        context: u64,
+        source: String,
+        source_strings: usize,
+    ) -> Result<u64, OpenClRuntimeError> {
+        if !self.validates_context(context) {
+            return Err(OpenClRuntimeError::new(
+                CL_INVALID_CONTEXT,
+                format!("OpenCL context token {context:#x} is stale, forged, or cross-engine"),
+            ));
+        }
+        if source.is_empty() {
+            return Err(OpenClRuntimeError::new(
+                CL_INVALID_VALUE,
+                "OpenCL program source is empty",
+            ));
+        }
+        if self.programs.len() >= MAX_OPENCL_PROGRAMS {
+            return Err(OpenClRuntimeError::new(
+                CL_OUT_OF_HOST_MEMORY,
+                format!("OpenCL program count exceeds {MAX_OPENCL_PROGRAMS}"),
+            ));
+        }
+        let token = self
+            .allocate_token(GpuTokenKind::Program)
+            .map_err(|detail| OpenClRuntimeError::new(CL_OUT_OF_HOST_MEMORY, detail))?;
+        let source_bytes = source.len();
+        self.programs.insert(
+            token,
+            ProgramRecord {
+                source,
+                backing: None,
+            },
+        );
+        self.opencl_evidence.source_strings = self
+            .opencl_evidence
+            .source_strings
+            .saturating_add(source_strings as u64);
+        self.opencl_evidence.source_bytes = self
+            .opencl_evidence
+            .source_bytes
+            .saturating_add(source_bytes as u64);
+        Ok(token)
+    }
+
+    pub(crate) fn build_opencl_program(
+        &mut self,
+        program: u64,
+        devices: &[u64],
+        options: Option<&str>,
+    ) -> Result<(), OpenClRuntimeError> {
+        if !self.validates_token(program, GpuTokenKind::Program)
+            || !self.programs.contains_key(&program)
+        {
+            return Err(OpenClRuntimeError::new(
+                CL_INVALID_PROGRAM,
+                format!("OpenCL program token {program:#x} is stale, forged, or cross-engine"),
+            ));
+        }
+        if devices.iter().any(|token| !self.validates_device(*token)) {
+            return Err(OpenClRuntimeError::new(
+                CL_INVALID_DEVICE,
+                "OpenCL build device list contains a stale, forged, or cross-engine token",
+            ));
+        }
+        let record = self
+            .programs
+            .get(&program)
+            .expect("validated OpenCL program remains present");
+        let backing = match self.backend.as_ref() {
+            Some(GpuBackend::OpenCl { session, .. }) => ProgramBacking::OpenCl(
+                session
+                    .build_program(&record.source, options)
+                    .map_err(|error| {
+                        OpenClRuntimeError::from_apple(error, CL_INVALID_PROGRAM)
+                    })?,
+            ),
+            #[cfg(test)]
+            Some(GpuBackend::Mock) => ProgramBacking::Mock,
+            None => {
+                return Err(OpenClRuntimeError::new(
+                    CL_INVALID_CONTEXT,
+                    "OpenCL runtime is not active",
+                ));
+            }
+        };
+        self.programs
+            .get_mut(&program)
+            .expect("validated OpenCL program remains present")
+            .backing = Some(backing);
+        self.opencl_evidence.programs_built =
+            self.opencl_evidence.programs_built.saturating_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn create_opencl_kernel(
+        &mut self,
+        program: u64,
+        name: &str,
+    ) -> Result<u64, OpenClRuntimeError> {
+        if !self.validates_token(program, GpuTokenKind::Program) {
+            return Err(OpenClRuntimeError::new(
+                CL_INVALID_PROGRAM,
+                format!("OpenCL program token {program:#x} is stale, forged, or cross-engine"),
+            ));
+        }
+        let record = self.programs.get(&program).ok_or_else(|| {
+            OpenClRuntimeError::new(
+                CL_INVALID_PROGRAM,
+                format!("OpenCL program token {program:#x} is stale or released"),
+            )
+        })?;
+        let backing = match record.backing.as_ref() {
+            Some(ProgramBacking::OpenCl(program)) => KernelBacking::OpenCl(
+                program
+                    .create_kernel(name)
+                    .map_err(|error| {
+                        OpenClRuntimeError::from_apple(error, CL_INVALID_PROGRAM_EXECUTABLE)
+                    })?,
+            ),
+            #[cfg(test)]
+            Some(ProgramBacking::Mock) => KernelBacking::Mock(BTreeMap::new()),
+            None => {
+                return Err(OpenClRuntimeError::new(
+                    CL_INVALID_PROGRAM_EXECUTABLE,
+                    "OpenCL program has not been built successfully",
+                ));
+            }
+        };
+        if self.kernels.len() >= MAX_OPENCL_KERNELS {
+            return Err(OpenClRuntimeError::new(
+                CL_OUT_OF_HOST_MEMORY,
+                format!("OpenCL kernel count exceeds {MAX_OPENCL_KERNELS}"),
+            ));
+        }
+        let token = self
+            .allocate_token(GpuTokenKind::Kernel)
+            .map_err(|detail| OpenClRuntimeError::new(CL_OUT_OF_HOST_MEMORY, detail))?;
+        self.kernels.insert(token, KernelRecord { backing });
+        self.opencl_evidence.kernels_created =
+            self.opencl_evidence.kernels_created.saturating_add(1);
+        Ok(token)
+    }
+
+    pub(crate) fn set_opencl_kernel_raw_arg(
+        &mut self,
+        kernel: u64,
+        index: u32,
+        bytes: &[u8],
+    ) -> Result<(), OpenClRuntimeError> {
+        if !self.validates_token(kernel, GpuTokenKind::Kernel) {
+            return Err(OpenClRuntimeError::new(
+                CL_INVALID_KERNEL,
+                format!("OpenCL kernel token {kernel:#x} is stale, forged, or cross-engine"),
+            ));
+        }
+        let record = self.kernels.get_mut(&kernel).ok_or_else(|| {
+            OpenClRuntimeError::new(
+                CL_INVALID_KERNEL,
+                format!("OpenCL kernel token {kernel:#x} is stale or released"),
+            )
+        })?;
+        match &mut record.backing {
+            KernelBacking::OpenCl(kernel) => kernel
+                .set_raw_arg(index, bytes)
+                .map_err(|error| OpenClRuntimeError::from_apple(error, CL_INVALID_ARG_SIZE))?,
+            #[cfg(test)]
+            KernelBacking::Mock(arguments) => {
+                if bytes.is_empty() {
+                    return Err(OpenClRuntimeError::new(
+                        CL_INVALID_ARG_SIZE,
+                        "OpenCL kernel argument is empty",
+                    ));
+                }
+                arguments.insert(index, bytes.to_vec());
+            }
+        }
+        self.opencl_evidence.scalar_arguments =
+            self.opencl_evidence.scalar_arguments.saturating_add(1);
+        self.opencl_evidence.scalar_argument_bytes = self
+            .opencl_evidence
+            .scalar_argument_bytes
+            .saturating_add(bytes.len() as u64);
+        Ok(())
+    }
+
+    pub(crate) fn set_opencl_kernel_buffer_arg(
+        &mut self,
+        kernel: u64,
+        index: u32,
+        buffer: u64,
+    ) -> Result<(), OpenClRuntimeError> {
+        if !self.validates_token(kernel, GpuTokenKind::Kernel) {
+            return Err(OpenClRuntimeError::new(
+                CL_INVALID_KERNEL,
+                format!("OpenCL kernel token {kernel:#x} is stale, forged, or cross-engine"),
+            ));
+        }
+        if !self.validates_token(buffer, GpuTokenKind::Buffer) {
+            return Err(OpenClRuntimeError::new(
+                CL_INVALID_MEM_OBJECT,
+                format!("OpenCL buffer token {buffer:#x} is stale, forged, or cross-engine"),
+            ));
+        }
+        let allocation = self.buffers.get(&buffer).ok_or_else(|| {
+            OpenClRuntimeError::new(
+                CL_INVALID_MEM_OBJECT,
+                format!("OpenCL buffer token {buffer:#x} is stale or released"),
+            )
+        })?;
+        let record = self.kernels.get_mut(&kernel).ok_or_else(|| {
+            OpenClRuntimeError::new(
+                CL_INVALID_KERNEL,
+                format!("OpenCL kernel token {kernel:#x} is stale or released"),
+            )
+        })?;
+        match (&mut record.backing, &allocation.backing) {
+            (KernelBacking::OpenCl(kernel), DeviceBufferBacking::OpenCl(buffer)) => kernel
+                .set_buffer_arg(index, buffer)
+                .map_err(|error| OpenClRuntimeError::from_apple(error, CL_INVALID_ARG_VALUE))?,
+            #[cfg(test)]
+            (KernelBacking::Mock(arguments), DeviceBufferBacking::Mock(_)) => {
+                arguments.insert(index, buffer.to_le_bytes().to_vec());
+            }
+            #[cfg(test)]
+            _ => {
+                return Err(OpenClRuntimeError::new(
+                    CL_INVALID_MEM_OBJECT,
+                    "OpenCL kernel and buffer belong to different runtime backends",
+                ));
+            }
+        }
+        self.opencl_evidence.buffer_arguments =
+            self.opencl_evidence.buffer_arguments.saturating_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn enqueue_opencl_kernel(
+        &mut self,
+        queue: u64,
+        kernel: u64,
+        global_offset: Option<&[usize]>,
+        global: &[usize],
+        local: Option<&[usize]>,
+    ) -> Result<(), OpenClRuntimeError> {
+        if !self.validates_queue(queue) {
+            return Err(OpenClRuntimeError::new(
+                CL_INVALID_COMMAND_QUEUE,
+                format!("OpenCL queue token {queue:#x} is stale, forged, or cross-engine"),
+            ));
+        }
+        if !self.validates_token(kernel, GpuTokenKind::Kernel) {
+            return Err(OpenClRuntimeError::new(
+                CL_INVALID_KERNEL,
+                format!("OpenCL kernel token {kernel:#x} is stale, forged, or cross-engine"),
+            ));
+        }
+        let record = self.kernels.get(&kernel).ok_or_else(|| {
+            OpenClRuntimeError::new(
+                CL_INVALID_KERNEL,
+                format!("OpenCL kernel token {kernel:#x} is stale or released"),
+            )
+        })?;
+        match (&self.backend, &record.backing) {
+            (
+                Some(GpuBackend::OpenCl { session, .. }),
+                KernelBacking::OpenCl(kernel),
+            ) => session
+                .enqueue_nd_range_with_offset(kernel, global_offset, global, local)
+                .map_err(|error| {
+                    OpenClRuntimeError::from_apple(error, CL_INVALID_WORK_DIMENSION)
+                })?,
+            #[cfg(test)]
+            (Some(GpuBackend::Mock), KernelBacking::Mock(_)) => {}
+            _ => {
+                return Err(OpenClRuntimeError::new(
+                    CL_INVALID_KERNEL,
+                    "OpenCL kernel belongs to another runtime backend",
+                ));
+            }
+        }
+        self.opencl_evidence.kernel_dispatches =
+            self.opencl_evidence.kernel_dispatches.saturating_add(1);
+        let work_items = global
+            .iter()
+            .copied()
+            .try_fold(1usize, usize::checked_mul)
+            .unwrap_or(usize::MAX) as u64;
+        self.opencl_evidence.dispatched_work_items = self
+            .opencl_evidence
+            .dispatched_work_items
+            .saturating_add(work_items);
+        Ok(())
+    }
+
+    pub(crate) fn release_opencl_kernel(
+        &mut self,
+        kernel: u64,
+    ) -> Result<(), OpenClRuntimeError> {
+        if !self.validates_token(kernel, GpuTokenKind::Kernel)
+            || !self.kernels.contains_key(&kernel)
+        {
+            return Err(OpenClRuntimeError::new(
+                CL_INVALID_KERNEL,
+                format!("OpenCL kernel token {kernel:#x} is stale, forged, or cross-engine"),
+            ));
+        }
+        self.kernels.remove(&kernel);
+        self.opencl_evidence.kernels_released =
+            self.opencl_evidence.kernels_released.saturating_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn is_program_token(&self, token: u64) -> bool {
+        self.validates_token(token, GpuTokenKind::Program) && self.programs.contains_key(&token)
+    }
+
+    pub(crate) fn is_kernel_token(&self, token: u64) -> bool {
+        self.validates_token(token, GpuTokenKind::Kernel) && self.kernels.contains_key(&token)
+    }
+
+    pub(crate) fn record_opencl_api_call(&mut self, operation: &'static str) {
+        let count = self
+            .opencl_evidence
+            .api_calls
+            .entry(operation.to_string())
+            .or_default();
+        *count = count.saturating_add(1);
+    }
+
+    pub(crate) fn record_opencl_error(
+        &mut self,
+        operation: &'static str,
+        status: i32,
+        detail: &str,
+    ) {
+        self.opencl_evidence.errors = self.opencl_evidence.errors.saturating_add(1);
+        self.opencl_evidence.last_error = Some(OpenClErrorEvidence {
+            operation: operation.to_string(),
+            status,
+            detail: bounded_opencl_evidence_detail(detail),
+        });
+    }
+
+    pub(crate) fn opencl_evidence(&self) -> OpenClBridgeEvidence {
+        let mut evidence = self.opencl_evidence.clone();
+        evidence.live_buffers = self.buffers.len();
+        evidence.live_programs = self.programs.len();
+        evidence.live_kernels = self.kernels.len();
+        apply_object_counts(&mut evidence, self.object_counts());
+        evidence
+    }
+
     pub(crate) fn allocate_token(&mut self, kind: GpuTokenKind) -> Result<u64, String> {
         let token = self
             .next_token
@@ -396,12 +885,24 @@ impl GpuRuntime {
             Some(GpuBackend::Mock) => None,
             None => return Err("GPU runtime is not active".into()),
         };
+        // OpenCL kernels retain their bound buffers in the safe facade. Drop
+        // kernels before programs and the runtime's owning buffer registry,
+        // then finally release the session/context.
+        self.kernels.clear();
+        self.programs.clear();
         self.buffers.clear();
         self.live_buffer_bytes = 0;
         self.backend = None;
         self.device_index = None;
         self.device_tokens = None;
-        Ok(tracker.map_or_else(ObjectCounts::default, |tracker| tracker.snapshot()))
+        let counts = tracker.map_or_else(ObjectCounts::default, |tracker| tracker.snapshot());
+        apply_object_counts(&mut self.opencl_evidence, counts);
+        self.opencl_evidence.live_buffers = 0;
+        self.opencl_evidence.live_programs = 0;
+        self.opencl_evidence.live_kernels = 0;
+        self.opencl_evidence.cleanup_balanced =
+            counts.live_total() == 0 && counts.release_errors == 0;
+        Ok(counts)
     }
 
     fn allocate_device_tokens(&mut self) -> Result<GpuDeviceTokens, String> {
@@ -432,6 +933,26 @@ fn next_gpu_token_generation() -> u32 {
             return generation;
         }
     }
+}
+
+fn apply_object_counts(evidence: &mut OpenClBridgeEvidence, counts: ObjectCounts) {
+    evidence.native_contexts = counts.contexts;
+    evidence.native_command_queues = counts.command_queues;
+    evidence.native_buffers = counts.buffers;
+    evidence.native_programs = counts.programs;
+    evidence.native_kernels = counts.kernels;
+    evidence.native_release_errors = counts.release_errors;
+}
+
+fn bounded_opencl_evidence_detail(detail: &str) -> String {
+    if detail.len() <= MAX_OPENCL_EVIDENCE_ERROR_BYTES {
+        return detail.to_string();
+    }
+    let mut end = MAX_OPENCL_EVIDENCE_ERROR_BYTES;
+    while !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &detail[..end])
 }
 
 fn checked_buffer_range(

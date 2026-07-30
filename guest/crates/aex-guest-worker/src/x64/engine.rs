@@ -1702,6 +1702,10 @@ impl GuestEngine<'static> {
         &self.unicorn.get_data().suite_requests
     }
 
+    pub fn opencl_bridge_evidence(&self) -> OpenClBridgeEvidence {
+        self.unicorn.get_data().gpu_runtime.opencl_evidence()
+    }
+
     pub fn unsupported_suite_calls(&self) -> &[UnsupportedSuiteCall] {
         &self.unicorn.get_data().unsupported_suite_calls
     }

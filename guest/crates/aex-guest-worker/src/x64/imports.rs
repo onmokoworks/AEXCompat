@@ -302,12 +302,11 @@ fn install_win64_import(
                 // synchronization/end helpers are deterministic no-ops.
             }
         },
-        Win64ImportDispatch::OpenClBridge(_)
-        | Win64ImportDispatch::UnsupportedGpuLibrary(_)
+        Win64ImportDispatch::OpenClBridge(symbol) => {
+            install_opencl_import_bridge(unicorn, stub, symbol)?;
+        }
+        Win64ImportDispatch::UnsupportedGpuLibrary(_)
         | Win64ImportDispatch::UnsupportedLegacyImport => {
-            // The recognized OpenCL surface remains a trap until the Apple
-            // OpenCL facade is wired. Its distinct dispatch outcome is the
-            // integration seam; it must never fall through to scalar zero.
             install_unsupported_import_trap(
                 unicorn,
                 stub,
