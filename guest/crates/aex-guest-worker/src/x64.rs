@@ -264,6 +264,7 @@ fn uc<T>(
 }
 
 include!("x64/trace.rs");
+include!("x64/gpu_runtime.rs");
 include!("x64/types.rs");
 include!("x64/imports.rs");
 include!("x64/engine.rs");

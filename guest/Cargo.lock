@@ -24,6 +24,7 @@ name = "aex-guest-worker"
 version = "0.1.0"
 dependencies = [
  "aex-abi",
+ "aex-apple-opencl",
  "aex-unicorn-buffer",
  "goblin",
  "iced-x86",
