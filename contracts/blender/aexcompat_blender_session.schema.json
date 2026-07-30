@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/contracts/blender/aexcompat_blender_session.schema.json",
+  "title": "AEXCompat Blender session result",
+  "type": "object",
+  "required": ["schema_version", "response_kind", "status", "failure_class", "aex_render_performed", "host_success", "worker_identity", "plugin_identity"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "response_kind": {"const": "aexcompat_blender_session_result"},
+    "status": {"enum": ["identity_only", "fixture_transform", "unsupported", "error"]},
+    "failure_class": {"enum": ["aex_not_loaded", "request_validation_error", "empty_input"]},
+    "aex_render_performed": {"const": false},
+    "host_success": {"const": false},
+    "worker_identity": {
+      "type": "object",
+      "required": ["name", "version", "source_sha256"],
+      "properties": {
+        "name": {"const": "blender_aexcompat_session"},
+        "version": {"const": "1"},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "plugin_identity": {
+      "type": "object",
+      "required": ["state", "source_relative_path", "sha256"],
+      "properties": {
+        "state": {"const": "not_loaded"},
+        "source_relative_path": {"type": ["string", "null"]},
+        "sha256": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "frame": {"$ref": "#/$defs/frame"},
+    "input": {"$ref": "#/$defs/artifact"},
+    "output": {"$ref": "#/$defs/artifact"},
+    "diff": {
+      "type": "object",
+      "required": ["byte_count", "changed_bytes", "max_abs_delta"],
+      "properties": {
+        "byte_count": {"type": "integer", "minimum": 0},
+        "changed_bytes": {"type": "integer", "minimum": 0},
+        "max_abs_delta": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "diagnostics": {"type": "array", "items": {"type": "string"}},
+    "error": {"type": "string"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "required": ["sha256", "bytes"],
+      "properties": {
+        "encoding": {"const": "base64-rgba8"},
+        "data": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "bytes": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "frame": {
+      "type": "object",
+      "required": ["width", "height", "stride", "channels", "alpha", "color_space", "frame_time"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "stride": {"type": "integer", "minimum": 4},
+        "channels": {"const": "RGBA8"},
+        "alpha": {"enum": ["straight", "premultiplied"]},
+        "color_space": {"type": "string", "minLength": 1},
+        "frame_time": {"type": "object"}
+      },
+      "additionalProperties": false
+    }
+  }
+}
