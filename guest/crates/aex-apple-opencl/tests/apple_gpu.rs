@@ -72,6 +72,11 @@ fn executes_real_kernel_on_apple_gpu_and_releases_every_object() {
             .expect("set raw scale");
         kernel.set_scalar_arg(3, -3.0f32).expect("set bias");
 
+        // clSetKernelArg copies only the native cl_mem value and does not
+        // retain it. The safe facade must keep this buffer alive through the
+        // kernel binding even after its caller-owned wrapper is dropped.
+        drop(input_buffer);
+        assert_eq!(tracker.snapshot().buffers, 2);
         session
             .enqueue_nd_range_with_offset(&kernel, Some(&[0]), &[ITEM_COUNT], Some(&[64]))
             .expect("enqueue kernel");

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::{CString, c_char},
     ptr,
     rc::Rc,
@@ -50,10 +51,14 @@ pub struct Session {
 }
 
 pub struct Buffer {
+    inner: Rc<BufferState>,
+}
+
+struct BufferState {
     handle: ffi::ClMem,
     bytes: usize,
     access: BufferAccess,
-    state: Rc<SessionState>,
+    session: Rc<SessionState>,
 }
 
 pub struct Program {
@@ -65,6 +70,7 @@ pub struct Program {
 pub struct Kernel {
     handle: ffi::ClKernel,
     state: Rc<SessionState>,
+    bound_buffers: HashMap<u32, Buffer>,
 }
 
 pub fn enumerate_gpu_devices() -> Result<Vec<GpuDevice>, Error> {
@@ -180,16 +186,18 @@ impl Session {
         }
         self.state.counters.buffers.fetch_add(1, Ordering::AcqRel);
         Ok(Buffer {
-            handle,
-            bytes,
-            access,
-            state: Rc::clone(&self.state),
+            inner: Rc::new(BufferState {
+                handle,
+                bytes,
+                access,
+                session: Rc::clone(&self.state),
+            }),
         })
     }
 
     pub fn write_buffer(&self, buffer: &Buffer, offset: usize, source: &[u8]) -> Result<(), Error> {
-        ensure_same_session(&self.state, &buffer.state, "buffer")?;
-        checked_range("buffer write", offset, source.len(), buffer.bytes)?;
+        ensure_same_session(&self.state, &buffer.inner.session, "buffer")?;
+        checked_range("buffer write", offset, source.len(), buffer.inner.bytes)?;
         if source.is_empty() {
             return Ok(());
         }
@@ -199,7 +207,7 @@ impl Session {
         let status = unsafe {
             ffi::clEnqueueWriteBuffer(
                 self.state.queue,
-                buffer.handle,
+                buffer.inner.handle,
                 ffi::CL_TRUE,
                 offset,
                 source.len(),
@@ -218,8 +226,8 @@ impl Session {
         offset: usize,
         destination: &mut [u8],
     ) -> Result<(), Error> {
-        ensure_same_session(&self.state, &buffer.state, "buffer")?;
-        checked_range("buffer read", offset, destination.len(), buffer.bytes)?;
+        ensure_same_session(&self.state, &buffer.inner.session, "buffer")?;
+        checked_range("buffer read", offset, destination.len(), buffer.inner.bytes)?;
         if destination.is_empty() {
             return Ok(());
         }
@@ -228,7 +236,7 @@ impl Session {
         let status = unsafe {
             ffi::clEnqueueReadBuffer(
                 self.state.queue,
-                buffer.handle,
+                buffer.inner.handle,
                 ffi::CL_TRUE,
                 offset,
                 destination.len(),
@@ -352,26 +360,26 @@ impl Session {
 
 impl Buffer {
     #[must_use]
-    pub const fn len(&self) -> usize {
-        self.bytes
+    pub fn len(&self) -> usize {
+        self.inner.bytes
     }
 
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.bytes == 0
+    pub fn is_empty(&self) -> bool {
+        self.inner.bytes == 0
     }
 
     #[must_use]
-    pub const fn access(&self) -> BufferAccess {
-        self.access
+    pub fn access(&self) -> BufferAccess {
+        self.inner.access
     }
 }
 
-impl Drop for Buffer {
+impl Drop for BufferState {
     fn drop(&mut self) {
         release(
-            &self.state.counters,
-            &self.state.counters.buffers,
+            &self.session.counters,
+            &self.session.counters.buffers,
             // SAFETY: this wrapper exclusively owns one retained memory handle.
             unsafe { ffi::clReleaseMemObject(self.handle) },
         );
@@ -405,6 +413,7 @@ impl Program {
         Ok(Kernel {
             handle,
             state: Rc::clone(&self.state),
+            bound_buffers: HashMap::new(),
         })
     }
 }
@@ -448,12 +457,14 @@ impl Kernel {
         // bytes.len() bytes during this synchronous call.
         let status =
             unsafe { ffi::clSetKernelArg(self.handle, index, bytes.len(), bytes.as_ptr().cast()) };
-        check("clSetKernelArg(raw)", status)
+        check("clSetKernelArg(raw)", status)?;
+        self.bound_buffers.remove(&index);
+        Ok(())
     }
 
     pub fn set_buffer_arg(&mut self, index: u32, buffer: &Buffer) -> Result<(), Error> {
-        ensure_same_session(&self.state, &buffer.state, "buffer")?;
-        let handle = buffer.handle;
+        ensure_same_session(&self.state, &buffer.inner.session, "buffer")?;
+        let handle = buffer.inner.handle;
         // SAFETY: clSetKernelArg copies one live cl_mem handle. Session identity
         // checking prevents a cross-context memory argument.
         let status = unsafe {
@@ -464,7 +475,14 @@ impl Kernel {
                 (&handle as *const ffi::ClMem).cast(),
             )
         };
-        check("clSetKernelArg(buffer)", status)
+        check("clSetKernelArg(buffer)", status)?;
+        self.bound_buffers.insert(
+            index,
+            Buffer {
+                inner: Rc::clone(&buffer.inner),
+            },
+        );
+        Ok(())
     }
 }
 
