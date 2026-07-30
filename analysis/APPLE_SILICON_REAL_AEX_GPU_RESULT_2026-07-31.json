@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "issue": 595,
-  "observed_utc": "2026-07-30T18:50:55Z",
-  "repository_head": "6dc7ddc6760300d4c1bae3e3180d71f7ab6d1adf",
-  "base_head": "2b7bb0d9cac58129836574ecbc9bc97004e7019a",
+  "observed_utc": "2026-07-30T19:01:04Z",
+  "repository_head": "371eb40db7a3f01184774ab4c8f27420c446178b",
+  "base_head": "05916fba5ffe5b2d2baf085f5a33b9b46477a088",
   "host": {
     "os": "macOS 15.7.2 (24G325)",
     "architecture": "arm64",
