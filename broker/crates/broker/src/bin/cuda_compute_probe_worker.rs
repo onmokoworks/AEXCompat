@@ -1,8 +1,8 @@
 use aexcompat_broker::cuda_compute_probe::{
     collect_with_api, device_name, missing_symbol_observation, no_driver_observation,
-    uuid_fingerprint, ApiFailure, CudaAggregateObservation, CudaDeviceObservation, CudaProbeApi,
-    CudaStage, JitLogObservation, PciLocation, COMPUTE_ELEMENT_COUNT, MAX_DEVICE_NAME_BYTES,
-    MAX_JIT_LOG_BYTES,
+    uuid_fingerprint, ApiFailure, CudaAggregateObservation, CudaCleanupFailure, CudaCleanupTarget,
+    CudaDeviceObservation, CudaProbeApi, CudaStage, JitLogObservation, PciLocation,
+    COMPUTE_ELEMENT_COUNT, MAX_DEVICE_NAME_BYTES, MAX_JIT_LOG_BYTES,
 };
 
 fn main() {
@@ -132,6 +132,7 @@ DONE:\n\
         *mut *mut c_void,
     ) -> CuResult;
     type CuCtxSynchronize = unsafe extern "system" fn() -> CuResult;
+    type CuGetErrorName = unsafe extern "system" fn(CuResult, *mut *const i8) -> CuResult;
 
     #[derive(Clone, Copy)]
     struct CudaFunctions {
@@ -155,6 +156,7 @@ DONE:\n\
         module_get_function: CuModuleGetFunction,
         launch_kernel: CuLaunchKernel,
         ctx_synchronize: CuCtxSynchronize,
+        get_error_name: Option<CuGetErrorName>,
     }
 
     struct Library(HMODULE);
@@ -187,41 +189,136 @@ DONE:\n\
     }
 
     struct OwnedContext {
-        handle: CuContext,
+        handle: Option<CuContext>,
         release: CuCtxDestroy,
+    }
+
+    struct RawCleanupFailure {
+        target: CudaCleanupTarget,
+        operation: &'static str,
+        api_error: CuResult,
+    }
+
+    impl OwnedContext {
+        fn close_inner(&mut self) -> Option<RawCleanupFailure> {
+            let handle = self.handle.take()?;
+            let status = unsafe { (self.release)(handle) };
+            (status != CUDA_SUCCESS).then_some(RawCleanupFailure {
+                target: CudaCleanupTarget::Context,
+                operation: "cuCtxDestroy_v2",
+                api_error: status,
+            })
+        }
+
+        fn finalize(mut self) -> Option<RawCleanupFailure> {
+            self.close_inner()
+        }
     }
 
     impl Drop for OwnedContext {
         fn drop(&mut self) {
-            unsafe {
-                (self.release)(self.handle);
+            if self.handle.is_some() {
+                let _ = self.close_inner();
             }
         }
     }
 
     struct DeviceMemory {
-        handle: CuDevicePtr,
+        handle: Option<CuDevicePtr>,
         release: CuMemFree,
+        target: CudaCleanupTarget,
+        operation: &'static str,
+    }
+
+    impl DeviceMemory {
+        fn handle(&self) -> CuDevicePtr {
+            self.handle.expect("owned CUDA allocation")
+        }
+
+        fn close_inner(&mut self) -> Option<RawCleanupFailure> {
+            let handle = self.handle.take()?;
+            let status = unsafe { (self.release)(handle) };
+            (status != CUDA_SUCCESS).then_some(RawCleanupFailure {
+                target: self.target,
+                operation: self.operation,
+                api_error: status,
+            })
+        }
+
+        fn finalize(mut self) -> Option<RawCleanupFailure> {
+            self.close_inner()
+        }
     }
 
     impl Drop for DeviceMemory {
         fn drop(&mut self) {
-            unsafe {
-                (self.release)(self.handle);
+            if self.handle.is_some() {
+                let _ = self.close_inner();
             }
         }
     }
 
     struct OwnedModule {
-        handle: CuModule,
+        handle: Option<CuModule>,
         release: CuModuleUnload,
+    }
+
+    impl OwnedModule {
+        fn handle(&self) -> CuModule {
+            self.handle.expect("owned CUDA module")
+        }
+
+        fn close_inner(&mut self) -> Option<RawCleanupFailure> {
+            let handle = self.handle.take()?;
+            let status = unsafe { (self.release)(handle) };
+            (status != CUDA_SUCCESS).then_some(RawCleanupFailure {
+                target: CudaCleanupTarget::Module,
+                operation: "cuModuleUnload",
+                api_error: status,
+            })
+        }
+
+        fn finalize(mut self) -> Option<RawCleanupFailure> {
+            self.close_inner()
+        }
     }
 
     impl Drop for OwnedModule {
         fn drop(&mut self) {
-            unsafe {
-                (self.release)(self.handle);
+            if self.handle.is_some() {
+                let _ = self.close_inner();
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct ComputeResources {
+        context: Option<OwnedContext>,
+        input: Option<DeviceMemory>,
+        output: Option<DeviceMemory>,
+        module: Option<OwnedModule>,
+    }
+
+    impl ComputeResources {
+        fn finalize(mut self, functions: CudaFunctions) -> Vec<CudaCleanupFailure> {
+            let mut failures = Vec::with_capacity(4);
+            for failure in [
+                self.module.take().and_then(OwnedModule::finalize),
+                self.output.take().and_then(DeviceMemory::finalize),
+                self.input.take().and_then(DeviceMemory::finalize),
+                self.context.take().and_then(OwnedContext::finalize),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                failures.push(CudaCleanupFailure {
+                    target: failure.target,
+                    operation: failure.operation.into(),
+                    api_error: failure.api_error,
+                    symbolic_info: symbolic_error(functions, failure.api_error),
+                });
+            }
+            failures
         }
     }
 
@@ -375,6 +472,7 @@ DONE:\n\
             "cuCtxSynchronize",
             &mut missing,
         );
+        let get_error_name = optional_symbol(resolver, b"cuGetErrorName\0");
         if !missing.is_empty() {
             return (None, missing);
         }
@@ -400,6 +498,7 @@ DONE:\n\
                 module_get_function: module_get_function.expect("checked"),
                 launch_kernel: launch_kernel.expect("checked"),
                 ctx_synchronize: ctx_synchronize.expect("checked"),
+                get_error_name,
             }),
             Vec::new(),
         )
@@ -636,279 +735,335 @@ DONE:\n\
         }
     }
 
+    fn symbolic_error(functions: CudaFunctions, status: CuResult) -> String {
+        if let Some(get_error_name) = functions.get_error_name {
+            let mut name = std::ptr::null();
+            let name_status = unsafe { get_error_name(status, &mut name) };
+            if name_status == CUDA_SUCCESS && !name.is_null() {
+                let bytes = unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes();
+                if !bytes.is_empty()
+                    && bytes.len() <= 64
+                    && bytes.iter().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_'
+                    })
+                {
+                    return String::from_utf8_lossy(bytes).into_owned();
+                }
+            }
+        }
+        if status < 0 {
+            format!("CUDA_ERROR_CODE_NEG_{}", status.unsigned_abs())
+        } else {
+            format!("CUDA_ERROR_CODE_{status}")
+        }
+    }
+
     fn run_compute(
         functions: CudaFunctions,
         device: CuDevice,
         metadata: CudaDeviceObservation,
     ) -> CudaDeviceObservation {
-        // This dedicated child starts without an application-owned CUDA
-        // context. cuCtxCreate_v2 makes the owned context current and
-        // cuCtxDestroy_v2 restores the previous (null) current context. Check
-        // the boundary before every device so a failed cleanup cannot
-        // contaminate the next device probe.
-        let mut previous_context = null_mut();
-        let status = unsafe { (functions.ctx_get_current)(&mut previous_context) };
-        if status != CUDA_SUCCESS {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Context,
-                "cuCtxGetCurrent",
-                Some(status),
-                None,
-            );
-        }
-        if !previous_context.is_null() {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Context,
-                "cuCtxGetCurrent.preexisting_context",
-                None,
-                None,
-            );
-        }
-
-        let mut context_handle = null_mut();
-        let status = unsafe { (functions.ctx_create)(&mut context_handle, 0, device) };
-        if status != CUDA_SUCCESS {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Context,
-                "cuCtxCreate_v2",
-                Some(status),
-                None,
-            );
-        }
-        if context_handle.is_null() {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Context,
-                "cuCtxCreate_v2.null_handle",
-                None,
-                None,
-            );
-        }
-        let _context = OwnedContext {
-            handle: context_handle,
-            release: functions.ctx_destroy,
-        };
-
-        let byte_count = COMPUTE_ELEMENT_COUNT * size_of::<u32>();
-        let mut input_handle = 0;
-        let status = unsafe { (functions.mem_alloc)(&mut input_handle, byte_count) };
-        if status != CUDA_SUCCESS {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Allocation,
-                "cuMemAlloc_v2.input",
-                Some(status),
-                None,
-            );
-        }
-        if input_handle == 0 {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Allocation,
-                "cuMemAlloc_v2.input.null_handle",
-                None,
-                None,
-            );
-        }
-        let input_memory = DeviceMemory {
-            handle: input_handle,
-            release: functions.mem_free,
-        };
-
-        let mut output_handle = 0;
-        let status = unsafe { (functions.mem_alloc)(&mut output_handle, byte_count) };
-        if status != CUDA_SUCCESS {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Allocation,
-                "cuMemAlloc_v2.output",
-                Some(status),
-                None,
-            );
-        }
-        if output_handle == 0 {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Allocation,
-                "cuMemAlloc_v2.output.null_handle",
-                None,
-                None,
-            );
-        }
-        let output_memory = DeviceMemory {
-            handle: output_handle,
-            release: functions.mem_free,
-        };
-
-        let input = (0..COMPUTE_ELEMENT_COUNT as u32).collect::<Vec<_>>();
-        let status = unsafe {
-            (functions.memcpy_htod)(input_memory.handle, input.as_ptr().cast(), byte_count)
-        };
-        if status != CUDA_SUCCESS {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::HostToDevice,
-                "cuMemcpyHtoD_v2",
-                Some(status),
-                None,
-            );
-        }
-
-        let mut info_log = [0u8; MAX_JIT_LOG_BYTES];
-        let mut error_log = [0u8; MAX_JIT_LOG_BYTES];
-        let mut info_size = info_log.len() as u32;
-        let mut error_size = error_log.len() as u32;
-        let mut options = [
-            CU_JIT_INFO_LOG_BUFFER,
-            CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES,
-            CU_JIT_ERROR_LOG_BUFFER,
-            CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES,
-        ];
-        let mut option_values = [
-            info_log.as_mut_ptr().cast(),
-            (&mut info_size as *mut u32).cast(),
-            error_log.as_mut_ptr().cast(),
-            (&mut error_size as *mut u32).cast(),
-        ];
-        let mut module_handle = null_mut();
-        let status = unsafe {
-            (functions.module_load_data_ex)(
-                &mut module_handle,
-                EMBEDDED_PTX.as_ptr().cast(),
-                options.len() as u32,
-                options.as_mut_ptr(),
-                option_values.as_mut_ptr(),
-            )
-        };
-        if status != CUDA_SUCCESS {
-            let jit_log = jit_log_observation(&info_log, info_size, &error_log, error_size);
-            let jit_failure = is_jit_failure(status)
-                || !matches!(
-                    jit_log.status,
-                    aexcompat_broker::cuda_compute_probe::JitLogStatus::Empty
-                        | aexcompat_broker::cuda_compute_probe::JitLogStatus::Unavailable
+        let mut resources = ComputeResources::default();
+        let observation = (|| -> CudaDeviceObservation {
+            // This dedicated child starts without an application-owned CUDA
+            // context. cuCtxCreate_v2 makes the owned context current and
+            // cuCtxDestroy_v2 restores the previous (null) current context. Check
+            // the boundary before every device so a failed cleanup cannot
+            // contaminate the next device probe.
+            let mut previous_context = null_mut();
+            let status = unsafe { (functions.ctx_get_current)(&mut previous_context) };
+            if status != CUDA_SUCCESS {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Context,
+                    "cuCtxGetCurrent",
+                    Some(status),
+                    None,
                 );
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                if jit_failure {
-                    CudaStage::Jit
-                } else {
-                    CudaStage::Module
-                },
-                "cuModuleLoadDataEx",
-                Some(status),
-                jit_failure.then_some(jit_log),
-            );
-        }
-        if module_handle.is_null() {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Module,
-                "cuModuleLoadDataEx.null_handle",
-                None,
-                None,
-            );
-        }
-        let module = OwnedModule {
-            handle: module_handle,
-            release: functions.module_unload,
-        };
+            }
+            if !previous_context.is_null() {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Context,
+                    "cuCtxGetCurrent.preexisting_context",
+                    None,
+                    None,
+                );
+            }
 
-        let mut function_handle = null_mut();
-        let status = unsafe {
-            (functions.module_get_function)(&mut function_handle, module.handle, c"affine".as_ptr())
-        };
-        if status != CUDA_SUCCESS {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Function,
-                "cuModuleGetFunction",
-                Some(status),
-                None,
-            );
-        }
-        if function_handle.is_null() {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Function,
-                "cuModuleGetFunction.null_handle",
-                None,
-                None,
-            );
-        }
+            let mut context_handle = null_mut();
+            let status = unsafe { (functions.ctx_create)(&mut context_handle, 0, device) };
+            if status != CUDA_SUCCESS {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Context,
+                    "cuCtxCreate_v2",
+                    Some(status),
+                    None,
+                );
+            }
+            if context_handle.is_null() {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Context,
+                    "cuCtxCreate_v2.null_handle",
+                    None,
+                    None,
+                );
+            }
+            resources.context = Some(OwnedContext {
+                handle: Some(context_handle),
+                release: functions.ctx_destroy,
+            });
 
-        let mut input_argument = input_memory.handle;
-        let mut output_argument = output_memory.handle;
-        let mut arguments = [
-            (&mut input_argument as *mut CuDevicePtr).cast::<c_void>(),
-            (&mut output_argument as *mut CuDevicePtr).cast::<c_void>(),
-        ];
-        let status = unsafe {
-            (functions.launch_kernel)(
-                function_handle,
-                1,
-                1,
-                1,
-                COMPUTE_ELEMENT_COUNT as u32,
-                1,
-                1,
-                0,
-                null_mut(),
-                arguments.as_mut_ptr(),
-                null_mut(),
-            )
-        };
-        if status != CUDA_SUCCESS {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Launch,
-                "cuLaunchKernel",
-                Some(status),
-                None,
-            );
-        }
+            let byte_count = COMPUTE_ELEMENT_COUNT * size_of::<u32>();
+            let mut input_handle = 0;
+            let status = unsafe { (functions.mem_alloc)(&mut input_handle, byte_count) };
+            if status != CUDA_SUCCESS {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Allocation,
+                    "cuMemAlloc_v2.input",
+                    Some(status),
+                    None,
+                );
+            }
+            if input_handle == 0 {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Allocation,
+                    "cuMemAlloc_v2.input.null_handle",
+                    None,
+                    None,
+                );
+            }
+            resources.input = Some(DeviceMemory {
+                handle: Some(input_handle),
+                release: functions.mem_free,
+                target: CudaCleanupTarget::InputMemory,
+                operation: "cuMemFree_v2.input",
+            });
 
-        let status = unsafe { (functions.ctx_synchronize)() };
-        if status != CUDA_SUCCESS {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Synchronize,
-                "cuCtxSynchronize",
-                Some(status),
-                None,
-            );
-        }
+            let mut output_handle = 0;
+            let status = unsafe { (functions.mem_alloc)(&mut output_handle, byte_count) };
+            if status != CUDA_SUCCESS {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Allocation,
+                    "cuMemAlloc_v2.output",
+                    Some(status),
+                    None,
+                );
+            }
+            if output_handle == 0 {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Allocation,
+                    "cuMemAlloc_v2.output.null_handle",
+                    None,
+                    None,
+                );
+            }
+            resources.output = Some(DeviceMemory {
+                handle: Some(output_handle),
+                release: functions.mem_free,
+                target: CudaCleanupTarget::OutputMemory,
+                operation: "cuMemFree_v2.output",
+            });
 
-        let mut output = [0u32; COMPUTE_ELEMENT_COUNT];
-        let status = unsafe {
-            (functions.memcpy_dtoh)(output.as_mut_ptr().cast(), output_memory.handle, byte_count)
-        };
-        if status != CUDA_SUCCESS {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::DeviceToHost,
-                "cuMemcpyDtoH_v2",
-                Some(status),
-                None,
-            );
+            let input = (0..COMPUTE_ELEMENT_COUNT as u32).collect::<Vec<_>>();
+            let status = unsafe {
+                (functions.memcpy_htod)(
+                    resources.input.as_ref().expect("input allocation").handle(),
+                    input.as_ptr().cast(),
+                    byte_count,
+                )
+            };
+            if status != CUDA_SUCCESS {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::HostToDevice,
+                    "cuMemcpyHtoD_v2",
+                    Some(status),
+                    None,
+                );
+            }
+
+            let mut info_log = [0u8; MAX_JIT_LOG_BYTES];
+            let mut error_log = [0u8; MAX_JIT_LOG_BYTES];
+            let mut info_size = info_log.len() as u32;
+            let mut error_size = error_log.len() as u32;
+            let mut options = [
+                CU_JIT_INFO_LOG_BUFFER,
+                CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES,
+                CU_JIT_ERROR_LOG_BUFFER,
+                CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES,
+            ];
+            let mut option_values = [
+                info_log.as_mut_ptr().cast(),
+                (&mut info_size as *mut u32).cast(),
+                error_log.as_mut_ptr().cast(),
+                (&mut error_size as *mut u32).cast(),
+            ];
+            let mut module_handle = null_mut();
+            let status = unsafe {
+                (functions.module_load_data_ex)(
+                    &mut module_handle,
+                    EMBEDDED_PTX.as_ptr().cast(),
+                    options.len() as u32,
+                    options.as_mut_ptr(),
+                    option_values.as_mut_ptr(),
+                )
+            };
+            if status != CUDA_SUCCESS {
+                let jit_log = jit_log_observation(&info_log, info_size, &error_log, error_size);
+                let jit_failure = is_jit_failure(status)
+                    || !matches!(
+                        jit_log.status,
+                        aexcompat_broker::cuda_compute_probe::JitLogStatus::Empty
+                            | aexcompat_broker::cuda_compute_probe::JitLogStatus::Unavailable
+                    );
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    if jit_failure {
+                        CudaStage::Jit
+                    } else {
+                        CudaStage::Module
+                    },
+                    "cuModuleLoadDataEx",
+                    Some(status),
+                    jit_failure.then_some(jit_log),
+                );
+            }
+            if module_handle.is_null() {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Module,
+                    "cuModuleLoadDataEx.null_handle",
+                    None,
+                    None,
+                );
+            }
+            resources.module = Some(OwnedModule {
+                handle: Some(module_handle),
+                release: functions.module_unload,
+            });
+
+            let mut function_handle = null_mut();
+            let status = unsafe {
+                (functions.module_get_function)(
+                    &mut function_handle,
+                    resources.module.as_ref().expect("loaded module").handle(),
+                    c"affine".as_ptr(),
+                )
+            };
+            if status != CUDA_SUCCESS {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Function,
+                    "cuModuleGetFunction",
+                    Some(status),
+                    None,
+                );
+            }
+            if function_handle.is_null() {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Function,
+                    "cuModuleGetFunction.null_handle",
+                    None,
+                    None,
+                );
+            }
+
+            let mut input_argument = resources.input.as_ref().expect("input allocation").handle();
+            let mut output_argument = resources
+                .output
+                .as_ref()
+                .expect("output allocation")
+                .handle();
+            let mut arguments = [
+                (&mut input_argument as *mut CuDevicePtr).cast::<c_void>(),
+                (&mut output_argument as *mut CuDevicePtr).cast::<c_void>(),
+            ];
+            let status = unsafe {
+                (functions.launch_kernel)(
+                    function_handle,
+                    1,
+                    1,
+                    1,
+                    COMPUTE_ELEMENT_COUNT as u32,
+                    1,
+                    1,
+                    0,
+                    null_mut(),
+                    arguments.as_mut_ptr(),
+                    null_mut(),
+                )
+            };
+            if status != CUDA_SUCCESS {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Launch,
+                    "cuLaunchKernel",
+                    Some(status),
+                    None,
+                );
+            }
+
+            let status = unsafe { (functions.ctx_synchronize)() };
+            if status != CUDA_SUCCESS {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Synchronize,
+                    "cuCtxSynchronize",
+                    Some(status),
+                    None,
+                );
+            }
+
+            let mut output = [0u32; COMPUTE_ELEMENT_COUNT];
+            let status = unsafe {
+                (functions.memcpy_dtoh)(
+                    output.as_mut_ptr().cast(),
+                    resources
+                        .output
+                        .as_ref()
+                        .expect("output allocation")
+                        .handle(),
+                    byte_count,
+                )
+            };
+            if status != CUDA_SUCCESS {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::DeviceToHost,
+                    "cuMemcpyDtoH_v2",
+                    Some(status),
+                    None,
+                );
+            }
+            if output
+                .iter()
+                .zip(input)
+                .any(|(actual, value)| *actual != value * 3 + 7)
+            {
+                return CudaDeviceObservation::with_compute_failure(
+                    metadata,
+                    CudaStage::Mismatch,
+                    "readback_compare",
+                    None,
+                    None,
+                );
+            }
+            metadata
+        })();
+        let cleanup_failures = resources.finalize(functions);
+        if cleanup_failures.is_empty() {
+            observation
+        } else {
+            CudaDeviceObservation::with_cleanup_failures(observation, cleanup_failures)
         }
-        if output
-            .iter()
-            .zip(input)
-            .any(|(actual, value)| *actual != value * 3 + 7)
-        {
-            return CudaDeviceObservation::with_compute_failure(
-                metadata,
-                CudaStage::Mismatch,
-                "readback_compare",
-                None,
-                None,
-            );
-        }
-        metadata
     }
 
     fn is_jit_failure(status: CuResult) -> bool {
@@ -1004,6 +1159,8 @@ DONE:\n\
             jit_log: Vec<u8>,
             jit_overflow: bool,
             releases: Vec<u64>,
+            release_failures: Vec<CudaCleanupTarget>,
+            release_failures_once: bool,
             current_context: bool,
             context_events: Vec<String>,
         }
@@ -1022,6 +1179,8 @@ DONE:\n\
                     jit_log: Vec::new(),
                     jit_overflow: false,
                     releases: Vec::new(),
+                    release_failures: Vec::new(),
+                    release_failures_once: false,
                     current_context: false,
                     context_events: Vec::new(),
                 }
@@ -1040,6 +1199,20 @@ DONE:\n\
 
         fn reset() {
             *state().lock().unwrap() = DispatchState::default();
+        }
+
+        fn should_fail_release(state: &mut DispatchState, target: CudaCleanupTarget) -> bool {
+            let Some(index) = state
+                .release_failures
+                .iter()
+                .position(|candidate| *candidate == target)
+            else {
+                return false;
+            };
+            if state.release_failures_once {
+                state.release_failures.remove(index);
+            }
+            true
         }
 
         #[test]
@@ -1232,9 +1405,13 @@ DONE:\n\
             state
                 .context_events
                 .push(format!("destroy:{}", handle as usize));
-            state.current_context = false;
             state.releases.push(handle as usize as u64);
-            CUDA_SUCCESS
+            if should_fail_release(&mut state, CudaCleanupTarget::Context) {
+                709
+            } else {
+                state.current_context = false;
+                CUDA_SUCCESS
+            }
         }
 
         unsafe extern "system" fn mem_alloc(output: *mut CuDevicePtr, _: usize) -> i32 {
@@ -1258,8 +1435,18 @@ DONE:\n\
         }
 
         unsafe extern "system" fn mem_free(handle: CuDevicePtr) -> i32 {
-            state().lock().unwrap().releases.push(handle);
-            CUDA_SUCCESS
+            let mut state = state().lock().unwrap();
+            state.releases.push(handle);
+            let target = if handle == 3 {
+                CudaCleanupTarget::OutputMemory
+            } else {
+                CudaCleanupTarget::InputMemory
+            };
+            if should_fail_release(&mut state, target) {
+                700 + handle as i32
+            } else {
+                CUDA_SUCCESS
+            }
         }
 
         unsafe extern "system" fn memcpy_htod(
@@ -1329,8 +1516,13 @@ DONE:\n\
         }
 
         unsafe extern "system" fn module_unload(_: CuModule) -> i32 {
-            state().lock().unwrap().releases.push(4);
-            CUDA_SUCCESS
+            let mut state = state().lock().unwrap();
+            state.releases.push(4);
+            if should_fail_release(&mut state, CudaCleanupTarget::Module) {
+                711
+            } else {
+                CUDA_SUCCESS
+            }
         }
 
         unsafe extern "system" fn module_get_function(
@@ -1402,6 +1594,11 @@ DONE:\n\
             CUDA_SUCCESS
         }
 
+        unsafe extern "system" fn get_error_name(_: CuResult, output: *mut *const i8) -> CuResult {
+            unsafe { *output = c"CUDA_ERROR_UNKNOWN".as_ptr() };
+            CUDA_SUCCESS
+        }
+
         fn dispatch() -> CudaFunctions {
             CudaFunctions {
                 init,
@@ -1424,6 +1621,7 @@ DONE:\n\
                 module_get_function,
                 launch_kernel,
                 ctx_synchronize,
+                get_error_name: Some(get_error_name),
             }
         }
 
@@ -1482,6 +1680,76 @@ DONE:\n\
             let result = run_compute(dispatch(), 0, metadata());
             assert_eq!(result.stage, CudaStage::Passed);
             assert_eq!(state().lock().unwrap().releases, [4, 3, 2, 1]);
+        }
+
+        #[test]
+        fn every_cleanup_error_is_reported_after_all_resources_are_released() {
+            let _guard = serial().lock().unwrap();
+            for (target, operation, api_error) in [
+                (CudaCleanupTarget::Module, "cuModuleUnload", 711),
+                (CudaCleanupTarget::OutputMemory, "cuMemFree_v2.output", 703),
+                (CudaCleanupTarget::InputMemory, "cuMemFree_v2.input", 702),
+                (CudaCleanupTarget::Context, "cuCtxDestroy_v2", 709),
+            ] {
+                reset();
+                state().lock().unwrap().release_failures = vec![target];
+                let result = run_compute(dispatch(), 0, metadata());
+                assert_eq!(result.stage, CudaStage::CleanupFailed, "{target:?}");
+                assert_eq!(result.operation.as_deref(), Some(operation), "{target:?}");
+                assert_eq!(result.api_error, Some(api_error), "{target:?}");
+                assert_eq!(result.cleanup_failures.len(), 1, "{target:?}");
+                assert_eq!(result.cleanup_failures[0].target, target);
+                assert_eq!(
+                    result.cleanup_failures[0].symbolic_info,
+                    "CUDA_ERROR_UNKNOWN"
+                );
+                assert_eq!(state().lock().unwrap().releases, [4, 3, 2, 1], "{target:?}");
+                assert!(result.validate(), "{target:?}");
+            }
+        }
+
+        #[test]
+        fn multiple_cleanup_errors_are_bounded_ordered_and_never_double_released() {
+            let _guard = serial().lock().unwrap();
+            reset();
+            state().lock().unwrap().release_failures = vec![
+                CudaCleanupTarget::Module,
+                CudaCleanupTarget::OutputMemory,
+                CudaCleanupTarget::InputMemory,
+                CudaCleanupTarget::Context,
+            ];
+            let result = run_compute(dispatch(), 0, metadata());
+            assert_eq!(result.stage, CudaStage::CleanupFailed);
+            assert_eq!(
+                result
+                    .cleanup_failures
+                    .iter()
+                    .map(|failure| failure.target)
+                    .collect::<Vec<_>>(),
+                [
+                    CudaCleanupTarget::Module,
+                    CudaCleanupTarget::OutputMemory,
+                    CudaCleanupTarget::InputMemory,
+                    CudaCleanupTarget::Context,
+                ]
+            );
+            assert_eq!(state().lock().unwrap().releases, [4, 3, 2, 1]);
+            assert!(result.validate());
+        }
+
+        #[test]
+        fn emergency_drop_releases_only_an_unfinalized_resource_once() {
+            let _guard = serial().lock().unwrap();
+            reset();
+            {
+                let _allocation = DeviceMemory {
+                    handle: Some(2),
+                    release: mem_free,
+                    target: CudaCleanupTarget::InputMemory,
+                    operation: "cuMemFree_v2.input",
+                };
+            }
+            assert_eq!(state().lock().unwrap().releases, [2]);
         }
 
         #[test]
@@ -1618,6 +1886,84 @@ DONE:\n\
                 ["create:0", "destroy:1", "create:1", "destroy:2"]
             );
             assert!(!state.current_context);
+        }
+
+        #[test]
+        fn multi_device_cleanup_failure_is_partial_and_does_not_skip_next_device() {
+            let _guard = serial().lock().unwrap();
+            reset();
+            {
+                let mut state = state().lock().unwrap();
+                state.device_count = 2;
+                state.release_failures = vec![CudaCleanupTarget::Module];
+                state.release_failures_once = true;
+            }
+            let aggregate = collect_with_api(&DispatchApi);
+            assert_eq!(
+                aggregate.status,
+                aexcompat_broker::cuda_compute_probe::CudaAggregateStatus::Partial
+            );
+            assert_eq!(aggregate.devices[0].stage, CudaStage::CleanupFailed);
+            assert_eq!(aggregate.devices[1].stage, CudaStage::Passed);
+            assert!(!aggregate.cuda_compute_ready);
+            let state = state().lock().unwrap();
+            assert_eq!(
+                state.context_events,
+                ["create:0", "destroy:1", "create:1", "destroy:2"]
+            );
+            assert_eq!(state.releases.len(), 8);
+            assert!(!state.current_context);
+        }
+
+        #[test]
+        fn context_cleanup_failure_prevents_next_device_from_using_stale_current_context() {
+            let _guard = serial().lock().unwrap();
+            reset();
+            {
+                let mut state = state().lock().unwrap();
+                state.device_count = 2;
+                state.release_failures = vec![CudaCleanupTarget::Context];
+                state.release_failures_once = true;
+            }
+            let aggregate = collect_with_api(&DispatchApi);
+            assert_eq!(
+                aggregate.status,
+                aexcompat_broker::cuda_compute_probe::CudaAggregateStatus::Failed
+            );
+            assert_eq!(aggregate.devices[0].stage, CudaStage::CleanupFailed);
+            assert_eq!(aggregate.devices[1].stage, CudaStage::Context);
+            assert_eq!(
+                aggregate.devices[1].operation.as_deref(),
+                Some("cuCtxGetCurrent.preexisting_context")
+            );
+            assert!(!aggregate.cuda_compute_ready);
+            let state = state().lock().unwrap();
+            assert_eq!(state.context_events, ["create:0", "destroy:1"]);
+            assert!(state.current_context);
+        }
+
+        #[test]
+        fn current_context_api_error_and_preexisting_context_are_fail_closed() {
+            let _guard = serial().lock().unwrap();
+            reset();
+            state().lock().unwrap().fail_operation = Some("cuCtxGetCurrent");
+            let api_error = run_compute(dispatch(), 0, metadata());
+            assert_eq!(api_error.stage, CudaStage::Context);
+            assert_eq!(api_error.operation.as_deref(), Some("cuCtxGetCurrent"));
+            assert_eq!(api_error.api_error, Some(201));
+            assert!(state().lock().unwrap().releases.is_empty());
+
+            reset();
+            state().lock().unwrap().current_context = true;
+            let preexisting = run_compute(dispatch(), 0, metadata());
+            assert_eq!(preexisting.stage, CudaStage::Context);
+            assert_eq!(
+                preexisting.operation.as_deref(),
+                Some("cuCtxGetCurrent.preexisting_context")
+            );
+            assert_eq!(preexisting.api_error, None);
+            assert!(preexisting.validate());
+            assert!(state().lock().unwrap().releases.is_empty());
         }
 
         #[test]

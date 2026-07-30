@@ -294,7 +294,8 @@
         "stage",
         "operation",
         "api_error",
-        "jit_log"
+        "jit_log",
+        "cleanup_failures"
       ],
       "properties": {
         "ordinal": {
@@ -354,6 +355,7 @@
             "synchronize",
             "device_to_host",
             "mismatch",
+            "cleanup_failed",
             "not_attempted"
           ]
         },
@@ -373,9 +375,102 @@
             { "$ref": "#/$defs/jitLog" },
             { "type": "null" }
           ]
+        },
+        "cleanup_failures": {
+          "type": "array",
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/cleanupFailure" }
         }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": { "stage": { "const": "cleanup_failed" } },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "operation": { "type": "string" },
+              "api_error": {
+                "type": "integer",
+                "not": { "const": 0 }
+              },
+              "jit_log": { "type": "null" },
+              "cleanup_failures": { "minItems": 1 }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "operation": { "const": "cuModuleUnload" },
+                  "cleanup_failures": {
+                    "prefixItems": [
+                      {
+                        "properties": {
+                          "target": { "const": "module" },
+                          "operation": { "const": "cuModuleUnload" }
+                        },
+                        "required": ["target", "operation"]
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "operation": { "const": "cuMemFree_v2.output" },
+                  "cleanup_failures": {
+                    "prefixItems": [
+                      {
+                        "properties": {
+                          "target": { "const": "output_memory" },
+                          "operation": { "const": "cuMemFree_v2.output" }
+                        },
+                        "required": ["target", "operation"]
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "operation": { "const": "cuMemFree_v2.input" },
+                  "cleanup_failures": {
+                    "prefixItems": [
+                      {
+                        "properties": {
+                          "target": { "const": "input_memory" },
+                          "operation": { "const": "cuMemFree_v2.input" }
+                        },
+                        "required": ["target", "operation"]
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "operation": { "const": "cuCtxDestroy_v2" },
+                  "cleanup_failures": {
+                    "prefixItems": [
+                      {
+                        "properties": {
+                          "target": { "const": "context" },
+                          "operation": { "const": "cuCtxDestroy_v2" }
+                        },
+                        "required": ["target", "operation"]
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "else": {
+            "properties": {
+              "cleanup_failures": { "maxItems": 0 }
+            }
+          }
+        },
         {
           "if": {
             "properties": {
@@ -538,6 +633,74 @@
           "maximum": 63
         }
       }
+    },
+    "cleanupFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "operation", "api_error", "symbolic_info"],
+      "properties": {
+        "target": {
+          "enum": ["module", "output_memory", "input_memory", "context"]
+        },
+        "operation": {
+          "enum": [
+            "cuModuleUnload",
+            "cuMemFree_v2.output",
+            "cuMemFree_v2.input",
+            "cuCtxDestroy_v2"
+          ]
+        },
+        "api_error": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647,
+          "not": { "const": 0 }
+        },
+        "symbolic_info": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Z0-9_]+$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "target": { "const": "module" } },
+            "required": ["target"]
+          },
+          "then": {
+            "properties": { "operation": { "const": "cuModuleUnload" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "target": { "const": "output_memory" } },
+            "required": ["target"]
+          },
+          "then": {
+            "properties": { "operation": { "const": "cuMemFree_v2.output" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "target": { "const": "input_memory" } },
+            "required": ["target"]
+          },
+          "then": {
+            "properties": { "operation": { "const": "cuMemFree_v2.input" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "target": { "const": "context" } },
+            "required": ["target"]
+          },
+          "then": {
+            "properties": { "operation": { "const": "cuCtxDestroy_v2" } }
+          }
+        }
+      ]
     },
     "jitLog": {
       "type": "object",

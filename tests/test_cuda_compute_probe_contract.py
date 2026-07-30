@@ -38,6 +38,7 @@ def _device(ordinal=0):
         "operation": None,
         "api_error": None,
         "jit_log": None,
+        "cleanup_failures": [],
     }
 
 
@@ -170,6 +171,96 @@ def test_partial_keeps_devices_but_cannot_claim_ready():
     missing_diagnostic = copy.deepcopy(report)
     missing_diagnostic["aggregate_driver_observation"]["diagnostics"] = []
     assert list(validator.iter_errors(missing_diagnostic))
+
+
+@pytest.mark.parametrize(
+    "target,operation,api_error",
+    (
+        ("module", "cuModuleUnload", 711),
+        ("output_memory", "cuMemFree_v2.output", 703),
+        ("input_memory", "cuMemFree_v2.input", 702),
+        ("context", "cuCtxDestroy_v2", 709),
+    ),
+)
+def test_cleanup_failure_is_structured_and_forces_not_ready(
+    target, operation, api_error
+):
+    validator = _validator()
+    report = _report()
+    device = _device()
+    device.update(
+        {
+            "stage": "cleanup_failed",
+            "operation": operation,
+            "api_error": api_error,
+            "cleanup_failures": [
+                {
+                    "target": target,
+                    "operation": operation,
+                    "api_error": api_error,
+                    "symbolic_info": "CUDA_ERROR_UNKNOWN",
+                }
+            ],
+        }
+    )
+    report["aggregate_driver_observation"] = {
+        "status": "failed",
+        "driver_version": 13000,
+        "devices": [device],
+        "diagnostics": [_diagnostic("device_failure", "device_compute_failed")],
+        "cuda_compute_ready": False,
+    }
+    report["cuda_compute_ready"] = False
+    validator.validate(report)
+
+    wrong_target = copy.deepcopy(report)
+    wrong_target["aggregate_driver_observation"]["devices"][0][
+        "cleanup_failures"
+    ][0]["target"] = "context" if target != "context" else "module"
+    assert list(validator.iter_errors(wrong_target))
+
+    raw_symbolic = copy.deepcopy(report)
+    raw_symbolic["aggregate_driver_observation"]["devices"][0][
+        "cleanup_failures"
+    ][0]["symbolic_info"] = r"C:\Users\name\driver.log"
+    assert list(validator.iter_errors(raw_symbolic))
+
+    success_code = copy.deepcopy(report)
+    success_code["aggregate_driver_observation"]["devices"][0][
+        "cleanup_failures"
+    ][0]["api_error"] = 0
+    assert list(validator.iter_errors(success_code))
+
+
+def test_cleanup_failures_are_bounded_and_only_valid_for_cleanup_stage():
+    validator = _validator()
+    report = _report()
+    failure = {
+        "target": "module",
+        "operation": "cuModuleUnload",
+        "api_error": 711,
+        "symbolic_info": "CUDA_ERROR_UNKNOWN",
+    }
+    report["aggregate_driver_observation"]["devices"][0]["cleanup_failures"] = [
+        failure
+    ]
+    assert list(validator.iter_errors(report))
+
+    report["aggregate_driver_observation"]["devices"][0].update(
+        {
+            "stage": "cleanup_failed",
+            "operation": "cuModuleUnload",
+            "api_error": 711,
+            "cleanup_failures": [failure] * 5,
+        }
+    )
+    report["aggregate_driver_observation"]["status"] = "failed"
+    report["aggregate_driver_observation"]["cuda_compute_ready"] = False
+    report["aggregate_driver_observation"]["diagnostics"] = [
+        _diagnostic("device_failure", "device_compute_failed")
+    ]
+    report["cuda_compute_ready"] = False
+    assert list(validator.iter_errors(report))
 
 
 def test_failed_rejects_a_successful_device_and_observed_rejects_failure():

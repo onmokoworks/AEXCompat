@@ -54,6 +54,7 @@ pub enum CudaStage {
     Synchronize,
     DeviceToHost,
     Mismatch,
+    CleanupFailed,
     NotAttempted,
 }
 
@@ -137,6 +138,37 @@ pub struct PciLocation {
     pub device: u32,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CudaCleanupTarget {
+    Module,
+    OutputMemory,
+    InputMemory,
+    Context,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CudaCleanupFailure {
+    pub target: CudaCleanupTarget,
+    pub operation: String,
+    pub api_error: i32,
+    pub symbolic_info: String,
+}
+
+impl CudaCleanupFailure {
+    fn is_valid(&self) -> bool {
+        self.api_error != 0
+            && valid_operation_name(&self.operation)
+            && valid_symbolic_error(&self.symbolic_info)
+            && match self.target {
+                CudaCleanupTarget::Module => self.operation == "cuModuleUnload",
+                CudaCleanupTarget::OutputMemory => self.operation == "cuMemFree_v2.output",
+                CudaCleanupTarget::InputMemory => self.operation == "cuMemFree_v2.input",
+                CudaCleanupTarget::Context => self.operation == "cuCtxDestroy_v2",
+            }
+    }
+}
+
 impl PciLocation {
     fn is_valid(&self) -> bool {
         self.domain <= 0xffff && self.bus <= 0xff && self.device <= 0x1f
@@ -156,6 +188,7 @@ pub struct CudaDeviceObservation {
     pub operation: Option<String>,
     pub api_error: Option<i32>,
     pub jit_log: Option<JitLogObservation>,
+    pub cleanup_failures: Vec<CudaCleanupFailure>,
 }
 
 impl CudaDeviceObservation {
@@ -180,6 +213,7 @@ impl CudaDeviceObservation {
             operation: None,
             api_error: None,
             jit_log: None,
+            cleanup_failures: Vec::new(),
         }
     }
 
@@ -200,6 +234,7 @@ impl CudaDeviceObservation {
             operation: Some(operation.into()),
             api_error,
             jit_log: None,
+            cleanup_failures: Vec::new(),
         }
     }
 
@@ -214,7 +249,22 @@ impl CudaDeviceObservation {
         metadata.operation = Some(operation.into());
         metadata.api_error = api_error;
         metadata.jit_log = jit_log;
+        metadata.cleanup_failures.clear();
         metadata
+    }
+
+    pub fn with_cleanup_failures(
+        mut observation: Self,
+        cleanup_failures: Vec<CudaCleanupFailure>,
+    ) -> Self {
+        if let Some(first) = cleanup_failures.first() {
+            observation.stage = CudaStage::CleanupFailed;
+            observation.operation = Some(first.operation.clone());
+            observation.api_error = Some(first.api_error);
+            observation.jit_log = None;
+        }
+        observation.cleanup_failures = cleanup_failures;
+        observation
     }
 
     pub fn not_attempted(ordinal: u32, operation: impl Into<String>) -> Self {
@@ -230,6 +280,7 @@ impl CudaDeviceObservation {
             operation: Some(operation.into()),
             api_error: None,
             jit_log: None,
+            cleanup_failures: Vec::new(),
         }
     }
 
@@ -252,9 +303,20 @@ impl CudaDeviceObservation {
             && self.total_memory_bytes.is_some_and(|value| value > 0)
     }
 
-    fn is_valid(&self) -> bool {
+    pub fn validate(&self) -> bool {
         let operation_valid = self.operation.as_deref().is_none_or(valid_operation_name);
         if !operation_valid || self.jit_log.as_ref().is_some_and(|log| !log.is_valid()) {
+            return false;
+        }
+        if self.cleanup_failures.len() > 4
+            || self
+                .cleanup_failures
+                .iter()
+                .any(|failure| !failure.is_valid())
+        {
+            return false;
+        }
+        if self.stage != CudaStage::CleanupFailed && !self.cleanup_failures.is_empty() {
             return false;
         }
         match self.stage {
@@ -263,6 +325,7 @@ impl CudaDeviceObservation {
                     && self.operation.is_none()
                     && self.api_error.is_none()
                     && self.jit_log.is_none()
+                    && self.cleanup_failures.is_empty()
             }
             CudaStage::Metadata | CudaStage::NotAttempted => {
                 self.name.is_none()
@@ -273,6 +336,7 @@ impl CudaDeviceObservation {
                     && self.total_memory_bytes.is_none()
                     && self.operation.is_some()
                     && self.jit_log.is_none()
+                    && self.cleanup_failures.is_empty()
                     && (self.stage != CudaStage::NotAttempted || self.api_error.is_none())
             }
             CudaStage::Mismatch => {
@@ -280,12 +344,23 @@ impl CudaDeviceObservation {
                     && self.operation.is_some()
                     && self.api_error.is_none()
                     && self.jit_log.is_none()
+                    && self.cleanup_failures.is_empty()
             }
             CudaStage::Jit => {
                 self.metadata_complete()
                     && self.operation.is_some()
                     && self.api_error.is_some()
                     && self.jit_log.is_some()
+                    && self.cleanup_failures.is_empty()
+            }
+            CudaStage::CleanupFailed => {
+                let Some(first) = self.cleanup_failures.first() else {
+                    return false;
+                };
+                self.metadata_complete()
+                    && self.operation.as_deref() == Some(first.operation.as_str())
+                    && self.api_error == Some(first.api_error)
+                    && self.jit_log.is_none()
             }
             _ => {
                 self.metadata_complete()
@@ -296,6 +371,7 @@ impl CudaDeviceObservation {
                             .as_deref()
                             .is_some_and(is_null_handle_operation))
                     && self.jit_log.is_none()
+                    && self.cleanup_failures.is_empty()
             }
         }
     }
@@ -341,7 +417,7 @@ impl CudaAggregateObservation {
     pub fn validate(&self) -> bool {
         if self.devices.len() > MAX_CUDA_DEVICES
             || self.diagnostics.len() > MAX_CUDA_DEVICES.saturating_add(16)
-            || self.devices.iter().any(|device| !device.is_valid())
+            || self.devices.iter().any(|device| !device.validate())
             || self.diagnostics.iter().any(|item| !item.is_valid())
             || self
                 .devices
@@ -491,13 +567,24 @@ pub fn collect_with_api(api: &impl CudaProbeApi) -> CudaAggregateObservation {
         .iter()
         .filter(|device| device.stage == CudaStage::Passed)
         .count();
+    let has_not_attempted = devices
+        .iter()
+        .any(|device| device.stage == CudaStage::NotAttempted);
     let limited = count > MAX_CUDA_DEVICES;
-    let (status, diagnostics) = if limited {
+    let (status, diagnostics) = if limited || has_not_attempted {
         (
             CudaAggregateStatus::Partial,
             vec![CudaDiagnostic::new(
-                CudaFailureKind::DeviceLimit,
-                "cuDeviceGetCount.uninspected_limit",
+                if limited {
+                    CudaFailureKind::DeviceLimit
+                } else {
+                    CudaFailureKind::Partial
+                },
+                if limited {
+                    "cuDeviceGetCount.uninspected_limit"
+                } else {
+                    "device_compute_not_attempted"
+                },
                 None,
             )],
         )
@@ -640,6 +727,14 @@ fn is_null_handle_operation(value: &str) -> bool {
 
 fn valid_driver_version(value: u32) -> bool {
     (100..=999_999).contains(&value)
+}
+
+fn valid_symbolic_error(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1000,6 +1095,54 @@ mod tests {
             None,
         )]));
         assert!(!invalid.validate());
+    }
+
+    #[test]
+    fn cleanup_failures_are_structured_bounded_and_fail_closed() {
+        let failed = CudaDeviceObservation::with_cleanup_failures(
+            metadata(0),
+            vec![
+                CudaCleanupFailure {
+                    target: CudaCleanupTarget::Module,
+                    operation: "cuModuleUnload".into(),
+                    api_error: 711,
+                    symbolic_info: "CUDA_ERROR_UNKNOWN".into(),
+                },
+                CudaCleanupFailure {
+                    target: CudaCleanupTarget::Context,
+                    operation: "cuCtxDestroy_v2".into(),
+                    api_error: 709,
+                    symbolic_info: "CUDA_ERROR_UNKNOWN".into(),
+                },
+            ],
+        );
+        assert_eq!(failed.stage, CudaStage::CleanupFailed);
+        assert!(failed.validate());
+        let aggregate = collect_with_api(&mock(vec![failed.clone()]));
+        assert_eq!(aggregate.status, CudaAggregateStatus::Failed);
+        assert!(!aggregate.cuda_compute_ready);
+        assert!(aggregate.validate());
+
+        let mut wrong_operation = failed.clone();
+        wrong_operation.cleanup_failures[0].operation = "cuCtxDestroy_v2".into();
+        assert!(!wrong_operation.validate());
+
+        let mut too_many = failed;
+        too_many.cleanup_failures = vec![too_many.cleanup_failures[0].clone(); 5];
+        assert!(!too_many.validate());
+    }
+
+    #[test]
+    fn all_devices_not_attempted_are_partial_not_failed() {
+        let aggregate = collect_with_api(&mock(vec![
+            CudaDeviceObservation::not_attempted(0, "device_probe.not_attempted"),
+            CudaDeviceObservation::not_attempted(1, "device_probe.not_attempted"),
+        ]));
+        assert_eq!(aggregate.status, CudaAggregateStatus::Partial);
+        assert!(!aggregate.cuda_compute_ready);
+        assert_eq!(aggregate.devices.len(), 2);
+        assert_eq!(aggregate.diagnostics[0].kind, CudaFailureKind::Partial);
+        assert!(aggregate.validate());
     }
 
     fn launch_result(classification: ExitClassification, stdout: &str) -> SecureLaunchResult {
