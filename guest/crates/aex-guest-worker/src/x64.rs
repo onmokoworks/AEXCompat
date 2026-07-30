@@ -93,6 +93,38 @@ const HOST_TRANSFER_RECT8: u64 = STUB_BASE + 0x80420;
 const HOST_ITERATE16: u64 = STUB_BASE + 0x80430;
 const HOST_ITERATE16_CONTINUE: u64 = STUB_BASE + 0x80440;
 const HOST_BLEND: u64 = STUB_BASE + 0x80450;
+const HOST_GPU_GET_DEVICE_COUNT: u64 = STUB_BASE + 0x80600;
+const HOST_GPU_GET_DEVICE_INFO: u64 = STUB_BASE + 0x80610;
+const HOST_GPU_ACQUIRE_EXCLUSIVE: u64 = STUB_BASE + 0x80620;
+const HOST_GPU_RELEASE_EXCLUSIVE: u64 = STUB_BASE + 0x80630;
+const HOST_GPU_ALLOCATE_DEVICE: u64 = STUB_BASE + 0x80640;
+const HOST_GPU_FREE_DEVICE: u64 = STUB_BASE + 0x80650;
+const HOST_GPU_PURGE_DEVICE: u64 = STUB_BASE + 0x80660;
+const HOST_GPU_ALLOCATE_HOST: u64 = STUB_BASE + 0x80670;
+const HOST_GPU_FREE_HOST: u64 = STUB_BASE + 0x80680;
+const HOST_GPU_PURGE_HOST: u64 = STUB_BASE + 0x80690;
+const HOST_GPU_CREATE_WORLD: u64 = STUB_BASE + 0x806a0;
+const HOST_GPU_DISPOSE_WORLD: u64 = STUB_BASE + 0x806b0;
+const HOST_GPU_GET_WORLD_DATA: u64 = STUB_BASE + 0x806c0;
+const HOST_GPU_GET_WORLD_SIZE: u64 = STUB_BASE + 0x806d0;
+const HOST_GPU_GET_WORLD_DEVICE_INDEX: u64 = STUB_BASE + 0x806e0;
+const HOST_GPU_SUITE_CALLBACKS: [u64; 15] = [
+    HOST_GPU_GET_DEVICE_COUNT,
+    HOST_GPU_GET_DEVICE_INFO,
+    HOST_GPU_ACQUIRE_EXCLUSIVE,
+    HOST_GPU_RELEASE_EXCLUSIVE,
+    HOST_GPU_ALLOCATE_DEVICE,
+    HOST_GPU_FREE_DEVICE,
+    HOST_GPU_PURGE_DEVICE,
+    HOST_GPU_ALLOCATE_HOST,
+    HOST_GPU_FREE_HOST,
+    HOST_GPU_PURGE_HOST,
+    HOST_GPU_CREATE_WORLD,
+    HOST_GPU_DISPOSE_WORLD,
+    HOST_GPU_GET_WORLD_DATA,
+    HOST_GPU_GET_WORLD_SIZE,
+    HOST_GPU_GET_WORLD_DEVICE_INDEX,
+];
 const MAX_SMART_CHECKOUT_IDS: usize = 64;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
@@ -101,6 +133,7 @@ const HOST_POINT_PARAM_SUITE: u64 = STUB_BASE + 0x81300;
 const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81400;
 const HOST_WORLD_SUITE: u64 = STUB_BASE + 0x81500;
 const HOST_PF_ANSI_SUITE_V2: u64 = STUB_BASE + 0x81600;
+const HOST_GPU_DEVICE_SUITE_V1: u64 = STUB_BASE + 0x81700;
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
 const HOST_ITERATE8_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x88000;
@@ -131,7 +164,7 @@ const TIMEOUT_MICROSECONDS: u64 = 600_000_000;
 const MAX_TRACE_EVENTS: usize = 50_000;
 const MAX_TRACE_BASIC_BLOCKS: usize = 50_000;
 const MAX_TRACE_BRANCH_EDGES: usize = 100_000;
-const TRACE_STACK_ARGUMENTS: usize = 4;
+const TRACE_STACK_ARGUMENTS: usize = MAX_WIN64_IMPORT_ARGUMENTS - 4;
 const TRACE_FIRST_SAMPLES: usize = 3;
 const TRACE_LAST_SAMPLES: usize = 3;
 const TRACE_DISTINCT_SAMPLES: usize = 16;
@@ -197,7 +230,7 @@ pub enum GuestError {
     StubCapacity,
     #[error("IAT entry is outside the mapped image")]
     IatRange,
-    #[error("unsupported import with nontrivial C++ return: {library}!{symbol}")]
+    #[error("unsupported Win64 import: {library}!{symbol}")]
     UnsupportedImport { library: String, symbol: String },
     #[error("guest data arena exhausted")]
     DataCapacity,
@@ -264,7 +297,11 @@ fn uc<T>(
 }
 
 include!("x64/trace.rs");
+include!("x64/gpu_runtime.rs");
+include!("x64/gpu_suite.rs");
 include!("x64/types.rs");
+include!("x64/imports.rs");
+include!("x64/opencl_imports.rs");
 include!("x64/engine.rs");
 include!("x64/callbacks.rs");
 include!("x64/iterate_and_suites.rs");
@@ -274,4 +311,5 @@ include!("x64/tail.rs");
 mod tests {
     include!("x64/tests_support.rs");
     include!("x64/tests_cases.rs");
+    include!("x64/tests_gpu.rs");
 }

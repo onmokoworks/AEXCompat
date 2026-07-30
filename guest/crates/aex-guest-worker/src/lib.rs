@@ -14,6 +14,7 @@ pub mod backend {
 }
 pub mod classic;
 mod crt_heap;
+pub mod gpu_lifecycle;
 #[cfg(all(
     feature = "native-carrier",
     target_arch = "x86_64",

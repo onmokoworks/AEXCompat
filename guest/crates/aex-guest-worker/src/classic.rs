@@ -8,19 +8,26 @@ use crate::backend::{
     ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue, TraceWatchSpec,
     UnsupportedSuiteCall,
 };
+use crate::gpu_lifecycle::{
+    GpuRenderDiagnostic, LifecycleCall, LifecycleFailure, LifecycleReply, RenderBackendRequest,
+    run_smart_lifecycle,
+};
 use crate::pe::PeImage;
 use crate::pixel::FramePixelFormat;
 
-const CMD_GLOBAL_SETUP: u64 = 1;
-const CMD_GLOBAL_SETDOWN: u64 = 3;
-const CMD_PARAMS_SETUP: u64 = 4;
-const CMD_SEQUENCE_SETUP: u64 = 5;
-const CMD_SEQUENCE_SETDOWN: u64 = 8;
-const CMD_FRAME_SETUP: u64 = 10;
-const CMD_RENDER: u64 = 11;
-const CMD_FRAME_SETDOWN: u64 = 12;
-const CMD_SMART_PRE_RENDER: u64 = 23;
-const CMD_SMART_RENDER: u64 = 24;
+const CMD_GLOBAL_SETUP: u64 = abi::PF_CMD_GLOBAL_SETUP as u64;
+const CMD_GLOBAL_SETDOWN: u64 = abi::PF_CMD_GLOBAL_SETDOWN as u64;
+const CMD_PARAMS_SETUP: u64 = abi::PF_CMD_PARAMS_SETUP as u64;
+const CMD_SEQUENCE_SETUP: u64 = abi::PF_CMD_SEQUENCE_SETUP as u64;
+const CMD_SEQUENCE_SETDOWN: u64 = abi::PF_CMD_SEQUENCE_SETDOWN as u64;
+const CMD_FRAME_SETUP: u64 = abi::PF_CMD_FRAME_SETUP as u64;
+const CMD_RENDER: u64 = abi::PF_CMD_RENDER as u64;
+const CMD_FRAME_SETDOWN: u64 = abi::PF_CMD_FRAME_SETDOWN as u64;
+const CMD_SMART_PRE_RENDER: u64 = abi::PF_CMD_SMART_PRE_RENDER as u64;
+const CMD_SMART_RENDER: u64 = abi::PF_CMD_SMART_RENDER as u64;
+const CMD_SMART_RENDER_GPU: u64 = abi::PF_CMD_SMART_RENDER_GPU as u64;
+const CMD_GPU_DEVICE_SETUP: u64 = abi::PF_CMD_GPU_DEVICE_SETUP as u64;
+const CMD_GPU_DEVICE_SETDOWN: u64 = abi::PF_CMD_GPU_DEVICE_SETDOWN as u64;
 const PARAM_LAYER: i32 = 0;
 const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
@@ -118,6 +125,7 @@ pub struct FailureReport {
     pub schema_version: u32,
     pub execution_backend: &'static str,
     pub error: String,
+    pub gpu: GpuRenderDiagnostic,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_message: Option<String>,
     pub suite_requests: Vec<String>,
@@ -161,6 +169,7 @@ pub struct RenderReport {
     pub setup: SetupReport,
     pub render_error: i32,
     pub render_mode: &'static str,
+    pub gpu: GpuRenderDiagnostic,
     pub width: u32,
     pub height: u32,
     pub pixel_format: &'static str,
@@ -192,6 +201,7 @@ pub struct ClassicHost {
     frame_resources: Option<FrameResources>,
     resident_frames: u64,
     resident_frame_setdown_error: i32,
+    last_gpu_diagnostic: GpuRenderDiagnostic,
 }
 
 #[derive(Clone)]
@@ -446,6 +456,7 @@ impl ClassicHost {
             frame_resources: None,
             resident_frames: 0,
             resident_frame_setdown_error: 0,
+            last_gpu_diagnostic: GpuRenderDiagnostic::pending(RenderBackendRequest::Cpu),
         })
     }
 
@@ -700,6 +711,7 @@ impl ClassicHost {
                 false,
                 false,
                 true,
+                RenderBackendRequest::Cpu,
             )?
             .0;
         if count_frame {
@@ -741,6 +753,7 @@ impl ClassicHost {
             schema_version: 1,
             execution_backend: self.engine.backend_name(),
             error: error.to_string(),
+            gpu: self.last_gpu_diagnostic.clone(),
             return_message,
             suite_requests: self.engine.suite_requests().to_vec(),
             unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
@@ -884,13 +897,21 @@ impl ClassicHost {
         &mut self,
         format: FramePixelFormat,
     ) -> Result<RenderReport, ClassicError> {
+        self.render_default_2x2_format_with_backend(format, RenderBackendRequest::Cpu)
+    }
+
+    pub fn render_default_2x2_format_with_backend(
+        &mut self,
+        format: FramePixelFormat,
+        backend: RenderBackendRequest,
+    ) -> Result<RenderReport, ClassicError> {
         let rgba8 = [
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ];
         let pixels = format
             .promote_rgba8(&rgba8)
             .map_err(|error| ClassicError::Input(error.to_string()))?;
-        self.render_pixels(2, 2, format, &pixels, &[])
+        self.render_pixels_with_backend(2, 2, format, &pixels, &[], backend)
     }
 
     pub fn render_argb8(
@@ -917,6 +938,25 @@ impl ClassicHost {
         input_pixels: &[u8],
         parameter_values: &[ParameterValue],
     ) -> Result<RenderReport, ClassicError> {
+        self.render_pixels_with_backend(
+            width,
+            height,
+            format,
+            input_pixels,
+            parameter_values,
+            RenderBackendRequest::Cpu,
+        )
+    }
+
+    pub fn render_pixels_with_backend(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+        backend: RenderBackendRequest,
+    ) -> Result<RenderReport, ClassicError> {
         self.render_pixels_with_request(
             width,
             height,
@@ -926,6 +966,7 @@ impl ClassicHost {
             [0, 0, width as i32, height as i32],
             false,
             false,
+            backend,
         )
         .map(|(report, _)| report)
     }
@@ -963,6 +1004,7 @@ impl ClassicHost {
             [0, 0, width as i32, height as i32],
             true,
             false,
+            RenderBackendRequest::Cpu,
         )
         .map(|(report, _)| report)
     }
@@ -1003,6 +1045,7 @@ impl ClassicHost {
             output_request,
             false,
             false,
+            RenderBackendRequest::Cpu,
         )
         .map(|(report, _)| report)
     }
@@ -1040,6 +1083,7 @@ impl ClassicHost {
             [0, 0, width as i32, height as i32],
             false,
             true,
+            RenderBackendRequest::Cpu,
         )
     }
 
@@ -1090,6 +1134,7 @@ impl ClassicHost {
         output_request: [i32; 4],
         census_enabled: bool,
         trace_enabled: bool,
+        backend: RenderBackendRequest,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
         self.render_pixels_with_request_mode(
             width,
@@ -1101,6 +1146,7 @@ impl ClassicHost {
             census_enabled,
             trace_enabled,
             false,
+            backend,
         )
     }
 
@@ -1116,7 +1162,9 @@ impl ClassicHost {
         census_enabled: bool,
         trace_enabled: bool,
         persistent_sequence: bool,
+        backend: RenderBackendRequest,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        self.last_gpu_diagnostic = GpuRenderDiagnostic::pending(backend);
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
             return Err(ClassicError::Input(format!(
                 "dimensions must be within 1x1..={MAX_RENDER_WIDTH}x{MAX_RENDER_HEIGHT}, got {width}x{height}"
@@ -1150,6 +1198,16 @@ impl ClassicHost {
             )));
         }
         let smart_render = setup.out_flags2 & (1 << 10) != 0;
+        if backend.is_gpu() && !smart_render {
+            return Err(ClassicError::Input(
+                "OpenCL GPU rendering requires Smart Render support".into(),
+            ));
+        }
+        if backend.is_gpu() && format != FramePixelFormat::Argb32f {
+            return Err(ClassicError::Input(
+                "OpenCL GPU rendering requires argb32f pixel transport".into(),
+            ));
+        }
         if census_enabled && !smart_render {
             return Err(ClassicError::Input(
                 "guest census currently requires Smart Render support".into(),
@@ -1234,6 +1292,8 @@ impl ClassicHost {
             width,
             height,
         );
+        write_i32(&mut input_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
+        write_u32(&mut input_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
         let mut input_definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
         input_definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
             .copy_from_slice(&input_world);
@@ -1301,6 +1361,8 @@ impl ClassicHost {
         write_i32(&mut world, abi::LAYER_WIDTH_OFFSET, width as i32);
         write_i32(&mut world, abi::LAYER_HEIGHT_OFFSET, height as i32);
         write_rect(&mut world, abi::LAYER_EXTENT_HINT_OFFSET, width, height);
+        write_i32(&mut world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
+        write_u32(&mut world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
         self.engine.write(output_world, &world)?;
         self.engine
             .configure_render_pixel_format(format.pf_pixel_format());
@@ -1367,6 +1429,7 @@ impl ClassicHost {
                     output_request,
                     census_enabled,
                     trace_enabled,
+                    backend,
                 )
             } else {
                 if output_request != [0, 0, width as i32, height as i32] {
@@ -1379,7 +1442,9 @@ impl ClassicHost {
                     [CMD_RENDER, self.input, self.output, params, output_world, 0],
                     trace_enabled,
                 )?;
-                Ok((return_value as i32, None, trace.into_iter().collect()))
+                let render_error = return_value as i32;
+                self.last_gpu_diagnostic = GpuRenderDiagnostic::classic_cpu(render_error);
+                Ok((render_error, None, trace.into_iter().collect()))
             }
         })();
         let frame_setdown = self.call_with_optional_trace(
@@ -1483,12 +1548,19 @@ impl ClassicHost {
                 setup,
                 render_error,
                 render_mode: if output_request != [0, 0, width as i32, height as i32] {
-                    "smart-cpu-region"
+                    if backend.is_gpu() {
+                        "smart-opencl-region"
+                    } else {
+                        "smart-cpu-region"
+                    }
+                } else if backend.is_gpu() {
+                    "smart-opencl"
                 } else if smart_render {
                     "smart-cpu"
                 } else {
                     "classic"
                 },
+                gpu: self.last_gpu_diagnostic.clone(),
                 width,
                 height,
                 pixel_format: format.name(),
@@ -1676,6 +1748,7 @@ impl ClassicHost {
         output_request: [i32; 4],
         census_enabled: bool,
         trace_enabled: bool,
+        backend: RenderBackendRequest,
     ) -> Result<(i32, Option<GuestCensus>, Vec<ExecutionTrace>), ClassicError> {
         let input_world = input_param + abi::PARAM_U_OFFSET as u64;
         let mut current_time = [0u8; 4];
@@ -1705,6 +1778,7 @@ impl ClassicHost {
             output_request,
             census_enabled,
             trace_enabled,
+            backend,
         );
         // PF Smart Render plug-ins in the frozen corpus commonly retain a
         // checked-out host world until the selector returns. The world is
@@ -1722,6 +1796,7 @@ impl ClassicHost {
         output_request: [i32; 4],
         census_enabled: bool,
         trace_enabled: bool,
+        backend: RenderBackendRequest,
     ) -> Result<(i32, Option<GuestCensus>, Vec<ExecutionTrace>), ClassicError> {
         let mut traces = Vec::new();
         let pre_input = self.engine.allocate(abi::PF_PRE_RENDER_INPUT_SIZE, 8)?;
@@ -1736,10 +1811,9 @@ impl ClassicHost {
         );
         write_i16(
             &mut pre_input_bytes,
-            abi::SMART_INPUT_BITDEPTH_OFFSET,
+            abi::PRE_INPUT_BITDEPTH_OFFSET,
             format.bit_depth(),
         );
-        self.engine.write(pre_input, &pre_input_bytes)?;
         self.engine
             .write(pre_output, &vec![0u8; abi::PF_PRE_RENDER_OUTPUT_SIZE])?;
         let mut pre_callbacks_bytes = vec![0u8; abi::PF_PRE_RENDER_CALLBACKS_SIZE];
@@ -1767,43 +1841,12 @@ impl ClassicHost {
             pre_callbacks,
         );
         self.engine.write(pre_extra, &pre_extra_bytes)?;
-        let (pre_result, trace) = self.call_with_optional_trace(
-            "SMART_PRE_RENDER",
-            [
-                CMD_SMART_PRE_RENDER,
-                self.input,
-                self.output,
-                params,
-                0,
-                pre_extra,
-            ],
-            trace_enabled,
-        )?;
-        traces.extend(trace);
-        let pre_error = pre_result as i32;
-        if pre_error != 0 {
-            return Err(ClassicError::Selector {
-                selector: "SMART_PRE_RENDER",
-                error: pre_error,
-            });
-        }
-
         let mut pre_output_bytes = vec![0u8; abi::PF_PRE_RENDER_OUTPUT_SIZE];
-        self.engine.read(pre_output, &mut pre_output_bytes)?;
-        let pre_render_data = self.read_guest_u64(pre_output + 40)?;
         let smart_input = self.engine.allocate(abi::PF_SMART_RENDER_INPUT_SIZE, 8)?;
         let smart_callbacks = self
             .engine
             .allocate(abi::PF_SMART_RENDER_CALLBACKS_SIZE, 8)?;
         let smart_extra = self.engine.allocate(abi::PF_SMART_RENDER_EXTRA_SIZE, 8)?;
-        let mut smart_input_bytes = vec![0u8; abi::PF_SMART_RENDER_INPUT_SIZE];
-        write_i16(
-            &mut smart_input_bytes,
-            abi::SMART_INPUT_BITDEPTH_OFFSET,
-            format.bit_depth(),
-        );
-        write_u64(&mut smart_input_bytes, 48, pre_render_data);
-        self.engine.write(smart_input, &smart_input_bytes)?;
         let mut smart_callbacks_bytes = vec![0u8; abi::PF_SMART_RENDER_CALLBACKS_SIZE];
         write_u64(
             &mut smart_callbacks_bytes,
@@ -1833,47 +1876,375 @@ impl ClassicHost {
             smart_callbacks,
         );
         self.engine.write(smart_extra, &smart_extra_bytes)?;
-        if census_enabled {
-            self.engine.begin_block_census()?;
-        }
-        let render_result = self.call_with_optional_trace(
-            "SMART_RENDER",
-            [
-                CMD_SMART_RENDER,
-                self.input,
-                self.output,
-                params,
-                0,
-                smart_extra,
-            ],
-            trace_enabled,
-        );
-        let census = if census_enabled {
-            Some(
+
+        let gpu_buffers = if backend.is_gpu() {
+            Some((
                 self.engine
-                    .finish_block_census(u64::from(width) * u64::from(height))?,
-            )
+                    .allocate(abi::PF_GPU_DEVICE_SETUP_INPUT_SIZE, 8)?,
+                self.engine
+                    .allocate(abi::PF_GPU_DEVICE_SETUP_OUTPUT_SIZE, 8)?,
+                self.engine
+                    .allocate(abi::PF_GPU_DEVICE_SETUP_EXTRA_SIZE, 8)?,
+                self.engine
+                    .allocate(abi::PF_GPU_DEVICE_SETDOWN_INPUT_SIZE, 8)?,
+                self.engine
+                    .allocate(abi::PF_GPU_DEVICE_SETDOWN_EXTRA_SIZE, 8)?,
+            ))
         } else {
             None
         };
-        let (return_value, trace) = render_result?;
-        traces.extend(trace);
-        let render_error = return_value as i32;
-        if render_error != 0 {
-            let callbacks = self.engine.smart_callback_counts();
-            let result_rect = [
-                read_i32(&pre_output_bytes, 0),
-                read_i32(&pre_output_bytes, 4),
-                read_i32(&pre_output_bytes, 8),
-                read_i32(&pre_output_bytes, 12),
-            ];
-            return Err(ClassicError::Input(format!(
-                "SMART_RENDER returned {render_error}; callbacks pre/checkout/output={callbacks:?}, result_rect={result_rect:?}, suite requests={:?}, handle allocations={:?}",
-                self.engine.suite_requests(),
-                self.engine.handle_allocations()
-            )));
+
+        let mut runtime_started = false;
+        let mut transport_prepared = false;
+        let mut transport_finished = false;
+        let mut transport_prepare_error = None;
+        let mut transport_cleanup_error = None;
+        if let RenderBackendRequest::OpenCl { device_index } = backend {
+            if let Err(source) = self.engine.begin_opencl_gpu(device_index) {
+                let mut diagnostic = GpuRenderDiagnostic::pending(backend);
+                diagnostic.runtime_begin_error = Some(source.to_string());
+                diagnostic.device_suite = Some(self.engine.gpu_suite_evidence());
+                diagnostic.opencl = Some(self.engine.opencl_bridge_evidence());
+                diagnostic.cleanup_complete = !self.engine.opencl_gpu_active();
+                self.last_gpu_diagnostic = diagnostic;
+                return Err(ClassicError::Guest(source));
+            }
+            runtime_started = true;
         }
-        Ok((render_error, census, traces))
+
+        let mut execution = run_smart_lifecycle(
+            backend,
+            abi::PF_GPU_FRAMEWORK_OPENCL as i32,
+            abi::PF_RENDER_OUTPUT_FLAG_GPU_RENDER_POSSIBLE as u16,
+            |call| -> Result<LifecycleReply<Option<GuestCensus>, ClassicError>, ClassicError> {
+                match call {
+                    LifecycleCall::Setup {
+                        framework,
+                        device_index,
+                    } => {
+                        let (
+                            setup_input,
+                            setup_output,
+                            setup_extra,
+                            _setdown_input,
+                            _setdown_extra,
+                        ) = gpu_buffers.expect("GPU lifecycle allocated setup buffers");
+                        let mut input_bytes = vec![0u8; abi::PF_GPU_DEVICE_SETUP_INPUT_SIZE];
+                        write_i32(
+                            &mut input_bytes,
+                            abi::GPU_SETUP_INPUT_WHAT_GPU_OFFSET,
+                            framework,
+                        );
+                        write_u32(
+                            &mut input_bytes,
+                            abi::GPU_SETUP_INPUT_DEVICE_INDEX_OFFSET,
+                            device_index,
+                        );
+                        self.engine.write(setup_input, &input_bytes)?;
+                        self.engine.write(
+                            setup_output,
+                            &vec![0u8; abi::PF_GPU_DEVICE_SETUP_OUTPUT_SIZE],
+                        )?;
+                        let mut extra_bytes = vec![0u8; abi::PF_GPU_DEVICE_SETUP_EXTRA_SIZE];
+                        write_u64(
+                            &mut extra_bytes,
+                            abi::GPU_SETUP_EXTRA_INPUT_OFFSET,
+                            setup_input,
+                        );
+                        write_u64(
+                            &mut extra_bytes,
+                            abi::GPU_SETUP_EXTRA_OUTPUT_OFFSET,
+                            setup_output,
+                        );
+                        self.engine.write(setup_extra, &extra_bytes)?;
+                        let (return_value, trace) = self.call_with_optional_trace(
+                            "GPU_DEVICE_SETUP",
+                            [
+                                CMD_GPU_DEVICE_SETUP,
+                                self.input,
+                                self.output,
+                                params,
+                                0,
+                                setup_extra,
+                            ],
+                            trace_enabled,
+                        )?;
+                        traces.extend(trace);
+                        let error = return_value as i32;
+                        let gpu_data = if error == 0 {
+                            self.read_guest_u64(
+                                setup_output + abi::GPU_SETUP_OUTPUT_GPU_DATA_OFFSET as u64,
+                            )
+                            .map_err(ClassicError::from)
+                        } else {
+                            Ok(0)
+                        };
+                        Ok(LifecycleReply::Setup { error, gpu_data })
+                    }
+                    LifecycleCall::PreRender { context } => {
+                        if let Some(context) = context {
+                            write_u64(
+                                &mut pre_input_bytes,
+                                abi::PRE_INPUT_GPU_DATA_OFFSET,
+                                context.gpu_data,
+                            );
+                            write_i32(
+                                &mut pre_input_bytes,
+                                abi::PRE_INPUT_WHAT_GPU_OFFSET,
+                                context.framework,
+                            );
+                            write_u32(
+                                &mut pre_input_bytes,
+                                abi::PRE_INPUT_DEVICE_INDEX_OFFSET,
+                                context.device_index,
+                            );
+                        }
+                        self.engine.write(pre_input, &pre_input_bytes)?;
+                        let (return_value, trace) = self.call_with_optional_trace(
+                            "SMART_PRE_RENDER",
+                            [
+                                CMD_SMART_PRE_RENDER,
+                                self.input,
+                                self.output,
+                                params,
+                                0,
+                                pre_extra,
+                            ],
+                            trace_enabled,
+                        )?;
+                        traces.extend(trace);
+                        self.engine.read(pre_output, &mut pre_output_bytes)?;
+                        let output_flags = u16::from_le_bytes(
+                            pre_output_bytes[abi::PRE_OUTPUT_FLAGS_OFFSET
+                                ..abi::PRE_OUTPUT_FLAGS_OFFSET + abi::PRE_OUTPUT_FLAGS_SIZE]
+                                .try_into()
+                                .expect("PF_PreRenderOutput flags are two bytes"),
+                        );
+                        Ok(LifecycleReply::PreRender {
+                            error: return_value as i32,
+                            output_flags,
+                        })
+                    }
+                    LifecycleCall::RenderCpu | LifecycleCall::RenderGpu { .. } => {
+                        let context = match call {
+                            LifecycleCall::RenderGpu { context } => Some(context),
+                            LifecycleCall::RenderCpu => None,
+                            _ => unreachable!(),
+                        };
+                        let mut smart_input_bytes = vec![0u8; abi::PF_SMART_RENDER_INPUT_SIZE];
+                        write_i16(
+                            &mut smart_input_bytes,
+                            abi::SMART_INPUT_BITDEPTH_OFFSET,
+                            format.bit_depth(),
+                        );
+                        write_u64(
+                            &mut smart_input_bytes,
+                            abi::SMART_INPUT_PRE_RENDER_DATA_OFFSET,
+                            read_u64(&pre_output_bytes, abi::PRE_OUTPUT_PRE_RENDER_DATA_OFFSET),
+                        );
+                        if let Some(context) = context {
+                            write_u64(
+                                &mut smart_input_bytes,
+                                abi::SMART_INPUT_GPU_DATA_OFFSET,
+                                context.gpu_data,
+                            );
+                            write_i32(
+                                &mut smart_input_bytes,
+                                abi::SMART_INPUT_WHAT_GPU_OFFSET,
+                                context.framework,
+                            );
+                            write_u32(
+                                &mut smart_input_bytes,
+                                abi::SMART_INPUT_DEVICE_INDEX_OFFSET,
+                                context.device_index,
+                            );
+                        }
+                        self.engine.write(smart_input, &smart_input_bytes)?;
+                        if census_enabled {
+                            self.engine.begin_block_census()?;
+                        }
+                        let (selector_name, selector) = if context.is_some() {
+                            ("SMART_RENDER_GPU", CMD_SMART_RENDER_GPU)
+                        } else {
+                            ("SMART_RENDER", CMD_SMART_RENDER)
+                        };
+                        if context.is_some() {
+                            match self.engine.prepare_gpu_render_transport() {
+                                Ok(()) => transport_prepared = true,
+                                Err(source) => {
+                                    transport_prepare_error = Some(source.to_string());
+                                    return Err(ClassicError::Guest(source));
+                                }
+                            }
+                        }
+                        let render_result = self.call_with_optional_trace(
+                            selector_name,
+                            [selector, self.input, self.output, params, 0, smart_extra],
+                            trace_enabled,
+                        );
+                        let transport_result = if context.is_some() {
+                            match self.engine.finish_gpu_render_transport() {
+                                Ok(()) => {
+                                    transport_finished = true;
+                                    Ok(())
+                                }
+                                Err(source) => {
+                                    transport_cleanup_error = Some(source.to_string());
+                                    Err(ClassicError::Guest(source))
+                                }
+                            }
+                        } else {
+                            Ok(())
+                        };
+                        let census_result = if census_enabled {
+                            self.engine
+                                .finish_block_census(u64::from(width) * u64::from(height))
+                                .map(Some)
+                                .map_err(ClassicError::from)
+                        } else {
+                            Ok(None)
+                        };
+                        let (return_value, trace) = render_result?;
+                        traces.extend(trace);
+                        if return_value as i32 != 0 {
+                            return Ok(LifecycleReply::Render {
+                                error: return_value as i32,
+                                output: census_result.ok().flatten(),
+                            });
+                        }
+                        let census = census_result?;
+                        transport_result?;
+                        Ok(LifecycleReply::Render {
+                            error: return_value as i32,
+                            output: census,
+                        })
+                    }
+                    LifecycleCall::Setdown { context } => {
+                        let (
+                            _setup_input,
+                            _setup_output,
+                            _setup_extra,
+                            setdown_input,
+                            setdown_extra,
+                        ) = gpu_buffers.expect("GPU lifecycle allocated setdown buffers");
+                        let mut input_bytes = vec![0u8; abi::PF_GPU_DEVICE_SETDOWN_INPUT_SIZE];
+                        write_u64(
+                            &mut input_bytes,
+                            abi::GPU_SETDOWN_INPUT_GPU_DATA_OFFSET,
+                            context.gpu_data,
+                        );
+                        write_i32(
+                            &mut input_bytes,
+                            abi::GPU_SETDOWN_INPUT_WHAT_GPU_OFFSET,
+                            context.framework,
+                        );
+                        write_u32(
+                            &mut input_bytes,
+                            abi::GPU_SETDOWN_INPUT_DEVICE_INDEX_OFFSET,
+                            context.device_index,
+                        );
+                        self.engine.write(setdown_input, &input_bytes)?;
+                        let mut extra_bytes = vec![0u8; abi::PF_GPU_DEVICE_SETDOWN_EXTRA_SIZE];
+                        write_u64(
+                            &mut extra_bytes,
+                            abi::GPU_SETDOWN_EXTRA_INPUT_OFFSET,
+                            setdown_input,
+                        );
+                        self.engine.write(setdown_extra, &extra_bytes)?;
+                        let (return_value, trace) = self.call_with_optional_trace(
+                            "GPU_DEVICE_SETDOWN",
+                            [
+                                CMD_GPU_DEVICE_SETDOWN,
+                                self.input,
+                                self.output,
+                                params,
+                                0,
+                                setdown_extra,
+                            ],
+                            trace_enabled,
+                        )?;
+                        traces.extend(trace);
+                        Ok(LifecycleReply::Setdown {
+                            error: return_value as i32,
+                        })
+                    }
+                }
+            },
+        );
+        let mut runtime_end_error = None;
+        if runtime_started && let Err(source) = self.engine.end_opencl_gpu() {
+            runtime_end_error = Some(source.to_string());
+            apply_runtime_end_failure(&mut execution.result, source);
+        }
+        if backend.is_gpu() {
+            execution.diagnostic.runtime_started = runtime_started;
+            execution.diagnostic.transport_prepared = transport_prepared;
+            execution.diagnostic.transport_finished = transport_finished;
+            execution.diagnostic.runtime_ended = !self.engine.opencl_gpu_active();
+            execution.diagnostic.transport_prepare_error = transport_prepare_error;
+            execution.diagnostic.transport_cleanup_error = transport_cleanup_error;
+            execution.diagnostic.runtime_end_error = runtime_end_error;
+            let device_suite = self.engine.gpu_suite_evidence();
+            let opencl = self.engine.opencl_bridge_evidence();
+            let plugin_cleanup_complete = execution.diagnostic.setup.error != Some(0)
+                || (execution.diagnostic.setdown.completed
+                    && execution.diagnostic.setdown.error == Some(0));
+            execution.diagnostic.cleanup_complete = plugin_cleanup_complete
+                && execution.diagnostic.runtime_ended
+                && (!execution.diagnostic.transport_prepared
+                    || execution.diagnostic.transport_finished)
+                && execution.diagnostic.transport_prepare_error.is_none()
+                && execution.diagnostic.transport_cleanup_error.is_none()
+                && execution.diagnostic.runtime_end_error.is_none()
+                && !device_suite.transport_active
+                && device_suite.live_host_allocations == 0
+                && device_suite.live_gpu_worlds == 0
+                && device_suite.live_borrowed_gpu_worlds == 0
+                && device_suite.live_device_allocations == 0
+                && device_suite.live_bytes == 0
+                && device_suite.cleanup_balanced
+                && opencl.live_buffers == 0
+                && opencl.live_programs == 0
+                && opencl.live_kernels == 0
+                && opencl.cleanup_balanced;
+            execution.diagnostic.device_suite = Some(device_suite);
+            execution.diagnostic.opencl = Some(opencl);
+        }
+        self.last_gpu_diagnostic = execution.diagnostic;
+        match execution.result {
+            Ok(census) => Ok((0, census, traces)),
+            Err(LifecycleFailure::Dispatch { selector, source }) => Err(match source {
+                ClassicError::Guest(source) => ClassicError::SelectorGuest { selector, source },
+                source => source,
+            }),
+            Err(LifecycleFailure::Selector {
+                selector: "SMART_RENDER",
+                error,
+            }) => {
+                let callbacks = self.engine.smart_callback_counts();
+                let result_rect = [
+                    read_i32(&pre_output_bytes, abi::PRE_OUTPUT_RESULT_RECT_OFFSET),
+                    read_i32(&pre_output_bytes, abi::PRE_OUTPUT_RESULT_RECT_OFFSET + 4),
+                    read_i32(&pre_output_bytes, abi::PRE_OUTPUT_RESULT_RECT_OFFSET + 8),
+                    read_i32(&pre_output_bytes, abi::PRE_OUTPUT_RESULT_RECT_OFFSET + 12),
+                ];
+                Err(ClassicError::Input(format!(
+                    "SMART_RENDER returned {error}; callbacks pre/checkout/output={callbacks:?}, result_rect={result_rect:?}, suite requests={:?}, handle allocations={:?}",
+                    self.engine.suite_requests(),
+                    self.engine.handle_allocations()
+                )))
+            }
+            Err(LifecycleFailure::Selector { selector, error }) => {
+                Err(ClassicError::Selector { selector, error })
+            }
+            Err(LifecycleFailure::GpuRenderNotPossible) => Err(ClassicError::Input(
+                "SMART_PRE_RENDER did not set GPU_RENDER_POSSIBLE for the explicit OpenCL request"
+                    .into(),
+            )),
+            Err(LifecycleFailure::InternalContract(message)) => Err(ClassicError::Input(format!(
+                "internal GPU lifecycle contract failure: {message}"
+            ))),
+        }
     }
 
     fn read_guest_u64(&mut self, address: u64) -> Result<u64, GuestError> {
@@ -2262,6 +2633,18 @@ fn selector_failure(selector: &'static str, error: i32) -> Option<ClassicError> 
     (error != 0).then_some(ClassicError::Selector { selector, error })
 }
 
+fn apply_runtime_end_failure<T>(
+    result: &mut Result<T, LifecycleFailure<ClassicError>>,
+    source: GuestError,
+) {
+    if result.is_ok() {
+        *result = Err(LifecycleFailure::Dispatch {
+            selector: "OPENCL_RUNTIME_END",
+            source: ClassicError::Guest(source),
+        });
+    }
+}
+
 fn selector_guest_error(selector: &'static str, source: GuestError) -> ClassicError {
     match source {
         GuestError::SelectorAbort { error, .. } => ClassicError::Selector { selector, error },
@@ -2334,6 +2717,42 @@ mod tests {
             }
         ));
         assert!(selector_failure("FRAME_SETDOWN", 0).is_none());
+    }
+
+    #[test]
+    fn runtime_end_failure_is_promoted_after_a_successful_render_body() {
+        let mut result: Result<&str, LifecycleFailure<ClassicError>> = Ok("rendered");
+        apply_runtime_end_failure(
+            &mut result,
+            GuestError::Callback("unbalanced OpenCL objects".into()),
+        );
+        assert!(matches!(
+            result,
+            Err(LifecycleFailure::Dispatch {
+                selector: "OPENCL_RUNTIME_END",
+                source: ClassicError::Guest(GuestError::Callback(ref message)),
+            }) if message == "unbalanced OpenCL objects"
+        ));
+    }
+
+    #[test]
+    fn runtime_end_failure_does_not_replace_the_primary_selector_error() {
+        let mut result: Result<(), LifecycleFailure<ClassicError>> =
+            Err(LifecycleFailure::Selector {
+                selector: "SMART_RENDER_GPU",
+                error: 25,
+            });
+        apply_runtime_end_failure(
+            &mut result,
+            GuestError::Callback("unbalanced OpenCL objects".into()),
+        );
+        assert!(matches!(
+            result,
+            Err(LifecycleFailure::Selector {
+                selector: "SMART_RENDER_GPU",
+                error: 25,
+            })
+        ));
     }
 
     #[test]

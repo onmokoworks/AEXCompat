@@ -475,6 +475,8 @@ int main() {
   field<decltype(PF_LayerDef::data)>("layer.data", offsetof(PF_LayerDef, data), first);
   field<decltype(PF_LayerDef::world_flags)>("layer.world_flags", offsetof(PF_LayerDef, world_flags), first);
   field<decltype(PF_LayerDef::extent_hint)>("layer.extent_hint", offsetof(PF_LayerDef, extent_hint), first);
+  field<decltype(PF_LayerDef::pix_aspect_ratio)>(
+      "layer.pix_aspect_ratio", offsetof(PF_LayerDef, pix_aspect_ratio), first);
   field<decltype(PF_Pixel::alpha)>("pixel.alpha", offsetof(PF_Pixel, alpha), first);
   field<decltype(PF_Pixel::red)>("pixel.red", offsetof(PF_Pixel, red), first);
   field<decltype(PF_Pixel::green)>("pixel.green", offsetof(PF_Pixel, green), first);
@@ -491,8 +493,14 @@ int main() {
   field<decltype(PF_PreRenderExtra::output)>("pre_extra.output", offsetof(PF_PreRenderExtra, output), first);
   field<decltype(PF_PreRenderExtra::cb)>("pre_extra.callbacks", offsetof(PF_PreRenderExtra, cb), first);
   field<decltype(PF_PreRenderInput::output_request)>("pre_input.output_request", offsetof(PF_PreRenderInput, output_request), first);
+  field<decltype(PF_PreRenderInput::bitdepth)>("pre_input.bitdepth", offsetof(PF_PreRenderInput, bitdepth), first);
+  field<decltype(PF_PreRenderInput::gpu_data)>("pre_input.gpu_data", offsetof(PF_PreRenderInput, gpu_data), first);
+  field<decltype(PF_PreRenderInput::what_gpu)>("pre_input.what_gpu", offsetof(PF_PreRenderInput, what_gpu), first);
+  field<decltype(PF_PreRenderInput::device_index)>("pre_input.device_index", offsetof(PF_PreRenderInput, device_index), first);
   field<decltype(PF_PreRenderOutput::result_rect)>("pre_output.result_rect", offsetof(PF_PreRenderOutput, result_rect), first);
   field<decltype(PF_PreRenderOutput::max_result_rect)>("pre_output.max_result_rect", offsetof(PF_PreRenderOutput, max_result_rect), first);
+  field<decltype(PF_PreRenderOutput::flags)>("pre_output.flags", offsetof(PF_PreRenderOutput, flags), first);
+  field<decltype(PF_PreRenderOutput::pre_render_data)>("pre_output.pre_render_data", offsetof(PF_PreRenderOutput, pre_render_data), first);
   field<decltype(PF_PreRenderCallbacks::checkout_layer)>("pre_callbacks.checkout_layer", offsetof(PF_PreRenderCallbacks, checkout_layer), first);
   field<decltype(PF_SmartRenderExtra::input)>("smart_extra.input", offsetof(PF_SmartRenderExtra, input), first);
   field<decltype(PF_SmartRenderExtra::cb)>("smart_extra.callbacks", offsetof(PF_SmartRenderExtra, cb), first);
@@ -500,6 +508,7 @@ int main() {
   field<decltype(PF_SmartRenderCallbacks::checkin_layer_pixels)>("smart_callbacks.checkin_layer_pixels", offsetof(PF_SmartRenderCallbacks, checkin_layer_pixels), first);
   field<decltype(PF_SmartRenderCallbacks::checkout_output)>("smart_callbacks.checkout_output", offsetof(PF_SmartRenderCallbacks, checkout_output), first);
   field<decltype(PF_SmartRenderInput::bitdepth)>("smart_input.bitdepth", offsetof(PF_SmartRenderInput, bitdepth), first);
+  field<decltype(PF_SmartRenderInput::pre_render_data)>("smart_input.pre_render_data", offsetof(PF_SmartRenderInput, pre_render_data), first);
   field<decltype(PF_SmartRenderInput::gpu_data)>("smart_input.gpu_data", offsetof(PF_SmartRenderInput, gpu_data), first);
   field<decltype(PF_SmartRenderInput::what_gpu)>("smart_input.what_gpu", offsetof(PF_SmartRenderInput, what_gpu), first);
   field<decltype(PF_SmartRenderInput::device_index)>("smart_input.device_index", offsetof(PF_SmartRenderInput, device_index), first);
@@ -631,6 +640,10 @@ int main() {
             << ",\"smart_render_gpu\":" << static_cast<int>(PF_Cmd_SMART_RENDER_GPU)
             << ",\"gpu_device_setup\":" << static_cast<int>(PF_Cmd_GPU_DEVICE_SETUP)
             << ",\"gpu_device_setdown\":" << static_cast<int>(PF_Cmd_GPU_DEVICE_SETDOWN)
+            << "},\n  \"gpu_frameworks\":{\"opencl\":"
+            << static_cast<int>(PF_GPU_Framework_OPENCL)
+            << "},\n  \"render_output_flags\":{\"gpu_render_possible\":"
+            << static_cast<uint32_t>(PF_RenderOutputFlag_GPU_RENDER_POSSIBLE)
             << "},\n  \"out_flags\":{\"i_do_dialog\":"
             << static_cast<uint32_t>(PF_OutFlag_I_DO_DIALOG)
             << ",\"wide_time_input\":"

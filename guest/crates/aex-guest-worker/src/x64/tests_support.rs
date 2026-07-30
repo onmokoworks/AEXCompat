@@ -288,6 +288,7 @@
             .unwrap();
         install_iterate8_suites(&mut unicorn).unwrap();
         install_pf_ansi_suite_v2(&mut unicorn).unwrap();
+        install_gpu_device_suite(&mut unicorn).unwrap();
         unicorn
             .mem_write(
                 HOST_COLOR_PARAM_SUITE,
@@ -1165,6 +1166,314 @@
         // mov rax, rcx; add rax, rdx; ret
         let mut engine = test_engine(&[0x48, 0x89, 0xc8, 0x48, 0x01, 0xd0, 0xc3]);
         assert_eq!(engine.call_win64(CODE, [40, 2, 0, 0, 0, 0]).unwrap(), 42);
+    }
+
+    #[test]
+    fn win64_import_dispatch_is_library_aware_and_case_normalized() {
+        assert_eq!(
+            dispatch_win64_import("UCRTBASE.DLL", "malloc"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Malloc)
+        );
+        assert_eq!(
+            dispatch_win64_import(r"C:\Windows\System32\OPENCL.DLL", "malloc"),
+            Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "malloc"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Malloc)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "unknown_scalar"),
+            Win64ImportDispatch::LegacyZero
+        );
+        assert_eq!(
+            dispatch_win64_import("KERNEL32.DLL", "unknown_system_symbol"),
+            Win64ImportDispatch::LegacyZero
+        );
+        assert_eq!(
+            canonical_import_trace_label(
+                r"C:\Windows\System32\OPENCL.DLL",
+                "clCreateKernel"
+            ),
+            "opencl.dll!clCreateKernel"
+        );
+    }
+
+    #[test]
+    fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
+        let crt_math = "api-ms-win-crt-math-l1-1-0.dll";
+        assert_eq!(
+            dispatch_win64_import(crt_math, "cosf"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CosF)
+        );
+        assert_eq!(
+            dispatch_win64_import(crt_math, "sinf"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::SinF)
+        );
+        assert_eq!(
+            dispatch_win64_import("OpenCL.DLL", "cosf"),
+            Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
+        );
+    }
+
+    #[test]
+    fn win64_crt_sincos_use_xmm0_f32_abi_and_bound_math_trace() {
+        const COSF_IMPORT: u64 = STUB_BASE + 0x1b0;
+        const SINF_IMPORT: u64 = STUB_BASE + 0x1c0;
+
+        fn call_f32(engine: &mut GuestEngine<'static>, import: u64, input: f32) -> f32 {
+            let mut xmm0 = [0u8; 16];
+            xmm0[..4].copy_from_slice(&input.to_le_bytes());
+            engine
+                .unicorn
+                .reg_write_long(RegisterX86::XMM0, &xmm0)
+                .unwrap();
+            engine.call_win64(import, [0; 6]).unwrap();
+            let xmm0 = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+            f32::from_le_bytes(xmm0[..4].try_into().unwrap())
+        }
+
+        let mut engine = test_engine(&[0xc3]);
+        for (import, symbol, expected) in [
+            (COSF_IMPORT, "cosf", LegacyWin64Import::CosF),
+            (SINF_IMPORT, "sinf", LegacyWin64Import::SinF),
+        ] {
+            engine.unicorn.mem_write(import, &[0xc3]).unwrap();
+            assert_eq!(
+                install_win64_import(
+                    &mut engine.unicorn,
+                    import,
+                    "api-ms-win-crt-math-l1-1-0.dll",
+                    symbol,
+                )
+                .unwrap(),
+                Win64ImportDispatch::LegacyImplemented(expected)
+            );
+        }
+
+        assert_eq!(call_f32(&mut engine, COSF_IMPORT, 0.0), 1.0);
+        assert_eq!(call_f32(&mut engine, SINF_IMPORT, 0.0), 0.0);
+        let cosine = call_f32(&mut engine, COSF_IMPORT, std::f32::consts::FRAC_PI_2);
+        let sine = call_f32(&mut engine, SINF_IMPORT, std::f32::consts::FRAC_PI_2);
+        assert!(cosine.is_finite());
+        assert!(cosine.abs() <= f32::EPSILON);
+        assert!(sine.is_finite());
+        assert_eq!(sine, 1.0);
+
+        for _ in 0..40 {
+            assert!(call_f32(&mut engine, COSF_IMPORT, 0.25).is_finite());
+        }
+        let math_calls = &engine.unicorn.get_data().math_calls;
+        assert_eq!(math_calls.len(), 32);
+        assert!(math_calls.iter().any(|call| call.starts_with("cosf(")));
+        assert!(math_calls.iter().any(|call| call.starts_with("sinf(")));
+    }
+
+    #[test]
+    fn opencl_bridge_symbols_and_unsupported_gpu_libraries_are_explicit() {
+        for (symbol, expected) in [
+            (
+                "clCreateProgramWithSource",
+                OpenClBridgeSymbol::CreateProgramWithSource,
+            ),
+            ("clBuildProgram", OpenClBridgeSymbol::BuildProgram),
+            ("clCreateKernel", OpenClBridgeSymbol::CreateKernel),
+            ("clSetKernelArg", OpenClBridgeSymbol::SetKernelArg),
+            (
+                "clEnqueueNDRangeKernel",
+                OpenClBridgeSymbol::EnqueueNdRangeKernel,
+            ),
+            ("clReleaseKernel", OpenClBridgeSymbol::ReleaseKernel),
+        ] {
+            assert_eq!(
+                dispatch_win64_import("OpenCL.DLL", symbol),
+                Win64ImportDispatch::OpenClBridge(expected)
+            );
+        }
+        assert_eq!(
+            dispatch_win64_import("opencl.dll", "clCreateBuffer"),
+            Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
+        );
+        for (library, family) in [
+            ("NVCUDA.DLL", GpuImportLibrary::Cuda),
+            ("cudart64_12.dll", GpuImportLibrary::Cuda),
+            (r"C:\CUDA\bin\CUBLAS64_12.DLL", GpuImportLibrary::Cuda),
+            ("cublasLt64_12.dll", GpuImportLibrary::Cuda),
+            ("cufft64_11.dll", GpuImportLibrary::Cuda),
+            ("cudnn64_9.dll", GpuImportLibrary::Cuda),
+            ("cudnn_ops_infer64_8.dll", GpuImportLibrary::Cuda),
+            ("cusparse64_12.dll", GpuImportLibrary::Cuda),
+            ("d3d11.dll", GpuImportLibrary::DirectX),
+            ("D3DCOMPILER_47.DLL", GpuImportLibrary::DirectX),
+            ("dxgi.dll", GpuImportLibrary::DirectX),
+            ("DXCORE.DLL", GpuImportLibrary::DirectX),
+        ] {
+            assert_eq!(
+                dispatch_win64_import(library, "same_symbol"),
+                Win64ImportDispatch::UnsupportedGpuLibrary(family)
+            );
+        }
+        for library in [
+            "cublast64_12.dll",
+            "cufftest64_11.dll",
+            "cudnnot64_8.dll",
+            "dxcore_helper.dll",
+        ] {
+            assert_eq!(
+                dispatch_win64_import(library, "same_symbol"),
+                Win64ImportDispatch::LegacyZero
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_opencl_import_traps_instead_of_returning_zero_success() {
+        const IMPORT: u64 = STUB_BASE + 0x1a0;
+        let mut code = vec![0x48, 0xb8];
+        code.extend_from_slice(&IMPORT.to_le_bytes());
+        code.extend_from_slice(&[0xff, 0xd0, 0xc3]);
+        let mut engine = test_engine(&code);
+        engine
+            .unicorn
+            .mem_write(IMPORT, &[0x31, 0xc0, 0xc3])
+            .unwrap();
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                IMPORT,
+                r"C:\Windows\System32\OPENCL.DLL",
+                "clUnknownExtension"
+            )
+            .unwrap(),
+            Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
+        );
+
+        let error = engine.call_win64(TEST_CODE, [0; 6]).unwrap_err();
+        assert!(matches!(
+            error,
+            GuestError::UnsupportedImport { library, symbol }
+                if library == "opencl.dll" && symbol == "clUnknownExtension"
+        ));
+    }
+
+    #[test]
+    fn cuda_and_directx_family_imports_trap_instead_of_returning_zero_success() {
+        const IMPORT: u64 = STUB_BASE + 0x1d0;
+        for (library, normalized, symbol, family) in [
+            (
+                r"C:\CUDA\bin\CUBLAS64_12.DLL",
+                "cublas64_12.dll",
+                "cublasCreate_v2",
+                GpuImportLibrary::Cuda,
+            ),
+            (
+                r"C:\Windows\System32\DXCORE.DLL",
+                "dxcore.dll",
+                "DXCoreCreateAdapterFactory",
+                GpuImportLibrary::DirectX,
+            ),
+        ] {
+            let mut code = vec![0x48, 0xb8];
+            code.extend_from_slice(&IMPORT.to_le_bytes());
+            code.extend_from_slice(&[0xff, 0xd0, 0xc3]);
+            let mut engine = test_engine(&code);
+            engine
+                .unicorn
+                .mem_write(IMPORT, &[0x31, 0xc0, 0xc3])
+                .unwrap();
+            assert_eq!(
+                install_win64_import(
+                    &mut engine.unicorn,
+                    IMPORT,
+                    library,
+                    symbol,
+                )
+                .unwrap(),
+                Win64ImportDispatch::UnsupportedGpuLibrary(family)
+            );
+
+            let error = engine.call_win64(TEST_CODE, [0; 6]).unwrap_err();
+            assert!(matches!(
+                error,
+                GuestError::UnsupportedImport {
+                    library,
+                    symbol: trapped_symbol
+                } if library == normalized && trapped_symbol == symbol
+            ));
+        }
+    }
+
+    #[test]
+    fn win64_import_argument_reader_supports_twelve_total_arguments() {
+        let mut engine = test_engine(&[0xc3]);
+        engine
+            .unicorn
+            .add_code_hook(TEST_CODE, TEST_CODE, |unicorn, _, _| {
+                for index in 0..MAX_WIN64_IMPORT_ARGUMENTS {
+                    match read_win64_import_argument(unicorn, index) {
+                        Ok(value) if value == index as u64 + 1 => {}
+                        Ok(value) => {
+                            unicorn.get_data_mut().callback_error = Some(format!(
+                                "argument {} was {value}, expected {}",
+                                index + 1,
+                                index + 1
+                            ));
+                            return;
+                        }
+                        Err(error) => {
+                            unicorn.get_data_mut().callback_error = Some(error);
+                            return;
+                        }
+                    }
+                }
+                if read_win64_import_argument(unicorn, MAX_WIN64_IMPORT_ARGUMENTS).is_ok() {
+                    unicorn.get_data_mut().callback_error =
+                        Some("argument reader accepted a thirteenth argument".into());
+                }
+            })
+            .unwrap();
+        let arguments = (1..=MAX_WIN64_IMPORT_ARGUMENTS as u64).collect::<Vec<_>>();
+        engine
+            .call_win64_with_timeout(TEST_CODE, &arguments, TIMEOUT_MICROSECONDS)
+            .unwrap();
+    }
+
+    #[test]
+    fn import_trace_records_twelve_total_win64_arguments() {
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.get_data_mut().trace_labels.insert(
+            TEST_CODE,
+            TraceLabel {
+                kind: TraceLabelKind::Import,
+                name: canonical_import_trace_label("OPENCL.DLL", "clTraceFixture"),
+            },
+        );
+        engine.begin_execution_trace("GPU_DEVICE_SETUP", TEST_CODE).unwrap();
+        let arguments = (1..=MAX_WIN64_IMPORT_ARGUMENTS as u64).collect::<Vec<_>>();
+        let result = engine
+            .call_win64_with_timeout(TEST_CODE, &arguments, TIMEOUT_MICROSECONDS)
+            .unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+        let import = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "import_call")
+            .unwrap();
+        assert_eq!(import.name.as_deref(), Some("opencl.dll!clTraceFixture"));
+        assert_eq!(import.arguments.len(), 4);
+        assert_eq!(import.stack_arguments.len(), 8);
+        assert_eq!(
+            import
+                .stack_arguments
+                .iter()
+                .map(|argument| argument.index)
+                .collect::<Vec<_>>(),
+            (5..=12).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            import.stack_arguments[7].value.raw,
+            MAX_WIN64_IMPORT_ARGUMENTS as u64
+        );
     }
 
     #[test]

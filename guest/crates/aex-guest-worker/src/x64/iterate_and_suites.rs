@@ -1069,6 +1069,16 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         finish_acquire_suite_success(unicorn);
         return;
     }
+    if name == "PF GPU Device Suite"
+        && version == 1
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_GPU_DEVICE_SUITE_V1.to_le_bytes())
+            .is_ok()
+    {
+        finish_acquire_suite_success(unicorn);
+        return;
+    }
     if name == "PF ANSI Suite"
         && version == 2
         && output != 0
@@ -2161,14 +2171,22 @@ fn emulate_get_world_pixel_format(unicorn: &mut Unicorn<'_, GuestState>, _: u64,
     let output = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
     let pixel_format = unicorn
         .get_data()
+        .gpu_suite
         .worlds
         .get(&world)
-        .map(|record| record.pixel_format)
+        .map(|_| PF_PIXEL_FORMAT_GPU_BGRA128)
+        .or_else(|| {
+            unicorn
+                .get_data()
+                .worlds
+                .get(&world)
+                .map(|record| record.pixel_format)
+        })
         .or_else(|| {
             (world != 0
                 && (world == unicorn.get_data().smart_input_world
                     || world == unicorn.get_data().smart_output_world))
-                .then_some(unicorn.get_data().smart_pixel_format)
+                .then_some(unicorn.get_data().render_pixel_format)
         })
         .or_else(|| {
             if world == 0 {

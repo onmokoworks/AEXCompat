@@ -10,6 +10,7 @@ native-carrier = []
 
 [dependencies]
 aex-abi = { path = "../aex-abi" }
+aex-apple-opencl = { path = "../aex-apple-opencl" }
 aex-unicorn-buffer = { path = "../aex-unicorn-buffer" }
 goblin.workspace = true
 iced-x86.workspace = true

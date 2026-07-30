@@ -14,6 +14,7 @@
 #![allow(unsafe_code)]
 
 use aex_abi::x86_64_windows as abi;
+use aex_apple_opencl::ObjectCounts;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
@@ -22,6 +23,7 @@ use std::ptr;
 use thiserror::Error;
 
 use crate::crt_heap::CrtHeap;
+use crate::gpu_lifecycle::{GpuSuiteEvidence, OpenClBridgeEvidence};
 #[cfg(test)]
 use crate::native_aegp_memory::active_arena_next;
 use crate::native_aegp_memory::{
@@ -693,6 +695,42 @@ impl GuestEngine<'static> {
 
     pub fn suite_requests(&self) -> &[String] {
         &self.state.suite_requests
+    }
+
+    pub(crate) fn begin_opencl_gpu(&mut self, _: u32) -> Result<(), GuestError> {
+        Err(GuestError::Callback(
+            "OpenCL GPU rendering is available only in the Unicorn worker".into(),
+        ))
+    }
+
+    pub(crate) fn end_opencl_gpu(&mut self) -> Result<ObjectCounts, GuestError> {
+        Err(GuestError::Callback(
+            "OpenCL GPU runtime is not active in the native carrier".into(),
+        ))
+    }
+
+    pub(crate) fn prepare_gpu_render_transport(&mut self) -> Result<(), GuestError> {
+        Err(GuestError::Callback(
+            "OpenCL GPU transport is unavailable in the native carrier".into(),
+        ))
+    }
+
+    pub(crate) fn finish_gpu_render_transport(&mut self) -> Result<(), GuestError> {
+        Err(GuestError::Callback(
+            "OpenCL GPU transport is unavailable in the native carrier".into(),
+        ))
+    }
+
+    pub(crate) fn opencl_gpu_active(&self) -> bool {
+        false
+    }
+
+    pub(crate) fn gpu_suite_evidence(&self) -> GpuSuiteEvidence {
+        GpuSuiteEvidence::default()
+    }
+
+    pub fn opencl_bridge_evidence(&self) -> OpenClBridgeEvidence {
+        OpenClBridgeEvidence::default()
     }
 
     pub fn unsupported_suite_calls(&self) -> &[UnsupportedSuiteCall] {

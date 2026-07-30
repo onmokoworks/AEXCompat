@@ -106,164 +106,12 @@ impl GuestEngine<'static> {
                     "write import stub",
                     unicorn.mem_write(stub, &[0x31, 0xc0, 0xc3]),
                 )?;
-                match symbol.name.as_str() {
-                    "malloc" => {
-                        uc("write malloc return", unicorn.mem_write(stub, &[0xc3]))?;
-                        uc(
-                            "install malloc import",
-                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                                emulate_crt_malloc(unicorn, false);
-                            }),
-                        )?;
-                    }
-                    "calloc" => {
-                        uc("write calloc return", unicorn.mem_write(stub, &[0xc3]))?;
-                        uc(
-                            "install calloc import",
-                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                                emulate_crt_malloc(unicorn, true);
-                            }),
-                        )?;
-                    }
-                    "free" => {
-                        uc("write free return", unicorn.mem_write(stub, &[0xc3]))?;
-                        uc(
-                            "install free import",
-                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                                emulate_crt_free(unicorn);
-                            }),
-                        )?;
-                    }
-                    "_callnewh" => {
-                        // No new-handler is installed by this bounded host.
-                        // Returning zero tells the MSVC allocation path not to retry.
-                    }
-                    "strncpy" => {
-                        uc(
-                            "install strncpy import",
-                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                                emulate_strncpy(unicorn);
-                            }),
-                        )?;
-                    }
-                    "memset" => {
-                        uc(
-                            "install memset import",
-                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                                emulate_memset(unicorn);
-                            }),
-                        )?;
-                    }
-                    "memcpy" | "memmove" => {
-                        uc(
-                            "write CRT memory-copy return",
-                            unicorn.mem_write(stub, &[0xc3]),
-                        )?;
-                        uc(
-                            "install CRT memory-copy import",
-                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                                emulate_crt_memory_copy(unicorn);
-                            }),
-                        )?;
-                    }
-                    "_CxxThrowException" => {
-                        uc("write C++ throw trap", unicorn.mem_write(stub, &[0xc3]))?;
-                        uc(
-                            "install C++ throw trap",
-                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                                emulate_cxx_throw_exception(unicorn);
-                            }),
-                        )?;
-                    }
-                    "expf" => install_float_import(&mut unicorn, stub, "expf", f32::exp)?,
-                    "floorf" => install_float_import(&mut unicorn, stub, "floorf", f32::floor)?,
-                    "powf" => install_float_binary_import(&mut unicorn, stub, "powf", f32::powf)?,
-                    "pow" => install_double_binary_import(&mut unicorn, stub, "pow", f64::powf)?,
-                    "omp_get_max_threads" => {
-                        let value = deterministic_import_i32("omp_get_max_threads")
-                            .expect("known deterministic import");
-                        uc(
-                            "install omp_get_max_threads import",
-                            unicorn.mem_write(stub, &deterministic_i32_stub(value)),
-                        )?;
-                    }
-                    "_vcomp_fork" => {
-                        // Marshal the captured arguments, then tail-jump into
-                        // the outlined worker so it returns to the caller.
-                        uc(
-                            "write _vcomp_fork tail jump",
-                            unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
-                        )?;
-                        uc(
-                            "install _vcomp_fork import",
-                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                                emulate_vcomp_fork(unicorn);
-                            }),
-                        )?;
-                    }
-                    "_vcomp_for_dynamic_init" => {
-                        uc(
-                            "write _vcomp_for_dynamic_init return",
-                            unicorn.mem_write(stub, &[0xc3]),
-                        )?;
-                        uc(
-                            "install _vcomp_for_dynamic_init import",
-                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                                emulate_vcomp_for_dynamic_init(unicorn);
-                            }),
-                        )?;
-                    }
-                    "_vcomp_for_dynamic_next" => {
-                        uc(
-                            "write _vcomp_for_dynamic_next return",
-                            unicorn.mem_write(stub, &[0xc3]),
-                        )?;
-                        uc(
-                            "install _vcomp_for_dynamic_next import",
-                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                                emulate_vcomp_for_dynamic_next(unicorn);
-                            }),
-                        )?;
-                    }
-                    "_vcomp_for_static_simple_init" => {
-                        uc(
-                            "write _vcomp_for_static_simple_init return",
-                            unicorn.mem_write(stub, &[0xc3]),
-                        )?;
-                        uc(
-                            "install _vcomp_for_static_simple_init import",
-                            unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                                emulate_vcomp_for_static_simple_init(unicorn);
-                            }),
-                        )?;
-                    }
-                    "_vcomp_enter_critsect"
-                    | "_vcomp_leave_critsect"
-                    | "_vcomp_barrier"
-                    | "_vcomp_for_static_end" => {
-                        // The worker is deliberately single-threaded, so these
-                        // synchronization/end helpers are deterministic no-ops.
-                    }
-                    name if name.starts_with("_vcomp_") => {
-                        return Err(GuestError::Callback(format!(
-                            "unsupported VCOMP import: {name}"
-                        )));
-                    }
-                    name if msvc_udt_by_value_return_import(name) => {
-                        install_unsupported_import_trap(
-                            &mut unicorn,
-                            stub,
-                            library.name.clone(),
-                            name.to_string(),
-                        )?;
-                    }
-                    _ => {}
-                }
+                install_win64_import(&mut unicorn, stub, &library.name, &symbol.name)?;
                 unicorn.get_data_mut().trace_labels.insert(
                     stub,
                     TraceLabel {
                         kind: TraceLabelKind::Import,
-                        name: format!("{}!{}", library.name, symbol.name),
+                        name: canonical_import_trace_label(&library.name, &symbol.name),
                     },
                 );
                 let iat_rva = u64::try_from(symbol.iat_rva).map_err(|_| GuestError::IatRange)?;
@@ -717,6 +565,10 @@ impl GuestEngine<'static> {
         )?;
         install_iterate8_suites(&mut unicorn)?;
         install_pf_ansi_suite_v2(&mut unicorn)?;
+        install_gpu_device_suite(&mut unicorn).map_err(|error| GuestError::Unicorn {
+            operation: "install PF GPU Device Suite",
+            detail: error.to_string(),
+        })?;
         uc(
             "write PF ColorParamSuite",
             unicorn.mem_write(
@@ -799,6 +651,24 @@ impl GuestEngine<'static> {
             (HOST_TRANSFER_RECT8, "transfer_rect8"),
             (HOST_ITERATE16, "iterate16"),
             (HOST_ITERATE16_CONTINUE, "iterate16_continue"),
+            (HOST_GPU_GET_DEVICE_COUNT, "gpu_get_device_count"),
+            (HOST_GPU_GET_DEVICE_INFO, "gpu_get_device_info"),
+            (HOST_GPU_ACQUIRE_EXCLUSIVE, "gpu_acquire_exclusive"),
+            (HOST_GPU_RELEASE_EXCLUSIVE, "gpu_release_exclusive"),
+            (HOST_GPU_ALLOCATE_DEVICE, "gpu_allocate_device_memory"),
+            (HOST_GPU_FREE_DEVICE, "gpu_free_device_memory"),
+            (HOST_GPU_PURGE_DEVICE, "gpu_purge_device_memory"),
+            (HOST_GPU_ALLOCATE_HOST, "gpu_allocate_host_memory"),
+            (HOST_GPU_FREE_HOST, "gpu_free_host_memory"),
+            (HOST_GPU_PURGE_HOST, "gpu_purge_host_memory"),
+            (HOST_GPU_CREATE_WORLD, "gpu_create_world"),
+            (HOST_GPU_DISPOSE_WORLD, "gpu_dispose_world"),
+            (HOST_GPU_GET_WORLD_DATA, "gpu_get_world_data"),
+            (HOST_GPU_GET_WORLD_SIZE, "gpu_get_world_size"),
+            (
+                HOST_GPU_GET_WORLD_DEVICE_INDEX,
+                "gpu_get_world_device_index",
+            ),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,
@@ -1852,6 +1722,10 @@ impl GuestEngine<'static> {
 
     pub fn suite_requests(&self) -> &[String] {
         &self.unicorn.get_data().suite_requests
+    }
+
+    pub fn opencl_bridge_evidence(&self) -> OpenClBridgeEvidence {
+        self.unicorn.get_data().gpu_runtime.opencl_evidence()
     }
 
     pub fn unsupported_suite_calls(&self) -> &[UnsupportedSuiteCall] {

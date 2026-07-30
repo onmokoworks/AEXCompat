@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use aex_guest_worker::backend::TraceWatchSpec;
 use aex_guest_worker::classic::{ClassicHost, ParameterValue};
+use aex_guest_worker::gpu_lifecycle::RenderBackendRequest;
 use aex_guest_worker::pe::PeImage;
 use aex_guest_worker::pixel::FramePixelFormat;
 use sha2::{Digest, Sha256};
@@ -67,6 +68,16 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let render_backend_explicit = remaining_args
+        .iter()
+        .any(|argument| argument == "--render-backend" || argument == "--gpu-device-index");
+    let render_backend = match extract_render_backend(&mut remaining_args) {
+        Ok(backend) => backend,
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            return ExitCode::from(2);
+        }
+    };
     let input = (!remaining_args.is_empty()).then(|| PathBuf::from(remaining_args.remove(0)));
     let output = (!remaining_args.is_empty()).then(|| PathBuf::from(remaining_args.remove(0)));
     let mut trailing_args = remaining_args;
@@ -116,6 +127,12 @@ fn main() -> ExitCode {
         && command != "census-png"
     {
         eprintln!("aex_guest_error: --pixel-format is only valid with render commands or session");
+        return ExitCode::from(2);
+    }
+    if render_backend_explicit && command != "render" && command != "render-png" {
+        eprintln!(
+            "aex_guest_error: render backend options are only valid with render or render-png"
+        );
         return ExitCode::from(2);
     }
     if ((command == "render-png"
@@ -179,7 +196,7 @@ fn main() -> ExitCode {
                 let mut host = ClassicHost::new_with_effect(&image, effect_selector.as_deref())
                     .map_err(|error| CommandFailure::from(error.to_string()))?;
                 let report = host
-                    .render_default_2x2_format(pixel_format)
+                    .render_default_2x2_format_with_backend(pixel_format, render_backend)
                     .map_err(|error| CommandFailure::with_classic_report(&host, error))?;
                 serde_json::to_string_pretty(&report)
                     .map_err(|error| CommandFailure::from(error.to_string()))
@@ -196,6 +213,7 @@ fn main() -> ExitCode {
                 None,
                 effect_selector.as_deref(),
                 pixel_format,
+                render_backend,
             ),
             Some("render-trace-png") => render_png(
                 &image,
@@ -209,6 +227,7 @@ fn main() -> ExitCode {
                 output_pixel,
                 effect_selector.as_deref(),
                 pixel_format,
+                render_backend,
             ),
             Some("render-region-png") => render_png(
                 &image,
@@ -222,6 +241,7 @@ fn main() -> ExitCode {
                 None,
                 effect_selector.as_deref(),
                 pixel_format,
+                render_backend,
             ),
             Some("census-png") => render_png(
                 &image,
@@ -235,6 +255,7 @@ fn main() -> ExitCode {
                 None,
                 effect_selector.as_deref(),
                 pixel_format,
+                render_backend,
             ),
             _ => Err(CommandFailure::from(
                 "command must be inspect, setup, trace-selector, render, render-png, render-trace-png, render-region-png, or census-png".to_string(),
@@ -267,7 +288,7 @@ fn selector_error(return_value: u64) -> Option<i32> {
 
 fn usage() {
     eprintln!(
-        "usage: aex-guest-worker <inspect|setup|render> <x64.aex> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>]"
+        "usage: aex-guest-worker <inspect|setup|render> <x64.aex> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--render-backend <cpu|opencl>] [--gpu-device-index <n>]"
     );
     eprintln!(
         "       aex-guest-worker session <x64.aex> <input.raw> <output.raw> <width> <height> <time-scale> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>]"
@@ -276,7 +297,7 @@ fn usage() {
         "       aex-guest-worker trace-selector <x64.aex> <GLOBAL_SETUP|PARAMS_SETUP> [--effect <#index|match-name>]"
     );
     eprintln!(
-        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [name=value | name@slot=a,r,g,b ...]"
+        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--render-backend <cpu|opencl>] [--gpu-device-index <n>] [name=value | name@slot=a,r,g,b ...]"
     );
     eprintln!(
         "       aex-guest-worker render-trace-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--watch <spec>] [--watch-output-pixel x,y] [name=value ...]"
@@ -340,6 +361,71 @@ fn extract_pixel_format(
         arguments.drain(index..=index + 1);
     }
     Ok(format.unwrap_or(FramePixelFormat::Argb8))
+}
+
+fn extract_render_backend(
+    arguments: &mut Vec<std::ffi::OsString>,
+) -> Result<RenderBackendRequest, String> {
+    let mut backend = None;
+    let mut device_index = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        let option = arguments[index].to_str();
+        let target = match option {
+            Some("--render-backend") => Some("backend"),
+            Some("--gpu-device-index") => Some("device"),
+            _ => None,
+        };
+        let Some(target) = target else {
+            index += 1;
+            continue;
+        };
+        if index + 1 >= arguments.len() {
+            return Err(format!(
+                "{} requires a value",
+                arguments[index].to_string_lossy()
+            ));
+        }
+        let value = arguments[index + 1]
+            .to_str()
+            .ok_or_else(|| format!("{} value must be UTF-8", arguments[index].to_string_lossy()))?;
+        match target {
+            "backend" => {
+                if backend.is_some() {
+                    return Err("--render-backend may be specified only once".into());
+                }
+                backend = Some(match value {
+                    "cpu" => "cpu",
+                    "opencl" => "opencl",
+                    _ => return Err("--render-backend requires cpu or opencl".into()),
+                });
+            }
+            "device" => {
+                if device_index.is_some() {
+                    return Err("--gpu-device-index may be specified only once".into());
+                }
+                let parsed = value
+                    .parse::<u32>()
+                    .map_err(|error| format!("invalid GPU device index: {error}"))?;
+                if parsed >= 64 {
+                    return Err("--gpu-device-index must be between 0 and 63".into());
+                }
+                device_index = Some(parsed);
+            }
+            _ => unreachable!(),
+        }
+        arguments.drain(index..=index + 1);
+    }
+    match backend.unwrap_or("cpu") {
+        "cpu" if device_index.is_some() => {
+            Err("--gpu-device-index requires --render-backend opencl".into())
+        }
+        "cpu" => Ok(RenderBackendRequest::Cpu),
+        "opencl" => Ok(RenderBackendRequest::OpenCl {
+            device_index: device_index.unwrap_or(0),
+        }),
+        _ => unreachable!(),
+    }
 }
 
 fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
@@ -423,6 +509,7 @@ fn render_png(
     output_pixel: Option<[u32; 2]>,
     effect_selector: Option<&str>,
     pixel_format: FramePixelFormat,
+    render_backend: RenderBackendRequest,
 ) -> Result<String, CommandFailure> {
     let input_png_sha256 = fs::read(input)
         .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
@@ -462,7 +549,14 @@ fn render_png(
                 )
                 .map(|report| (report, Vec::new())),
             (None, false) => host
-                .render_pixels(width, height, pixel_format, &input_pixels, parameter_values)
+                .render_pixels_with_backend(
+                    width,
+                    height,
+                    pixel_format,
+                    &input_pixels,
+                    parameter_values,
+                    render_backend,
+                )
                 .map(|report| (report, Vec::new())),
         }
     };
@@ -715,9 +809,10 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_effect_selector, extract_pixel_format, parse_parameter_values, parse_trace_watches,
-        selector_error,
+        extract_effect_selector, extract_pixel_format, extract_render_backend,
+        parse_parameter_values, parse_trace_watches, selector_error,
     };
+    use aex_guest_worker::gpu_lifecycle::RenderBackendRequest;
     use aex_guest_worker::pixel::FramePixelFormat;
     use std::ffi::OsString;
 
@@ -776,6 +871,48 @@ mod tests {
         );
         values.extend([OsString::from("--pixel-format"), OsString::from("rgba8")]);
         assert!(extract_pixel_format(&mut values).is_err());
+    }
+
+    #[test]
+    fn render_backend_is_explicit_bounded_and_defaults_to_cpu() {
+        let mut values = vec![
+            OsString::from("input.png"),
+            OsString::from("--gpu-device-index"),
+            OsString::from("3"),
+            OsString::from("--render-backend"),
+            OsString::from("opencl"),
+            OsString::from("output.png"),
+        ];
+        assert_eq!(
+            extract_render_backend(&mut values).unwrap(),
+            RenderBackendRequest::OpenCl { device_index: 3 }
+        );
+        assert_eq!(
+            values,
+            [OsString::from("input.png"), OsString::from("output.png")]
+        );
+        assert_eq!(
+            extract_render_backend(&mut values).unwrap(),
+            RenderBackendRequest::Cpu
+        );
+
+        for arguments in [
+            vec![OsString::from("--render-backend"), OsString::from("metal")],
+            vec![
+                OsString::from("--render-backend"),
+                OsString::from("cpu"),
+                OsString::from("--gpu-device-index"),
+                OsString::from("1"),
+            ],
+            vec![
+                OsString::from("--render-backend"),
+                OsString::from("opencl"),
+                OsString::from("--gpu-device-index"),
+                OsString::from("64"),
+            ],
+        ] {
+            assert!(extract_render_backend(&mut arguments.clone()).is_err());
+        }
     }
 
     #[test]

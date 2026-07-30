@@ -392,7 +392,7 @@ fn install_unsupported_import_trap(
     symbol: String,
 ) -> Result<(), GuestError> {
     uc(
-        "install unsupported C++ object-return import trap",
+        "install unsupported Win64 import trap",
         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
             if unicorn.get_data().unsupported_import.is_none() {
                 unicorn.get_data_mut().unsupported_import = Some((library.clone(), symbol.clone()));
