@@ -601,9 +601,16 @@ fn gpu_render_transport_swaps_bgra_tokens_and_restores_argb32f_worlds() {
 fn remaining_cuda_toolkit_dll_family_boundaries_are_bounded() {
     for library in [
         r"C:\CUDA\bin\NVJITLINK.DLL",
+        "nvjitlink_120_0.dll",
         "nvFatbin.dll",
+        "nvfatbin_120_0.dll",
         "nvblas.dll",
+        "nvblas64_12.dll",
+        "nvvm64_40_0.dll",
+        "nvrtc64_120_0.alt.dll",
         "nvjpeg64_12.dll",
+        "npp64_11.dll",
+        "nppi64_11.dll",
         "nppc64_12.dll",
         "nppial64_12.dll",
         "nppicom64_11.dll",
@@ -613,8 +620,6 @@ fn remaining_cuda_toolkit_dll_family_boundaries_are_bounded() {
         "nvToolsExt64_1.dll",
         "cupti64_2026.2.0.dll",
         "cupti.dll",
-        "cufile.dll",
-        "cufile_rdma.dll",
     ] {
         assert_eq!(
             dispatch_win64_import(library, "same_symbol"),
@@ -625,13 +630,21 @@ fn remaining_cuda_toolkit_dll_family_boundaries_are_bounded() {
 
     for library in [
         "nvjitlink_helper.dll",
+        "nvjitlink64_120_0.dll",
+        "nvjitlink_120_0beta.dll",
         "nvfatbinary.dll",
+        "nvfatbin_120_x.dll",
         "nvblast.dll",
+        "nvblas64_.dll",
+        "nvvm64_40_0rc.dll",
+        "nvrtc64_120_0.alternate.dll",
         "nvjpeg64_beta.dll",
         "nppfake64_12.dll",
         "nppc64_12beta.dll",
         "nvtoolsextension64_1.dll",
         "cuptical64_2026.2.0.dll",
+        "cufile.dll",
+        "cufile_rdma.dll",
         "cufile_helper.dll",
     ] {
         assert_eq!(
@@ -652,6 +665,11 @@ fn nvjitlink_npp_and_nvjpeg_imports_trap_instead_of_returning_zero_success() {
             "nvJitLinkCreate",
         ),
         (
+            r"C:\CUDA\bin\NVJITLINK_120_0.DLL",
+            "nvjitlink_120_0.dll",
+            "nvJitLinkCreate",
+        ),
+        (
             r"C:\CUDA\bin\NPPC64_12.DLL",
             "nppc64_12.dll",
             "nppGetLibVersion",
@@ -660,6 +678,11 @@ fn nvjitlink_npp_and_nvjpeg_imports_trap_instead_of_returning_zero_success() {
             r"C:\CUDA\bin\NVJPEG64_12.DLL",
             "nvjpeg64_12.dll",
             "nvjpegCreateSimple",
+        ),
+        (
+            r"C:\CUDA\extras\CUPTI\lib64\CUPTI64_2026.2.0.DLL",
+            "cupti64_2026.2.0.dll",
+            "cuptiActivityEnable",
         ),
     ] {
         let mut code = vec![0x48, 0xb8];

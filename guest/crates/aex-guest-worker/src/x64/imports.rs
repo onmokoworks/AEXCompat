@@ -60,9 +60,9 @@ const EXACT_CUDA_DLLS: &[&str] = &[
     "nvfatbin.dll",
     "nvblas.dll",
     "cupti.dll",
-    "cufile.dll",
-    "cufile_rdma.dll",
 ];
+
+const VERSIONED_CUDA_DLL_FAMILIES: &[&str] = &["nvjitlink", "nvfatbin"];
 
 const VERSIONED_CUDA_64_DLL_FAMILIES: &[&str] = &[
     "cudart",
@@ -79,11 +79,13 @@ const VERSIONED_CUDA_64_DLL_FAMILIES: &[&str] = &[
     "nvjpeg",
     "nvtoolsext",
     "cupti",
+    "nvvm",
+    "nvblas",
 ];
 
 const VERSIONED_NPP_64_DLL_FAMILIES: &[&str] = &[
-    "nppc", "nppial", "nppicc", "nppicom", "nppidei", "nppif", "nppig", "nppim", "nppist",
-    "nppisu", "nppitc", "npps",
+    "npp", "nppi", "nppc", "nppial", "nppicc", "nppicom", "nppidei", "nppif", "nppig", "nppim",
+    "nppist", "nppisu", "nppitc", "npps",
 ];
 
 fn normalize_import_library_name(library: &str) -> String {
@@ -102,12 +104,28 @@ fn version_suffix_is_numeric(version: &str) -> bool {
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
+fn cuda_64_version_suffix<'a>(library: &'a str, family: &str) -> Option<&'a str> {
+    library
+        .strip_suffix(".dll")?
+        .strip_prefix(family)?
+        .strip_prefix("64_")
+}
+
 fn is_versioned_cuda_dll(library: &str, family: &str) -> bool {
-    let Some(stem) = library.strip_suffix(".dll") else {
-        return false;
-    };
-    stem.strip_prefix(family)
-        .and_then(|suffix| suffix.strip_prefix("64_"))
+    cuda_64_version_suffix(library, family).is_some_and(version_suffix_is_numeric)
+}
+
+fn is_versioned_cuda_alt_dll(library: &str, family: &str) -> bool {
+    cuda_64_version_suffix(library, family)
+        .and_then(|version| version.strip_suffix(".alt"))
+        .is_some_and(version_suffix_is_numeric)
+}
+
+fn is_versioned_cuda_dll_without_arch(library: &str, family: &str) -> bool {
+    library
+        .strip_suffix(".dll")
+        .and_then(|stem| stem.strip_prefix(family))
+        .and_then(|suffix| suffix.strip_prefix('_'))
         .is_some_and(version_suffix_is_numeric)
 }
 
@@ -137,12 +155,16 @@ fn classify_gpu_import_library(library: &str) -> Option<GpuImportLibrary> {
         return Some(GpuImportLibrary::OpenCl);
     }
     if EXACT_CUDA_DLLS.contains(&library.as_str())
+        || VERSIONED_CUDA_DLL_FAMILIES
+            .iter()
+            .any(|family| is_versioned_cuda_dll_without_arch(&library, family))
         || VERSIONED_CUDA_64_DLL_FAMILIES
         .iter()
         .any(|family| is_versioned_cuda_dll(&library, family))
         || VERSIONED_NPP_64_DLL_FAMILIES
             .iter()
             .any(|family| is_versioned_cuda_dll(&library, family))
+        || is_versioned_cuda_alt_dll(&library, "nvrtc")
         || is_versioned_cudnn_dll(&library)
     {
         return Some(GpuImportLibrary::Cuda);
