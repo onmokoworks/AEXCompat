@@ -136,16 +136,55 @@ def test_candidate_evidence_cannot_claim_individual_binding_or_raw_identity():
     assert list(validator.iter_errors(report))
 
 
+PATH_LIKE_METADATA = (
+    r"\Users\name",
+    r"C:Users\name",
+    r"vendor\private",
+    "vendor/private",
+    r"C:\Private\platform",
+    "C:/Private/platform",
+    r"\\server\share",
+    "/usr/lib/vendor",
+    "C:drive-relative",
+)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("name", "vendor", "version", "profile", "extensions", "icd_suffix"),
+)
+@pytest.mark.parametrize("value", PATH_LIKE_METADATA)
+def test_schema_rejects_path_like_platform_metadata(field, value):
+    validator = _validator()
+    report = _report()
+    report["aggregate_loader_observation"]["platforms"][0][field] = (
+        [value] if field == "extensions" else value
+    )
+    assert list(validator.iter_errors(report))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("name", "vendor", "driver_version", "version", "profile", "extensions"),
+)
+@pytest.mark.parametrize("value", PATH_LIKE_METADATA)
+def test_schema_rejects_path_like_device_metadata(field, value):
+    validator = _validator()
+    report = _report()
+    report["aggregate_loader_observation"]["platforms"][0]["devices"][0][field] = (
+        [value] if field == "extensions" else value
+    )
+    assert list(validator.iter_errors(report))
+
+
 @pytest.mark.parametrize(
     "field,value",
     (
-        ("name", r"C:\Private\platform"),
-        ("vendor", "/usr/lib/vendor"),
         ("icd_suffix", "bad suffix"),
         ("extensions", ["cl_ok", "bad extension"]),
     ),
 )
-def test_schema_rejects_paths_and_malformed_platform_fields(field, value):
+def test_schema_rejects_other_malformed_platform_fields(field, value):
     validator = _validator()
     report = _report()
     report["aggregate_loader_observation"]["platforms"][0][field] = value

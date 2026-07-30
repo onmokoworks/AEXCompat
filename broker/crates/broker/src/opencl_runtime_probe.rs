@@ -512,7 +512,7 @@ fn bounded_string(
         || value.len() > MAX_STRING_BYTES
         || value.contains('\0')
         || value.chars().any(|character| character.is_control())
-        || contains_absolute_path(&value)
+        || contains_disallowed_metadata_path(&value)
     {
         return Err(ProbeDiagnostic::simple(
             ProbeFailureKind::Malformed,
@@ -522,18 +522,13 @@ fn bounded_string(
     Ok(value)
 }
 
-fn contains_absolute_path(value: &str) -> bool {
+fn contains_disallowed_metadata_path(value: &str) -> bool {
     let bytes = value.as_bytes();
-    value.starts_with('/')
-        || value.contains(r"\\")
+    value.contains('/')
+        || value.contains('\\')
         || bytes
-            .windows(2)
-            .any(|window| window[0].is_ascii_whitespace() && window[1] == b'/')
-        || bytes.windows(3).any(|window| {
-            window[0].is_ascii_alphabetic()
-                && window[1] == b':'
-                && matches!(window[2], b'\\' | b'/')
-        })
+            .get(0..2)
+            .is_some_and(|prefix| prefix[0].is_ascii_alphabetic() && prefix[1] == b':')
 }
 
 fn extension_list(value: String) -> Result<Vec<String>, ProbeDiagnostic> {
@@ -965,6 +960,76 @@ mod tests {
         assert_eq!(observation.status, AggregateStatus::Observed);
         assert!(observation.platforms[0].extensions.is_empty());
         assert!(observation.platforms[0].devices[0].extensions.is_empty());
+    }
+
+    #[test]
+    fn path_like_metadata_is_malformed_and_partial_observation_is_not_success() {
+        let path_like_values = [
+            r"\Users\name",
+            r"C:Users\name",
+            r"vendor\private",
+            "vendor/private",
+            r"C:\Users\name",
+            "C:/Users/name",
+            r"\\server\share",
+            "/usr/lib/vendor",
+            "C:drive-relative",
+        ];
+        let platform_parameters = [
+            CL_PLATFORM_NAME,
+            CL_PLATFORM_VENDOR,
+            CL_PLATFORM_VERSION,
+            CL_PLATFORM_PROFILE,
+            CL_PLATFORM_EXTENSIONS,
+            CL_PLATFORM_ICD_SUFFIX_KHR,
+        ];
+        for parameter in platform_parameters {
+            for value in path_like_values {
+                let mut api = valid_mock();
+                api.platform_strings
+                    .insert((1, parameter), Ok(value.into()));
+                let observation = collect_with_api(&api);
+                assert_eq!(observation.status, AggregateStatus::Incomplete);
+                assert!(observation.platforms.is_empty());
+                assert_eq!(observation.diagnostics[0].kind, ProbeFailureKind::Malformed);
+            }
+        }
+
+        let device_parameters = [
+            CL_DEVICE_NAME,
+            CL_DEVICE_VENDOR,
+            CL_DRIVER_VERSION,
+            CL_DEVICE_VERSION,
+            CL_DEVICE_PROFILE,
+            CL_DEVICE_EXTENSIONS,
+        ];
+        for parameter in device_parameters {
+            for value in path_like_values {
+                let mut api = valid_mock();
+                api.device_strings.insert((11, parameter), Ok(value.into()));
+                let observation = collect_with_api(&api);
+                assert_eq!(observation.status, AggregateStatus::Incomplete);
+                assert!(observation.platforms.is_empty());
+                assert_eq!(observation.diagnostics[0].kind, ProbeFailureKind::Malformed);
+            }
+        }
+
+        let mut partial = valid_mock();
+        partial.platforms = Ok(vec![1, 2]);
+        partial.platform_strings.extend(
+            valid_mock()
+                .platform_strings
+                .into_iter()
+                .map(|((_, parameter), value)| ((2, parameter), value)),
+        );
+        partial.devices.insert(2, Ok(vec![11]));
+        partial
+            .platform_strings
+            .insert((2, CL_PLATFORM_VENDOR), Ok(r"\Users\name".into()));
+        let observation = collect_with_api(&partial);
+        assert_eq!(observation.status, AggregateStatus::Incomplete);
+        assert_eq!(observation.platforms.len(), 1);
+        assert_eq!(observation.diagnostics[0].kind, ProbeFailureKind::Malformed);
     }
 
     fn launch_result(classification: ExitClassification, stdout: &str) -> SecureLaunchResult {
