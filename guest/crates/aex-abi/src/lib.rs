@@ -18,6 +18,11 @@ mod tests {
     fn gpu_smartfx_layout_is_inside_observed_structures() {
         for (offset, size, container) in [
             (
+                abi::PRE_INPUT_BITDEPTH_OFFSET,
+                abi::PRE_INPUT_BITDEPTH_SIZE,
+                abi::PF_PRE_RENDER_INPUT_SIZE,
+            ),
+            (
                 abi::PRE_INPUT_GPU_DATA_OFFSET,
                 abi::PRE_INPUT_GPU_DATA_SIZE,
                 abi::PF_PRE_RENDER_INPUT_SIZE,
@@ -41,6 +46,11 @@ mod tests {
                 abi::PRE_OUTPUT_PRE_RENDER_DATA_OFFSET,
                 abi::PRE_OUTPUT_PRE_RENDER_DATA_SIZE,
                 abi::PF_PRE_RENDER_OUTPUT_SIZE,
+            ),
+            (
+                abi::SMART_INPUT_PRE_RENDER_DATA_OFFSET,
+                abi::SMART_INPUT_PRE_RENDER_DATA_SIZE,
+                abi::PF_SMART_RENDER_INPUT_SIZE,
             ),
             (
                 abi::SMART_INPUT_GPU_DATA_OFFSET,

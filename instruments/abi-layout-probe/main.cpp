@@ -491,6 +491,7 @@ int main() {
   field<decltype(PF_PreRenderExtra::output)>("pre_extra.output", offsetof(PF_PreRenderExtra, output), first);
   field<decltype(PF_PreRenderExtra::cb)>("pre_extra.callbacks", offsetof(PF_PreRenderExtra, cb), first);
   field<decltype(PF_PreRenderInput::output_request)>("pre_input.output_request", offsetof(PF_PreRenderInput, output_request), first);
+  field<decltype(PF_PreRenderInput::bitdepth)>("pre_input.bitdepth", offsetof(PF_PreRenderInput, bitdepth), first);
   field<decltype(PF_PreRenderInput::gpu_data)>("pre_input.gpu_data", offsetof(PF_PreRenderInput, gpu_data), first);
   field<decltype(PF_PreRenderInput::what_gpu)>("pre_input.what_gpu", offsetof(PF_PreRenderInput, what_gpu), first);
   field<decltype(PF_PreRenderInput::device_index)>("pre_input.device_index", offsetof(PF_PreRenderInput, device_index), first);
@@ -505,6 +506,7 @@ int main() {
   field<decltype(PF_SmartRenderCallbacks::checkin_layer_pixels)>("smart_callbacks.checkin_layer_pixels", offsetof(PF_SmartRenderCallbacks, checkin_layer_pixels), first);
   field<decltype(PF_SmartRenderCallbacks::checkout_output)>("smart_callbacks.checkout_output", offsetof(PF_SmartRenderCallbacks, checkout_output), first);
   field<decltype(PF_SmartRenderInput::bitdepth)>("smart_input.bitdepth", offsetof(PF_SmartRenderInput, bitdepth), first);
+  field<decltype(PF_SmartRenderInput::pre_render_data)>("smart_input.pre_render_data", offsetof(PF_SmartRenderInput, pre_render_data), first);
   field<decltype(PF_SmartRenderInput::gpu_data)>("smart_input.gpu_data", offsetof(PF_SmartRenderInput, gpu_data), first);
   field<decltype(PF_SmartRenderInput::what_gpu)>("smart_input.what_gpu", offsetof(PF_SmartRenderInput, what_gpu), first);
   field<decltype(PF_SmartRenderInput::device_index)>("smart_input.device_index", offsetof(PF_SmartRenderInput, device_index), first);
