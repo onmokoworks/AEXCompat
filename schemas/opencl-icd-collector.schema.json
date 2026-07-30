@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onmokoworks.example/schemas/opencl-icd-collector.schema.json",
+  "title": "AEXCompat Windows OpenCL ICD collector report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "registry_path",
+    "candidates",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "registry_path": {
+      "const": "SOFTWARE\\Khronos\\OpenCL\\Vendors"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/candidate"
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/registryDiagnostic"
+      }
+    }
+  },
+  "$defs": {
+    "registryView": {
+      "enum": [
+        "registry64",
+        "registry32"
+      ]
+    },
+    "classification": {
+      "enum": [
+        "identity_verified",
+        "disabled",
+        "malformed_registry_value",
+        "invalid_path",
+        "missing_dll",
+        "inaccessible_dll",
+        "unsafe_dll",
+        "invalid_pe",
+        "architecture_mismatch",
+        "untrusted_dll",
+        "identity_unsupported",
+        "identity_io_failure",
+        "registry_read_failure"
+      ]
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_view",
+        "enabled",
+        "classification",
+        "path_basename",
+        "path_fingerprint_sha256",
+        "identity",
+        "adapter_association",
+        "backend_ready"
+      ],
+      "properties": {
+        "registry_view": {
+          "$ref": "#/$defs/registryView"
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "classification": {
+          "$ref": "#/$defs/classification"
+        },
+        "path_basename": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 32767,
+          "pattern": "^[^/\\\\]+$"
+        },
+        "path_fingerprint_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "identity": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_association": {
+          "const": "unverified"
+        },
+        "backend_ready": {
+          "const": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "const": "identity_verified"
+              }
+            },
+            "required": [
+              "classification"
+            ]
+          },
+          "then": {
+            "properties": {
+              "enabled": {
+                "const": true
+              },
+              "path_basename": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32767,
+                "pattern": "^[^/\\\\]+$"
+              },
+              "path_fingerprint_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "identity": {
+                "$ref": "#/$defs/identity"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "identity": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "const": "disabled"
+              }
+            },
+            "required": [
+              "classification"
+            ]
+          },
+          "then": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "const": "malformed_registry_value"
+              }
+            },
+            "required": [
+              "classification"
+            ]
+          },
+          "then": {
+            "properties": {
+              "enabled": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "size",
+        "sha256",
+        "pe_machine",
+        "volume_serial_number",
+        "file_index",
+        "authenticode"
+      ],
+      "properties": {
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "pe_machine": {
+          "type": "string",
+          "pattern": "^(i386|amd64|arm|arm64|unknown_[0-9a-f]{4})$"
+        },
+        "volume_serial_number": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}$"
+        },
+        "file_index": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "authenticode": {
+          "enum": [
+            "embedded",
+            "catalog"
+          ]
+        }
+      }
+    },
+    "registryDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_view",
+        "classification"
+      ],
+      "properties": {
+        "registry_view": {
+          "$ref": "#/$defs/registryView"
+        },
+        "classification": {
+          "enum": [
+            "missing_registry_key",
+            "inaccessible_registry_key",
+            "registry_read_failure"
+          ]
+        }
+      }
+    }
+  }
+}
