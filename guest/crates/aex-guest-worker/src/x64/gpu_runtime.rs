@@ -96,6 +96,10 @@ struct DeviceAllocation {
     device_index: u32,
     bytes: usize,
     backing: DeviceBufferBacking,
+    // Freeing invalidates the guest token immediately. The bounded registry
+    // retains this record only while a kernel still owns the native buffer.
+    token_live: bool,
+    kernel_bindings: usize,
 }
 
 enum ProgramBacking {
@@ -117,6 +121,7 @@ enum KernelBacking {
 
 struct KernelRecord {
     backing: KernelBacking,
+    bound_buffers: BTreeMap<u32, u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -367,6 +372,8 @@ impl GpuRuntime {
                 device_index,
                 bytes,
                 backing,
+                token_live: true,
+                kernel_bindings: 0,
             },
         );
         self.live_buffer_bytes += bytes;
@@ -376,20 +383,24 @@ impl GpuRuntime {
     pub(crate) fn free_device(&mut self, device_index: u32, token: u64) -> Result<(), String> {
         let allocation = self
             .buffers
-            .get(&token)
+            .get_mut(&token)
             .ok_or_else(|| format!("GPU device token {token:#x} is stale or forged"))?;
+        if !allocation.token_live {
+            return Err(format!(
+                "GPU device token {token:#x} is stale or forged"
+            ));
+        }
         if allocation.device_index != device_index || self.device_index != Some(device_index) {
             return Err(format!(
                 "GPU device token {token:#x} belongs to device {}, not {device_index}",
                 allocation.device_index
             ));
         }
-        let allocation = self
-            .buffers
-            .remove(&token)
-            .expect("validated GPU allocation remains present");
-        self.live_buffer_bytes -= allocation.bytes;
-        drop(allocation);
+        allocation.token_live = false;
+        let is_unbound = allocation.kernel_bindings == 0;
+        if is_unbound {
+            self.drop_released_buffer(token);
+        }
         Ok(())
     }
 
@@ -454,11 +465,18 @@ impl GpuRuntime {
     }
 
     pub(crate) fn buffer_len(&self, token: u64) -> Option<usize> {
-        self.buffers.get(&token).map(|allocation| allocation.bytes)
+        self.buffers
+            .get(&token)
+            .filter(|allocation| allocation.token_live)
+            .map(|allocation| allocation.bytes)
     }
 
     pub(crate) fn is_buffer_token(&self, token: u64) -> bool {
-        self.validates_token(token, GpuTokenKind::Buffer) && self.buffers.contains_key(&token)
+        self.validates_token(token, GpuTokenKind::Buffer)
+            && self
+                .buffers
+                .get(&token)
+                .is_some_and(|allocation| allocation.token_live)
     }
 
     pub(crate) fn looks_like_token(token: u64) -> bool {
@@ -637,7 +655,13 @@ impl GpuRuntime {
         let token = self
             .allocate_token(GpuTokenKind::Kernel)
             .map_err(|detail| OpenClRuntimeError::new(CL_OUT_OF_HOST_MEMORY, detail))?;
-        self.kernels.insert(token, KernelRecord { backing });
+        self.kernels.insert(
+            token,
+            KernelRecord {
+                backing,
+                bound_buffers: BTreeMap::new(),
+            },
+        );
         self.opencl_evidence.kernels_created =
             self.opencl_evidence.kernels_created.saturating_add(1);
         Ok(token)
@@ -655,26 +679,32 @@ impl GpuRuntime {
                 format!("OpenCL kernel token {kernel:#x} is stale, forged, or cross-engine"),
             ));
         }
-        let record = self.kernels.get_mut(&kernel).ok_or_else(|| {
-            OpenClRuntimeError::new(
-                CL_INVALID_KERNEL,
-                format!("OpenCL kernel token {kernel:#x} is stale or released"),
-            )
-        })?;
-        match &mut record.backing {
-            KernelBacking::OpenCl(kernel) => kernel
-                .set_raw_arg(index, bytes)
-                .map_err(|error| OpenClRuntimeError::from_apple(error, CL_INVALID_ARG_SIZE))?,
-            #[cfg(test)]
-            KernelBacking::Mock(arguments) => {
-                if bytes.is_empty() {
-                    return Err(OpenClRuntimeError::new(
-                        CL_INVALID_ARG_SIZE,
-                        "OpenCL kernel argument is empty",
-                    ));
+        let previous_buffer = {
+            let record = self.kernels.get_mut(&kernel).ok_or_else(|| {
+                OpenClRuntimeError::new(
+                    CL_INVALID_KERNEL,
+                    format!("OpenCL kernel token {kernel:#x} is stale or released"),
+                )
+            })?;
+            match &mut record.backing {
+                KernelBacking::OpenCl(kernel) => kernel
+                    .set_raw_arg(index, bytes)
+                    .map_err(|error| OpenClRuntimeError::from_apple(error, CL_INVALID_ARG_SIZE))?,
+                #[cfg(test)]
+                KernelBacking::Mock(arguments) => {
+                    if bytes.is_empty() {
+                        return Err(OpenClRuntimeError::new(
+                            CL_INVALID_ARG_SIZE,
+                            "OpenCL kernel argument is empty",
+                        ));
+                    }
+                    arguments.insert(index, bytes.to_vec());
                 }
-                arguments.insert(index, bytes.to_vec());
             }
+            record.bound_buffers.remove(&index)
+        };
+        if let Some(buffer) = previous_buffer {
+            self.drop_kernel_buffer_binding(buffer);
         }
         self.opencl_evidence.scalar_arguments =
             self.opencl_evidence.scalar_arguments.saturating_add(1);
@@ -703,32 +733,47 @@ impl GpuRuntime {
                 format!("OpenCL buffer token {buffer:#x} is stale, forged, or cross-engine"),
             ));
         }
-        let allocation = self.buffers.get(&buffer).ok_or_else(|| {
-            OpenClRuntimeError::new(
-                CL_INVALID_MEM_OBJECT,
-                format!("OpenCL buffer token {buffer:#x} is stale or released"),
-            )
-        })?;
-        let record = self.kernels.get_mut(&kernel).ok_or_else(|| {
-            OpenClRuntimeError::new(
-                CL_INVALID_KERNEL,
-                format!("OpenCL kernel token {kernel:#x} is stale or released"),
-            )
-        })?;
-        match (&mut record.backing, &allocation.backing) {
-            (KernelBacking::OpenCl(kernel), DeviceBufferBacking::OpenCl(buffer)) => kernel
-                .set_buffer_arg(index, buffer)
-                .map_err(|error| OpenClRuntimeError::from_apple(error, CL_INVALID_ARG_VALUE))?,
-            #[cfg(test)]
-            (KernelBacking::Mock(arguments), DeviceBufferBacking::Mock(_)) => {
-                arguments.insert(index, buffer.to_le_bytes().to_vec());
+        let previous_buffer = {
+            let allocation = self
+                .buffers
+                .get(&buffer)
+                .filter(|allocation| allocation.token_live)
+                .ok_or_else(|| {
+                    OpenClRuntimeError::new(
+                        CL_INVALID_MEM_OBJECT,
+                        format!("OpenCL buffer token {buffer:#x} is stale or released"),
+                    )
+                })?;
+            let record = self.kernels.get_mut(&kernel).ok_or_else(|| {
+                OpenClRuntimeError::new(
+                    CL_INVALID_KERNEL,
+                    format!("OpenCL kernel token {kernel:#x} is stale or released"),
+                )
+            })?;
+            match (&mut record.backing, &allocation.backing) {
+                (KernelBacking::OpenCl(kernel), DeviceBufferBacking::OpenCl(buffer)) => kernel
+                    .set_buffer_arg(index, buffer)
+                    .map_err(|error| {
+                        OpenClRuntimeError::from_apple(error, CL_INVALID_ARG_VALUE)
+                    })?,
+                #[cfg(test)]
+                (KernelBacking::Mock(arguments), DeviceBufferBacking::Mock(_)) => {
+                    arguments.insert(index, buffer.to_le_bytes().to_vec());
+                }
+                #[cfg(test)]
+                _ => {
+                    return Err(OpenClRuntimeError::new(
+                        CL_INVALID_MEM_OBJECT,
+                        "OpenCL kernel and buffer belong to different runtime backends",
+                    ));
+                }
             }
-            #[cfg(test)]
-            _ => {
-                return Err(OpenClRuntimeError::new(
-                    CL_INVALID_MEM_OBJECT,
-                    "OpenCL kernel and buffer belong to different runtime backends",
-                ));
+            record.bound_buffers.insert(index, buffer)
+        };
+        if previous_buffer != Some(buffer) {
+            self.add_kernel_buffer_binding(buffer);
+            if let Some(previous) = previous_buffer {
+                self.drop_kernel_buffer_binding(previous);
             }
         }
         self.opencl_evidence.buffer_arguments =
@@ -806,7 +851,15 @@ impl GpuRuntime {
                 format!("OpenCL kernel token {kernel:#x} is stale, forged, or cross-engine"),
             ));
         }
-        self.kernels.remove(&kernel);
+        let record = self
+            .kernels
+            .remove(&kernel)
+            .expect("validated OpenCL kernel remains present");
+        let bound_buffers = record.bound_buffers.values().copied().collect::<Vec<_>>();
+        drop(record);
+        for buffer in bound_buffers {
+            self.drop_kernel_buffer_binding(buffer);
+        }
         self.opencl_evidence.kernels_released =
             self.opencl_evidence.kernels_released.saturating_add(1);
         Ok(())
@@ -895,10 +948,12 @@ impl GpuRuntime {
     }
 
     pub(crate) fn live_buffer_count(&self) -> usize {
+        // Token-dead buffers remain charged while kernel bindings retain them.
         self.buffers.len()
     }
 
     pub(crate) fn live_buffer_bytes(&self) -> usize {
+        // Kept in sync with the charged records above, not just live tokens.
         self.live_buffer_bytes
     }
 
@@ -967,7 +1022,48 @@ impl GpuRuntime {
     fn device_allocation(&self, token: u64) -> Result<&DeviceAllocation, String> {
         self.buffers
             .get(&token)
+            .filter(|allocation| allocation.token_live)
             .ok_or_else(|| format!("GPU device token {token:#x} is stale or forged"))
+    }
+
+    fn add_kernel_buffer_binding(&mut self, token: u64) {
+        let allocation = self
+            .buffers
+            .get_mut(&token)
+            .expect("successfully bound GPU allocation remains present");
+        allocation.kernel_bindings = allocation
+            .kernel_bindings
+            .checked_add(1)
+            .expect("GPU kernel buffer binding count overflow");
+    }
+
+    fn drop_kernel_buffer_binding(&mut self, token: u64) {
+        let allocation = self
+            .buffers
+            .get_mut(&token)
+            .expect("bound GPU allocation remains present");
+        allocation.kernel_bindings = allocation
+            .kernel_bindings
+            .checked_sub(1)
+            .expect("GPU kernel buffer binding count underflow");
+        let is_released_and_unbound = !allocation.token_live && allocation.kernel_bindings == 0;
+        if is_released_and_unbound {
+            self.drop_released_buffer(token);
+        }
+    }
+
+    fn drop_released_buffer(&mut self, token: u64) {
+        let allocation = self
+            .buffers
+            .remove(&token)
+            .expect("released GPU allocation remains present");
+        debug_assert!(!allocation.token_live);
+        debug_assert_eq!(allocation.kernel_bindings, 0);
+        self.live_buffer_bytes = self
+            .live_buffer_bytes
+            .checked_sub(allocation.bytes)
+            .expect("GPU live buffer byte accounting underflow");
+        drop(allocation);
     }
 }
 
@@ -1098,5 +1194,158 @@ mod gpu_runtime_tests {
         assert!(runtime.programs.is_empty());
         runtime.end_opencl().unwrap();
         assert_eq!(runtime.live_program_source_bytes, 0);
+    }
+
+    #[test]
+    fn freed_kernel_bound_buffers_cannot_bypass_allocation_count() {
+        let (mut runtime, kernel) = mock_runtime_with_kernel();
+        for index in 0..MAX_GPU_DEVICE_ALLOCATIONS as u32 {
+            let buffer = runtime
+                .allocate_device(0, 1, BufferAccess::ReadWrite)
+                .unwrap();
+            runtime
+                .set_opencl_kernel_buffer_arg(kernel, index, buffer)
+                .unwrap();
+            runtime.free_device(0, buffer).unwrap();
+            assert!(!runtime.is_buffer_token(buffer));
+            assert_eq!(runtime.buffer_len(buffer), None);
+        }
+
+        assert_eq!(runtime.live_buffer_count(), MAX_GPU_DEVICE_ALLOCATIONS);
+        assert_eq!(runtime.live_buffer_bytes(), MAX_GPU_DEVICE_ALLOCATIONS);
+        assert_eq!(
+            runtime.opencl_evidence().live_buffers,
+            MAX_GPU_DEVICE_ALLOCATIONS
+        );
+        assert!(
+            runtime
+                .allocate_device(0, 1, BufferAccess::ReadWrite)
+                .unwrap_err()
+                .contains("allocation count")
+        );
+
+        runtime.end_opencl().unwrap();
+        assert_eq!(runtime.live_buffer_count(), 0);
+        assert_eq!(runtime.live_buffer_bytes(), 0);
+        assert!(runtime.buffers.is_empty());
+        assert!(runtime.opencl_evidence().cleanup_balanced);
+    }
+
+    #[test]
+    fn freed_buffer_charge_tracks_byte_limit_replacement_and_kernel_release() {
+        let (mut runtime, kernel) = mock_runtime_with_kernel();
+        // Model one maximum-sized mock allocation without reserving 256 MiB of
+        // host memory in the unit test. The production allocation path applies
+        // the same bytes field and live byte counter before a token can bind.
+        let maximum_buffer = runtime.allocate_token(GpuTokenKind::Buffer).unwrap();
+        assert!(
+            runtime
+                .buffers
+                .insert(
+                    maximum_buffer,
+                    DeviceAllocation {
+                        device_index: 0,
+                        bytes: MAX_GPU_DEVICE_BYTES,
+                        backing: DeviceBufferBacking::Mock(RefCell::new(Vec::new())),
+                        token_live: true,
+                        kernel_bindings: 0,
+                    },
+                )
+                .is_none()
+        );
+        runtime.live_buffer_bytes = MAX_GPU_DEVICE_BYTES;
+
+        runtime
+            .set_opencl_kernel_buffer_arg(kernel, 0, maximum_buffer)
+            .unwrap();
+        runtime.free_device(0, maximum_buffer).unwrap();
+        assert!(!runtime.is_buffer_token(maximum_buffer));
+        assert!(runtime.free_device(0, maximum_buffer).is_err());
+        assert!(runtime.read_device(maximum_buffer, 0, &mut []).is_err());
+        assert_eq!(
+            runtime
+                .set_opencl_kernel_buffer_arg(kernel, 0, maximum_buffer)
+                .unwrap_err()
+                .status,
+            CL_INVALID_MEM_OBJECT
+        );
+        assert_eq!(runtime.live_buffer_count(), 1);
+        assert_eq!(runtime.live_buffer_bytes(), MAX_GPU_DEVICE_BYTES);
+        assert!(
+            runtime
+                .allocate_device(0, 1, BufferAccess::ReadWrite)
+                .unwrap_err()
+                .contains("live bytes")
+        );
+
+        runtime
+            .set_opencl_kernel_raw_arg(kernel, 0, &[0])
+            .unwrap();
+        assert_eq!(runtime.live_buffer_count(), 0);
+        assert_eq!(runtime.live_buffer_bytes(), 0);
+        assert!(runtime.buffers.is_empty());
+
+        let shared = runtime
+            .allocate_device(0, 8, BufferAccess::ReadWrite)
+            .unwrap();
+        runtime
+            .set_opencl_kernel_buffer_arg(kernel, 1, shared)
+            .unwrap();
+        runtime
+            .set_opencl_kernel_buffer_arg(kernel, 2, shared)
+            .unwrap();
+        runtime.free_device(0, shared).unwrap();
+        runtime
+            .set_opencl_kernel_raw_arg(kernel, 1, &[0])
+            .unwrap();
+        assert_eq!(runtime.live_buffer_count(), 1);
+        assert_eq!(runtime.live_buffer_bytes(), 8);
+        runtime
+            .set_opencl_kernel_raw_arg(kernel, 2, &[0])
+            .unwrap();
+        assert_eq!(runtime.live_buffer_count(), 0);
+        assert_eq!(runtime.live_buffer_bytes(), 0);
+
+        let first = runtime
+            .allocate_device(0, 8, BufferAccess::ReadWrite)
+            .unwrap();
+        let replacement = runtime
+            .allocate_device(0, 16, BufferAccess::ReadWrite)
+            .unwrap();
+        runtime
+            .set_opencl_kernel_buffer_arg(kernel, 3, first)
+            .unwrap();
+        runtime.free_device(0, first).unwrap();
+        assert_eq!(runtime.live_buffer_count(), 2);
+        assert_eq!(runtime.live_buffer_bytes(), 24);
+
+        runtime
+            .set_opencl_kernel_buffer_arg(kernel, 3, replacement)
+            .unwrap();
+        assert_eq!(runtime.live_buffer_count(), 1);
+        assert_eq!(runtime.live_buffer_bytes(), 16);
+        assert!(!runtime.buffers.contains_key(&first));
+
+        runtime.free_device(0, replacement).unwrap();
+        assert_eq!(runtime.live_buffer_count(), 1);
+        assert_eq!(runtime.live_buffer_bytes(), 16);
+        runtime.release_opencl_kernel(kernel).unwrap();
+        assert_eq!(runtime.live_buffer_count(), 0);
+        assert_eq!(runtime.live_buffer_bytes(), 0);
+        assert!(runtime.buffers.is_empty());
+        runtime.end_opencl().unwrap();
+    }
+
+    fn mock_runtime_with_kernel() -> (GpuRuntime, u64) {
+        let mut runtime = GpuRuntime::default();
+        let tokens = runtime.begin_mock(0).unwrap();
+        let program = runtime
+            .stage_opencl_program(tokens.context, "__kernel void test() {}".into(), 1)
+            .unwrap();
+        runtime
+            .build_opencl_program(program, &[tokens.device], None)
+            .unwrap();
+        let kernel = runtime.create_opencl_kernel(program, "test").unwrap();
+        (runtime, kernel)
     }
 }
