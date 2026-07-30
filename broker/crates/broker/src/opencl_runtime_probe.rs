@@ -1,6 +1,6 @@
-use crate::ExitClassification;
 use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
-use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult, secure_launch};
+use crate::secure_launch::{secure_launch, SecureLaunchRequest, SecureLaunchResult};
+use crate::ExitClassification;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -207,6 +207,16 @@ impl ComputeDeviceObservation {
             missing_symbols: Vec::new(),
             build_log: None,
         }
+    }
+
+    pub fn failed_after_queue(
+        stage: ComputeStage,
+        api_error: Option<i32>,
+        queue_api: QueueApi,
+    ) -> Self {
+        let mut observation = Self::failed(stage, api_error);
+        observation.queue_api = Some(queue_api);
+        observation
     }
 
     pub fn not_attempted(missing_symbols: Vec<String>) -> Self {
@@ -1221,13 +1231,36 @@ mod tests {
                 &valid_mock(),
                 &MockCompute::new([if stage == ComputeStage::NotAttempted {
                     ComputeDeviceObservation::not_attempted(vec!["clCreateContext".into()])
-                } else {
+                } else if matches!(stage, ComputeStage::Context | ComputeStage::Queue) {
                     ComputeDeviceObservation::failed(stage, Some(-5))
+                } else {
+                    ComputeDeviceObservation::failed_after_queue(
+                        stage,
+                        (stage != ComputeStage::Mismatch).then_some(-5),
+                        QueueApi::Legacy,
+                    )
                 }]),
             );
             assert_eq!(result.status, AggregateStatus::Observed);
             assert!(!result.compute_ready);
             assert_eq!(result.platforms[0].devices[0].compute.stage, stage);
+            assert_eq!(
+                result.platforms[0].devices[0].compute.queue_api,
+                if matches!(
+                    stage,
+                    ComputeStage::Buffer
+                        | ComputeStage::Build
+                        | ComputeStage::Kernel
+                        | ComputeStage::Enqueue
+                        | ComputeStage::Finish
+                        | ComputeStage::Readback
+                        | ComputeStage::Mismatch
+                ) {
+                    Some(QueueApi::Legacy)
+                } else {
+                    None
+                }
+            );
         }
 
         let mut two_devices = valid_mock();
@@ -1236,7 +1269,11 @@ mod tests {
             &two_devices,
             &MockCompute::new([
                 ComputeDeviceObservation::passed(QueueApi::Legacy),
-                ComputeDeviceObservation::failed(ComputeStage::Readback, Some(-5)),
+                ComputeDeviceObservation::failed_after_queue(
+                    ComputeStage::Readback,
+                    Some(-5),
+                    QueueApi::Legacy,
+                ),
             ]),
         );
         assert_eq!(partial.status, AggregateStatus::Observed);

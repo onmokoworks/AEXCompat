@@ -1,8 +1,8 @@
 use aexcompat_broker::opencl_runtime_probe::{
+    collect_with_compute, missing_symbol_observation, no_loader_observation,
     AggregateLoaderObservation, ApiFailure, BuildLogObservation, BuildLogStatus,
-    COMPUTE_ELEMENT_COUNT, ComputeDeviceObservation, ComputeDeviceProbe, ComputeStage,
-    MAX_BUILD_LOG_BYTES, OpenClApi, QueueApi, collect_with_compute, missing_symbol_observation,
-    no_loader_observation,
+    ComputeDeviceObservation, ComputeDeviceProbe, ComputeStage, OpenClApi, QueueApi,
+    COMPUTE_ELEMENT_COUNT, MAX_BUILD_LOG_BYTES,
 };
 
 fn main() {
@@ -34,7 +34,7 @@ mod platform {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
     use windows_sys::Win32::System::LibraryLoader::{
-        GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
     };
 
     const CL_SUCCESS: i32 = 0;
@@ -644,9 +644,7 @@ mod platform {
             queue_handle =
                 unsafe { create(context.handle, device, properties.as_ptr(), &mut error) };
             if queue_handle.is_null() || error != CL_SUCCESS {
-                let mut result = ComputeDeviceObservation::failed(ComputeStage::Queue, Some(error));
-                result.queue_api = Some(queue_api);
-                return result;
+                return ComputeDeviceObservation::failed(ComputeStage::Queue, Some(error));
             }
         } else if let Some(create) = functions.create_queue {
             queue_api = QueueApi::Legacy;
@@ -658,9 +656,7 @@ mod platform {
             ]);
         }
         if queue_handle.is_null() || error != CL_SUCCESS {
-            let mut result = ComputeDeviceObservation::failed(ComputeStage::Queue, Some(error));
-            result.queue_api = Some(queue_api);
-            return result;
+            return ComputeDeviceObservation::failed(ComputeStage::Queue, Some(error));
         }
         let queue = Resource::new(queue_handle, functions.release_queue);
 
@@ -676,7 +672,11 @@ mod platform {
             )
         };
         if input_handle.is_null() || error != CL_SUCCESS {
-            return ComputeDeviceObservation::failed(ComputeStage::Buffer, Some(error));
+            return ComputeDeviceObservation::failed_after_queue(
+                ComputeStage::Buffer,
+                Some(error),
+                queue_api,
+            );
         }
         let input_buffer = Resource::new(input_handle, functions.release_mem);
         error = CL_SUCCESS;
@@ -690,7 +690,11 @@ mod platform {
             )
         };
         if output_handle.is_null() || error != CL_SUCCESS {
-            return ComputeDeviceObservation::failed(ComputeStage::Buffer, Some(error));
+            return ComputeDeviceObservation::failed_after_queue(
+                ComputeStage::Buffer,
+                Some(error),
+                queue_api,
+            );
         }
         let output_buffer = Resource::new(output_handle, functions.release_mem);
 
@@ -709,7 +713,11 @@ mod platform {
             )
         };
         if status != CL_SUCCESS {
-            return ComputeDeviceObservation::failed(ComputeStage::Buffer, Some(status));
+            return ComputeDeviceObservation::failed_after_queue(
+                ComputeStage::Buffer,
+                Some(status),
+                queue_api,
+            );
         }
 
         let source = b"__kernel void affine(__global const uint* input, __global uint* output) { size_t i = get_global_id(0); output[i] = input[i] * 3u + 7u; }";
@@ -726,14 +734,22 @@ mod platform {
             )
         };
         if program_handle.is_null() || error != CL_SUCCESS {
-            return ComputeDeviceObservation::failed(ComputeStage::Build, Some(error));
+            return ComputeDeviceObservation::failed_after_queue(
+                ComputeStage::Build,
+                Some(error),
+                queue_api,
+            );
         }
         let program = Resource::new(program_handle, functions.release_program);
         let status = unsafe {
             (functions.build_program)(program.handle, 1, &device, null(), None, null_mut())
         };
         if status != CL_SUCCESS {
-            let mut result = ComputeDeviceObservation::failed(ComputeStage::Build, Some(status));
+            let mut result = ComputeDeviceObservation::failed_after_queue(
+                ComputeStage::Build,
+                Some(status),
+                queue_api,
+            );
             result.build_log = Some(build_log_evidence(functions, program.handle, device));
             return result;
         }
@@ -742,7 +758,11 @@ mod platform {
         let kernel_handle =
             unsafe { (functions.create_kernel)(program.handle, c"affine".as_ptr(), &mut error) };
         if kernel_handle.is_null() || error != CL_SUCCESS {
-            return ComputeDeviceObservation::failed(ComputeStage::Kernel, Some(error));
+            return ComputeDeviceObservation::failed_after_queue(
+                ComputeStage::Kernel,
+                Some(error),
+                queue_api,
+            );
         }
         let kernel = Resource::new(kernel_handle, functions.release_kernel);
         for (index, handle) in [input_buffer.handle, output_buffer.handle]
@@ -758,7 +778,11 @@ mod platform {
                 )
             };
             if status != CL_SUCCESS {
-                return ComputeDeviceObservation::failed(ComputeStage::Kernel, Some(status));
+                return ComputeDeviceObservation::failed_after_queue(
+                    ComputeStage::Kernel,
+                    Some(status),
+                    queue_api,
+                );
             }
         }
 
@@ -777,11 +801,19 @@ mod platform {
             )
         };
         if status != CL_SUCCESS {
-            return ComputeDeviceObservation::failed(ComputeStage::Enqueue, Some(status));
+            return ComputeDeviceObservation::failed_after_queue(
+                ComputeStage::Enqueue,
+                Some(status),
+                queue_api,
+            );
         }
         let status = unsafe { (functions.finish)(queue.handle) };
         if status != CL_SUCCESS {
-            return ComputeDeviceObservation::failed(ComputeStage::Finish, Some(status));
+            return ComputeDeviceObservation::failed_after_queue(
+                ComputeStage::Finish,
+                Some(status),
+                queue_api,
+            );
         }
 
         let mut output = vec![0u32; COMPUTE_ELEMENT_COUNT];
@@ -799,14 +831,22 @@ mod platform {
             )
         };
         if status != CL_SUCCESS {
-            return ComputeDeviceObservation::failed(ComputeStage::Readback, Some(status));
+            return ComputeDeviceObservation::failed_after_queue(
+                ComputeStage::Readback,
+                Some(status),
+                queue_api,
+            );
         }
         if output
             .iter()
             .zip(input)
             .any(|(actual, value)| *actual != value * 3 + 7)
         {
-            return ComputeDeviceObservation::failed(ComputeStage::Mismatch, None);
+            return ComputeDeviceObservation::failed_after_queue(
+                ComputeStage::Mismatch,
+                None,
+                queue_api,
+            );
         }
         ComputeDeviceObservation::passed(queue_api)
     }
@@ -1230,7 +1270,7 @@ mod platform {
                 true,
             );
             assert_eq!(failed.stage, ComputeStage::Queue);
-            assert_eq!(failed.queue_api, Some(QueueApi::WithProperties));
+            assert_eq!(failed.queue_api, None);
             let state = dispatch_state().lock().unwrap();
             assert_eq!(state.legacy_calls, 0);
             assert_eq!(state.releases, [1]);
@@ -1248,6 +1288,7 @@ mod platform {
                 true,
             );
             assert_eq!(build.stage, ComputeStage::Build);
+            assert_eq!(build.queue_api, Some(QueueApi::WithProperties));
             let evidence = build.build_log.expect("bounded build log evidence");
             assert_eq!(evidence.status, BuildLogStatus::Redacted);
             assert_eq!(evidence.sha256.unwrap().len(), 64);
@@ -1262,6 +1303,22 @@ mod platform {
                 true,
             );
             assert_eq!(mismatch.stage, ComputeStage::Mismatch);
+            assert_eq!(mismatch.queue_api, Some(QueueApi::WithProperties));
+            assert_eq!(
+                dispatch_state().lock().unwrap().releases,
+                [6, 5, 4, 3, 2, 1]
+            );
+
+            reset_dispatch();
+            dispatch_state().lock().unwrap().fail_stage = Some(ComputeStage::Readback);
+            let legacy_failure = run_compute(
+                dispatch(),
+                0x1234usize as ClPlatformId,
+                0x5678usize as ClDeviceId,
+                false,
+            );
+            assert_eq!(legacy_failure.stage, ComputeStage::Readback);
+            assert_eq!(legacy_failure.queue_api, Some(QueueApi::Legacy));
             assert_eq!(
                 dispatch_state().lock().unwrap().releases,
                 [6, 5, 4, 3, 2, 1]
@@ -1288,6 +1345,15 @@ mod platform {
                     true,
                 );
                 assert_eq!(result.stage, stage);
+                assert_eq!(
+                    result.queue_api,
+                    if stage == ComputeStage::Context {
+                        None
+                    } else {
+                        Some(QueueApi::WithProperties)
+                    },
+                    "stage {stage:?}"
+                );
                 assert_eq!(
                     dispatch_state().lock().unwrap().releases,
                     expected_releases,

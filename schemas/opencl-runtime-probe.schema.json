@@ -485,6 +485,42 @@
         },
         {
           "if": {
+            "properties": {
+              "stage": { "enum": ["context", "queue"] }
+            },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "queue_api": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "enum": [
+                  "buffer",
+                  "build",
+                  "kernel",
+                  "enqueue",
+                  "finish",
+                  "readback",
+                  "mismatch"
+                ]
+              }
+            },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "queue_api": { "enum": ["with_properties", "legacy"] }
+            }
+          }
+        },
+        {
+          "if": {
             "properties": { "stage": { "const": "build" } },
             "required": ["stage"]
           },

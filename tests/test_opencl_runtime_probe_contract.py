@@ -160,7 +160,7 @@ def test_compute_failure_stages_force_aggregate_not_ready(stage):
     compute["stage"] = stage
     compute["queue_api"] = (
         "with_properties"
-        if stage in ("queue", "buffer", "build", "kernel", "enqueue", "finish", "readback", "mismatch")
+        if stage in ("buffer", "build", "kernel", "enqueue", "finish", "readback", "mismatch")
         else None
     )
     compute["api_error"] = -5 if stage not in ("mismatch", "not_attempted") else None
@@ -264,6 +264,79 @@ def test_compute_queue_api_state_invariants():
     report["aggregate_loader_observation"]["compute_ready"] = False
     report["compute_ready"] = False
     assert list(validator.iter_errors(report))
+
+    for stage in ("context", "queue"):
+        report = _report()
+        compute = report["aggregate_loader_observation"]["platforms"][0]["devices"][
+            0
+        ]["compute"]
+        compute.update(
+            {
+                "stage": stage,
+                "queue_api": "with_properties",
+                "api_error": -5,
+            }
+        )
+        report["aggregate_loader_observation"]["compute_ready"] = False
+        report["compute_ready"] = False
+        assert list(validator.iter_errors(report))
+
+    for stage in (
+        "buffer",
+        "build",
+        "kernel",
+        "enqueue",
+        "finish",
+        "readback",
+        "mismatch",
+    ):
+        report = _report()
+        compute = report["aggregate_loader_observation"]["platforms"][0]["devices"][
+            0
+        ]["compute"]
+        compute.update(
+            {
+                "stage": stage,
+                "queue_api": None,
+                "api_error": None if stage == "mismatch" else -5,
+                "build_log": (
+                    {"status": "redacted", "sha256": "a" * 64}
+                    if stage == "build"
+                    else None
+                ),
+            }
+        )
+        report["aggregate_loader_observation"]["compute_ready"] = False
+        report["compute_ready"] = False
+        assert list(validator.iter_errors(report))
+
+
+@pytest.mark.parametrize("queue_api", ("with_properties", "legacy"))
+@pytest.mark.parametrize(
+    "stage",
+    ("buffer", "build", "kernel", "enqueue", "finish", "readback", "mismatch"),
+)
+def test_post_queue_failure_preserves_selected_queue_api(stage, queue_api):
+    validator = _validator()
+    report = _report()
+    compute = report["aggregate_loader_observation"]["platforms"][0]["devices"][0][
+        "compute"
+    ]
+    compute.update(
+        {
+            "stage": stage,
+            "queue_api": queue_api,
+            "api_error": None if stage == "mismatch" else -5,
+            "build_log": (
+                {"status": "redacted", "sha256": "a" * 64}
+                if stage == "build"
+                else None
+            ),
+        }
+    )
+    report["aggregate_loader_observation"]["compute_ready"] = False
+    report["compute_ready"] = False
+    validator.validate(report)
 
 
 def test_candidate_evidence_cannot_claim_individual_binding_or_raw_identity():
