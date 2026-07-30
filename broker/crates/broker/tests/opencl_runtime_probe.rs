@@ -29,9 +29,23 @@ mod windows {
             "not_attempted"
         );
         if report.launch.status == ProbeLaunchStatus::Observed {
-            assert!(report.aggregate_loader_observation.is_some());
+            let aggregate = report
+                .aggregate_loader_observation
+                .as_ref()
+                .expect("observed worker returns aggregate");
+            assert_eq!(report.compute_ready, aggregate.compute_ready);
+            assert_eq!(
+                aggregate.compute_ready,
+                aggregate.platforms.iter().all(|platform| {
+                    platform.devices.iter().all(|device| {
+                        device.compute.stage
+                            == aexcompat_broker::opencl_runtime_probe::ComputeStage::Passed
+                    })
+                })
+            );
         } else {
             assert!(report.aggregate_loader_observation.is_none());
+            assert!(!report.compute_ready);
         }
     }
 }

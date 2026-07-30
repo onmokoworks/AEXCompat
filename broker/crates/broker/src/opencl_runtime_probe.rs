@@ -1,6 +1,6 @@
-use crate::ExitClassification;
 use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
-use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult, secure_launch};
+use crate::secure_launch::{secure_launch, SecureLaunchRequest, SecureLaunchResult};
+use crate::ExitClassification;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -13,6 +13,8 @@ pub const MAX_DEVICES_PER_PLATFORM: usize = 64;
 pub const MAX_STRING_BYTES: usize = 16 * 1024;
 pub const MAX_WORK_ITEM_DIMENSIONS: usize = 8;
 pub const MAX_WORKER_STDOUT_BYTES: usize = 1024 * 1024;
+pub const COMPUTE_ELEMENT_COUNT: usize = 64;
+pub const MAX_BUILD_LOG_BYTES: usize = 16 * 1024;
 
 pub const CL_PLATFORM_PROFILE: u32 = 0x0900;
 pub const CL_PLATFORM_VERSION: u32 = 0x0901;
@@ -136,6 +138,96 @@ pub struct DeviceObservation {
     pub max_mem_alloc_bytes: u64,
     pub global_mem_bytes: u64,
     pub local_mem_bytes: u64,
+    pub compute: ComputeDeviceObservation,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeStage {
+    Passed,
+    Context,
+    Queue,
+    Buffer,
+    Build,
+    Kernel,
+    Enqueue,
+    Finish,
+    Readback,
+    Mismatch,
+    NotAttempted,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueApi {
+    WithProperties,
+    Legacy,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildLogStatus {
+    Redacted,
+    Overflow,
+    Unavailable,
+    Malformed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BuildLogObservation {
+    pub status: BuildLogStatus,
+    pub sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComputeDeviceObservation {
+    pub stage: ComputeStage,
+    pub queue_api: Option<QueueApi>,
+    pub api_error: Option<i32>,
+    pub missing_symbols: Vec<String>,
+    pub build_log: Option<BuildLogObservation>,
+}
+
+impl ComputeDeviceObservation {
+    pub fn passed(queue_api: QueueApi) -> Self {
+        Self {
+            stage: ComputeStage::Passed,
+            queue_api: Some(queue_api),
+            api_error: None,
+            missing_symbols: Vec::new(),
+            build_log: None,
+        }
+    }
+
+    pub fn failed(stage: ComputeStage, api_error: Option<i32>) -> Self {
+        Self {
+            stage,
+            queue_api: None,
+            api_error,
+            missing_symbols: Vec::new(),
+            build_log: None,
+        }
+    }
+
+    pub fn failed_after_queue(
+        stage: ComputeStage,
+        api_error: Option<i32>,
+        queue_api: QueueApi,
+    ) -> Self {
+        let mut observation = Self::failed(stage, api_error);
+        observation.queue_api = Some(queue_api);
+        observation
+    }
+
+    pub fn not_attempted(missing_symbols: Vec<String>) -> Self {
+        Self {
+            stage: ComputeStage::NotAttempted,
+            queue_api: None,
+            api_error: None,
+            missing_symbols,
+            build_log: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -153,6 +245,7 @@ pub struct AggregateLoaderObservation {
     pub status: AggregateStatus,
     pub platforms: Vec<PlatformObservation>,
     pub diagnostics: Vec<ProbeDiagnostic>,
+    pub compute_ready: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -203,6 +296,7 @@ pub struct SystemOpenClProbeReport {
     pub candidate_evidence: CandidateEvidenceBoundary,
     pub aggregate_loader_observation: Option<AggregateLoaderObservation>,
     pub launch: ProbeLaunchObservation,
+    pub compute_ready: bool,
     pub backend_ready: bool,
 }
 
@@ -232,7 +326,32 @@ pub trait OpenClApi {
     ) -> Result<Vec<usize>, ApiFailure>;
 }
 
+pub trait ComputeDeviceProbe {
+    fn probe_device(
+        &self,
+        platform: usize,
+        device: usize,
+        platform_version: &str,
+        device_version: &str,
+    ) -> ComputeDeviceObservation;
+}
+
+struct NotAttemptedCompute;
+
+impl ComputeDeviceProbe for NotAttemptedCompute {
+    fn probe_device(&self, _: usize, _: usize, _: &str, _: &str) -> ComputeDeviceObservation {
+        ComputeDeviceObservation::not_attempted(Vec::new())
+    }
+}
+
 pub fn collect_with_api(api: &impl OpenClApi) -> AggregateLoaderObservation {
+    collect_with_compute(api, &NotAttemptedCompute)
+}
+
+pub fn collect_with_compute(
+    api: &impl OpenClApi,
+    compute: &impl ComputeDeviceProbe,
+) -> AggregateLoaderObservation {
     let platforms = match api.platform_ids(MAX_PLATFORMS) {
         Ok(platforms) if platforms.is_empty() => {
             return AggregateLoaderObservation {
@@ -242,6 +361,7 @@ pub fn collect_with_api(api: &impl OpenClApi) -> AggregateLoaderObservation {
                     ProbeFailureKind::NoPlatform,
                     "clGetPlatformIDs",
                 )],
+                compute_ready: false,
             };
         }
         Ok(platforms) => platforms,
@@ -250,7 +370,7 @@ pub fn collect_with_api(api: &impl OpenClApi) -> AggregateLoaderObservation {
     let mut observations = Vec::new();
     let mut diagnostics = Vec::new();
     for (platform_index, platform) in platforms.into_iter().enumerate() {
-        match collect_platform(api, platform) {
+        match collect_platform(api, compute, platform) {
             Ok(observation) => observations.push(observation),
             Err(mut error) => {
                 error.platform_index = Some(platform_index as u32);
@@ -258,14 +378,24 @@ pub fn collect_with_api(api: &impl OpenClApi) -> AggregateLoaderObservation {
             }
         }
     }
+    let status = if observations.is_empty() || !diagnostics.is_empty() {
+        AggregateStatus::Incomplete
+    } else {
+        AggregateStatus::Observed
+    };
+    let compute_ready = status == AggregateStatus::Observed
+        && observations.iter().all(|platform| {
+            !platform.devices.is_empty()
+                && platform
+                    .devices
+                    .iter()
+                    .all(|device| device.compute.stage == ComputeStage::Passed)
+        });
     AggregateLoaderObservation {
-        status: if observations.is_empty() || !diagnostics.is_empty() {
-            AggregateStatus::Incomplete
-        } else {
-            AggregateStatus::Observed
-        },
+        status,
         platforms: observations,
         diagnostics,
+        compute_ready,
     }
 }
 
@@ -277,6 +407,7 @@ pub fn no_loader_observation() -> AggregateLoaderObservation {
             ProbeFailureKind::NoLoader,
             "LoadLibraryExW(system32:OpenCL.dll)",
         )],
+        compute_ready: false,
     }
 }
 
@@ -293,6 +424,7 @@ pub fn missing_symbol_observation(symbols: &[&str]) -> AggregateLoaderObservatio
                 )
             })
             .collect(),
+        compute_ready: false,
     }
 }
 
@@ -307,11 +439,13 @@ fn failure_observation(error: ApiFailure) -> AggregateLoaderObservation {
             platform_index: None,
             device_index: None,
         }],
+        compute_ready: false,
     }
 }
 
 fn collect_platform(
     api: &impl OpenClApi,
+    compute: &impl ComputeDeviceProbe,
     platform: usize,
 ) -> Result<PlatformObservation, ProbeDiagnostic> {
     let name = platform_string(api, platform, CL_PLATFORM_NAME)?;
@@ -335,7 +469,7 @@ fn collect_platform(
     }
     let mut devices = Vec::new();
     for (device_index, device) in device_ids.into_iter().enumerate() {
-        match collect_device(api, device) {
+        match collect_device(api, compute, platform, device, &version) {
             Ok(observation) => devices.push(observation),
             Err(mut error) => {
                 error.device_index = Some(device_index as u32);
@@ -356,7 +490,10 @@ fn collect_platform(
 
 fn collect_device(
     api: &impl OpenClApi,
+    compute: &impl ComputeDeviceProbe,
+    platform: usize,
     device: usize,
+    platform_version: &str,
 ) -> Result<DeviceObservation, ProbeDiagnostic> {
     let dimensions = api
         .device_u32(device, CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS)
@@ -417,19 +554,26 @@ fn collect_device(
             "clGetDeviceInfo(capability bounds)",
         ));
     }
+    let name = device_string(api, device, CL_DEVICE_NAME)?;
+    let vendor = device_string(api, device, CL_DEVICE_VENDOR)?;
+    let driver_version = device_string(api, device, CL_DRIVER_VERSION)?;
+    let version = device_string(api, device, CL_DEVICE_VERSION)?;
+    let profile = device_string(api, device, CL_DEVICE_PROFILE)?;
+    let extensions = extension_list(device_string_allow_empty(
+        api,
+        device,
+        CL_DEVICE_EXTENSIONS,
+    )?)?;
+    let compute = compute.probe_device(platform, device, platform_version, &version);
     Ok(DeviceObservation {
         device_type,
         vendor_id,
-        name: device_string(api, device, CL_DEVICE_NAME)?,
-        vendor: device_string(api, device, CL_DEVICE_VENDOR)?,
-        driver_version: device_string(api, device, CL_DRIVER_VERSION)?,
-        version: device_string(api, device, CL_DEVICE_VERSION)?,
-        profile: device_string(api, device, CL_DEVICE_PROFILE)?,
-        extensions: extension_list(device_string_allow_empty(
-            api,
-            device,
-            CL_DEVICE_EXTENSIONS,
-        )?)?,
+        name,
+        vendor,
+        driver_version,
+        version,
+        profile,
+        extensions,
         available,
         compiler_available,
         max_compute_units,
@@ -448,6 +592,7 @@ fn collect_device(
         local_mem_bytes: api
             .device_u64(device, CL_DEVICE_LOCAL_MEM_SIZE)
             .map_err(diagnostic)?,
+        compute,
     })
 }
 
@@ -679,9 +824,12 @@ fn report(
     aggregate_loader_observation: Option<AggregateLoaderObservation>,
 ) -> SystemOpenClProbeReport {
     SystemOpenClProbeReport {
-        schema_version: 1,
+        schema_version: 2,
         contract: "system_opencl_loader_probe",
         candidate_evidence: CandidateEvidenceBoundary::default(),
+        compute_ready: aggregate_loader_observation
+            .as_ref()
+            .is_some_and(|observation| observation.compute_ready),
         aggregate_loader_observation,
         launch,
         backend_ready: false,
@@ -691,7 +839,9 @@ fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::collections::VecDeque;
 
     struct MockApi {
         platforms: Result<Vec<usize>, ApiFailure>,
@@ -716,6 +866,27 @@ mod tests {
                 device_usizes: BTreeMap::new(),
                 device_usize_arrays: BTreeMap::new(),
             }
+        }
+    }
+
+    struct MockCompute {
+        observations: RefCell<VecDeque<ComputeDeviceObservation>>,
+    }
+
+    impl MockCompute {
+        fn new(observations: impl IntoIterator<Item = ComputeDeviceObservation>) -> Self {
+            Self {
+                observations: RefCell::new(observations.into_iter().collect()),
+            }
+        }
+    }
+
+    impl ComputeDeviceProbe for MockCompute {
+        fn probe_device(&self, _: usize, _: usize, _: &str, _: &str) -> ComputeDeviceObservation {
+            self.observations
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| ComputeDeviceObservation::not_attempted(Vec::new()))
         }
     }
 
@@ -1032,6 +1203,84 @@ mod tests {
         assert_eq!(observation.diagnostics[0].kind, ProbeFailureKind::Malformed);
     }
 
+    #[test]
+    fn compute_stage_matrix_and_partial_success_fail_closed() {
+        let passed = collect_with_compute(
+            &valid_mock(),
+            &MockCompute::new([ComputeDeviceObservation::passed(QueueApi::Legacy)]),
+        );
+        assert!(passed.compute_ready);
+        assert_eq!(
+            passed.platforms[0].devices[0].compute.stage,
+            ComputeStage::Passed
+        );
+
+        for stage in [
+            ComputeStage::Context,
+            ComputeStage::Queue,
+            ComputeStage::Buffer,
+            ComputeStage::Build,
+            ComputeStage::Kernel,
+            ComputeStage::Enqueue,
+            ComputeStage::Finish,
+            ComputeStage::Readback,
+            ComputeStage::Mismatch,
+            ComputeStage::NotAttempted,
+        ] {
+            let result = collect_with_compute(
+                &valid_mock(),
+                &MockCompute::new([if stage == ComputeStage::NotAttempted {
+                    ComputeDeviceObservation::not_attempted(vec!["clCreateContext".into()])
+                } else if matches!(stage, ComputeStage::Context | ComputeStage::Queue) {
+                    ComputeDeviceObservation::failed(stage, Some(-5))
+                } else {
+                    ComputeDeviceObservation::failed_after_queue(
+                        stage,
+                        (stage != ComputeStage::Mismatch).then_some(-5),
+                        QueueApi::Legacy,
+                    )
+                }]),
+            );
+            assert_eq!(result.status, AggregateStatus::Observed);
+            assert!(!result.compute_ready);
+            assert_eq!(result.platforms[0].devices[0].compute.stage, stage);
+            assert_eq!(
+                result.platforms[0].devices[0].compute.queue_api,
+                if matches!(
+                    stage,
+                    ComputeStage::Buffer
+                        | ComputeStage::Build
+                        | ComputeStage::Kernel
+                        | ComputeStage::Enqueue
+                        | ComputeStage::Finish
+                        | ComputeStage::Readback
+                        | ComputeStage::Mismatch
+                ) {
+                    Some(QueueApi::Legacy)
+                } else {
+                    None
+                }
+            );
+        }
+
+        let mut two_devices = valid_mock();
+        two_devices.devices.insert(1, Ok(vec![11, 11]));
+        let partial = collect_with_compute(
+            &two_devices,
+            &MockCompute::new([
+                ComputeDeviceObservation::passed(QueueApi::Legacy),
+                ComputeDeviceObservation::failed_after_queue(
+                    ComputeStage::Readback,
+                    Some(-5),
+                    QueueApi::Legacy,
+                ),
+            ]),
+        );
+        assert_eq!(partial.status, AggregateStatus::Observed);
+        assert_eq!(partial.platforms[0].devices.len(), 2);
+        assert!(!partial.compute_ready);
+    }
+
     fn launch_result(classification: ExitClassification, stdout: &str) -> SecureLaunchResult {
         SecureLaunchResult {
             classification,
@@ -1068,25 +1317,18 @@ mod tests {
                 ProbeLaunchStatus::Timeout,
             ),
         ] {
-            assert_eq!(
-                report_from_launch(launch_result(classification, ""))
-                    .launch
-                    .status,
-                expected
-            );
+            let report = report_from_launch(launch_result(classification, ""));
+            assert_eq!(report.launch.status, expected);
+            assert!(!report.compute_ready);
         }
-        assert_eq!(
-            report_from_launch(launch_result(ExitClassification::Ok, "{bad json"))
-                .launch
-                .status,
-            ProbeLaunchStatus::MalformedOutput
-        );
+        let malformed = report_from_launch(launch_result(ExitClassification::Ok, "{bad json"));
+        assert_eq!(malformed.launch.status, ProbeLaunchStatus::MalformedOutput);
+        assert!(!malformed.compute_ready);
         let mut truncated = launch_result(ExitClassification::Ok, "{}");
         truncated.stdout_truncated = true;
-        assert_eq!(
-            report_from_launch(truncated).launch.status,
-            ProbeLaunchStatus::OutputTruncated
-        );
+        let truncated = report_from_launch(truncated);
+        assert_eq!(truncated.launch.status, ProbeLaunchStatus::OutputTruncated);
+        assert!(!truncated.compute_ready);
     }
 
     #[test]
