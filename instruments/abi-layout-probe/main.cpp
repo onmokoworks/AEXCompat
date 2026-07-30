@@ -491,8 +491,13 @@ int main() {
   field<decltype(PF_PreRenderExtra::output)>("pre_extra.output", offsetof(PF_PreRenderExtra, output), first);
   field<decltype(PF_PreRenderExtra::cb)>("pre_extra.callbacks", offsetof(PF_PreRenderExtra, cb), first);
   field<decltype(PF_PreRenderInput::output_request)>("pre_input.output_request", offsetof(PF_PreRenderInput, output_request), first);
+  field<decltype(PF_PreRenderInput::gpu_data)>("pre_input.gpu_data", offsetof(PF_PreRenderInput, gpu_data), first);
+  field<decltype(PF_PreRenderInput::what_gpu)>("pre_input.what_gpu", offsetof(PF_PreRenderInput, what_gpu), first);
+  field<decltype(PF_PreRenderInput::device_index)>("pre_input.device_index", offsetof(PF_PreRenderInput, device_index), first);
   field<decltype(PF_PreRenderOutput::result_rect)>("pre_output.result_rect", offsetof(PF_PreRenderOutput, result_rect), first);
   field<decltype(PF_PreRenderOutput::max_result_rect)>("pre_output.max_result_rect", offsetof(PF_PreRenderOutput, max_result_rect), first);
+  field<decltype(PF_PreRenderOutput::flags)>("pre_output.flags", offsetof(PF_PreRenderOutput, flags), first);
+  field<decltype(PF_PreRenderOutput::pre_render_data)>("pre_output.pre_render_data", offsetof(PF_PreRenderOutput, pre_render_data), first);
   field<decltype(PF_PreRenderCallbacks::checkout_layer)>("pre_callbacks.checkout_layer", offsetof(PF_PreRenderCallbacks, checkout_layer), first);
   field<decltype(PF_SmartRenderExtra::input)>("smart_extra.input", offsetof(PF_SmartRenderExtra, input), first);
   field<decltype(PF_SmartRenderExtra::cb)>("smart_extra.callbacks", offsetof(PF_SmartRenderExtra, cb), first);
@@ -631,6 +636,10 @@ int main() {
             << ",\"smart_render_gpu\":" << static_cast<int>(PF_Cmd_SMART_RENDER_GPU)
             << ",\"gpu_device_setup\":" << static_cast<int>(PF_Cmd_GPU_DEVICE_SETUP)
             << ",\"gpu_device_setdown\":" << static_cast<int>(PF_Cmd_GPU_DEVICE_SETDOWN)
+            << "},\n  \"gpu_frameworks\":{\"opencl\":"
+            << static_cast<int>(PF_GPU_Framework_OPENCL)
+            << "},\n  \"render_output_flags\":{\"gpu_render_possible\":"
+            << static_cast<uint32_t>(PF_RenderOutputFlag_GPU_RENDER_POSSIBLE)
             << "},\n  \"out_flags\":{\"i_do_dialog\":"
             << static_cast<uint32_t>(PF_OutFlag_I_DO_DIALOG)
             << ",\"wide_time_input\":"

@@ -177,6 +177,47 @@ REQUIRED_FIELDS.add("utils.ansi_cos")
 REQUIRED_FIELDS.add("utils.ansi_sqrt")
 REQUIRED_FIELDS.add("utils.ansi_asin")
 REQUIRED_FIELDS.add("utils.ansi_acos")
+REQUIRED_FIELDS.update(
+    {
+        "pre_input.gpu_data",
+        "pre_input.what_gpu",
+        "pre_input.device_index",
+        "pre_output.flags",
+        "pre_output.pre_render_data",
+        "smart_input.gpu_data",
+        "smart_input.what_gpu",
+        "smart_input.device_index",
+        "gpu_setup_extra.input",
+        "gpu_setup_extra.output",
+        "gpu_setup_input.what_gpu",
+        "gpu_setup_input.device_index",
+        "gpu_setup_output.gpu_data",
+        "gpu_setdown_extra.input",
+        "gpu_setdown_input.gpu_data",
+        "gpu_setdown_input.what_gpu",
+        "gpu_setdown_input.device_index",
+    }
+)
+
+OBSERVED_ENUM_GROUPS = {
+    "selectors": "PF_CMD",
+    "out_flags": "PF_OUT_FLAG",
+    "out_flags2": "PF_OUT_FLAG2",
+    "gpu_frameworks": "PF_GPU_FRAMEWORK",
+    "render_output_flags": "PF_RENDER_OUTPUT_FLAG",
+}
+
+REQUIRED_ENUM_VALUES = {
+    "selectors": {
+        "smart_pre_render",
+        "smart_render",
+        "smart_render_gpu",
+        "gpu_device_setup",
+        "gpu_device_setdown",
+    },
+    "gpu_frameworks": {"opencl"},
+    "render_output_flags": {"gpu_render_possible"},
+}
 
 
 class ContractError(ValueError):
@@ -263,6 +304,26 @@ def load_contract(path: Path) -> dict[str, Any]:
             offsets.append(field["offset"])
         if len(offsets) != len(set(offsets)):
             raise ContractError(f"{table_name} contains duplicate offsets")
+    for group_name, required_names in REQUIRED_ENUM_VALUES.items():
+        values = data.get(group_name)
+        if not isinstance(values, dict):
+            raise ContractError(f"{group_name} must be an object")
+        missing_values = sorted(required_names - values.keys())
+        if missing_values:
+            raise ContractError(
+                f"{group_name} is missing required values: {', '.join(missing_values)}"
+            )
+    for group_name in OBSERVED_ENUM_GROUPS:
+        values = data.get(group_name)
+        if not isinstance(values, dict):
+            raise ContractError(f"{group_name} must be an object")
+        for name, value in values.items():
+            if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9_]+", name):
+                raise ContractError(f"invalid {group_name} name: {name!r}")
+            if type(value) is not int or value < 0 or value > 0xFFFF_FFFF:
+                raise ContractError(
+                    f"{group_name}.{name} must be an integer in 0..4294967295"
+                )
     return data
 
 
@@ -280,6 +341,11 @@ def constants(data: dict[str, Any]) -> list[tuple[str, int]]:
     for name, field in data["fields"].items():
         values.append((f"{ident(name)}_OFFSET", field["offset"]))
         values.append((f"{ident(name)}_SIZE", field["size"]))
+    for group_name, prefix in OBSERVED_ENUM_GROUPS.items():
+        values.extend(
+            (f"{prefix}_{ident(name)}", value)
+            for name, value in data[group_name].items()
+        )
     values.sort()
     names = [name for name, _ in values]
     if len(names) != len(set(names)):
