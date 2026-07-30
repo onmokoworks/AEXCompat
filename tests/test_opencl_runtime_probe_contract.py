@@ -46,6 +46,7 @@ def _device():
         "local_mem_bytes": 64 << 10,
         "compute": {
             "stage": "passed",
+            "queue_api": "legacy",
             "api_error": None,
             "missing_symbols": [],
             "build_log": None,
@@ -157,6 +158,11 @@ def test_compute_failure_stages_force_aggregate_not_ready(stage):
         "compute"
     ]
     compute["stage"] = stage
+    compute["queue_api"] = (
+        "with_properties"
+        if stage in ("queue", "buffer", "build", "kernel", "enqueue", "finish", "readback", "mismatch")
+        else None
+    )
     compute["api_error"] = -5 if stage not in ("mismatch", "not_attempted") else None
     compute["missing_symbols"] = ["clCreateContext"] if stage == "not_attempted" else []
     if stage == "build":
@@ -172,6 +178,7 @@ def test_partial_compute_success_cannot_claim_ready():
     failed = copy.deepcopy(_device())
     failed["compute"] = {
         "stage": "readback",
+        "queue_api": "legacy",
         "api_error": -5,
         "missing_symbols": [],
         "build_log": None,
@@ -218,6 +225,7 @@ def test_build_log_nonraw_failure_evidence_is_accepted(status):
     compute.update(
         {
             "stage": "build",
+            "queue_api": "with_properties",
             "api_error": -11,
             "build_log": {"status": status, "sha256": None},
         }
@@ -230,6 +238,30 @@ def test_build_log_nonraw_failure_evidence_is_accepted(status):
 def test_top_level_and_aggregate_compute_readiness_must_match():
     validator = _validator()
     report = _report()
+    report["compute_ready"] = False
+    assert list(validator.iter_errors(report))
+
+
+def test_compute_queue_api_state_invariants():
+    validator = _validator()
+    report = _report()
+    report["aggregate_loader_observation"]["platforms"][0]["devices"][0]["compute"][
+        "queue_api"
+    ] = None
+    assert list(validator.iter_errors(report))
+
+    report = _report()
+    compute = report["aggregate_loader_observation"]["platforms"][0]["devices"][0][
+        "compute"
+    ]
+    compute.update(
+        {
+            "stage": "not_attempted",
+            "queue_api": "legacy",
+            "missing_symbols": ["clCreateContext"],
+        }
+    )
+    report["aggregate_loader_observation"]["compute_ready"] = False
     report["compute_ready"] = False
     assert list(validator.iter_errors(report))
 

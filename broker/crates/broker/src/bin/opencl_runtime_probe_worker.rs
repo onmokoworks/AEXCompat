@@ -1,7 +1,7 @@
 use aexcompat_broker::opencl_runtime_probe::{
     AggregateLoaderObservation, ApiFailure, BuildLogObservation, BuildLogStatus,
     COMPUTE_ELEMENT_COUNT, ComputeDeviceObservation, ComputeDeviceProbe, ComputeStage,
-    MAX_BUILD_LOG_BYTES, OpenClApi, collect_with_compute, missing_symbol_observation,
+    MAX_BUILD_LOG_BYTES, OpenClApi, QueueApi, collect_with_compute, missing_symbol_observation,
     no_loader_observation,
 };
 
@@ -45,6 +45,7 @@ mod platform {
     const CL_MEM_READ_ONLY: u64 = 1 << 2;
     const CL_TRUE: u32 = 1;
     const CL_PROGRAM_BUILD_LOG: u32 = 0x1183;
+    const CL_CONTEXT_PLATFORM: isize = 0x1084;
 
     type ClPlatformId = *mut c_void;
     type ClDeviceId = *mut c_void;
@@ -54,6 +55,7 @@ mod platform {
     type ClProgram = *mut c_void;
     type ClKernel = *mut c_void;
     type ClEvent = *mut c_void;
+    const _: () = assert!(size_of::<isize>() == size_of::<ClPlatformId>());
     type ClGetPlatformIDs = unsafe extern "system" fn(u32, *mut ClPlatformId, *mut u32) -> i32;
     type ClGetPlatformInfo =
         unsafe extern "system" fn(ClPlatformId, u32, usize, *mut c_void, *mut usize) -> i32;
@@ -571,50 +573,94 @@ mod platform {
     }
 
     impl ComputeDeviceProbe for DynamicOpenCl {
-        fn probe_device(&self, device: usize) -> ComputeDeviceObservation {
+        fn probe_device(
+            &self,
+            platform: usize,
+            device: usize,
+            platform_version: &str,
+            device_version: &str,
+        ) -> ComputeDeviceObservation {
             let Some(functions) = self.compute else {
                 return ComputeDeviceObservation::not_attempted(
                     self.missing_compute_symbols.clone(),
                 );
             };
-            run_compute(functions, device as ClDeviceId)
+            run_compute(
+                functions,
+                platform as ClPlatformId,
+                device as ClDeviceId,
+                supports_opencl_2(platform_version) && supports_opencl_2(device_version),
+            )
         }
     }
 
-    fn run_compute(functions: ComputeFunctions, device: ClDeviceId) -> ComputeDeviceObservation {
+    fn supports_opencl_2(version: &str) -> bool {
+        version
+            .strip_prefix("OpenCL ")
+            .and_then(|rest| rest.split_once('.'))
+            .and_then(|(major, rest)| {
+                Some((major.parse::<u32>().ok()?, rest.split_whitespace().next()?))
+            })
+            .and_then(|(major, minor)| Some((major, minor.parse::<u32>().ok()?)))
+            .is_some_and(|(major, _)| major >= 2)
+    }
+
+    fn platform_property(platform: ClPlatformId) -> isize {
+        isize::from_ne_bytes((platform as usize).to_ne_bytes())
+    }
+
+    fn run_compute(
+        functions: ComputeFunctions,
+        platform: ClPlatformId,
+        device: ClDeviceId,
+        supports_with_properties: bool,
+    ) -> ComputeDeviceObservation {
         let mut error = CL_SUCCESS;
-        let context_handle =
-            unsafe { (functions.create_context)(null(), 1, &device, None, null_mut(), &mut error) };
+        let context_properties = [CL_CONTEXT_PLATFORM, platform_property(platform), 0];
+        let context_handle = unsafe {
+            (functions.create_context)(
+                context_properties.as_ptr(),
+                1,
+                &device,
+                None,
+                null_mut(),
+                &mut error,
+            )
+        };
         if context_handle.is_null() || error != CL_SUCCESS {
             return ComputeDeviceObservation::failed(ComputeStage::Context, Some(error));
         }
         let context = Resource::new(context_handle, functions.release_context);
 
         error = CL_SUCCESS;
-        let mut queue_handle = null_mut();
-        if let Some(create) = functions.create_queue_with_properties {
+        let queue_handle;
+        let queue_api;
+        if supports_with_properties && functions.create_queue_with_properties.is_some() {
+            queue_api = QueueApi::WithProperties;
+            let create = functions
+                .create_queue_with_properties
+                .expect("checked with-properties symbol");
             let properties = [0isize];
             queue_handle =
                 unsafe { create(context.handle, device, properties.as_ptr(), &mut error) };
-        }
-        if (queue_handle.is_null() || error != CL_SUCCESS) && functions.create_queue.is_some() {
+            if queue_handle.is_null() || error != CL_SUCCESS {
+                let mut result = ComputeDeviceObservation::failed(ComputeStage::Queue, Some(error));
+                result.queue_api = Some(queue_api);
+                return result;
+            }
+        } else if let Some(create) = functions.create_queue {
+            queue_api = QueueApi::Legacy;
             error = CL_SUCCESS;
-            queue_handle = unsafe {
-                functions.create_queue.expect("checked fallback")(
-                    context.handle,
-                    device,
-                    0,
-                    &mut error,
-                )
-            };
-        }
-        if functions.create_queue_with_properties.is_none() && functions.create_queue.is_none() {
+            queue_handle = unsafe { create(context.handle, device, 0, &mut error) };
+        } else {
             return ComputeDeviceObservation::not_attempted(vec![
                 "clCreateCommandQueueWithProperties|clCreateCommandQueue".into(),
             ]);
         }
         if queue_handle.is_null() || error != CL_SUCCESS {
-            return ComputeDeviceObservation::failed(ComputeStage::Queue, Some(error));
+            let mut result = ComputeDeviceObservation::failed(ComputeStage::Queue, Some(error));
+            result.queue_api = Some(queue_api);
+            return result;
         }
         let queue = Resource::new(queue_handle, functions.release_queue);
 
@@ -762,7 +808,7 @@ mod platform {
         {
             return ComputeDeviceObservation::failed(ComputeStage::Mismatch, None);
         }
-        ComputeDeviceObservation::passed()
+        ComputeDeviceObservation::passed(queue_api)
     }
 
     fn build_log_evidence(
@@ -885,6 +931,28 @@ mod platform {
         use super::*;
         use std::sync::{Mutex, OnceLock};
 
+        #[derive(Default)]
+        struct DispatchState {
+            context_properties: Vec<isize>,
+            with_properties_error: i32,
+            build_error: i32,
+            mismatch: bool,
+            with_properties_calls: usize,
+            legacy_calls: usize,
+            next_buffer: usize,
+            releases: Vec<usize>,
+        }
+
+        fn dispatch_state() -> &'static Mutex<DispatchState> {
+            static STATE: OnceLock<Mutex<DispatchState>> = OnceLock::new();
+            STATE.get_or_init(|| Mutex::new(DispatchState::default()))
+        }
+
+        fn dispatch_test_lock() -> &'static Mutex<()> {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            LOCK.get_or_init(|| Mutex::new(()))
+        }
+
         fn releases() -> &'static Mutex<Vec<usize>> {
             static RELEASES: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
             RELEASES.get_or_init(|| Mutex::new(Vec::new()))
@@ -893,6 +961,285 @@ mod platform {
         unsafe extern "system" fn record_release(handle: *mut c_void) -> i32 {
             releases().lock().unwrap().push(handle as usize);
             CL_SUCCESS
+        }
+
+        unsafe extern "system" fn stub_create_context(
+            properties: *const isize,
+            _: u32,
+            _: *const ClDeviceId,
+            _: Option<unsafe extern "system" fn(*const i8, *const c_void, usize, *mut c_void)>,
+            _: *mut c_void,
+            error: *mut i32,
+        ) -> ClContext {
+            let values = unsafe { std::slice::from_raw_parts(properties, 3) };
+            dispatch_state().lock().unwrap().context_properties = values.to_vec();
+            unsafe { *error = CL_SUCCESS };
+            1usize as ClContext
+        }
+
+        unsafe extern "system" fn stub_queue_with(
+            _: ClContext,
+            _: ClDeviceId,
+            _: *const isize,
+            error: *mut i32,
+        ) -> ClCommandQueue {
+            let mut state = dispatch_state().lock().unwrap();
+            state.with_properties_calls += 1;
+            unsafe { *error = state.with_properties_error };
+            if state.with_properties_error == CL_SUCCESS {
+                2usize as ClCommandQueue
+            } else {
+                null_mut()
+            }
+        }
+
+        unsafe extern "system" fn stub_queue_legacy(
+            _: ClContext,
+            _: ClDeviceId,
+            _: u64,
+            error: *mut i32,
+        ) -> ClCommandQueue {
+            dispatch_state().lock().unwrap().legacy_calls += 1;
+            unsafe { *error = CL_SUCCESS };
+            2usize as ClCommandQueue
+        }
+
+        unsafe extern "system" fn stub_create_buffer(
+            _: ClContext,
+            _: u64,
+            _: usize,
+            _: *mut c_void,
+            error: *mut i32,
+        ) -> ClMem {
+            let mut state = dispatch_state().lock().unwrap();
+            state.next_buffer += 1;
+            unsafe { *error = CL_SUCCESS };
+            (2 + state.next_buffer) as ClMem
+        }
+
+        unsafe extern "system" fn stub_transfer(
+            _: ClCommandQueue,
+            _: ClMem,
+            _: u32,
+            _: usize,
+            _: usize,
+            _: *const c_void,
+            _: u32,
+            _: *const ClEvent,
+            _: *mut ClEvent,
+        ) -> i32 {
+            CL_SUCCESS
+        }
+
+        unsafe extern "system" fn stub_read(
+            _: ClCommandQueue,
+            _: ClMem,
+            _: u32,
+            _: usize,
+            size: usize,
+            output: *const c_void,
+            _: u32,
+            _: *const ClEvent,
+            _: *mut ClEvent,
+        ) -> i32 {
+            let output = unsafe {
+                std::slice::from_raw_parts_mut(output as *mut u32, size / size_of::<u32>())
+            };
+            let mismatch = dispatch_state().lock().unwrap().mismatch;
+            for (index, value) in output.iter_mut().enumerate() {
+                *value = index as u32 * 3 + 7;
+            }
+            if mismatch {
+                output[0] ^= 1;
+            }
+            CL_SUCCESS
+        }
+
+        unsafe extern "system" fn stub_program(
+            _: ClContext,
+            _: u32,
+            _: *const *const i8,
+            _: *const usize,
+            error: *mut i32,
+        ) -> ClProgram {
+            unsafe { *error = CL_SUCCESS };
+            5usize as ClProgram
+        }
+
+        unsafe extern "system" fn stub_build(
+            _: ClProgram,
+            _: u32,
+            _: *const ClDeviceId,
+            _: *const i8,
+            _: Option<unsafe extern "system" fn(ClProgram, *mut c_void)>,
+            _: *mut c_void,
+        ) -> i32 {
+            dispatch_state().lock().unwrap().build_error
+        }
+
+        unsafe extern "system" fn stub_build_log(
+            _: ClProgram,
+            _: ClDeviceId,
+            _: u32,
+            size: usize,
+            output: *mut c_void,
+            returned: *mut usize,
+        ) -> i32 {
+            let log = b"C:\\Users\\private\\kernel.cl: build failed\0";
+            unsafe { *returned = log.len() };
+            if size != 0 {
+                unsafe { std::ptr::copy_nonoverlapping(log.as_ptr(), output.cast(), log.len()) };
+            }
+            CL_SUCCESS
+        }
+
+        unsafe extern "system" fn stub_kernel(
+            _: ClProgram,
+            _: *const i8,
+            error: *mut i32,
+        ) -> ClKernel {
+            unsafe { *error = CL_SUCCESS };
+            6usize as ClKernel
+        }
+
+        unsafe extern "system" fn stub_set_arg(
+            _: ClKernel,
+            _: u32,
+            _: usize,
+            _: *const c_void,
+        ) -> i32 {
+            CL_SUCCESS
+        }
+
+        unsafe extern "system" fn stub_enqueue(
+            _: ClCommandQueue,
+            _: ClKernel,
+            _: u32,
+            _: *const usize,
+            _: *const usize,
+            _: *const usize,
+            _: u32,
+            _: *const ClEvent,
+            _: *mut ClEvent,
+        ) -> i32 {
+            CL_SUCCESS
+        }
+
+        unsafe extern "system" fn stub_finish(_: ClCommandQueue) -> i32 {
+            CL_SUCCESS
+        }
+
+        unsafe extern "system" fn stub_release(handle: *mut c_void) -> i32 {
+            dispatch_state()
+                .lock()
+                .unwrap()
+                .releases
+                .push(handle as usize);
+            CL_SUCCESS
+        }
+
+        fn dispatch() -> ComputeFunctions {
+            ComputeFunctions {
+                create_context: stub_create_context,
+                create_queue_with_properties: Some(stub_queue_with),
+                create_queue: Some(stub_queue_legacy),
+                create_buffer: stub_create_buffer,
+                enqueue_write_buffer: stub_transfer,
+                create_program_with_source: stub_program,
+                build_program: stub_build,
+                get_program_build_info: stub_build_log,
+                create_kernel: stub_kernel,
+                set_kernel_arg: stub_set_arg,
+                enqueue_nd_range_kernel: stub_enqueue,
+                finish: stub_finish,
+                enqueue_read_buffer: stub_read,
+                release_kernel: stub_release,
+                release_program: stub_release,
+                release_mem: stub_release,
+                release_queue: stub_release,
+                release_context: stub_release,
+            }
+        }
+
+        fn reset_dispatch() {
+            *dispatch_state().lock().unwrap() = DispatchState::default();
+        }
+
+        #[test]
+        fn dispatch_binds_platform_and_limits_queue_fallback() {
+            let _serial = dispatch_test_lock().lock().unwrap();
+            reset_dispatch();
+            let result = run_compute(
+                dispatch(),
+                0x1234usize as ClPlatformId,
+                0x5678usize as ClDeviceId,
+                true,
+            );
+            assert_eq!(result.stage, ComputeStage::Passed);
+            assert_eq!(result.queue_api, Some(QueueApi::WithProperties));
+            let state = dispatch_state().lock().unwrap();
+            assert_eq!(state.context_properties, [CL_CONTEXT_PLATFORM, 0x1234, 0]);
+            assert_eq!(state.with_properties_calls, 1);
+            assert_eq!(state.legacy_calls, 0);
+            assert_eq!(state.releases, [6, 5, 4, 3, 2, 1]);
+            drop(state);
+
+            reset_dispatch();
+            let legacy = run_compute(
+                dispatch(),
+                0x1234usize as ClPlatformId,
+                0x5678usize as ClDeviceId,
+                false,
+            );
+            assert_eq!(legacy.stage, ComputeStage::Passed);
+            assert_eq!(legacy.queue_api, Some(QueueApi::Legacy));
+            assert_eq!(dispatch_state().lock().unwrap().legacy_calls, 1);
+
+            reset_dispatch();
+            dispatch_state().lock().unwrap().with_properties_error = -30;
+            let failed = run_compute(
+                dispatch(),
+                0x1234usize as ClPlatformId,
+                0x5678usize as ClDeviceId,
+                true,
+            );
+            assert_eq!(failed.stage, ComputeStage::Queue);
+            assert_eq!(failed.queue_api, Some(QueueApi::WithProperties));
+            let state = dispatch_state().lock().unwrap();
+            assert_eq!(state.legacy_calls, 0);
+            assert_eq!(state.releases, [1]);
+        }
+
+        #[test]
+        fn dispatch_build_log_and_mismatch_are_fail_closed_with_cleanup() {
+            let _serial = dispatch_test_lock().lock().unwrap();
+            reset_dispatch();
+            dispatch_state().lock().unwrap().build_error = -11;
+            let build = run_compute(
+                dispatch(),
+                0x1234usize as ClPlatformId,
+                0x5678usize as ClDeviceId,
+                true,
+            );
+            assert_eq!(build.stage, ComputeStage::Build);
+            let evidence = build.build_log.expect("bounded build log evidence");
+            assert_eq!(evidence.status, BuildLogStatus::Redacted);
+            assert_eq!(evidence.sha256.unwrap().len(), 64);
+            assert_eq!(dispatch_state().lock().unwrap().releases, [5, 4, 3, 2, 1]);
+
+            reset_dispatch();
+            dispatch_state().lock().unwrap().mismatch = true;
+            let mismatch = run_compute(
+                dispatch(),
+                0x1234usize as ClPlatformId,
+                0x5678usize as ClDeviceId,
+                true,
+            );
+            assert_eq!(mismatch.stage, ComputeStage::Mismatch);
+            assert_eq!(
+                dispatch_state().lock().unwrap().releases,
+                [6, 5, 4, 3, 2, 1]
+            );
         }
 
         #[test]

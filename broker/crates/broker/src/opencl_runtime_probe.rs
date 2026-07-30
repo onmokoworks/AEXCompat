@@ -159,6 +159,13 @@ pub enum ComputeStage {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum QueueApi {
+    WithProperties,
+    Legacy,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BuildLogStatus {
     Redacted,
     Overflow,
@@ -175,15 +182,17 @@ pub struct BuildLogObservation {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ComputeDeviceObservation {
     pub stage: ComputeStage,
+    pub queue_api: Option<QueueApi>,
     pub api_error: Option<i32>,
     pub missing_symbols: Vec<String>,
     pub build_log: Option<BuildLogObservation>,
 }
 
 impl ComputeDeviceObservation {
-    pub fn passed() -> Self {
+    pub fn passed(queue_api: QueueApi) -> Self {
         Self {
             stage: ComputeStage::Passed,
+            queue_api: Some(queue_api),
             api_error: None,
             missing_symbols: Vec::new(),
             build_log: None,
@@ -193,6 +202,7 @@ impl ComputeDeviceObservation {
     pub fn failed(stage: ComputeStage, api_error: Option<i32>) -> Self {
         Self {
             stage,
+            queue_api: None,
             api_error,
             missing_symbols: Vec::new(),
             build_log: None,
@@ -202,6 +212,7 @@ impl ComputeDeviceObservation {
     pub fn not_attempted(missing_symbols: Vec<String>) -> Self {
         Self {
             stage: ComputeStage::NotAttempted,
+            queue_api: None,
             api_error: None,
             missing_symbols,
             build_log: None,
@@ -306,13 +317,19 @@ pub trait OpenClApi {
 }
 
 pub trait ComputeDeviceProbe {
-    fn probe_device(&self, device: usize) -> ComputeDeviceObservation;
+    fn probe_device(
+        &self,
+        platform: usize,
+        device: usize,
+        platform_version: &str,
+        device_version: &str,
+    ) -> ComputeDeviceObservation;
 }
 
 struct NotAttemptedCompute;
 
 impl ComputeDeviceProbe for NotAttemptedCompute {
-    fn probe_device(&self, _: usize) -> ComputeDeviceObservation {
+    fn probe_device(&self, _: usize, _: usize, _: &str, _: &str) -> ComputeDeviceObservation {
         ComputeDeviceObservation::not_attempted(Vec::new())
     }
 }
@@ -442,7 +459,7 @@ fn collect_platform(
     }
     let mut devices = Vec::new();
     for (device_index, device) in device_ids.into_iter().enumerate() {
-        match collect_device(api, compute, device) {
+        match collect_device(api, compute, platform, device, &version) {
             Ok(observation) => devices.push(observation),
             Err(mut error) => {
                 error.device_index = Some(device_index as u32);
@@ -464,7 +481,9 @@ fn collect_platform(
 fn collect_device(
     api: &impl OpenClApi,
     compute: &impl ComputeDeviceProbe,
+    platform: usize,
     device: usize,
+    platform_version: &str,
 ) -> Result<DeviceObservation, ProbeDiagnostic> {
     let dimensions = api
         .device_u32(device, CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS)
@@ -525,19 +544,26 @@ fn collect_device(
             "clGetDeviceInfo(capability bounds)",
         ));
     }
+    let name = device_string(api, device, CL_DEVICE_NAME)?;
+    let vendor = device_string(api, device, CL_DEVICE_VENDOR)?;
+    let driver_version = device_string(api, device, CL_DRIVER_VERSION)?;
+    let version = device_string(api, device, CL_DEVICE_VERSION)?;
+    let profile = device_string(api, device, CL_DEVICE_PROFILE)?;
+    let extensions = extension_list(device_string_allow_empty(
+        api,
+        device,
+        CL_DEVICE_EXTENSIONS,
+    )?)?;
+    let compute = compute.probe_device(platform, device, platform_version, &version);
     Ok(DeviceObservation {
         device_type,
         vendor_id,
-        name: device_string(api, device, CL_DEVICE_NAME)?,
-        vendor: device_string(api, device, CL_DEVICE_VENDOR)?,
-        driver_version: device_string(api, device, CL_DRIVER_VERSION)?,
-        version: device_string(api, device, CL_DEVICE_VERSION)?,
-        profile: device_string(api, device, CL_DEVICE_PROFILE)?,
-        extensions: extension_list(device_string_allow_empty(
-            api,
-            device,
-            CL_DEVICE_EXTENSIONS,
-        )?)?,
+        name,
+        vendor,
+        driver_version,
+        version,
+        profile,
+        extensions,
         available,
         compiler_available,
         max_compute_units,
@@ -556,7 +582,7 @@ fn collect_device(
         local_mem_bytes: api
             .device_u64(device, CL_DEVICE_LOCAL_MEM_SIZE)
             .map_err(diagnostic)?,
-        compute: compute.probe_device(device),
+        compute,
     })
 }
 
@@ -846,7 +872,7 @@ mod tests {
     }
 
     impl ComputeDeviceProbe for MockCompute {
-        fn probe_device(&self, _: usize) -> ComputeDeviceObservation {
+        fn probe_device(&self, _: usize, _: usize, _: &str, _: &str) -> ComputeDeviceObservation {
             self.observations
                 .borrow_mut()
                 .pop_front()
@@ -1171,7 +1197,7 @@ mod tests {
     fn compute_stage_matrix_and_partial_success_fail_closed() {
         let passed = collect_with_compute(
             &valid_mock(),
-            &MockCompute::new([ComputeDeviceObservation::passed()]),
+            &MockCompute::new([ComputeDeviceObservation::passed(QueueApi::Legacy)]),
         );
         assert!(passed.compute_ready);
         assert_eq!(
@@ -1209,7 +1235,7 @@ mod tests {
         let partial = collect_with_compute(
             &two_devices,
             &MockCompute::new([
-                ComputeDeviceObservation::passed(),
+                ComputeDeviceObservation::passed(QueueApi::Legacy),
                 ComputeDeviceObservation::failed(ComputeStage::Readback, Some(-5)),
             ]),
         );

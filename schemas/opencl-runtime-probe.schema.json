@@ -412,7 +412,7 @@
     "compute": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["stage", "api_error", "missing_symbols", "build_log"],
+      "required": ["stage", "queue_api", "api_error", "missing_symbols", "build_log"],
       "properties": {
         "stage": {
           "enum": [
@@ -428,6 +428,9 @@
             "mismatch",
             "not_attempted"
           ]
+        },
+        "queue_api": {
+          "enum": ["with_properties", "legacy", null]
         },
         "api_error": {
           "type": ["integer", "null"],
@@ -461,6 +464,7 @@
           "then": {
             "properties": {
               "api_error": { "type": "null" },
+              "queue_api": { "enum": ["with_properties", "legacy"] },
               "missing_symbols": { "maxItems": 0 },
               "build_log": { "type": "null" }
             }
@@ -474,6 +478,7 @@
           "then": {
             "properties": {
               "api_error": { "type": "null" },
+              "queue_api": { "type": "null" },
               "build_log": { "type": "null" }
             }
           }
