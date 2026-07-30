@@ -13,6 +13,13 @@ name = "aex-abi"
 version = "0.1.0"
 
 [[package]]
+name = "aex-apple-opencl"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "aex-guest-worker"
 version = "0.1.0"
 dependencies = [
