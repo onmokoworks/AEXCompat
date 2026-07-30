@@ -39,7 +39,6 @@ pub struct RuntimeModuleIdentityEvidence {
 }
 
 const CATALOG_ENUMERATION_SUCCESS: u32 = 0;
-const CATALOG_ENUMERATION_EXHAUSTED: u32 = 1168; // ERROR_NOT_FOUND
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RawCatalogEnumeration<H> {
@@ -82,10 +81,7 @@ impl<B: CatalogEnumerationBackend> CatalogEnumeration<B> {
         if self.current.is_some() {
             return Ok(self.current);
         }
-        if matches!(
-            outcome.last_error,
-            CATALOG_ENUMERATION_SUCCESS | CATALOG_ENUMERATION_EXHAUSTED
-        ) {
+        if outcome.last_error == CATALOG_ENUMERATION_SUCCESS {
             Ok(None)
         } else {
             Err(outcome.last_error)
@@ -784,6 +780,8 @@ mod tests {
 
     #[test]
     fn catalog_enumeration_error_after_one_success_is_not_normal_completion() {
+        const ERROR_NOT_FOUND: u32 = 1168;
+
         let (mut catalogs, state) = mock_catalogs([
             (
                 None,
@@ -798,12 +796,12 @@ mod tests {
                 RawCatalogEnumeration {
                     next: None,
                     previous_retained: Some(11),
-                    last_error: 5,
+                    last_error: ERROR_NOT_FOUND,
                 },
             ),
         ]);
         assert_eq!(catalogs.advance(&[1, 2]), Ok(Some(11)));
-        assert_eq!(catalogs.advance(&[1, 2]), Err(5));
+        assert_eq!(catalogs.advance(&[1, 2]), Err(ERROR_NOT_FOUND));
         assert_eq!(unique_verified_catalog_digest(&[[9; 32]], true), None);
         drop(catalogs);
         assert_eq!(state.borrow().releases, vec![11]);
@@ -826,7 +824,7 @@ mod tests {
                 RawCatalogEnumeration {
                     next: None,
                     previous_retained: Some(21),
-                    last_error: CATALOG_ENUMERATION_EXHAUSTED,
+                    last_error: CATALOG_ENUMERATION_SUCCESS,
                 },
             ),
         ]);
