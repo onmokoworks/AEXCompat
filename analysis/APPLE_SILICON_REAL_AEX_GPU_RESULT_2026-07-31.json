@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "issue": 595,
+  "observed_utc": "2026-07-30T18:50:55Z",
+  "repository_head": "6dc7ddc6760300d4c1bae3e3180d71f7ab6d1adf",
+  "base_head": "2b7bb0d9cac58129836574ecbc9bc97004e7019a",
+  "host": {
+    "os": "macOS 15.7.2 (24G325)",
+    "architecture": "arm64",
+    "processor": "Apple M1 Pro",
+    "opencl_platform": "Apple",
+    "opencl_device": "Apple M1 Pro",
+    "opencl_compute_units": 14
+  },
+  "fixture": {
+    "path": "target/issue595-windows-source/SDK_Invert_ProcAmp_OpenCL.aex",
+    "size": 109568,
+    "sha256": "6ad8f4e0808c1fe2cda1cf8a66e79b5f333095bb8ff28f1aa1764260730f586c",
+    "acquisition": {
+      "source_host": "R5900X",
+      "source_path": "D:\\Projects\\01_Project\\04_Tools\\AEXCompat\\target\\sdk-fixtures\\invert-procamp\\SDK_Invert_ProcAmp_OpenCL.aex",
+      "transport": "scp over the configured Tailscale SSH alias r5900x",
+      "rebuilt_during_acquisition": false,
+      "identity_matched_the_prior_windows_evidence": true
+    },
+    "reproduction": {
+      "build_recipe": "tools/build-sdk-invert-opencl.ps1",
+      "source": "Adobe After Effects SDK SDK_Invert_ProcAmp example",
+      "kernel_storage": "embedded OpenCL C source",
+      "external_runtime_sidecars": []
+    },
+    "input_path": "target/issue595-windows-source/probe-invert.png",
+    "input_sha256": "bd112765998bb452a0ddd0532c2a58d14156be25b261b99ead372826e6ca455f",
+    "width": 37,
+    "height": 23,
+    "pixel_format": "argb32f"
+  },
+  "default_gpu_render": {
+    "command": "guest/target/release/aex-guest-worker render-png target/issue595-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue595-windows-source/probe-invert.png target/issue595-macos-result/default.png --pixel-format argb32f --render-backend opencl --gpu-device-index 0",
+    "exit_code": 0,
+    "render_error": 0,
+    "selector_errors": {
+      "GPU_DEVICE_SETUP": 0,
+      "SMART_PRE_RENDER": 0,
+      "SMART_RENDER_GPU": 0,
+      "GPU_DEVICE_SETDOWN": 0
+    },
+    "gpu_render_possible": true,
+    "source_strings": 2,
+    "source_bytes": 66067,
+    "programs_built": 1,
+    "kernels_created": 2,
+    "kernels_released": 2,
+    "kernel_arguments": {
+      "total": 18,
+      "buffer": 4,
+      "scalar": 14,
+      "scalar_bytes": 56
+    },
+    "kernel_dispatches": 2,
+    "dispatched_work_items": 3072,
+    "upload_bytes": 13616,
+    "download_bytes": 13616,
+    "allocations_created": 3,
+    "allocations_freed": 3,
+    "worlds_created": 1,
+    "worlds_disposed": 1,
+    "raw_argb32f_sha256": "e3c36b52b1033c74507a419630f5918656b9b267a89c3573a65e7605ae0ad89e",
+    "windows_gpu_raw_argb32f_sha256": "e3c36b52b1033c74507a419630f5918656b9b267a89c3573a65e7605ae0ad89e",
+    "decoded_public_rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617",
+    "windows_public_rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617",
+    "windows_public_rgba8_byte_exact": true,
+    "output_png_sha256": "f97f46aa45d915bb75e46491b4fbd33ec554afef85b23e41058ec485eb6d98fd",
+    "cold_wall_seconds": 0.38,
+    "cleanup": {
+      "suite_balanced": true,
+      "opencl_balanced": true,
+      "transport_finished": true,
+      "runtime_ended": true,
+      "live_host_allocations": 0,
+      "live_gpu_worlds": 0,
+      "live_borrowed_gpu_worlds": 0,
+      "live_device_allocations": 0,
+      "live_bytes": 0,
+      "live_native_objects": 0,
+      "native_release_errors": 0,
+      "complete": true
+    }
+  },
+  "parameter_gpu_render": {
+    "parameter": {
+      "slot": 1,
+      "name": "Brightness",
+      "value": 25.0
+    },
+    "exit_code": 0,
+    "render_error": 0,
+    "raw_argb32f_sha256": "d6f672fae016974aec384a4533a02ea56c46322d3e31b8b923f0c9b4c122455a",
+    "decoded_public_rgba8_sha256": "6677d579bc6680478e5bd53897795d726ff999ff3af13c482686fa799c55e6f8",
+    "differs_from_default": true,
+    "warm_wall_seconds": 0.06,
+    "kernel_dispatches": 2,
+    "cleanup_complete": true
+  },
+  "cpu_non_regression": {
+    "fixture": "/Users/onmk/Documents/Projects/Personal/OLM as/plugins_2025/OLMBlur.aex",
+    "fixture_size": 63488,
+    "fixture_sha256": "f0611785e7b14ac4fcfc75f23b8862beb4539eee52d25d472556849535e96e5b",
+    "exit_code": 0,
+    "render_error": 0,
+    "render_mode": "smart-cpu",
+    "gpu_runtime_started": false,
+    "gpu_setup_attempted": false,
+    "gpu_setdown_attempted": false,
+    "guards_intact": true,
+    "raw_argb8_sha256": "3f174ac3d9c0cc8d573dbb4424982e7465a2628e07327e200a8256b59aa96693",
+    "wall_seconds": 0.18
+  },
+  "validation": {
+    "cargo_fmt_check": "pass",
+    "guest_workspace_tests_single_thread": "pass (173 + 9 + 2 tests)",
+    "guest_workspace_release_build": "pass",
+    "x86_64_native_carrier_check": "pass",
+    "git_diff_check": "pass",
+    "ci": "not run under the repository billing policy"
+  }
+}
