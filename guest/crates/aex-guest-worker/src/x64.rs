@@ -311,4 +311,5 @@ include!("x64/tail.rs");
 mod tests {
     include!("x64/tests_support.rs");
     include!("x64/tests_cases.rs");
+    include!("x64/tests_gpu.rs");
 }
