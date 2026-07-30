@@ -63,7 +63,31 @@ def test_resolve_ofx_source_contains_real_exports_and_no_identity_success():
     assert "kOfxStatErrUnsupported" in source
     assert "paramGetValueAtTime" in source
     assert "strength" in source
+    assert "checked_multiply" in source
+    assert "checked_last_pixel_end" in source
+    assert "kMaxImageSpan" in source
+    assert "row_bytes <= 0" in source
+    assert "source_row_bytes < 0 ? -source_row_bytes" not in source
     assert "return kOfxStatErrUnsupported;" in source
     assert "OpenFX" in header
     assert "BSD-3-Clause" in header
     assert '#include "ofx' not in header
+
+
+def test_resolve_ofx_native_smoke_covers_fail_closed_geometry_cases():
+    smoke = (
+        ROOT / "bridges" / "resolve-ofx" / "src" / "resolve_ofx_smoke.cpp"
+    ).read_text(encoding="utf-8")
+    for case in (
+        "zero_rowbytes_rejected",
+        "negative_rowbytes_rejected",
+        "int_min_rowbytes_rejected",
+        "short_row_rejected",
+        "oversized_span_rejected",
+        "overflow_bounds_rejected",
+        "oversized_pixel_span_rejected",
+        "out_of_bounds_window_rejected",
+    ):
+        assert case in smoke
+    assert "safety_checks_ok" in smoke
+    assert "output_after_render" in smoke

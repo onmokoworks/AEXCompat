@@ -6,6 +6,7 @@
 #pragma comment(lib, "bcrypt.lib")
 #endif
 
+#include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -313,6 +314,24 @@ static void set_image_property(FakePropertySet &properties, const char *name,
                   kOfxImagePreMultiplied);
 }
 
+static void set_image_bounds(FakePropertySet &properties, int x1, int y1,
+                             int x2, int y2) {
+  const int bounds[] = {x1, y1, x2, y2};
+  for (int index = 0; index < 4; ++index) {
+    prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&properties),
+                 kOfxImagePropBounds, index, bounds[index]);
+  }
+}
+
+static void set_render_window(FakePropertySet &properties, int x1, int y1,
+                              int x2, int y2) {
+  const int bounds[] = {x1, y1, x2, y2};
+  for (int index = 0; index < 4; ++index) {
+    prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&properties),
+                 kOfxImageEffectPropRenderWindow, index, bounds[index]);
+  }
+}
+
 static void initialize_fixture(FakeImageObject &instance) {
   instance.strength.value = 0.25;
   instance.source_clip.owner = &instance;
@@ -476,16 +495,75 @@ int main(int argc, char **argv) {
   FakePropertySet render_args;
   prop_set_double(reinterpret_cast<OfxPropertySetHandle>(&render_args),
                   kOfxPropTime, 0, 7.0);
-  const int render_window[] = {1, 0, 3, 2};
-  for (int index = 0; index < 4; ++index) {
-    prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&render_args),
-                 kOfxImageEffectPropRenderWindow, index, render_window[index]);
-  }
+  set_render_window(render_args, 1, 0, 3, 2);
   const auto render_status = plugin->mainEntry(
       kOfxImageEffectActionRender, &instance,
       reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);
   int changed_bytes = 0;
   const bool render_verified = rendered_fixture_ok(instance, &changed_bytes);
+  const auto output_after_render = instance.output_pixels;
+  const auto rejected_without_output_write = [&](OfxStatus expected) {
+    const auto status = plugin->mainEntry(
+        kOfxImageEffectActionRender, &instance,
+        reinterpret_cast<OfxPropertySetHandle>(&render_args), nullptr);
+    return status == expected && instance.output_pixels == output_after_render;
+  };
+
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, 0);
+  const bool zero_rowbytes_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, -20);
+  const bool negative_rowbytes_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, INT_MIN);
+  const bool int_min_rowbytes_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, 8);
+  const bool short_row_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, INT_MAX);
+  const bool oversized_span_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, 20);
+
+  set_image_bounds(instance.source_image, INT_MIN, 0, INT_MAX, 1);
+  set_image_bounds(instance.output_image, INT_MIN, 0, INT_MAX, 1);
+  const bool overflow_bounds_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  set_image_bounds(instance.source_image, 0, 0, 3, 2);
+  set_image_bounds(instance.output_image, 0, 0, 3, 2);
+
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, 65536);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.output_image),
+               kOfxImagePropRowBytes, 0, 65536);
+  set_image_bounds(instance.source_image, 0, 0, 16384, 16384);
+  set_image_bounds(instance.output_image, 0, 0, 16384, 16384);
+  const bool oversized_pixel_span_rejected =
+      rejected_without_output_write(kOfxStatErrFormat);
+  set_image_bounds(instance.source_image, 0, 0, 3, 2);
+  set_image_bounds(instance.output_image, 0, 0, 3, 2);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.source_image),
+               kOfxImagePropRowBytes, 0, 20);
+  prop_set_int(reinterpret_cast<OfxPropertySetHandle>(&instance.output_image),
+               kOfxImagePropRowBytes, 0, 24);
+
+  set_render_window(render_args, -1, 0, 3, 2);
+  const bool out_of_bounds_window_rejected =
+      rejected_without_output_write(kOfxStatErrValue);
+  set_render_window(render_args, 1, 0, 3, 2);
+  const bool safety_checks_ok = zero_rowbytes_rejected &&
+                                negative_rowbytes_rejected &&
+                                int_min_rowbytes_rejected && short_row_rejected &&
+                                oversized_span_rejected && overflow_bounds_rejected &&
+                                oversized_pixel_span_rejected &&
+                                out_of_bounds_window_rejected;
   const auto input_sha256 = sha256(instance.source_pixels);
   const auto output_sha256 = sha256(instance.output_pixels);
   const auto destroy_status = plugin->mainEntry(
@@ -496,6 +574,7 @@ int main(int argc, char **argv) {
                             context_status == kOfxStatOK &&
                             create_status == kOfxStatOK &&
                             render_status == kOfxStatOK && render_verified &&
+                            safety_checks_ok &&
                             destroy_status == kOfxStatOK &&
                             unload_status == kOfxStatOK &&
                             has_string(descriptor.properties, kOfxPropLabel,
@@ -515,6 +594,8 @@ int main(int argc, char **argv) {
             << ",\"frame_time\":7.0,\"parameter\":{\"name\":\"strength\",\"time\":7.0,\"value\":0.25},\"input_sha256\":\"" << input_sha256
             << "\",\"output_sha256\":\"" << output_sha256
             << "\",\"pixel_diff\":" << changed_bytes
+            << ",\"safety_checks\":"
+            << (safety_checks_ok ? "true" : "false")
             << ",\"lifecycle_ok\":"
             << (lifecycle_ok ? "true" : "false") << "}" << std::endl;
   FreeLibrary(module);

@@ -1,5 +1,7 @@
 #include "resolve_ofx_abi.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cmath>
 #include <new>
 #include <string>
@@ -10,6 +12,125 @@ OfxHost g_host{};
 const OfxPropertySuiteV1 *g_properties = nullptr;
 const OfxImageEffectSuiteV1 *g_image_effect = nullptr;
 const OfxParameterSuiteV1 *g_parameters = nullptr;
+
+constexpr std::uint64_t kBytesPerPixel = 4;
+constexpr std::uint64_t kMaxImageDimension = 16384;
+constexpr std::uint64_t kMaxRenderPixels = 64ull * 1024 * 1024;
+constexpr std::uint64_t kMaxImageSpan = 512ull * 1024 * 1024;
+
+struct ImageGeometry {
+  std::uint64_t width = 0;
+  std::uint64_t height = 0;
+  std::uint64_t row_bytes = 0;
+  std::uint64_t span = 0;
+};
+
+bool checked_add(std::uint64_t left, std::uint64_t right,
+                 std::uint64_t *result) {
+  if (!result || left > UINT64_MAX - right) return false;
+  *result = left + right;
+  return true;
+}
+
+bool checked_multiply(std::uint64_t left, std::uint64_t right,
+                      std::uint64_t *result) {
+  if (!result || (right != 0 && left > UINT64_MAX / right)) return false;
+  *result = left * right;
+  return true;
+}
+
+bool image_geometry(const OfxRectI &bounds, int row_bytes,
+                    ImageGeometry *geometry) {
+  if (!geometry || row_bytes <= 0) return false;
+
+  const auto width = static_cast<std::int64_t>(bounds.x2) -
+                     static_cast<std::int64_t>(bounds.x1);
+  const auto height = static_cast<std::int64_t>(bounds.y2) -
+                      static_cast<std::int64_t>(bounds.y1);
+  if (width <= 0 || height <= 0 ||
+      static_cast<std::uint64_t>(width) > kMaxImageDimension ||
+      static_cast<std::uint64_t>(height) > kMaxImageDimension) {
+    return false;
+  }
+
+  std::uint64_t minimum_row_bytes = 0;
+  std::uint64_t pixel_count = 0;
+  std::uint64_t pixel_span = 0;
+  std::uint64_t span = 0;
+  if (!checked_multiply(static_cast<std::uint64_t>(width), kBytesPerPixel,
+                        &minimum_row_bytes) ||
+      !checked_multiply(static_cast<std::uint64_t>(width),
+                        static_cast<std::uint64_t>(height), &pixel_count) ||
+      !checked_multiply(pixel_count, kBytesPerPixel, &pixel_span) ||
+      pixel_span > kMaxImageSpan ||
+      static_cast<std::uint64_t>(row_bytes) < minimum_row_bytes ||
+      !checked_multiply(static_cast<std::uint64_t>(row_bytes),
+                        static_cast<std::uint64_t>(height), &span) ||
+      span > kMaxImageSpan) {
+    return false;
+  }
+
+  geometry->width = static_cast<std::uint64_t>(width);
+  geometry->height = static_cast<std::uint64_t>(height);
+  geometry->row_bytes = static_cast<std::uint64_t>(row_bytes);
+  geometry->span = span;
+  return true;
+}
+
+bool render_extent(const OfxRectI &bounds, const OfxRectI &render_window,
+                   const ImageGeometry &geometry, std::uint64_t *first_row,
+                   std::uint64_t *first_column, std::uint64_t *pixel_count) {
+  if (!first_row || !first_column || !pixel_count ||
+      render_window.x1 < bounds.x1 || render_window.y1 < bounds.y1 ||
+      render_window.x2 > bounds.x2 || render_window.y2 > bounds.y2 ||
+      render_window.x2 <= render_window.x1 ||
+      render_window.y2 <= render_window.y1) {
+    return false;
+  }
+
+  const auto width = static_cast<std::int64_t>(render_window.x2) -
+                     static_cast<std::int64_t>(render_window.x1);
+  const auto height = static_cast<std::int64_t>(render_window.y2) -
+                      static_cast<std::int64_t>(render_window.y1);
+  const auto row = static_cast<std::int64_t>(render_window.y1) -
+                   static_cast<std::int64_t>(bounds.y1);
+  const auto column = static_cast<std::int64_t>(render_window.x1) -
+                      static_cast<std::int64_t>(bounds.x1);
+  if (width <= 0 || height <= 0 || row < 0 || column < 0 ||
+      static_cast<std::uint64_t>(width) > geometry.width ||
+      static_cast<std::uint64_t>(height) > geometry.height ||
+      !checked_multiply(static_cast<std::uint64_t>(width),
+                        static_cast<std::uint64_t>(height), pixel_count) ||
+      *pixel_count > kMaxRenderPixels) {
+    return false;
+  }
+
+  *first_row = static_cast<std::uint64_t>(row);
+  *first_column = static_cast<std::uint64_t>(column);
+  return true;
+}
+
+bool checked_last_pixel_end(const ImageGeometry &geometry,
+                            std::uint64_t first_row,
+                            std::uint64_t first_column,
+                            std::uint64_t render_width,
+                            std::uint64_t render_height) {
+  std::uint64_t last_row = 0;
+  std::uint64_t last_column = 0;
+  std::uint64_t row_offset = 0;
+  std::uint64_t pixel_offset = 0;
+  std::uint64_t pixel_end = 0;
+  if (!checked_add(first_row, render_height - 1, &last_row) ||
+      !checked_add(first_column, render_width - 1, &last_column) ||
+      last_row >= geometry.height || last_column >= geometry.width ||
+      !checked_multiply(last_row, geometry.row_bytes, &row_offset) ||
+      !checked_multiply(last_column, kBytesPerPixel, &pixel_offset) ||
+      !checked_add(row_offset, pixel_offset, &pixel_end) ||
+      !checked_add(pixel_end, kBytesPerPixel, &pixel_end)) {
+    return false;
+  }
+  return pixel_end <= geometry.span;
+}
 
 struct InstanceState {
   unsigned int lifecycle_cookie = 0xA3E0388u;
@@ -243,52 +364,56 @@ OfxStatus render(OfxImageEffectHandle instance, OfxPropertySetHandle in_args) {
       get_int(source_image, kOfxImagePropRowBytes, 0, &source_row_bytes) &&
       get_int(output_image, kOfxImagePropRowBytes, 0, &output_row_bytes) &&
       source_data && output_data;
+  ImageGeometry source_geometry{};
+  ImageGeometry output_geometry{};
   if (!image_properties_ok || source_bounds.x1 != output_bounds.x1 ||
       source_bounds.y1 != output_bounds.y1 || source_bounds.x2 != output_bounds.x2 ||
-      source_bounds.y2 != output_bounds.y2 || source_bounds.x2 <= source_bounds.x1 ||
-      source_bounds.y2 <= source_bounds.y1) {
+      source_bounds.y2 != output_bounds.y2 ||
+      !image_geometry(source_bounds, source_row_bytes, &source_geometry) ||
+      !image_geometry(output_bounds, output_row_bytes, &output_geometry)) {
     g_image_effect->clipReleaseImage(source_image);
     g_image_effect->clipReleaseImage(output_image);
     return kOfxStatErrFormat;
   }
 
-  const auto width = static_cast<long long>(source_bounds.x2) - source_bounds.x1;
-  const auto min_row_bytes = width * 4;
-  if (min_row_bytes <= 0 ||
-      static_cast<long long>(source_row_bytes < 0 ? -source_row_bytes
-                                                  : source_row_bytes) < min_row_bytes ||
-      static_cast<long long>(output_row_bytes < 0 ? -output_row_bytes
-                                                  : output_row_bytes) < min_row_bytes) {
-    g_image_effect->clipReleaseImage(source_image);
-    g_image_effect->clipReleaseImage(output_image);
-    return kOfxStatErrFormat;
-  }
-
-  const int x1 = render_window.x1 > source_bounds.x1 ? render_window.x1
-                                                       : source_bounds.x1;
-  const int y1 = render_window.y1 > source_bounds.y1 ? render_window.y1
-                                                       : source_bounds.y1;
-  const int x2 = render_window.x2 < source_bounds.x2 ? render_window.x2
-                                                       : source_bounds.x2;
-  const int y2 = render_window.y2 < source_bounds.y2 ? render_window.y2
-                                                       : source_bounds.y2;
-  if (x2 <= x1 || y2 <= y1) {
+  std::uint64_t first_row = 0;
+  std::uint64_t first_column = 0;
+  std::uint64_t pixel_count = 0;
+  if (!render_extent(source_bounds, render_window, source_geometry, &first_row,
+                     &first_column, &pixel_count)) {
     g_image_effect->clipReleaseImage(source_image);
     g_image_effect->clipReleaseImage(output_image);
     return kOfxStatErrValue;
   }
 
+  const auto render_width = static_cast<std::uint64_t>(
+      static_cast<std::int64_t>(render_window.x2) - render_window.x1);
+  const auto render_height = static_cast<std::uint64_t>(
+      static_cast<std::int64_t>(render_window.y2) - render_window.y1);
+  if (!checked_last_pixel_end(source_geometry, first_row, first_column,
+                              render_width, render_height) ||
+      !checked_last_pixel_end(output_geometry, first_row, first_column,
+                              render_width, render_height)) {
+    g_image_effect->clipReleaseImage(source_image);
+    g_image_effect->clipReleaseImage(output_image);
+    return kOfxStatErrFormat;
+  }
+
   // Bounded, deterministic control effect: darken premultiplied RGB by the
   // time-evaluated strength parameter, preserve alpha, and honor host rowbytes.
   // This is an actual OFX pixel render, but it is not an AEX render claim.
-  for (int y = y1; y < y2; ++y) {
+  for (std::uint64_t row = 0; row < render_height; ++row) {
+    const auto source_row_offset = (first_row + row) * source_geometry.row_bytes;
+    const auto output_row_offset = (first_row + row) * output_geometry.row_bytes;
     auto *source_row = static_cast<unsigned char *>(source_data) +
-                       static_cast<long long>(y - source_bounds.y1) * source_row_bytes;
+                       static_cast<size_t>(source_row_offset);
     auto *output_row = static_cast<unsigned char *>(output_data) +
-                       static_cast<long long>(y - output_bounds.y1) * output_row_bytes;
-    for (int x = x1; x < x2; ++x) {
-      const auto source_offset = static_cast<size_t>(x - source_bounds.x1) * 4;
-      const auto output_offset = static_cast<size_t>(x - output_bounds.x1) * 4;
+                       static_cast<size_t>(output_row_offset);
+    for (std::uint64_t column = 0; column < render_width; ++column) {
+      const auto source_offset = static_cast<size_t>(first_column + column) *
+                                 static_cast<size_t>(kBytesPerPixel);
+      const auto output_offset = static_cast<size_t>(first_column + column) *
+                                 static_cast<size_t>(kBytesPerPixel);
       const auto attenuation = 1.0 - strength;
       output_row[output_offset + 0] = static_cast<unsigned char>(
           source_row[source_offset + 0] * attenuation + 0.5);
