@@ -1,0 +1,283 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onmokoworks.example/schemas/opencl-icd-adapter-binding.schema.json",
+  "title": "AEXCompat Windows OpenCL ICD adapter binding report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "binding_kind",
+    "bindings",
+    "registry_diagnostics",
+    "platform_diagnostics"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "binding_kind": {
+      "const": "opencl_icd_adapter_driver"
+    },
+    "bindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/binding"
+      }
+    },
+    "registry_diagnostics": {
+      "type": "array",
+      "items": {
+        "$ref": "opencl-icd-collector.schema.json#/$defs/registryDiagnostic"
+      }
+    },
+    "platform_diagnostics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/platformDiagnostic"
+      }
+    }
+  },
+  "$defs": {
+    "status": {
+      "enum": [
+        "verified",
+        "unverified_missing_candidate_identity",
+        "unverified_no_catalog_evidence",
+        "unverified_no_matching_driver_package",
+        "unverified_incomplete_platform_evidence",
+        "ambiguous_multiple_driver_packages",
+        "conflict_missing_catalog_digest",
+        "conflict_driver_identity"
+      ]
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_view",
+        "candidate_classification",
+        "candidate_path_basename",
+        "candidate_path_fingerprint_sha256",
+        "candidate_identity_sha256",
+        "status",
+        "authoritative_evidence",
+        "adapter",
+        "backend_ready"
+      ],
+      "properties": {
+        "registry_view": {
+          "$ref": "opencl-icd-collector.schema.json#/$defs/registryView"
+        },
+        "candidate_classification": {
+          "$ref": "opencl-icd-collector.schema.json#/$defs/classification"
+        },
+        "candidate_path_basename": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 32767,
+          "pattern": "^[^/\\\\]+$"
+        },
+        "candidate_path_fingerprint_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "candidate_identity_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "authoritative_evidence": {
+          "enum": [
+            "catalog_sha256_exact_match",
+            null
+          ]
+        },
+        "adapter": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/adapter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "backend_ready": {
+          "const": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "verified"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "candidate_path_basename": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32767,
+                "pattern": "^[^/\\\\]+$"
+              },
+              "candidate_path_fingerprint_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "candidate_identity_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "authoritative_evidence": {
+                "const": "catalog_sha256_exact_match"
+              },
+              "adapter": {
+                "$ref": "#/$defs/adapter"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "authoritative_evidence": {
+                "type": "null"
+              },
+              "adapter": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "backend",
+        "adapter_luid",
+        "pci_vendor_id",
+        "pci_device_id",
+        "pci_subsystem_id",
+        "pci_revision_id",
+        "driver_inf",
+        "driver_catalog_sha256",
+        "driver_version",
+        "os_build"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "backend": {
+          "const": "opencl"
+        },
+        "adapter_luid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "pci_vendor_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "pci_device_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "pci_subsystem_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}$"
+        },
+        "pci_revision_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{2}$"
+        },
+        "driver_inf": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 255,
+          "pattern": "^[^/\\\\:]+\\.inf$"
+        },
+        "driver_catalog_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "driver_version": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+)*$",
+          "maxLength": 64
+        },
+        "os_build": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "platformDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter_luid",
+        "classification"
+      ],
+      "properties": {
+        "adapter_luid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "classification": {
+          "enum": [
+            "adapter_enumeration_failed",
+            "driver_identity_collection_failed"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "classification": {
+                "const": "adapter_enumeration_failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "adapter_luid": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "adapter_luid": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{16}$"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -564,6 +564,7 @@ mod tests {
                 file_index: 0x5678_0000 | u64::from(seed),
             },
             authenticode: AuthenticodeEvidence::Embedded,
+            signing_catalog_sha256: None,
         }
     }
 

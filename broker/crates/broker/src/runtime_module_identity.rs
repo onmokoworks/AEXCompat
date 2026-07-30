@@ -32,6 +32,10 @@ pub struct RuntimeModuleIdentityEvidence {
     pub pe_machine: PeMachine,
     pub file_identity: FileIdentity,
     pub authenticode: AuthenticodeEvidence,
+    /// SHA-256 of the catalog that authoritatively contains this module.
+    /// Embedded signatures and non-unique/incomplete catalog enumeration have
+    /// no driver-package binding evidence.
+    pub signing_catalog_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,7 +130,7 @@ fn capture_impl(path: &Path) -> Result<RuntimeModuleIdentityEvidence, IdentityEv
     let sha256: [u8; 32] = hash.finalize().into();
 
     verify_open_file_identity(path, &canonical_path, &file, &info)?;
-    let authenticode = verify_authenticode(&file, &canonical_path)?;
+    let (authenticode, signing_catalog_sha256) = verify_authenticode(&file, &canonical_path)?;
     verify_open_file_identity(path, &canonical_path, &file, &info)?;
     Ok(RuntimeModuleIdentityEvidence {
         canonical_path,
@@ -138,6 +142,7 @@ fn capture_impl(path: &Path) -> Result<RuntimeModuleIdentityEvidence, IdentityEv
             file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
         },
         authenticode,
+        signing_catalog_sha256,
     })
 }
 
@@ -176,7 +181,8 @@ fn verify_open_file_identity(
 fn verify_authenticode(
     file: &File,
     canonical_path: &Path,
-) -> Result<AuthenticodeEvidence, IdentityEvidenceError> {
+) -> Result<(AuthenticodeEvidence, Option<[u8; 32]>), IdentityEvidenceError> {
+    use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Security::Cryptography::Catalog::{
         CATALOG_INFO, CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
@@ -200,7 +206,7 @@ fn verify_authenticode(
         pFile: &mut file_info,
     };
     if verify_and_close(&mut embedded_data) == 0 {
-        return Ok(AuthenticodeEvidence::Embedded);
+        return Ok((AuthenticodeEvidence::Embedded, None));
     }
 
     struct CatalogAdmin(isize);
@@ -209,13 +215,29 @@ fn verify_authenticode(
             unsafe { CryptCATAdminReleaseContext(self.0, 0) };
         }
     }
-    struct CatalogContext {
+    struct CatalogEnumeration {
         admin: isize,
-        context: isize,
+        current: isize,
     }
-    impl Drop for CatalogContext {
+    impl CatalogEnumeration {
+        fn advance(&mut self, hash: &[u8]) {
+            let mut previous = std::mem::replace(&mut self.current, 0);
+            self.current = unsafe {
+                CryptCATAdminEnumCatalogFromHash(
+                    self.admin,
+                    hash.as_ptr(),
+                    hash.len() as u32,
+                    0,
+                    &mut previous,
+                )
+            };
+        }
+    }
+    impl Drop for CatalogEnumeration {
         fn drop(&mut self) {
-            unsafe { CryptCATAdminReleaseCatalogContext(self.admin, self.context, 0) };
+            if self.current != 0 {
+                unsafe { CryptCATAdminReleaseCatalogContext(self.admin, self.current, 0) };
+            }
         }
     }
 
@@ -256,49 +278,102 @@ fn verify_authenticode(
         return Err(untrusted("failed to calculate the catalog member hash"));
     }
     hash.truncate(hash_len as usize);
-    let catalog = unsafe {
+    let first_catalog = unsafe {
         CryptCATAdminEnumCatalogFromHash(admin.0, hash.as_ptr(), hash_len, 0, std::ptr::null_mut())
     };
-    if catalog == 0 {
+    if first_catalog == 0 {
         return Err(untrusted(
             "no verified embedded or catalog signature was found",
         ));
     }
-    let catalog = CatalogContext {
+    let mut catalogs = CatalogEnumeration {
         admin: admin.0,
-        context: catalog,
+        current: first_catalog,
     };
-    let mut catalog_path: CATALOG_INFO = unsafe { std::mem::zeroed() };
-    catalog_path.cbStruct = std::mem::size_of::<CATALOG_INFO>() as u32;
-    if unsafe { CryptCATCatalogInfoFromContext(catalog.context, &mut catalog_path, 0) } == 0 {
-        return Err(untrusted("failed to resolve the catalog path"));
-    }
     let member_tag = hash
         .iter()
         .map(|byte| format!("{byte:02X}"))
         .collect::<String>();
     let member_tag_wide: Vec<u16> = member_tag.encode_utf16().chain(Some(0)).collect();
-    let mut catalog_info = WINTRUST_CATALOG_INFO {
-        cbStruct: std::mem::size_of::<WINTRUST_CATALOG_INFO>() as u32,
-        dwCatalogVersion: 0,
-        pcwszCatalogFilePath: catalog_path.wszCatalogFile.as_ptr(),
-        pcwszMemberTag: member_tag_wide.as_ptr(),
-        pcwszMemberFilePath: path_wide.as_ptr(),
-        hMemberFile: handle,
-        pbCalculatedFileHash: hash.as_mut_ptr(),
-        cbCalculatedFileHash: hash_len,
-        pcCatalogContext: std::ptr::null_mut(),
-        hCatAdmin: admin.0,
-    };
-    let mut catalog_data = trust_data(WTD_CHOICE_CATALOG);
-    catalog_data.Anonymous = WINTRUST_DATA_0 {
-        pCatalog: &mut catalog_info,
-    };
-    if verify_and_close(&mut catalog_data) == 0 {
-        Ok(AuthenticodeEvidence::Catalog)
-    } else {
-        Err(untrusted("catalog member signature verification failed"))
+    let mut verified_catalogs = Vec::new();
+    let mut incomplete = false;
+    let mut visited_catalogs = 0usize;
+    const MAX_CATALOG_MEMBERSHIPS: usize = 256;
+    while catalogs.current != 0 {
+        if visited_catalogs >= MAX_CATALOG_MEMBERSHIPS {
+            incomplete = true;
+            break;
+        }
+        visited_catalogs += 1;
+        let mut catalog_path: CATALOG_INFO = unsafe { std::mem::zeroed() };
+        catalog_path.cbStruct = std::mem::size_of::<CATALOG_INFO>() as u32;
+        if unsafe { CryptCATCatalogInfoFromContext(catalogs.current, &mut catalog_path, 0) } == 0 {
+            incomplete = true;
+            catalogs.advance(&hash);
+            continue;
+        }
+        let mut catalog_info = WINTRUST_CATALOG_INFO {
+            cbStruct: std::mem::size_of::<WINTRUST_CATALOG_INFO>() as u32,
+            dwCatalogVersion: 0,
+            pcwszCatalogFilePath: catalog_path.wszCatalogFile.as_ptr(),
+            pcwszMemberTag: member_tag_wide.as_ptr(),
+            pcwszMemberFilePath: path_wide.as_ptr(),
+            hMemberFile: handle,
+            pbCalculatedFileHash: hash.as_mut_ptr(),
+            cbCalculatedFileHash: hash_len,
+            pcCatalogContext: std::ptr::null_mut(),
+            hCatAdmin: admin.0,
+        };
+        let mut catalog_data = trust_data(WTD_CHOICE_CATALOG);
+        catalog_data.Anonymous = WINTRUST_DATA_0 {
+            pCatalog: &mut catalog_info,
+        };
+        if verify_and_close(&mut catalog_data) == 0 {
+            let catalog_path = PathBuf::from(std::ffi::OsString::from_wide(nul_slice(
+                &catalog_path.wszCatalogFile,
+            )));
+            verified_catalogs.push(hash_regular_non_reparse_file(&catalog_path)?);
+        } else {
+            incomplete = true;
+        }
+        catalogs.advance(&hash);
     }
+    match verified_catalogs.as_slice() {
+        [] => Err(untrusted("catalog member signature verification failed")),
+        [catalog_sha256] if !incomplete => {
+            Ok((AuthenticodeEvidence::Catalog, Some(*catalog_sha256)))
+        }
+        _ => Ok((AuthenticodeEvidence::Catalog, None)),
+    }
+}
+
+#[cfg(windows)]
+fn hash_regular_non_reparse_file(path: &Path) -> Result<[u8; 32], IdentityEvidenceError> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    validate_input_path(path)?;
+    reject_reparse_components(path)?;
+    let canonical = fs::canonicalize(path)?;
+    reject_reparse_components(&canonical)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(canonical)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(error(
+            IdentityEvidenceErrorKind::UnsafeFile,
+            "signing catalog must be a regular non-reparse file",
+        ));
+    }
+    let mut hash = Sha256::new();
+    io::copy(&mut file, &mut hash)?;
+    Ok(hash.finalize().into())
 }
 
 #[cfg(windows)]
@@ -339,6 +414,14 @@ fn verify_and_close(data: &mut windows_sys::Win32::Security::WinTrust::WINTRUST_
 fn wide_null(value: &std::ffi::OsStr) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     value.encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(windows)]
+fn nul_slice(value: &[u16]) -> &[u16] {
+    &value[..value
+        .iter()
+        .position(|word| *word == 0)
+        .unwrap_or(value.len())]
 }
 
 fn untrusted(message: &str) -> IdentityEvidenceError {
