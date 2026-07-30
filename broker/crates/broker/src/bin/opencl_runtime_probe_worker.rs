@@ -937,6 +937,7 @@ mod platform {
             with_properties_error: i32,
             build_error: i32,
             mismatch: bool,
+            fail_stage: Option<ComputeStage>,
             with_properties_calls: usize,
             legacy_calls: usize,
             next_buffer: usize,
@@ -973,8 +974,13 @@ mod platform {
         ) -> ClContext {
             let values = unsafe { std::slice::from_raw_parts(properties, 3) };
             dispatch_state().lock().unwrap().context_properties = values.to_vec();
-            unsafe { *error = CL_SUCCESS };
-            1usize as ClContext
+            if dispatch_state().lock().unwrap().fail_stage == Some(ComputeStage::Context) {
+                unsafe { *error = -5 };
+                null_mut()
+            } else {
+                unsafe { *error = CL_SUCCESS };
+                1usize as ClContext
+            }
         }
 
         unsafe extern "system" fn stub_queue_with(
@@ -1012,6 +1018,10 @@ mod platform {
             error: *mut i32,
         ) -> ClMem {
             let mut state = dispatch_state().lock().unwrap();
+            if state.fail_stage == Some(ComputeStage::Buffer) {
+                unsafe { *error = -5 };
+                return null_mut();
+            }
             state.next_buffer += 1;
             unsafe { *error = CL_SUCCESS };
             (2 + state.next_buffer) as ClMem
@@ -1042,6 +1052,9 @@ mod platform {
             _: *const ClEvent,
             _: *mut ClEvent,
         ) -> i32 {
+            if dispatch_state().lock().unwrap().fail_stage == Some(ComputeStage::Readback) {
+                return -5;
+            }
             let output = unsafe {
                 std::slice::from_raw_parts_mut(output as *mut u32, size / size_of::<u32>())
             };
@@ -1098,8 +1111,13 @@ mod platform {
             _: *const i8,
             error: *mut i32,
         ) -> ClKernel {
-            unsafe { *error = CL_SUCCESS };
-            6usize as ClKernel
+            if dispatch_state().lock().unwrap().fail_stage == Some(ComputeStage::Kernel) {
+                unsafe { *error = -5 };
+                null_mut()
+            } else {
+                unsafe { *error = CL_SUCCESS };
+                6usize as ClKernel
+            }
         }
 
         unsafe extern "system" fn stub_set_arg(
@@ -1122,11 +1140,19 @@ mod platform {
             _: *const ClEvent,
             _: *mut ClEvent,
         ) -> i32 {
-            CL_SUCCESS
+            if dispatch_state().lock().unwrap().fail_stage == Some(ComputeStage::Enqueue) {
+                -5
+            } else {
+                CL_SUCCESS
+            }
         }
 
         unsafe extern "system" fn stub_finish(_: ClCommandQueue) -> i32 {
-            CL_SUCCESS
+            if dispatch_state().lock().unwrap().fail_stage == Some(ComputeStage::Finish) {
+                -5
+            } else {
+                CL_SUCCESS
+            }
         }
 
         unsafe extern "system" fn stub_release(handle: *mut c_void) -> i32 {
@@ -1240,6 +1266,34 @@ mod platform {
                 dispatch_state().lock().unwrap().releases,
                 [6, 5, 4, 3, 2, 1]
             );
+        }
+
+        #[test]
+        fn each_early_failure_releases_exactly_the_owned_prefix() {
+            let _serial = dispatch_test_lock().lock().unwrap();
+            for (stage, expected_releases) in [
+                (ComputeStage::Context, Vec::new()),
+                (ComputeStage::Buffer, vec![2, 1]),
+                (ComputeStage::Kernel, vec![5, 4, 3, 2, 1]),
+                (ComputeStage::Enqueue, vec![6, 5, 4, 3, 2, 1]),
+                (ComputeStage::Finish, vec![6, 5, 4, 3, 2, 1]),
+                (ComputeStage::Readback, vec![6, 5, 4, 3, 2, 1]),
+            ] {
+                reset_dispatch();
+                dispatch_state().lock().unwrap().fail_stage = Some(stage);
+                let result = run_compute(
+                    dispatch(),
+                    0x1234usize as ClPlatformId,
+                    0x5678usize as ClDeviceId,
+                    true,
+                );
+                assert_eq!(result.stage, stage);
+                assert_eq!(
+                    dispatch_state().lock().unwrap().releases,
+                    expected_releases,
+                    "stage {stage:?}"
+                );
+            }
         }
 
         #[test]
