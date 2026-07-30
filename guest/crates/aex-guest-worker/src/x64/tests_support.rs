@@ -1187,6 +1187,10 @@
             Win64ImportDispatch::LegacyZero
         );
         assert_eq!(
+            dispatch_win64_import("KERNEL32.DLL", "unknown_system_symbol"),
+            Win64ImportDispatch::LegacyZero
+        );
+        assert_eq!(
             canonical_import_trace_label(
                 r"C:\Windows\System32\OPENCL.DLL",
                 "clCreateKernel"
@@ -1293,13 +1297,31 @@
         for (library, family) in [
             ("NVCUDA.DLL", GpuImportLibrary::Cuda),
             ("cudart64_12.dll", GpuImportLibrary::Cuda),
+            (r"C:\CUDA\bin\CUBLAS64_12.DLL", GpuImportLibrary::Cuda),
+            ("cublasLt64_12.dll", GpuImportLibrary::Cuda),
+            ("cufft64_11.dll", GpuImportLibrary::Cuda),
+            ("cudnn64_9.dll", GpuImportLibrary::Cuda),
+            ("cudnn_ops_infer64_8.dll", GpuImportLibrary::Cuda),
+            ("cusparse64_12.dll", GpuImportLibrary::Cuda),
             ("d3d11.dll", GpuImportLibrary::DirectX),
             ("D3DCOMPILER_47.DLL", GpuImportLibrary::DirectX),
             ("dxgi.dll", GpuImportLibrary::DirectX),
+            ("DXCORE.DLL", GpuImportLibrary::DirectX),
         ] {
             assert_eq!(
                 dispatch_win64_import(library, "same_symbol"),
                 Win64ImportDispatch::UnsupportedGpuLibrary(family)
+            );
+        }
+        for library in [
+            "cublast64_12.dll",
+            "cufftest64_11.dll",
+            "cudnnot64_8.dll",
+            "dxcore_helper.dll",
+        ] {
+            assert_eq!(
+                dispatch_win64_import(library, "same_symbol"),
+                Win64ImportDispatch::LegacyZero
             );
         }
     }
@@ -1332,6 +1354,53 @@
             GuestError::UnsupportedImport { library, symbol }
                 if library == "opencl.dll" && symbol == "clUnknownExtension"
         ));
+    }
+
+    #[test]
+    fn cuda_and_directx_family_imports_trap_instead_of_returning_zero_success() {
+        const IMPORT: u64 = STUB_BASE + 0x1d0;
+        for (library, normalized, symbol, family) in [
+            (
+                r"C:\CUDA\bin\CUBLAS64_12.DLL",
+                "cublas64_12.dll",
+                "cublasCreate_v2",
+                GpuImportLibrary::Cuda,
+            ),
+            (
+                r"C:\Windows\System32\DXCORE.DLL",
+                "dxcore.dll",
+                "DXCoreCreateAdapterFactory",
+                GpuImportLibrary::DirectX,
+            ),
+        ] {
+            let mut code = vec![0x48, 0xb8];
+            code.extend_from_slice(&IMPORT.to_le_bytes());
+            code.extend_from_slice(&[0xff, 0xd0, 0xc3]);
+            let mut engine = test_engine(&code);
+            engine
+                .unicorn
+                .mem_write(IMPORT, &[0x31, 0xc0, 0xc3])
+                .unwrap();
+            assert_eq!(
+                install_win64_import(
+                    &mut engine.unicorn,
+                    IMPORT,
+                    library,
+                    symbol,
+                )
+                .unwrap(),
+                Win64ImportDispatch::UnsupportedGpuLibrary(family)
+            );
+
+            let error = engine.call_win64(TEST_CODE, [0; 6]).unwrap_err();
+            assert!(matches!(
+                error,
+                GuestError::UnsupportedImport {
+                    library,
+                    symbol: trapped_symbol
+                } if library == normalized && trapped_symbol == symbol
+            ));
+        }
     }
 
     #[test]

@@ -60,6 +60,42 @@ fn normalize_import_library_name(library: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn version_suffix_is_numeric(version: &str) -> bool {
+    !version.is_empty()
+        && version
+            .split('_')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn is_versioned_cuda_dll(library: &str, family: &str) -> bool {
+    let Some(stem) = library.strip_suffix(".dll") else {
+        return false;
+    };
+    stem.strip_prefix(family)
+        .and_then(|suffix| suffix.strip_prefix("64_"))
+        .is_some_and(version_suffix_is_numeric)
+}
+
+fn is_versioned_cudnn_dll(library: &str) -> bool {
+    if is_versioned_cuda_dll(library, "cudnn") {
+        return true;
+    }
+    let Some(stem) = library.strip_suffix(".dll") else {
+        return false;
+    };
+    let Some(component_and_version) = stem.strip_prefix("cudnn_") else {
+        return false;
+    };
+    let Some((component, version)) = component_and_version.rsplit_once("64_") else {
+        return false;
+    };
+    !component.is_empty()
+        && component
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        && version_suffix_is_numeric(version)
+}
+
 fn classify_gpu_import_library(library: &str) -> Option<GpuImportLibrary> {
     let library = normalize_import_library_name(library);
     if library == "opencl.dll" {
@@ -67,8 +103,20 @@ fn classify_gpu_import_library(library: &str) -> Option<GpuImportLibrary> {
     }
     if library == "nvcuda.dll"
         || library == "cuda.dll"
-        || (library.starts_with("cudart") && library.ends_with(".dll"))
-        || (library.starts_with("nvrtc") && library.ends_with(".dll"))
+        || [
+            "cudart",
+            "nvrtc",
+            "nvrtc-builtins",
+            "cublas",
+            "cublaslt",
+            "cufft",
+            "curand",
+            "cusolver",
+            "cusparse",
+        ]
+        .iter()
+        .any(|family| is_versioned_cuda_dll(&library, family))
+        || is_versioned_cudnn_dll(&library)
     {
         return Some(GpuImportLibrary::Cuda);
     }
@@ -80,6 +128,7 @@ fn classify_gpu_import_library(library: &str) -> Option<GpuImportLibrary> {
             | "d3d11.dll"
             | "d3d12.dll"
             | "dxgi.dll"
+            | "dxcore.dll"
             | "dxcompiler.dll"
             | "dxil.dll"
             | "directml.dll"
