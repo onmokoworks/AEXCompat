@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onmokoworks.example/schemas/pnp-opencl-runtime-collector.schema.json",
+  "title": "AEXCompat Windows PnP OpenCL runtime report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract",
+    "host_architecture",
+    "candidates",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "contract": { "const": "windows_pnp_opencl_runtime" },
+    "host_architecture": {
+      "enum": ["x86_64", "aarch64", "x86", "arm"]
+    },
+    "candidates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/candidate" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/diagnostic" }
+    }
+  },
+  "$defs": {
+    "sourceClass": {
+      "enum": ["display_adapter", "software_component"]
+    },
+    "classification": {
+      "enum": [
+        "identity_verified",
+        "missing_value",
+        "wrong_registry_type",
+        "empty_value",
+        "malformed_multi_string",
+        "invalid_path",
+        "missing_dll",
+        "inaccessible_dll",
+        "unsafe_dll",
+        "invalid_pe",
+        "architecture_mismatch",
+        "untrusted_dll",
+        "identity_unsupported",
+        "identity_io_failure",
+        "software_key_open_failure",
+        "registry_read_failure"
+      ]
+    },
+    "status": {
+      "enum": [
+        "verified",
+        "unverified_candidate",
+        "unverified_adapter",
+        "unverified_no_catalog_evidence",
+        "conflict_catalog_digest"
+      ]
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_class",
+        "architecture",
+        "loader_selected",
+        "value_name",
+        "classification",
+        "path_basename",
+        "path_fingerprint_sha256",
+        "identity",
+        "status",
+        "authoritative_evidence",
+        "adapter",
+        "legacy_merge",
+        "backend_ready"
+      ],
+      "properties": {
+        "source_class": { "$ref": "#/$defs/sourceClass" },
+        "architecture": { "enum": ["native", "wow32"] },
+        "loader_selected": { "type": "boolean" },
+        "value_name": {
+          "enum": ["OpenCLDriverName", "OpenCLDriverNameWow"]
+        },
+        "classification": { "$ref": "#/$defs/classification" },
+        "path_basename": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 32767,
+          "pattern": "^[^/\\\\]+$"
+        },
+        "path_fingerprint_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "identity": {
+          "oneOf": [
+            { "$ref": "#/$defs/identity" },
+            { "type": "null" }
+          ]
+        },
+        "status": { "$ref": "#/$defs/status" },
+        "authoritative_evidence": {
+          "enum": [
+            "pnp_software_key_catalog_adapter_exact_match",
+            null
+          ]
+        },
+        "adapter": {
+          "oneOf": [
+            { "$ref": "#/$defs/adapter" },
+            { "type": "null" }
+          ]
+        },
+        "legacy_merge": {
+          "enum": [
+            "exact_match",
+            "no_legacy_match",
+            "not_eligible",
+            "ambiguous_duplicate",
+            "conflict_evidence"
+          ]
+        },
+        "backend_ready": { "const": false }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "architecture": { "const": "native" } },
+            "required": ["architecture"]
+          },
+          "then": {
+            "properties": {
+              "value_name": { "const": "OpenCLDriverName" }
+            }
+          },
+          "else": {
+            "properties": {
+              "value_name": { "const": "OpenCLDriverNameWow" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "verified" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "loader_selected": { "const": true },
+              "classification": { "const": "identity_verified" },
+              "path_basename": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^/\\\\]+$"
+              },
+              "path_fingerprint_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "identity": { "$ref": "#/$defs/verifiedIdentity" },
+              "authoritative_evidence": {
+                "const": "pnp_software_key_catalog_adapter_exact_match"
+              },
+              "adapter": { "$ref": "#/$defs/adapter" }
+            }
+          },
+          "else": {
+            "properties": {
+              "authoritative_evidence": { "type": "null" },
+              "adapter": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "size",
+        "sha256",
+        "pe_machine",
+        "volume_serial_number",
+        "file_index",
+        "authenticode",
+        "catalog_sha256"
+      ],
+      "properties": {
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "pe_machine": {
+          "type": "string",
+          "pattern": "^(i386|amd64|arm|arm64|unknown_[0-9a-f]{4})$"
+        },
+        "volume_serial_number": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}$"
+        },
+        "file_index": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "authenticode": { "enum": ["embedded", "catalog"] },
+        "catalog_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "verifiedIdentity": {
+      "allOf": [
+        { "$ref": "#/$defs/identity" },
+        {
+          "properties": {
+            "authenticode": { "const": "catalog" },
+            "catalog_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "backend",
+        "adapter_luid",
+        "pci_vendor_id",
+        "pci_device_id",
+        "pci_subsystem_id",
+        "pci_revision_id",
+        "driver_inf",
+        "driver_catalog_sha256",
+        "driver_version",
+        "os_build"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "backend": { "const": "opencl" },
+        "adapter_luid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "pci_vendor_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "pci_device_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "pci_subsystem_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}$"
+        },
+        "pci_revision_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{2}$"
+        },
+        "driver_inf": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 255,
+          "pattern": "^[^/\\\\:]+\\.inf$"
+        },
+        "driver_catalog_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "driver_version": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+)*$",
+          "maxLength": 64
+        },
+        "os_build": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_class", "adapter_luid", "classification"],
+      "properties": {
+        "source_class": {
+          "oneOf": [
+            { "$ref": "#/$defs/sourceClass" },
+            { "type": "null" }
+          ]
+        },
+        "adapter_luid": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "classification": {
+          "enum": [
+            "adapter_enumeration_failed",
+            "display_enumeration_failed",
+            "adapter_device_unmatched",
+            "adapter_device_ambiguous",
+            "adapter_identity_collection_failed",
+            "device_property_read_failed",
+            "pending_reboot",
+            "device_status_failure",
+            "child_traversal_failed",
+            "child_class_read_failed",
+            "no_software_component_child"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -10,10 +10,25 @@ pub struct GpuAdapterObservation {
     pub pci_revision_id: u8,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GpuAdapterDeviceBinding {
+    pub adapter: GpuAdapterObservation,
+    pub bus_number: u32,
+    pub device_number: u32,
+    pub function_number: u32,
+}
+
 /// Enumerates hardware adapters through DXGI. The LUID and PCI identity come
 /// from the same DXGI descriptor; software adapters are excluded.
 pub fn enumerate_gpu_adapters() -> io::Result<Vec<GpuAdapterObservation>> {
     platform::enumerate_gpu_adapters()
+}
+
+/// Binds every current DXGI hardware adapter to its D3DKMT PCI location.
+/// Consumers can then match one present SetupAPI display device without
+/// exposing a raw device instance or hardware ID.
+pub fn enumerate_gpu_adapter_device_bindings() -> io::Result<Vec<GpuAdapterDeviceBinding>> {
+    platform::enumerate_gpu_adapter_device_bindings()
 }
 
 /// Collects the active Windows display-driver package for one exact DXGI LUID.
@@ -74,6 +89,13 @@ mod platform {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "GPU platform collection requires Windows",
+        ))
+    }
+
+    pub fn enumerate_gpu_adapter_device_bindings() -> io::Result<Vec<GpuAdapterDeviceBinding>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "GPU adapter device binding requires Windows",
         ))
     }
 
@@ -168,6 +190,29 @@ mod platform {
             return Err(invalid("DXGI reported no hardware GPU adapters"));
         }
         Ok(adapters)
+    }
+
+    pub fn enumerate_gpu_adapter_device_bindings() -> io::Result<Vec<GpuAdapterDeviceBinding>> {
+        enumerate_gpu_adapters()?
+            .into_iter()
+            .map(|adapter| {
+                let kmt = KmtAdapter::open(adapter.adapter_luid)?;
+                let count: D3DKMT_PHYSICAL_ADAPTER_COUNT =
+                    kmt.query(KMTQAITYPE_PHYSICALADAPTERCOUNT)?;
+                if count.Count != 1 {
+                    return Err(invalid(
+                        "linked or multi-physical DXGI adapters cannot be bound to one PnP device",
+                    ));
+                }
+                let address: D3DKMT_ADAPTERADDRESS = kmt.query(KMTQAITYPE_ADAPTERADDRESS)?;
+                Ok(GpuAdapterDeviceBinding {
+                    adapter,
+                    bus_number: address.BusNumber,
+                    device_number: address.DeviceNumber,
+                    function_number: address.FunctionNumber,
+                })
+            })
+            .collect()
     }
 
     pub fn collect_gpu_platform_identity(
