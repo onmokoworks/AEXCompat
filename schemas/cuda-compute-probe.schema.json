@@ -1,0 +1,595 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onmokoworks.example/schemas/cuda-compute-probe.schema.json",
+  "title": "AEXCompat isolated CUDA Driver API compute probe report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract",
+    "aggregate_driver_observation",
+    "launch",
+    "cuda_compute_ready",
+    "backend_ready"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "contract": { "const": "system_cuda_driver_compute_probe" },
+    "aggregate_driver_observation": {
+      "oneOf": [
+        { "$ref": "#/$defs/aggregate" },
+        { "type": "null" }
+      ]
+    },
+    "launch": { "$ref": "#/$defs/launch" },
+    "cuda_compute_ready": { "type": "boolean" },
+    "backend_ready": { "const": false }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "launch": {
+            "properties": { "status": { "const": "observed" } },
+            "required": ["status"]
+          }
+        },
+        "required": ["launch"]
+      },
+      "then": {
+        "properties": {
+          "aggregate_driver_observation": { "$ref": "#/$defs/aggregate" }
+        }
+      },
+      "else": {
+        "properties": {
+          "aggregate_driver_observation": { "type": "null" },
+          "cuda_compute_ready": { "const": false }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "cuda_compute_ready": { "const": true } },
+        "required": ["cuda_compute_ready"]
+      },
+      "then": {
+        "properties": {
+          "aggregate_driver_observation": {
+            "allOf": [
+              { "$ref": "#/$defs/aggregate" },
+              {
+                "properties": {
+                  "status": { "const": "observed" },
+                  "cuda_compute_ready": { "const": true }
+                },
+                "required": ["status", "cuda_compute_ready"]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "aggregate_driver_observation": {
+            "type": "object",
+            "properties": { "cuda_compute_ready": { "const": true } },
+            "required": ["cuda_compute_ready"]
+          }
+        },
+        "required": ["aggregate_driver_observation"]
+      },
+      "then": {
+        "properties": { "cuda_compute_ready": { "const": true } }
+      }
+    }
+  ],
+  "$defs": {
+    "launch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "exit_code",
+        "kill_reason",
+        "stdout_truncated",
+        "stderr_truncated",
+        "memory_limit_reached"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "observed",
+            "nonzero_exit",
+            "timeout",
+            "crash",
+            "output_truncated",
+            "malformed_output",
+            "launch_error"
+          ]
+        },
+        "exit_code": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "kill_reason": {
+          "enum": ["timeout", "memory_limit", null]
+        },
+        "stdout_truncated": { "type": "boolean" },
+        "stderr_truncated": { "type": "boolean" },
+        "memory_limit_reached": { "type": "boolean" }
+      }
+    },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "driver_version",
+        "devices",
+        "diagnostics",
+        "cuda_compute_ready"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "observed",
+            "failed",
+            "partial",
+            "incomplete",
+            "no_driver",
+            "missing_symbol",
+            "no_device"
+          ]
+        },
+        "driver_version": {
+          "type": ["integer", "null"],
+          "minimum": 100,
+          "maximum": 999999
+        },
+        "devices": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/device" }
+        },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 80,
+          "items": { "$ref": "#/$defs/diagnostic" }
+        },
+        "cuda_compute_ready": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "observed" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "driver_version": { "type": "integer" },
+              "devices": {
+                "minItems": 1,
+                "items": {
+                  "allOf": [
+                    { "$ref": "#/$defs/device" },
+                    {
+                      "properties": { "stage": { "const": "passed" } },
+                      "required": ["stage"]
+                    }
+                  ]
+                }
+              },
+              "diagnostics": { "maxItems": 0 },
+              "cuda_compute_ready": { "const": true }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "failed" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "driver_version": { "type": "integer" },
+              "devices": {
+                "minItems": 1,
+                "items": {
+                  "allOf": [
+                    { "$ref": "#/$defs/device" },
+                    {
+                      "properties": {
+                        "stage": {
+                          "not": { "const": "passed" }
+                        }
+                      },
+                      "required": ["stage"]
+                    }
+                  ]
+                }
+              },
+              "diagnostics": {
+                "minItems": 1,
+                "contains": {
+                  "properties": {
+                    "kind": { "const": "device_failure" }
+                  },
+                  "required": ["kind"]
+                }
+              },
+              "cuda_compute_ready": { "const": false }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "partial" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "driver_version": { "type": "integer" },
+              "devices": { "minItems": 1 },
+              "diagnostics": {
+                "minItems": 1,
+                "contains": {
+                  "properties": {
+                    "kind": { "enum": ["partial", "device_limit"] }
+                  },
+                  "required": ["kind"]
+                }
+              },
+              "cuda_compute_ready": { "const": false }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "no_device" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "driver_version": { "type": "integer" },
+              "devices": { "maxItems": 0 },
+              "diagnostics": { "minItems": 1 },
+              "cuda_compute_ready": { "const": false }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": ["incomplete", "no_driver", "missing_symbol"]
+              }
+            },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "devices": { "maxItems": 0 },
+              "diagnostics": { "minItems": 1 },
+              "cuda_compute_ready": { "const": false }
+            }
+          }
+        }
+      ]
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal",
+        "name",
+        "uuid_fingerprint_sha256",
+        "pci_location",
+        "compute_capability_major",
+        "compute_capability_minor",
+        "total_memory_bytes",
+        "stage",
+        "operation",
+        "api_error",
+        "jit_log"
+      ],
+      "properties": {
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        },
+        "name": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^(?![A-Za-z]:)[^/\\\\:]+$"
+            },
+            { "type": "null" }
+          ]
+        },
+        "uuid_fingerprint_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "pci_location": {
+          "oneOf": [
+            { "$ref": "#/$defs/pci" },
+            { "type": "null" }
+          ]
+        },
+        "compute_capability_major": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "compute_capability_minor": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "total_memory_bytes": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "stage": {
+          "enum": [
+            "passed",
+            "metadata",
+            "context",
+            "allocation",
+            "host_to_device",
+            "module",
+            "jit",
+            "function",
+            "launch",
+            "synchronize",
+            "device_to_host",
+            "mismatch",
+            "not_attempted"
+          ]
+        },
+        "operation": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.()|]+$"
+        },
+        "api_error": {
+          "type": ["integer", "null"],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "jit_log": {
+          "oneOf": [
+            { "$ref": "#/$defs/jitLog" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "stage": { "enum": ["metadata", "not_attempted"] }
+            },
+            "required": ["stage"]
+          },
+          "then": { "$ref": "#/$defs/deviceWithoutMetadata" },
+          "else": { "$ref": "#/$defs/deviceWithMetadata" }
+        },
+        {
+          "if": {
+            "properties": { "stage": { "const": "passed" } },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "operation": { "type": "null" },
+              "api_error": { "type": "null" },
+              "jit_log": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "stage": { "const": "not_attempted" } },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": { "api_error": { "type": "null" } }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": { "not": { "const": "jit" } }
+            },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": { "jit_log": { "type": "null" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "stage": { "const": "mismatch" } },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "operation": { "type": "string" },
+              "api_error": { "type": "null" },
+              "jit_log": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "stage": { "const": "jit" } },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "operation": { "type": "string" },
+              "api_error": { "type": "integer" },
+              "jit_log": { "$ref": "#/$defs/jitLog" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "enum": [
+                  "context",
+                  "allocation",
+                  "host_to_device",
+                  "module",
+                  "function",
+                  "launch",
+                  "synchronize",
+                  "device_to_host"
+                ]
+              },
+              "api_error": { "type": "null" }
+            },
+            "required": ["stage", "api_error"]
+          },
+          "then": {
+            "properties": {
+              "operation": {
+                "enum": [
+                  "cuCtxCreate_v2.null_handle",
+                  "cuCtxGetCurrent.preexisting_context",
+                  "cuMemAlloc_v2.input.null_handle",
+                  "cuMemAlloc_v2.output.null_handle",
+                  "cuModuleLoadDataEx.null_handle",
+                  "cuModuleGetFunction.null_handle"
+                ]
+              },
+              "jit_log": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "deviceWithMetadata": {
+      "properties": {
+        "name": { "type": "string" },
+        "uuid_fingerprint_sha256": { "$ref": "#/$defs/sha256" },
+        "pci_location": { "$ref": "#/$defs/pci" },
+        "compute_capability_major": { "type": "integer" },
+        "compute_capability_minor": { "type": "integer" },
+        "total_memory_bytes": { "type": "integer" }
+      }
+    },
+    "deviceWithoutMetadata": {
+      "properties": {
+        "name": { "type": "null" },
+        "uuid_fingerprint_sha256": { "type": "null" },
+        "pci_location": { "type": "null" },
+        "compute_capability_major": { "type": "null" },
+        "compute_capability_minor": { "type": "null" },
+        "total_memory_bytes": { "type": "null" },
+        "operation": { "type": "string" },
+        "jit_log": { "type": "null" }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "operation", "api_error", "device_ordinal"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "no_driver",
+            "missing_symbol",
+            "api_error",
+            "no_device",
+            "device_limit",
+            "device_failure",
+            "partial",
+            "malformed"
+          ]
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.()|]+$"
+        },
+        "api_error": {
+          "type": ["integer", "null"],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "device_ordinal": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 63
+        }
+      }
+    },
+    "jitLog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "length_bytes", "sha256"],
+      "properties": {
+        "status": {
+          "enum": ["empty", "redacted", "overflow", "unavailable"]
+        },
+        "length_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "redacted" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "length_bytes": { "minimum": 1, "maximum": 32768 },
+              "sha256": { "$ref": "#/$defs/sha256" }
+            }
+          },
+          "else": {
+            "properties": { "sha256": { "type": "null" } }
+          }
+        }
+      ]
+    },
+    "pci": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domain", "bus", "device"],
+      "properties": {
+        "domain": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "bus": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "device": { "type": "integer", "minimum": 0, "maximum": 31 }
+      }
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

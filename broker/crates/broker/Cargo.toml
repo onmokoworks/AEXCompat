@@ -27,3 +27,7 @@ path = "src/main.rs"
 [[bin]]
 name = "opencl-runtime-probe-worker"
 path = "src/bin/opencl_runtime_probe_worker.rs"
+
+[[bin]]
+name = "cuda-compute-probe-worker"
+path = "src/bin/cuda_compute_probe_worker.rs"
