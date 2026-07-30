@@ -475,6 +475,8 @@ int main() {
   field<decltype(PF_LayerDef::data)>("layer.data", offsetof(PF_LayerDef, data), first);
   field<decltype(PF_LayerDef::world_flags)>("layer.world_flags", offsetof(PF_LayerDef, world_flags), first);
   field<decltype(PF_LayerDef::extent_hint)>("layer.extent_hint", offsetof(PF_LayerDef, extent_hint), first);
+  field<decltype(PF_LayerDef::pix_aspect_ratio)>(
+      "layer.pix_aspect_ratio", offsetof(PF_LayerDef, pix_aspect_ratio), first);
   field<decltype(PF_Pixel::alpha)>("pixel.alpha", offsetof(PF_Pixel, alpha), first);
   field<decltype(PF_Pixel::red)>("pixel.red", offsetof(PF_Pixel, red), first);
   field<decltype(PF_Pixel::green)>("pixel.green", offsetof(PF_Pixel, green), first);

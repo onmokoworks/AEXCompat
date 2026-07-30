@@ -1,6 +1,7 @@
 const PF_ERR_NONE: u64 = 0;
 const PF_ERR_OUT_OF_MEMORY: u64 = 4;
-const PF_ERR_BAD_CALLBACK_PARAM: u64 = 516;
+const PF_FIRST_ERR: u64 = 512;
+const PF_ERR_BAD_CALLBACK_PARAM: u64 = PF_FIRST_ERR + 4;
 const PF_GPU_FRAMEWORK_OPENCL: i32 = 1;
 const PF_PIXEL_FORMAT_GPU_BGRA128: i32 = 0x4144_4340;
 const PF_GPU_DEVICE_INFO_SIZE: usize = 56;
@@ -13,6 +14,7 @@ const GPU_WORLD_DESCRIPTOR_BASE: u64 = 0x0000_0021_0000_0000;
 const GPU_WORLD_DESCRIPTOR_END: u64 = GPU_WORLD_DESCRIPTOR_BASE + 0x0100_0000;
 const GPU_FILL_CHUNK_BYTES: usize = 1024 * 1024;
 const GPU_MAX_EXCLUSIVE_DEPTH: u32 = 64;
+use crate::gpu_lifecycle::GpuSuiteEvidence;
 
 #[derive(Clone, Debug)]
 struct GpuHostAllocation {
@@ -54,24 +56,6 @@ struct GpuRenderTransport {
     previous_render_pixel_format: i32,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct GpuSuiteEvidence {
-    pub(crate) allocations_created: u64,
-    pub(crate) allocations_freed: u64,
-    pub(crate) upload_bytes: u64,
-    pub(crate) download_bytes: u64,
-    pub(crate) worlds_created: u64,
-    pub(crate) worlds_disposed: u64,
-    pub(crate) invalid_operations: u64,
-    pub(crate) exclusive_access_depth: u32,
-    pub(crate) live_host_allocations: usize,
-    pub(crate) live_gpu_worlds: usize,
-    pub(crate) live_device_allocations: usize,
-    pub(crate) live_bytes: usize,
-    pub(crate) transport_active: bool,
-    pub(crate) last_error: Option<String>,
-}
-
 #[derive(Default)]
 struct GpuSuiteState {
     host_allocations: HashMap<u64, GpuHostAllocation>,
@@ -102,6 +86,7 @@ impl GpuSuiteState {
             exclusive_access_depth: self.exclusive_access_depth,
             live_host_allocations: self.host_allocations.len(),
             live_gpu_worlds: self.worlds.len(),
+            live_borrowed_gpu_worlds: self.borrowed_worlds.len(),
             live_device_allocations: runtime.live_buffer_count(),
             live_bytes: self
                 .host_allocations
@@ -110,6 +95,15 @@ impl GpuSuiteState {
                 .sum::<usize>()
                 .saturating_add(runtime.live_buffer_bytes()),
             transport_active: self.transport.is_some(),
+            cleanup_balanced: self.allocations_created == self.allocations_freed
+                && self.worlds_created == self.worlds_disposed
+                && self.exclusive_access_depth == 0
+                && self.host_allocations.is_empty()
+                && self.worlds.is_empty()
+                && self.borrowed_worlds.is_empty()
+                && self.transport.is_none()
+                && runtime.live_buffer_count() == 0
+                && runtime.live_buffer_bytes() == 0,
             last_error: self.last_error.clone(),
         }
     }
@@ -593,7 +587,9 @@ fn emulate_gpu_create_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u3
         let field = gpu_stack_arg(unicorn, 0x30, "CreateGPUWorld field")? as u32 as i32;
         let pixel_format =
             gpu_stack_arg(unicorn, 0x38, "CreateGPUWorld pixel format")? as u32 as i32;
-        let clear = gpu_stack_arg(unicorn, 0x40, "CreateGPUWorld clear")?;
+        // PF_Boolean is one byte. Win64 callers are not required to
+        // initialize the seven padding bytes in its eight-byte stack slot.
+        let clear = gpu_stack_arg(unicorn, 0x40, "CreateGPUWorld clear")? as u8;
         let output = gpu_stack_arg(unicorn, 0x48, "CreateGPUWorld output")?;
         write_gpu_output(unicorn, output, &0u64.to_le_bytes(), "CreateGPUWorld")?;
         let aspect_numerator = scale as u32 as i32;
@@ -660,8 +656,12 @@ fn emulate_gpu_create_world(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u3
             let offset = abi::LAYER_EXTENT_HINT_OFFSET + index * 4;
             definition[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
-        definition[88..92].copy_from_slice(&aspect_numerator.to_le_bytes());
-        definition[92..96].copy_from_slice(&aspect_denominator.to_le_bytes());
+        definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET
+            ..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4]
+            .copy_from_slice(&aspect_numerator.to_le_bytes());
+        definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4
+            ..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 8]
+            .copy_from_slice(&aspect_denominator.to_le_bytes());
         if let Err(error) = unicorn.mem_write(descriptor, &definition) {
             let _ = unicorn.mem_unmap(descriptor, PAGE_SIZE);
             let _ = unicorn
@@ -963,24 +963,82 @@ impl GuestEngine<'_> {
     }
 
     pub(crate) fn end_opencl_gpu(&mut self) -> Result<ObjectCounts, GuestError> {
+        let mut first_error = None;
         if self.unicorn.get_data().gpu_suite.transport.is_some() {
-            self.finish_gpu_render_transport()?;
+            if let Err(error) = self.finish_gpu_render_transport() {
+                first_error = Some(error.to_string());
+            }
         }
-        let state = self.unicorn.get_data();
-        if !state.gpu_suite.worlds.is_empty()
-            || !state.gpu_suite.host_allocations.is_empty()
-            || !state.gpu_suite.borrowed_worlds.is_empty()
-            || state.gpu_suite.exclusive_access_depth != 0
-        {
-            return Err(GuestError::Callback(
-                "GPU Device Suite resources remain live at OpenCL shutdown".into(),
-            ));
+        let suite_evidence = self.gpu_suite_evidence();
+        if !suite_evidence.cleanup_balanced {
+            let message = format!(
+                "GPU Device Suite cleanup is unbalanced: allocations={}/{}, worlds={}/{}, host_allocations={}, gpu_worlds={}, borrowed_worlds={}, device_allocations={}, live_bytes={}, exclusive_depth={}, transport_active={}",
+                suite_evidence.allocations_created,
+                suite_evidence.allocations_freed,
+                suite_evidence.worlds_created,
+                suite_evidence.worlds_disposed,
+                suite_evidence.live_host_allocations,
+                suite_evidence.live_gpu_worlds,
+                suite_evidence.live_borrowed_gpu_worlds,
+                suite_evidence.live_device_allocations,
+                suite_evidence.live_bytes,
+                suite_evidence.exclusive_access_depth,
+                suite_evidence.transport_active
+            );
+            if first_error.is_none() {
+                first_error = Some(message.clone());
+            }
+            self.unicorn.get_data_mut().gpu_suite.last_error = Some(message);
         }
-        self.unicorn
+        let mapped_regions = self.unicorn.get_data().gpu_suite.mapped_regions();
+        let suite_resources = {
+            let state = self.unicorn.get_data();
+            (
+                state.gpu_suite.host_allocations.len(),
+                state.gpu_suite.worlds.len(),
+                state.gpu_suite.borrowed_worlds.len(),
+                state.gpu_suite.exclusive_access_depth,
+            )
+        };
+        if suite_resources != (0, 0, 0, 0) {
+            let message = format!(
+                "forced GPU Device Suite cleanup at OpenCL shutdown: host_allocations={}, worlds={}, borrowed_worlds={}, exclusive_depth={}",
+                suite_resources.0, suite_resources.1, suite_resources.2, suite_resources.3
+            );
+            if first_error.is_none() {
+                first_error = Some(message.clone());
+            }
+            let suite = &mut self.unicorn.get_data_mut().gpu_suite;
+            suite.last_error = Some(message);
+            suite.clear_for_drop();
+        }
+        for (address, bytes) in mapped_regions {
+            if let Err(error) = self.unicorn.mem_unmap(address, bytes)
+                && first_error.is_none()
+            {
+                first_error = Some(format!(
+                    "forced GPU Device Suite unmap {address:#x}+{bytes:#x}: {error}"
+                ));
+            }
+        }
+        let counts = match self
+            .unicorn
             .get_data_mut()
             .gpu_runtime
             .end_opencl()
-            .map_err(GuestError::Callback)
+        {
+            Ok(counts) => counts,
+            Err(error) => {
+                return Err(GuestError::Callback(first_error.map_or(error.clone(), |first| {
+                    format!("{first}; OpenCL runtime end: {error}")
+                })));
+            }
+        };
+        finish_opencl_shutdown(counts, first_error)
+    }
+
+    pub(crate) fn opencl_gpu_active(&self) -> bool {
+        self.unicorn.get_data().gpu_runtime.is_active()
     }
 
     pub(crate) fn prepare_gpu_render_transport(&mut self) -> Result<(), GuestError> {
@@ -1320,5 +1378,27 @@ impl GuestEngine<'_> {
     pub(crate) fn gpu_suite_evidence(&self) -> GpuSuiteEvidence {
         let state = self.unicorn.get_data();
         state.gpu_suite.evidence(&state.gpu_runtime)
+    }
+}
+
+fn finish_opencl_shutdown(
+    counts: ObjectCounts,
+    first_error: Option<String>,
+) -> Result<ObjectCounts, GuestError> {
+    let balance_error = (counts.live_total() != 0 || counts.release_errors != 0).then(|| {
+        format!(
+            "OpenCL runtime cleanup is unbalanced: contexts={}, queues={}, buffers={}, programs={}, kernels={}, release_errors={}",
+            counts.contexts,
+            counts.command_queues,
+            counts.buffers,
+            counts.programs,
+            counts.kernels,
+            counts.release_errors
+        )
+    });
+    match (first_error, balance_error) {
+        (None, None) => Ok(counts),
+        (Some(error), None) | (None, Some(error)) => Err(GuestError::Callback(error)),
+        (Some(first), Some(balance)) => Err(GuestError::Callback(format!("{first}; {balance}"))),
     }
 }

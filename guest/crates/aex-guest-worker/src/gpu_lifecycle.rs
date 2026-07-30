@@ -1,4 +1,71 @@
 use serde::Serialize;
+use std::collections::BTreeMap;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct GpuSuiteEvidence {
+    pub allocations_created: u64,
+    pub allocations_freed: u64,
+    pub upload_bytes: u64,
+    pub download_bytes: u64,
+    pub worlds_created: u64,
+    pub worlds_disposed: u64,
+    pub invalid_operations: u64,
+    pub exclusive_access_depth: u32,
+    pub live_host_allocations: usize,
+    pub live_gpu_worlds: usize,
+    pub live_borrowed_gpu_worlds: usize,
+    pub live_device_allocations: usize,
+    pub live_bytes: usize,
+    pub transport_active: bool,
+    pub cleanup_balanced: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct OpenClErrorEvidence {
+    pub operation: String,
+    pub status: i32,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct OpenClBridgeEvidence {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_units: Option<u32>,
+    pub api_calls: BTreeMap<String, u64>,
+    pub source_strings: u64,
+    pub source_bytes: u64,
+    pub programs_built: u64,
+    pub kernels_created: u64,
+    pub kernels_released: u64,
+    pub scalar_arguments: u64,
+    pub scalar_argument_bytes: u64,
+    pub buffer_arguments: u64,
+    pub kernel_dispatches: u64,
+    pub dispatched_work_items: u64,
+    pub errors: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<OpenClErrorEvidence>,
+    pub live_buffers: usize,
+    pub live_programs: usize,
+    pub live_kernels: usize,
+    pub native_contexts: usize,
+    pub native_command_queues: usize,
+    pub native_buffers: usize,
+    pub native_programs: usize,
+    pub native_kernels: usize,
+    pub native_release_errors: usize,
+    pub cleanup_balanced: bool,
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RenderBackendRequest {
@@ -66,6 +133,22 @@ pub struct GpuRenderDiagnostic {
     pub gpu_render_possible: Option<bool>,
     pub render: GpuSelectorDiagnostic,
     pub setdown: GpuSelectorDiagnostic,
+    pub runtime_started: bool,
+    pub transport_prepared: bool,
+    pub transport_finished: bool,
+    pub runtime_ended: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_begin_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport_prepare_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport_cleanup_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_end_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_suite: Option<GpuSuiteEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opencl: Option<OpenClBridgeEvidence>,
     pub cleanup_complete: bool,
 }
 
@@ -89,6 +172,16 @@ impl GpuRenderDiagnostic {
                 "SMART_RENDER"
             }),
             setdown: GpuSelectorDiagnostic::pending("GPU_DEVICE_SETDOWN"),
+            runtime_started: false,
+            transport_prepared: false,
+            transport_finished: false,
+            runtime_ended: false,
+            runtime_begin_error: None,
+            transport_prepare_error: None,
+            transport_cleanup_error: None,
+            runtime_end_error: None,
+            device_suite: None,
+            opencl: None,
             cleanup_complete: !request.is_gpu(),
         }
     }

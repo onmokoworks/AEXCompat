@@ -2833,6 +2833,29 @@ fn gpu_device_and_host_allocations_are_distinct_bounded_and_stale_safe() {
 }
 
 #[test]
+fn gpu_callback_error_codes_match_the_after_effects_sdk() {
+    let mut engine = test_engine(&[0xc3]);
+    finish_gpu_callback(
+        &mut engine.unicorn,
+        Err(GpuCallbackFailure::out_of_memory("test out of memory")),
+    );
+    assert_eq!(
+        engine.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        4,
+        "PF_Err_OUT_OF_MEMORY"
+    );
+    finish_gpu_callback(
+        &mut engine.unicorn,
+        Err(GpuCallbackFailure::bad("test bad callback parameter")),
+    );
+    assert_eq!(
+        engine.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        516,
+        "PF_Err_BAD_CALLBACK_PARAM"
+    );
+}
+
+#[test]
 fn gpu_world_roundtrip_uses_buffer_tokens_and_cleans_every_failure_path() {
     let mut engine = test_engine(&[0xc3]);
     engine
@@ -2855,7 +2878,7 @@ fn gpu_world_roundtrip_uses_buffer_tokens_and_cleans_every_failure_path() {
                     scale,
                     0,
                     PF_PIXEL_FORMAT_GPU_BGRA128 as u32 as u64,
-                    1,
+                    0xa5a5_a5a5_a5a5_a501,
                     world_output,
                 ],
                 TIMEOUT_MICROSECONDS,
@@ -2881,6 +2904,24 @@ fn gpu_world_roundtrip_uses_buffer_tokens_and_cleans_every_failure_path() {
                 .unwrap()
         ),
         48
+    );
+    assert_eq!(
+        i32::from_le_bytes(
+            definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET
+                ..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4]
+                .try_into()
+                .unwrap()
+        ),
+        1
+    );
+    assert_eq!(
+        u32::from_le_bytes(
+            definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4
+                ..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 8]
+                .try_into()
+                .unwrap()
+        ),
+        1
     );
     let mut device_bytes = vec![0xff; 96];
     engine
@@ -2978,6 +3019,64 @@ fn gpu_world_roundtrip_uses_buffer_tokens_and_cleans_every_failure_path() {
     assert_eq!(evidence.live_gpu_worlds, 0);
     assert_eq!(evidence.live_device_allocations, 0);
     assert_eq!(evidence.live_bytes, 0);
+}
+
+#[test]
+fn opencl_shutdown_rejects_live_or_release_failed_native_objects() {
+    for counts in [
+        ObjectCounts {
+            buffers: 1,
+            ..ObjectCounts::default()
+        },
+        ObjectCounts {
+            release_errors: 1,
+            ..ObjectCounts::default()
+        },
+    ] {
+        let error = finish_opencl_shutdown(counts, None).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("OpenCL runtime cleanup is unbalanced"));
+    }
+    assert_eq!(
+        finish_opencl_shutdown(ObjectCounts::default(), None).unwrap(),
+        ObjectCounts::default()
+    );
+}
+
+#[test]
+fn opencl_shutdown_reports_unfreed_device_suite_allocation_and_deactivates_runtime() {
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .unicorn
+        .get_data_mut()
+        .gpu_runtime
+        .begin_mock(0)
+        .unwrap();
+    let output = engine.allocate(8, 8).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(HOST_GPU_ALLOCATE_DEVICE, [1, 0, 64, output, 0, 0])
+            .unwrap(),
+        0
+    );
+    let before = engine.gpu_suite_evidence();
+    assert_eq!(before.allocations_created, 1);
+    assert_eq!(before.allocations_freed, 0);
+    assert_eq!(before.live_device_allocations, 1);
+    assert!(!before.cleanup_balanced);
+
+    let error = engine.end_opencl_gpu().unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("GPU Device Suite cleanup is unbalanced"));
+    assert!(!engine.unicorn.get_data().gpu_runtime.is_active());
+    let after = engine.gpu_suite_evidence();
+    assert_eq!(after.allocations_created, 1);
+    assert_eq!(after.allocations_freed, 0);
+    assert_eq!(after.live_device_allocations, 0);
+    assert_eq!(after.live_bytes, 0);
+    assert!(!after.cleanup_balanced);
 }
 
 #[test]

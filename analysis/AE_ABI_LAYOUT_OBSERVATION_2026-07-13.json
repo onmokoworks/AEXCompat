@@ -311,6 +311,7 @@
     "layer.data":{"offset":24,"size":8},
     "layer.world_flags":{"offset":16,"size":4},
     "layer.extent_hint":{"offset":44,"size":16},
+    "layer.pix_aspect_ratio":{"offset":88,"size":8},
     "pixel.alpha":{"offset":0,"size":1},
     "pixel.red":{"offset":1,"size":1},
     "pixel.green":{"offset":2,"size":1},

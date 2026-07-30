@@ -2,6 +2,7 @@ use aex_apple_opencl::{
     Buffer, BufferAccess, Error as AppleOpenClError, Kernel, ObjectCounts, ObjectTracker, Program,
     Session, MAX_BUFFER_BYTES,
 };
+use crate::gpu_lifecycle::{OpenClBridgeEvidence, OpenClErrorEvidence};
 #[cfg(test)]
 use std::cell::RefCell;
 use std::sync::{
@@ -153,45 +154,6 @@ impl OpenClRuntimeError {
         };
         Self::new(status, error.to_string())
     }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct OpenClErrorEvidence {
-    pub operation: String,
-    pub status: i32,
-    pub detail: String,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct OpenClBridgeEvidence {
-    pub device_index: Option<u32>,
-    pub platform: Option<String>,
-    pub device: Option<String>,
-    pub vendor: Option<String>,
-    pub compute_units: Option<u32>,
-    pub api_calls: BTreeMap<String, u64>,
-    pub source_strings: u64,
-    pub source_bytes: u64,
-    pub programs_built: u64,
-    pub kernels_created: u64,
-    pub kernels_released: u64,
-    pub scalar_arguments: u64,
-    pub scalar_argument_bytes: u64,
-    pub buffer_arguments: u64,
-    pub kernel_dispatches: u64,
-    pub dispatched_work_items: u64,
-    pub errors: u64,
-    pub last_error: Option<OpenClErrorEvidence>,
-    pub live_buffers: usize,
-    pub live_programs: usize,
-    pub live_kernels: usize,
-    pub native_contexts: usize,
-    pub native_command_queues: usize,
-    pub native_buffers: usize,
-    pub native_programs: usize,
-    pub native_kernels: usize,
-    pub native_release_errors: usize,
-    pub cleanup_balanced: bool,
 }
 
 pub(crate) struct GpuRuntime {

@@ -108,6 +108,7 @@ REQUIRED_FIELDS = {
     "layer.rowbytes",
     "layer.width",
     "layer.height",
+    "layer.pix_aspect_ratio",
 }
 
 CALLBACK_TABLES = {
