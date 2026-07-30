@@ -86,7 +86,8 @@
             "null"
           ],
           "minLength": 1,
-          "maxLength": 32767
+          "maxLength": 32767,
+          "pattern": "^[^/\\\\]+$"
         },
         "path_fingerprint_sha256": {
           "type": [
@@ -128,6 +129,16 @@
             "properties": {
               "enabled": {
                 "const": true
+              },
+              "path_basename": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32767,
+                "pattern": "^[^/\\\\]+$"
+              },
+              "path_fingerprint_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
               },
               "identity": {
                 "$ref": "#/$defs/identity"

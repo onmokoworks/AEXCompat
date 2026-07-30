@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator
 
 
@@ -74,6 +75,52 @@ def test_opencl_icd_report_schema_is_closed_and_accepts_the_failure_matrix():
     ]
     errors = list(Draft202012Validator(schema).iter_errors(rounded_failure))
     assert errors
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        r"C:\Windows\System32\vendor-opencl.dll",
+        "/usr/lib/vendor-opencl.dll",
+        "vendor/subdir/opencl.dll",
+        r"vendor\subdir\opencl.dll",
+    ),
+)
+def test_opencl_icd_schema_rejects_paths_where_a_basename_is_required(path):
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    report = _sample_report()
+    report["candidates"][0]["path_basename"] = path
+    assert list(Draft202012Validator(schema).iter_errors(report))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("path_basename", "path_fingerprint_sha256", "identity"),
+)
+def test_identity_verified_rejects_null_required_evidence(field):
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    report = _sample_report()
+    report["candidates"][0][field] = None
+    assert list(Draft202012Validator(schema).iter_errors(report))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("path_basename", "path_fingerprint_sha256", "identity"),
+)
+def test_identity_verified_rejects_missing_required_evidence(field):
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    report = _sample_report()
+    del report["candidates"][0][field]
+    assert list(Draft202012Validator(schema).iter_errors(report))
+
+
+@pytest.mark.parametrize("fingerprint", ("A" * 64, "a" * 63, "a" * 65))
+def test_identity_verified_requires_exact_lowercase_sha256_fingerprint(fingerprint):
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    report = _sample_report()
+    report["candidates"][0]["path_fingerprint_sha256"] = fingerprint
+    assert list(Draft202012Validator(schema).iter_errors(report))
 
 
 def test_opencl_icd_json_rejects_duplicate_keys_and_source_stays_fail_closed():
