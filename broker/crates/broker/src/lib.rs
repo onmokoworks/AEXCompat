@@ -13,6 +13,7 @@ pub mod minidump_policy;
 pub mod observability;
 pub mod opencl_icd_adapter_binding;
 pub mod opencl_icd_collector;
+pub mod opencl_runtime_probe;
 pub mod plugin_dependency_closure;
 pub mod pnp_opencl_runtime_collector;
 #[cfg(windows)]

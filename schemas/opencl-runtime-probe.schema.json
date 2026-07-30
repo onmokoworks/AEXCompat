@@ -1,0 +1,380 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onmokoworks.example/schemas/opencl-runtime-probe.schema.json",
+  "title": "AEXCompat isolated system OpenCL loader probe report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract",
+    "candidate_evidence",
+    "aggregate_loader_observation",
+    "launch",
+    "backend_ready"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "contract": { "const": "system_opencl_loader_probe" },
+    "candidate_evidence": { "$ref": "#/$defs/candidateEvidence" },
+    "aggregate_loader_observation": {
+      "oneOf": [
+        { "$ref": "#/$defs/aggregate" },
+        { "type": "null" }
+      ]
+    },
+    "launch": { "$ref": "#/$defs/launch" },
+    "backend_ready": { "const": false }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "launch": {
+            "properties": { "status": { "const": "observed" } },
+            "required": ["status"]
+          }
+        },
+        "required": ["launch"]
+      },
+      "then": {
+        "properties": {
+          "aggregate_loader_observation": { "$ref": "#/$defs/aggregate" }
+        }
+      },
+      "else": {
+        "properties": {
+          "aggregate_loader_observation": { "type": "null" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "boundedString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "pattern": "^(?![A-Za-z]:)[^/\\\\]+$"
+    },
+    "candidateEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "legacy_registry_contract",
+        "adapter_binding_contract",
+        "pnp_software_key_contract",
+        "individual_icd_binding"
+      ],
+      "properties": {
+        "legacy_registry_contract": {
+          "const": "opencl_icd_registry_candidates"
+        },
+        "adapter_binding_contract": {
+          "const": "opencl_icd_adapter_driver"
+        },
+        "pnp_software_key_contract": {
+          "const": "windows_pnp_opencl_runtime"
+        },
+        "individual_icd_binding": {
+          "const": "not_attempted"
+        }
+      }
+    },
+    "launch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "exit_code",
+        "kill_reason",
+        "stdout_truncated",
+        "stderr_truncated",
+        "memory_limit_reached"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "observed",
+            "nonzero_exit",
+            "timeout",
+            "crash",
+            "output_truncated",
+            "malformed_output",
+            "launch_error"
+          ]
+        },
+        "exit_code": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "kill_reason": {
+          "enum": ["timeout", "memory_limit", null]
+        },
+        "stdout_truncated": { "type": "boolean" },
+        "stderr_truncated": { "type": "boolean" },
+        "memory_limit_reached": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "launch_error" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": { "exit_code": { "type": "null" } }
+          },
+          "else": {
+            "properties": { "exit_code": { "type": "integer" } }
+          }
+        }
+      ]
+    },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "platforms", "diagnostics"],
+      "properties": {
+        "status": {
+          "enum": [
+            "observed",
+            "incomplete",
+            "no_loader",
+            "missing_symbol",
+            "no_platform"
+          ]
+        },
+        "platforms": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/platform" }
+        },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 1040,
+          "items": { "$ref": "#/$defs/diagnostic" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "observed" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "platforms": { "minItems": 1 },
+              "diagnostics": { "maxItems": 0 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": ["no_loader", "missing_symbol", "no_platform"]
+              }
+            },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "platforms": { "maxItems": 0 },
+              "diagnostics": { "minItems": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "incomplete" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "diagnostics": { "minItems": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "vendor",
+        "version",
+        "profile",
+        "extensions",
+        "icd_suffix",
+        "devices"
+      ],
+      "properties": {
+        "name": { "$ref": "#/$defs/boundedString" },
+        "vendor": { "$ref": "#/$defs/boundedString" },
+        "version": { "$ref": "#/$defs/boundedString" },
+        "profile": { "$ref": "#/$defs/boundedString" },
+        "extensions": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          }
+        },
+        "icd_suffix": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "devices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/device" }
+        }
+      }
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device_type",
+        "vendor_id",
+        "name",
+        "vendor",
+        "driver_version",
+        "version",
+        "profile",
+        "extensions",
+        "available",
+        "compiler_available",
+        "max_compute_units",
+        "max_clock_frequency_mhz",
+        "max_work_group_size",
+        "max_work_item_sizes",
+        "max_mem_alloc_bytes",
+        "global_mem_bytes",
+        "local_mem_bytes"
+      ],
+      "properties": {
+        "device_type": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "vendor_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "name": { "$ref": "#/$defs/boundedString" },
+        "vendor": { "$ref": "#/$defs/boundedString" },
+        "driver_version": { "$ref": "#/$defs/boundedString" },
+        "version": { "$ref": "#/$defs/boundedString" },
+        "profile": { "$ref": "#/$defs/boundedString" },
+        "extensions": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          }
+        },
+        "available": { "type": "boolean" },
+        "compiler_available": { "type": "boolean" },
+        "max_compute_units": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "max_clock_frequency_mhz": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "max_work_group_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "max_work_item_sizes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 18446744073709551615
+          }
+        },
+        "max_mem_alloc_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "global_mem_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "local_mem_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "operation",
+        "api_error",
+        "platform_index",
+        "device_index"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "no_loader",
+            "missing_symbol",
+            "no_platform",
+            "no_device",
+            "api_error",
+            "malformed",
+            "count_overflow"
+          ]
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9_().:\\[\\] -]+$"
+        },
+        "api_error": {
+          "type": ["integer", "null"],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "platform_index": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 15
+        },
+        "device_index": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 63
+        }
+      }
+    }
+  }
+}
