@@ -155,6 +155,12 @@ target_compile_features(aex_l2_worker PRIVATE cxx_std_17)
 target_compile_definitions(aex_l2_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(aex_l2_worker PRIVATE bcrypt aexcompat_trace_writer)
 
+add_executable(worker_report_json_selftest
+    ../tests/native/worker_report_json_selftest.cpp
+    src/worker_report.cpp)
+target_compile_features(worker_report_json_selftest PRIVATE cxx_std_17)
+target_include_directories(worker_report_json_selftest PRIVATE src)
+
 add_executable(aex_render_worker src/worker_render_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
 target_compile_features(aex_render_worker PRIVATE cxx_std_17)
 target_compile_definitions(aex_render_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
