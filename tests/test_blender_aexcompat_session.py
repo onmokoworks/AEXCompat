@@ -4,8 +4,10 @@ import base64
 import hashlib
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import jsonschema
@@ -121,6 +123,37 @@ def test_packaged_wrapper_roundtrip_supports_addon_only_install():
     assert result["status"] == "identity_only"
 
 
+@pytest.mark.parametrize("layout", ["installed_directory", "zip_extract"])
+def test_addon_install_layouts_bundle_a_resolvable_wrapper(tmp_path, layout):
+    source_package = ROOT / "blender_addon" / "aexcompat_blender"
+    if layout == "installed_directory":
+        package = tmp_path / "scripts" / "addons" / "aexcompat_blender"
+        shutil.copytree(source_package, package)
+    else:
+        archive = tmp_path / "aexcompat_blender.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            for source in source_package.iterdir():
+                bundle.write(source, Path("aexcompat_blender") / source.name)
+        extract_root = tmp_path / "scripts" / "addons"
+        with zipfile.ZipFile(archive) as bundle:
+            bundle.extractall(extract_root)
+        package = extract_root / "aexcompat_blender"
+
+    wrapper = package / "session_wrapper.py"
+    assert wrapper.is_file()
+    completed = subprocess.run(
+        [sys.executable, str(wrapper)],
+        input=json.dumps(request()) + "\n",
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=wrapper.parent,
+    )
+    result = json.loads(completed.stdout)
+    jsonschema.validate(result, SCHEMA)
+    assert result["status"] == "identity_only"
+
+
 def test_addon_source_contract_stays_fail_closed_and_out_of_process():
     assert "class AEXCompatCompositorNode(bpy.types.CompositorNode)" in ADDON_SOURCE
     assert "CompositorNodeOFX" in ADDON_SOURCE
@@ -134,7 +167,17 @@ def test_addon_source_contract_stays_fail_closed_and_out_of_process():
 
 @pytest.mark.parametrize(
     "value",
-    ["../outside.aex", "..\\outside.aex", "C:\\outside.aex", "\\\\server\\share\\outside.aex", "/tmp/outside.aex"],
+    [
+        "../outside.aex",
+        "..\\outside.aex",
+        "effects/../outside.aex",
+        "effects\\..\\outside.aex",
+        "/tmp/outside.aex",
+        "C:\\outside.aex",
+        "C:outside.aex",
+        "\\\\server\\share\\outside.aex",
+        "\x00outside.aex",
+    ],
 )
 def test_plugin_path_rejects_root_and_traversal(value):
     payload = request()

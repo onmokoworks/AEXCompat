@@ -198,14 +198,25 @@ def run_reload(output_dir: Path) -> Path:
         raise RuntimeError("addon_node_missing_after_reload")
     sample = bytes((index * 17) % 256 for index in range(4 * 4 * 4))
     output, response = node.evaluate_rgba8(sample, 4, 4, color_space="scene_linear")
+    expected_output = (
+        bytes(value if index % 4 == 3 else 255 - value for index, value in enumerate(sample))
+        if node.transport_mode == "fixture_invert_no_aex"
+        else sample
+    )
+    evaluate_after_reload = output == expected_output
     baked_image = bpy.data.images.get("AEXCompat Baked")
     native_nodes = [item.bl_idname for item in bpy.context.scene.node_tree.nodes] if bpy.context.scene.use_nodes else []
     evidence = {
         "schema_version": 1,
         "report_kind": "aexcompat_blender_reload_smoke",
-        "result_state": "save_reload_transport_smoke_passed_aex_not_loaded" if output == sample else "reload_smoke_failed",
+        "result_state": "save_reload_transport_smoke_passed_aex_not_loaded" if evaluate_after_reload else "reload_smoke_failed",
         "blender_api": {"version": bpy.app.version_string, "CompositorNodeOFX": hasattr(bpy.types, "CompositorNodeOFX")},
-        "lifecycle": {"loaded": True, "node_found": True, "evaluate_after_reload": output == sample},
+        "lifecycle": {
+            "loaded": True,
+            "node_found": True,
+            "evaluate_after_reload": evaluate_after_reload,
+            "transport_mode": node.transport_mode,
+        },
         "baked_image": {
             "loaded": baked_image is not None,
             "native_compositor_graph": native_nodes,
