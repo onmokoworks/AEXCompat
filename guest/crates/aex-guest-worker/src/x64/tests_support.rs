@@ -1196,6 +1196,76 @@
     }
 
     #[test]
+    fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
+        let crt_math = "api-ms-win-crt-math-l1-1-0.dll";
+        assert_eq!(
+            dispatch_win64_import(crt_math, "cosf"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CosF)
+        );
+        assert_eq!(
+            dispatch_win64_import(crt_math, "sinf"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::SinF)
+        );
+        assert_eq!(
+            dispatch_win64_import("OpenCL.DLL", "cosf"),
+            Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
+        );
+    }
+
+    #[test]
+    fn win64_crt_sincos_use_xmm0_f32_abi_and_bound_math_trace() {
+        const COSF_IMPORT: u64 = STUB_BASE + 0x1b0;
+        const SINF_IMPORT: u64 = STUB_BASE + 0x1c0;
+
+        fn call_f32(engine: &mut GuestEngine<'static>, import: u64, input: f32) -> f32 {
+            let mut xmm0 = [0u8; 16];
+            xmm0[..4].copy_from_slice(&input.to_le_bytes());
+            engine
+                .unicorn
+                .reg_write_long(RegisterX86::XMM0, &xmm0)
+                .unwrap();
+            engine.call_win64(import, [0; 6]).unwrap();
+            let xmm0 = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+            f32::from_le_bytes(xmm0[..4].try_into().unwrap())
+        }
+
+        let mut engine = test_engine(&[0xc3]);
+        for (import, symbol, expected) in [
+            (COSF_IMPORT, "cosf", LegacyWin64Import::CosF),
+            (SINF_IMPORT, "sinf", LegacyWin64Import::SinF),
+        ] {
+            engine.unicorn.mem_write(import, &[0xc3]).unwrap();
+            assert_eq!(
+                install_win64_import(
+                    &mut engine.unicorn,
+                    import,
+                    "api-ms-win-crt-math-l1-1-0.dll",
+                    symbol,
+                )
+                .unwrap(),
+                Win64ImportDispatch::LegacyImplemented(expected)
+            );
+        }
+
+        assert_eq!(call_f32(&mut engine, COSF_IMPORT, 0.0), 1.0);
+        assert_eq!(call_f32(&mut engine, SINF_IMPORT, 0.0), 0.0);
+        let cosine = call_f32(&mut engine, COSF_IMPORT, std::f32::consts::FRAC_PI_2);
+        let sine = call_f32(&mut engine, SINF_IMPORT, std::f32::consts::FRAC_PI_2);
+        assert!(cosine.is_finite());
+        assert!(cosine.abs() <= f32::EPSILON);
+        assert!(sine.is_finite());
+        assert_eq!(sine, 1.0);
+
+        for _ in 0..40 {
+            assert!(call_f32(&mut engine, COSF_IMPORT, 0.25).is_finite());
+        }
+        let math_calls = &engine.unicorn.get_data().math_calls;
+        assert_eq!(math_calls.len(), 32);
+        assert!(math_calls.iter().any(|call| call.starts_with("cosf(")));
+        assert!(math_calls.iter().any(|call| call.starts_with("sinf(")));
+    }
+
+    #[test]
     fn opencl_bridge_symbols_and_unsupported_gpu_libraries_are_explicit() {
         for (symbol, expected) in [
             (

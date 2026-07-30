@@ -25,10 +25,12 @@ enum LegacyWin64Import {
     Memset,
     MemoryCopy,
     CxxThrowException,
+    CosF,
     ExpF,
     FloorF,
     PowF,
     Pow,
+    SinF,
     OmpGetMaxThreads,
     VcompFork,
     VcompForDynamicInit,
@@ -124,10 +126,12 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         "memset" => LegacyWin64Import::Memset,
         "memcpy" | "memmove" => LegacyWin64Import::MemoryCopy,
         "_CxxThrowException" => LegacyWin64Import::CxxThrowException,
+        "cosf" => LegacyWin64Import::CosF,
         "expf" => LegacyWin64Import::ExpF,
         "floorf" => LegacyWin64Import::FloorF,
         "powf" => LegacyWin64Import::PowF,
         "pow" => LegacyWin64Import::Pow,
+        "sinf" => LegacyWin64Import::SinF,
         "omp_get_max_threads" => LegacyWin64Import::OmpGetMaxThreads,
         "_vcomp_fork" => LegacyWin64Import::VcompFork,
         "_vcomp_for_dynamic_init" => LegacyWin64Import::VcompForDynamicInit,
@@ -227,6 +231,9 @@ fn install_win64_import(
                     }),
                 )?;
             }
+            LegacyWin64Import::CosF => {
+                install_float_import(unicorn, stub, "cosf", f32::cos)?;
+            }
             LegacyWin64Import::ExpF => {
                 install_float_import(unicorn, stub, "expf", f32::exp)?;
             }
@@ -238,6 +245,9 @@ fn install_win64_import(
             }
             LegacyWin64Import::Pow => {
                 install_double_binary_import(unicorn, stub, "pow", f64::powf)?;
+            }
+            LegacyWin64Import::SinF => {
+                install_float_import(unicorn, stub, "sinf", f32::sin)?;
             }
             LegacyWin64Import::OmpGetMaxThreads => {
                 let value = deterministic_import_i32("omp_get_max_threads")
