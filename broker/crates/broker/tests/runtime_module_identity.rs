@@ -42,6 +42,12 @@ fn captures_canonical_hash_machine_and_stable_file_identity() {
         first.authenticode,
         AuthenticodeEvidence::Embedded | AuthenticodeEvidence::Catalog
     ));
+    if first.signing_catalog_sha256.is_some() {
+        assert_eq!(first.authenticode, AuthenticodeEvidence::Catalog);
+    }
+    if first.authenticode == AuthenticodeEvidence::Embedded {
+        assert!(first.signing_catalog_sha256.is_none());
+    }
     require_verified_authenticode(&first).unwrap();
 }
 

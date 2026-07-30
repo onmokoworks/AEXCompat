@@ -11,6 +11,7 @@ pub mod l1;
 pub mod l2;
 pub mod minidump_policy;
 pub mod observability;
+pub mod opencl_icd_adapter_binding;
 pub mod opencl_icd_collector;
 pub mod plugin_dependency_closure;
 #[cfg(windows)]
