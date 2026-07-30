@@ -2642,6 +2642,8 @@
 
 #[test]
 fn gpu_device_suite_v1_acquires_exact_table_and_writes_56_byte_device_info() {
+    assert_eq!(PF_ERR_OUT_OF_MEMORY, 4);
+    assert_eq!(PF_ERR_BAD_CALLBACK_PARAM, 516);
     let mut engine = test_engine(&[0xc3]);
     let tokens = engine
         .unicorn
