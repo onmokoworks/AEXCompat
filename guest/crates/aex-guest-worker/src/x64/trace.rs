@@ -735,14 +735,19 @@ fn trace_stack_arguments(
     (0..TRACE_STACK_ARGUMENTS)
         .filter_map(|offset| {
             let stack_offset = first_offset + (offset * 8) as u64;
-            let mut bytes = [0u8; 8];
-            unicorn
-                .mem_read(rsp.checked_add(stack_offset)?, &mut bytes)
-                .ok()?;
+            let raw = if first_offset == 0x28 {
+                read_win64_import_argument(unicorn, offset + 4).ok()?
+            } else {
+                let mut bytes = [0u8; 8];
+                unicorn
+                    .mem_read(rsp.checked_add(stack_offset)?, &mut bytes)
+                    .ok()?;
+                u64::from_le_bytes(bytes)
+            };
             Some(TraceStackArgument {
                 index: offset + 5,
                 stack_offset,
-                value: classify_trace_value(u64::from_le_bytes(bytes), image_base, image_end),
+                value: classify_trace_value(raw, image_base, image_end),
             })
         })
         .collect()

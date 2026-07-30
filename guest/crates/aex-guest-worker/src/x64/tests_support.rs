@@ -1168,6 +1168,175 @@
     }
 
     #[test]
+    fn win64_import_dispatch_is_library_aware_and_case_normalized() {
+        assert_eq!(
+            dispatch_win64_import("UCRTBASE.DLL", "malloc"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Malloc)
+        );
+        assert_eq!(
+            dispatch_win64_import(r"C:\Windows\System32\OPENCL.DLL", "malloc"),
+            Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "malloc"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Malloc)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "unknown_scalar"),
+            Win64ImportDispatch::LegacyZero
+        );
+        assert_eq!(
+            canonical_import_trace_label(
+                r"C:\Windows\System32\OPENCL.DLL",
+                "clCreateKernel"
+            ),
+            "opencl.dll!clCreateKernel"
+        );
+    }
+
+    #[test]
+    fn opencl_bridge_symbols_and_unsupported_gpu_libraries_are_explicit() {
+        for (symbol, expected) in [
+            (
+                "clCreateProgramWithSource",
+                OpenClBridgeSymbol::CreateProgramWithSource,
+            ),
+            ("clBuildProgram", OpenClBridgeSymbol::BuildProgram),
+            ("clCreateKernel", OpenClBridgeSymbol::CreateKernel),
+            ("clSetKernelArg", OpenClBridgeSymbol::SetKernelArg),
+            (
+                "clEnqueueNDRangeKernel",
+                OpenClBridgeSymbol::EnqueueNdRangeKernel,
+            ),
+            ("clReleaseKernel", OpenClBridgeSymbol::ReleaseKernel),
+        ] {
+            assert_eq!(
+                dispatch_win64_import("OpenCL.DLL", symbol),
+                Win64ImportDispatch::OpenClBridge(expected)
+            );
+        }
+        assert_eq!(
+            dispatch_win64_import("opencl.dll", "clCreateBuffer"),
+            Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
+        );
+        for (library, family) in [
+            ("NVCUDA.DLL", GpuImportLibrary::Cuda),
+            ("cudart64_12.dll", GpuImportLibrary::Cuda),
+            ("d3d11.dll", GpuImportLibrary::DirectX),
+            ("D3DCOMPILER_47.DLL", GpuImportLibrary::DirectX),
+            ("dxgi.dll", GpuImportLibrary::DirectX),
+        ] {
+            assert_eq!(
+                dispatch_win64_import(library, "same_symbol"),
+                Win64ImportDispatch::UnsupportedGpuLibrary(family)
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_opencl_import_traps_instead_of_returning_zero_success() {
+        const IMPORT: u64 = STUB_BASE + 0x1a0;
+        let mut code = vec![0x48, 0xb8];
+        code.extend_from_slice(&IMPORT.to_le_bytes());
+        code.extend_from_slice(&[0xff, 0xd0, 0xc3]);
+        let mut engine = test_engine(&code);
+        engine
+            .unicorn
+            .mem_write(IMPORT, &[0x31, 0xc0, 0xc3])
+            .unwrap();
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                IMPORT,
+                r"C:\Windows\System32\OPENCL.DLL",
+                "clUnknownExtension"
+            )
+            .unwrap(),
+            Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
+        );
+
+        let error = engine.call_win64(TEST_CODE, [0; 6]).unwrap_err();
+        assert!(matches!(
+            error,
+            GuestError::UnsupportedImport { library, symbol }
+                if library == "opencl.dll" && symbol == "clUnknownExtension"
+        ));
+    }
+
+    #[test]
+    fn win64_import_argument_reader_supports_twelve_total_arguments() {
+        let mut engine = test_engine(&[0xc3]);
+        engine
+            .unicorn
+            .add_code_hook(TEST_CODE, TEST_CODE, |unicorn, _, _| {
+                for index in 0..MAX_WIN64_IMPORT_ARGUMENTS {
+                    match read_win64_import_argument(unicorn, index) {
+                        Ok(value) if value == index as u64 + 1 => {}
+                        Ok(value) => {
+                            unicorn.get_data_mut().callback_error = Some(format!(
+                                "argument {} was {value}, expected {}",
+                                index + 1,
+                                index + 1
+                            ));
+                            return;
+                        }
+                        Err(error) => {
+                            unicorn.get_data_mut().callback_error = Some(error);
+                            return;
+                        }
+                    }
+                }
+                if read_win64_import_argument(unicorn, MAX_WIN64_IMPORT_ARGUMENTS).is_ok() {
+                    unicorn.get_data_mut().callback_error =
+                        Some("argument reader accepted a thirteenth argument".into());
+                }
+            })
+            .unwrap();
+        let arguments = (1..=MAX_WIN64_IMPORT_ARGUMENTS as u64).collect::<Vec<_>>();
+        engine
+            .call_win64_with_timeout(TEST_CODE, &arguments, TIMEOUT_MICROSECONDS)
+            .unwrap();
+    }
+
+    #[test]
+    fn import_trace_records_twelve_total_win64_arguments() {
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.get_data_mut().trace_labels.insert(
+            TEST_CODE,
+            TraceLabel {
+                kind: TraceLabelKind::Import,
+                name: canonical_import_trace_label("OPENCL.DLL", "clTraceFixture"),
+            },
+        );
+        engine.begin_execution_trace("GPU_DEVICE_SETUP", TEST_CODE).unwrap();
+        let arguments = (1..=MAX_WIN64_IMPORT_ARGUMENTS as u64).collect::<Vec<_>>();
+        let result = engine
+            .call_win64_with_timeout(TEST_CODE, &arguments, TIMEOUT_MICROSECONDS)
+            .unwrap();
+        let trace = engine.finish_execution_trace(result).unwrap();
+        let import = trace
+            .events
+            .iter()
+            .find(|event| event.kind == "import_call")
+            .unwrap();
+        assert_eq!(import.name.as_deref(), Some("opencl.dll!clTraceFixture"));
+        assert_eq!(import.arguments.len(), 4);
+        assert_eq!(import.stack_arguments.len(), 8);
+        assert_eq!(
+            import
+                .stack_arguments
+                .iter()
+                .map(|argument| argument.index)
+                .collect::<Vec<_>>(),
+            (5..=12).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            import.stack_arguments[7].value.raw,
+            MAX_WIN64_IMPORT_ARGUMENTS as u64
+        );
+    }
+
+    #[test]
     fn selector_call_converts_unsupported_suite_cxx_throw_to_selector_abort() {
         const CODE: u64 = 0x1000_0000;
         let error_pointer = DATA_BASE + 0x300;

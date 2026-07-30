@@ -131,7 +131,7 @@ const TIMEOUT_MICROSECONDS: u64 = 600_000_000;
 const MAX_TRACE_EVENTS: usize = 50_000;
 const MAX_TRACE_BASIC_BLOCKS: usize = 50_000;
 const MAX_TRACE_BRANCH_EDGES: usize = 100_000;
-const TRACE_STACK_ARGUMENTS: usize = 4;
+const TRACE_STACK_ARGUMENTS: usize = MAX_WIN64_IMPORT_ARGUMENTS - 4;
 const TRACE_FIRST_SAMPLES: usize = 3;
 const TRACE_LAST_SAMPLES: usize = 3;
 const TRACE_DISTINCT_SAMPLES: usize = 16;
@@ -197,7 +197,7 @@ pub enum GuestError {
     StubCapacity,
     #[error("IAT entry is outside the mapped image")]
     IatRange,
-    #[error("unsupported import with nontrivial C++ return: {library}!{symbol}")]
+    #[error("unsupported Win64 import: {library}!{symbol}")]
     UnsupportedImport { library: String, symbol: String },
     #[error("guest data arena exhausted")]
     DataCapacity,
@@ -265,6 +265,7 @@ fn uc<T>(
 
 include!("x64/trace.rs");
 include!("x64/types.rs");
+include!("x64/imports.rs");
 include!("x64/engine.rs");
 include!("x64/callbacks.rs");
 include!("x64/iterate_and_suites.rs");
