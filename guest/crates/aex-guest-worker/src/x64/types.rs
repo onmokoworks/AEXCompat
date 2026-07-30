@@ -108,6 +108,7 @@ struct GuestState {
     avx_fallback_instructions: u64,
     avx_defined_ymm: [bool; 16],
     gpu_runtime: GpuRuntime,
+    gpu_suite: GpuSuiteState,
 }
 
 #[derive(Clone, Debug)]
@@ -240,6 +241,14 @@ impl Drop for GuestEngine<'_> {
                 .allocations()
                 .map(|(pointer, allocation)| (pointer, allocation.backing_size)),
         );
+        mappings.extend(self.unicorn.get_data().gpu_suite.mapped_regions());
+        {
+            let state = self.unicorn.get_data_mut();
+            state.gpu_suite.clear_for_drop();
+            if state.gpu_runtime.is_active() {
+                let _ = state.gpu_runtime.end_opencl();
+            }
+        }
         for (address, size) in mappings {
             let _ = self.unicorn.mem_unmap(address, size);
         }

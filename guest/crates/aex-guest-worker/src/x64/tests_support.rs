@@ -288,6 +288,7 @@
             .unwrap();
         install_iterate8_suites(&mut unicorn).unwrap();
         install_pf_ansi_suite_v2(&mut unicorn).unwrap();
+        install_gpu_device_suite(&mut unicorn).unwrap();
         unicorn
             .mem_write(
                 HOST_COLOR_PARAM_SUITE,

@@ -565,6 +565,10 @@ impl GuestEngine<'static> {
         )?;
         install_iterate8_suites(&mut unicorn)?;
         install_pf_ansi_suite_v2(&mut unicorn)?;
+        install_gpu_device_suite(&mut unicorn).map_err(|error| GuestError::Unicorn {
+            operation: "install PF GPU Device Suite",
+            detail: error.to_string(),
+        })?;
         uc(
             "write PF ColorParamSuite",
             unicorn.mem_write(
@@ -647,6 +651,24 @@ impl GuestEngine<'static> {
             (HOST_TRANSFER_RECT8, "transfer_rect8"),
             (HOST_ITERATE16, "iterate16"),
             (HOST_ITERATE16_CONTINUE, "iterate16_continue"),
+            (HOST_GPU_GET_DEVICE_COUNT, "gpu_get_device_count"),
+            (HOST_GPU_GET_DEVICE_INFO, "gpu_get_device_info"),
+            (HOST_GPU_ACQUIRE_EXCLUSIVE, "gpu_acquire_exclusive"),
+            (HOST_GPU_RELEASE_EXCLUSIVE, "gpu_release_exclusive"),
+            (HOST_GPU_ALLOCATE_DEVICE, "gpu_allocate_device_memory"),
+            (HOST_GPU_FREE_DEVICE, "gpu_free_device_memory"),
+            (HOST_GPU_PURGE_DEVICE, "gpu_purge_device_memory"),
+            (HOST_GPU_ALLOCATE_HOST, "gpu_allocate_host_memory"),
+            (HOST_GPU_FREE_HOST, "gpu_free_host_memory"),
+            (HOST_GPU_PURGE_HOST, "gpu_purge_host_memory"),
+            (HOST_GPU_CREATE_WORLD, "gpu_create_world"),
+            (HOST_GPU_DISPOSE_WORLD, "gpu_dispose_world"),
+            (HOST_GPU_GET_WORLD_DATA, "gpu_get_world_data"),
+            (HOST_GPU_GET_WORLD_SIZE, "gpu_get_world_size"),
+            (
+                HOST_GPU_GET_WORLD_DEVICE_INDEX,
+                "gpu_get_world_device_index",
+            ),
         ] {
             unicorn.get_data_mut().trace_labels.insert(
                 address,

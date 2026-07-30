@@ -1089,6 +1089,7 @@ fn is_suite_address(address: u64) -> bool {
             HOST_AEGP_MEMORY_SUITE,
             HOST_WORLD_SUITE,
             HOST_PF_ANSI_SUITE_V2,
+            HOST_GPU_DEVICE_SUITE_V1,
         ]
         .into_iter()
         .any(|start| (start..start + 0x100).contains(&address))
