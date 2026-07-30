@@ -4,7 +4,10 @@ use aex_apple_opencl::{
 };
 #[cfg(test)]
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicU32, Ordering},
+};
 
 const GPU_TOKEN_BASE: u64 = 0x0000_0040_0000_0000;
 const GPU_TOKEN_GENERATION_BYTES: u64 = 0x0100_0000;
@@ -17,6 +20,7 @@ const MAX_GPU_DEVICE_ALLOCATIONS: usize = 256;
 const MAX_GPU_DEVICE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_OPENCL_PROGRAMS: usize = 256;
 const MAX_OPENCL_KERNELS: usize = 1_024;
+const MAX_OPENCL_LIVE_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OPENCL_EVIDENCE_ERROR_BYTES: usize = 4_096;
 pub(crate) const CL_SUCCESS: i32 = 0;
 pub(crate) const CL_OUT_OF_HOST_MEMORY: i32 = -6;
@@ -36,6 +40,7 @@ pub(crate) const CL_INVALID_GLOBAL_OFFSET: i32 = -56;
 pub(crate) const CL_INVALID_EVENT_WAIT_LIST: i32 = -57;
 pub(crate) const CL_INVALID_GLOBAL_WORK_SIZE: i32 = -63;
 static NEXT_GPU_TOKEN_GENERATION: AtomicU32 = AtomicU32::new(1);
+static ISSUED_GPU_TOKENS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -194,6 +199,8 @@ pub(crate) struct GpuRuntime {
     programs: HashMap<u64, ProgramRecord>,
     kernels: HashMap<u64, KernelRecord>,
     live_buffer_bytes: usize,
+    live_program_source_bytes: usize,
+    issued_tokens: HashSet<u64>,
     opencl_evidence: OpenClBridgeEvidence,
 }
 
@@ -212,7 +219,20 @@ impl Default for GpuRuntime {
             programs: HashMap::new(),
             kernels: HashMap::new(),
             live_buffer_bytes: 0,
+            live_program_source_bytes: 0,
+            issued_tokens: HashSet::new(),
             opencl_evidence: OpenClBridgeEvidence::default(),
+        }
+    }
+}
+
+impl Drop for GpuRuntime {
+    fn drop(&mut self) {
+        let mut issued = issued_gpu_tokens()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for token in &self.issued_tokens {
+            issued.remove(token);
         }
     }
 }
@@ -489,6 +509,18 @@ impl GpuRuntime {
                 format!("OpenCL program count exceeds {MAX_OPENCL_PROGRAMS}"),
             ));
         }
+        let next_source_bytes = self
+            .live_program_source_bytes
+            .checked_add(source.len())
+            .filter(|bytes| *bytes <= MAX_OPENCL_LIVE_SOURCE_BYTES)
+            .ok_or_else(|| {
+                OpenClRuntimeError::new(
+                    CL_OUT_OF_HOST_MEMORY,
+                    format!(
+                        "OpenCL retained program sources exceed {MAX_OPENCL_LIVE_SOURCE_BYTES} bytes"
+                    ),
+                )
+            })?;
         let token = self
             .allocate_token(GpuTokenKind::Program)
             .map_err(|detail| OpenClRuntimeError::new(CL_OUT_OF_HOST_MEMORY, detail))?;
@@ -500,6 +532,7 @@ impl GpuRuntime {
                 backing: None,
             },
         );
+        self.live_program_source_bytes = next_source_bytes;
         self.opencl_evidence.source_strings = self
             .opencl_evidence
             .source_strings
@@ -787,6 +820,13 @@ impl GpuRuntime {
         self.validates_token(token, GpuTokenKind::Kernel) && self.kernels.contains_key(&token)
     }
 
+    pub(crate) fn is_issued_token(token: u64) -> bool {
+        issued_gpu_tokens()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&token)
+    }
+
     pub(crate) fn record_opencl_api_call(&mut self, operation: &'static str) {
         let count = self
             .opencl_evidence
@@ -830,6 +870,11 @@ impl GpuRuntime {
             .filter(|next| *next < self.token_end)
             .ok_or_else(|| "GPU synthetic token space exhausted".to_string())?;
         self.next_token = next;
+        self.issued_tokens.insert(token);
+        issued_gpu_tokens()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(token);
         Ok(token)
     }
 
@@ -892,6 +937,7 @@ impl GpuRuntime {
         self.programs.clear();
         self.buffers.clear();
         self.live_buffer_bytes = 0;
+        self.live_program_source_bytes = 0;
         self.backend = None;
         self.device_index = None;
         self.device_tokens = None;
@@ -933,6 +979,10 @@ fn next_gpu_token_generation() -> u32 {
             return generation;
         }
     }
+}
+
+fn issued_gpu_tokens() -> &'static Mutex<HashSet<u64>> {
+    ISSUED_GPU_TOKENS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 fn apply_object_counts(evidence: &mut OpenClBridgeEvidence, counts: ObjectCounts) {
@@ -1034,5 +1084,19 @@ mod gpu_runtime_tests {
         assert_eq!(runtime.live_buffer_count(), 0);
         assert_eq!(runtime.live_buffer_bytes(), 0);
         assert!(!runtime.is_buffer_token(token));
+    }
+
+    #[test]
+    fn retained_program_sources_have_an_aggregate_bound() {
+        let mut runtime = GpuRuntime::default();
+        let tokens = runtime.begin_mock(0).unwrap();
+        runtime.live_program_source_bytes = MAX_OPENCL_LIVE_SOURCE_BYTES;
+        let error = runtime
+            .stage_opencl_program(tokens.context, "x".into(), 1)
+            .unwrap_err();
+        assert_eq!(error.status, CL_OUT_OF_HOST_MEMORY);
+        assert!(runtime.programs.is_empty());
+        runtime.end_opencl().unwrap();
+        assert_eq!(runtime.live_program_source_bytes, 0);
     }
 }

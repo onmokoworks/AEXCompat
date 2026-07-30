@@ -312,7 +312,7 @@ fn emulate_cl_set_kernel_arg(
                 .gpu_runtime
                 .set_opencl_kernel_buffer_arg(kernel, index, token);
         }
-        if GpuRuntime::looks_like_token(token) {
+        if GpuRuntime::is_issued_token(token) {
             return Err(OpenClRuntimeError::new(
                 CL_INVALID_MEM_OBJECT,
                 format!(
@@ -487,16 +487,9 @@ fn opencl_u32_argument(
     index: usize,
     operation: &'static str,
 ) -> Result<u32, OpenClRuntimeError> {
-    let value = opencl_argument(unicorn, index, operation)?;
-    u32::try_from(value).map_err(|_| {
-        OpenClRuntimeError::new(
-            CL_INVALID_VALUE,
-            format!(
-                "{operation} argument {} value {value:#x} does not fit cl_uint",
-                index + 1
-            ),
-        )
-    })
+    // Win64 right-justifies 32-bit integer arguments in 64-bit ABI slots; the
+    // upper half is unspecified and may contain stale stack/register bytes.
+    Ok(opencl_argument(unicorn, index, operation)? as u32)
 }
 
 fn opencl_usize_argument(
@@ -977,7 +970,17 @@ mod opencl_import_bridge_tests {
             call_import(
                 &mut unicorn,
                 ENQUEUE_STUB,
-                &[tokens.queue, kernel, 2, 0, global, local, 0, 0, 0],
+                &[
+                    tokens.queue,
+                    kernel,
+                    2,
+                    0,
+                    global,
+                    local,
+                    0xa5a5_a5a5_0000_0000,
+                    0,
+                    0,
+                ],
             ),
             CL_SUCCESS as u64
         );
@@ -1016,6 +1019,16 @@ mod opencl_import_bridge_tests {
             ),
             CL_INVALID_MEM_OBJECT as u32 as u64
         );
+        let token_shaped_scalar = program + (100 * GPU_TOKEN_OBJECT_STRIDE);
+        assert!(GpuRuntime::looks_like_token(token_shaped_scalar));
+        assert!(!GpuRuntime::is_issued_token(token_shaped_scalar));
+        set_argument(
+            &mut unicorn,
+            kernel,
+            2,
+            DATA_BASE + 0x0e30,
+            &token_shaped_scalar.to_le_bytes(),
+        );
 
         assert_eq!(
             call_import(&mut unicorn, RELEASE_KERNEL_STUB, &[kernel]),
@@ -1029,14 +1042,14 @@ mod opencl_import_bridge_tests {
         assert_eq!(evidence.api_calls["clCreateProgramWithSource"], 2);
         assert_eq!(evidence.api_calls["clBuildProgram"], 2);
         assert_eq!(evidence.api_calls["clCreateKernel"], 1);
-        assert_eq!(evidence.api_calls["clSetKernelArg"], 5);
+        assert_eq!(evidence.api_calls["clSetKernelArg"], 6);
         assert_eq!(evidence.api_calls["clEnqueueNDRangeKernel"], 2);
         assert_eq!(evidence.api_calls["clReleaseKernel"], 2);
         assert_eq!(evidence.source_strings, 2);
         assert_eq!(evidence.kernel_dispatches, 1);
         assert_eq!(evidence.dispatched_work_items, 32);
         assert_eq!(evidence.buffer_arguments, 1);
-        assert_eq!(evidence.scalar_arguments, 1);
+        assert_eq!(evidence.scalar_arguments, 2);
         assert_eq!(evidence.errors, 7);
         assert_eq!(evidence.live_programs, 1);
         assert_eq!(evidence.live_kernels, 0);
