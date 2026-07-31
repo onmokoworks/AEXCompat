@@ -36,6 +36,92 @@ mod tests {
     }
 
     #[test]
+    fn close_failure_diagnostic_names_a_bounded_invariant_without_worker_strings() {
+        let close = json!({
+            "invalidated": false,
+            "worker": {"classification": "ok", "detail": "C:\\\\secret\\\\plugin.aex"},
+            "final_report": {
+                "suite_acquires": 8,
+                "suite_releases": 7,
+                "live_suite_lease_count": 1,
+                "live_suite_leases": "C:\\\\secret\\\\plugin.aex"
+            }
+        });
+        let diagnostic = close_failure_diagnostic(
+            &close,
+            crate::render_session::CloseReportInvariant::SuiteFaultObserved,
+        );
+        assert_eq!(
+            diagnostic,
+            "render session close rejected invariant=suite_fault_observed invalidated=false worker_ok=true suite_acquires=8 suite_releases=7 live_suite_lease_count=1 live_suite_reference_count=unknown"
+        );
+        assert!(!diagnostic.contains("secret"));
+    }
+
+    #[test]
+    fn rejected_close_does_not_supply_stale_state_to_the_next_wrapper_report() {
+        let rejected = json!({
+            "invalidated": false,
+            "worker": {"classification": "ok"},
+            "final_report": {
+                "status": "render_completed",
+                "render_error": 0,
+                "global_setdown_error": 0,
+                "persistent_sequence_setup_error": 0,
+                "persistent_sequence_setdown_error": 0,
+                "guard_bytes_intact": true,
+                "suite_leases_balanced": false,
+                "suite_lease_warning": true,
+                "suite_fault_observed": false,
+                "suite_acquires": 8,
+                "suite_releases": 7,
+                "live_suite_lease_count": 1,
+                "live_suite_reference_count": 1,
+                "live_suite_leases": "C:\\\\secret\\\\plugin.aex",
+                "handle_lifetimes_balanced": true,
+                "world_lifetimes_balanced": true,
+                "param_checkouts_balanced": true,
+            }
+        });
+        assert_eq!(
+            validated_wrapper_final_report(&rejected, false),
+            Err(crate::render_session::CloseReportInvariant::SuiteLeaseList)
+        );
+        let diagnostic = close_failure_diagnostic(
+            &rejected,
+            crate::render_session::CloseReportInvariant::SuiteLeaseList,
+        );
+        assert!(!diagnostic.contains("secret"));
+
+        let next_clean = json!({
+            "invalidated": false,
+            "worker": {"classification": "ok"},
+            "final_report": {
+                "status": "render_completed",
+                "render_error": 0,
+                "global_setdown_error": 0,
+                "persistent_sequence_setup_error": 0,
+                "persistent_sequence_setdown_error": 0,
+                "guard_bytes_intact": true,
+                "suite_leases_balanced": true,
+                "suite_lease_warning": false,
+                "suite_fault_observed": false,
+                "suite_acquires": 2,
+                "suite_releases": 2,
+                "live_suite_lease_count": 0,
+                "live_suite_leases": "",
+                "handle_lifetimes_balanced": true,
+                "world_lifetimes_balanced": true,
+                "param_checkouts_balanced": true,
+            }
+        });
+        let report = validated_wrapper_final_report(&next_clean, false)
+            .expect("a new clean close must not inherit the rejected close");
+        assert_eq!(report["live_suite_leases"], json!(""));
+        assert_eq!(report["suite_lease_warning"], json!(false));
+    }
+
+    #[test]
     fn suite_call_slot_probe_keeps_shape_but_drops_raw_process_values() {
         let raw_sentinel = "0xfeedfacecafebeef";
         let worker_report = json!({

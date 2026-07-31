@@ -101,6 +101,12 @@ fn final_report_clean_fails_closed_on_missing_or_dirty_fields() {
         "persistent_sequence_setdown_error": 0,
         "guard_bytes_intact": true,
         "suite_leases_balanced": true,
+        "suite_lease_warning": false,
+        "suite_fault_observed": false,
+        "suite_acquires": 2,
+        "suite_releases": 2,
+        "live_suite_lease_count": 0,
+        "live_suite_leases": "",
         "handle_lifetimes_balanced": true,
         "world_lifetimes_balanced": true,
         "param_checkouts_balanced": true,
@@ -151,6 +157,12 @@ fn smart_final_report_clean_requires_the_session_fields() {
         "global_setdown_error": 0,
         "guard_bytes_intact": true,
         "suite_leases_balanced": true,
+        "suite_lease_warning": false,
+        "suite_fault_observed": false,
+        "suite_acquires": 2,
+        "suite_releases": 2,
+        "live_suite_lease_count": 0,
+        "live_suite_leases": "",
         "handle_lifetimes_balanced": true,
         "world_lifetimes_balanced": true,
         "param_checkouts_balanced": true,
@@ -188,7 +200,7 @@ fn smart_final_report_clean_requires_the_session_fields() {
 }
 
 #[test]
-fn final_report_clean_accepts_only_explicit_nonfaulting_suite_lease_warning() {
+fn classic_final_report_accepts_only_explicit_nonfaulting_suite_lease_warning() {
     let mut warned = serde_json::json!({
         "status": "render_completed",
         "global_setdown_error": 0,
@@ -196,38 +208,304 @@ fn final_report_clean_accepts_only_explicit_nonfaulting_suite_lease_warning() {
         "suite_leases_balanced": false,
         "suite_lease_warning": true,
         "suite_fault_observed": false,
-        "suite_acquires": 123,
+        "suite_acquires": 33,
         "suite_releases": 24,
         "live_suite_lease_count": 1,
-        "live_suite_leases": "PF World Suite@2=99",
+        "live_suite_reference_count": 9,
+        "live_suite_leases": "PF World Suite@2=9",
         "handle_lifetimes_balanced": true,
         "world_lifetimes_balanced": true,
         "param_checkouts_balanced": true,
-        "session_mode": true,
-        "session_render_error": 0,
-        "session_sequence_setup_error": 0,
-        "session_sequence_setdown_error": 0,
+        "render_error": 0,
+        "persistent_sequence_setup_error": 0,
+        "persistent_sequence_setdown_error": 0,
     });
-    assert!(final_report_clean(&warned, true));
+    assert_eq!(
+        validate_final_report(&warned, false),
+        Ok(FinalReportValidation::CleanWithSuiteLeaseWarning {
+            suite_acquires: 33,
+            suite_releases: 24,
+            live_suite_lease_count: 1,
+        })
+    );
+
+    let mut smart_warned = warned.clone();
+    smart_warned.as_object_mut().unwrap().remove("render_error");
+    smart_warned
+        .as_object_mut()
+        .unwrap()
+        .remove("persistent_sequence_setup_error");
+    smart_warned
+        .as_object_mut()
+        .unwrap()
+        .remove("persistent_sequence_setdown_error");
+    smart_warned["session_mode"] = serde_json::json!(true);
+    smart_warned["session_render_error"] = serde_json::json!(0);
+    smart_warned["session_sequence_setup_error"] = serde_json::json!(0);
+    smart_warned["session_sequence_setdown_error"] = serde_json::json!(0);
+    assert_eq!(
+        validate_final_report(&smart_warned, true),
+        Err(CloseReportInvariant::UnexpectedLiveSuiteLease)
+    );
 
     for (key, value) in [
         ("suite_lease_warning", serde_json::json!(false)),
         ("suite_fault_observed", serde_json::json!(true)),
         ("suite_acquires", serde_json::json!(24)),
+        ("live_suite_reference_count", serde_json::json!(0)),
         ("live_suite_lease_count", serde_json::json!(0)),
         ("live_suite_leases", serde_json::json!("")),
     ] {
         warned[key] = value;
-        assert!(!final_report_clean(&warned, true), "{key} must fail closed");
+        assert!(
+            !final_report_clean(&warned, false),
+            "{key} must fail closed"
+        );
         warned[key] = match key {
             "suite_lease_warning" => serde_json::json!(true),
             "suite_fault_observed" => serde_json::json!(false),
-            "suite_acquires" => serde_json::json!(123),
+            "suite_acquires" => serde_json::json!(33),
+            "live_suite_reference_count" => serde_json::json!(9),
             "live_suite_lease_count" => serde_json::json!(1),
-            "live_suite_leases" => serde_json::json!("PF World Suite@2=99"),
+            "live_suite_leases" => serde_json::json!("PF World Suite@2=9"),
             _ => unreachable!(),
         };
     }
+}
+
+#[test]
+fn classic_suite_warning_requires_canonical_lease_summary_and_exact_counters() {
+    let valid = serde_json::json!({
+        "status": "render_completed",
+        "render_error": 0,
+        "global_setdown_error": 0,
+        "persistent_sequence_setup_error": 0,
+        "persistent_sequence_setdown_error": 0,
+        "guard_bytes_intact": true,
+        "suite_leases_balanced": false,
+        "suite_lease_warning": true,
+        "suite_fault_observed": false,
+        "suite_acquires": 10,
+        "suite_releases": 7,
+        "live_suite_lease_count": 2,
+        "live_suite_reference_count": 3,
+        "live_suite_leases": "PF Handle Suite@2=1;PF World Suite@2=2",
+        "handle_lifetimes_balanced": true,
+        "world_lifetimes_balanced": true,
+        "param_checkouts_balanced": true,
+    });
+    assert!(matches!(
+        validate_final_report(&valid, false),
+        Ok(FinalReportValidation::CleanWithSuiteLeaseWarning {
+            suite_acquires: 10,
+            suite_releases: 7,
+            live_suite_lease_count: 2,
+        })
+    ));
+
+    let mut missing_fault = valid.clone();
+    missing_fault
+        .as_object_mut()
+        .unwrap()
+        .remove("suite_fault_observed");
+    assert_eq!(
+        validate_final_report(&missing_fault, false),
+        Err(CloseReportInvariant::MissingSuiteFaultEvidence)
+    );
+    let mut null_fault = valid.clone();
+    null_fault["suite_fault_observed"] = serde_json::json!(null);
+    assert_eq!(
+        validate_final_report(&null_fault, false),
+        Err(CloseReportInvariant::MissingSuiteFaultEvidence)
+    );
+    let mut observed_fault = valid.clone();
+    observed_fault["suite_fault_observed"] = serde_json::json!(true);
+    assert_eq!(
+        validate_final_report(&observed_fault, false),
+        Err(CloseReportInvariant::SuiteFaultObserved)
+    );
+
+    for malformed in [
+        "PF Handle Suite@2=1;",
+        "PF Handle Suite@2=0",
+        "PF Handle Suite@02=1",
+        "PF Handle Suite@2=01",
+        "PF Handle Suite@2=-1",
+        " PF Handle Suite@2=1",
+        "PF  Handle Suite@2=1",
+        "PF Handle Suite@2=1;pf handle suite@2=2",
+        "PF H\u{00e4}ndle Suite@2=1",
+        "PF Handle Suite@2=18446744073709551616",
+    ] {
+        let mut rejected = valid.clone();
+        rejected["live_suite_leases"] = serde_json::json!(malformed);
+        assert_eq!(
+            validate_final_report(&rejected, false),
+            Err(CloseReportInvariant::SuiteLeaseList),
+            "{malformed:?} must not be accepted"
+        );
+    }
+    let mut entry_count_mismatch = valid.clone();
+    entry_count_mismatch["live_suite_lease_count"] = serde_json::json!(1);
+    assert_eq!(
+        validate_final_report(&entry_count_mismatch, false),
+        Err(CloseReportInvariant::SuiteLeaseCounts)
+    );
+    let mut reference_sum_mismatch = valid.clone();
+    reference_sum_mismatch["live_suite_reference_count"] = serde_json::json!(4);
+    assert_eq!(
+        validate_final_report(&reference_sum_mismatch, false),
+        Err(CloseReportInvariant::SuiteLeaseCounts)
+    );
+    let mut residual_mismatch = valid.clone();
+    residual_mismatch["suite_acquires"] = serde_json::json!(11);
+    assert_eq!(
+        validate_final_report(&residual_mismatch, false),
+        Err(CloseReportInvariant::SuiteLeaseCounts)
+    );
+    let mut reference_overflow = valid;
+    reference_overflow["live_suite_lease_count"] = serde_json::json!(2);
+    reference_overflow["live_suite_reference_count"] = serde_json::json!(0);
+    reference_overflow["suite_acquires"] = serde_json::json!(1);
+    reference_overflow["suite_releases"] = serde_json::json!(0);
+    reference_overflow["live_suite_leases"] =
+        serde_json::json!("PF Handle Suite@2=18446744073709551615;PF World Suite@2=1");
+    assert_eq!(
+        validate_final_report(&reference_overflow, false),
+        Err(CloseReportInvariant::SuiteLeaseCounts)
+    );
+}
+
+#[test]
+fn close_report_validation_is_typed_and_rejects_unexpected_or_incomplete_leases() {
+    let clean = serde_json::json!({
+        "status": "render_completed",
+        "render_error": 0,
+        "global_setdown_error": 0,
+        "persistent_sequence_setup_error": 0,
+        "persistent_sequence_setdown_error": 0,
+        "guard_bytes_intact": true,
+        "suite_leases_balanced": false,
+        "suite_lease_warning": true,
+        "suite_fault_observed": false,
+        "suite_acquires": 8,
+        "suite_releases": 7,
+        "live_suite_lease_count": 1,
+        "live_suite_reference_count": 1,
+        "live_suite_leases": "PF Handle Suite@2=1",
+        "handle_lifetimes_balanced": true,
+        "world_lifetimes_balanced": true,
+        "param_checkouts_balanced": true,
+    });
+    let close = serde_json::json!({
+        "invalidated": false,
+        "worker": {"classification": "ok"},
+        "final_report": clean,
+        // Deliberately stale: consumers must use the shared final-report
+        // verdict rather than this convenience field.
+        "session_clean": false,
+    });
+    assert!(matches!(
+        validate_close_report(&close, false),
+        Ok(FinalReportValidation::CleanWithSuiteLeaseWarning { .. })
+    ));
+    let cases = [
+        (
+            "suite_fault_observed",
+            serde_json::json!(true),
+            CloseReportInvariant::SuiteFaultObserved,
+        ),
+        (
+            "live_suite_lease_count",
+            serde_json::json!(0),
+            CloseReportInvariant::SuiteLeaseCounts,
+        ),
+        (
+            "live_suite_leases",
+            serde_json::json!(""),
+            CloseReportInvariant::SuiteLeaseList,
+        ),
+        (
+            "handle_lifetimes_balanced",
+            serde_json::json!(false),
+            CloseReportInvariant::HandleLifetimes,
+        ),
+        (
+            "world_lifetimes_balanced",
+            serde_json::json!(false),
+            CloseReportInvariant::WorldLifetimes,
+        ),
+        (
+            "param_checkouts_balanced",
+            serde_json::json!(false),
+            CloseReportInvariant::ParameterCheckouts,
+        ),
+    ];
+    for (key, value, expected) in cases {
+        let mut rejected = close.clone();
+        rejected["final_report"][key] = value;
+        assert_eq!(validate_close_report(&rejected, false), Err(expected));
+    }
+
+    let mut missing_warning_metadata = close.clone();
+    missing_warning_metadata["final_report"]
+        .as_object_mut()
+        .unwrap()
+        .remove("suite_lease_warning");
+    assert_eq!(
+        validate_close_report(&missing_warning_metadata, false),
+        Err(CloseReportInvariant::SuiteLeaseWarningMetadata)
+    );
+    let mut missing_fault_evidence = close.clone();
+    missing_fault_evidence["final_report"]
+        .as_object_mut()
+        .unwrap()
+        .remove("suite_fault_observed");
+    assert_eq!(
+        validate_close_report(&missing_fault_evidence, false),
+        Err(CloseReportInvariant::MissingSuiteFaultEvidence)
+    );
+    let mut missing_count_metadata = close.clone();
+    missing_count_metadata["final_report"]
+        .as_object_mut()
+        .unwrap()
+        .remove("suite_acquires");
+    assert_eq!(
+        validate_close_report(&missing_count_metadata, false),
+        Err(CloseReportInvariant::SuiteLeaseWarningMetadata)
+    );
+
+    let mut unexpected_live_lease = close.clone();
+    unexpected_live_lease["final_report"]["suite_leases_balanced"] = serde_json::json!(true);
+    unexpected_live_lease["final_report"]["suite_lease_warning"] = serde_json::json!(false);
+    unexpected_live_lease["final_report"]["suite_acquires"] = serde_json::json!(8);
+    unexpected_live_lease["final_report"]["suite_releases"] = serde_json::json!(8);
+    assert_eq!(
+        validate_close_report(&unexpected_live_lease, false),
+        Err(CloseReportInvariant::UnexpectedLiveSuiteLease)
+    );
+}
+
+#[test]
+fn close_report_validation_rejects_crash_and_missing_report() {
+    let crashed = serde_json::json!({
+        "invalidated": true,
+        "worker": {"classification": "crashed"},
+        "final_report": null,
+    });
+    assert_eq!(
+        validate_close_report(&crashed, false),
+        Err(CloseReportInvariant::CloseInvalidated)
+    );
+    let no_report = serde_json::json!({
+        "invalidated": false,
+        "worker": {"classification": "ok"},
+        "final_report": null,
+    });
+    assert_eq!(
+        validate_close_report(&no_report, false),
+        Err(CloseReportInvariant::FinalReportMissing)
+    );
 }
 
 #[test]

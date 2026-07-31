@@ -683,20 +683,15 @@ fn render_classic_via_length_one_session(
     // at the expanded dimensions (protocol §3, issue #262), so the session route
     // carries the expand without a re-open (which would replay SEQUENCE/FRAME
     // setup and setdown).
+    // `close` consumes the session before any return below.  In particular a
+    // deadline/crash/invalidation or rejected final report cannot leak a live
+    // worker, its lease state, or the frame pixels into a subsequent render.
     let close = session.close();
-    if close.get("session_clean") != Some(&Value::Bool(true))
-        || close.get("invalidated") != Some(&Value::Bool(false))
-    {
-        return SessionWrapperOutcome::Fallback("the render session did not close cleanly".into());
-    }
-    let Some(final_report) = close
-        .get("final_report")
-        .filter(|value| value.is_object())
-        .cloned()
-    else {
-        return SessionWrapperOutcome::Fallback(
-            "the render session close carried no final report".into(),
-        );
+    let final_report = match validated_wrapper_final_report(&close, request.smart) {
+        Ok(report) => report,
+        Err(invariant) => {
+            return SessionWrapperOutcome::Fallback(close_failure_diagnostic(&close, invariant));
+        }
     };
     let classification = close["worker"]["classification"]
         .as_str()
@@ -888,6 +883,59 @@ fn render_classic_via_length_one_session(
     };
     RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     SessionWrapperOutcome::Report(build_interactive_image_report(&final_report, facts))
+}
+
+/// A bounded failure summary for the public one-shot-compatible wrapper.  The
+/// typed invariant comes from `render_session`; the only worker values exposed
+/// are the four small lease counters.  Do not add report strings, paths, or
+/// launch details here: this path is also used after crashes and timeouts.
+fn close_failure_diagnostic(
+    close: &Value,
+    invariant: crate::render_session::CloseReportInvariant,
+) -> String {
+    let report = close.get("final_report");
+    let counter = |key: &str| {
+        report
+            .and_then(|report| report.get(key))
+            .and_then(Value::as_u64)
+            .map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+    };
+    let invalidated = close
+        .get("invalidated")
+        .and_then(Value::as_bool)
+        .map_or("unknown", |value| if value { "true" } else { "false" });
+    let worker_ok = close
+        .get("worker")
+        .and_then(|worker| worker.get("classification"))
+        .and_then(Value::as_str)
+        .is_some_and(|classification| classification == "ok");
+    format!(
+        "render session close rejected invariant={} invalidated={} worker_ok={} suite_acquires={} suite_releases={} live_suite_lease_count={} live_suite_reference_count={}",
+        invariant.as_str(),
+        invalidated,
+        worker_ok,
+        counter("suite_acquires"),
+        counter("suite_releases"),
+        counter("live_suite_lease_count"),
+        counter("live_suite_reference_count"),
+    )
+}
+
+/// The wrapper has no retained close state: each render consumes its session,
+/// validates that close summary, then clones only that summary's final report.
+/// Keeping this boundary explicit makes a rejected close unable to carry its
+/// image, lease diagnostics, or report into the next independently opened
+/// session.
+fn validated_wrapper_final_report(
+    close: &Value,
+    smart: bool,
+) -> Result<Value, crate::render_session::CloseReportInvariant> {
+    crate::render_session::validate_close_report(close, smart)?;
+    close
+        .get("final_report")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or(crate::render_session::CloseReportInvariant::FinalReportMissing)
 }
 
 /// Static configuration for a resident interactive render session
