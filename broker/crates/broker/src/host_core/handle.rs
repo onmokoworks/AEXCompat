@@ -81,18 +81,11 @@ impl<T> HandleRegistry<T> {
                 "allocate_handle_registry",
             ));
         }
-        if let Some((slot, entry)) = self
-            .entries
-            .iter_mut()
-            .enumerate()
-            .find(|(_, entry)| entry.value.is_none())
+        if let Some((slot, entry)) =
+            self.entries.iter_mut().enumerate().find(|(_, entry)| {
+                entry.value.is_none() && entry.generation < GENERATION_MASK as u32
+            })
         {
-            if entry.generation >= GENERATION_MASK as u32 {
-                return Err(HostError::new(
-                    HostErrorCode::CapacityExceeded,
-                    "reuse_handle_slot",
-                ));
-            }
             entry.generation += 1;
             entry.owner = owner;
             entry.kind = kind;
@@ -335,5 +328,37 @@ mod tests {
                 .code(),
             HostErrorCode::InvalidHandle
         );
+    }
+
+    #[test]
+    fn exhausted_slots_are_retired_without_blocking_remaining_capacity() {
+        let owner = OwnerId::new(31).unwrap();
+        let mut registry = HandleRegistry::default();
+        let first = registry.insert(owner, HandleKind::Scene, "first").unwrap();
+        let second = registry.insert(owner, HandleKind::Scene, "second").unwrap();
+        registry.remove(first, owner, HandleKind::Scene).unwrap();
+        registry.remove(second, owner, HandleKind::Scene).unwrap();
+        registry.entries[0].generation = GENERATION_MASK as u32;
+
+        let reused = registry.insert(owner, HandleKind::Scene, "reused").unwrap();
+        let (_, reused_slot, reused_generation, _) = decode(reused).unwrap();
+        assert_eq!(reused_slot, 1);
+        assert_eq!(reused_generation, 2);
+
+        let mut fresh_capacity = HandleRegistry::default();
+        let exhausted = fresh_capacity
+            .insert(owner, HandleKind::Scene, "exhausted")
+            .unwrap();
+        fresh_capacity
+            .remove(exhausted, owner, HandleKind::Scene)
+            .unwrap();
+        fresh_capacity.entries[0].generation = GENERATION_MASK as u32;
+
+        let newly_allocated = fresh_capacity
+            .insert(owner, HandleKind::Scene, "new-slot")
+            .unwrap();
+        let (_, new_slot, new_generation, _) = decode(newly_allocated).unwrap();
+        assert_eq!(new_slot, 1);
+        assert_eq!(new_generation, 1);
     }
 }
