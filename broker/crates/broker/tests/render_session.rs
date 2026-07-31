@@ -1787,10 +1787,21 @@ mod windows_e2e {
             assert_eq!(close["smart_capability_source"], capability_source);
             assert_eq!(close["smart_capability_identity"], capability_identity);
             assert_eq!(close["smart_capability_version"], 1);
+            let selector_count = |selector: &str| {
+                close["final_report"]["selector_counters"][selector]
+                    .as_u64()
+                    .expect("worker must return bounded selector counter evidence")
+            };
             if smart {
                 assert_eq!(close["final_report"]["session_mode"], true);
+                assert_eq!(selector_count("classic_render"), 0);
+                assert!(selector_count("smart_pre_render") >= 2);
+                assert!(selector_count("smart_render") >= 2);
             } else {
                 assert!(close["final_report"]["session_mode"].is_null());
+                assert_eq!(selector_count("smart_pre_render"), 0);
+                assert_eq!(selector_count("smart_render"), 0);
+                assert!(selector_count("classic_render") >= 2);
             }
             assert_eq!(close["session_clean"], true, "close: {close}");
         }

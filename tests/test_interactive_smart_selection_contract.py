@@ -6,6 +6,7 @@ BROKER_SESSION = ROOT / "broker" / "crates" / "broker" / "src" / "image_render" 
 LIVE_SESSION = ROOT / "broker" / "crates" / "harness" / "src" / "windows" / "live_session.rs"
 APP = ROOT / "broker" / "crates" / "harness" / "src" / "windows" / "app.rs"
 INSPECTION = ROOT / "broker" / "crates" / "broker" / "src" / "image_render" / "inspection_and_probes.rs"
+DUMMY_SESSION_WORKER = ROOT / "broker" / "crates" / "dummy-workers" / "src" / "bin" / "session_protocol_worker.rs"
 
 
 def test_resident_session_uses_the_existing_smart_selection_and_reports_it():
@@ -13,6 +14,7 @@ def test_resident_session_uses_the_existing_smart_selection_and_reports_it():
     live_session = LIVE_SESSION.read_text(encoding="utf-8")
     app = APP.read_text(encoding="utf-8")
     inspection = INSPECTION.read_text(encoding="utf-8")
+    dummy_session_worker = DUMMY_SESSION_WORKER.read_text(encoding="utf-8")
 
     # The session receives a closed, validated selection snapshot; it cannot
     # pair a caller-provided free-form source with an arbitrary selector path.
@@ -41,7 +43,8 @@ def test_resident_session_uses_the_existing_smart_selection_and_reports_it():
     assert "inspected_render_capability" in app
     assert "self.smart_render_capability = None;" in app
     assert "no valid SmartFX/classic capability inspection is available" in app
-    assert "automatic render path does not match" in live_session
+    assert "unsupported_override: requested path is not advertised" in live_session
+    assert "if requested_smart != capability.smart_render_advertised" in live_session
     assert "inspection report has no valid out_flags2" in inspection
     assert ".get(\"out_flags2\")" in inspection
     capability_slice = inspection[
@@ -51,6 +54,8 @@ def test_resident_session_uses_the_existing_smart_selection_and_reports_it():
     assert "let live_eligible = host_context.is_none()" in app
     assert "let live_eligible = !smart" not in app
     assert "annotate_interactive_selection(" in app
+    assert "unsupported override: render blocked" in app
+    assert '"selector_counters"' in dummy_session_worker
     for source in (
         "advertised_smart",
         "advertised_classic",

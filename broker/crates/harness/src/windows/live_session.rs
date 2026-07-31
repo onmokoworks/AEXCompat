@@ -43,12 +43,14 @@ fn selected_interactive_session_selection(
     use aexcompat_broker::image_render::{
         InteractiveCapabilitySource, InteractiveRenderPath, InteractiveSessionSelection,
     };
-    // This is the existing GUI policy used by the isolated one-shot route:
-    // automatic selection follows the descriptor, while an explicit GUI
-    // choice keeps its own provenance.  Resident and one-shot routes must use
-    // this one resolver rather than silently imposing different policy.
-    if !manual_override && requested_smart != capability.smart_render_advertised {
-        return Err("automatic render path does not match the inspected AEX capability".into());
+    // A descriptor proves only its advertised path.  Keep the GUI override
+    // state for diagnostics, but reject a cross-path choice before either the
+    // resident or isolated one-shot transport can dispatch it.  A same-path
+    // explicit choice is still meaningful provenance in the receipt.
+    if requested_smart != capability.smart_render_advertised {
+        return Err(
+            "unsupported_override: requested path is not advertised by the inspected AEX".into(),
+        );
     }
     let path = if requested_smart {
         InteractiveRenderPath::SmartFx

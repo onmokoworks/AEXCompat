@@ -2614,7 +2614,7 @@ impl eframe::App for HarnessApp {
                         if let Some(advertised) = self.smart_render_advertised {
                             ui.weak(if advertised { "advertised: SmartFX" } else { "advertised: Classic" });
                             if self.smart_render != advertised {
-                                ui.colored_label(egui::Color32::from_rgb(230, 180, 60), "manual override");
+                                ui.colored_label(egui::Color32::from_rgb(230, 180, 60), "unsupported override: render blocked");
                             }
                         }
                     });

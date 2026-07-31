@@ -62,13 +62,7 @@ mod tests {
         // resident key so `render_live_request` closes and reopens instead of
         // reporting a new source from a stale session.
         assert!(key(auto) != key(manual));
-        assert_eq!(
-            selected_interactive_session_selection(smart, false, true)
-                .expect("the established GUI Classic override remains available")
-                .source
-                .report_name(),
-            "manual_classic"
-        );
+        assert!(selected_interactive_session_selection(smart, false, true).is_err());
 
         let classic = InspectedRenderCapability {
             smart_render_advertised: false,
@@ -82,12 +76,13 @@ mod tests {
             "advertised_classic"
         );
         assert_eq!(
-            selected_interactive_session_selection(classic, true, true)
-                .expect("the established GUI SmartFX override remains available")
+            selected_interactive_session_selection(classic, false, true)
+                .expect("an explicit same-path Classic selection is retained")
                 .source
                 .report_name(),
-            "manual_smart"
+            "manual_classic"
         );
+        assert!(selected_interactive_session_selection(classic, true, true).is_err());
     }
 
     #[test]
@@ -99,6 +94,29 @@ mod tests {
         ] {
             assert!(inspected_render_capability(&report).is_err(), "{report}");
         }
+    }
+
+    #[test]
+    fn selection_failure_keeps_the_open_time_snapshot() {
+        let selection = selected_interactive_session_selection(
+            InspectedRenderCapability {
+                smart_render_advertised: true,
+                out_flags2: 1 << 10,
+            },
+            true,
+            true,
+        )
+        .expect("same-path manual SmartFX selection");
+        let report: serde_json::Value = serde_json::from_str(&interactive_selection_failure(
+            selection,
+            "session invalidated; fallback failed".into(),
+        ))
+        .expect("structured failure report");
+        assert_eq!(report["passed"], false);
+        assert_eq!(report["render_path"], "smartfx");
+        assert_eq!(report["smart_capability_source"], "manual_smart");
+        assert_eq!(report["smart_capability_identity"], 1 << 10);
+        assert_eq!(report["smart_capability_version"], 1);
     }
 
     fn temporary_directory(name: &str) -> PathBuf {
