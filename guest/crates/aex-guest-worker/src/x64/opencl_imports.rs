@@ -1057,7 +1057,7 @@ mod opencl_import_bridge_tests {
         let counts = unicorn
             .get_data_mut()
             .gpu_runtime
-            .end_opencl()
+            .end()
             .unwrap();
         assert_eq!(counts, ObjectCounts::default());
         let evidence = unicorn.get_data().gpu_runtime.opencl_evidence();
@@ -1075,7 +1075,7 @@ mod opencl_import_bridge_tests {
         let tokens = unicorn
             .get_data_mut()
             .gpu_runtime
-            .begin_opencl(0)
+            .begin(GpuRuntimeBackendKind::AppleOpenCl, 0)
             .unwrap();
         let program = create_program(
             &mut unicorn,
@@ -1194,7 +1194,7 @@ mod opencl_import_bridge_tests {
             unicorn
                 .get_data_mut()
                 .gpu_runtime
-                .end_opencl()
+                .end()
                 .unwrap(),
             ObjectCounts::default()
         );

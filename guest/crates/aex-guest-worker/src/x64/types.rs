@@ -246,7 +246,7 @@ impl Drop for GuestEngine<'_> {
             let state = self.unicorn.get_data_mut();
             state.gpu_suite.clear_for_drop();
             if state.gpu_runtime.is_active() {
-                let _ = state.gpu_runtime.end_opencl();
+                let _ = state.gpu_runtime.end();
             }
         }
         for (address, size) in mappings {

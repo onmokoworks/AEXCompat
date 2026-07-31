@@ -1,6 +1,23 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum GpuRuntimeBackendKind {
+    #[serde(rename = "apple-opencl")]
+    AppleOpenCl,
+    #[serde(rename = "wgpu-metal")]
+    WgpuMetal,
+}
+
+impl GpuRuntimeBackendKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::AppleOpenCl => "apple-opencl",
+            Self::WgpuMetal => "wgpu-metal",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct GpuSuiteEvidence {
     pub allocations_created: u64,
@@ -67,6 +84,35 @@ pub struct OpenClBridgeEvidence {
     pub cleanup_balanced: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct WgpuResourceCounts {
+    pub buffers: usize,
+    pub staging_buffers: usize,
+    pub shader_modules: usize,
+    pub bind_group_layouts: usize,
+    pub pipeline_layouts: usize,
+    pub pipelines: usize,
+    pub bind_groups: usize,
+    pub command_buffers: usize,
+}
+
+impl WgpuResourceCounts {
+    pub fn is_zero(self) -> bool {
+        self == Self::default()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct WgpuRuntimeEvidence {
+    pub executor_available: bool,
+    pub backend_operations_attempted: u64,
+    pub created_resources: WgpuResourceCounts,
+    pub live_resources: WgpuResourceCounts,
+    pub cleanup_balanced: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RenderBackendRequest {
     #[default]
@@ -96,6 +142,21 @@ impl RenderBackendRequest {
         match self {
             Self::Cpu => None,
             Self::OpenCl { .. } | Self::WgpuMetal { .. } => Some("opencl"),
+        }
+    }
+
+    pub fn runtime_backend(self) -> Option<GpuRuntimeBackendKind> {
+        match self {
+            Self::Cpu => None,
+            Self::OpenCl { .. } => Some(GpuRuntimeBackendKind::AppleOpenCl),
+            Self::WgpuMetal { .. } => Some(GpuRuntimeBackendKind::WgpuMetal),
+        }
+    }
+
+    pub fn device_index(self) -> Option<u32> {
+        match self {
+            Self::Cpu => None,
+            Self::OpenCl { device_index } | Self::WgpuMetal { device_index } => Some(device_index),
         }
     }
 }
@@ -133,6 +194,8 @@ impl GpuSelectorDiagnostic {
 pub struct GpuRenderDiagnostic {
     pub requested_backend: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_backend: Option<GpuRuntimeBackendKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub framework: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_framework: Option<&'static str>,
@@ -162,19 +225,18 @@ pub struct GpuRenderDiagnostic {
     pub device_suite: Option<GpuSuiteEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opencl: Option<OpenClBridgeEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wgpu: Option<WgpuRuntimeEvidence>,
     pub cleanup_complete: bool,
 }
 
 impl GpuRenderDiagnostic {
     pub fn pending(request: RenderBackendRequest) -> Self {
-        let device_index = match request {
-            RenderBackendRequest::Cpu => None,
-            RenderBackendRequest::OpenCl { device_index }
-            | RenderBackendRequest::WgpuMetal { device_index } => Some(device_index),
-        };
+        let device_index = request.device_index();
         let plugin_framework = request.plugin_framework();
         Self {
             requested_backend: request.backend_name(),
+            runtime_backend: None,
             framework: plugin_framework,
             plugin_framework,
             device_index,
@@ -198,6 +260,7 @@ impl GpuRenderDiagnostic {
             runtime_end_error: None,
             device_suite: None,
             opencl: None,
+            wgpu: None,
             cleanup_complete: !request.is_gpu(),
         }
     }
@@ -209,6 +272,43 @@ impl GpuRenderDiagnostic {
         diagnostic.render.begin();
         diagnostic.render.finish(render_error);
         diagnostic
+    }
+
+    pub(crate) fn finish_runtime_evidence(
+        &mut self,
+        device_suite: GpuSuiteEvidence,
+        opencl: OpenClBridgeEvidence,
+        wgpu: Option<WgpuRuntimeEvidence>,
+    ) {
+        let plugin_cleanup_complete = match self.setup.error {
+            Some(0) => self.setdown.completed && self.setdown.error == Some(0),
+            Some(_) => true,
+            None => false,
+        };
+        let wgpu_cleanup_complete = wgpu
+            .as_ref()
+            .is_none_or(|evidence| evidence.cleanup_balanced && evidence.live_resources.is_zero());
+        self.cleanup_complete = plugin_cleanup_complete
+            && self.runtime_ended
+            && (!self.transport_prepared || self.transport_finished)
+            && self.transport_prepare_error.is_none()
+            && self.transport_cleanup_error.is_none()
+            && self.runtime_end_error.is_none()
+            && !device_suite.transport_active
+            && device_suite.live_host_allocations == 0
+            && device_suite.live_gpu_worlds == 0
+            && device_suite.live_borrowed_gpu_worlds == 0
+            && device_suite.live_device_allocations == 0
+            && device_suite.live_bytes == 0
+            && device_suite.cleanup_balanced
+            && opencl.live_buffers == 0
+            && opencl.live_programs == 0
+            && opencl.live_kernels == 0
+            && opencl.cleanup_balanced
+            && wgpu_cleanup_complete;
+        self.device_suite = Some(device_suite);
+        self.opencl = Some(opencl);
+        self.wgpu = wgpu;
     }
 }
 
@@ -505,15 +605,86 @@ mod tests {
     #[test]
     fn wgpu_metal_reports_the_opencl_plugin_framework() {
         let request = RenderBackendRequest::WgpuMetal { device_index: 5 };
-        let diagnostic = GpuRenderDiagnostic::pending(request);
+        let mut diagnostic = GpuRenderDiagnostic::pending(request);
 
         assert_eq!(request.backend_name(), "wgpu-metal");
         assert!(request.is_gpu());
         assert_eq!(diagnostic.requested_backend, "wgpu-metal");
+        assert_eq!(diagnostic.runtime_backend, None);
         assert_eq!(diagnostic.framework, Some("opencl"));
         assert_eq!(diagnostic.plugin_framework, Some("opencl"));
         assert_eq!(diagnostic.device_index, Some(5));
         assert!(!diagnostic.cleanup_complete);
+
+        diagnostic.runtime_backend = request.runtime_backend();
+        diagnostic.wgpu = Some(WgpuRuntimeEvidence::default());
+        let json = serde_json::to_value(&diagnostic).unwrap();
+        assert_eq!(json["requested_backend"], "wgpu-metal");
+        assert_eq!(json["runtime_backend"], "wgpu-metal");
+        assert_eq!(json["framework"], "opencl");
+        assert_eq!(json["plugin_framework"], "opencl");
+        assert!(json.get("wgpu").is_some());
+    }
+
+    #[test]
+    fn wgpu_metal_preserves_the_opencl_selector_contract() {
+        let context = GpuContext {
+            framework: 1,
+            device_index: 5,
+            gpu_data: 0x5678,
+        };
+        let mut calls = Vec::new();
+        let execution = run_smart_lifecycle(
+            RenderBackendRequest::WgpuMetal { device_index: 5 },
+            1,
+            2,
+            |call| -> Result<LifecycleReply<&'static str, FixtureError>, FixtureError> {
+                calls.push(call);
+                Ok(match call {
+                    LifecycleCall::Setup {
+                        framework: 1,
+                        device_index: 5,
+                    } => LifecycleReply::Setup {
+                        error: 0,
+                        gpu_data: Ok(0x5678),
+                    },
+                    LifecycleCall::PreRender {
+                        context: Some(actual),
+                    } if actual == context => LifecycleReply::PreRender {
+                        error: 0,
+                        output_flags: 2,
+                    },
+                    LifecycleCall::RenderGpu { context: actual } if actual == context => {
+                        LifecycleReply::Render {
+                            error: 0,
+                            output: "wgpu",
+                        }
+                    }
+                    LifecycleCall::Setdown { context: actual } if actual == context => {
+                        LifecycleReply::Setdown { error: 0 }
+                    }
+                    _ => panic!("unexpected wgpu lifecycle call {call:?}"),
+                })
+            },
+        );
+
+        assert_eq!(execution.result.unwrap(), "wgpu");
+        assert_eq!(
+            calls,
+            [
+                LifecycleCall::Setup {
+                    framework: 1,
+                    device_index: 5,
+                },
+                LifecycleCall::PreRender {
+                    context: Some(context),
+                },
+                LifecycleCall::RenderGpu { context },
+                LifecycleCall::Setdown { context },
+            ]
+        );
+        assert_eq!(execution.diagnostic.plugin_framework, Some("opencl"));
+        assert!(execution.diagnostic.cleanup_complete);
     }
 
     #[test]

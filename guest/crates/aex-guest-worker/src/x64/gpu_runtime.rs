@@ -2,8 +2,9 @@ use aex_apple_opencl::{
     Buffer, BufferAccess, Error as AppleOpenClError, Kernel, ObjectCounts, ObjectTracker, Program,
     Session, MAX_BUFFER_BYTES,
 };
-use crate::gpu_lifecycle::{OpenClBridgeEvidence, OpenClErrorEvidence};
-#[cfg(test)]
+use crate::gpu_lifecycle::{
+    GpuRuntimeBackendKind, OpenClBridgeEvidence, OpenClErrorEvidence, WgpuRuntimeEvidence,
+};
 use std::cell::RefCell;
 use std::sync::{
     Mutex, OnceLock,
@@ -23,7 +24,10 @@ const MAX_OPENCL_PROGRAMS: usize = 256;
 const MAX_OPENCL_KERNELS: usize = 1_024;
 const MAX_OPENCL_LIVE_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OPENCL_EVIDENCE_ERROR_BYTES: usize = 4_096;
+const WGPU_EXECUTOR_UNAVAILABLE: &str =
+    "wgpu-metal runtime executor is unavailable until kernel translation is connected";
 pub(crate) const CL_SUCCESS: i32 = 0;
+pub(crate) const CL_BUILD_PROGRAM_FAILURE: i32 = -11;
 pub(crate) const CL_OUT_OF_HOST_MEMORY: i32 = -6;
 pub(crate) const CL_INVALID_VALUE: i32 = -30;
 pub(crate) const CL_INVALID_DEVICE: i32 = -33;
@@ -83,6 +87,10 @@ enum GpuBackend {
         session: Session,
         tracker: ObjectTracker,
     },
+    // This marker establishes the backend-neutral guest lifecycle without
+    // borrowing Apple OpenCL. The translation integration can add its executor
+    // here without changing the AEX-facing selector or token contracts.
+    WgpuMetal,
     #[cfg(test)]
     Mock,
 }
@@ -169,6 +177,7 @@ pub(crate) struct GpuRuntime {
     live_program_source_bytes: usize,
     issued_tokens: HashSet<u64>,
     opencl_evidence: OpenClBridgeEvidence,
+    wgpu_evidence: RefCell<Option<WgpuRuntimeEvidence>>,
 }
 
 impl Default for GpuRuntime {
@@ -189,12 +198,16 @@ impl Default for GpuRuntime {
             live_program_source_bytes: 0,
             issued_tokens: HashSet::new(),
             opencl_evidence: OpenClBridgeEvidence::default(),
+            wgpu_evidence: RefCell::new(None),
         }
     }
 }
 
 impl Drop for GpuRuntime {
     fn drop(&mut self) {
+        if self.is_active() {
+            let _ = self.end();
+        }
         let mut issued = issued_gpu_tokens()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -205,27 +218,46 @@ impl Drop for GpuRuntime {
 }
 
 impl GpuRuntime {
-    pub(crate) fn begin_opencl(
+    pub(crate) fn begin(
         &mut self,
+        backend_kind: GpuRuntimeBackendKind,
         device_index: u32,
     ) -> Result<GpuDeviceTokens, String> {
         if self.backend.is_some() {
             return Err("GPU runtime is already active".into());
         }
-        let session =
-            Session::select_gpu(device_index as usize).map_err(|error| error.to_string())?;
-        let tracker = session.object_tracker();
-        let device = session.device().clone();
-        let tokens = self.allocate_device_tokens()?;
-        self.opencl_evidence = OpenClBridgeEvidence {
-            device_index: Some(device_index),
-            platform: Some(device.platform_name().to_string()),
-            device: Some(device.name().to_string()),
-            vendor: Some(device.vendor().to_string()),
-            compute_units: Some(device.compute_units()),
-            ..OpenClBridgeEvidence::default()
+        let (backend, opencl_evidence, wgpu_evidence) = match backend_kind {
+            GpuRuntimeBackendKind::AppleOpenCl => {
+                let session = Session::select_gpu(device_index as usize)
+                    .map_err(|error| error.to_string())?;
+                let tracker = session.object_tracker();
+                let device = session.device().clone();
+                (
+                    GpuBackend::OpenCl { session, tracker },
+                    OpenClBridgeEvidence {
+                        device_index: Some(device_index),
+                        platform: Some(device.platform_name().to_string()),
+                        device: Some(device.name().to_string()),
+                        vendor: Some(device.vendor().to_string()),
+                        compute_units: Some(device.compute_units()),
+                        ..OpenClBridgeEvidence::default()
+                    },
+                    None,
+                )
+            }
+            GpuRuntimeBackendKind::WgpuMetal => (
+                GpuBackend::WgpuMetal,
+                OpenClBridgeEvidence {
+                    device_index: Some(device_index),
+                    ..OpenClBridgeEvidence::default()
+                },
+                Some(WgpuRuntimeEvidence::default()),
+            ),
         };
-        self.backend = Some(GpuBackend::OpenCl { session, tracker });
+        let tokens = self.allocate_device_tokens()?;
+        self.opencl_evidence = opencl_evidence;
+        *self.wgpu_evidence.borrow_mut() = wgpu_evidence;
+        self.backend = Some(backend);
         self.device_index = Some(device_index);
         self.device_tokens = Some(tokens);
         Ok(tokens)
@@ -248,11 +280,22 @@ impl GpuRuntime {
         self.backend = Some(GpuBackend::Mock);
         self.device_index = Some(device_index);
         self.device_tokens = Some(tokens);
+        *self.wgpu_evidence.borrow_mut() = None;
         Ok(tokens)
     }
 
     pub(crate) fn is_active(&self) -> bool {
         self.backend.is_some()
+    }
+
+    pub(crate) fn backend_kind(&self) -> Option<GpuRuntimeBackendKind> {
+        match self.backend.as_ref() {
+            Some(GpuBackend::OpenCl { .. }) => Some(GpuRuntimeBackendKind::AppleOpenCl),
+            Some(GpuBackend::WgpuMetal) => Some(GpuRuntimeBackendKind::WgpuMetal),
+            #[cfg(test)]
+            Some(GpuBackend::Mock) => Some(GpuRuntimeBackendKind::AppleOpenCl),
+            None => None,
+        }
     }
 
     pub(crate) fn device_index(&self) -> Option<u32> {
@@ -321,6 +364,9 @@ impl GpuRuntime {
                     .create_buffer(bytes, access)
                     .map_err(|error| error.to_string())?,
             ),
+            Some(GpuBackend::WgpuMetal) => {
+                return Err(self.wgpu_executor_unavailable("allocate device buffer"));
+            }
             #[cfg(test)]
             Some(GpuBackend::Mock) => {
                 DeviceBufferBacking::Mock(RefCell::new(vec![0; bytes]))
@@ -380,6 +426,9 @@ impl GpuRuntime {
             ) => session
                 .write_buffer(buffer, offset, source)
                 .map_err(|error| error.to_string()),
+            (Some(GpuBackend::WgpuMetal), _) => {
+                Err(self.wgpu_executor_unavailable("write device buffer"))
+            }
             #[cfg(test)]
             (Some(GpuBackend::Mock), DeviceBufferBacking::Mock(bytes)) => {
                 let mut bytes = bytes.borrow_mut();
@@ -410,6 +459,9 @@ impl GpuRuntime {
             ) => session
                 .read_buffer(buffer, offset, destination)
                 .map_err(|error| error.to_string()),
+            (Some(GpuBackend::WgpuMetal), _) => {
+                Err(self.wgpu_executor_unavailable("read device buffer"))
+            }
             #[cfg(test)]
             (Some(GpuBackend::Mock), DeviceBufferBacking::Mock(bytes)) => {
                 let bytes = bytes.borrow();
@@ -450,6 +502,9 @@ impl GpuRuntime {
     pub(crate) fn opencl_session(&self) -> Result<&Session, String> {
         match self.backend.as_ref() {
             Some(GpuBackend::OpenCl { session, .. }) => Ok(session),
+            Some(GpuBackend::WgpuMetal) => {
+                Err(self.wgpu_executor_unavailable("access OpenCL session"))
+            }
             #[cfg(test)]
             Some(GpuBackend::Mock) => Err("mock GPU runtime has no OpenCL session".into()),
             None => Err("GPU runtime is not active".into()),
@@ -457,6 +512,9 @@ impl GpuRuntime {
     }
 
     pub(crate) fn opencl_buffer(&self, token: u64) -> Result<&Buffer, String> {
+        if matches!(self.backend.as_ref(), Some(GpuBackend::WgpuMetal)) {
+            return Err(self.wgpu_executor_unavailable("access OpenCL buffer"));
+        }
         let allocation = self.device_allocation(token)?;
         match &allocation.backing {
             DeviceBufferBacking::OpenCl(buffer) => Ok(buffer),
@@ -556,6 +614,12 @@ impl GpuRuntime {
                         OpenClRuntimeError::from_apple(error, CL_INVALID_PROGRAM)
                     })?,
             ),
+            Some(GpuBackend::WgpuMetal) => {
+                return Err(OpenClRuntimeError::new(
+                    CL_BUILD_PROGRAM_FAILURE,
+                    self.wgpu_executor_unavailable("build OpenCL program"),
+                ));
+            }
             #[cfg(test)]
             Some(GpuBackend::Mock) => ProgramBacking::Mock,
             None => {
@@ -780,6 +844,12 @@ impl GpuRuntime {
                 })?,
             #[cfg(test)]
             (Some(GpuBackend::Mock), KernelBacking::Mock(_)) => {}
+            (Some(GpuBackend::WgpuMetal), _) => {
+                return Err(OpenClRuntimeError::new(
+                    CL_INVALID_PROGRAM_EXECUTABLE,
+                    self.wgpu_executor_unavailable("dispatch OpenCL kernel"),
+                ));
+            }
             _ => {
                 return Err(OpenClRuntimeError::new(
                     CL_INVALID_KERNEL,
@@ -874,6 +944,10 @@ impl GpuRuntime {
         evidence
     }
 
+    pub(crate) fn wgpu_evidence(&self) -> Option<WgpuRuntimeEvidence> {
+        self.wgpu_evidence.borrow().clone()
+    }
+
     pub(crate) fn allocate_token(&mut self, kind: GpuTokenKind) -> Result<u64, String> {
         let token = self
             .next_token
@@ -922,6 +996,7 @@ impl GpuRuntime {
     pub(crate) fn object_counts(&self) -> ObjectCounts {
         match self.backend.as_ref() {
             Some(GpuBackend::OpenCl { tracker, .. }) => tracker.snapshot(),
+            Some(GpuBackend::WgpuMetal) => ObjectCounts::default(),
             #[cfg(test)]
             Some(GpuBackend::Mock) | None => ObjectCounts::default(),
             #[cfg(not(test))]
@@ -934,15 +1009,19 @@ impl GpuRuntime {
             Some(GpuBackend::OpenCl { session, .. }) => {
                 session.finish().map_err(|error| error.to_string())
             }
+            Some(GpuBackend::WgpuMetal) => {
+                Err(self.wgpu_executor_unavailable("finish command queue"))
+            }
             #[cfg(test)]
             Some(GpuBackend::Mock) => Ok(()),
             None => Err("GPU runtime is not active".into()),
         }
     }
 
-    pub(crate) fn end_opencl(&mut self) -> Result<ObjectCounts, String> {
+    pub(crate) fn end(&mut self) -> Result<ObjectCounts, String> {
         let tracker = match self.backend.as_ref() {
             Some(GpuBackend::OpenCl { tracker, .. }) => Some(tracker.clone()),
+            Some(GpuBackend::WgpuMetal) => None,
             #[cfg(test)]
             Some(GpuBackend::Mock) => None,
             None => return Err("GPU runtime is not active".into()),
@@ -965,7 +1044,20 @@ impl GpuRuntime {
         self.opencl_evidence.live_kernels = 0;
         self.opencl_evidence.cleanup_balanced =
             counts.live_total() == 0 && counts.release_errors == 0;
+        if let Some(evidence) = self.wgpu_evidence.borrow_mut().as_mut() {
+            evidence.cleanup_balanced = evidence.live_resources.is_zero();
+        }
         Ok(counts)
+    }
+
+    fn wgpu_executor_unavailable(&self, operation: &'static str) -> String {
+        let detail = format!("{WGPU_EXECUTOR_UNAVAILABLE}: {operation}");
+        if let Some(evidence) = self.wgpu_evidence.borrow_mut().as_mut() {
+            evidence.backend_operations_attempted =
+                evidence.backend_operations_attempted.saturating_add(1);
+            evidence.last_error = Some(detail.clone());
+        }
+        detail
     }
 
     fn allocate_device_tokens(&mut self) -> Result<GpuDeviceTokens, String> {
@@ -1085,6 +1177,66 @@ mod gpu_runtime_tests {
     use super::*;
 
     #[test]
+    fn wgpu_marker_fails_the_first_executor_operation_and_ends_cleanly() {
+        let mut runtime = GpuRuntime::default();
+        let tokens = runtime.begin(GpuRuntimeBackendKind::WgpuMetal, 5).unwrap();
+        assert_eq!(
+            runtime.backend_kind(),
+            Some(GpuRuntimeBackendKind::WgpuMetal)
+        );
+        assert!(runtime.validates_platform(tokens.platform));
+        assert!(runtime.validates_device(tokens.device));
+        assert!(runtime.validates_context(tokens.context));
+        assert!(runtime.validates_queue(tokens.queue));
+
+        let opencl = runtime.opencl_evidence();
+        assert_eq!(opencl.device_index, Some(5));
+        assert_eq!(opencl.platform, None);
+        assert_eq!(opencl.device, None);
+        assert_eq!(opencl.vendor, None);
+        assert_eq!(opencl.compute_units, None);
+        assert_eq!(runtime.object_counts(), ObjectCounts::default());
+
+        let program = runtime
+            .stage_opencl_program(tokens.context, "__kernel void test() {}".into(), 1)
+            .unwrap();
+        let error = runtime
+            .build_opencl_program(program, &[tokens.device], None)
+            .unwrap_err();
+        assert_eq!(error.status, CL_BUILD_PROGRAM_FAILURE);
+        assert!(error.detail.contains(WGPU_EXECUTOR_UNAVAILABLE));
+        assert!(runtime
+            .programs
+            .get(&program)
+            .is_some_and(|record| record.backing.is_none()));
+        assert_eq!(runtime.opencl_evidence().programs_built, 0);
+        let wgpu = runtime.wgpu_evidence().unwrap();
+        assert!(!wgpu.executor_available);
+        assert_eq!(wgpu.backend_operations_attempted, 1);
+        assert!(wgpu.created_resources.is_zero());
+        assert!(wgpu.live_resources.is_zero());
+        assert!(!wgpu.cleanup_balanced);
+        assert!(wgpu
+            .last_error
+            .as_deref()
+            .is_some_and(|detail| detail.contains(WGPU_EXECUTOR_UNAVAILABLE)));
+
+        assert_eq!(runtime.end().unwrap(), ObjectCounts::default());
+        assert!(!runtime.is_active());
+        assert_eq!(runtime.device_index(), None);
+        assert_eq!(runtime.device_tokens(), None);
+        assert!(runtime.programs.is_empty());
+        assert_eq!(runtime.live_program_source_bytes, 0);
+        assert!(runtime.opencl_evidence().cleanup_balanced);
+        let wgpu = runtime.wgpu_evidence().unwrap();
+        assert!(wgpu.live_resources.is_zero());
+        assert!(wgpu.cleanup_balanced);
+        assert!(GpuRuntime::is_issued_token(tokens.context));
+        drop(runtime);
+        assert!(!GpuRuntime::is_issued_token(tokens.context));
+    }
+
+    #[test]
     fn mock_runtime_uses_per_engine_tokens_and_bounded_buffers() {
         let mut first = GpuRuntime::default();
         let mut second = GpuRuntime::default();
@@ -1117,7 +1269,7 @@ mod gpu_runtime_tests {
         assert_eq!(first.live_buffer_bytes(), 0);
         assert_eq!(first.object_counts(), ObjectCounts::default());
         first.finish().unwrap();
-        assert_eq!(first.end_opencl().unwrap(), ObjectCounts::default());
+        assert_eq!(first.end().unwrap(), ObjectCounts::default());
         assert!(!first.is_active());
     }
 
@@ -1138,7 +1290,7 @@ mod gpu_runtime_tests {
             runtime.opencl_buffer(token).err().unwrap(),
             "mock GPU token has no OpenCL buffer"
         );
-        runtime.end_opencl().unwrap();
+        runtime.end().unwrap();
         assert_eq!(runtime.live_buffer_count(), 0);
         assert_eq!(runtime.live_buffer_bytes(), 0);
         assert!(!runtime.is_buffer_token(token));
@@ -1154,7 +1306,7 @@ mod gpu_runtime_tests {
             .unwrap_err();
         assert_eq!(error.status, CL_OUT_OF_HOST_MEMORY);
         assert!(runtime.programs.is_empty());
-        runtime.end_opencl().unwrap();
+        runtime.end().unwrap();
         assert_eq!(runtime.live_program_source_bytes, 0);
     }
 
@@ -1186,7 +1338,7 @@ mod gpu_runtime_tests {
                 .contains("allocation count")
         );
 
-        runtime.end_opencl().unwrap();
+        runtime.end().unwrap();
         assert_eq!(runtime.live_buffer_count(), 0);
         assert_eq!(runtime.live_buffer_bytes(), 0);
         assert!(runtime.buffers.is_empty());
@@ -1295,7 +1447,7 @@ mod gpu_runtime_tests {
         assert_eq!(runtime.live_buffer_count(), 0);
         assert_eq!(runtime.live_buffer_bytes(), 0);
         assert!(runtime.buffers.is_empty());
-        runtime.end_opencl().unwrap();
+        runtime.end().unwrap();
     }
 
     fn mock_runtime_with_kernel() -> (GpuRuntime, u64) {

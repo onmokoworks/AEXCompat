@@ -9,8 +9,8 @@ use crate::backend::{
     UnsupportedSuiteCall,
 };
 use crate::gpu_lifecycle::{
-    GpuRenderDiagnostic, LifecycleCall, LifecycleFailure, LifecycleReply, RenderBackendRequest,
-    run_smart_lifecycle,
+    GpuRenderDiagnostic, GpuRuntimeBackendKind, LifecycleCall, LifecycleFailure, LifecycleReply,
+    RenderBackendRequest, run_smart_lifecycle,
 };
 use crate::pe::PeImage;
 use crate::pixel::FramePixelFormat;
@@ -1165,12 +1165,6 @@ impl ClassicHost {
         backend: RenderBackendRequest,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
         self.last_gpu_diagnostic = GpuRenderDiagnostic::pending(backend);
-        if matches!(backend, RenderBackendRequest::WgpuMetal { .. }) {
-            let message = "wgpu-metal runtime integration is not available yet";
-            self.last_gpu_diagnostic.runtime_begin_error = Some(message.into());
-            self.last_gpu_diagnostic.cleanup_complete = true;
-            return Err(ClassicError::Input(message.into()));
-        }
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
             return Err(ClassicError::Input(format!(
                 "dimensions must be within 1x1..={MAX_RENDER_WIDTH}x{MAX_RENDER_HEIGHT}, got {width}x{height}"
@@ -1905,13 +1899,17 @@ impl ClassicHost {
         let mut transport_finished = false;
         let mut transport_prepare_error = None;
         let mut transport_cleanup_error = None;
-        if let RenderBackendRequest::OpenCl { device_index } = backend {
-            if let Err(source) = self.engine.begin_opencl_gpu(device_index) {
+        if let Some(runtime_backend) = backend.runtime_backend() {
+            let device_index = backend
+                .device_index()
+                .expect("GPU runtime request carries a device index");
+            if let Err(source) = self.engine.begin_gpu_runtime(runtime_backend, device_index) {
                 let mut diagnostic = GpuRenderDiagnostic::pending(backend);
                 diagnostic.runtime_begin_error = Some(source.to_string());
                 diagnostic.device_suite = Some(self.engine.gpu_suite_evidence());
                 diagnostic.opencl = Some(self.engine.opencl_bridge_evidence());
-                diagnostic.cleanup_complete = !self.engine.opencl_gpu_active();
+                diagnostic.wgpu = self.engine.wgpu_runtime_evidence();
+                diagnostic.cleanup_complete = !self.engine.gpu_runtime_active();
                 self.last_gpu_diagnostic = diagnostic;
                 return Err(ClassicError::Guest(source));
             }
@@ -2178,43 +2176,35 @@ impl ClassicHost {
             },
         );
         let mut runtime_end_error = None;
-        if runtime_started && let Err(source) = self.engine.end_opencl_gpu() {
+        if runtime_started && let Err(source) = self.engine.end_gpu_runtime() {
             runtime_end_error = Some(source.to_string());
-            apply_runtime_end_failure(&mut execution.result, source);
+            apply_runtime_end_failure(
+                &mut execution.result,
+                backend
+                    .runtime_backend()
+                    .expect("started GPU request has a runtime backend"),
+                source,
+            );
         }
         if backend.is_gpu() {
+            execution.diagnostic.runtime_backend = if runtime_started {
+                backend.runtime_backend()
+            } else {
+                None
+            };
             execution.diagnostic.runtime_started = runtime_started;
             execution.diagnostic.transport_prepared = transport_prepared;
             execution.diagnostic.transport_finished = transport_finished;
-            execution.diagnostic.runtime_ended = !self.engine.opencl_gpu_active();
+            execution.diagnostic.runtime_ended = !self.engine.gpu_runtime_active();
             execution.diagnostic.transport_prepare_error = transport_prepare_error;
             execution.diagnostic.transport_cleanup_error = transport_cleanup_error;
             execution.diagnostic.runtime_end_error = runtime_end_error;
             let device_suite = self.engine.gpu_suite_evidence();
             let opencl = self.engine.opencl_bridge_evidence();
-            let plugin_cleanup_complete = execution.diagnostic.setup.error != Some(0)
-                || (execution.diagnostic.setdown.completed
-                    && execution.diagnostic.setdown.error == Some(0));
-            execution.diagnostic.cleanup_complete = plugin_cleanup_complete
-                && execution.diagnostic.runtime_ended
-                && (!execution.diagnostic.transport_prepared
-                    || execution.diagnostic.transport_finished)
-                && execution.diagnostic.transport_prepare_error.is_none()
-                && execution.diagnostic.transport_cleanup_error.is_none()
-                && execution.diagnostic.runtime_end_error.is_none()
-                && !device_suite.transport_active
-                && device_suite.live_host_allocations == 0
-                && device_suite.live_gpu_worlds == 0
-                && device_suite.live_borrowed_gpu_worlds == 0
-                && device_suite.live_device_allocations == 0
-                && device_suite.live_bytes == 0
-                && device_suite.cleanup_balanced
-                && opencl.live_buffers == 0
-                && opencl.live_programs == 0
-                && opencl.live_kernels == 0
-                && opencl.cleanup_balanced;
-            execution.diagnostic.device_suite = Some(device_suite);
-            execution.diagnostic.opencl = Some(opencl);
+            let wgpu = self.engine.wgpu_runtime_evidence();
+            execution
+                .diagnostic
+                .finish_runtime_evidence(device_suite, opencl, wgpu);
         }
         self.last_gpu_diagnostic = execution.diagnostic;
         match execution.result {
@@ -2641,11 +2631,15 @@ fn selector_failure(selector: &'static str, error: i32) -> Option<ClassicError> 
 
 fn apply_runtime_end_failure<T>(
     result: &mut Result<T, LifecycleFailure<ClassicError>>,
+    backend_kind: GpuRuntimeBackendKind,
     source: GuestError,
 ) {
     if result.is_ok() {
         *result = Err(LifecycleFailure::Dispatch {
-            selector: "OPENCL_RUNTIME_END",
+            selector: match backend_kind {
+                GpuRuntimeBackendKind::AppleOpenCl => "OPENCL_RUNTIME_END",
+                GpuRuntimeBackendKind::WgpuMetal => "WGPU_METAL_RUNTIME_END",
+            },
             source: ClassicError::Guest(source),
         });
     }
@@ -2730,6 +2724,7 @@ mod tests {
         let mut result: Result<&str, LifecycleFailure<ClassicError>> = Ok("rendered");
         apply_runtime_end_failure(
             &mut result,
+            GpuRuntimeBackendKind::AppleOpenCl,
             GuestError::Callback("unbalanced OpenCL objects".into()),
         );
         assert!(matches!(
@@ -2750,6 +2745,7 @@ mod tests {
             });
         apply_runtime_end_failure(
             &mut result,
+            GpuRuntimeBackendKind::AppleOpenCl,
             GuestError::Callback("unbalanced OpenCL objects".into()),
         );
         assert!(matches!(
