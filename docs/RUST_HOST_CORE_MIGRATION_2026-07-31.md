@@ -118,15 +118,40 @@ inside the SEH frame. The raw-pointer invocation helpers remain available only
 for ABI conformance tests, with the same validity precondition as the C ABI.
 
 The native dual-run now consumes this adapter rather than maintaining its own
-loader and SEH helpers. It proves missing-export rejection with a real
-non-host-core DLL and raises a synthetic SEH exception through the invocation
-path to verify token cleanup and normalized status/report fields. The original
-independent session oracle comparison remains unchanged.
+loader and SEH helpers. It keeps missing-export rejection in the adapter's
+complete-table validation and raises a synthetic SEH exception through the
+invocation path to verify token cleanup and normalized status/report fields.
+The original independent session oracle comparison remains unchanged.
 
 No Adobe SDK-shaped value enters this adapter. Production worker routing
 remains unchanged, scene/world/parameter semantics still wait for #26 / PR
 #571, resident integration remains outside #98, and #614/wgpu/GPU remains
 untouched.
+
+## Phase 4 pre-cast ABI identity gate (Issue #626)
+
+Phase 4 adds one fixed, pointer-free ABI descriptor to identify the exact
+value layouts already shared by the Rust DLL and C++ adapter. Its fields are
+limited to a magic value, ABI version, descriptor size, size/alignment pairs
+for `AexHostCallContext`, `AexHostCallStatus`, `AexHostOpaqueHandle`, and
+`AexHostReportSnapshot`, plus the single session-lifecycle-v1 capability bit.
+The descriptor is exported as the data symbol
+`aex_host_core_abi_descriptor_v1`; it does not introduce a function table,
+SDK pointer, callback, or broader feature schema.
+
+`AdapterV1::Load` now resolves that data symbol first, copies its value inside
+an SEH-protected helper, and requires an exact descriptor match before it
+resolves or casts any of the six function exports. A missing symbol is
+distinguished from an incompatible value, and either result unloads the DLL
+without publishing a callable adapter. The native dual-run loads the real
+Release Rust DLL through the compatible path, rejects a real DLL with no
+descriptor, and exercises every descriptor mismatch through the same
+compatibility predicate used by the loader. Missing-function classification
+remains covered independently after descriptor validation.
+
+This gate does not negotiate report meaning, alter scene/session state, or
+route a production worker. Issue #26 / PR #571, #98, and #614/wgpu/GPU remain
+outside its write scope.
 
 ## Later phases
 

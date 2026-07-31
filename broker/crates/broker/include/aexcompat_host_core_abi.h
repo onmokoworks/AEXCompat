@@ -4,6 +4,9 @@
 #include <stdint.h>
 
 #define AEXCOMPAT_HOST_CORE_ABI_VERSION 1u
+#define AEXCOMPAT_HOST_CORE_ABI_DESCRIPTOR_MAGIC \
+  UINT64_C(0x41455848434F5245)
+#define AEXCOMPAT_HOST_CORE_CAPABILITY_SESSION_LIFECYCLE_V1 UINT64_C(1)
 
 #if defined(_WIN32)
 #define AEXCOMPAT_HOST_CORE_CALL __cdecl
@@ -94,6 +97,23 @@ typedef struct AexHostReportSnapshot {
   uint64_t callbacks_completed;
 } AexHostReportSnapshot;
 
+typedef struct AexHostCoreAbiDescriptorV1 {
+  uint64_t magic;
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint32_t call_context_size;
+  uint32_t call_context_alignment;
+  uint32_t call_status_size;
+  uint32_t call_status_alignment;
+  uint32_t opaque_handle_size;
+  uint32_t opaque_handle_alignment;
+  uint32_t report_snapshot_size;
+  uint32_t report_snapshot_alignment;
+  uint64_t capabilities;
+} AexHostCoreAbiDescriptorV1;
+
+extern const AexHostCoreAbiDescriptorV1 aex_host_core_abi_descriptor_v1;
+
 typedef int32_t(AEXCOMPAT_HOST_CORE_CALL *AexHostCoreSessionCreateV1Fn)(
     const AexHostCallContext *context,
     AexHostOpaqueHandle *session,
@@ -170,4 +190,23 @@ static_assert(alignof(AexHostReportSnapshot) == 8);
 static_assert(offsetof(AexHostReportSnapshot, error_code) == 20);
 static_assert(offsetof(AexHostReportSnapshot, report_id) == 32);
 static_assert(offsetof(AexHostReportSnapshot, callbacks_completed) == 64);
+
+static_assert(sizeof(AexHostCoreAbiDescriptorV1) == 56);
+static_assert(alignof(AexHostCoreAbiDescriptorV1) == 8);
+static_assert(offsetof(AexHostCoreAbiDescriptorV1, magic) == 0);
+static_assert(offsetof(AexHostCoreAbiDescriptorV1, abi_version) == 8);
+static_assert(offsetof(AexHostCoreAbiDescriptorV1, struct_size) == 12);
+static_assert(offsetof(AexHostCoreAbiDescriptorV1, call_context_size) == 16);
+static_assert(offsetof(AexHostCoreAbiDescriptorV1, call_context_alignment) ==
+              20);
+static_assert(offsetof(AexHostCoreAbiDescriptorV1, call_status_size) == 24);
+static_assert(offsetof(AexHostCoreAbiDescriptorV1, call_status_alignment) ==
+              28);
+static_assert(offsetof(AexHostCoreAbiDescriptorV1, opaque_handle_size) == 32);
+static_assert(offsetof(AexHostCoreAbiDescriptorV1, opaque_handle_alignment) ==
+              36);
+static_assert(offsetof(AexHostCoreAbiDescriptorV1, report_snapshot_size) == 40);
+static_assert(
+    offsetof(AexHostCoreAbiDescriptorV1, report_snapshot_alignment) == 44);
+static_assert(offsetof(AexHostCoreAbiDescriptorV1, capabilities) == 48);
 #endif
