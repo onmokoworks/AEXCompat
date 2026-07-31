@@ -46,6 +46,22 @@ mod tests {
         let manual = selected_interactive_session_selection(smart, true, true)
             .expect("a valid manual SmartFX choice is retained as manual");
         assert_eq!(manual.source.report_name(), "manual_smart");
+        let key = |selection| LiveSessionKey {
+            plugin_sha256: "a".repeat(64),
+            dependency_identities: vec![],
+            parameter_signature: "[]".into(),
+            selection,
+            width: 16,
+            height: 16,
+            pixel_format: aexcompat_broker::image_render::RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 1,
+            time_scale: 1,
+        };
+        // The only difference is the typed provenance. This must change the
+        // resident key so `render_live_request` closes and reopens instead of
+        // reporting a new source from a stale session.
+        assert!(key(auto) != key(manual));
         assert!(selected_interactive_session_selection(smart, false, true).is_err());
 
         let classic = InspectedRenderCapability {
