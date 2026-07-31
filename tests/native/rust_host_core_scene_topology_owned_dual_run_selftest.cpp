@@ -328,6 +328,27 @@ int32_t AEXCOMPAT_HOST_CORE_CALL SyntheticDestroySeh(
   return AEX_HOST_OK;
 }
 
+int32_t AEXCOMPAT_HOST_CORE_CALL SyntheticCreateError(
+    const AexHostCallContext *, const AexHostSceneTopologySnapshot *,
+    AexHostOpaqueHandle *handle) {
+  if (handle != nullptr) handle->value = UINT64_MAX;
+  return AEX_HOST_INVALID_STATE;
+}
+
+int32_t AEXCOMPAT_HOST_CORE_CALL SyntheticQueryError(
+    const AexHostCallContext *, AexHostOpaqueHandle, uint32_t,
+    AexHostSceneTopologyEntry *entry) {
+  if (entry != nullptr) std::memset(entry, 0xA5, sizeof(*entry));
+  return AEX_HOST_INVALID_STATE;
+}
+
+int32_t AEXCOMPAT_HOST_CORE_CALL SyntheticSummaryError(
+    const AexHostCallContext *, AexHostOpaqueHandle,
+    AexHostSceneTopologySummary *summary) {
+  if (summary != nullptr) std::memset(summary, 0xA5, sizeof(*summary));
+  return AEX_HOST_INVALID_STATE;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t **argv) {
@@ -564,6 +585,28 @@ int wmain(int argc, wchar_t **argv) {
                    destroy_seh.return_code == AEX_HOST_SEH_FAULT &&
                        destroy_seh.exception_code ==
                            kSyntheticDestroySehCode);
+
+  AexHostOpaqueHandle error_handle{UINT64_MAX};
+  const auto create_error = AdapterV1::InvokeSceneTopologySnapshotCreateRaw(
+      SyntheticCreateError, &context, &overflow, &error_handle);
+  AexHostSceneTopologyEntry error_entry = oracle_entries[0];
+  const auto query_error = AdapterV1::InvokeSceneTopologySnapshotQueryRaw(
+      SyntheticQueryError, &context, {}, 0, &error_entry);
+  AexHostSceneTopologySummary error_summary = oracle_summary;
+  const auto summary_error = AdapterV1::InvokeSceneTopologySnapshotSummaryRaw(
+      SyntheticSummaryError, &context, {}, &error_summary);
+  verifier.Require("create error return must clear a written handle",
+                   create_error.return_code == AEX_HOST_INVALID_STATE &&
+                       create_error.exception_code == 0 &&
+                       error_handle.value == 0);
+  verifier.Require("query error return must clear a written entry",
+                   query_error.return_code == AEX_HOST_INVALID_STATE &&
+                       query_error.exception_code == 0 &&
+                       IsZeroEntry(error_entry));
+  verifier.Require("summary error return must clear a written output",
+                   summary_error.return_code == AEX_HOST_INVALID_STATE &&
+                       summary_error.exception_code == 0 &&
+                       EqualSummary(error_summary, {}));
 
   if (verifier.failures() != 0) {
     std::fprintf(stderr, "owned topology failures=%d checks=%d\n",

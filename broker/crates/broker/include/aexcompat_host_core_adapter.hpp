@@ -656,9 +656,9 @@ class AdapterV1 {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
       result.return_code = AEX_HOST_SEH_FAULT;
       result.exception_code = static_cast<uint32_t>(GetExceptionCode());
-      if (handle != nullptr) {
-        *handle = AexHostOpaqueHandle{};
-      }
+    }
+    if (result.return_code != AEX_HOST_OK && handle != nullptr) {
+      *handle = AexHostOpaqueHandle{};
     }
     return result;
   }
@@ -679,9 +679,9 @@ class AdapterV1 {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
       result.return_code = AEX_HOST_SEH_FAULT;
       result.exception_code = static_cast<uint32_t>(GetExceptionCode());
-      if (entry != nullptr) {
-        *entry = AexHostSceneTopologyEntry{};
-      }
+    }
+    if (result.return_code != AEX_HOST_OK && entry != nullptr) {
+      *entry = AexHostSceneTopologyEntry{};
     }
     return result;
   }
@@ -702,9 +702,9 @@ class AdapterV1 {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
       result.return_code = AEX_HOST_SEH_FAULT;
       result.exception_code = static_cast<uint32_t>(GetExceptionCode());
-      if (summary != nullptr) {
-        *summary = AexHostSceneTopologySummary{};
-      }
+    }
+    if (result.return_code != AEX_HOST_OK && summary != nullptr) {
+      *summary = AexHostSceneTopologySummary{};
     }
     return result;
   }

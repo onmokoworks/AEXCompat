@@ -128,6 +128,7 @@ class RustHostCorePhase8Tests(unittest.TestCase):
             "AexHostOpaqueHandle{}",
             "AexHostSceneTopologyEntry{}",
             "AexHostSceneTopologySummary{}",
+            "result.return_code != AEX_HOST_OK",
             "__except (EXCEPTION_EXECUTE_HANDLER)",
             "AEX_HOST_SEH_FAULT",
         ):
@@ -156,6 +157,12 @@ class RustHostCorePhase8Tests(unittest.TestCase):
             "SyntheticQuerySeh",
             "SyntheticSummarySeh",
             "SyntheticDestroySeh",
+            "SyntheticCreateError",
+            "SyntheticQueryError",
+            "SyntheticSummaryError",
+            "create error return must clear a written handle",
+            "query error return must clear a written entry",
+            "summary error return must clear a written output",
         ):
             self.assertIn(marker, native)
         for forbidden in (
