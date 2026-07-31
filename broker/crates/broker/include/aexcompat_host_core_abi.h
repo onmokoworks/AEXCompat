@@ -7,6 +7,10 @@
 #define AEXCOMPAT_HOST_CORE_ABI_DESCRIPTOR_MAGIC \
   UINT64_C(0x41455848434F5245)
 #define AEXCOMPAT_HOST_CORE_CAPABILITY_SESSION_LIFECYCLE_V1 UINT64_C(1)
+#define AEXCOMPAT_HOST_CORE_SCENE_IDENTITY_ABI_VERSION 1u
+#define AEXCOMPAT_HOST_CORE_SCENE_IDENTITY_ABI_DESCRIPTOR_MAGIC \
+  UINT64_C(0x4145585343494431)
+#define AEXCOMPAT_HOST_CORE_SCENE_IDENTITY_CAPABILITY_MATCH_V1 UINT64_C(1)
 
 #if defined(_WIN32)
 #define AEXCOMPAT_HOST_CORE_CALL __cdecl
@@ -62,6 +66,20 @@ typedef enum AexHostSessionState {
   AEX_HOST_SESSION_STATE_FAULTED = 5,
 } AexHostSessionState;
 
+typedef enum AexHostSceneObjectKind {
+  AEX_HOST_SCENE_OBJECT_KIND_NONE = 0,
+  AEX_HOST_SCENE_OBJECT_KIND_PROJECT = 1,
+  AEX_HOST_SCENE_OBJECT_KIND_ITEM = 2,
+  AEX_HOST_SCENE_OBJECT_KIND_COMPOSITION = 3,
+  AEX_HOST_SCENE_OBJECT_KIND_FOLDER = 4,
+  AEX_HOST_SCENE_OBJECT_KIND_FOOTAGE = 5,
+  AEX_HOST_SCENE_OBJECT_KIND_LAYER = 6,
+  AEX_HOST_SCENE_OBJECT_KIND_EFFECT = 7,
+  AEX_HOST_SCENE_OBJECT_KIND_STREAM = 8,
+  AEX_HOST_SCENE_OBJECT_KIND_KEYFRAME = 9,
+  AEX_HOST_SCENE_OBJECT_KIND_VALUE = 10,
+} AexHostSceneObjectKind;
+
 typedef struct AexHostCallContext {
   uint32_t abi_version;
   uint32_t struct_size;
@@ -80,6 +98,14 @@ typedef struct AexHostCallStatus {
 typedef struct AexHostOpaqueHandle {
   uint64_t value;
 } AexHostOpaqueHandle;
+
+typedef struct AexHostSceneIdentity {
+  uint64_t project_id;
+  uint64_t object_id;
+  uint32_t generation;
+  uint8_t kind;
+  uint8_t reserved[3];
+} AexHostSceneIdentity;
 
 typedef struct AexHostReportSnapshot {
   uint32_t abi_version;
@@ -112,7 +138,18 @@ typedef struct AexHostCoreAbiDescriptorV1 {
   uint64_t capabilities;
 } AexHostCoreAbiDescriptorV1;
 
+typedef struct AexHostSceneIdentityAbiDescriptorV1 {
+  uint64_t magic;
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint32_t identity_size;
+  uint32_t identity_alignment;
+  uint64_t capabilities;
+} AexHostSceneIdentityAbiDescriptorV1;
+
 extern const AexHostCoreAbiDescriptorV1 aex_host_core_abi_descriptor_v1;
+extern const AexHostSceneIdentityAbiDescriptorV1
+    aex_host_core_scene_identity_abi_descriptor_v1;
 
 typedef int32_t(AEXCOMPAT_HOST_CORE_CALL *AexHostCoreSessionCreateV1Fn)(
     const AexHostCallContext *context,
@@ -125,6 +162,11 @@ typedef int32_t(AEXCOMPAT_HOST_CORE_CALL *AexHostCoreSessionCallV1Fn)(
     AexHostOpaqueHandle session,
     AexHostCallStatus *status,
     AexHostReportSnapshot *report);
+
+typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
+                    *AexHostCoreSceneIdentityMatchV1Fn)(
+    const AexHostSceneIdentity *current,
+    const AexHostSceneIdentity *candidate);
 
 int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_session_create_v1(
     const AexHostCallContext *context,
@@ -162,6 +204,10 @@ int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_session_dispose_v1(
     AexHostCallStatus *status,
     AexHostReportSnapshot *report);
 
+int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_scene_identity_match_v1(
+    const AexHostSceneIdentity *current,
+    const AexHostSceneIdentity *candidate);
+
 #if defined(__cplusplus)
 }
 #endif
@@ -184,6 +230,14 @@ static_assert(offsetof(AexHostCallStatus, report_id) == 16);
 
 static_assert(sizeof(AexHostOpaqueHandle) == 8);
 static_assert(alignof(AexHostOpaqueHandle) == 8);
+
+static_assert(sizeof(AexHostSceneIdentity) == 24);
+static_assert(alignof(AexHostSceneIdentity) == 8);
+static_assert(offsetof(AexHostSceneIdentity, project_id) == 0);
+static_assert(offsetof(AexHostSceneIdentity, object_id) == 8);
+static_assert(offsetof(AexHostSceneIdentity, generation) == 16);
+static_assert(offsetof(AexHostSceneIdentity, kind) == 20);
+static_assert(offsetof(AexHostSceneIdentity, reserved) == 21);
 
 static_assert(sizeof(AexHostReportSnapshot) == 72);
 static_assert(alignof(AexHostReportSnapshot) == 8);
@@ -209,4 +263,31 @@ static_assert(offsetof(AexHostCoreAbiDescriptorV1, report_snapshot_size) == 40);
 static_assert(
     offsetof(AexHostCoreAbiDescriptorV1, report_snapshot_alignment) == 44);
 static_assert(offsetof(AexHostCoreAbiDescriptorV1, capabilities) == 48);
+
+static_assert(sizeof(AexHostSceneIdentityAbiDescriptorV1) == 32);
+static_assert(alignof(AexHostSceneIdentityAbiDescriptorV1) == 8);
+static_assert(
+    offsetof(AexHostSceneIdentityAbiDescriptorV1, magic) == 0);
+static_assert(
+    offsetof(AexHostSceneIdentityAbiDescriptorV1, abi_version) == 8);
+static_assert(
+    offsetof(AexHostSceneIdentityAbiDescriptorV1, struct_size) == 12);
+static_assert(
+    offsetof(AexHostSceneIdentityAbiDescriptorV1, identity_size) == 16);
+static_assert(
+    offsetof(AexHostSceneIdentityAbiDescriptorV1, identity_alignment) == 20);
+static_assert(
+    offsetof(AexHostSceneIdentityAbiDescriptorV1, capabilities) == 24);
+
+static_assert(AEX_HOST_SCENE_OBJECT_KIND_PROJECT == 1);
+static_assert(AEX_HOST_SCENE_OBJECT_KIND_ITEM == 2);
+static_assert(AEX_HOST_SCENE_OBJECT_KIND_COMPOSITION == 3);
+static_assert(AEX_HOST_SCENE_OBJECT_KIND_FOLDER == 4);
+static_assert(AEX_HOST_SCENE_OBJECT_KIND_FOOTAGE == 5);
+static_assert(AEX_HOST_SCENE_OBJECT_KIND_LAYER == 6);
+static_assert(AEX_HOST_SCENE_OBJECT_KIND_EFFECT == 7);
+static_assert(AEX_HOST_SCENE_OBJECT_KIND_STREAM == 8);
+static_assert(AEX_HOST_SCENE_OBJECT_KIND_KEYFRAME == 9);
+static_assert(AEX_HOST_SCENE_OBJECT_KIND_VALUE == 10);
+static_assert(AEX_HOST_SCENE_OBJECT_KIND_NONE == 0);
 #endif

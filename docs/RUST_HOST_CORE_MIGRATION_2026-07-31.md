@@ -153,12 +153,43 @@ This gate does not negotiate report meaning, alter scene/session state, or
 route a production worker. Issue #26 / PR #571, #98, and #614/wgpu/GPU remain
 outside its write scope.
 
+## Phase 5 scene identity/generation gate (Issue #628)
+
+After PR #571 landed, Phase 5 freezes only its pointer-free scene identity as a
+shared Rust/C value: `project_id`, `object_id`, `generation`, and an integer
+object kind, plus three required-zero reserved bytes. The 24-byte layout, the
+ten live #571 kind values, and its zero `none` sentinel are asserted
+independently by Rust, the public C header, and a native test compiled with the
+actual C++ scene model. The C ABI keeps kind as `uint8_t`; Rust validates the
+integer before using it and never constructs an enum from an unknown
+discriminant.
+
+A dedicated 32-byte identity descriptor contains only magic, ABI version,
+descriptor size, identity size/alignment, and the matcher-v1 capability.
+`AdapterV1::Load` copies and exactly validates this descriptor inside its SEH
+frame before resolving or casting the identity matcher export. The Rust export
+is separately wrapped by `contain_panic`.
+
+The matcher receives a C++-owned current identity and a caller-held candidate.
+It validates canonical nonzero IDs/generation and required-zero reserved bytes,
+then classifies foreign project, wrong kind, different object, and stale
+generation using the existing stable host error codes. A standalone native
+Release test runs the Rust matcher beside an independent C++ identity oracle
+using identities created and invalidated by the real #571
+`scene_model::Registry`.
+
+This phase does not move `ObjectSnapshot`, stream/keyframe/parameter values,
+registry mutation, transaction, or snapshot ownership. Production worker
+routing remains unchanged, including every resident and one-shot/session path
+owned by Issue #98. The gate does not require After Effects and does not
+compare pixels.
+
 ## Later phases
 
-1. After #26 / PR #571 lands, define value-only scene/world/parameter snapshots
-   and run the Rust model beside the C++ owner. Compare normalized state,
-   lifecycle counters, error class, and report fields; do not require pixel
-   identity when the phase does not render.
+1. Define the next bounded value-only scene/world/parameter snapshot payload
+   beyond the Phase 5 identity and run it beside the C++ owner. Compare only
+   the normalized fields owned by that slice; do not require pixel identity
+   when the phase does not render.
 2. Add an explicitly opt-in worker dual-run call site only after its ownership
    and resident-session dependencies no longer overlap #26 or #98. Any
    mismatch must fail that migration gate without changing production output.
