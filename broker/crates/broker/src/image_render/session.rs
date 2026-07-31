@@ -905,6 +905,14 @@ pub struct InteractiveSessionOpen<'a> {
     /// Declared parameter set; launch values double as the fallback for
     /// frames rendered without a per-frame update.
     pub parameters: Option<&'a [InteractiveParameter]>,
+    /// Selected from the existing parameter-inspection capability report, or
+    /// from the GUI's explicit render-path override.  The resident transport
+    /// must preserve this decision instead of assuming Classic RENDER.
+    pub smart: bool,
+    /// Provenance for `smart`, retained in the public per-frame and close
+    /// reports so a rendered frame cannot hide which capability decision
+    /// selected its selector sequence.
+    pub smart_capability_source: &'a str,
     pub dependencies: Vec<ApprovedImageArtifact>,
     pub width: u32,
     pub height: u32,
@@ -925,6 +933,8 @@ pub struct InteractiveSessionOpen<'a> {
 pub struct InteractiveRenderSession {
     session: crate::render_session::RenderSession,
     plugin_id: String,
+    smart: bool,
+    smart_capability_source: String,
     pixel_format: RenderPixelFormat,
     width: u32,
     height: u32,
@@ -957,7 +967,7 @@ impl InteractiveRenderSession {
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
                 layers: &[],
-                smart: false,
+                smart: request.smart,
                 gpu_backend: RenderGpuBackend::Auto,
                 gpu_runtime_policy: None,
                 dependencies: request.dependencies,
@@ -973,6 +983,8 @@ impl InteractiveRenderSession {
         Ok(Self {
             session,
             plugin_id: request.plugin_id.to_owned(),
+            smart: request.smart,
+            smart_capability_source: request.smart_capability_source.to_owned(),
             pixel_format: request.pixel_format,
             width: request.width,
             height: request.height,
@@ -1072,7 +1084,8 @@ impl InteractiveRenderSession {
                     "schema_version": 1,
                     "stage": "interactive_image_render",
                     "plugin_id": self.plugin_id,
-                    "render_path": "classic",
+                    "render_path": if self.smart { "smartfx" } else { "classic" },
+                    "smart_capability_source": self.smart_capability_source,
                     "pixel_format": self.pixel_format.report_name(),
                     "width": frame_width,
                     "height": frame_height,
@@ -1111,7 +1124,8 @@ impl InteractiveRenderSession {
                     "schema_version": 1,
                     "stage": "interactive_image_render",
                     "plugin_id": self.plugin_id,
-                    "render_path": "classic",
+                    "render_path": if self.smart { "smartfx" } else { "classic" },
+                    "smart_capability_source": self.smart_capability_source,
                     "pixel_format": self.pixel_format.report_name(),
                     "current_time": current_time,
                     "worker_classification": "resident_session",
@@ -1127,7 +1141,16 @@ impl InteractiveRenderSession {
     /// Ends the session and returns the close summary, including the final
     /// report and the `session_clean` verdict (`render_session.rs`).
     pub fn close(self) -> Value {
-        self.session.close()
+        let Self {
+            session,
+            smart,
+            smart_capability_source,
+            ..
+        } = self;
+        let mut summary = session.close();
+        summary["render_path"] = json!(if smart { "smartfx" } else { "classic" });
+        summary["smart_capability_source"] = json!(smart_capability_source);
+        summary
     }
 }
 

@@ -2,6 +2,17 @@
 /// broker's interactive one-shot timeout.
 const LIVE_RENDER_FRAME_DEADLINE_MS: u64 = 30_000;
 
+/// Preserve the existing inspection/default/override policy as reportable
+/// provenance.  A missing field is the established classic-default contract;
+/// it is not treated as a guessed SmartFX capability.
+fn selected_smart_capability_source(advertised: Option<bool>, selected: bool) -> &'static str {
+    match advertised {
+        Some(value) if value == selected => "inspection_out_flags2",
+        Some(_) => "explicit_gui_override",
+        None => "classic_default_no_capability_report",
+    }
+}
+
 /// Static configuration a resident render session was opened with (issue
 /// #107). A key change means the running worker cannot carry the next render:
 /// the session thread closes it and opens a fresh one (SEQUENCE_SETUP runs
@@ -17,6 +28,10 @@ struct LiveSessionKey {
     /// Parameter structure only (slots, kinds, ranges, choices); values ride
     /// each frame's v:2 message and must not force a reopen.
     parameter_signature: String,
+    /// The inspection-selected or explicitly overridden selector path is a
+    /// session property: changing it must never reuse a worker opened for the
+    /// other dispatch protocol.
+    smart: bool,
     width: u32,
     height: u32,
     pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
@@ -57,6 +72,8 @@ struct LiveRenderRequest {
     plugin_sha256: String,
     dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
     parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+    smart: bool,
+    smart_capability_source: String,
     input_path: PathBuf,
     timing: aexcompat_broker::image_render::RenderTiming,
     pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
@@ -194,6 +211,7 @@ fn live_render(
             })
             .collect(),
         parameter_signature: parameter_structure_signature(&request.parameters),
+        smart: request.smart,
         width,
         height,
         pixel_format: request.pixel_format,
@@ -218,7 +236,7 @@ fn live_render(
                 &request.output,
                 &request.parameters,
                 request.timing,
-                false,
+                request.smart,
                 request.pixel_format,
                 None,
                 None,
@@ -237,6 +255,8 @@ fn live_render(
             plugin_path: &request.plugin_path,
             plugin_sha256: &request.plugin_sha256,
             parameters: (!request.parameters.is_empty()).then_some(request.parameters.as_slice()),
+            smart: request.smart,
+            smart_capability_source: &request.smart_capability_source,
             dependencies: request.dependencies.clone(),
             width,
             height,

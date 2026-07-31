@@ -1325,14 +1325,14 @@ impl HarnessApp {
             && custom_ui_action.is_none()
             && pixel_format == aexcompat_broker::image_render::RenderPixelFormat::Argb8
             && audio_sidecar.is_none();
-        // Resident-session eligibility mirrors the broker's length-1 wrapper:
-        // plain classic CPU renders only. Anything else keeps the one-shot
-        // transport below (issue #107). The session transport is
+        // The resident-session selector path follows the existing inspection
+        // result and explicit GUI override.  SmartFX-capable AEXes must open a
+        // Smart session: routing them through Classic RENDER can yield a
+        // no-op frame that looks successful (#606). The session transport is
         // Windows-only; other targets always render one-shot.
         #[cfg(windows)]
         {
-            let live_eligible = !smart
-                && host_context.is_none()
+            let live_eligible = host_context.is_none()
                 && custom_ui_action.is_none()
                 && audio_sidecar.is_none()
                 && gpu_backend == aexcompat_broker::image_render::RenderGpuBackend::Auto
@@ -1358,6 +1358,12 @@ impl HarnessApp {
                     plugin_sha256: hash,
                     dependencies,
                     parameters,
+                    smart,
+                    smart_capability_source: selected_smart_capability_source(
+                        self.smart_render_advertised,
+                        smart,
+                    )
+                    .to_owned(),
                     input_path: input,
                     timing,
                     pixel_format,

@@ -50,6 +50,28 @@ mod tests {
         assert_eq!(advertised_smart_render(&serde_json::json!({})), None);
     }
 
+    #[test]
+    fn resident_session_path_keeps_inspection_and_override_provenance() {
+        assert_eq!(
+            selected_smart_capability_source(Some(true), true),
+            "inspection_out_flags2"
+        );
+        assert_eq!(
+            selected_smart_capability_source(Some(false), false),
+            "inspection_out_flags2"
+        );
+        assert_eq!(
+            selected_smart_capability_source(Some(true), false),
+            "explicit_gui_override"
+        );
+        // The existing missing-capability contract stays classic; no path is
+        // inferred from the AEX name or a missing descriptor field.
+        assert_eq!(
+            selected_smart_capability_source(None, false),
+            "classic_default_no_capability_report"
+        );
+    }
+
     fn temporary_directory(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "aexcompat-diagnostics-{name}-{}-{}",
