@@ -1,11 +1,12 @@
 use crate::runtime_module_policy::{AuthenticatedGpuModuleReport, RuntimeBackend};
 use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
 use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult, secure_launch};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerKind {
@@ -160,7 +161,7 @@ fn launch_session_with_admission(
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
 ) -> io::Result<crate::secure_launch::SecureSessionProcess> {
-    let (worker_sha256, worker_size) = admit_local_worker(worker_program)?;
+    let (worker_sha256, worker_size) = admit_local_worker(repository, worker_program)?;
     let request = SecureLaunchRequest {
         worker_program,
         worker_expected_sha256: worker_sha256,
@@ -378,7 +379,7 @@ pub fn dispatch_secure_image_with_resources(
         .map(load_entry)
         .collect::<io::Result<Vec<_>>>()?;
     let tree = SealedLoadTree::create_with_resources(main, dependencies, resources)?;
-    let (worker_sha256, worker_size) = admit_local_worker(&worker_program)?;
+    let (worker_sha256, worker_size) = admit_local_worker(input.repository, &worker_program)?;
     let request = SecureLaunchRequest {
         worker_program: &worker_program,
         worker_expected_sha256: worker_sha256,
@@ -400,16 +401,77 @@ pub fn dispatch_secure_image_with_resources(
 /// replace the worker binary can equally rebuild the broker that dispatches
 /// it. Receipt-driven flows keep supplying an externally pinned identity
 /// through `secure_launch` and do not pass through this admission.
-fn admit_local_worker(path: &Path) -> io::Result<([u8; 32], u64)> {
+fn admit_local_worker(repository: &Path, path: &Path) -> io::Result<([u8; 32], u64)> {
     let mut file = File::open(path).map_err(|error| {
         io::Error::new(error.kind(), "local worker binary is missing or unreadable")
     })?;
+    ensure_local_worker_freshness(repository, path)?;
     let mut hasher = Sha256::new();
     let size = io::copy(&mut file, &mut hasher)?;
     if size == 0 {
         return Err(invalid("local worker binary is empty"));
     }
     Ok((hasher.finalize().into(), size))
+}
+
+/// A local minihost worker carries source-side logic (notably module-audit
+/// classification).  Do not let a stale build produce a convincing-looking
+/// compatibility receipt for current broker sources.  This intentionally uses
+/// only repository-local source mtimes: commit/build-id integration belongs to
+/// a later build-system scope.
+fn ensure_local_worker_freshness(repository: &Path, worker: &Path) -> io::Result<()> {
+    let worker_modified = std::fs::metadata(worker)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|_| worker_freshness_error("metadata_unavailable"))?;
+    let source_root = repository.join("minihost").join("src");
+    let source_modified = newest_source_modified(&source_root)
+        .map_err(|_| worker_freshness_error("metadata_unavailable"))?;
+    if source_modified > worker_modified {
+        return Err(worker_freshness_error("source_newer_than_worker"));
+    }
+    Ok(())
+}
+
+fn newest_source_modified(root: &Path) -> io::Result<SystemTime> {
+    let mut newest = None;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "minihost source metadata is indeterminate",
+                ));
+            }
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                let modified = entry.metadata()?.modified()?;
+                newest =
+                    Some(newest.map_or(modified, |previous: SystemTime| previous.max(modified)));
+            }
+        }
+    }
+    newest.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "minihost source metadata is indeterminate",
+        )
+    })
+}
+
+fn worker_freshness_error(reason: &'static str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        json!({
+            "classification": "stale_worker",
+            "stage": "worker_freshness",
+            "reason": reason,
+        })
+        .to_string(),
+    )
 }
 
 fn load_entry(artifact: ApprovedImageArtifact) -> io::Result<LoadEntry> {
@@ -438,7 +500,7 @@ fn invalid(message: &'static str) -> io::Error {
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::SystemTime;
+    use std::time::{Duration as StdDuration, SystemTime};
 
     fn artifact(root: &Path, name: &str, bytes: &[u8]) -> ApprovedImageArtifact {
         let path = root.join(name);
@@ -448,6 +510,34 @@ mod tests {
             expected_sha256: Sha256::digest(bytes).into(),
             expected_size: bytes.len() as u64,
         }
+    }
+
+    fn set_modified(path: &Path, time: SystemTime) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(time))
+            .unwrap();
+    }
+
+    fn freshness_fixture(root: &Path, worker_newer: bool) -> PathBuf {
+        let source = root.join("minihost/src/worker.cpp");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"source").unwrap();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        fs::write(&worker, b"worker").unwrap();
+        let now = SystemTime::now();
+        let older = now - StdDuration::from_secs(60);
+        if worker_newer {
+            set_modified(&source, older);
+            set_modified(&worker, now);
+        } else {
+            set_modified(&source, now);
+            set_modified(&worker, older);
+        }
+        worker
     }
 
     #[test]
@@ -503,6 +593,12 @@ mod tests {
         let worker = root.join("target/minihost-build/aex_render_worker.exe");
         fs::create_dir_all(worker.parent().unwrap()).unwrap();
         fs::write(&worker, b"").unwrap();
+        let source = root.join("minihost/src/worker.cpp");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"source").unwrap();
+        let now = SystemTime::now();
+        set_modified(&source, now - StdDuration::from_secs(60));
+        set_modified(&worker, now);
 
         let error = dispatch_secure_image(SecureImageDispatch {
             repository: &root,
@@ -516,6 +612,64 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(error.to_string(), "local worker binary is empty");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_local_worker_is_admitted_when_newer_than_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-worker-freshness-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let worker = freshness_fixture(&root, true);
+        let (_, size) = admit_local_worker(&root, &worker).expect("current worker is admitted");
+        assert_eq!(size, 6);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_local_worker_is_rejected_before_launch() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-worker-freshness-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let worker = freshness_fixture(&root, false);
+        let error = admit_local_worker(&root, &worker).expect_err("stale worker must not launch");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&error.to_string()).unwrap(),
+            json!({
+                "classification": "stale_worker",
+                "stage": "worker_freshness",
+                "reason": "source_newer_than_worker",
+            })
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn indeterminate_worker_freshness_is_rejected_before_launch() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-worker-freshness-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        fs::write(&worker, b"worker").unwrap();
+        let error = admit_local_worker(&root, &worker)
+            .expect_err("missing source metadata must not permit a worker launch");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&error.to_string()).unwrap(),
+            json!({
+                "classification": "stale_worker",
+                "stage": "worker_freshness",
+                "reason": "metadata_unavailable",
+            })
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

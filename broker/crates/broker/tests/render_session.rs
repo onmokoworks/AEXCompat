@@ -97,6 +97,21 @@ mod windows_e2e {
             .join("session_protocol_worker.exe")
     }
 
+    fn write_freshness_source_marker(root: &Path) {
+        let marker = root.join("minihost/src/session_fixture.cpp");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, b"fixture source").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+            )
+            .unwrap();
+    }
+
     /// A temp repository whose `target/minihost-build/aex_render_worker.exe`
     /// is the protocol fixture; the "plugin" is inert bytes sealed and staged
     /// like a real AEX.
@@ -107,6 +122,7 @@ mod windows_e2e {
             std::process::id(),
             rand::random::<u128>()
         ));
+        write_freshness_source_marker(&root);
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
         std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
@@ -231,6 +247,7 @@ mod windows_e2e {
             std::process::id(),
             rand::random::<u128>()
         ));
+        write_freshness_source_marker(&root);
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
         std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
@@ -2539,6 +2556,7 @@ mod windows_e2e {
             std::process::id(),
             rand::random::<u128>()
         ));
+        write_freshness_source_marker(&root);
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
         std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
