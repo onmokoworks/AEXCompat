@@ -27,6 +27,8 @@ enum class AdapterLoadStatus : uint32_t {
   kIncompatibleSceneIdentityAbiDescriptor = 8,
   kMissingSceneOwnerRelationAbiDescriptor = 9,
   kIncompatibleSceneOwnerRelationAbiDescriptor = 10,
+  kMissingSceneTopologyAbiDescriptor = 11,
+  kIncompatibleSceneTopologyAbiDescriptor = 12,
 };
 
 struct ApiV1 {
@@ -38,13 +40,15 @@ struct ApiV1 {
   AexHostCoreSessionCallV1Fn session_dispose = nullptr;
   AexHostCoreSceneIdentityMatchV1Fn scene_identity_match = nullptr;
   AexHostCoreSceneOwnerRelationMatchV1Fn scene_owner_relation_match = nullptr;
+  AexHostCoreSceneTopologySummarizeV1Fn scene_topology_summarize = nullptr;
 
   bool complete() const noexcept {
     return session_create != nullptr && session_open != nullptr &&
            session_begin_callback != nullptr &&
            session_end_callback != nullptr && session_close != nullptr &&
            session_dispose != nullptr && scene_identity_match != nullptr &&
-           scene_owner_relation_match != nullptr;
+           scene_owner_relation_match != nullptr &&
+           scene_topology_summarize != nullptr;
   }
 };
 
@@ -69,6 +73,12 @@ struct SceneIdentityInvocation {
 struct SceneOwnerRelationInvocation {
   int32_t return_code = AEX_HOST_INVALID_STATE;
   uint32_t exception_code = 0;
+};
+
+struct SceneTopologyInvocation {
+  int32_t return_code = AEX_HOST_INVALID_STATE;
+  uint32_t exception_code = 0;
+  AexHostSceneTopologySummary summary{};
 };
 
 // Owns one loaded host-core DLL and its complete v1 function table. Callers
@@ -138,6 +148,29 @@ class AdapterV1 {
                alignof(AexHostSceneOwnerRelation) &&
            descriptor.capabilities ==
                AEXCOMPAT_HOST_CORE_SCENE_OWNER_RELATION_CAPABILITY_MATCH_V1;
+  }
+
+  static bool IsCompatibleSceneTopologyDescriptor(
+      const AexHostSceneTopologyAbiDescriptorV1 &descriptor) noexcept {
+    return descriptor.magic ==
+               AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_ABI_DESCRIPTOR_MAGIC &&
+           descriptor.abi_version ==
+               AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_ABI_VERSION &&
+           descriptor.struct_size ==
+               sizeof(AexHostSceneTopologyAbiDescriptorV1) &&
+           descriptor.entry_size == sizeof(AexHostSceneTopologyEntry) &&
+           descriptor.entry_alignment == alignof(AexHostSceneTopologyEntry) &&
+           descriptor.snapshot_size == sizeof(AexHostSceneTopologySnapshot) &&
+           descriptor.snapshot_alignment ==
+               alignof(AexHostSceneTopologySnapshot) &&
+           descriptor.summary_size == sizeof(AexHostSceneTopologySummary) &&
+           descriptor.summary_alignment ==
+               alignof(AexHostSceneTopologySummary) &&
+           descriptor.capacity ==
+               AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPACITY &&
+           descriptor.reserved == 0 &&
+           descriptor.capabilities ==
+               AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPABILITY_SUMMARY_V1;
   }
 
   static AdapterLoadStatus ValidateApi(const ApiV1 &api) noexcept {
@@ -252,6 +285,31 @@ class AdapterV1 {
       return AdapterLoadStatus::kIncompatibleSceneOwnerRelationAbiDescriptor;
     }
 
+    const FARPROC topology_descriptor_symbol = GetProcAddress(
+        module, "aex_host_core_scene_topology_abi_descriptor_v1");
+    if (topology_descriptor_symbol == nullptr) {
+      output->native_error_ = ERROR_PROC_NOT_FOUND;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kMissingSceneTopologyAbiDescriptor;
+    }
+    const auto *published_topology_descriptor =
+        reinterpret_cast<const AexHostSceneTopologyAbiDescriptorV1 *>(
+            topology_descriptor_symbol);
+    AexHostSceneTopologyAbiDescriptorV1 topology_descriptor{};
+    DWORD topology_descriptor_error = ERROR_SUCCESS;
+    if (!CopySceneTopologyDescriptor(
+            published_topology_descriptor, &topology_descriptor,
+            &topology_descriptor_error)) {
+      output->native_error_ = topology_descriptor_error;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kIncompatibleSceneTopologyAbiDescriptor;
+    }
+    if (!IsCompatibleSceneTopologyDescriptor(topology_descriptor)) {
+      output->native_error_ = ERROR_BAD_FORMAT;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kIncompatibleSceneTopologyAbiDescriptor;
+    }
+
     ApiV1 api;
     api.session_create = Resolve<AexHostCoreSessionCreateV1Fn>(
         module, "aex_host_core_session_create_v1");
@@ -270,6 +328,9 @@ class AdapterV1 {
     api.scene_owner_relation_match =
         Resolve<AexHostCoreSceneOwnerRelationMatchV1Fn>(
             module, "aex_host_core_scene_owner_relation_match_v1");
+    api.scene_topology_summarize =
+        Resolve<AexHostCoreSceneTopologySummarizeV1Fn>(
+            module, "aex_host_core_scene_topology_summarize_v1");
     if (ValidateApi(api) != AdapterLoadStatus::kOk) {
       output->native_error_ = ERROR_PROC_NOT_FOUND;
       FreeLibrary(module);
@@ -281,6 +342,7 @@ class AdapterV1 {
     output->descriptor_ = descriptor;
     output->scene_identity_descriptor_ = scene_descriptor;
     output->scene_owner_relation_descriptor_ = owner_relation_descriptor;
+    output->scene_topology_descriptor_ = topology_descriptor;
     output->native_error_ = ERROR_SUCCESS;
     return AdapterLoadStatus::kOk;
   }
@@ -290,6 +352,7 @@ class AdapterV1 {
            IsCompatibleSceneIdentityDescriptor(scene_identity_descriptor_) &&
            IsCompatibleSceneOwnerRelationDescriptor(
                scene_owner_relation_descriptor_) &&
+           IsCompatibleSceneTopologyDescriptor(scene_topology_descriptor_) &&
            api_.complete();
   }
 
@@ -313,6 +376,11 @@ class AdapterV1 {
   const AexHostSceneOwnerRelationAbiDescriptorV1 &
   scene_owner_relation_descriptor() const noexcept {
     return scene_owner_relation_descriptor_;
+  }
+
+  const AexHostSceneTopologyAbiDescriptorV1 &
+  scene_topology_descriptor() const noexcept {
+    return scene_topology_descriptor_;
   }
 
   // Normal callers use value copies so the pointers passed to Rust always
@@ -369,6 +437,16 @@ class AdapterV1 {
         api_.scene_owner_relation_match, &current, &candidate);
     return SceneOwnerRelationInvocation{result.return_code,
                                         result.exception_code};
+  }
+
+  SceneTopologyInvocation SummarizeSceneTopology(
+      AexHostSceneTopologySnapshot snapshot) const noexcept {
+    SceneTopologyInvocation invocation;
+    const SehCallResult result = InvokeSceneTopologyRaw(
+        api_.scene_topology_summarize, &snapshot, &invocation.summary);
+    invocation.return_code = result.return_code;
+    invocation.exception_code = result.exception_code;
+    return invocation;
   }
 
   // Low-level ABI conformance hooks. Each non-null pointer must remain valid;
@@ -449,6 +527,30 @@ class AdapterV1 {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
       result.return_code = AEX_HOST_SEH_FAULT;
       result.exception_code = static_cast<uint32_t>(GetExceptionCode());
+    }
+    return result;
+  }
+
+  static SehCallResult InvokeSceneTopologyRaw(
+      AexHostCoreSceneTopologySummarizeV1Fn function,
+      const AexHostSceneTopologySnapshot *snapshot,
+      AexHostSceneTopologySummary *summary) noexcept {
+    if (function == nullptr) {
+      if (summary != nullptr) {
+        *summary = AexHostSceneTopologySummary{};
+      }
+      return SehCallResult{AEX_HOST_INVALID_STATE, 0};
+    }
+
+    SehCallResult result{AEX_HOST_SEH_FAULT, 0};
+    __try {
+      result.return_code = function(snapshot, summary);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      result.return_code = AEX_HOST_SEH_FAULT;
+      result.exception_code = static_cast<uint32_t>(GetExceptionCode());
+      if (summary != nullptr) {
+        *summary = AexHostSceneTopologySummary{};
+      }
     }
     return result;
   }
@@ -536,6 +638,33 @@ class AdapterV1 {
     return copied;
   }
 
+  static bool CopySceneTopologyDescriptor(
+      const AexHostSceneTopologyAbiDescriptorV1 *source,
+      AexHostSceneTopologyAbiDescriptorV1 *destination,
+      DWORD *native_error) noexcept {
+    if (source == nullptr || destination == nullptr || native_error == nullptr) {
+      return false;
+    }
+    bool copied = false;
+    __try {
+      destination->magic = source->magic;
+      destination->abi_version = source->abi_version;
+      destination->struct_size = source->struct_size;
+      if (destination->magic ==
+              AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_ABI_DESCRIPTOR_MAGIC &&
+          destination->abi_version ==
+              AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_ABI_VERSION &&
+          destination->struct_size ==
+              sizeof(AexHostSceneTopologyAbiDescriptorV1)) {
+        *destination = *source;
+      }
+      copied = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      *native_error = static_cast<DWORD>(GetExceptionCode());
+    }
+    return copied;
+  }
+
   static Invocation InvokeSession(AexHostCoreSessionCallV1Fn function,
                                   AexHostCallContext context,
                                   AexHostOpaqueHandle session) noexcept {
@@ -596,6 +725,7 @@ class AdapterV1 {
     scene_identity_descriptor_ = AexHostSceneIdentityAbiDescriptorV1{};
     scene_owner_relation_descriptor_ =
         AexHostSceneOwnerRelationAbiDescriptorV1{};
+    scene_topology_descriptor_ = AexHostSceneTopologyAbiDescriptorV1{};
     absolute_path_.fill(L'\0');
     native_error_ = ERROR_SUCCESS;
   }
@@ -607,6 +737,7 @@ class AdapterV1 {
     scene_identity_descriptor_ = other.scene_identity_descriptor_;
     scene_owner_relation_descriptor_ =
         other.scene_owner_relation_descriptor_;
+    scene_topology_descriptor_ = other.scene_topology_descriptor_;
     absolute_path_ = other.absolute_path_;
     native_error_ = other.native_error_;
     other.module_ = nullptr;
@@ -616,6 +747,8 @@ class AdapterV1 {
         AexHostSceneIdentityAbiDescriptorV1{};
     other.scene_owner_relation_descriptor_ =
         AexHostSceneOwnerRelationAbiDescriptorV1{};
+    other.scene_topology_descriptor_ =
+        AexHostSceneTopologyAbiDescriptorV1{};
     other.absolute_path_.fill(L'\0');
     other.native_error_ = ERROR_SUCCESS;
   }
@@ -626,6 +759,7 @@ class AdapterV1 {
   AexHostSceneIdentityAbiDescriptorV1 scene_identity_descriptor_{};
   AexHostSceneOwnerRelationAbiDescriptorV1
       scene_owner_relation_descriptor_{};
+  AexHostSceneTopologyAbiDescriptorV1 scene_topology_descriptor_{};
   std::array<wchar_t, 32768> absolute_path_{};
   DWORD native_error_ = ERROR_SUCCESS;
 };

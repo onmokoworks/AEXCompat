@@ -16,6 +16,12 @@
   UINT64_C(0x4145584F574E5231)
 #define AEXCOMPAT_HOST_CORE_SCENE_OWNER_RELATION_CAPABILITY_MATCH_V1 \
   UINT64_C(1)
+#define AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_ABI_VERSION 1u
+#define AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_ABI_DESCRIPTOR_MAGIC \
+  UINT64_C(0x414558544F504F31)
+#define AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPABILITY_SUMMARY_V1 \
+  UINT64_C(1)
+#define AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPACITY 16u
 
 #if defined(_WIN32)
 #define AEXCOMPAT_HOST_CORE_CALL __cdecl
@@ -117,6 +123,29 @@ typedef struct AexHostSceneOwnerRelation {
   AexHostSceneIdentity owner;
 } AexHostSceneOwnerRelation;
 
+typedef struct AexHostSceneTopologyEntry {
+  AexHostSceneOwnerRelation relation;
+  int32_t local_index;
+  uint32_t reserved;
+} AexHostSceneTopologyEntry;
+
+typedef struct AexHostSceneTopologySnapshot {
+  uint64_t project_id;
+  uint32_t entry_count;
+  uint32_t reserved;
+  AexHostSceneTopologyEntry
+      entries[AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPACITY];
+} AexHostSceneTopologySnapshot;
+
+typedef struct AexHostSceneTopologySummary {
+  uint64_t project_id;
+  uint64_t fingerprint;
+  uint32_t object_count;
+  uint32_t edge_count;
+  uint32_t root_count;
+  uint32_t reserved;
+} AexHostSceneTopologySummary;
+
 typedef struct AexHostReportSnapshot {
   uint32_t abi_version;
   uint32_t struct_size;
@@ -166,11 +195,28 @@ typedef struct AexHostSceneOwnerRelationAbiDescriptorV1 {
   uint64_t capabilities;
 } AexHostSceneOwnerRelationAbiDescriptorV1;
 
+typedef struct AexHostSceneTopologyAbiDescriptorV1 {
+  uint64_t magic;
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint32_t entry_size;
+  uint32_t entry_alignment;
+  uint32_t snapshot_size;
+  uint32_t snapshot_alignment;
+  uint32_t summary_size;
+  uint32_t summary_alignment;
+  uint32_t capacity;
+  uint32_t reserved;
+  uint64_t capabilities;
+} AexHostSceneTopologyAbiDescriptorV1;
+
 extern const AexHostCoreAbiDescriptorV1 aex_host_core_abi_descriptor_v1;
 extern const AexHostSceneIdentityAbiDescriptorV1
     aex_host_core_scene_identity_abi_descriptor_v1;
 extern const AexHostSceneOwnerRelationAbiDescriptorV1
     aex_host_core_scene_owner_relation_abi_descriptor_v1;
+extern const AexHostSceneTopologyAbiDescriptorV1
+    aex_host_core_scene_topology_abi_descriptor_v1;
 
 typedef int32_t(AEXCOMPAT_HOST_CORE_CALL *AexHostCoreSessionCreateV1Fn)(
     const AexHostCallContext *context,
@@ -193,6 +239,11 @@ typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
                     *AexHostCoreSceneOwnerRelationMatchV1Fn)(
     const AexHostSceneOwnerRelation *current,
     const AexHostSceneOwnerRelation *candidate);
+
+typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
+                    *AexHostCoreSceneTopologySummarizeV1Fn)(
+    const AexHostSceneTopologySnapshot *snapshot,
+    AexHostSceneTopologySummary *summary);
 
 int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_session_create_v1(
     const AexHostCallContext *context,
@@ -238,6 +289,10 @@ int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_scene_owner_relation_match_v1(
     const AexHostSceneOwnerRelation *current,
     const AexHostSceneOwnerRelation *candidate);
 
+int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_scene_topology_summarize_v1(
+    const AexHostSceneTopologySnapshot *snapshot,
+    AexHostSceneTopologySummary *summary);
+
 #if defined(__cplusplus)
 }
 #endif
@@ -273,6 +328,28 @@ static_assert(sizeof(AexHostSceneOwnerRelation) == 48);
 static_assert(alignof(AexHostSceneOwnerRelation) == 8);
 static_assert(offsetof(AexHostSceneOwnerRelation, object) == 0);
 static_assert(offsetof(AexHostSceneOwnerRelation, owner) == 24);
+
+static_assert(sizeof(AexHostSceneTopologyEntry) == 56);
+static_assert(alignof(AexHostSceneTopologyEntry) == 8);
+static_assert(offsetof(AexHostSceneTopologyEntry, relation) == 0);
+static_assert(offsetof(AexHostSceneTopologyEntry, local_index) == 48);
+static_assert(offsetof(AexHostSceneTopologyEntry, reserved) == 52);
+
+static_assert(sizeof(AexHostSceneTopologySnapshot) == 912);
+static_assert(alignof(AexHostSceneTopologySnapshot) == 8);
+static_assert(offsetof(AexHostSceneTopologySnapshot, project_id) == 0);
+static_assert(offsetof(AexHostSceneTopologySnapshot, entry_count) == 8);
+static_assert(offsetof(AexHostSceneTopologySnapshot, reserved) == 12);
+static_assert(offsetof(AexHostSceneTopologySnapshot, entries) == 16);
+
+static_assert(sizeof(AexHostSceneTopologySummary) == 32);
+static_assert(alignof(AexHostSceneTopologySummary) == 8);
+static_assert(offsetof(AexHostSceneTopologySummary, project_id) == 0);
+static_assert(offsetof(AexHostSceneTopologySummary, fingerprint) == 8);
+static_assert(offsetof(AexHostSceneTopologySummary, object_count) == 16);
+static_assert(offsetof(AexHostSceneTopologySummary, edge_count) == 20);
+static_assert(offsetof(AexHostSceneTopologySummary, root_count) == 24);
+static_assert(offsetof(AexHostSceneTopologySummary, reserved) == 28);
 
 static_assert(sizeof(AexHostReportSnapshot) == 72);
 static_assert(alignof(AexHostReportSnapshot) == 8);
@@ -329,6 +406,27 @@ static_assert(
              relation_alignment) == 20);
 static_assert(
     offsetof(AexHostSceneOwnerRelationAbiDescriptorV1, capabilities) == 24);
+
+static_assert(sizeof(AexHostSceneTopologyAbiDescriptorV1) == 56);
+static_assert(alignof(AexHostSceneTopologyAbiDescriptorV1) == 8);
+static_assert(offsetof(AexHostSceneTopologyAbiDescriptorV1, magic) == 0);
+static_assert(offsetof(AexHostSceneTopologyAbiDescriptorV1, abi_version) == 8);
+static_assert(offsetof(AexHostSceneTopologyAbiDescriptorV1, struct_size) == 12);
+static_assert(offsetof(AexHostSceneTopologyAbiDescriptorV1, entry_size) == 16);
+static_assert(
+    offsetof(AexHostSceneTopologyAbiDescriptorV1, entry_alignment) == 20);
+static_assert(
+    offsetof(AexHostSceneTopologyAbiDescriptorV1, snapshot_size) == 24);
+static_assert(
+    offsetof(AexHostSceneTopologyAbiDescriptorV1, snapshot_alignment) == 28);
+static_assert(
+    offsetof(AexHostSceneTopologyAbiDescriptorV1, summary_size) == 32);
+static_assert(
+    offsetof(AexHostSceneTopologyAbiDescriptorV1, summary_alignment) == 36);
+static_assert(offsetof(AexHostSceneTopologyAbiDescriptorV1, capacity) == 40);
+static_assert(offsetof(AexHostSceneTopologyAbiDescriptorV1, reserved) == 44);
+static_assert(
+    offsetof(AexHostSceneTopologyAbiDescriptorV1, capabilities) == 48);
 
 static_assert(AEX_HOST_SCENE_OBJECT_KIND_PROJECT == 1);
 static_assert(AEX_HOST_SCENE_OBJECT_KIND_ITEM == 2);
