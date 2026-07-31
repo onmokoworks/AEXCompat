@@ -62,7 +62,13 @@ mod tests {
         // resident key so `render_live_request` closes and reopens instead of
         // reporting a new source from a stale session.
         assert!(key(auto) != key(manual));
-        assert!(selected_interactive_session_selection(smart, false, true).is_err());
+        assert_eq!(
+            selected_interactive_session_selection(smart, false, true)
+                .expect("the established GUI Classic override remains available")
+                .source
+                .report_name(),
+            "manual_classic"
+        );
 
         let classic = InspectedRenderCapability {
             smart_render_advertised: false,
@@ -75,7 +81,13 @@ mod tests {
                 .report_name(),
             "advertised_classic"
         );
-        assert!(selected_interactive_session_selection(classic, true, true).is_err());
+        assert_eq!(
+            selected_interactive_session_selection(classic, true, true)
+                .expect("the established GUI SmartFX override remains available")
+                .source
+                .report_name(),
+            "manual_smart"
+        );
     }
 
     #[test]

@@ -1074,7 +1074,7 @@ impl InteractiveRenderSession {
                 image
                     .save_with_format(output_path, ImageFormat::Png)
                     .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
-                Ok(json!({
+                let mut report = json!({
                     "schema_version": 1,
                     "stage": "interactive_image_render",
                     "plugin_id": self.plugin_id,
@@ -1109,14 +1109,16 @@ impl InteractiveRenderSession {
                     "worker_classification": "resident_session",
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
                     "passed": true,
-                }))
+                });
+                annotate_interactive_selection(&mut report, self.selection);
+                Ok(report)
             }
             FrameStatus::FrameError {
                 render_error,
                 missing_dependency,
             } => {
                 self.frames_errored += 1;
-                Ok(json!({
+                let mut report = json!({
                     "schema_version": 1,
                     "stage": "interactive_image_render",
                     "plugin_id": self.plugin_id,
@@ -1131,7 +1133,9 @@ impl InteractiveRenderSession {
                     "render_error": render_error,
                     "missing_dependency": missing_dependency,
                     "passed": false,
-                }))
+                });
+                annotate_interactive_selection(&mut report, self.selection);
+                Ok(report)
             }
         }
     }
@@ -1143,10 +1147,7 @@ impl InteractiveRenderSession {
             session, selection, ..
         } = self;
         let mut summary = session.close();
-        summary["render_path"] = json!(selection.path.report_name());
-        summary["smart_capability_source"] = json!(selection.source.report_name());
-        summary["smart_capability_identity"] = json!(selection.capability_identity);
-        summary["smart_capability_version"] = json!(selection.capability_version);
+        annotate_interactive_selection(&mut summary, selection);
         summary
     }
 }
@@ -1236,6 +1237,17 @@ impl InteractiveSessionSelection {
             capability_identity,
         })
     }
+}
+
+/// Attach the complete open-time selection snapshot to every route's public
+/// report.  The one-shot fallback deliberately calls this too; reducing the
+/// selection to a `smart: bool` there would make receipts lie about why the
+/// worker used a selector sequence.
+pub fn annotate_interactive_selection(report: &mut Value, selection: InteractiveSessionSelection) {
+    report["render_path"] = json!(selection.path.report_name());
+    report["smart_capability_source"] = json!(selection.source.report_name());
+    report["smart_capability_identity"] = json!(selection.capability_identity);
+    report["smart_capability_version"] = json!(selection.capability_version);
 }
 
 /// Host-side expectations the isolated worker report is validated against.

@@ -43,14 +43,12 @@ fn selected_interactive_session_selection(
     use aexcompat_broker::image_render::{
         InteractiveCapabilitySource, InteractiveRenderPath, InteractiveSessionSelection,
     };
-    // The inspection contract only asserts one supported selector sequence.
-    // Until a future descriptor provides a separate dual-capability fact, an
-    // override to the other sequence is unsafe and is rejected before either
-    // resident or one-shot dispatch.
-    if requested_smart != capability.smart_render_advertised {
-        return Err(
-            "requested render path is not supported by the inspected AEX capability".into(),
-        );
+    // This is the existing GUI policy used by the isolated one-shot route:
+    // automatic selection follows the descriptor, while an explicit GUI
+    // choice keeps its own provenance.  Resident and one-shot routes must use
+    // this one resolver rather than silently imposing different policy.
+    if !manual_override && requested_smart != capability.smart_render_advertised {
+        return Err("automatic render path does not match the inspected AEX capability".into());
     }
     let path = if requested_smart {
         InteractiveRenderPath::SmartFx
@@ -300,7 +298,16 @@ fn live_render(
                 aexcompat_broker::image_render::RenderGpuBackend::Auto,
                 request.dependencies.clone(),
             )
-            .map_err(|error| format!("{error} (after resident session fallback: {reason})"))?;
+            .map_err(|error| {
+                interactive_selection_failure(
+                    request.selection,
+                    format!("{error} (after resident session fallback: {reason})"),
+                )
+            })?;
+        aexcompat_broker::image_render::annotate_interactive_selection(
+            &mut report,
+            request.selection,
+        );
         report["resident_session_fallback"] = serde_json::json!(reason);
         let body = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
         Ok((body, Some(request.output.clone())))
@@ -351,7 +358,7 @@ fn live_render(
             } else {
                 // Frame-local compatibility error: the session stays open and
                 // the failure reports like a one-shot render failure.
-                Err(body)
+                Err(interactive_selection_failure(request.selection, body))
             }
         }
         Err(error) => {
@@ -365,10 +372,30 @@ fn live_render(
             } else {
                 // Rejected request (bad timing or parameter set); the session
                 // itself is still usable for the next render.
-                Err(format!("resident session rejected the render: {error}"))
+                Err(interactive_selection_failure(
+                    request.selection,
+                    format!("resident session rejected the render: {error}"),
+                ))
             }
         }
     }
+}
+
+fn interactive_selection_failure(
+    selection: aexcompat_broker::image_render::InteractiveSessionSelection,
+    error: String,
+) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "stage": "interactive_image_render",
+        "passed": false,
+        "error": error,
+        "render_path": selection.path.report_name(),
+        "smart_capability_source": selection.source.report_name(),
+        "smart_capability_identity": selection.capability_identity,
+        "smart_capability_version": selection.capability_version,
+    }))
+    .unwrap_or_else(|error| format!("interactive render failed: {error}"))
 }
 
 #[cfg(windows)]

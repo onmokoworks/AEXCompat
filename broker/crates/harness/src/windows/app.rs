@@ -1460,7 +1460,12 @@ impl HarnessApp {
                     dependencies,
                 )
             }
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| interactive_selection_failure(interactive_selection, error.to_string()))?;
+            let mut report = report;
+            aexcompat_broker::image_render::annotate_interactive_selection(
+                &mut report,
+                interactive_selection,
+            );
             let body = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
             Ok((body, Some(output)))
         });
@@ -2591,30 +2596,25 @@ impl eframe::App for HarnessApp {
                     }
                     ui.horizontal(|ui| {
                         ui.label("Render path:");
-                        if ui
-                            .checkbox(&mut self.smart_render_manual_override, "Manual override")
-                            .changed()
-                        {
+                        let classic_changed = ui
+                            .selectable_value(&mut self.smart_render, false, "Classic")
+                            .changed();
+                        let smart_changed = ui
+                            .selectable_value(&mut self.smart_render, true, "SmartFX")
+                            .changed();
+                        if classic_changed || smart_changed {
+                            // Preserve the pre-resident GUI policy: choosing a
+                            // different path is an explicit override, and
+                            // changing it always tears down the old worker.
+                            self.smart_render_manual_override = self
+                                .smart_render_advertised
+                                .is_some_and(|advertised| self.smart_render != advertised);
                             self.close_live_session();
                         }
-                        ui.add_enabled_ui(self.smart_render_manual_override, |ui| {
-                            if ui
-                                .selectable_value(&mut self.smart_render, false, "Classic")
-                                .changed()
-                            {
-                                self.close_live_session();
-                            }
-                            if ui
-                                .selectable_value(&mut self.smart_render, true, "SmartFX")
-                                .changed()
-                            {
-                                self.close_live_session();
-                            }
-                        });
                         if let Some(advertised) = self.smart_render_advertised {
                             ui.weak(if advertised { "advertised: SmartFX" } else { "advertised: Classic" });
                             if self.smart_render != advertised {
-                                ui.colored_label(egui::Color32::from_rgb(230, 180, 60), "unsupported override: render blocked");
+                                ui.colored_label(egui::Color32::from_rgb(230, 180, 60), "manual override");
                             }
                         }
                     });
