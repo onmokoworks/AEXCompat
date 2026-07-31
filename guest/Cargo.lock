@@ -47,6 +47,7 @@ dependencies = [
 name = "aex-wgpu-compute"
 version = "0.1.0"
 dependencies = [
+ "naga",
  "pollster",
  "thiserror",
  "wgpu",
@@ -1332,6 +1333,7 @@ dependencies = [
  "document-features",
  "js-sys",
  "log",
+ "naga",
  "parking_lot",
  "profiling",
  "raw-window-handle",
