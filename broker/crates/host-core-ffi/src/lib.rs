@@ -13,7 +13,8 @@ use aexcompat_host_core::handle::{HandleKind, HandleRegistry, OwnerId};
 use aexcompat_host_core::report::{HostReport, HostReportSnapshot, ReportCounters, ReportPhase};
 use aexcompat_host_core::scene::{
     HostSceneIdentity, HostSceneIdentityAbiDescriptorV1, HostSceneOwnerRelation,
-    HostSceneOwnerRelationAbiDescriptorV1,
+    HostSceneOwnerRelationAbiDescriptorV1, HostSceneTopologyAbiDescriptorV1,
+    HostSceneTopologySnapshot, HostSceneTopologySummary,
 };
 use aexcompat_host_core::session::{HostSession, SessionState};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +31,10 @@ pub static AEX_HOST_CORE_SCENE_IDENTITY_ABI_DESCRIPTOR_V1: HostSceneIdentityAbiD
 #[unsafe(export_name = "aex_host_core_scene_owner_relation_abi_descriptor_v1")]
 pub static AEX_HOST_CORE_SCENE_OWNER_RELATION_ABI_DESCRIPTOR_V1:
     HostSceneOwnerRelationAbiDescriptorV1 = HostSceneOwnerRelationAbiDescriptorV1::current();
+
+#[unsafe(export_name = "aex_host_core_scene_topology_abi_descriptor_v1")]
+pub static AEX_HOST_CORE_SCENE_TOPOLOGY_ABI_DESCRIPTOR_V1: HostSceneTopologyAbiDescriptorV1 =
+    HostSceneTopologyAbiDescriptorV1::current();
 
 struct SessionRecord {
     session: HostSession,
@@ -158,6 +163,18 @@ unsafe fn read_scene_owner_relation(
     let relation = unsafe { relation.read() };
     relation.validate()?;
     Ok(relation)
+}
+
+unsafe fn read_scene_topology_snapshot(
+    snapshot: *const HostSceneTopologySnapshot,
+    operation: &'static str,
+) -> Result<HostSceneTopologySnapshot, HostError> {
+    if snapshot.is_null() {
+        return Err(HostError::new(HostErrorCode::InvalidArgument, operation));
+    }
+    // SAFETY: The thin C++ adapter owns pointer validity and places this read
+    // inside its SEH frame. The copied value contains no pointer.
+    Ok(unsafe { snapshot.read() })
 }
 
 fn create_session(context: HostCallContext) -> CallOutcome {
@@ -603,6 +620,39 @@ pub unsafe extern "C" fn aex_host_core_scene_owner_relation_match_v1(
     }
 }
 
+/// Validates and summarizes one bounded C++-owned topology snapshot.
+///
+/// # Safety
+///
+/// `snapshot` and `summary` must be aligned and valid for one complete read or
+/// write. The native adapter must place the call inside its Windows SEH
+/// boundary. `summary` is cleared before any input validation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aex_host_core_scene_topology_summarize_v1(
+    snapshot: *const HostSceneTopologySnapshot,
+    summary: *mut HostSceneTopologySummary,
+) -> i32 {
+    if summary.is_null() {
+        return HostErrorCode::InvalidArgument as i32;
+    }
+    // SAFETY: The caller provides one writable summary and the native adapter
+    // contains pointer faults with SEH.
+    unsafe { summary.write(HostSceneTopologySummary::zeroed()) };
+    match contain_panic("ffi_scene_topology_summarize", || {
+        let snapshot =
+            unsafe { read_scene_topology_snapshot(snapshot, "read_scene_topology_snapshot") }?;
+        snapshot.calculate_summary()
+    }) {
+        Ok(calculated) => {
+            // SAFETY: The output pointer was checked above and remains valid
+            // for the duration of this synchronous call.
+            unsafe { summary.write(calculated) };
+            HostErrorCode::Ok as i32
+        }
+        Err(error) => error.code() as i32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +671,10 @@ mod tests {
         assert_eq!(
             AEX_HOST_CORE_SCENE_OWNER_RELATION_ABI_DESCRIPTOR_V1,
             HostSceneOwnerRelationAbiDescriptorV1::current()
+        );
+        assert_eq!(
+            AEX_HOST_CORE_SCENE_TOPOLOGY_ABI_DESCRIPTOR_V1,
+            HostSceneTopologyAbiDescriptorV1::current()
         );
     }
 
@@ -670,6 +724,48 @@ mod tests {
             );
             assert_eq!(
                 aex_host_core_scene_owner_relation_match_v1(std::ptr::null(), &candidate),
+                HostErrorCode::InvalidArgument as i32
+            );
+        }
+    }
+
+    #[test]
+    fn exported_scene_topology_summary_is_value_only_and_fail_closed() {
+        use aexcompat_host_core::scene::{HostSceneTopologyEntry, object_kind};
+
+        let zero = HostSceneIdentity::new(0, 0, 0, object_kind::NONE);
+        let project = HostSceneIdentity::new(17, 17, 1, object_kind::PROJECT);
+        let item = HostSceneIdentity::new(17, 101, 1, object_kind::ITEM);
+        let mut snapshot = HostSceneTopologySnapshot::empty(17);
+        snapshot.entry_count = 2;
+        snapshot.entries[0] =
+            HostSceneTopologyEntry::new(HostSceneOwnerRelation::new(project, zero), -1);
+        snapshot.entries[1] =
+            HostSceneTopologyEntry::new(HostSceneOwnerRelation::new(item, project), 0);
+        let mut summary = HostSceneTopologySummary::zeroed();
+
+        unsafe {
+            assert_eq!(
+                aex_host_core_scene_topology_summarize_v1(&snapshot, &mut summary),
+                HostErrorCode::Ok as i32
+            );
+            assert_eq!(summary.object_count, 2);
+            assert_eq!(summary.edge_count, 1);
+
+            snapshot.entry_count =
+                aexcompat_host_core::scene::HOST_SCENE_TOPOLOGY_CAPACITY as u32 + 1;
+            summary.fingerprint = 99;
+            assert_eq!(
+                aex_host_core_scene_topology_summarize_v1(&snapshot, &mut summary),
+                HostErrorCode::CapacityExceeded as i32
+            );
+            assert_eq!(summary, HostSceneTopologySummary::zeroed());
+            assert_eq!(
+                aex_host_core_scene_topology_summarize_v1(std::ptr::null(), &mut summary,),
+                HostErrorCode::InvalidArgument as i32
+            );
+            assert_eq!(
+                aex_host_core_scene_topology_summarize_v1(&snapshot, std::ptr::null_mut(),),
                 HostErrorCode::InvalidArgument as i32
             );
         }

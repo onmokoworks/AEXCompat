@@ -219,12 +219,48 @@ reports, or sessions. Production worker routing remains unchanged, including
 every Issue #98 path. It does not require After Effects and does not compare
 pixels.
 
+## Phase 7 bounded scene topology state gate (Issue #632)
+
+Phase 7 is the first Rust scene slice that processes a complete state bundle
+rather than comparing one identity or owner edge. C++ projects up to sixteen
+real Registry snapshots into a fixed-capacity, pointer-free topology value.
+Each entry contains only the Phase 6 object-to-owner relation, the existing
+`ObjectSnapshot::local_index`, and a required-zero reserved field. A nonzero
+entry count above the fixed capacity is classified as capacity exceeded; Rust
+does not inspect or truncate the entries in that case.
+
+Rust validates the whole snapshot before producing a summary. The bundle must
+contain exactly one project root, remain within one project, use unique object
+identities, contain every non-root owner, contain no ownership cycle, and use
+unique `(owner, object kind, local_index)` sibling slots. Unused capacity and
+all reserved bytes must be zero. The canonical summary contains project,
+object, edge, and root counts plus an enumeration-order-independent topology
+fingerprint. Hash equality is never the only success gate: the native test
+compares every structural classification and all normalized summary fields.
+
+The standalone C++ dual-run extracts project/item/composition/layer values
+from the real `scene_model::Registry`. An independent C++ oracle is compared
+with the Rust calculation for the baseline topology and a reversed
+enumeration, after a successful composition invalidation with propagated owner
+generation, after a layer `local_index` reorder, and after a rejected mutation
+that must preserve the summary. It separately rejects capacity overflow,
+duplicate identity, missing and cross-project owner, cycle, sibling-index
+collision, malformed reserved state, and invalid local indices. The topology
+descriptor is copied and validated under SEH before the function is resolved
+or cast; Rust panic containment remains inside the exported function.
+
+The C++ Registry remains authoritative for storage, ownership, and mutation.
+This phase does not change Registry source, stream/keyframe/parameter/world
+values, pixel data, reports, sessions, or any production worker path.
+Production worker routing remains unchanged, including Issue #98. It does not
+require After Effects and does not compare pixels.
+
 ## Later phases
 
 1. Define the next bounded value-only scene/world/parameter payload beyond
-   the Phase 6 owner edge and run it beside the C++ owner. Compare only the
-   normalized fields owned by that slice; do not require pixel identity when
-   the phase does not render.
+   the Phase 7 topology summary and run it beside the C++ owner. Compare only
+   the normalized fields owned by that slice; do not require pixel identity
+   when the phase does not render.
 2. Add an explicitly opt-in worker dual-run call site only after its ownership
    and resident-session dependencies no longer overlap #26 or #98. Any
    mismatch must fail that migration gate without changing production output.
