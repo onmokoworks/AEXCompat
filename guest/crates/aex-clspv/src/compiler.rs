@@ -180,6 +180,15 @@ impl CompileRequest {
     pub fn guest_options(&self) -> &[String] {
         &self.guest_options
     }
+
+    /// Returns the complete canonical clspv option vector, including the
+    /// crate-owned fixed ABI options.
+    ///
+    /// Callers admitting precompiled artifacts should use this method instead
+    /// of duplicating the fixed option prefix.
+    pub fn normalized_options(&self) -> Result<Vec<String>, CompilerError> {
+        canonical_options_from_guest(&self.guest_options)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -190,9 +199,35 @@ pub struct CompilerOutput {
     compiler_identity: CompilerIdentity,
     normalized_options: Vec<String>,
     invocation_argv: Vec<String>,
+    source_sha256: [u8; 32],
 }
 
 impl CompilerOutput {
+    /// Wraps an externally produced compiler artifact in the same metadata
+    /// representation as [`PinnedCompiler::compile`].
+    ///
+    /// This performs only the basic SPIR-V container checks shared with the
+    /// compiler runner. The returned output must still enter the strict
+    /// reflection and Naga validation pipeline before dispatch.
+    pub fn from_precompiled(
+        raw_spirv: impl Into<Vec<u8>>,
+        request: &CompileRequest,
+        compiler_identity: CompilerIdentity,
+    ) -> Result<Self, CompilerError> {
+        let normalized_options = request.normalized_options()?;
+        let spirv = raw_spirv.into();
+        validate_spirv_container(&spirv)?;
+        Ok(Self {
+            spirv,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            compiler_identity,
+            normalized_options,
+            invocation_argv: Vec::new(),
+            source_sha256: Sha256::digest(request.source()).into(),
+        })
+    }
+
     pub fn spirv(&self) -> &[u8] {
         &self.spirv
     }
@@ -215,6 +250,10 @@ impl CompilerOutput {
 
     pub fn normalized_options(&self) -> &[String] {
         &self.normalized_options
+    }
+
+    pub const fn source_sha256(&self) -> &[u8; 32] {
+        &self.source_sha256
     }
 
     /// Diagnostic only. Temporary input/output paths in this vector are not cache-key material.
@@ -489,8 +528,7 @@ impl PinnedCompiler {
                 limit: self.limits.max_source_bytes,
             });
         }
-        let normalized_guest_options = normalize_guest_options(&request.guest_options)?;
-        let normalized_options = canonical_options_from_normalized_guest(&normalized_guest_options);
+        let normalized_options = request.normalized_options()?;
         self.verify_identity()?;
 
         let temp = tempfile::Builder::new()
@@ -650,6 +688,7 @@ impl PinnedCompiler {
             compiler_identity: self.identity.clone(),
             normalized_options,
             invocation_argv: argv,
+            source_sha256: Sha256::digest(request.source()).into(),
         })
     }
 
@@ -1117,6 +1156,70 @@ mod tests {
         let identity = CompilerIdentity::for_precompiled(digest);
         assert_eq!(identity.binary_sha256(), digest);
         assert_eq!(identity.executable_path(), None);
+    }
+
+    #[test]
+    fn request_exposes_canonical_options_and_rejects_unsupported_options() {
+        let request = CompileRequest::new(
+            b"kernel source".to_vec(),
+            vec![
+                "-cl-fast-relaxed-math".to_owned(),
+                "-cl-single-precision-constant".to_owned(),
+            ],
+        );
+        assert_eq!(
+            request.normalized_options().unwrap(),
+            [
+                "-cl-std=CL1.2",
+                "-cl-kernel-arg-info",
+                "-spv-version=1.0",
+                "-pod-ubo",
+                "-cluster-pod-kernel-args=1",
+                "-cl-single-precision-constant",
+                "-cl-fast-relaxed-math",
+            ]
+        );
+
+        let unsupported = CompileRequest::new(Vec::new(), vec!["-I/tmp/injected".to_owned()])
+            .normalized_options();
+        assert!(matches!(
+            unsupported,
+            Err(CompilerError::UnsupportedGuestOption(option))
+                if option == "-I/tmp/injected"
+        ));
+    }
+
+    #[test]
+    fn precompiled_output_uses_request_metadata_and_shared_container_validation() {
+        let request = CompileRequest::new(
+            b"kernel source".to_vec(),
+            vec!["-cl-fast-relaxed-math".to_owned()],
+        );
+        let identity = CompilerIdentity::for_precompiled([0x42; 32]);
+        let output =
+            CompilerOutput::from_precompiled(minimal_spirv(), &request, identity.clone()).unwrap();
+        assert_eq!(output.spirv(), minimal_spirv());
+        assert_eq!(output.compiler_identity(), &identity);
+        assert_eq!(
+            output.normalized_options(),
+            request.normalized_options().unwrap()
+        );
+        assert_eq!(
+            output.source_sha256(),
+            &<[u8; 32]>::from(Sha256::digest(request.source()))
+        );
+        assert!(output.stdout().is_empty());
+        assert!(output.stderr().is_empty());
+        assert!(output.invocation_argv().is_empty());
+
+        assert!(matches!(
+            CompilerOutput::from_precompiled(
+                b"not spirv".to_vec(),
+                &request,
+                CompilerIdentity::for_precompiled([0x42; 32]),
+            ),
+            Err(CompilerError::InvalidSpirv(_))
+        ));
     }
 
     #[cfg(unix)]

@@ -9,8 +9,8 @@ use std::{error::Error, fmt};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CompileRequest, CompilerError, CompilerIdentity, NagaError, PinnedCompiler, PreparedEntryPoint,
-    ReflectionError, SpirvModule, SpirvReflection, prepare_entry_point,
+    CompileRequest, CompilerError, CompilerIdentity, CompilerOutput, NagaError, PinnedCompiler,
+    PreparedEntryPoint, ReflectionError, SpirvModule, SpirvReflection, prepare_entry_point,
     prepare_entry_point_for_dispatch,
 };
 
@@ -48,6 +48,18 @@ pub struct ArtifactProvenance {
 }
 
 impl ArtifactProvenance {
+    /// Derives exact cache provenance from an opaque compiler output. Both
+    /// local compilation and [`CompilerOutput::from_precompiled`] populate
+    /// these fields from a [`CompileRequest`], so callers never need to copy
+    /// the crate-owned fixed clspv options.
+    pub fn from_compiler_output(output: &CompilerOutput) -> Self {
+        Self {
+            source: SourceIdentity::from_sha256(*output.source_sha256()),
+            normalized_options: output.normalized_options().to_vec(),
+            compiler: output.compiler_identity().clone(),
+        }
+    }
+
     pub fn cache_key(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(CACHE_KEY_DOMAIN);
@@ -72,6 +84,16 @@ impl ArtifactProvenance {
 pub struct PrecompiledInput {
     pub raw_spirv: Vec<u8>,
     pub provenance: ArtifactProvenance,
+}
+
+impl From<CompilerOutput> for PrecompiledInput {
+    fn from(output: CompilerOutput) -> Self {
+        let provenance = ArtifactProvenance::from_compiler_output(&output);
+        Self {
+            raw_spirv: output.into_spirv(),
+            provenance,
+        }
+    }
 }
 
 /// Strictly parsed and Naga-validated SPIR-V ready for per-dispatch
@@ -177,16 +199,8 @@ pub fn compile_and_validate(
     compiler: &PinnedCompiler,
     request: &CompileRequest,
 ) -> Result<ValidatedArtifact, PipelineError> {
-    let source = SourceIdentity::from_source(request.source());
     let output = compiler.compile(request)?;
-    validate_precompiled(PrecompiledInput {
-        raw_spirv: output.spirv().to_vec(),
-        provenance: ArtifactProvenance {
-            source,
-            normalized_options: output.normalized_options().to_vec(),
-            compiler: output.compiler_identity().clone(),
-        },
-    })
+    validate_precompiled(output.into())
 }
 
 /// Strictly validate an untrusted cached compiler result.
@@ -273,5 +287,33 @@ mod tests {
         assert_eq!(base.cache_key(), base.clone().cache_key());
         assert_ne!(base.cache_key(), changed.cache_key());
         assert_eq!(base.cache_key_hex().len(), 64);
+    }
+
+    #[test]
+    fn compiler_output_carries_precompiled_provenance_without_option_duplication() {
+        let request = CompileRequest::new(
+            b"kernel source".to_vec(),
+            vec!["-cl-fast-relaxed-math".to_owned()],
+        );
+        let identity = CompilerIdentity::from_binary_sha256([7; 32]);
+        let raw_spirv = vec![
+            0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let output =
+            CompilerOutput::from_precompiled(raw_spirv.clone(), &request, identity.clone())
+                .unwrap();
+        let input = PrecompiledInput::from(output);
+
+        assert_eq!(input.raw_spirv, raw_spirv);
+        assert_eq!(
+            input.provenance.source,
+            SourceIdentity::from_source(request.source())
+        );
+        assert_eq!(
+            input.provenance.normalized_options,
+            request.normalized_options().unwrap()
+        );
+        assert_eq!(input.provenance.compiler, identity);
     }
 }
