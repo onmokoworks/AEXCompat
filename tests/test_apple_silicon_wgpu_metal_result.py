@@ -1,6 +1,6 @@
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -276,7 +276,7 @@ def test_cpu_regression_commands_and_validation_status_are_explicit():
     result = _load()
     cpu = result["cpu_non_regression"]
     assert cpu["fixture_path_kind"] == "external_local_provenance"
-    assert Path(cpu["fixture"]).is_absolute()
+    assert PurePosixPath(cpu["fixture"]).is_absolute()
     assert cpu["fixture"].endswith("/OLM as/plugins_2025/OLMBlur.aex")
     assert SHA256.fullmatch(cpu["fixture_sha256"])
     assert cpu["input_path"] == result["fixture"]["input"]["path"]
