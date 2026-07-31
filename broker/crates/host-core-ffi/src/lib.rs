@@ -12,13 +12,15 @@ use aexcompat_host_core::error::{HostError, HostErrorCode};
 use aexcompat_host_core::handle::{HandleKind, HandleRegistry, OwnerId};
 use aexcompat_host_core::report::{HostReport, HostReportSnapshot, ReportCounters, ReportPhase};
 use aexcompat_host_core::scene::{
-    HostSceneIdentity, HostSceneIdentityAbiDescriptorV1, HostSceneOwnerRelation,
-    HostSceneOwnerRelationAbiDescriptorV1, HostSceneTopologyAbiDescriptorV1,
-    HostSceneTopologySnapshot, HostSceneTopologySummary,
+    HostOwnedSceneTopologySnapshot, HostSceneIdentity, HostSceneIdentityAbiDescriptorV1,
+    HostSceneOwnerRelation, HostSceneOwnerRelationAbiDescriptorV1,
+    HostSceneTopologyAbiDescriptorV1, HostSceneTopologyEntry, HostSceneTopologySnapshot,
+    HostSceneTopologySummary,
 };
 use aexcompat_host_core::session::{HostSession, SessionState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::thread::{self, ThreadId};
 
 #[unsafe(export_name = "aex_host_core_abi_descriptor_v1")]
 pub static AEX_HOST_CORE_ABI_DESCRIPTOR_V1: HostCoreAbiDescriptorV1 =
@@ -41,9 +43,16 @@ struct SessionRecord {
     caller_thread_token: u64,
 }
 
+struct SceneSnapshotRecord {
+    snapshot: HostOwnedSceneTopologySnapshot,
+    caller_thread_token: u64,
+    origin_thread: ThreadId,
+}
+
 #[derive(Default)]
 struct AdapterState {
     sessions: HandleRegistry<SessionRecord>,
+    scene_snapshots: HandleRegistry<SceneSnapshotRecord>,
 }
 
 #[derive(Clone, Copy)]
@@ -175,6 +184,80 @@ unsafe fn read_scene_topology_snapshot(
     // SAFETY: The thin C++ adapter owns pointer validity and places this read
     // inside its SEH frame. The copied value contains no pointer.
     Ok(unsafe { snapshot.read() })
+}
+
+fn validate_scene_snapshot_thread(
+    record: &SceneSnapshotRecord,
+    context: HostCallContext,
+    operation: &'static str,
+) -> Result<(), HostError> {
+    if record.caller_thread_token != context.caller_thread_token
+        || record.origin_thread != thread::current().id()
+    {
+        return Err(HostError::new(HostErrorCode::WrongThread, operation));
+    }
+    Ok(())
+}
+
+fn create_owned_scene_snapshot(
+    context: HostCallContext,
+    snapshot: HostSceneTopologySnapshot,
+) -> Result<HostOpaqueHandle, HostError> {
+    let owner = OwnerId::new(context.session_id)?;
+    let snapshot = HostOwnedSceneTopologySnapshot::from_snapshot(&snapshot)?;
+    let record = SceneSnapshotRecord {
+        snapshot,
+        caller_thread_token: context.caller_thread_token,
+        origin_thread: thread::current().id(),
+    };
+    lock_state("create_owned_scene_snapshot")?
+        .scene_snapshots
+        .insert(owner, HandleKind::Scene, record)
+}
+
+fn query_owned_scene_snapshot(
+    context: HostCallContext,
+    handle: HostOpaqueHandle,
+    index: u32,
+) -> Result<HostSceneTopologyEntry, HostError> {
+    let owner = OwnerId::new(context.session_id)?;
+    let state = lock_state("query_owned_scene_snapshot")?;
+    let record = state
+        .scene_snapshots
+        .get(handle, owner, HandleKind::Scene)?;
+    validate_scene_snapshot_thread(record, context, "query_owned_scene_snapshot_thread")?;
+    record.snapshot.entry(index)
+}
+
+fn summarize_owned_scene_snapshot(
+    context: HostCallContext,
+    handle: HostOpaqueHandle,
+) -> Result<HostSceneTopologySummary, HostError> {
+    let owner = OwnerId::new(context.session_id)?;
+    let state = lock_state("summarize_owned_scene_snapshot")?;
+    let record = state
+        .scene_snapshots
+        .get(handle, owner, HandleKind::Scene)?;
+    validate_scene_snapshot_thread(record, context, "summarize_owned_scene_snapshot_thread")?;
+    Ok(record.snapshot.summary())
+}
+
+fn destroy_owned_scene_snapshot(
+    context: HostCallContext,
+    handle: HostOpaqueHandle,
+) -> Result<(), HostError> {
+    let owner = OwnerId::new(context.session_id)?;
+    let mut state = lock_state("destroy_owned_scene_snapshot")?;
+    {
+        let record = state
+            .scene_snapshots
+            .get(handle, owner, HandleKind::Scene)?;
+        validate_scene_snapshot_thread(record, context, "destroy_owned_scene_snapshot_thread")?;
+    }
+    state
+        .scene_snapshots
+        .remove(handle, owner, HandleKind::Scene)?;
+    Ok(())
 }
 
 fn create_session(context: HostCallContext) -> CallOutcome {
@@ -653,6 +736,116 @@ pub unsafe extern "C" fn aex_host_core_scene_topology_summarize_v1(
     }
 }
 
+/// Copies one validated topology value into Rust-owned immutable state.
+///
+/// # Safety
+///
+/// All pointers must be aligned and valid for their complete value. The native
+/// adapter must contain pointer faults with SEH. `handle` is cleared before
+/// any input is inspected.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aex_host_core_scene_topology_snapshot_create_v1(
+    context: *const HostCallContext,
+    snapshot: *const HostSceneTopologySnapshot,
+    handle: *mut HostOpaqueHandle,
+) -> i32 {
+    if handle.is_null() {
+        return HostErrorCode::InvalidArgument as i32;
+    }
+    unsafe { handle.write(HostOpaqueHandle(0)) };
+    match contain_panic("ffi_scene_topology_snapshot_create", || {
+        let context = unsafe { read_context(context, "read_scene_snapshot_create_context") }?;
+        let snapshot =
+            unsafe { read_scene_topology_snapshot(snapshot, "read_scene_snapshot_create_value") }?;
+        create_owned_scene_snapshot(context, snapshot)
+    }) {
+        Ok(created) => {
+            unsafe { handle.write(created) };
+            HostErrorCode::Ok as i32
+        }
+        Err(error) => error.code() as i32,
+    }
+}
+
+/// Returns one canonical entry from a Rust-owned topology snapshot.
+///
+/// # Safety
+///
+/// `context` and `entry` must be valid for one complete read or write and the
+/// native adapter must contain pointer faults with SEH. `entry` is always
+/// cleared before validation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aex_host_core_scene_topology_snapshot_query_v1(
+    context: *const HostCallContext,
+    handle: HostOpaqueHandle,
+    index: u32,
+    entry: *mut HostSceneTopologyEntry,
+) -> i32 {
+    if entry.is_null() {
+        return HostErrorCode::InvalidArgument as i32;
+    }
+    unsafe { entry.write(HostSceneTopologyEntry::zeroed()) };
+    match contain_panic("ffi_scene_topology_snapshot_query", || {
+        let context = unsafe { read_context(context, "read_scene_snapshot_query_context") }?;
+        query_owned_scene_snapshot(context, handle, index)
+    }) {
+        Ok(found) => {
+            unsafe { entry.write(found) };
+            HostErrorCode::Ok as i32
+        }
+        Err(error) => error.code() as i32,
+    }
+}
+
+/// Returns the summary stored when the Rust-owned snapshot was created.
+///
+/// # Safety
+///
+/// `context` and `summary` must be valid for one complete read or write and
+/// the native adapter must contain pointer faults with SEH. `summary` is
+/// always cleared before validation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aex_host_core_scene_topology_snapshot_summary_v1(
+    context: *const HostCallContext,
+    handle: HostOpaqueHandle,
+    summary: *mut HostSceneTopologySummary,
+) -> i32 {
+    if summary.is_null() {
+        return HostErrorCode::InvalidArgument as i32;
+    }
+    unsafe { summary.write(HostSceneTopologySummary::zeroed()) };
+    match contain_panic("ffi_scene_topology_snapshot_summary", || {
+        let context = unsafe { read_context(context, "read_scene_snapshot_summary_context") }?;
+        summarize_owned_scene_snapshot(context, handle)
+    }) {
+        Ok(stored) => {
+            unsafe { summary.write(stored) };
+            HostErrorCode::Ok as i32
+        }
+        Err(error) => error.code() as i32,
+    }
+}
+
+/// Destroys one Rust-owned topology snapshot.
+///
+/// # Safety
+///
+/// `context` must be valid for one complete read and the native adapter must
+/// contain pointer faults with SEH.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aex_host_core_scene_topology_snapshot_destroy_v1(
+    context: *const HostCallContext,
+    handle: HostOpaqueHandle,
+) -> i32 {
+    match contain_panic("ffi_scene_topology_snapshot_destroy", || {
+        let context = unsafe { read_context(context, "read_scene_snapshot_destroy_context") }?;
+        destroy_owned_scene_snapshot(context, handle)
+    }) {
+        Ok(()) => HostErrorCode::Ok as i32,
+        Err(error) => error.code() as i32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,6 +962,200 @@ mod tests {
                 HostErrorCode::InvalidArgument as i32
             );
         }
+    }
+
+    #[test]
+    fn rust_owned_scene_snapshot_lifecycle_is_detached_typed_and_thread_bound() {
+        use aexcompat_host_core::scene::{HostSceneTopologyEntry, object_kind};
+
+        let zero = HostSceneIdentity::new(0, 0, 0, object_kind::NONE);
+        let project = HostSceneIdentity::new(81, 81, 1, object_kind::PROJECT);
+        let composition = HostSceneIdentity::new(81, 900, 2, object_kind::COMPOSITION);
+        let layer = HostSceneIdentity::new(81, 700, 4, object_kind::LAYER);
+        let mut input = HostSceneTopologySnapshot::empty(81);
+        input.entry_count = 3;
+        input.entries[0] =
+            HostSceneTopologyEntry::new(HostSceneOwnerRelation::new(layer, composition), 0);
+        input.entries[1] =
+            HostSceneTopologyEntry::new(HostSceneOwnerRelation::new(project, zero), -1);
+        input.entries[2] =
+            HostSceneTopologyEntry::new(HostSceneOwnerRelation::new(composition, project), 0);
+        let expected_summary = input.calculate_summary().unwrap();
+        let context = HostCallContext::new(81_001, 81_101);
+        let mut scene_handle = HostOpaqueHandle(u64::MAX);
+
+        unsafe {
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_create_v1(
+                    &context,
+                    &input,
+                    &mut scene_handle,
+                ),
+                HostErrorCode::Ok as i32
+            );
+        }
+        assert_ne!(scene_handle, HostOpaqueHandle(0));
+
+        input = HostSceneTopologySnapshot::empty(999);
+        assert_eq!(input.entry_count, 0);
+        let mut entry =
+            HostSceneTopologyEntry::new(HostSceneOwnerRelation::new(layer, composition), i32::MAX);
+        let mut summary = HostSceneTopologySummary::zeroed();
+        unsafe {
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_query_v1(
+                    &context,
+                    scene_handle,
+                    0,
+                    &mut entry,
+                ),
+                HostErrorCode::Ok as i32
+            );
+            assert_eq!(entry.relation.object, project);
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_summary_v1(
+                    &context,
+                    scene_handle,
+                    &mut summary,
+                ),
+                HostErrorCode::Ok as i32
+            );
+        }
+        assert_eq!(summary, expected_summary);
+
+        entry.local_index = i32::MAX;
+        unsafe {
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_query_v1(
+                    &context,
+                    scene_handle,
+                    3,
+                    &mut entry,
+                ),
+                HostErrorCode::InvalidArgument as i32
+            );
+        }
+        assert_eq!(entry, HostSceneTopologyEntry::zeroed());
+
+        let wrong_logical_thread = HostCallContext::new(81_001, 81_102);
+        summary = expected_summary;
+        unsafe {
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_summary_v1(
+                    &wrong_logical_thread,
+                    scene_handle,
+                    &mut summary,
+                ),
+                HostErrorCode::WrongThread as i32
+            );
+        }
+        assert_eq!(summary, HostSceneTopologySummary::zeroed());
+
+        let foreign_owner = HostCallContext::new(81_002, 81_101);
+        unsafe {
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_destroy_v1(&foreign_owner, scene_handle),
+                HostErrorCode::WrongOwner as i32
+            );
+        }
+
+        let foreign_thread_code = std::thread::spawn(move || {
+            let mut foreign_entry = HostSceneTopologyEntry::new(
+                HostSceneOwnerRelation::new(layer, composition),
+                i32::MAX,
+            );
+            let code = unsafe {
+                aex_host_core_scene_topology_snapshot_query_v1(
+                    &context,
+                    scene_handle,
+                    0,
+                    &mut foreign_entry,
+                )
+            };
+            (code, foreign_entry)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(foreign_thread_code.0, HostErrorCode::WrongThread as i32);
+        assert_eq!(foreign_thread_code.1, HostSceneTopologyEntry::zeroed());
+
+        let mut session_handle = HostOpaqueHandle(0);
+        let mut status = HostCallStatus::success(0);
+        let mut report = HostReport::passed(0, ReportPhase::Session, ReportCounters::default())
+            .snapshot(HOST_CORE_ABI_VERSION);
+        unsafe {
+            assert_eq!(
+                aex_host_core_session_create_v1(
+                    &context,
+                    &mut session_handle,
+                    &mut status,
+                    &mut report,
+                ),
+                HostErrorCode::Ok as i32
+            );
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_destroy_v1(&context, session_handle),
+                HostErrorCode::InvalidHandle as i32
+            );
+            assert_eq!(
+                aex_host_core_session_open_v1(&context, session_handle, &mut status, &mut report,),
+                HostErrorCode::Ok as i32
+            );
+            assert_eq!(
+                aex_host_core_session_close_v1(&context, scene_handle, &mut status, &mut report,),
+                HostErrorCode::InvalidHandle as i32
+            );
+            assert_eq!(
+                aex_host_core_session_close_v1(&context, session_handle, &mut status, &mut report,),
+                HostErrorCode::Ok as i32
+            );
+            assert_eq!(
+                aex_host_core_session_dispose_v1(
+                    &context,
+                    session_handle,
+                    &mut status,
+                    &mut report,
+                ),
+                HostErrorCode::Ok as i32
+            );
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_summary_v1(
+                    &context,
+                    scene_handle,
+                    &mut summary,
+                ),
+                HostErrorCode::Ok as i32
+            );
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_destroy_v1(&context, scene_handle),
+                HostErrorCode::Ok as i32
+            );
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_query_v1(
+                    &context,
+                    scene_handle,
+                    0,
+                    &mut entry,
+                ),
+                HostErrorCode::StaleHandle as i32
+            );
+            assert_eq!(entry, HostSceneTopologyEntry::zeroed());
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_destroy_v1(&context, scene_handle),
+                HostErrorCode::StaleHandle as i32
+            );
+        }
+
+        let mut overflow = HostSceneTopologySnapshot::empty(81);
+        overflow.entry_count = aexcompat_host_core::scene::HOST_SCENE_TOPOLOGY_CAPACITY as u32 + 1;
+        let mut rejected = HostOpaqueHandle(u64::MAX);
+        unsafe {
+            assert_eq!(
+                aex_host_core_scene_topology_snapshot_create_v1(&context, &overflow, &mut rejected,),
+                HostErrorCode::CapacityExceeded as i32
+            );
+        }
+        assert_eq!(rejected, HostOpaqueHandle(0));
     }
 
     #[test]

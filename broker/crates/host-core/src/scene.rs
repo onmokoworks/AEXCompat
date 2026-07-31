@@ -16,6 +16,7 @@ pub const HOST_SCENE_OWNER_RELATION_CAPABILITY_MATCH_V1: u64 = 1;
 pub const HOST_SCENE_TOPOLOGY_ABI_VERSION: u32 = 1;
 pub const HOST_SCENE_TOPOLOGY_ABI_DESCRIPTOR_MAGIC: u64 = 0x4145_5854_4f50_4f31;
 pub const HOST_SCENE_TOPOLOGY_CAPABILITY_SUMMARY_V1: u64 = 1;
+pub const HOST_SCENE_TOPOLOGY_CAPABILITY_OWNED_SNAPSHOT_V1: u64 = 1 << 1;
 pub const HOST_SCENE_TOPOLOGY_CAPACITY: usize = 16;
 
 /// Numeric values frozen by `scene_model::ObjectKind` in Issue #26 / PR #571.
@@ -456,6 +457,59 @@ impl HostSceneTopologySummary {
     }
 }
 
+/// Rust-owned, immutable, canonical copy of one validated topology snapshot.
+///
+/// The source C ABI value is copied synchronously. No caller pointer is stored,
+/// and valid entries are sorted by identity so later queries are independent
+/// of the C++ registry's enumeration order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostOwnedSceneTopologySnapshot {
+    entries: [HostSceneTopologyEntry; HOST_SCENE_TOPOLOGY_CAPACITY],
+    entry_count: u32,
+    summary: HostSceneTopologySummary,
+}
+
+impl HostOwnedSceneTopologySnapshot {
+    pub fn from_snapshot(snapshot: &HostSceneTopologySnapshot) -> Result<Self, HostError> {
+        let summary = snapshot.calculate_summary()?;
+        let entry_count = snapshot.entry_count as usize;
+        let mut entries = [HostSceneTopologyEntry::zeroed(); HOST_SCENE_TOPOLOGY_CAPACITY];
+        entries[..entry_count].copy_from_slice(&snapshot.entries[..entry_count]);
+        entries[..entry_count].sort_unstable_by_key(|entry| {
+            let object = entry.relation.object;
+            (
+                object.project_id,
+                object.object_id,
+                object.generation,
+                object.kind,
+            )
+        });
+        Ok(Self {
+            entries,
+            entry_count: snapshot.entry_count,
+            summary,
+        })
+    }
+
+    pub fn entry(&self, index: u32) -> Result<HostSceneTopologyEntry, HostError> {
+        if index >= self.entry_count {
+            return Err(HostError::new(
+                HostErrorCode::InvalidArgument,
+                "query_owned_scene_topology_index",
+            ));
+        }
+        Ok(self.entries[index as usize])
+    }
+
+    pub const fn summary(&self) -> HostSceneTopologySummary {
+        self.summary
+    }
+
+    pub const fn entry_count(&self) -> u32 {
+        self.entry_count
+    }
+}
+
 /// Dedicated pre-cast descriptor for the one identity value and matcher.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -538,7 +592,8 @@ impl HostSceneTopologyAbiDescriptorV1 {
             summary_alignment: align_of::<HostSceneTopologySummary>() as u32,
             capacity: HOST_SCENE_TOPOLOGY_CAPACITY as u32,
             reserved: 0,
-            capabilities: HOST_SCENE_TOPOLOGY_CAPABILITY_SUMMARY_V1,
+            capabilities: HOST_SCENE_TOPOLOGY_CAPABILITY_SUMMARY_V1
+                | HOST_SCENE_TOPOLOGY_CAPABILITY_OWNED_SNAPSHOT_V1,
         }
     }
 }
@@ -871,6 +926,7 @@ mod tests {
         assert_eq!(
             descriptor.capabilities,
             HOST_SCENE_TOPOLOGY_CAPABILITY_SUMMARY_V1
+                | HOST_SCENE_TOPOLOGY_CAPABILITY_OWNED_SNAPSHOT_V1
         );
 
         let summary = topology_fixture().calculate_summary().unwrap();
@@ -909,6 +965,30 @@ mod tests {
         assert_ne!(
             local_index_changed.calculate_summary().unwrap().fingerprint,
             expected.fingerprint
+        );
+    }
+
+    #[test]
+    fn owned_topology_is_canonical_and_detached_from_the_input_buffer() {
+        let mut snapshot = topology_fixture();
+        snapshot.entries[..snapshot.entry_count as usize].reverse();
+        let expected_summary = snapshot.calculate_summary().unwrap();
+        let owned = HostOwnedSceneTopologySnapshot::from_snapshot(&snapshot).unwrap();
+
+        assert_eq!(owned.entry_count(), 5);
+        assert_eq!(owned.summary(), expected_summary);
+        let object_ids = (0..owned.entry_count())
+            .map(|index| owned.entry(index).unwrap().relation.object.object_id)
+            .collect::<Vec<_>>();
+        assert_eq!(object_ids, vec![7, 100, 1001, 2001, 5001]);
+
+        snapshot = HostSceneTopologySnapshot::empty(99);
+        assert_eq!(snapshot.entry_count, 0);
+        assert_eq!(owned.summary(), expected_summary);
+        assert_eq!(owned.entry(0).unwrap().relation.object.object_id, 7);
+        assert_eq!(
+            owned.entry(owned.entry_count()).unwrap_err().code(),
+            HostErrorCode::InvalidArgument
         );
     }
 

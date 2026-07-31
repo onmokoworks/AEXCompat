@@ -21,6 +21,8 @@
   UINT64_C(0x414558544F504F31)
 #define AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPABILITY_SUMMARY_V1 \
   UINT64_C(1)
+#define AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPABILITY_OWNED_SNAPSHOT_V1 \
+  UINT64_C(2)
 #define AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPACITY 16u
 
 #if defined(_WIN32)
@@ -245,6 +247,30 @@ typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
     const AexHostSceneTopologySnapshot *snapshot,
     AexHostSceneTopologySummary *summary);
 
+typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
+                    *AexHostCoreSceneTopologySnapshotCreateV1Fn)(
+    const AexHostCallContext *context,
+    const AexHostSceneTopologySnapshot *snapshot,
+    AexHostOpaqueHandle *handle);
+
+typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
+                    *AexHostCoreSceneTopologySnapshotQueryV1Fn)(
+    const AexHostCallContext *context,
+    AexHostOpaqueHandle handle,
+    uint32_t index,
+    AexHostSceneTopologyEntry *entry);
+
+typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
+                    *AexHostCoreSceneTopologySnapshotSummaryV1Fn)(
+    const AexHostCallContext *context,
+    AexHostOpaqueHandle handle,
+    AexHostSceneTopologySummary *summary);
+
+typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
+                    *AexHostCoreSceneTopologySnapshotDestroyV1Fn)(
+    const AexHostCallContext *context,
+    AexHostOpaqueHandle handle);
+
 int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_session_create_v1(
     const AexHostCallContext *context,
     AexHostOpaqueHandle *session,
@@ -292,6 +318,30 @@ int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_scene_owner_relation_match_v1(
 int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_scene_topology_summarize_v1(
     const AexHostSceneTopologySnapshot *snapshot,
     AexHostSceneTopologySummary *summary);
+
+int32_t AEXCOMPAT_HOST_CORE_CALL
+aex_host_core_scene_topology_snapshot_create_v1(
+    const AexHostCallContext *context,
+    const AexHostSceneTopologySnapshot *snapshot,
+    AexHostOpaqueHandle *handle);
+
+int32_t AEXCOMPAT_HOST_CORE_CALL
+aex_host_core_scene_topology_snapshot_query_v1(
+    const AexHostCallContext *context,
+    AexHostOpaqueHandle handle,
+    uint32_t index,
+    AexHostSceneTopologyEntry *entry);
+
+int32_t AEXCOMPAT_HOST_CORE_CALL
+aex_host_core_scene_topology_snapshot_summary_v1(
+    const AexHostCallContext *context,
+    AexHostOpaqueHandle handle,
+    AexHostSceneTopologySummary *summary);
+
+int32_t AEXCOMPAT_HOST_CORE_CALL
+aex_host_core_scene_topology_snapshot_destroy_v1(
+    const AexHostCallContext *context,
+    AexHostOpaqueHandle handle);
 
 #if defined(__cplusplus)
 }

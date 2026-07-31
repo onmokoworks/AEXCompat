@@ -401,7 +401,7 @@ int wmain(int argc, wchar_t **argv) {
   reject_descriptor("nonzero topology descriptor reserved must fail closed",
                     incompatible);
   incompatible = descriptor;
-  incompatible.capabilities |= UINT64_C(2);
+  incompatible.capabilities |= UINT64_C(4);
   reject_descriptor("unknown topology capability must fail closed",
                     incompatible);
 

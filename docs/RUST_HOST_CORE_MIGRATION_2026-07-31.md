@@ -255,10 +255,44 @@ values, pixel data, reports, sessions, or any production worker path.
 Production worker routing remains unchanged, including Issue #98. It does not
 require After Effects and does not compare pixels.
 
+## Phase 8 Rust-owned immutable scene topology lifecycle (Issue #634)
+
+Phase 8 converts the Phase 7 borrowed value calculation into the first
+Rust-owned scene state. Create accepts the same fixed-capacity pointer-free
+snapshot, performs the complete Phase 7 validation, sorts its live entries by
+identity, and copies the canonical entries and summary into an immutable Rust
+record. No caller pointer is retained. A canonical entry query and stored
+summary query therefore keep returning the original state after the caller
+reorders or overwrites its input caller buffer.
+
+The record is addressed only through the existing integer
+`AexHostOpaqueHandle`. Its dedicated scene registry namespace is distinct from
+the session registry, so a session handle cannot query or destroy scene state
+and a scene handle cannot mutate session state. Resolution checks the owner ID,
+logical caller-thread token, actual origin thread, handle kind, registry ID,
+slot, and generation. Query-after-destroy and double destroy are stale-handle
+errors; foreign owner or thread calls leave the record alive. Capacity overflow
+is rejected without truncation, and every value output is cleared before input
+validation.
+
+The topology descriptor advertises the owned-snapshot capability before the
+C++ adapter resolves or casts create/query/summary/destroy exports. Each Rust
+export contains panics before returning through C ABI. The thin C++ adapter
+contains SEH and clears handle, entry, or summary outputs on failure. The
+standalone native dual-run builds input from the real C++ Registry, compares
+every canonical entry and the stored summary against an independent C++
+oracle, then reorders and overwrites the caller values to prove Rust ownership.
+
+This is an in-process test-only migration gate. C++ Registry ownership and
+mutation remain unchanged. Production worker routing remains unchanged,
+including Issue #98; no resident, one-shot, or render-session path consumes
+the handle. Stream/keyframe/parameter/world/pixel/report state is outside the
+slice. It does not require After Effects and does not compare pixels.
+
 ## Later phases
 
-1. Define the next bounded value-only scene/world/parameter payload beyond
-   the Phase 7 topology summary and run it beside the C++ owner. Compare only
+1. Define the next bounded scene/world/parameter state owner beyond the Phase
+   8 immutable topology lifecycle and run it beside the C++ owner. Compare only
    the normalized fields owned by that slice; do not require pixel identity
    when the phase does not render.
 2. Add an explicitly opt-in worker dual-run call site only after its ownership
