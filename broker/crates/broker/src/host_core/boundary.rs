@@ -73,7 +73,7 @@ impl HostCallStatus {
         Self {
             abi_version: HOST_CORE_ABI_VERSION,
             struct_size: size_of::<Self>() as u32,
-            code: code as i32,
+            code: code.fail_closed() as i32,
             reserved: 0,
             report_id,
         }
@@ -148,5 +148,12 @@ mod tests {
         let result: Result<(), HostError> =
             contain_panic("test_callback", || panic!("must not cross the boundary"));
         assert_eq!(result.unwrap_err().code(), HostErrorCode::Panic);
+    }
+
+    #[test]
+    fn failure_status_rejects_success_code() {
+        let status = HostCallStatus::failure(HostErrorCode::Ok, 17);
+        assert_eq!(status.code, HostErrorCode::InvalidState as i32);
+        assert_ne!(status.code, HostErrorCode::Ok as i32);
     }
 }

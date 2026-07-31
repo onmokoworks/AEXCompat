@@ -17,6 +17,19 @@ pub enum HostErrorCode {
     CapacityExceeded = 10,
 }
 
+impl HostErrorCode {
+    /// Converts a code used on an error path into a fail-closed value.
+    ///
+    /// `Ok` is a valid success status at the ABI boundary, but it must never
+    /// escape from a failure constructor.
+    pub const fn fail_closed(self) -> Self {
+        match self {
+            Self::Ok => Self::InvalidState,
+            code => code,
+        }
+    }
+}
+
 /// Internal diagnostic. It deliberately carries no raw pointer, host handle,
 /// plugin bytes, or filesystem path.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -27,7 +40,10 @@ pub struct HostError {
 
 impl HostError {
     pub const fn new(code: HostErrorCode, operation: &'static str) -> Self {
-        Self { code, operation }
+        Self {
+            code: code.fail_closed(),
+            operation,
+        }
     }
 
     pub const fn code(&self) -> HostErrorCode {
@@ -68,5 +84,11 @@ mod tests {
         ] {
             assert_ne!(code as i32, HostErrorCode::Ok as i32);
         }
+    }
+
+    #[test]
+    fn error_constructor_rejects_success_code() {
+        let error = HostError::new(HostErrorCode::Ok, "invalid_error");
+        assert_eq!(error.code(), HostErrorCode::InvalidState);
     }
 }
