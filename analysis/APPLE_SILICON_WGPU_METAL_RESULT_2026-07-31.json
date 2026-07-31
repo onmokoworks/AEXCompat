@@ -1,0 +1,381 @@
+{
+  "schema_version": 1,
+  "issue": 615,
+  "observed_utc": "2026-07-31T07:05:22Z",
+  "repository_head": "2935f7ab7de22c0363e6ddd350dc575551a54ef5",
+  "base_head": "8fcd3cfeb1c5267f170407278c3b5060711feec6",
+  "host": {
+    "os": "macOS 15.7.2 (24G325)",
+    "architecture": "arm64",
+    "processor": "Apple M1 Pro"
+  },
+  "fixture": {
+    "path": "target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex",
+    "path_kind": "repository_relative_provenance",
+    "size_bytes": 109568,
+    "sha256": "6ad8f4e0808c1fe2cda1cf8a66e79b5f333095bb8ff28f1aa1764260730f586c",
+    "input": {
+      "path": "target/issue615-windows-source/probe-invert.png",
+      "path_kind": "repository_relative_provenance",
+      "sha256": "bd112765998bb452a0ddd0532c2a58d14156be25b261b99ead372826e6ca455f",
+      "width": 37,
+      "height": 23
+    },
+    "opencl_source": {
+      "strings": 2,
+      "bytes": 66067,
+      "sha256": "989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937"
+    },
+    "precompiled_spirv": {
+      "path": "target/issue615-clspv-proof/SDK_Invert_ProcAmp_OpenCL.pod-ubo.spv",
+      "path_kind": "repository_relative_provenance",
+      "bytes": 7120,
+      "sha256": "05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb",
+      "spirv_version": "1.0",
+      "validation_targets": [
+        "spv1.0",
+        "vulkan1.0"
+      ],
+      "entry_points": [
+        "ProcAmp2Kernel",
+        "InvertColorKernel"
+      ]
+    },
+    "compiler": {
+      "name": "clspv",
+      "source_commit": "0aa9274f9a001ab4da9938b0e3385a6a48fcd444",
+      "binary_sha256": "6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a",
+      "normalized_options": [
+        "-cl-std=CL1.2",
+        "-cl-kernel-arg-info",
+        "-spv-version=1.0",
+        "-pod-ubo",
+        "-cluster-pod-kernel-args=1",
+        "-cl-single-precision-constant",
+        "-cl-fast-relaxed-math"
+      ]
+    }
+  },
+  "reproduction": {
+    "working_directory": "repository root",
+    "wgpu_environment": {
+      "AEXCOMPAT_WGPU_PRECOMPILED_SPIRV": "$PWD/target/issue615-clspv-proof/SDK_Invert_ProcAmp_OpenCL.pod-ubo.spv",
+      "AEXCOMPAT_WGPU_PRECOMPILED_SOURCE_SHA256": "989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937",
+      "AEXCOMPAT_WGPU_PRECOMPILED_SPIRV_SHA256": "05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb",
+      "AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256": "6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a"
+    },
+    "commands": {
+      "wgpu_default": "env AEXCOMPAT_WGPU_PRECOMPILED_SPIRV=\"$PWD/target/issue615-clspv-proof/SDK_Invert_ProcAmp_OpenCL.pod-ubo.spv\" AEXCOMPAT_WGPU_PRECOMPILED_SOURCE_SHA256=989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937 AEXCOMPAT_WGPU_PRECOMPILED_SPIRV_SHA256=05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256=6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a guest/target/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/wgpu-default.png --pixel-format argb32f --render-backend wgpu-metal --gpu-device-index 0",
+      "wgpu_brightness_25": "env AEXCOMPAT_WGPU_PRECOMPILED_SPIRV=\"$PWD/target/issue615-clspv-proof/SDK_Invert_ProcAmp_OpenCL.pod-ubo.spv\" AEXCOMPAT_WGPU_PRECOMPILED_SOURCE_SHA256=989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937 AEXCOMPAT_WGPU_PRECOMPILED_SPIRV_SHA256=05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256=6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a guest/target/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/wgpu-brightness25.png --pixel-format argb32f --render-backend wgpu-metal --gpu-device-index 0 Brightness=25",
+      "apple_opencl_default": "guest/target/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/opencl-default.png --pixel-format argb32f --render-backend opencl --gpu-device-index 0",
+      "apple_opencl_brightness_25": "guest/target/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/opencl-brightness25.png --pixel-format argb32f --render-backend opencl --gpu-device-index 0 Brightness=25",
+      "olmblur_cpu": "guest/target/release/aex-guest-worker render-png \"/Users/onmk/Documents/Projects/Personal/OLM as/plugins_2025/OLMBlur.aex\" target/issue615-windows-source/probe-invert.png target/issue615-acceptance/olmblur-cpu.png --pixel-format argb8 --render-backend cpu"
+    }
+  },
+  "normal_effect_entry": {
+    "normal_effect_entry_exercised": true,
+    "execution_backend": "unicorn-x86_64",
+    "render_mode": "smart-opencl",
+    "requested_backend": "wgpu-metal",
+    "runtime_backend": "wgpu-metal",
+    "plugin_framework": "opencl",
+    "device_index": 0,
+    "suite_requests": [
+      "PF Handle Suite v2",
+      "PF GPU Device Suite v1",
+      "PF World Suite v2"
+    ],
+    "selector_lifecycle": [
+      {
+        "selector": "GPU_DEVICE_SETUP",
+        "command": 32,
+        "attempted": true,
+        "completed": true,
+        "error": 0
+      },
+      {
+        "selector": "SMART_PRE_RENDER",
+        "command": 23,
+        "attempted": true,
+        "completed": true,
+        "error": 0
+      },
+      {
+        "selector": "SMART_RENDER_GPU",
+        "command": 31,
+        "attempted": true,
+        "completed": true,
+        "error": 0
+      },
+      {
+        "selector": "GPU_DEVICE_SETDOWN",
+        "command": 33,
+        "attempted": true,
+        "completed": true,
+        "error": 0
+      }
+    ],
+    "pre_render_output_flags": 2,
+    "gpu_render_possible": true,
+    "runtime_started": true,
+    "transport_prepared": true,
+    "transport_finished": true,
+    "runtime_ended": true,
+    "guards_intact": true,
+    "unsupported_suite_calls": 0,
+    "device_suite": {
+      "allocations_created": 3,
+      "allocations_freed": 3,
+      "upload_bytes": 13616,
+      "download_bytes": 13616,
+      "worlds_created": 1,
+      "worlds_disposed": 1,
+      "invalid_operations": 0,
+      "exclusive_access_depth": 0,
+      "live_host_allocations": 0,
+      "live_gpu_worlds": 0,
+      "live_borrowed_gpu_worlds": 0,
+      "live_device_allocations": 0,
+      "live_bytes": 0,
+      "transport_active": false,
+      "cleanup_balanced": true
+    },
+    "opencl_abi_facade": {
+      "native_opencl_backend_used": false,
+      "api_calls": {
+        "clCreateProgramWithSource": 1,
+        "clBuildProgram": 1,
+        "clCreateKernel": 2,
+        "clSetKernelArg": 18,
+        "clEnqueueNDRangeKernel": 2,
+        "clReleaseKernel": 2
+      },
+      "source_strings": 2,
+      "source_bytes": 66067,
+      "programs_built": 1,
+      "kernels_created": 2,
+      "kernels_released": 2,
+      "kernel_arguments": {
+        "total": 18,
+        "buffer": 4,
+        "scalar": 14,
+        "scalar_bytes": 56
+      },
+      "kernel_dispatches": 2,
+      "dispatched_work_items": 3072,
+      "errors": 0,
+      "live_buffers": 0,
+      "live_programs": 0,
+      "live_kernels": 0,
+      "native_contexts": 0,
+      "native_command_queues": 0,
+      "native_buffers": 0,
+      "native_programs": 0,
+      "native_kernels": 0,
+      "native_release_errors": 0,
+      "cleanup_balanced": true
+    },
+    "wgpu": {
+      "executor_available": true,
+      "backend_operations_attempted": 3,
+      "adapter": {
+        "index": 0,
+        "name": "Apple M1 Pro",
+        "backend": "Metal",
+        "device_type": "IntegratedGpu",
+        "vendor": 0,
+        "device": 0,
+        "driver": "",
+        "driver_info": ""
+      },
+      "artifacts": [
+        {
+          "toolchain_mode": "precompiled-pinned",
+          "source_sha256": "989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937",
+          "compiler_sha256": "6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a",
+          "raw_spirv_sha256": "05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb",
+          "normalized_options": [
+            "-cl-std=CL1.2",
+            "-cl-kernel-arg-info",
+            "-spv-version=1.0",
+            "-pod-ubo",
+            "-cluster-pod-kernel-args=1",
+            "-cl-single-precision-constant",
+            "-cl-fast-relaxed-math"
+          ]
+        }
+      ],
+      "dispatches": [
+        {
+          "kernel": "InvertColorKernel",
+          "work_dim": 2,
+          "global": [
+            48,
+            32,
+            1
+          ],
+          "local": [
+            16,
+            16,
+            1
+          ],
+          "groups": [
+            3,
+            2,
+            1
+          ],
+          "storage_bindings": 2,
+          "uniform_bindings": 1,
+          "upload_bytes": 27264,
+          "download_bytes": 27232
+        },
+        {
+          "kernel": "ProcAmp2Kernel",
+          "work_dim": 2,
+          "global": [
+            48,
+            32,
+            1
+          ],
+          "local": [
+            16,
+            16,
+            1
+          ],
+          "groups": [
+            3,
+            2,
+            1
+          ],
+          "storage_bindings": 2,
+          "uniform_bindings": 1,
+          "upload_bytes": 27280,
+          "download_bytes": 27232
+        }
+      ],
+      "upload_bytes": 54544,
+      "download_bytes": 54464,
+      "created_resources": {
+        "buffers": 6,
+        "staging_buffers": 4,
+        "shader_modules": 2,
+        "bind_group_layouts": 2,
+        "pipeline_layouts": 2,
+        "pipelines": 2,
+        "bind_groups": 2,
+        "command_buffers": 2
+      },
+      "live_resources": {
+        "buffers": 0,
+        "staging_buffers": 0,
+        "shader_modules": 0,
+        "bind_group_layouts": 0,
+        "pipeline_layouts": 0,
+        "pipelines": 0,
+        "bind_groups": 0,
+        "command_buffers": 0
+      },
+      "cleanup_balanced": true
+    },
+    "cleanup_complete": true,
+    "diagnostic_profile_applies_to_cases": [
+      "default",
+      "brightness_25"
+    ]
+  },
+  "wgpu_renders": {
+    "default": {
+      "exit_code": 0,
+      "render_error": 0,
+      "pixel_format": "argb32f",
+      "raw_pixel_bytes": 13616,
+      "raw_argb32f_sha256": "e3c36b52b1033c74507a419630f5918656b9b267a89c3573a65e7605ae0ad89e",
+      "decoded_public_rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617",
+      "windows_byte_exact": true,
+      "apple_opencl_byte_exact": true,
+      "cleanup_complete": true
+    },
+    "brightness_25": {
+      "parameter": {
+        "slot": 1,
+        "name": "Brightness",
+        "value": 25.0,
+        "kernel_value": 0.25
+      },
+      "exit_code": 0,
+      "render_error": 0,
+      "pixel_format": "argb32f",
+      "raw_pixel_bytes": 13616,
+      "raw_argb32f_sha256": "d6f672fae016974aec384a4533a02ea56c46322d3e31b8b923f0c9b4c122455a",
+      "decoded_public_rgba8_sha256": "6677d579bc6680478e5bd53897795d726ff999ff3af13c482686fa799c55e6f8",
+      "differs_from_default": true,
+      "windows_byte_exact": true,
+      "apple_opencl_byte_exact": true,
+      "cleanup_complete": true
+    }
+  },
+  "oracle_comparison": {
+    "windows": {
+      "default": {
+        "raw_argb32f_sha256": "e3c36b52b1033c74507a419630f5918656b9b267a89c3573a65e7605ae0ad89e",
+        "decoded_public_rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617"
+      },
+      "brightness_25": {
+        "raw_argb32f_sha256": "d6f672fae016974aec384a4533a02ea56c46322d3e31b8b923f0c9b4c122455a",
+        "decoded_public_rgba8_sha256": "6677d579bc6680478e5bd53897795d726ff999ff3af13c482686fa799c55e6f8"
+      }
+    },
+    "apple_opencl": {
+      "requested_backend": "opencl",
+      "runtime_backend": "apple-opencl",
+      "plugin_framework": "opencl",
+      "platform": "Apple",
+      "device": "Apple M1 Pro",
+      "compute_units": 14,
+      "default": {
+        "exit_code": 0,
+        "render_error": 0,
+        "raw_argb32f_sha256": "e3c36b52b1033c74507a419630f5918656b9b267a89c3573a65e7605ae0ad89e",
+        "decoded_public_rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617",
+        "wgpu_byte_exact": true
+      },
+      "brightness_25": {
+        "exit_code": 0,
+        "render_error": 0,
+        "raw_argb32f_sha256": "d6f672fae016974aec384a4533a02ea56c46322d3e31b8b923f0c9b4c122455a",
+        "decoded_public_rgba8_sha256": "6677d579bc6680478e5bd53897795d726ff999ff3af13c482686fa799c55e6f8",
+        "wgpu_byte_exact": true
+      },
+      "cleanup_complete": true
+    }
+  },
+  "cpu_non_regression": {
+    "fixture": "/Users/onmk/Documents/Projects/Personal/OLM as/plugins_2025/OLMBlur.aex",
+    "fixture_path_kind": "external_local_provenance",
+    "fixture_size_bytes": 63488,
+    "fixture_sha256": "f0611785e7b14ac4fcfc75f23b8862beb4539eee52d25d472556849535e96e5b",
+    "input_path": "target/issue615-windows-source/probe-invert.png",
+    "input_sha256": "bd112765998bb452a0ddd0532c2a58d14156be25b261b99ead372826e6ca455f",
+    "exit_code": 0,
+    "render_error": 0,
+    "render_mode": "smart-cpu",
+    "pixel_format": "argb8",
+    "raw_pixel_bytes": 3404,
+    "raw_argb8_sha256": "3f174ac3d9c0cc8d573dbb4424982e7465a2628e07327e200a8256b59aa96693",
+    "gpu_runtime_started": false,
+    "gpu_setup_attempted": false,
+    "gpu_setdown_attempted": false,
+    "guards_intact": true,
+    "cleanup_complete": true
+  },
+  "validation": {
+    "guest_worker_tests": {
+      "status": "pass",
+      "passed_tests": 183
+    },
+    "guest_worker_release_build": "pass",
+    "remaining_workspace_validation": "pending",
+    "latest_head_review": "pending",
+    "ci": "ignored under the repository billing policy"
+  }
+}
