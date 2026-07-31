@@ -2656,6 +2656,7 @@ pub(crate) enum CloseReportInvariant {
     GlobalSetdownError,
     GuardBytes,
     SuiteLeaseWarningMetadata,
+    MissingSuiteFaultEvidence,
     SuiteFaultObserved,
     SuiteLeaseCounts,
     SuiteLeaseList,
@@ -2682,6 +2683,7 @@ impl CloseReportInvariant {
             Self::GlobalSetdownError => "global_setdown_error",
             Self::GuardBytes => "guard_bytes_intact",
             Self::SuiteLeaseWarningMetadata => "suite_lease_warning_metadata",
+            Self::MissingSuiteFaultEvidence => "missing_suite_fault_evidence",
             Self::SuiteFaultObserved => "suite_fault_observed",
             Self::SuiteLeaseCounts => "suite_lease_counts",
             Self::SuiteLeaseList => "live_suite_leases",
@@ -2787,36 +2789,43 @@ fn validate_suite_lease_state(
             if warning != Some(true) {
                 return Err(CloseReportInvariant::SuiteLeaseWarningMetadata);
             }
-            // Older classic reports do not carry a negative fault observation;
-            // they do carry every positive fault.  Preserve that compatibility
-            // while rejecting an observed fault and while requiring the actual
-            // warning/count/list evidence below.
-            if fault_observed == Some(true) {
-                return Err(CloseReportInvariant::SuiteFaultObserved);
+            match fault_observed {
+                Some(false) => {}
+                Some(true) => return Err(CloseReportInvariant::SuiteFaultObserved),
+                None => return Err(CloseReportInvariant::MissingSuiteFaultEvidence),
             }
             let acquires = report.get("suite_acquires").and_then(Value::as_u64);
             let releases = report.get("suite_releases").and_then(Value::as_u64);
-            let (Some(acquires), Some(releases), Some(live_suite_lease_count), Some(leases)) =
-                (acquires, releases, live_count, leases)
+            let live_suite_reference_count = report
+                .get("live_suite_reference_count")
+                .and_then(Value::as_u64);
+            let (
+                Some(acquires),
+                Some(releases),
+                Some(live_suite_lease_count),
+                Some(live_suite_reference_count),
+                Some(leases),
+            ) = (
+                acquires,
+                releases,
+                live_count,
+                live_suite_reference_count,
+                leases,
+            )
             else {
                 return Err(CloseReportInvariant::SuiteLeaseWarningMetadata);
             };
-            if acquires <= releases
-                || live_suite_lease_count == 0
-                || live_suite_lease_count > acquires.saturating_sub(releases)
+            let Some(residual_suite_references) = acquires.checked_sub(releases) else {
+                return Err(CloseReportInvariant::SuiteLeaseCounts);
+            };
+            let (parsed_entry_count, parsed_reference_count) =
+                parse_canonical_live_suite_leases(leases)?;
+            if live_suite_lease_count == 0
+                || parsed_entry_count != live_suite_lease_count
+                || parsed_reference_count != live_suite_reference_count
+                || parsed_reference_count != residual_suite_references
             {
                 return Err(CloseReportInvariant::SuiteLeaseCounts);
-            }
-            // The worker summary has a fixed, small schema.  Keep the common
-            // validator conservative even if a malformed worker tries to turn
-            // the warning exception into a diagnostic payload.
-            if leases.is_empty()
-                || leases.len() > 512
-                || !leases
-                    .bytes()
-                    .all(|byte| byte.is_ascii_graphic() || byte == b' ')
-            {
-                return Err(CloseReportInvariant::SuiteLeaseList);
             }
             Ok(FinalReportValidation::CleanWithSuiteLeaseWarning {
                 suite_acquires: acquires,
@@ -2826,6 +2835,82 @@ fn validate_suite_lease_state(
         }
         _ => Err(CloseReportInvariant::SuiteLeaseWarningMetadata),
     }
+}
+
+/// Parse the only accepted representation of `SuiteLeaseTracker::live_summary`:
+/// `name@version=count;...`.  The producer writes map keys and integer values
+/// directly, so delimiters, whitespace padding, duplicate normalized keys and
+/// non-canonical decimal spellings are never emitted by a valid worker report.
+/// Keep this parser private to the close validator: callers must not turn the
+/// worker-controlled summary into a diagnostic payload.
+fn parse_canonical_live_suite_leases(summary: &str) -> Result<(u64, u64), CloseReportInvariant> {
+    if summary.is_empty() || summary.len() > 512 || !summary.is_ascii() {
+        return Err(CloseReportInvariant::SuiteLeaseList);
+    }
+
+    let mut entry_count = 0u64;
+    let mut reference_count = 0u64;
+    let mut normalized_keys = std::collections::BTreeSet::new();
+    for entry in summary.split(';') {
+        let Some((key, count_text)) = entry.split_once('=') else {
+            return Err(CloseReportInvariant::SuiteLeaseList);
+        };
+        if entry.is_empty() || count_text.contains('=') {
+            return Err(CloseReportInvariant::SuiteLeaseList);
+        }
+        let Some((name, version_text)) = key.split_once('@') else {
+            return Err(CloseReportInvariant::SuiteLeaseList);
+        };
+        if key.matches('@').count() != 1
+            || !canonical_suite_name(name)
+            || canonical_i32(version_text).is_none()
+        {
+            return Err(CloseReportInvariant::SuiteLeaseList);
+        }
+        let Some(count) = canonical_u64(count_text) else {
+            return Err(CloseReportInvariant::SuiteLeaseList);
+        };
+        if count == 0 {
+            return Err(CloseReportInvariant::SuiteLeaseList);
+        }
+        let normalized_key = format!("{}@{}", name.to_ascii_lowercase(), version_text);
+        if !normalized_keys.insert(normalized_key) {
+            return Err(CloseReportInvariant::SuiteLeaseList);
+        }
+        entry_count = entry_count
+            .checked_add(1)
+            .ok_or(CloseReportInvariant::SuiteLeaseCounts)?;
+        reference_count = reference_count
+            .checked_add(count)
+            .ok_or(CloseReportInvariant::SuiteLeaseCounts)?;
+    }
+    Ok((entry_count, reference_count))
+}
+
+fn canonical_suite_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(' ')
+        && !name.ends_with(' ')
+        && !name.contains("  ")
+        && name.bytes().all(|byte| {
+            (byte.is_ascii_graphic() && !matches!(byte, b'@' | b'=' | b';')) || byte == b' '
+        })
+}
+
+fn canonical_i32(text: &str) -> Option<i32> {
+    if text.is_empty() || text == "-0" {
+        return None;
+    }
+    let value = text.parse::<i32>().ok()?;
+    (value.to_string() == text).then_some(value)
+}
+
+fn canonical_u64(text: &str) -> Option<u64> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let value = text.parse::<u64>().ok()?;
+    (value.to_string() == text).then_some(value)
 }
 
 /// Validates a serialized close summary for consumers that did not retain the
