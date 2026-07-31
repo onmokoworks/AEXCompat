@@ -235,6 +235,18 @@ def test_wgpu_metal_artifact_dispatch_geometry_and_resources_are_bounded():
         assert dispatch["download_bytes"] > 0
     assert wgpu["upload_bytes"] == sum(item["upload_bytes"] for item in dispatches)
     assert wgpu["download_bytes"] == sum(item["download_bytes"] for item in dispatches)
+    resource_keys = {
+        "buffers",
+        "staging_buffers",
+        "shader_modules",
+        "bind_group_layouts",
+        "pipeline_layouts",
+        "pipelines",
+        "bind_groups",
+        "command_buffers",
+    }
+    assert set(wgpu["created_resources"]) == resource_keys
+    assert set(wgpu["live_resources"]) == resource_keys
     assert all(value > 0 for value in wgpu["created_resources"].values())
     _assert_zero_counts(wgpu["live_resources"])
     assert wgpu["live_resource_scope"] == LIVE_RESOURCE_SCOPE
@@ -276,6 +288,52 @@ def test_wgpu_is_byte_exact_and_parameter_sensitive_against_both_oracles():
         assert oracle["brightness_25"]["raw_argb32f_sha256"] == BRIGHTNESS_RAW
         assert oracle["brightness_25"]["decoded_public_rgba8_sha256"] == BRIGHTNESS_RGBA
 
+    windows = result["oracle_comparison"]["windows"]
+    capture = windows["capture"]
+    assert capture["host"] == "R5900X"
+    assert capture["os"] == "Windows"
+    assert capture["transport"] == "Tailscale SSH alias r5900x"
+    assert capture["worker"] == {
+        "path": "target/minihost-build/aex_smart_worker.exe",
+        "sha256": "3abdb1611d1a9b0595a29120644d10421b4eaded9b3dd6a0c97029104f496bbe",
+    }
+    assert capture["protocol"] == "--smart-session32-opencl-v1"
+    assert capture["fixture"]["sha256"] == result["fixture"]["sha256"]
+    assert capture["input"]["png_sha256"] == result["fixture"]["input"]["sha256"]
+    assert capture["manifest"]["path_kind"] == "host_local_provenance"
+    assert SHA256.fullmatch(capture["manifest"]["sha256"])
+    assert capture["slot_normalization"] == {
+        "physical_layout": "rgba32f",
+        "canonical_layout": "argb32f",
+        "operation": "reorder each float32 pixel [R,G,B,A] to [A,R,G,B]",
+    }
+    assert capture["default"]["payload"] == "v2|"
+    assert capture["brightness_25"]["payload"] == "v2|brightness@1:f64=25"
+    assert capture["brightness_25"]["requested_parameter"] == {
+        "id": "brightness",
+        "slot": 1,
+        "kind": "float",
+        "value": 25.0,
+    }
+    assert (
+        capture["default"]["physical_rgba32f_sha256"]
+        != windows["default"]["raw_argb32f_sha256"]
+    )
+    assert (
+        capture["brightness_25"]["physical_rgba32f_sha256"]
+        != windows["brightness_25"]["raw_argb32f_sha256"]
+    )
+    for case in ("default", "brightness_25"):
+        assert windows[case]["capture_byte_exact"] is True
+        assert capture[case]["render_error"] == 0
+        assert capture[case]["opencl_context_used"] is True
+        assert capture[case]["upload_bytes"] == capture[case]["download_bytes"] == 13616
+        assert capture[case]["gpu_memory_lifetimes_balanced"] is True
+        assert capture[case]["live_gpu_allocation_count"] == 0
+        assert capture[case]["guard_bytes_intact"] is True
+        assert SHA256.fullmatch(capture[case]["physical_rgba32f_sha256"])
+        assert SHA256.fullmatch(capture[case]["report_sha256"])
+
     apple = result["oracle_comparison"]["apple_opencl"]
     assert apple["requested_backend"] == "opencl"
     assert apple["runtime_backend"] == "apple-opencl"
@@ -309,6 +367,26 @@ def test_cpu_regression_commands_and_validation_status_are_explicit():
 
     reproduction = result["reproduction"]
     assert reproduction["working_directory"] == "repository root"
+    assert reproduction["command_scope"] == (
+        "host-local invocation records, not clean-checkout reproduction"
+    )
+    assert reproduction["host_local_artifacts"] == [
+        {
+            "path": result["fixture"]["path"],
+            "sha256": result["fixture"]["sha256"],
+        },
+        {
+            "path": result["fixture"]["input"]["path"],
+            "sha256": result["fixture"]["input"]["sha256"],
+        },
+        {
+            "path": result["fixture"]["precompiled_spirv"]["path"],
+            "sha256": result["fixture"]["precompiled_spirv"]["sha256"],
+        },
+    ]
+    assert reproduction["prepare_output_directory"] == (
+        "mkdir -p target/issue615-acceptance"
+    )
     environment = reproduction["wgpu_environment"]
     assert environment["AEXCOMPAT_WGPU_PRECOMPILED_SPIRV"].startswith("$PWD/")
     assert (
@@ -429,6 +507,7 @@ def test_cpu_regression_commands_and_validation_status_are_explicit():
         "passed_subtests": 391,
     }
     assert validation["normal_effect_entry_acceptance"] == "pass"
+    assert validation["windows_opencl_default_and_brightness_oracle_recapture"] == "pass"
     assert validation["apple_opencl_non_regression"] == "pass"
     assert validation["cpu_olmblur_non_regression"] == "pass"
     assert validation["default_dependency_graph"] == "pass"

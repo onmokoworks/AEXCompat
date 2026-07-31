@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "issue": 615,
-  "observed_utc": "2026-07-31T07:45:41Z",
+  "observed_utc": "2026-07-31T08:01:49Z",
   "repository_head": "c6a4181daf1af49372b115444b8982039f4bd418",
   "base_head": "93cfbb7e9f25f296636444cc54d1a97624e12bfb",
   "host": {
@@ -59,6 +59,22 @@
   },
   "reproduction": {
     "working_directory": "repository root",
+    "command_scope": "host-local invocation records, not clean-checkout reproduction",
+    "host_local_artifacts": [
+      {
+        "path": "target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex",
+        "sha256": "6ad8f4e0808c1fe2cda1cf8a66e79b5f333095bb8ff28f1aa1764260730f586c"
+      },
+      {
+        "path": "target/issue615-windows-source/probe-invert.png",
+        "sha256": "bd112765998bb452a0ddd0532c2a58d14156be25b261b99ead372826e6ca455f"
+      },
+      {
+        "path": "target/issue615-clspv-proof/SDK_Invert_ProcAmp_OpenCL.pod-ubo.spv",
+        "sha256": "05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb"
+      }
+    ],
+    "prepare_output_directory": "mkdir -p target/issue615-acceptance",
     "build_commands": {
       "default_worker": "cargo build --manifest-path guest/Cargo.toml --locked -p aex-guest-worker --release --no-default-features --target-dir target/issue615-default-worker",
       "wgpu_metal_experimental_worker": "cargo build --manifest-path guest/Cargo.toml --locked -p aex-guest-worker --release --no-default-features --features wgpu-metal-experimental --target-dir target/issue615-wgpu-worker"
@@ -324,13 +340,74 @@
   },
   "oracle_comparison": {
     "windows": {
+      "capture": {
+        "observed_utc": "2026-07-31T08:01:26Z",
+        "host": "R5900X",
+        "os": "Windows",
+        "transport": "Tailscale SSH alias r5900x",
+        "worker": {
+          "path": "target/minihost-build/aex_smart_worker.exe",
+          "sha256": "3abdb1611d1a9b0595a29120644d10421b4eaded9b3dd6a0c97029104f496bbe"
+        },
+        "protocol": "--smart-session32-opencl-v1",
+        "fixture": {
+          "path": "target/sdk-fixtures/invert-procamp/SDK_Invert_ProcAmp_OpenCL.aex",
+          "sha256": "6ad8f4e0808c1fe2cda1cf8a66e79b5f333095bb8ff28f1aa1764260730f586c"
+        },
+        "input": {
+          "png_sha256": "bd112765998bb452a0ddd0532c2a58d14156be25b261b99ead372826e6ca455f",
+          "decoded_rgba8_sha256": "e262995eeaf4ba4ac17385566eadae4597ec4a974ea0c116a170c0edb1e632f9"
+        },
+        "manifest": {
+          "path": "target/issue615-windows-brightness/manifest.json",
+          "path_kind": "host_local_provenance",
+          "sha256": "02c6f09bf1a4dd2288369d26025f842d5bea559dd9789fb9796a7be93dfef7f4"
+        },
+        "slot_normalization": {
+          "physical_layout": "rgba32f",
+          "canonical_layout": "argb32f",
+          "operation": "reorder each float32 pixel [R,G,B,A] to [A,R,G,B]"
+        },
+        "default": {
+          "payload": "v2|",
+          "physical_rgba32f_sha256": "2dbf218ccf2907d1fdfa8041816df3c93b21bd47d9396bb4818aee51ebc1721c",
+          "report_sha256": "a8a731918f74db0491c3f499616c3830ba3d831ba60d5cfac01c26106031cdf4",
+          "render_error": 0,
+          "opencl_context_used": true,
+          "upload_bytes": 13616,
+          "download_bytes": 13616,
+          "gpu_memory_lifetimes_balanced": true,
+          "live_gpu_allocation_count": 0,
+          "guard_bytes_intact": true
+        },
+        "brightness_25": {
+          "payload": "v2|brightness@1:f64=25",
+          "requested_parameter": {
+            "id": "brightness",
+            "slot": 1,
+            "kind": "float",
+            "value": 25.0
+          },
+          "physical_rgba32f_sha256": "d639f864eabe8f934fd26f5f6c6c2fd8f168cd505a76209c8e816f8213883373",
+          "report_sha256": "be2b81015fe9c22f5bf67be61cab9441950d70f05328557dfb4b8def30e98704",
+          "render_error": 0,
+          "opencl_context_used": true,
+          "upload_bytes": 13616,
+          "download_bytes": 13616,
+          "gpu_memory_lifetimes_balanced": true,
+          "live_gpu_allocation_count": 0,
+          "guard_bytes_intact": true
+        }
+      },
       "default": {
         "raw_argb32f_sha256": "e3c36b52b1033c74507a419630f5918656b9b267a89c3573a65e7605ae0ad89e",
-        "decoded_public_rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617"
+        "decoded_public_rgba8_sha256": "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617",
+        "capture_byte_exact": true
       },
       "brightness_25": {
         "raw_argb32f_sha256": "d6f672fae016974aec384a4533a02ea56c46322d3e31b8b923f0c9b4c122455a",
-        "decoded_public_rgba8_sha256": "6677d579bc6680478e5bd53897795d726ff999ff3af13c482686fa799c55e6f8"
+        "decoded_public_rgba8_sha256": "6677d579bc6680478e5bd53897795d726ff999ff3af13c482686fa799c55e6f8",
+        "capture_byte_exact": true
       }
     },
     "apple_opencl": {
@@ -456,6 +533,7 @@
       ]
     },
     "normal_effect_entry_acceptance": "pass",
+    "windows_opencl_default_and_brightness_oracle_recapture": "pass",
     "apple_opencl_non_regression": "pass",
     "cpu_olmblur_non_regression": "pass",
     "default_dependency_graph": "pass",
