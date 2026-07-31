@@ -152,7 +152,6 @@ int32_t publish_cached_receipt(const ItemValue& options, void** output, bool* ca
   receipt->world.height = backing->world.height;
   receipt->world.extent_hint = {0, 0, backing->world.width, backing->world.height};
   receipt->world.pix_aspect_ratio = {1, 1};
-  std::lock_guard<std::mutex> lock(g_mutex);
   if (current_timestamp != g_project_generation.load() || g_timestamp_exhausted.load()) return 4;
   if (render_receipts::register_receipt(std::move(receipt), output) != 0) return 4;
   *cache_hit = true;

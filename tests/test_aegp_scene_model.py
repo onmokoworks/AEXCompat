@@ -321,6 +321,17 @@ def test_scene_mutation_and_receipt_publication_are_generation_serialized() -> N
     assert registration.index(
         "generation_reader() != draft->project_generation"
     ) < registration.index("g_receipts.emplace")
+    publication = external[
+        external.index("int32_t publish_cached_receipt"):
+        external.index("int32_t __cdecl timestamp")
+    ]
+    cache_lock = publication.rfind(
+        "std::lock_guard<std::mutex> lock(g_mutex)"
+    )
+    assert 0 <= cache_lock < publication.index("receipt->pixel_format")
+    assert publication.index(
+        "receipt->pixel_format"
+    ) < publication.index("render_receipts::register_receipt")
     assert "in_flight_generation + 1" in compat
     assert "stale_publication_result != 0" in compat
     assert "in_flight_receipt == nullptr" in compat
