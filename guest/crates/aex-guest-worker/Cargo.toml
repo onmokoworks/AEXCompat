@@ -7,11 +7,17 @@ license = "GPL-2.0-only"
 [features]
 default = []
 native-carrier = []
+wgpu-metal-experimental = [
+    "dep:aex-clspv",
+    "dep:aex-wgpu-compute",
+]
 
 [dependencies]
 aex-abi = { path = "../aex-abi" }
 aex-apple-opencl = { path = "../aex-apple-opencl" }
+aex-clspv = { path = "../aex-clspv", optional = true }
 aex-unicorn-buffer = { path = "../aex-unicorn-buffer" }
+aex-wgpu-compute = { path = "../aex-wgpu-compute", optional = true }
 goblin.workspace = true
 iced-x86.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }

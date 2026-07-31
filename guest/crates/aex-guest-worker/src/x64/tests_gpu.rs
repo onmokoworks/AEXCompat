@@ -1,5 +1,5 @@
 #[test]
-fn gpu_device_suite_v1_acquires_exact_table_and_writes_56_byte_device_info() {
+fn gpu_suite_exposes_backend_neutral_opencl_device_info() {
     assert_eq!(PF_ERR_OUT_OF_MEMORY, 4);
     assert_eq!(PF_ERR_BAD_CALLBACK_PARAM, 516);
     let mut engine = test_engine(&[0xc3]);
@@ -53,7 +53,10 @@ fn gpu_device_suite_v1_acquires_exact_table_and_writes_56_byte_device_info() {
     );
     let mut info = [0u8; PF_GPU_DEVICE_INFO_SIZE];
     engine.read(info_output, &mut info).unwrap();
-    assert_eq!(i32::from_le_bytes(info[0..4].try_into().unwrap()), 1);
+    assert_eq!(
+        i32::from_le_bytes(info[0..4].try_into().unwrap()),
+        PF_GPU_FRAMEWORK_OPENCL
+    );
     assert_eq!(info[4], 1);
     assert_eq!(
         u64::from_le_bytes(info[8..16].try_into().unwrap()),
@@ -88,6 +91,11 @@ fn gpu_device_suite_v1_acquires_exact_table_and_writes_56_byte_device_info() {
     );
     engine.read(suite_output, &mut pointer).unwrap();
     assert_eq!(u64::from_le_bytes(pointer), 0);
+    assert_eq!(
+        engine.end_gpu_runtime().unwrap(),
+        ObjectCounts::default()
+    );
+    assert!(engine.opencl_bridge_evidence().cleanup_balanced);
 }
 
 #[test]
@@ -391,13 +399,20 @@ fn opencl_shutdown_rejects_live_or_release_failed_native_objects() {
             ..ObjectCounts::default()
         },
     ] {
-        let error = finish_opencl_shutdown(counts, None).unwrap_err();
+        let error =
+            finish_gpu_runtime_shutdown(GpuRuntimeBackendKind::AppleOpenCl, counts, None)
+                .unwrap_err();
         assert!(error
             .to_string()
             .contains("OpenCL runtime cleanup is unbalanced"));
     }
     assert_eq!(
-        finish_opencl_shutdown(ObjectCounts::default(), None).unwrap(),
+        finish_gpu_runtime_shutdown(
+            GpuRuntimeBackendKind::AppleOpenCl,
+            ObjectCounts::default(),
+            None,
+        )
+        .unwrap(),
         ObjectCounts::default()
     );
 }
@@ -424,7 +439,7 @@ fn opencl_shutdown_reports_unfreed_device_suite_allocation_and_deactivates_runti
     assert_eq!(before.live_device_allocations, 1);
     assert!(!before.cleanup_balanced);
 
-    let error = engine.end_opencl_gpu().unwrap_err();
+    let error = engine.end_gpu_runtime().unwrap_err();
     assert!(error
         .to_string()
         .contains("GPU Device Suite cleanup is unbalanced"));
@@ -593,7 +608,7 @@ fn gpu_render_transport_swaps_bgra_tokens_and_restores_argb32f_worlds() {
     assert_eq!(evidence.allocations_freed, 2);
     assert_eq!(evidence.live_device_allocations, 0);
     assert!(!evidence.transport_active);
-    engine.end_opencl_gpu().unwrap();
+    engine.end_gpu_runtime().unwrap();
     assert!(!engine.unicorn.get_data().gpu_runtime.is_active());
 }
 

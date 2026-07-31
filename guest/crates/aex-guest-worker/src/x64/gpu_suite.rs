@@ -953,16 +953,26 @@ fn write_bgra128_as_argb32f(
 }
 
 impl GuestEngine<'_> {
-    pub(crate) fn begin_opencl_gpu(&mut self, device_index: u32) -> Result<(), GuestError> {
+    pub(crate) fn begin_gpu_runtime(
+        &mut self,
+        backend_kind: GpuRuntimeBackendKind,
+        device_index: u32,
+    ) -> Result<(), GuestError> {
         self.unicorn
             .get_data_mut()
             .gpu_runtime
-            .begin_opencl(device_index)
+            .begin(backend_kind, device_index)
             .map(|_| ())
             .map_err(GuestError::Callback)
     }
 
-    pub(crate) fn end_opencl_gpu(&mut self) -> Result<ObjectCounts, GuestError> {
+    pub(crate) fn end_gpu_runtime(&mut self) -> Result<ObjectCounts, GuestError> {
+        let backend_kind = self
+            .unicorn
+            .get_data()
+            .gpu_runtime
+            .backend_kind()
+            .ok_or_else(|| GuestError::Callback("GPU runtime is not active".into()))?;
         let mut first_error = None;
         if self.unicorn.get_data().gpu_suite.transport.is_some() {
             if let Err(error) = self.finish_gpu_render_transport() {
@@ -1001,10 +1011,16 @@ impl GuestEngine<'_> {
             )
         };
         if suite_resources != (0, 0, 0, 0) {
-            let message = format!(
-                "forced GPU Device Suite cleanup at OpenCL shutdown: host_allocations={}, worlds={}, borrowed_worlds={}, exclusive_depth={}",
-                suite_resources.0, suite_resources.1, suite_resources.2, suite_resources.3
-            );
+            let message = match backend_kind {
+                GpuRuntimeBackendKind::AppleOpenCl => format!(
+                    "forced GPU Device Suite cleanup at OpenCL shutdown: host_allocations={}, worlds={}, borrowed_worlds={}, exclusive_depth={}",
+                    suite_resources.0, suite_resources.1, suite_resources.2, suite_resources.3
+                ),
+                GpuRuntimeBackendKind::WgpuMetal => format!(
+                    "forced GPU Device Suite cleanup at wgpu-metal shutdown: host_allocations={}, worlds={}, borrowed_worlds={}, exclusive_depth={}",
+                    suite_resources.0, suite_resources.1, suite_resources.2, suite_resources.3
+                ),
+            };
             if first_error.is_none() {
                 first_error = Some(message.clone());
             }
@@ -1025,19 +1041,23 @@ impl GuestEngine<'_> {
             .unicorn
             .get_data_mut()
             .gpu_runtime
-            .end_opencl()
+            .end()
         {
             Ok(counts) => counts,
             Err(error) => {
                 return Err(GuestError::Callback(first_error.map_or(error.clone(), |first| {
-                    format!("{first}; OpenCL runtime end: {error}")
+                    let backend = match backend_kind {
+                        GpuRuntimeBackendKind::AppleOpenCl => "OpenCL",
+                        GpuRuntimeBackendKind::WgpuMetal => backend_kind.name(),
+                    };
+                    format!("{first}; {backend} runtime end: {error}")
                 })));
             }
         };
-        finish_opencl_shutdown(counts, first_error)
+        finish_gpu_runtime_shutdown(backend_kind, counts, first_error)
     }
 
-    pub(crate) fn opencl_gpu_active(&self) -> bool {
+    pub(crate) fn gpu_runtime_active(&self) -> bool {
         self.unicorn.get_data().gpu_runtime.is_active()
     }
 
@@ -1379,14 +1399,19 @@ impl GuestEngine<'_> {
         let state = self.unicorn.get_data();
         state.gpu_suite.evidence(&state.gpu_runtime)
     }
+
+    pub(crate) fn wgpu_runtime_evidence(&self) -> Option<WgpuRuntimeEvidence> {
+        self.unicorn.get_data().gpu_runtime.wgpu_evidence()
+    }
 }
 
-fn finish_opencl_shutdown(
+fn finish_gpu_runtime_shutdown(
+    backend_kind: GpuRuntimeBackendKind,
     counts: ObjectCounts,
     first_error: Option<String>,
 ) -> Result<ObjectCounts, GuestError> {
-    let balance_error = (counts.live_total() != 0 || counts.release_errors != 0).then(|| {
-        format!(
+    let balance_error = (counts.live_total() != 0 || counts.release_errors != 0).then(|| match backend_kind {
+        GpuRuntimeBackendKind::AppleOpenCl => format!(
             "OpenCL runtime cleanup is unbalanced: contexts={}, queues={}, buffers={}, programs={}, kernels={}, release_errors={}",
             counts.contexts,
             counts.command_queues,
@@ -1394,7 +1419,16 @@ fn finish_opencl_shutdown(
             counts.programs,
             counts.kernels,
             counts.release_errors
-        )
+        ),
+        GpuRuntimeBackendKind::WgpuMetal => format!(
+            "wgpu-metal returned unexpected Apple OpenCL object counts: contexts={}, queues={}, buffers={}, programs={}, kernels={}, release_errors={}",
+            counts.contexts,
+            counts.command_queues,
+            counts.buffers,
+            counts.programs,
+            counts.kernels,
+            counts.release_errors
+        ),
     });
     match (first_error, balance_error) {
         (None, None) => Ok(counts),

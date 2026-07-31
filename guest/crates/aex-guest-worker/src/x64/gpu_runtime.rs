@@ -2,8 +2,11 @@ use aex_apple_opencl::{
     Buffer, BufferAccess, Error as AppleOpenClError, Kernel, ObjectCounts, ObjectTracker, Program,
     Session, MAX_BUFFER_BYTES,
 };
-use crate::gpu_lifecycle::{OpenClBridgeEvidence, OpenClErrorEvidence};
-#[cfg(test)]
+#[cfg(feature = "wgpu-metal-experimental")]
+use aex_wgpu_compute::MAX_BUFFER_BYTES as MAX_WGPU_BUFFER_BYTES;
+use crate::gpu_lifecycle::{
+    GpuRuntimeBackendKind, OpenClBridgeEvidence, OpenClErrorEvidence, WgpuRuntimeEvidence,
+};
 use std::cell::RefCell;
 use std::sync::{
     Mutex, OnceLock,
@@ -23,7 +26,14 @@ const MAX_OPENCL_PROGRAMS: usize = 256;
 const MAX_OPENCL_KERNELS: usize = 1_024;
 const MAX_OPENCL_LIVE_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OPENCL_EVIDENCE_ERROR_BYTES: usize = 4_096;
+#[cfg(not(feature = "wgpu-metal-experimental"))]
+const WGPU_METAL_EXPERIMENTAL_UNAVAILABLE: &str = "wgpu-metal is unavailable in this build; \
+    rebuild locally with the non-shipping Cargo feature 'wgpu-metal-experimental'";
 pub(crate) const CL_SUCCESS: i32 = 0;
+#[cfg(feature = "wgpu-metal-experimental")]
+pub(crate) const CL_BUILD_PROGRAM_FAILURE: i32 = -11;
+#[cfg(feature = "wgpu-metal-experimental")]
+pub(crate) const CL_OUT_OF_RESOURCES: i32 = -5;
 pub(crate) const CL_OUT_OF_HOST_MEMORY: i32 = -6;
 pub(crate) const CL_INVALID_VALUE: i32 = -30;
 pub(crate) const CL_INVALID_DEVICE: i32 = -33;
@@ -33,8 +43,12 @@ pub(crate) const CL_INVALID_MEM_OBJECT: i32 = -38;
 pub(crate) const CL_INVALID_PROGRAM: i32 = -44;
 pub(crate) const CL_INVALID_PROGRAM_EXECUTABLE: i32 = -45;
 pub(crate) const CL_INVALID_KERNEL: i32 = -48;
+#[cfg(feature = "wgpu-metal-experimental")]
+pub(crate) const CL_INVALID_ARG_INDEX: i32 = -49;
 pub(crate) const CL_INVALID_ARG_VALUE: i32 = -50;
 pub(crate) const CL_INVALID_ARG_SIZE: i32 = -51;
+#[cfg(feature = "wgpu-metal-experimental")]
+pub(crate) const CL_INVALID_KERNEL_ARGS: i32 = -52;
 pub(crate) const CL_INVALID_WORK_DIMENSION: i32 = -53;
 pub(crate) const CL_INVALID_WORK_GROUP_SIZE: i32 = -54;
 pub(crate) const CL_INVALID_GLOBAL_OFFSET: i32 = -56;
@@ -83,12 +97,16 @@ enum GpuBackend {
         session: Session,
         tracker: ObjectTracker,
     },
+    #[cfg(feature = "wgpu-metal-experimental")]
+    WgpuMetal(WgpuExecutor),
     #[cfg(test)]
     Mock,
 }
 
 enum DeviceBufferBacking {
     OpenCl(Buffer),
+    #[cfg(feature = "wgpu-metal-experimental")]
+    WgpuMetal(RefCell<Vec<u8>>),
     #[cfg(test)]
     Mock(RefCell<Vec<u8>>),
 }
@@ -105,6 +123,8 @@ struct DeviceAllocation {
 
 enum ProgramBacking {
     OpenCl(Program),
+    #[cfg(feature = "wgpu-metal-experimental")]
+    WgpuMetal(aex_clspv::ValidatedArtifact),
     #[cfg(test)]
     Mock,
 }
@@ -116,6 +136,8 @@ struct ProgramRecord {
 
 enum KernelBacking {
     OpenCl(Kernel),
+    #[cfg(feature = "wgpu-metal-experimental")]
+    WgpuMetal(WgpuKernel),
     #[cfg(test)]
     Mock(BTreeMap<u32, Vec<u8>>),
 }
@@ -169,6 +191,8 @@ pub(crate) struct GpuRuntime {
     live_program_source_bytes: usize,
     issued_tokens: HashSet<u64>,
     opencl_evidence: OpenClBridgeEvidence,
+    wgpu_evidence: RefCell<Option<WgpuRuntimeEvidence>>,
+    wgpu_sticky_error: RefCell<Option<String>>,
 }
 
 impl Default for GpuRuntime {
@@ -189,12 +213,17 @@ impl Default for GpuRuntime {
             live_program_source_bytes: 0,
             issued_tokens: HashSet::new(),
             opencl_evidence: OpenClBridgeEvidence::default(),
+            wgpu_evidence: RefCell::new(None),
+            wgpu_sticky_error: RefCell::new(None),
         }
     }
 }
 
 impl Drop for GpuRuntime {
     fn drop(&mut self) {
+        if self.is_active() {
+            let _ = self.end();
+        }
         let mut issued = issued_gpu_tokens()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -205,37 +234,93 @@ impl Drop for GpuRuntime {
 }
 
 impl GpuRuntime {
-    pub(crate) fn begin_opencl(
+    pub(crate) fn begin(
         &mut self,
+        backend_kind: GpuRuntimeBackendKind,
         device_index: u32,
     ) -> Result<GpuDeviceTokens, String> {
-        if self.backend.is_some() {
-            return Err("GPU runtime is already active".into());
-        }
-        let session =
-            Session::select_gpu(device_index as usize).map_err(|error| error.to_string())?;
-        let tracker = session.object_tracker();
-        let device = session.device().clone();
-        let tokens = self.allocate_device_tokens()?;
-        self.opencl_evidence = OpenClBridgeEvidence {
-            device_index: Some(device_index),
-            platform: Some(device.platform_name().to_string()),
-            device: Some(device.name().to_string()),
-            vendor: Some(device.vendor().to_string()),
-            compute_units: Some(device.compute_units()),
-            ..OpenClBridgeEvidence::default()
+        self.begin_with_wgpu_initializer(backend_kind, device_index, |device_index| {
+            #[cfg(feature = "wgpu-metal-experimental")]
+            {
+                let config = WgpuCompilerConfig::from_process_env()?;
+                let executor = WgpuExecutor::new(device_index, config)?;
+                let evidence = executor.initial_evidence();
+                Ok((
+                    GpuBackend::WgpuMetal(executor),
+                    OpenClBridgeEvidence {
+                        device_index: Some(device_index),
+                        ..OpenClBridgeEvidence::default()
+                    },
+                    Some(evidence),
+                ))
+            }
+            #[cfg(not(feature = "wgpu-metal-experimental"))]
+            {
+                let _ = device_index;
+                Err(WGPU_METAL_EXPERIMENTAL_UNAVAILABLE.into())
+            }
+        })
+    }
+
+    fn begin_with_wgpu_initializer(
+        &mut self,
+        backend_kind: GpuRuntimeBackendKind,
+        device_index: u32,
+        initialize_wgpu: impl FnOnce(
+            u32,
+        ) -> Result<
+            (
+                GpuBackend,
+                OpenClBridgeEvidence,
+                Option<WgpuRuntimeEvidence>,
+            ),
+            String,
+        >,
+    ) -> Result<GpuDeviceTokens, String> {
+        self.prepare_begin_attempt()?;
+        let (backend, opencl_evidence, wgpu_evidence) = match backend_kind {
+            GpuRuntimeBackendKind::AppleOpenCl => {
+                let session = Session::select_gpu(device_index as usize)
+                    .map_err(|error| error.to_string())?;
+                let tracker = session.object_tracker();
+                let device = session.device().clone();
+                (
+                    GpuBackend::OpenCl { session, tracker },
+                    OpenClBridgeEvidence {
+                        device_index: Some(device_index),
+                        platform: Some(device.platform_name().to_string()),
+                        device: Some(device.name().to_string()),
+                        vendor: Some(device.vendor().to_string()),
+                        compute_units: Some(device.compute_units()),
+                        ..OpenClBridgeEvidence::default()
+                    },
+                    None,
+                )
+            }
+            GpuRuntimeBackendKind::WgpuMetal => initialize_wgpu(device_index)?,
         };
-        self.backend = Some(GpuBackend::OpenCl { session, tracker });
+        let tokens = self.allocate_device_tokens()?;
+        self.opencl_evidence = opencl_evidence;
+        *self.wgpu_evidence.borrow_mut() = wgpu_evidence;
+        self.backend = Some(backend);
         self.device_index = Some(device_index);
         self.device_tokens = Some(tokens);
         Ok(tokens)
     }
 
-    #[cfg(test)]
-    pub(crate) fn begin_mock(&mut self, device_index: u32) -> Result<GpuDeviceTokens, String> {
+    fn prepare_begin_attempt(&mut self) -> Result<(), String> {
         if self.backend.is_some() {
             return Err("GPU runtime is already active".into());
         }
+        self.opencl_evidence = OpenClBridgeEvidence::default();
+        *self.wgpu_evidence.borrow_mut() = None;
+        *self.wgpu_sticky_error.borrow_mut() = None;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_mock(&mut self, device_index: u32) -> Result<GpuDeviceTokens, String> {
+        self.prepare_begin_attempt()?;
         let tokens = self.allocate_device_tokens()?;
         self.opencl_evidence = OpenClBridgeEvidence {
             device_index: Some(device_index),
@@ -253,6 +338,17 @@ impl GpuRuntime {
 
     pub(crate) fn is_active(&self) -> bool {
         self.backend.is_some()
+    }
+
+    pub(crate) fn backend_kind(&self) -> Option<GpuRuntimeBackendKind> {
+        match self.backend.as_ref() {
+            Some(GpuBackend::OpenCl { .. }) => Some(GpuRuntimeBackendKind::AppleOpenCl),
+            #[cfg(feature = "wgpu-metal-experimental")]
+            Some(GpuBackend::WgpuMetal(_)) => Some(GpuRuntimeBackendKind::WgpuMetal),
+            #[cfg(test)]
+            Some(GpuBackend::Mock) => Some(GpuRuntimeBackendKind::AppleOpenCl),
+            None => None,
+        }
     }
 
     pub(crate) fn device_index(&self) -> Option<u32> {
@@ -294,10 +390,15 @@ impl GpuRuntime {
         if bytes == 0 {
             return Err("GPU device allocation must contain at least one byte".into());
         }
-        if bytes > MAX_BUFFER_BYTES || bytes > MAX_GPU_DEVICE_BYTES {
+        let backend_buffer_limit = match self.backend.as_ref() {
+            #[cfg(feature = "wgpu-metal-experimental")]
+            Some(GpuBackend::WgpuMetal(_)) => MAX_WGPU_BUFFER_BYTES,
+            _ => MAX_BUFFER_BYTES,
+        };
+        if bytes > backend_buffer_limit || bytes > MAX_GPU_DEVICE_BYTES {
             return Err(format!(
                 "GPU device allocation {bytes} exceeds {} bytes",
-                MAX_GPU_DEVICE_BYTES.min(MAX_BUFFER_BYTES)
+                MAX_GPU_DEVICE_BYTES.min(backend_buffer_limit)
             ));
         }
         if self.buffers.len() >= MAX_GPU_DEVICE_ALLOCATIONS {
@@ -321,6 +422,10 @@ impl GpuRuntime {
                     .create_buffer(bytes, access)
                     .map_err(|error| error.to_string())?,
             ),
+            #[cfg(feature = "wgpu-metal-experimental")]
+            Some(GpuBackend::WgpuMetal(_)) => {
+                DeviceBufferBacking::WgpuMetal(RefCell::new(vec![0; bytes]))
+            }
             #[cfg(test)]
             Some(GpuBackend::Mock) => {
                 DeviceBufferBacking::Mock(RefCell::new(vec![0; bytes]))
@@ -380,6 +485,21 @@ impl GpuRuntime {
             ) => session
                 .write_buffer(buffer, offset, source)
                 .map_err(|error| error.to_string()),
+            #[cfg(feature = "wgpu-metal-experimental")]
+            (
+                Some(GpuBackend::WgpuMetal(_)),
+                DeviceBufferBacking::WgpuMetal(bytes),
+            ) => {
+                let mut bytes = bytes.borrow_mut();
+                let range = checked_buffer_range(
+                    "wgpu Metal buffer write",
+                    offset,
+                    source.len(),
+                    bytes.len(),
+                )?;
+                bytes[range].copy_from_slice(source);
+                Ok(())
+            }
             #[cfg(test)]
             (Some(GpuBackend::Mock), DeviceBufferBacking::Mock(bytes)) => {
                 let mut bytes = bytes.borrow_mut();
@@ -410,6 +530,21 @@ impl GpuRuntime {
             ) => session
                 .read_buffer(buffer, offset, destination)
                 .map_err(|error| error.to_string()),
+            #[cfg(feature = "wgpu-metal-experimental")]
+            (
+                Some(GpuBackend::WgpuMetal(_)),
+                DeviceBufferBacking::WgpuMetal(bytes),
+            ) => {
+                let bytes = bytes.borrow();
+                let range = checked_buffer_range(
+                    "wgpu Metal buffer read",
+                    offset,
+                    destination.len(),
+                    bytes.len(),
+                )?;
+                destination.copy_from_slice(&bytes[range]);
+                Ok(())
+            }
             #[cfg(test)]
             (Some(GpuBackend::Mock), DeviceBufferBacking::Mock(bytes)) => {
                 let bytes = bytes.borrow();
@@ -450,6 +585,10 @@ impl GpuRuntime {
     pub(crate) fn opencl_session(&self) -> Result<&Session, String> {
         match self.backend.as_ref() {
             Some(GpuBackend::OpenCl { session, .. }) => Ok(session),
+            #[cfg(feature = "wgpu-metal-experimental")]
+            Some(GpuBackend::WgpuMetal(_)) => {
+                Err("wgpu Metal runtime does not expose an Apple OpenCL session".into())
+            }
             #[cfg(test)]
             Some(GpuBackend::Mock) => Err("mock GPU runtime has no OpenCL session".into()),
             None => Err("GPU runtime is not active".into()),
@@ -457,9 +596,17 @@ impl GpuRuntime {
     }
 
     pub(crate) fn opencl_buffer(&self, token: u64) -> Result<&Buffer, String> {
+        #[cfg(feature = "wgpu-metal-experimental")]
+        if matches!(self.backend.as_ref(), Some(GpuBackend::WgpuMetal(_))) {
+            return Err("wgpu Metal buffers are host-mirrored and have no Apple OpenCL object".into());
+        }
         let allocation = self.device_allocation(token)?;
         match &allocation.backing {
             DeviceBufferBacking::OpenCl(buffer) => Ok(buffer),
+            #[cfg(feature = "wgpu-metal-experimental")]
+            DeviceBufferBacking::WgpuMetal(_) => {
+                Err("wgpu Metal buffer has no Apple OpenCL object".into())
+            }
             #[cfg(test)]
             DeviceBufferBacking::Mock(_) => Err("mock GPU token has no OpenCL buffer".into()),
         }
@@ -544,18 +691,39 @@ impl GpuRuntime {
                 "OpenCL build device list contains a stale, forged, or cross-engine token",
             ));
         }
-        let record = self
+        let source = self
             .programs
             .get(&program)
-            .expect("validated OpenCL program remains present");
+            .expect("validated OpenCL program remains present")
+            .source
+            .clone();
         let backing = match self.backend.as_ref() {
             Some(GpuBackend::OpenCl { session, .. }) => ProgramBacking::OpenCl(
                 session
-                    .build_program(&record.source, options)
+                    .build_program(&source, options)
                     .map_err(|error| {
                         OpenClRuntimeError::from_apple(error, CL_INVALID_PROGRAM)
                     })?,
             ),
+            #[cfg(feature = "wgpu-metal-experimental")]
+            Some(GpuBackend::WgpuMetal(executor)) => {
+                if let Some(evidence) = self.wgpu_evidence.borrow_mut().as_mut() {
+                    evidence.backend_operations_attempted =
+                        evidence.backend_operations_attempted.saturating_add(1);
+                }
+                let build = match executor.build_program(&source, options) {
+                    Ok(build) => build,
+                    Err(detail) => {
+                        let detail = format!("wgpu OpenCL program build failed: {detail}");
+                        self.record_wgpu_sticky_error(&detail);
+                        return Err(OpenClRuntimeError::new(CL_BUILD_PROGRAM_FAILURE, detail));
+                    }
+                };
+                if let Some(evidence) = self.wgpu_evidence.borrow_mut().as_mut() {
+                    add_artifact_evidence(evidence, build.evidence);
+                }
+                ProgramBacking::WgpuMetal(build.artifact)
+            }
             #[cfg(test)]
             Some(GpuBackend::Mock) => ProgramBacking::Mock,
             None => {
@@ -599,6 +767,19 @@ impl GpuRuntime {
                         OpenClRuntimeError::from_apple(error, CL_INVALID_PROGRAM_EXECUTABLE)
                     })?,
             ),
+            #[cfg(feature = "wgpu-metal-experimental")]
+            Some(ProgramBacking::WgpuMetal(artifact)) => {
+                match WgpuKernel::new(artifact.clone(), name) {
+                    Ok(kernel) => KernelBacking::WgpuMetal(kernel),
+                    Err(error) => {
+                        self.record_wgpu_sticky_error(&format!(
+                            "wgpu kernel creation failed: {}",
+                            error.detail
+                        ));
+                        return Err(error);
+                    }
+                }
+            }
             #[cfg(test)]
             Some(ProgramBacking::Mock) => KernelBacking::Mock(BTreeMap::new()),
             None => {
@@ -652,6 +833,10 @@ impl GpuRuntime {
                 KernelBacking::OpenCl(kernel) => kernel
                     .set_raw_arg(index, bytes)
                     .map_err(|error| OpenClRuntimeError::from_apple(error, CL_INVALID_ARG_SIZE))?,
+                #[cfg(feature = "wgpu-metal-experimental")]
+                KernelBacking::WgpuMetal(kernel) => {
+                    kernel.set_raw_argument(index, bytes)?;
+                }
                 #[cfg(test)]
                 KernelBacking::Mock(arguments) => {
                     if bytes.is_empty() {
@@ -675,6 +860,67 @@ impl GpuRuntime {
             .scalar_argument_bytes
             .saturating_add(bytes.len() as u64);
         Ok(())
+    }
+
+    pub(crate) fn set_opencl_kernel_arg(
+        &mut self,
+        kernel: u64,
+        index: u32,
+        bytes: &[u8],
+    ) -> Result<(), OpenClRuntimeError> {
+        #[cfg(feature = "wgpu-metal-experimental")]
+        {
+            let expectation = self
+                .kernels
+                .get(&kernel)
+                .and_then(|record| match &record.backing {
+                    KernelBacking::WgpuMetal(kernel) => Some(kernel.argument_expectation(index)),
+                    _ => None,
+                })
+                .transpose()?;
+            if let Some(expectation) = expectation {
+                return match expectation {
+                    WgpuArgumentExpectation::StorageBuffer => {
+                        if bytes.len() != size_of::<u64>() {
+                            return Err(OpenClRuntimeError::new(
+                                CL_INVALID_ARG_SIZE,
+                                format!(
+                                    "wgpu storage argument {index} requires an eight-byte cl_mem token"
+                                ),
+                            ));
+                        }
+                        let token = u64::from_le_bytes(
+                            bytes
+                                .try_into()
+                                .expect("validated storage token has eight bytes"),
+                        );
+                        self.set_opencl_kernel_buffer_arg(kernel, index, token)
+                    }
+                    WgpuArgumentExpectation::PodUniform { .. } => {
+                        self.set_opencl_kernel_raw_arg(kernel, index, bytes)
+                    }
+                };
+            }
+        }
+        if bytes.len() == size_of::<u64>() {
+            let token = u64::from_le_bytes(
+                bytes
+                    .try_into()
+                    .expect("eight-byte OpenCL argument has exact length"),
+            );
+            if self.is_buffer_token(token) {
+                return self.set_opencl_kernel_buffer_arg(kernel, index, token);
+            }
+            if Self::is_issued_token(token) {
+                return Err(OpenClRuntimeError::new(
+                    CL_INVALID_MEM_OBJECT,
+                    format!(
+                        "OpenCL kernel argument contains stale, forged, cross-kind, or cross-engine token {token:#x}"
+                    ),
+                ));
+            }
+        }
+        self.set_opencl_kernel_raw_arg(kernel, index, bytes)
     }
 
     pub(crate) fn set_opencl_kernel_buffer_arg(
@@ -718,6 +964,21 @@ impl GpuRuntime {
                     .map_err(|error| {
                         OpenClRuntimeError::from_apple(error, CL_INVALID_ARG_VALUE)
                     })?,
+                #[cfg(feature = "wgpu-metal-experimental")]
+                (
+                    KernelBacking::WgpuMetal(kernel),
+                    DeviceBufferBacking::WgpuMetal(_),
+                ) => {
+                    kernel.set_buffer_argument(index, buffer)?;
+                }
+                #[cfg(feature = "wgpu-metal-experimental")]
+                (KernelBacking::OpenCl(_), DeviceBufferBacking::WgpuMetal(_))
+                | (KernelBacking::WgpuMetal(_), DeviceBufferBacking::OpenCl(_)) => {
+                    return Err(OpenClRuntimeError::new(
+                        CL_INVALID_MEM_OBJECT,
+                        "OpenCL kernel and buffer belong to different runtime backends",
+                    ));
+                }
                 #[cfg(test)]
                 (KernelBacking::Mock(arguments), DeviceBufferBacking::Mock(_)) => {
                     arguments.insert(index, buffer.to_le_bytes().to_vec());
@@ -780,6 +1041,108 @@ impl GpuRuntime {
                 })?,
             #[cfg(test)]
             (Some(GpuBackend::Mock), KernelBacking::Mock(_)) => {}
+            #[cfg(feature = "wgpu-metal-experimental")]
+            (
+                Some(GpuBackend::WgpuMetal(executor)),
+                KernelBacking::WgpuMetal(kernel),
+            ) => {
+                let plan = match kernel.prepare_dispatch(
+                    global_offset,
+                    global,
+                    local,
+                    |token| {
+                        let allocation = self
+                            .buffers
+                            .get(&token)
+                            .ok_or_else(|| format!("bound buffer token {token:#x} was lost"))?;
+                        match &allocation.backing {
+                            DeviceBufferBacking::WgpuMetal(bytes) => Ok(bytes.borrow().clone()),
+                            _ => Err(format!(
+                                "bound buffer token {token:#x} belongs to another backend"
+                            )),
+                        }
+                    },
+                ) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        self.record_wgpu_sticky_error(&format!(
+                            "wgpu dispatch preparation failed: {}",
+                            error.detail
+                        ));
+                        return Err(error);
+                    }
+                };
+                if let Some(evidence) = self.wgpu_evidence.borrow_mut().as_mut() {
+                    evidence.backend_operations_attempted =
+                        evidence.backend_operations_attempted.saturating_add(1);
+                }
+                let report = match executor.dispatch(&plan) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        let detail = format!("wgpu kernel dispatch failed: {error}");
+                        if let Some(evidence) = self.wgpu_evidence.borrow_mut().as_mut() {
+                            replace_resource_counts(
+                                &mut evidence.live_resources,
+                                executor.live_objects(),
+                            );
+                        }
+                        self.record_wgpu_sticky_error(&detail);
+                        return Err(OpenClRuntimeError::new(CL_OUT_OF_RESOURCES, detail));
+                    }
+                };
+                let mut seen_outputs = BTreeSet::new();
+                let mut download_bytes = 0u64;
+                for output in &report.outputs {
+                    let Some(token) = plan.output_tokens.get(&output.binding) else {
+                        let detail = format!(
+                            "wgpu returned unexpected writable binding {}",
+                            output.binding
+                        );
+                        self.record_wgpu_sticky_error(&detail);
+                        return Err(OpenClRuntimeError::new(CL_OUT_OF_RESOURCES, detail));
+                    };
+                    if !seen_outputs.insert(output.binding) {
+                        let detail =
+                            format!("wgpu returned duplicate writable binding {}", output.binding);
+                        self.record_wgpu_sticky_error(&detail);
+                        return Err(OpenClRuntimeError::new(CL_OUT_OF_RESOURCES, detail));
+                    }
+                    let Some(allocation) = self.buffers.get(token) else {
+                        let detail = format!("wgpu output buffer token {token:#x} was lost");
+                        self.record_wgpu_sticky_error(&detail);
+                        return Err(OpenClRuntimeError::new(CL_OUT_OF_RESOURCES, detail));
+                    };
+                    let DeviceBufferBacking::WgpuMetal(bytes) = &allocation.backing else {
+                        let detail =
+                            format!("wgpu output buffer token {token:#x} changed backend");
+                        self.record_wgpu_sticky_error(&detail);
+                        return Err(OpenClRuntimeError::new(CL_OUT_OF_RESOURCES, detail));
+                    };
+                    let mut bytes = bytes.borrow_mut();
+                    if bytes.len() != output.bytes.len() {
+                        let detail = format!(
+                            "wgpu output binding {} changed size from {} to {}",
+                            output.binding,
+                            bytes.len(),
+                            output.bytes.len()
+                        );
+                        self.record_wgpu_sticky_error(&detail);
+                        return Err(OpenClRuntimeError::new(CL_OUT_OF_RESOURCES, detail));
+                    }
+                    bytes.copy_from_slice(&output.bytes);
+                    download_bytes = download_bytes.saturating_add(output.bytes.len() as u64);
+                }
+                if seen_outputs.len() != plan.output_tokens.len() {
+                    let detail = "wgpu omitted a reflected writable binding".to_string();
+                    self.record_wgpu_sticky_error(&detail);
+                    return Err(OpenClRuntimeError::new(CL_OUT_OF_RESOURCES, detail));
+                }
+                if let Some(evidence) = self.wgpu_evidence.borrow_mut().as_mut() {
+                    add_resource_counts(&mut evidence.created_resources, report.created_resources);
+                    replace_resource_counts(&mut evidence.live_resources, report.live_resources);
+                    add_dispatch_evidence(evidence, plan.evidence(download_bytes));
+                }
+            }
             _ => {
                 return Err(OpenClRuntimeError::new(
                     CL_INVALID_KERNEL,
@@ -874,6 +1237,10 @@ impl GpuRuntime {
         evidence
     }
 
+    pub(crate) fn wgpu_evidence(&self) -> Option<WgpuRuntimeEvidence> {
+        self.wgpu_evidence.borrow().clone()
+    }
+
     pub(crate) fn allocate_token(&mut self, kind: GpuTokenKind) -> Result<u64, String> {
         let token = self
             .next_token
@@ -922,6 +1289,8 @@ impl GpuRuntime {
     pub(crate) fn object_counts(&self) -> ObjectCounts {
         match self.backend.as_ref() {
             Some(GpuBackend::OpenCl { tracker, .. }) => tracker.snapshot(),
+            #[cfg(feature = "wgpu-metal-experimental")]
+            Some(GpuBackend::WgpuMetal(_)) => ObjectCounts::default(),
             #[cfg(test)]
             Some(GpuBackend::Mock) | None => ObjectCounts::default(),
             #[cfg(not(test))]
@@ -934,19 +1303,38 @@ impl GpuRuntime {
             Some(GpuBackend::OpenCl { session, .. }) => {
                 session.finish().map_err(|error| error.to_string())
             }
+            #[cfg(feature = "wgpu-metal-experimental")]
+            Some(GpuBackend::WgpuMetal(executor)) => {
+                if let Some(detail) = self.wgpu_sticky_error.borrow().clone() {
+                    return Err(detail);
+                }
+                let live = executor.live_objects();
+                if !live.is_zero() {
+                    return Err("wgpu Metal session retained live dispatch resources".into());
+                }
+                Ok(())
+            }
             #[cfg(test)]
             Some(GpuBackend::Mock) => Ok(()),
             None => Err("GPU runtime is not active".into()),
         }
     }
 
-    pub(crate) fn end_opencl(&mut self) -> Result<ObjectCounts, String> {
+    pub(crate) fn end(&mut self) -> Result<ObjectCounts, String> {
         let tracker = match self.backend.as_ref() {
             Some(GpuBackend::OpenCl { tracker, .. }) => Some(tracker.clone()),
+            #[cfg(feature = "wgpu-metal-experimental")]
+            Some(GpuBackend::WgpuMetal(_)) => None,
             #[cfg(test)]
             Some(GpuBackend::Mock) => None,
             None => return Err("GPU runtime is not active".into()),
         };
+        #[cfg(feature = "wgpu-metal-experimental")]
+        let wgpu_live = match self.backend.as_ref() {
+            Some(GpuBackend::WgpuMetal(executor)) => Some(executor.live_objects()),
+            _ => None,
+        };
+        let wgpu_sticky_error = self.wgpu_sticky_error.borrow().clone();
         // OpenCL kernels retain their bound buffers in the safe facade. Drop
         // kernels before programs and the runtime's owning buffer registry,
         // then finally release the session/context.
@@ -965,7 +1353,35 @@ impl GpuRuntime {
         self.opencl_evidence.live_kernels = 0;
         self.opencl_evidence.cleanup_balanced =
             counts.live_total() == 0 && counts.release_errors == 0;
+        if let Some(evidence) = self.wgpu_evidence.borrow_mut().as_mut() {
+            #[cfg(feature = "wgpu-metal-experimental")]
+            if let Some(live) = wgpu_live {
+                replace_resource_counts(&mut evidence.live_resources, live);
+            }
+            evidence.cleanup_balanced =
+                evidence.live_resources.is_zero() && wgpu_sticky_error.is_none();
+        }
+        if let Some(detail) = wgpu_sticky_error {
+            return Err(detail);
+        }
+        #[cfg(feature = "wgpu-metal-experimental")]
+        if wgpu_live.is_some_and(|counts| !counts.is_zero()) {
+            return Err("wgpu Metal session retained live dispatch resources at shutdown".into());
+        }
         Ok(counts)
+    }
+
+    #[cfg(any(test, feature = "wgpu-metal-experimental"))]
+    fn record_wgpu_sticky_error(&self, detail: &str) {
+        let detail = bounded_opencl_evidence_detail(detail);
+        let mut sticky = self.wgpu_sticky_error.borrow_mut();
+        if sticky.is_none() {
+            *sticky = Some(detail.clone());
+        }
+        if let Some(evidence) = self.wgpu_evidence.borrow_mut().as_mut() {
+            evidence.last_error = Some(detail);
+            evidence.cleanup_balanced = false;
+        }
     }
 
     fn allocate_device_tokens(&mut self) -> Result<GpuDeviceTokens, String> {
@@ -1063,6 +1479,7 @@ fn bounded_opencl_evidence_detail(detail: &str) -> String {
     format!("{}…", &detail[..end])
 }
 
+#[cfg(any(test, feature = "wgpu-metal-experimental"))]
 fn checked_buffer_range(
     operation: &str,
     offset: usize,
@@ -1117,8 +1534,71 @@ mod gpu_runtime_tests {
         assert_eq!(first.live_buffer_bytes(), 0);
         assert_eq!(first.object_counts(), ObjectCounts::default());
         first.finish().unwrap();
-        assert_eq!(first.end_opencl().unwrap(), ObjectCounts::default());
+        assert_eq!(first.end().unwrap(), ObjectCounts::default());
         assert!(!first.is_active());
+    }
+
+    #[test]
+    fn failed_second_begin_clears_prior_evidence_before_config_loading() {
+        let mut runtime = GpuRuntime::default();
+        runtime.begin_mock(3).unwrap();
+        runtime.record_opencl_api_call("priorCall");
+        runtime.end().unwrap();
+        *runtime.wgpu_evidence.borrow_mut() = Some(WgpuRuntimeEvidence {
+            executor_available: true,
+            ..WgpuRuntimeEvidence::default()
+        });
+        *runtime.wgpu_sticky_error.borrow_mut() = Some("prior sticky error".into());
+        assert!(!runtime.opencl_evidence.api_calls.is_empty());
+
+        let error = runtime
+            .begin_with_wgpu_initializer(GpuRuntimeBackendKind::WgpuMetal, 0, |_| {
+                Err("new configuration failure".into())
+            })
+            .unwrap_err();
+
+        assert_eq!(error, "new configuration failure");
+        assert_eq!(runtime.opencl_evidence, OpenClBridgeEvidence::default());
+        assert!(runtime.wgpu_evidence.borrow().is_none());
+        assert!(runtime.wgpu_sticky_error.borrow().is_none());
+        assert!(!runtime.is_active());
+    }
+
+    #[cfg(not(feature = "wgpu-metal-experimental"))]
+    #[test]
+    fn wgpu_request_without_feature_is_explicitly_unsupported_without_fallback() {
+        let mut runtime = GpuRuntime::default();
+        let error = runtime
+            .begin(GpuRuntimeBackendKind::WgpuMetal, 4)
+            .unwrap_err();
+
+        assert_eq!(error, WGPU_METAL_EXPERIMENTAL_UNAVAILABLE);
+        assert!(!runtime.is_active());
+        assert_eq!(runtime.backend_kind(), None);
+        assert_eq!(runtime.device_index(), None);
+        assert_eq!(runtime.device_tokens(), None);
+        assert_eq!(runtime.opencl_evidence(), OpenClBridgeEvidence::default());
+        assert!(runtime.wgpu_evidence().is_none());
+        assert!(runtime.wgpu_sticky_error.borrow().is_none());
+    }
+
+    #[test]
+    fn sticky_wgpu_error_cannot_serialize_cleanup_as_balanced() {
+        let mut runtime = GpuRuntime::default();
+        runtime.begin_mock(0).unwrap();
+        *runtime.wgpu_evidence.borrow_mut() = Some(WgpuRuntimeEvidence {
+            executor_available: true,
+            cleanup_balanced: true,
+            ..WgpuRuntimeEvidence::default()
+        });
+        runtime.record_wgpu_sticky_error("proof dispatch failed");
+
+        assert_eq!(runtime.end().unwrap_err(), "proof dispatch failed");
+        let evidence = runtime.wgpu_evidence().unwrap();
+        assert!(!evidence.cleanup_balanced);
+        assert_eq!(evidence.last_error.as_deref(), Some("proof dispatch failed"));
+        let json = serde_json::to_value(evidence).unwrap();
+        assert_eq!(json["cleanup_balanced"], false);
     }
 
     #[test]
@@ -1138,7 +1618,7 @@ mod gpu_runtime_tests {
             runtime.opencl_buffer(token).err().unwrap(),
             "mock GPU token has no OpenCL buffer"
         );
-        runtime.end_opencl().unwrap();
+        runtime.end().unwrap();
         assert_eq!(runtime.live_buffer_count(), 0);
         assert_eq!(runtime.live_buffer_bytes(), 0);
         assert!(!runtime.is_buffer_token(token));
@@ -1154,7 +1634,7 @@ mod gpu_runtime_tests {
             .unwrap_err();
         assert_eq!(error.status, CL_OUT_OF_HOST_MEMORY);
         assert!(runtime.programs.is_empty());
-        runtime.end_opencl().unwrap();
+        runtime.end().unwrap();
         assert_eq!(runtime.live_program_source_bytes, 0);
     }
 
@@ -1186,7 +1666,7 @@ mod gpu_runtime_tests {
                 .contains("allocation count")
         );
 
-        runtime.end_opencl().unwrap();
+        runtime.end().unwrap();
         assert_eq!(runtime.live_buffer_count(), 0);
         assert_eq!(runtime.live_buffer_bytes(), 0);
         assert!(runtime.buffers.is_empty());
@@ -1295,7 +1775,7 @@ mod gpu_runtime_tests {
         assert_eq!(runtime.live_buffer_count(), 0);
         assert_eq!(runtime.live_buffer_bytes(), 0);
         assert!(runtime.buffers.is_empty());
-        runtime.end_opencl().unwrap();
+        runtime.end().unwrap();
     }
 
     fn mock_runtime_with_kernel() -> (GpuRuntime, u64) {

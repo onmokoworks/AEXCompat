@@ -288,7 +288,7 @@ fn selector_error(return_value: u64) -> Option<i32> {
 
 fn usage() {
     eprintln!(
-        "usage: aex-guest-worker <inspect|setup|render> <x64.aex> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--render-backend <cpu|opencl>] [--gpu-device-index <n>]"
+        "usage: aex-guest-worker <inspect|setup|render> <x64.aex> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--render-backend <cpu|opencl|wgpu-metal>] [--gpu-device-index <n>]"
     );
     eprintln!(
         "       aex-guest-worker session <x64.aex> <input.raw> <output.raw> <width> <height> <time-scale> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>]"
@@ -297,7 +297,7 @@ fn usage() {
         "       aex-guest-worker trace-selector <x64.aex> <GLOBAL_SETUP|PARAMS_SETUP> [--effect <#index|match-name>]"
     );
     eprintln!(
-        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--render-backend <cpu|opencl>] [--gpu-device-index <n>] [name=value | name@slot=a,r,g,b ...]"
+        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--render-backend <cpu|opencl|wgpu-metal>] [--gpu-device-index <n>] [name=value | name@slot=a,r,g,b ...]"
     );
     eprintln!(
         "       aex-guest-worker render-trace-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--watch <spec>] [--watch-output-pixel x,y] [name=value ...]"
@@ -397,7 +397,8 @@ fn extract_render_backend(
                 backend = Some(match value {
                     "cpu" => "cpu",
                     "opencl" => "opencl",
-                    _ => return Err("--render-backend requires cpu or opencl".into()),
+                    "wgpu-metal" => "wgpu-metal",
+                    _ => return Err("--render-backend requires cpu, opencl, or wgpu-metal".into()),
                 });
             }
             "device" => {
@@ -418,10 +419,13 @@ fn extract_render_backend(
     }
     match backend.unwrap_or("cpu") {
         "cpu" if device_index.is_some() => {
-            Err("--gpu-device-index requires --render-backend opencl".into())
+            Err("--gpu-device-index requires --render-backend opencl or wgpu-metal".into())
         }
         "cpu" => Ok(RenderBackendRequest::Cpu),
         "opencl" => Ok(RenderBackendRequest::OpenCl {
+            device_index: device_index.unwrap_or(0),
+        }),
+        "wgpu-metal" => Ok(RenderBackendRequest::WgpuMetal {
             device_index: device_index.unwrap_or(0),
         }),
         _ => unreachable!(),
@@ -895,6 +899,29 @@ mod tests {
             extract_render_backend(&mut values).unwrap(),
             RenderBackendRequest::Cpu
         );
+        values.extend([
+            OsString::from("--render-backend"),
+            OsString::from("wgpu-metal"),
+            OsString::from("--gpu-device-index"),
+            OsString::from("5"),
+        ]);
+        assert_eq!(
+            extract_render_backend(&mut values).unwrap(),
+            RenderBackendRequest::WgpuMetal { device_index: 5 }
+        );
+        assert_eq!(
+            values,
+            [OsString::from("input.png"), OsString::from("output.png")]
+        );
+        let mut wgpu_default = vec![
+            OsString::from("--render-backend"),
+            OsString::from("wgpu-metal"),
+        ];
+        assert_eq!(
+            extract_render_backend(&mut wgpu_default).unwrap(),
+            RenderBackendRequest::WgpuMetal { device_index: 0 }
+        );
+        assert!(wgpu_default.is_empty());
 
         for arguments in [
             vec![OsString::from("--render-backend"), OsString::from("metal")],

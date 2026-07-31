@@ -2,8 +2,10 @@
 members = [
     "crates/aex-abi",
     "crates/aex-apple-opencl",
+    "crates/aex-clspv",
     "crates/aex-guest-worker",
     "crates/aex-unicorn-buffer",
+    "crates/aex-wgpu-compute",
 ]
 resolver = "2"
 

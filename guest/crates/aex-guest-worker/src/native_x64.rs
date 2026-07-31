@@ -23,7 +23,9 @@ use std::ptr;
 use thiserror::Error;
 
 use crate::crt_heap::CrtHeap;
-use crate::gpu_lifecycle::{GpuSuiteEvidence, OpenClBridgeEvidence};
+use crate::gpu_lifecycle::{
+    GpuRuntimeBackendKind, GpuSuiteEvidence, OpenClBridgeEvidence, WgpuRuntimeEvidence,
+};
 #[cfg(test)]
 use crate::native_aegp_memory::active_arena_next;
 use crate::native_aegp_memory::{
@@ -697,15 +699,25 @@ impl GuestEngine<'static> {
         &self.state.suite_requests
     }
 
-    pub(crate) fn begin_opencl_gpu(&mut self, _: u32) -> Result<(), GuestError> {
-        Err(GuestError::Callback(
-            "OpenCL GPU rendering is available only in the Unicorn worker".into(),
-        ))
+    pub(crate) fn begin_gpu_runtime(
+        &mut self,
+        backend_kind: GpuRuntimeBackendKind,
+        _: u32,
+    ) -> Result<(), GuestError> {
+        let message = match backend_kind {
+            GpuRuntimeBackendKind::AppleOpenCl => {
+                "OpenCL GPU rendering is available only in the Unicorn worker"
+            }
+            GpuRuntimeBackendKind::WgpuMetal => {
+                "wgpu-metal GPU rendering is available only in the Unicorn worker"
+            }
+        };
+        Err(GuestError::Callback(message.into()))
     }
 
-    pub(crate) fn end_opencl_gpu(&mut self) -> Result<ObjectCounts, GuestError> {
+    pub(crate) fn end_gpu_runtime(&mut self) -> Result<ObjectCounts, GuestError> {
         Err(GuestError::Callback(
-            "OpenCL GPU runtime is not active in the native carrier".into(),
+            "GPU runtime is not active in the native carrier".into(),
         ))
     }
 
@@ -721,7 +733,7 @@ impl GuestEngine<'static> {
         ))
     }
 
-    pub(crate) fn opencl_gpu_active(&self) -> bool {
+    pub(crate) fn gpu_runtime_active(&self) -> bool {
         false
     }
 
@@ -731,6 +743,10 @@ impl GuestEngine<'static> {
 
     pub fn opencl_bridge_evidence(&self) -> OpenClBridgeEvidence {
         OpenClBridgeEvidence::default()
+    }
+
+    pub(crate) fn wgpu_runtime_evidence(&self) -> Option<WgpuRuntimeEvidence> {
+        None
     }
 
     pub fn unsupported_suite_calls(&self) -> &[UnsupportedSuiteCall] {
