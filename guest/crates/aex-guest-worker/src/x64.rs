@@ -16,7 +16,9 @@ use crate::plugin_data::{
     CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
 };
 
+#[cfg(feature = "wgpu-metal-experimental")]
 mod wgpu_runtime;
+#[cfg(feature = "wgpu-metal-experimental")]
 use wgpu_runtime::{
     WgpuArgumentExpectation, WgpuCompilerConfig, WgpuExecutor, WgpuKernel, add_artifact_evidence,
     add_dispatch_evidence, add_resource_counts, replace_resource_counts,
