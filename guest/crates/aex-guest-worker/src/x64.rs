@@ -16,6 +16,12 @@ use crate::plugin_data::{
     CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
 };
 
+mod wgpu_runtime;
+use wgpu_runtime::{
+    WgpuArgumentExpectation, WgpuCompilerConfig, WgpuExecutor, WgpuKernel, add_artifact_evidence,
+    add_dispatch_evidence, add_resource_counts, replace_resource_counts,
+};
+
 const PAGE_SIZE: u64 = 0x1000;
 const STACK_BASE: u64 = 0x0000_0000_7000_0000;
 const STACK_SIZE: u64 = 0x20_0000;

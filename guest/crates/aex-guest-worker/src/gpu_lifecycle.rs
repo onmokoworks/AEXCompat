@@ -103,9 +103,49 @@ impl WgpuResourceCounts {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct WgpuAdapterEvidence {
+    pub index: usize,
+    pub name: String,
+    pub backend: String,
+    pub device_type: String,
+    pub vendor: u32,
+    pub device: u32,
+    pub driver: String,
+    pub driver_info: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct WgpuArtifactEvidence {
+    pub toolchain_mode: String,
+    pub source_sha256: String,
+    pub compiler_sha256: String,
+    pub raw_spirv_sha256: String,
+    pub normalized_options: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct WgpuDispatchEvidence {
+    pub kernel: String,
+    pub work_dim: u32,
+    pub global: [u64; 3],
+    pub local: [u32; 3],
+    pub groups: [u32; 3],
+    pub storage_bindings: usize,
+    pub uniform_bindings: usize,
+    pub upload_bytes: u64,
+    pub download_bytes: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct WgpuRuntimeEvidence {
     pub executor_available: bool,
     pub backend_operations_attempted: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<WgpuAdapterEvidence>,
+    pub artifacts: Vec<WgpuArtifactEvidence>,
+    pub dispatches: Vec<WgpuDispatchEvidence>,
+    pub upload_bytes: u64,
+    pub download_bytes: u64,
     pub created_resources: WgpuResourceCounts,
     pub live_resources: WgpuResourceCounts,
     pub cleanup_balanced: bool,

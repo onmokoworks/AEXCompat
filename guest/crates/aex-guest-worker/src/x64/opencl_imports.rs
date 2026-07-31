@@ -299,32 +299,10 @@ fn emulate_cl_set_kernel_arg(
         argument_size,
         "OpenCL kernel argument",
     )?;
-    if argument_size == size_of::<u64>() {
-        let token = u64::from_le_bytes(
-            bytes
-                .as_slice()
-                .try_into()
-                .expect("eight-byte OpenCL argument has exact length"),
-        );
-        if unicorn.get_data().gpu_runtime.is_buffer_token(token) {
-            return unicorn
-                .get_data_mut()
-                .gpu_runtime
-                .set_opencl_kernel_buffer_arg(kernel, index, token);
-        }
-        if GpuRuntime::is_issued_token(token) {
-            return Err(OpenClRuntimeError::new(
-                CL_INVALID_MEM_OBJECT,
-                format!(
-                    "OpenCL kernel argument contains stale, forged, cross-kind, or cross-engine token {token:#x}"
-                ),
-            ));
-        }
-    }
     unicorn
         .get_data_mut()
         .gpu_runtime
-        .set_opencl_kernel_raw_arg(kernel, index, &bytes)
+        .set_opencl_kernel_arg(kernel, index, &bytes)
 }
 
 fn emulate_cl_enqueue_nd_range_kernel(

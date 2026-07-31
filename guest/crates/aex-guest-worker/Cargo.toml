@@ -11,7 +11,9 @@ native-carrier = []
 [dependencies]
 aex-abi = { path = "../aex-abi" }
 aex-apple-opencl = { path = "../aex-apple-opencl" }
+aex-clspv = { path = "../aex-clspv" }
 aex-unicorn-buffer = { path = "../aex-unicorn-buffer" }
+aex-wgpu-compute = { path = "../aex-wgpu-compute" }
 goblin.workspace = true
 iced-x86.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }

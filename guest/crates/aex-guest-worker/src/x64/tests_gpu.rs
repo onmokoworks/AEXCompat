@@ -1,5 +1,5 @@
 #[test]
-fn wgpu_marker_exposes_opencl_device_info_through_the_existing_gpu_suite() {
+fn gpu_suite_exposes_backend_neutral_opencl_device_info() {
     assert_eq!(PF_ERR_OUT_OF_MEMORY, 4);
     assert_eq!(PF_ERR_BAD_CALLBACK_PARAM, 516);
     let mut engine = test_engine(&[0xc3]);
@@ -7,7 +7,7 @@ fn wgpu_marker_exposes_opencl_device_info_through_the_existing_gpu_suite() {
         .unicorn
         .get_data_mut()
         .gpu_runtime
-        .begin(GpuRuntimeBackendKind::WgpuMetal, 0)
+        .begin_mock(0)
         .unwrap();
     let name = engine.allocate(20, 1).unwrap();
     engine.write(name, b"PF GPU Device Suite\0").unwrap();
@@ -95,7 +95,7 @@ fn wgpu_marker_exposes_opencl_device_info_through_the_existing_gpu_suite() {
         engine.end_gpu_runtime().unwrap(),
         ObjectCounts::default()
     );
-    assert!(engine.wgpu_runtime_evidence().unwrap().cleanup_balanced);
+    assert!(engine.opencl_bridge_evidence().cleanup_balanced);
 }
 
 #[test]
