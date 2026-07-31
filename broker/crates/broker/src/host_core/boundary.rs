@@ -92,7 +92,19 @@ pub fn contain_panic<T>(
 ) -> Result<T, HostError> {
     match catch_unwind(AssertUnwindSafe(callback)) {
         Ok(result) => result,
-        Err(_) => Err(HostError::new(HostErrorCode::Panic, operation)),
+        Err(payload) => {
+            dispose_caught_panic(payload);
+            Err(HostError::new(HostErrorCode::Panic, operation))
+        }
+    }
+}
+
+fn dispose_caught_panic(payload: Box<dyn std::any::Any + Send>) {
+    if let Err(drop_panic) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
+        // A panic payload may itself panic from Drop. The secondary payload
+        // must not be dropped on this boundary because that can unwind again.
+        // Leaking this exceptional payload is the only fail-closed option.
+        std::mem::forget(drop_panic);
     }
 }
 
@@ -147,6 +159,23 @@ mod tests {
     fn panic_is_converted_before_reaching_the_adapter() {
         let result: Result<(), HostError> =
             contain_panic("test_callback", || panic!("must not cross the boundary"));
+        assert_eq!(result.unwrap_err().code(), HostErrorCode::Panic);
+    }
+
+    #[test]
+    fn panic_payload_drop_cannot_escape_the_boundary() {
+        struct PanicOnDrop;
+
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                panic!("panic payload drop must also be contained");
+            }
+        }
+
+        let outer = catch_unwind(AssertUnwindSafe(|| {
+            contain_panic::<()>("test_drop_panic", || std::panic::panic_any(PanicOnDrop))
+        }));
+        let result = outer.expect("contain_panic must absorb payload Drop panics");
         assert_eq!(result.unwrap_err().code(), HostErrorCode::Panic);
     }
 

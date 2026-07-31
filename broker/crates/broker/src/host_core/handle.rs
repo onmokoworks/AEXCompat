@@ -1,10 +1,24 @@
 use crate::host_core::boundary::HostOpaqueHandle;
 use crate::host_core::error::{HostError, HostErrorCode};
+use std::sync::atomic::{AtomicU32, Ordering};
 
-const KIND_BITS: u32 = 8;
-const SLOT_BITS: u32 = 24;
+// Internal token layout: registry | generation | one-based slot | kind.
+// Registry IDs and generations never wrap; exhaustion fails closed instead.
+const KIND_BITS: u32 = 4;
+const SLOT_BITS: u32 = 20;
+const GENERATION_BITS: u32 = 20;
+const REGISTRY_BITS: u32 = 20;
+const KIND_MASK: u64 = (1_u64 << KIND_BITS) - 1;
 const SLOT_MASK: u64 = (1_u64 << SLOT_BITS) - 1;
+const GENERATION_MASK: u64 = (1_u64 << GENERATION_BITS) - 1;
+const REGISTRY_MASK: u64 = (1_u64 << REGISTRY_BITS) - 1;
+const SLOT_SHIFT: u32 = KIND_BITS;
+const GENERATION_SHIFT: u32 = SLOT_SHIFT + SLOT_BITS;
+const REGISTRY_SHIFT: u32 = GENERATION_SHIFT + GENERATION_BITS;
 const MAX_SLOTS: usize = SLOT_MASK as usize;
+static NEXT_REGISTRY_ID: AtomicU32 = AtomicU32::new(1);
+
+const _: () = assert!(KIND_BITS + SLOT_BITS + GENERATION_BITS + REGISTRY_BITS == 64);
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,6 +53,7 @@ struct Entry<T> {
 }
 
 pub struct HandleRegistry<T> {
+    registry_id: u32,
     entries: Vec<Entry<T>>,
     live: usize,
 }
@@ -46,6 +61,7 @@ pub struct HandleRegistry<T> {
 impl<T> Default for HandleRegistry<T> {
     fn default() -> Self {
         Self {
+            registry_id: allocate_registry_id(),
             entries: Vec::new(),
             live: 0,
         }
@@ -59,20 +75,30 @@ impl<T> HandleRegistry<T> {
         kind: HandleKind,
         value: T,
     ) -> Result<HostOpaqueHandle, HostError> {
+        if self.registry_id == 0 {
+            return Err(HostError::new(
+                HostErrorCode::CapacityExceeded,
+                "allocate_handle_registry",
+            ));
+        }
         if let Some((slot, entry)) = self
             .entries
             .iter_mut()
             .enumerate()
             .find(|(_, entry)| entry.value.is_none())
         {
-            entry.generation = entry.generation.checked_add(1).ok_or_else(|| {
-                HostError::new(HostErrorCode::CapacityExceeded, "reuse_handle_slot")
-            })?;
+            if entry.generation >= GENERATION_MASK as u32 {
+                return Err(HostError::new(
+                    HostErrorCode::CapacityExceeded,
+                    "reuse_handle_slot",
+                ));
+            }
+            entry.generation += 1;
             entry.owner = owner;
             entry.kind = kind;
             entry.value = Some(value);
             self.live += 1;
-            return Ok(encode(slot, entry.generation, kind));
+            return Ok(encode(self.registry_id, slot, entry.generation, kind));
         }
         if self.entries.len() >= MAX_SLOTS {
             return Err(HostError::new(
@@ -88,7 +114,7 @@ impl<T> HandleRegistry<T> {
             value: Some(value),
         });
         self.live += 1;
-        Ok(encode(slot, 1, kind))
+        Ok(encode(self.registry_id, slot, 1, kind))
     }
 
     pub fn get(
@@ -130,8 +156,11 @@ impl<T> HandleRegistry<T> {
         expected_kind: HandleKind,
         operation: &'static str,
     ) -> Result<(usize, &Entry<T>), HostError> {
-        let (slot, generation, encoded_kind) = decode(handle)
+        let (registry_id, slot, generation, encoded_kind) = decode(handle)
             .ok_or_else(|| HostError::new(HostErrorCode::InvalidHandle, operation))?;
+        if registry_id != self.registry_id {
+            return Err(HostError::new(HostErrorCode::InvalidHandle, operation));
+        }
         let entry = self
             .entries
             .get(slot)
@@ -149,15 +178,28 @@ impl<T> HandleRegistry<T> {
     }
 }
 
-fn encode(slot: usize, generation: u32, kind: HandleKind) -> HostOpaqueHandle {
+fn allocate_registry_id() -> u32 {
+    // Relaxed ordering is sufficient: atomic uniqueness, rather than memory
+    // publication, is the invariant. Zero permanently denotes exhaustion.
+    NEXT_REGISTRY_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            (next <= REGISTRY_MASK as u32).then_some(next + 1)
+        })
+        .unwrap_or(0)
+}
+
+fn encode(registry_id: u32, slot: usize, generation: u32, kind: HandleKind) -> HostOpaqueHandle {
     let slot_word = slot as u64 + 1;
     HostOpaqueHandle(
-        ((generation as u64) << (SLOT_BITS + KIND_BITS)) | (slot_word << KIND_BITS) | kind as u64,
+        ((registry_id as u64) << REGISTRY_SHIFT)
+            | ((generation as u64) << GENERATION_SHIFT)
+            | (slot_word << SLOT_SHIFT)
+            | kind as u64,
     )
 }
 
-fn decode(handle: HostOpaqueHandle) -> Option<(usize, u32, HandleKind)> {
-    let kind = match (handle.0 & ((1 << KIND_BITS) - 1)) as u8 {
+fn decode(handle: HostOpaqueHandle) -> Option<(u32, usize, u32, HandleKind)> {
+    let kind = match (handle.0 & KIND_MASK) as u8 {
         1 => HandleKind::Scene,
         2 => HandleKind::World,
         3 => HandleKind::Parameter,
@@ -165,12 +207,13 @@ fn decode(handle: HostOpaqueHandle) -> Option<(usize, u32, HandleKind)> {
         5 => HandleKind::Report,
         _ => return None,
     };
-    let slot_word = (handle.0 >> KIND_BITS) & SLOT_MASK;
-    let generation = (handle.0 >> (SLOT_BITS + KIND_BITS)) as u32;
-    if slot_word == 0 || generation == 0 {
+    let slot_word = (handle.0 >> SLOT_SHIFT) & SLOT_MASK;
+    let generation = ((handle.0 >> GENERATION_SHIFT) & GENERATION_MASK) as u32;
+    let registry_id = ((handle.0 >> REGISTRY_SHIFT) & REGISTRY_MASK) as u32;
+    if registry_id == 0 || slot_word == 0 || generation == 0 {
         return None;
     }
-    Some((slot_word as usize - 1, generation, kind))
+    Some((registry_id, slot_word as usize - 1, generation, kind))
 }
 
 #[cfg(test)]
@@ -249,6 +292,45 @@ mod tests {
         assert_eq!(
             registry
                 .get(HostOpaqueHandle(0), owner, HandleKind::Scene)
+                .unwrap_err()
+                .code(),
+            HostErrorCode::InvalidHandle
+        );
+    }
+
+    #[test]
+    fn tokens_are_bound_to_the_registry_that_created_them() {
+        let owner = OwnerId::new(21).unwrap();
+        let mut first = HandleRegistry::default();
+        let first_handle = first.insert(owner, HandleKind::Scene, "first").unwrap();
+        let mut second = HandleRegistry::default();
+        let second_handle = second.insert(owner, HandleKind::Scene, "second").unwrap();
+
+        assert_ne!(first_handle, second_handle);
+        assert_eq!(
+            second
+                .get(first_handle, owner, HandleKind::Scene)
+                .unwrap_err()
+                .code(),
+            HostErrorCode::InvalidHandle
+        );
+        assert_eq!(
+            first
+                .get(second_handle, owner, HandleKind::Scene)
+                .unwrap_err()
+                .code(),
+            HostErrorCode::InvalidHandle
+        );
+
+        drop(first);
+        let mut replacement = HandleRegistry::default();
+        let replacement_handle = replacement
+            .insert(owner, HandleKind::Scene, "replacement")
+            .unwrap();
+        assert_ne!(first_handle, replacement_handle);
+        assert_eq!(
+            replacement
+                .get(first_handle, owner, HandleKind::Scene)
                 .unwrap_err()
                 .code(),
             HostErrorCode::InvalidHandle
