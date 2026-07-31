@@ -1,6 +1,6 @@
 import json
 import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -349,8 +349,9 @@ def test_cpu_regression_commands_and_validation_status_are_explicit():
     result = _load()
     cpu = result["cpu_non_regression"]
     assert cpu["fixture_path_kind"] == "external_local_provenance"
-    assert PurePosixPath(cpu["fixture"]).is_absolute()
-    assert cpu["fixture"].endswith("/OLM as/plugins_2025/OLMBlur.aex")
+    assert cpu["fixture"] == "OLMBlur.aex"
+    assert cpu["fixture_locator"] == "environment:AEXCOMPAT_OLMBLUR_AEX"
+    assert "/Users/" not in json.dumps(result)
     assert SHA256.fullmatch(cpu["fixture_sha256"])
     assert cpu["input_path"] == result["fixture"]["input"]["path"]
     assert cpu["input_sha256"] == result["fixture"]["input"]["sha256"]
@@ -433,7 +434,7 @@ def test_cpu_regression_commands_and_validation_status_are_explicit():
         "apple_opencl_default"
     ]
     assert "Brightness=25" in commands["apple_opencl_brightness_25"]
-    assert f'"{cpu["fixture"]}"' in commands["olmblur_cpu"]
+    assert '"$AEXCOMPAT_OLMBLUR_AEX"' in commands["olmblur_cpu"]
     assert "--render-backend cpu" in commands["olmblur_cpu"]
 
     distribution = result["distribution"]

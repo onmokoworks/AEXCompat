@@ -91,7 +91,7 @@
       "wgpu_brightness_25": "env -u AEXCOMPAT_CLSPV_PATH -u AEXCOMPAT_CLSPV_SHA256 AEXCOMPAT_WGPU_PRECOMPILED_SPIRV=\"$PWD/target/issue615-clspv-proof/SDK_Invert_ProcAmp_OpenCL.pod-ubo.spv\" AEXCOMPAT_WGPU_PRECOMPILED_SOURCE_SHA256=989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937 AEXCOMPAT_WGPU_PRECOMPILED_SPIRV_SHA256=05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256=6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a AEXCOMPAT_WGPU_PRECOMPILED_PROVENANCE_SHA256=0372c252499d01cf530a2f8fd0365ca21355dd55eca758ae031d078d74522765 target/issue615-wgpu-worker/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/final-wgpu-brightness25.png --pixel-format argb32f --render-backend wgpu-metal --gpu-device-index 0 Brightness=25",
       "apple_opencl_default": "target/issue615-default-worker/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/final-opencl-default.png --pixel-format argb32f --render-backend opencl --gpu-device-index 0",
       "apple_opencl_brightness_25": "target/issue615-default-worker/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/final-opencl-brightness25.png --pixel-format argb32f --render-backend opencl --gpu-device-index 0 Brightness=25",
-      "olmblur_cpu": "target/issue615-default-worker/release/aex-guest-worker render-png \"/Users/onmk/Documents/Projects/Personal/OLM as/plugins_2025/OLMBlur.aex\" target/issue615-windows-source/probe-invert.png target/issue615-acceptance/final-olmblur-cpu.png --pixel-format argb8 --render-backend cpu"
+      "olmblur_cpu": "target/issue615-default-worker/release/aex-guest-worker render-png \"$AEXCOMPAT_OLMBLUR_AEX\" target/issue615-windows-source/probe-invert.png target/issue615-acceptance/final-olmblur-cpu.png --pixel-format argb8 --render-backend cpu"
     }
   },
   "normal_effect_entry": {
@@ -435,7 +435,8 @@
     }
   },
   "cpu_non_regression": {
-    "fixture": "/Users/onmk/Documents/Projects/Personal/OLM as/plugins_2025/OLMBlur.aex",
+    "fixture": "OLMBlur.aex",
+    "fixture_locator": "environment:AEXCOMPAT_OLMBLUR_AEX",
     "fixture_path_kind": "external_local_provenance",
     "fixture_size_bytes": 63488,
     "fixture_sha256": "f0611785e7b14ac4fcfc75f23b8862beb4539eee52d25d472556849535e96e5b",
