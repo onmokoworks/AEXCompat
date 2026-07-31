@@ -136,14 +136,14 @@ impl<T> HandleRegistry<T> {
             .entries
             .get(slot)
             .ok_or_else(|| HostError::new(HostErrorCode::InvalidHandle, operation))?;
+        if generation != entry.generation || entry.value.is_none() {
+            return Err(HostError::new(HostErrorCode::StaleHandle, operation));
+        }
         if encoded_kind != entry.kind || expected_kind != entry.kind {
             return Err(HostError::new(HostErrorCode::WrongKind, operation));
         }
         if owner != entry.owner {
             return Err(HostError::new(HostErrorCode::WrongOwner, operation));
-        }
-        if generation != entry.generation || entry.value.is_none() {
-            return Err(HostError::new(HostErrorCode::StaleHandle, operation));
         }
         Ok((slot, entry))
     }
@@ -215,7 +215,7 @@ mod tests {
         );
 
         let replacement = registry
-            .insert(owner, HandleKind::Scene, "replacement")
+            .insert(foreign, HandleKind::World, "replacement")
             .unwrap();
         assert_ne!(scene, replacement);
         assert_eq!(
@@ -224,6 +224,20 @@ mod tests {
                 .unwrap_err()
                 .code(),
             HostErrorCode::StaleHandle
+        );
+        assert_eq!(
+            registry
+                .get(replacement, owner, HandleKind::World)
+                .unwrap_err()
+                .code(),
+            HostErrorCode::WrongOwner
+        );
+        assert_eq!(
+            registry
+                .get(replacement, foreign, HandleKind::Scene)
+                .unwrap_err()
+                .code(),
+            HostErrorCode::WrongKind
         );
         assert_eq!(registry.live_count(), 1);
     }
