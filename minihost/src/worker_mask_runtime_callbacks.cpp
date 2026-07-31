@@ -459,9 +459,12 @@ int32_t __cdecl set_stream_value(int32_t plugin_id, void* stream, StreamValue* v
   HostStreamRef* record = find_stream(stream);
   const auto checked = value ? g_stream_values.find(value) : g_stream_values.end();
   if (plugin_id != 1 || !record || !value || value->stream != record->handle ||
-      !usable_mask(record->mask) || !dynamic_leaf(record->kind) ||
-      checked == g_stream_values.end() || checked->second.stream != record ||
-      !record->mask->keyframes.empty()) {
+      !dynamic_leaf(record->kind) || checked == g_stream_values.end() ||
+      checked->second.stream != record) {
+    ++g_invalid_stream_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  if (!usable_mask(record->mask) || !record->mask->keyframes.empty()) {
     ++g_invalid_stream_operations; return 4;
   }
   HostMask candidate = *record->mask;
@@ -490,7 +493,8 @@ int32_t __cdecl set_stream_value(int32_t plugin_id, void* stream, StreamValue* v
   candidate.dynamic_modified = true;
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       aexcompat::scene_model::registry(), record->identity.project_id,
-      &aexcompat::aegp_external_render_runtime::project_generation);
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
       [&]() noexcept {
@@ -520,14 +524,19 @@ int32_t __cdecl get_expression_state(int32_t plugin_id, void* stream, uint8_t* e
 }
 int32_t __cdecl reject_expression_state(int32_t plugin_id, void* stream, uint8_t enabled) {
   HostStreamRef* record = find_stream(stream); const int32_t index = record ? expression_index(record->kind) : -1;
-  if (plugin_id != 1 || !record || !record->mask || index < 0 ||
-      (enabled && record->mask->expressions[static_cast<std::size_t>(index)].empty())) {
+  if (plugin_id != 1 || !record || !record->mask || index < 0) {
+    ++g_invalid_stream_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  if (enabled &&
+      record->mask->expressions[static_cast<std::size_t>(index)].empty()) {
     ++g_invalid_stream_operations; return 4;
   }
   const bool candidate_enabled = enabled != 0;
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       aexcompat::scene_model::registry(), record->identity.project_id,
-      &aexcompat::aegp_external_render_runtime::project_generation);
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
       [&]() noexcept {
@@ -552,9 +561,11 @@ int32_t __cdecl unsupported_set_expression(int32_t plugin_id, void* stream, cons
   if (length > 4096) { ++g_invalid_stream_operations; return 4; }
   std::u16string candidate(
       reinterpret_cast<const char16_t*>(expression), length);
+  aexcompat::scene_transaction::MutationLock mutation_lock;
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       aexcompat::scene_model::registry(), record->identity.project_id,
-      &aexcompat::aegp_external_render_runtime::project_generation);
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
       [&]() noexcept {
@@ -699,7 +710,9 @@ bool ensure_keyframe_identity(HostStreamRef* stream, HostKeyframe* key,
 }
 
 bool commit_keyframe_candidate(HostStreamRef* stream, HostKeyframe* key,
-                               HostKeyframe candidate) {
+                               HostKeyframe candidate,
+                               aexcompat::scene_transaction::MutationLock&&
+                                   mutation_lock) {
   if (!stream || !key) return false;
   aexcompat::scene_model::ObjectSnapshot identity{};
   auto& registry = aexcompat::scene_model::registry();
@@ -708,7 +721,8 @@ bool commit_keyframe_candidate(HostStreamRef* stream, HostKeyframe* key,
   staged_identity.keyframe = keyframe_state(candidate);
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       registry, stream->identity.project_id,
-      &aexcompat::aegp_external_render_runtime::project_generation);
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
   if (!transaction.stage() || !transaction.validate(true)) return false;
   return transaction.commit(
       [&]() noexcept {
@@ -737,6 +751,19 @@ HostKeyframe snapshot_keyframe(const HostMask& mask, const HostTime& time) {
   key.time = time;
   return key;
 }
+bool update_keyframe_local_indices(HostStreamRef* stream) {
+  if (!stream || !stream->mask) return false;
+  auto& registry = aexcompat::scene_model::registry();
+  int32_t index = 0;
+  for (const auto& keyframe : stream->mask->keyframes) {
+    const auto identity = keyframe.identity;
+    if (identity != aexcompat::scene_model::Identity{} &&
+        !registry.update_local_index(identity, index))
+      return false;
+    ++index;
+  }
+  return true;
+}
 int32_t __cdecl get_stream_num_keyframes(void* stream, int32_t* count) {
   HostStreamRef* record = find_stream(stream);
   if (!record || !count) return 4;
@@ -763,8 +790,12 @@ int32_t __cdecl get_keyframe_time(void* stream, int32_t index, int16_t time_mode
 int32_t __cdecl insert_keyframe(void* stream, int16_t time_mode, const HostTime* time,
                                 int32_t* index) {
   HostStreamRef* record = find_stream(stream);
-  if (!record || time_mode < 0 || time_mode > 1 || !valid_time(time) || !index ||
-      record->mask->keyframes.size() >= kMaxKeyframesPerStream) {
+  if (!record || time_mode < 0 || time_mode > 1 || !valid_time(time) ||
+      !index) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  if (record->mask->keyframes.size() >= kMaxKeyframesPerStream) {
     ++g_invalid_keyframe_operations; return 4;
   }
   auto position = record->mask->keyframes.begin();
@@ -781,9 +812,18 @@ int32_t __cdecl insert_keyframe(void* stream, int16_t time_mode, const HostTime*
     ++g_invalid_keyframe_operations;
     return 4;
   }
+  aexcompat::scene_model::Registry::MutationCheckpoint
+      registry_checkpoint{};
+  if (!registry.capture_mutation_checkpoint(registry_checkpoint)) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
+  auto keyframes_before_apply = record->mask->keyframes;
+  const uint32_t mutations_before_apply = g_keyframe_mutations;
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       registry, record->identity.project_id,
-      &aexcompat::aegp_external_render_runtime::project_generation);
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   const bool committed = transaction.commit(
       [&]() noexcept {
@@ -795,9 +835,15 @@ int32_t __cdecl insert_keyframe(void* stream, int16_t time_mode, const HostTime*
                 candidate.identity, keyframe_state(candidate)))
           return false;
         record->mask->keyframes.insert(position, std::move(candidate));
+        if (!update_keyframe_local_indices(record)) return false;
         ++g_keyframe_mutations;
         *index = found_index;
         return true;
+      },
+      [&]() noexcept {
+        record->mask->keyframes.swap(keyframes_before_apply);
+        g_keyframe_mutations = mutations_before_apply;
+        return registry.restore_mutation_checkpoint(registry_checkpoint);
       },
       []() noexcept { bump_render_project_timestamp(); });
   return committed ? 0 : 4;
@@ -894,6 +940,10 @@ uint64_t mask_scene_fingerprint() noexcept {
 }
 int32_t __cdecl delete_keyframe(void* stream, int32_t index) {
   HostStreamRef* record = find_stream(stream);
+  if (!record) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
   HostKeyframe* key = keyframe_at(record, index);
   if (!key || !ensure_keyframe_identity(record, key, index) ||
       std::any_of(g_stream_values.begin(), g_stream_values.end(),
@@ -902,17 +952,32 @@ int32_t __cdecl delete_keyframe(void* stream, int32_t index) {
   }
   auto position = record->mask->keyframes.begin(); std::advance(position, index);
   const auto identity = key->identity;
+  auto& registry = aexcompat::scene_model::registry();
+  aexcompat::scene_model::Registry::MutationCheckpoint
+      registry_checkpoint{};
+  if (!registry.capture_mutation_checkpoint(registry_checkpoint)) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
+  auto keyframes_before_apply = record->mask->keyframes;
+  const uint32_t mutations_before_apply = g_keyframe_mutations;
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
-      aexcompat::scene_model::registry(), record->identity.project_id,
-      &aexcompat::aegp_external_render_runtime::project_generation);
+      registry, record->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
   if (!transaction.stage() || !transaction.validate(true)) return 4;
   return transaction.commit(
       [&]() noexcept {
-        if (!aexcompat::scene_model::registry().erase_tree(identity))
-          return false;
+        if (!registry.erase_tree(identity)) return false;
         record->mask->keyframes.erase(position);
+        if (!update_keyframe_local_indices(record)) return false;
         ++g_keyframe_mutations;
         return true;
+      },
+      [&]() noexcept {
+        record->mask->keyframes.swap(keyframes_before_apply);
+        g_keyframe_mutations = mutations_before_apply;
+        return registry.restore_mutation_checkpoint(registry_checkpoint);
       },
       []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
@@ -944,16 +1009,22 @@ int32_t __cdecl get_new_keyframe_value(int32_t plugin_id, void* stream, int32_t 
 }
 int32_t __cdecl set_keyframe_value(void* stream, int32_t index, const StreamValue* value) {
   HostStreamRef* record = find_stream(stream);
-  HostKeyframe* key = keyframe_at(record, index);
   OutlineData* source = value ? find_outline(value->value) : nullptr;
+  if (!record || !source) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  HostKeyframe* key = keyframe_at(record, index);
   if (!key || !ensure_keyframe_identity(record, key, index) ||
-      !source || source == key) {
+      source == key) {
     ++g_invalid_keyframe_operations;
     return 4;
   }
   HostKeyframe candidate = *key;
   static_cast<OutlineData&>(candidate) = *source;
-  return commit_keyframe_candidate(record, key, std::move(candidate))
+  return commit_keyframe_candidate(
+             record, key, std::move(candidate), std::move(mutation_lock))
       ? 0 : 4;
 }
 int32_t __cdecl get_stream_value_dimensionality(void* stream, int16_t* dimensions) {
@@ -1063,7 +1134,6 @@ int32_t __cdecl set_keyframe_spatial_tangents(void* stream, int32_t index,
                                                const StreamValue* in_value,
                                                const StreamValue* out_value) {
   HostStreamRef* record = find_stream(stream);
-  HostKeyframe* key = keyframe_at(record, index);
   const auto checked_for_stream = [record](const StreamValue* value) -> OutlineData* {
     if (!value) return nullptr;
     const auto found = g_stream_values.find(const_cast<StreamValue*>(value));
@@ -1074,15 +1144,20 @@ int32_t __cdecl set_keyframe_spatial_tangents(void* stream, int32_t index,
   };
   OutlineData* in_outline = checked_for_stream(in_value);
   OutlineData* out_outline = checked_for_stream(out_value);
-  if (!key || !ensure_keyframe_identity(record, key, index) ||
-      (!in_value && !out_value) || (in_value && !in_outline) ||
+  if (!record || (!in_value && !out_value) || (in_value && !in_outline) ||
       (out_value && !out_outline)) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index)) {
     ++g_invalid_keyframe_operations; return 4;
   }
   HostKeyframe candidate = *key;
   if (in_outline) candidate.spatial_in = *in_outline;
   if (out_outline) candidate.spatial_out = *out_outline;
-  return commit_keyframe_candidate(record, key, std::move(candidate))
+  return commit_keyframe_candidate(
+             record, key, std::move(candidate), std::move(mutation_lock))
       ? 0 : 4;
 }
 int32_t __cdecl get_keyframe_temporal_ease(void* stream, int32_t index, int32_t dimension,
@@ -1103,22 +1178,26 @@ int32_t __cdecl set_keyframe_temporal_ease(void* stream, int32_t index, int32_t 
                                             const KeyframeEase* in_ease,
                                             const KeyframeEase* out_ease) {
   HostStreamRef* record = find_stream(stream);
-  HostKeyframe* key = keyframe_at(record, index);
   const auto valid_ease = [](const KeyframeEase* ease) {
     return !ease || (std::isfinite(ease->speed) &&
         std::isfinite(ease->influence) && ease->influence >= 0.0 &&
         ease->influence <= 100.0);
   };
-  if (!key || !ensure_keyframe_identity(record, key, index) ||
-      dimension < 0 || dimension >= kHostTemporalDimensions ||
+  if (!record || dimension < 0 || dimension >= kHostTemporalDimensions ||
       (!in_ease && !out_ease) || !valid_ease(in_ease) ||
       !valid_ease(out_ease)) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index)) {
     ++g_invalid_keyframe_operations; return 4;
   }
   HostKeyframe candidate = *key;
   if (in_ease) candidate.temporal_in[dimension] = *in_ease;
   if (out_ease) candidate.temporal_out[dimension] = *out_ease;
-  return commit_keyframe_candidate(record, key, std::move(candidate))
+  return commit_keyframe_candidate(
+             record, key, std::move(candidate), std::move(mutation_lock))
       ? 0 : 4;
 }
 int32_t __cdecl get_keyframe_flags(void* stream, int32_t index, int32_t* flags) {
@@ -1130,16 +1209,20 @@ int32_t __cdecl get_keyframe_flags(void* stream, int32_t index, int32_t* flags) 
 }
 int32_t __cdecl set_keyframe_flag(void* stream, int32_t index, int32_t flag, uint8_t enabled) {
   HostStreamRef* record = find_stream(stream);
-  HostKeyframe* key = keyframe_at(record, index);
-  if (!key || !ensure_keyframe_identity(record, key, index) ||
-      flag == 0 || (flag & ~0x1f) != 0 ||
+  if (!record || flag == 0 || (flag & ~0x1f) != 0 ||
       (flag & (flag - 1)) != 0 || enabled > 1) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index)) {
     ++g_invalid_keyframe_operations; return 4;
   }
   HostKeyframe candidate = *key;
   if (enabled) candidate.flags |= flag;
   else candidate.flags &= ~flag;
-  return commit_keyframe_candidate(record, key, std::move(candidate))
+  return commit_keyframe_candidate(
+             record, key, std::move(candidate), std::move(mutation_lock))
       ? 0 : 4;
 }
 int32_t __cdecl get_keyframe_interpolation(void* stream, int32_t index,
@@ -1156,16 +1239,20 @@ int32_t __cdecl get_keyframe_interpolation(void* stream, int32_t index,
 int32_t __cdecl set_keyframe_interpolation(void* stream, int32_t index,
                                            int32_t in_interp, int32_t out_interp) {
   HostStreamRef* record = find_stream(stream);
-  HostKeyframe* key = keyframe_at(record, index);
-  if (!key || !ensure_keyframe_identity(record, key, index) ||
-      in_interp < 0 || in_interp > 3 ||
+  if (!record || in_interp < 0 || in_interp > 3 ||
       out_interp < 0 || out_interp > 3) {
+    ++g_invalid_keyframe_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index)) {
     ++g_invalid_keyframe_operations; return 4;
   }
   HostKeyframe candidate = *key;
   candidate.in_interpolation = in_interp;
   candidate.out_interpolation = out_interp;
-  return commit_keyframe_candidate(record, key, std::move(candidate))
+  return commit_keyframe_candidate(
+             record, key, std::move(candidate), std::move(mutation_lock))
       ? 0 : 4;
 }
 bool usable_keyframe_stream(const HostStreamRef* stream) {
@@ -1300,7 +1387,7 @@ int32_t __cdecl end_add_keyframes(uint8_t add, void* handle) {
                   return false;
                 }
               }
-              return true;
+              return update_keyframe_local_indices(stream);
             },
             [&]() noexcept {
               stream->mask->keyframes.swap(keyframes_before_apply);
@@ -1324,15 +1411,20 @@ int32_t __cdecl get_keyframe_label(void* stream, int32_t index, int32_t* label) 
 }
 int32_t __cdecl set_keyframe_label(void* stream, int32_t index, int32_t label) {
   HostStreamRef* record = find_stream(stream);
+  if (!record || label < 0 || label > 16) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
   HostKeyframe* key = keyframe_at(record, index);
-  if (!key || !ensure_keyframe_identity(record, key, index) ||
-      label < 0 || label > 16) {
+  if (!key || !ensure_keyframe_identity(record, key, index)) {
     ++g_invalid_keyframe_operations;
     return 4;
   }
   HostKeyframe candidate = *key;
   candidate.label = label;
-  return commit_keyframe_candidate(record, key, std::move(candidate))
+  return commit_keyframe_candidate(
+             record, key, std::move(candidate), std::move(mutation_lock))
       ? 0 : 4;
 }
 
@@ -1371,11 +1463,15 @@ uint32_t* dynamic_flags(HostStreamRef* stream) {
   return &stream->mask->dynamic_flags[index];
 }
 template <typename Apply>
-bool commit_dynamic_stream_mutation(HostStreamRef* stream, Apply&& apply) {
+bool commit_dynamic_stream_mutation(
+    HostStreamRef* stream,
+    aexcompat::scene_transaction::MutationLock&& mutation_lock,
+    Apply&& apply) {
   if (!stream || stream->identity.project_id == 0) return false;
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
       aexcompat::scene_model::registry(), stream->identity.project_id,
-      &aexcompat::aegp_external_render_runtime::project_generation);
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
   if (!transaction.stage() || !transaction.validate(true)) return false;
   return transaction.commit(
       std::forward<Apply>(apply),
@@ -1416,15 +1512,20 @@ int32_t __cdecl get_dynamic_stream_flags(void* stream, uint32_t* flags) {
 }
 int32_t __cdecl set_dynamic_stream_flag(void* stream, uint32_t flag, uint8_t undoable,
                                         uint8_t set) {
-  HostStreamRef* record = find_stream(stream); uint32_t* stored = dynamic_flags(record);
-  if (!stored || (flag != 1 && flag != 2) || undoable > 1 || set > 1 ||
+  HostStreamRef* record = find_stream(stream);
+  if (!record || (flag != 1 && flag != 2) || undoable > 1 || set > 1 ||
       (!undoable && flag != 2)) {
+    ++g_invalid_dynamic_stream_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  uint32_t* stored = dynamic_flags(record);
+  if (!stored) {
     ++g_invalid_dynamic_stream_operations; return 4;
   }
   uint32_t candidate = *stored;
   if (set) candidate |= flag; else candidate &= ~flag;
   return commit_dynamic_stream_mutation(
-      record,
+      record, std::move(mutation_lock),
       [record, stored, candidate]() noexcept {
         *stored = candidate;
         if (record->mask) record->mask->dynamic_modified = true;
@@ -1479,7 +1580,11 @@ int32_t __cdecl get_new_dynamic_stream_by_match_name(int32_t plugin_id, void* pa
 }
 int32_t __cdecl delete_dynamic_stream(void* stream) {
   HostStreamRef* record = find_stream(stream);
-  if (!record || record->kind != DynamicNodeKind::MaskAtom || !record->mask ||
+  if (!record) {
+    ++g_invalid_dynamic_stream_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  if (record->kind != DynamicNodeKind::MaskAtom || !record->mask ||
       record->mask->deleted || std::any_of(g_stream_refs.begin(), g_stream_refs.end(),
           [record](const auto& other) { return &other != record && other.mask == record->mask; })) {
     ++g_invalid_dynamic_stream_operations; return 4;
@@ -1493,7 +1598,7 @@ int32_t __cdecl delete_dynamic_stream(void* stream) {
         ? candidate.dynamic_order - 1 : candidate.dynamic_order;
   }
   return commit_dynamic_stream_mutation(
-      record,
+      record, std::move(mutation_lock),
       [record, staged_orders]() noexcept {
         record->mask->deleted = true;
         record->mask->dynamic_modified = true;
@@ -1504,8 +1609,13 @@ int32_t __cdecl delete_dynamic_stream(void* stream) {
       }) ? 0 : 4;
 }
 int32_t __cdecl reorder_dynamic_stream(void* stream, int32_t new_index) {
-  HostStreamRef* record = find_stream(stream); const auto masks = ordered_active_masks();
-  if (!record || record->kind != DynamicNodeKind::MaskAtom || !record->mask || new_index < 0 ||
+  HostStreamRef* record = find_stream(stream);
+  if (!record || new_index < 0) {
+    ++g_invalid_dynamic_stream_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  const auto masks = ordered_active_masks();
+  if (record->kind != DynamicNodeKind::MaskAtom || !record->mask ||
       static_cast<std::size_t>(new_index) >= masks.size()) {
     ++g_invalid_dynamic_stream_operations; return 4;
   }
@@ -1525,7 +1635,7 @@ int32_t __cdecl reorder_dynamic_stream(void* stream, int32_t new_index) {
       static_cast<std::size_t>(record->mask - g_mask_scene.data());
   staged_orders[record_index] = new_index;
   return commit_dynamic_stream_mutation(
-      record,
+      record, std::move(mutation_lock),
       [record, staged_orders]() noexcept {
         for (std::size_t index = 0; index < g_mask_scene.size(); ++index)
           g_mask_scene[index].dynamic_order = staged_orders[index];
@@ -1536,7 +1646,11 @@ int32_t __cdecl reorder_dynamic_stream(void* stream, int32_t new_index) {
 }
 int32_t __cdecl duplicate_dynamic_stream(int32_t plugin_id, void* stream, int32_t* new_index) {
   HostStreamRef* record = find_stream(stream);
-  if (plugin_id != 1 || !record || record->kind != DynamicNodeKind::MaskAtom || !record->mask ||
+  if (plugin_id != 1 || !record) {
+    ++g_invalid_dynamic_stream_operations; return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  if (record->kind != DynamicNodeKind::MaskAtom || !record->mask ||
       g_mask_scene.size() >= kMaxHostMasks ||
       g_mask_scene.capacity() < kMaxHostMasks ||
       g_next_mask_id <= 0 ||
@@ -1555,7 +1669,7 @@ int32_t __cdecl duplicate_dynamic_stream(int32_t plugin_id, void* stream, int32_
   copy.dynamic_modified = true;
   const int32_t candidate_index = copy.dynamic_order;
   return commit_dynamic_stream_mutation(
-      record,
+      record, std::move(mutation_lock),
       [&copy, new_index, candidate_index]() noexcept {
         g_mask_scene.push_back(std::move(copy));
         ++g_next_mask_id;
@@ -1567,15 +1681,19 @@ int32_t __cdecl duplicate_dynamic_stream(int32_t plugin_id, void* stream, int32_
 }
 int32_t __cdecl set_dynamic_stream_name(void* stream, const uint16_t* name) {
   HostStreamRef* record = find_stream(stream);
-  if (!record || record->kind != DynamicNodeKind::MaskAtom || !record->mask || !name) {
+  if (!record || !name) {
     ++g_invalid_dynamic_stream_operations; return 4;
   }
   std::size_t length = 0; while (length <= 127 && name[length]) ++length;
   if (length > 127) { ++g_invalid_dynamic_stream_operations; return 4; }
   std::u16string candidate(
       reinterpret_cast<const char16_t*>(name), length);
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  if (record->kind != DynamicNodeKind::MaskAtom || !record->mask) {
+    ++g_invalid_dynamic_stream_operations; return 4;
+  }
   return commit_dynamic_stream_mutation(
-      record,
+      record, std::move(mutation_lock),
       [record, candidate = std::move(candidate)]() mutable noexcept {
         record->mask->dynamic_name = std::move(candidate);
         record->mask->dynamic_modified = true;
@@ -1592,8 +1710,14 @@ int32_t __cdecl can_add_dynamic_stream(void* stream, const char* match_name, uin
 }
 int32_t __cdecl add_dynamic_stream(int32_t plugin_id, void* stream, const char* match_name,
                                    void** added) {
-  HostStreamRef* group = find_stream(stream); uint8_t can_add{};
-  if (plugin_id != 1 || !added || can_add_dynamic_stream(stream, match_name, &can_add) != 0 ||
+  HostStreamRef* group = find_stream(stream);
+  if (plugin_id != 1 || !added || !group || !match_name) {
+    ++g_invalid_dynamic_stream_operations;
+    return 4;
+  }
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  uint8_t can_add{};
+  if (can_add_dynamic_stream(stream, match_name, &can_add) != 0 ||
       !can_add || !group || group->kind != DynamicNodeKind::MaskParade ||
       g_stream_refs.size() >= 64 ||
       g_mask_scene.capacity() < kMaxHostMasks ||
@@ -1621,7 +1745,7 @@ int32_t __cdecl add_dynamic_stream(int32_t plugin_id, void* stream, const char* 
   mask.dynamic_order = static_cast<int32_t>(active_mask_count());
   mask.dynamic_modified = true;
   return commit_dynamic_stream_mutation(
-      group,
+      group, std::move(mutation_lock),
       [&mask, added]() noexcept {
         const int32_t saved_mask_id = g_next_mask_id;
         const int32_t saved_stream_id = g_next_stream_id;

@@ -18,6 +18,8 @@ struct AegpSceneModelSelftestReport {
   bool duplicate_order_state_unchanged{};
   bool duplicate_order_receipt_unchanged{};
   bool concurrent_effect_flags_serialized{};
+  bool concurrent_mask_streams_serialized{};
+  bool concurrent_keyframe_inserts_serialized{};
   bool stage_invalidated{};
   bool receipt_invalidated{};
   bool direct_bump_receipt_invalidated{};

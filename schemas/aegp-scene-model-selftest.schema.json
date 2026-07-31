@@ -71,6 +71,8 @@
         "failure_state_unchanged",
         "failure_receipt_unchanged",
         "concurrent_effect_flags_serialized",
+        "concurrent_mask_streams_serialized",
+        "concurrent_keyframe_inserts_serialized",
         "effect_order_hash"
       ],
       "properties": {
@@ -79,6 +81,8 @@
         "failure_state_unchanged": {"const": true},
         "failure_receipt_unchanged": {"const": true},
         "concurrent_effect_flags_serialized": {"const": true},
+        "concurrent_mask_streams_serialized": {"const": true},
+        "concurrent_keyframe_inserts_serialized": {"const": true},
         "effect_order_hash": {"$ref": "#/$defs/hash64"}
       }
     },

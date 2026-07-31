@@ -264,6 +264,8 @@ def test_common_scene_transaction_has_explicit_atomic_lifecycle() -> None:
         "invalidate_all_scene_generations(next)",
         "direct_bump_receipt_invalidated",
         "concurrent_effect_flags_serialized",
+        "concurrent_mask_streams_serialized",
+        "concurrent_keyframe_inserts_serialized",
         "in_flight_receipt_rejected",
         "std::memcmp(",
         "bump_render_project_timestamp()",
@@ -282,6 +284,9 @@ def test_common_scene_transaction_has_explicit_atomic_lifecycle() -> None:
 
 def test_scene_mutation_and_receipt_publication_are_generation_serialized() -> None:
     scene = read(SCENE_SOURCE)
+    mask = read(
+        ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
+    )
     transaction = read(TRANSACTION_HEADER)
     external = read(EXTERNAL_RENDER_RUNTIME)
     receipts = read(RENDER_RECEIPTS)
@@ -302,6 +307,25 @@ def test_scene_mutation_and_receipt_publication_are_generation_serialized() -> N
     assert "waiting_mutations() noexcept" in transaction
     assert "both_waiting" in compat
     assert "combined_flags == 3u" in compat
+    mask_setter = mask[
+        mask.index("int32_t __cdecl set_stream_value"):
+        mask.index("int32_t __cdecl unsupported_layer_stream_value")
+    ]
+    assert mask_setter.index("MutationLock mutation_lock") < (
+        mask_setter.index("HostMask candidate")
+    )
+    assert "std::move(mutation_lock)" in mask_setter
+    keyframe_insert = mask[
+        mask.index("int32_t __cdecl insert_keyframe"):
+        mask.index("void inject_keyframe_apply_failure_after")
+    ]
+    assert keyframe_insert.index("MutationLock mutation_lock") < (
+        keyframe_insert.index("auto position")
+    )
+    assert "std::move(mutation_lock)" in keyframe_insert
+    assert "update_keyframe_local_indices(record)" in keyframe_insert
+    assert "mask_record->opacity == 63.0" in compat
+    assert "concurrent_keyframe_inserts_serialized" in compat
 
     bump = external[
         external.index("void bump_project_generation() noexcept"):

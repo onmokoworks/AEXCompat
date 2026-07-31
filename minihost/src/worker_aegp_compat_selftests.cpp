@@ -2180,8 +2180,14 @@ AegpSceneModelSelftestReport verify_aegp_scene_model() {
   using DisposeMask = int32_t(__cdecl*)(void*);
   using GetMaskStream = int32_t(__cdecl*)(int32_t, void*, int32_t, void**);
   using DisposeStream = int32_t(__cdecl*)(void*);
+  using GetStreamValue = int32_t(__cdecl*)(
+      int32_t, void*, int32_t, const HostTime*, int32_t, StreamValue*);
+  using SetStreamValue = int32_t(__cdecl*)(
+      int32_t, void*, StreamValue*);
+  using DisposeStreamValue = int32_t(__cdecl*)(StreamValue*);
   using InsertKeyframe = int32_t(__cdecl*)(
       void*, int16_t, const HostTime*, int32_t*);
+  using DeleteKeyframe = int32_t(__cdecl*)(void*, int32_t);
   bool mask_commit = configured_mask &&
       compat_acquire_suite("AEGP Layer Mask Suite", 7,
                            &mask_suite_raw) == 0 &&
@@ -2203,14 +2209,23 @@ AegpSceneModelSelftestReport verify_aegp_scene_model() {
       ? reinterpret_cast<GetMaskStream>(stream_slots[6]) : nullptr;
   const auto dispose_stream = stream_slots
       ? reinterpret_cast<DisposeStream>(stream_slots[7]) : nullptr;
+  const auto get_stream_value = stream_slots
+      ? reinterpret_cast<GetStreamValue>(stream_slots[13]) : nullptr;
+  const auto dispose_stream_value = stream_slots
+      ? reinterpret_cast<DisposeStreamValue>(stream_slots[14]) : nullptr;
+  const auto set_stream_value = stream_slots
+      ? reinterpret_cast<SetStreamValue>(stream_slots[15]) : nullptr;
   const auto insert_key = key_slots
       ? reinterpret_cast<InsertKeyframe>(key_slots[2]) : nullptr;
+  const auto delete_key = key_slots
+      ? reinterpret_cast<DeleteKeyframe>(key_slots[3]) : nullptr;
   void* mask = nullptr;
   void* stream = nullptr;
   int32_t inserted_index = -1;
   const HostTime inserted_time{77, 30};
   mask_commit = mask_commit && get_mask && dispose_mask &&
-      get_mask_stream && dispose_stream && insert_key &&
+      get_mask_stream && dispose_stream && get_stream_value &&
+      dispose_stream_value && set_stream_value && insert_key && delete_key &&
       get_mask(g_hooks.pf_layer, 0, &mask) == 0 &&
       get_mask_stream(1, mask, 400, &stream) == 0 &&
       insert_key(stream, 1, &inserted_time, &inserted_index) == 0;
@@ -2237,6 +2252,139 @@ AegpSceneModelSelftestReport verify_aegp_scene_model() {
       unchanged_world == nullptr &&
       render_receipts::statistics().invalid_handle_operations >
           receipt_stats_after.invalid_handle_operations;
+
+  const bool removed_fixture_key =
+      mask_commit && delete_key(stream, inserted_index) == 0;
+  void* opacity_stream = nullptr;
+  void* expansion_stream = nullptr;
+  StreamValue opacity_value{};
+  StreamValue expansion_value{};
+  const HostTime stream_value_time{0, 30};
+  bool mask_stream_setup = removed_fixture_key &&
+      get_mask_stream(1, mask, 401, &opacity_stream) == 0 &&
+      get_mask_stream(1, mask, 403, &expansion_stream) == 0 &&
+      get_stream_value(
+          1, opacity_stream, 1, &stream_value_time, 0,
+          &opacity_value) == 0 &&
+      get_stream_value(
+          1, expansion_stream, 1, &stream_value_time, 0,
+          &expansion_value) == 0;
+  if (mask_stream_setup) {
+    opacity_value.one_d = 63.0;
+    expansion_value.one_d = 12.5;
+    std::atomic<int32_t> opacity_result{4};
+    std::atomic<int32_t> expansion_result{4};
+    bool both_waiting = false;
+    std::unique_lock<std::mutex> held(
+        aexcompat::scene_transaction::mutation_mutex());
+    const uint64_t waiting_before =
+        aexcompat::scene_transaction::waiting_mutations();
+    std::thread opacity_setter([&]() {
+      opacity_result.store(
+          set_stream_value(1, opacity_stream, &opacity_value));
+    });
+    std::thread expansion_setter([&]() {
+      expansion_result.store(
+          set_stream_value(1, expansion_stream, &expansion_value));
+    });
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (aexcompat::scene_transaction::waiting_mutations() <
+               waiting_before + 2 &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    both_waiting =
+        aexcompat::scene_transaction::waiting_mutations() >=
+        waiting_before + 2;
+    held.unlock();
+    opacity_setter.join();
+    expansion_setter.join();
+    const HostMask* mask_record = find_mask(mask);
+    report.concurrent_mask_streams_serialized =
+        both_waiting && opacity_result.load() == 0 &&
+        expansion_result.load() == 0 && mask_record &&
+        mask_record->opacity == 63.0 &&
+        mask_record->expansion == 12.5;
+  }
+  if (opacity_value.stream)
+    ok = dispose_stream_value(&opacity_value) == 0 && ok;
+  if (expansion_value.stream)
+    ok = dispose_stream_value(&expansion_value) == 0 && ok;
+  if (opacity_stream)
+    ok = dispose_stream(opacity_stream) == 0 && ok;
+  if (expansion_stream)
+    ok = dispose_stream(expansion_stream) == 0 && ok;
+  ok = ok && report.concurrent_mask_streams_serialized;
+
+  int32_t baseline_key_index = -1;
+  const HostTime baseline_key_time{10, 30};
+  const bool keyframe_setup = removed_fixture_key &&
+      insert_key(
+          stream, 1, &baseline_key_time, &baseline_key_index) == 0 &&
+      baseline_key_index == 0;
+  if (keyframe_setup) {
+    const HostTime later_key_time{7, 30};
+    const HostTime earlier_key_time{5, 30};
+    int32_t later_key_index = -1;
+    int32_t earlier_key_index = -1;
+    std::atomic<int32_t> later_result{4};
+    std::atomic<int32_t> earlier_result{4};
+    bool both_waiting = false;
+    std::unique_lock<std::mutex> held(
+        aexcompat::scene_transaction::mutation_mutex());
+    const uint64_t waiting_before =
+        aexcompat::scene_transaction::waiting_mutations();
+    std::thread later_inserter([&]() {
+      later_result.store(
+          insert_key(
+              stream, 1, &later_key_time, &later_key_index));
+    });
+    std::thread earlier_inserter([&]() {
+      earlier_result.store(
+          insert_key(
+              stream, 1, &earlier_key_time, &earlier_key_index));
+    });
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (aexcompat::scene_transaction::waiting_mutations() <
+               waiting_before + 2 &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    both_waiting =
+        aexcompat::scene_transaction::waiting_mutations() >=
+        waiting_before + 2;
+    held.unlock();
+    later_inserter.join();
+    earlier_inserter.join();
+    HostStreamRef* stream_record = find_stream(stream);
+    bool sorted = stream_record &&
+        stream_record->mask->keyframes.size() == 3;
+    if (sorted) {
+      auto key = stream_record->mask->keyframes.begin();
+      sorted = time_equal(key->time, earlier_key_time);
+      ++key;
+      sorted = sorted && time_equal(key->time, later_key_time);
+      ++key;
+      sorted = sorted && time_equal(key->time, baseline_key_time);
+    }
+    bool indexed = sorted;
+    if (stream_record) {
+      int32_t key_index = 0;
+      for (const auto& keyframe : stream_record->mask->keyframes) {
+        if (!indexed) break;
+        scene_model::ObjectSnapshot key_snapshot{};
+        indexed = registry.snapshot(
+                      keyframe.identity, key_snapshot) &&
+            key_snapshot.owner == stream_record->identity &&
+            key_snapshot.local_index == key_index;
+        ++key_index;
+      }
+    }
+    report.concurrent_keyframe_inserts_serialized =
+        both_waiting && later_result.load() == 0 &&
+        earlier_result.load() == 0 && sorted && indexed;
+  }
+  ok = ok && report.concurrent_keyframe_inserts_serialized;
 
   Identity direct_project{};
   std::unique_ptr<render_receipts::ReceiptDraft> direct_draft;
@@ -2370,6 +2518,8 @@ AegpSceneModelSelftestReport verify_aegp_scene_model() {
       report.duplicate_order_state_unchanged &&
       report.duplicate_order_receipt_unchanged &&
       report.concurrent_effect_flags_serialized &&
+      report.concurrent_mask_streams_serialized &&
+      report.concurrent_keyframe_inserts_serialized &&
       report.unsupported_slots_preserved &&
       report.stage_invalidated && report.receipt_invalidated &&
       report.direct_bump_receipt_invalidated &&

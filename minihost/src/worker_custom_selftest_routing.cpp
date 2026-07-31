@@ -130,6 +130,10 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << json_bool(report.duplicate_order_receipt_unchanged)
         << ",\"concurrent_effect_flags_serialized\":"
         << json_bool(report.concurrent_effect_flags_serialized)
+        << ",\"concurrent_mask_streams_serialized\":"
+        << json_bool(report.concurrent_mask_streams_serialized)
+        << ",\"concurrent_keyframe_inserts_serialized\":"
+        << json_bool(report.concurrent_keyframe_inserts_serialized)
         << ",\"effect_order_hash\":\""
         << hex64(report.effect_order_hash) << "\"}"
         << ",\"generation\":{\"before\":"
