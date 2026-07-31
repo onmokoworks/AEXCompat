@@ -37,7 +37,8 @@ def test_item_checkout_uses_immutable_host_stage_not_reentrant_render():
         "struct ResolveSnapshot",
         "bool resolve_plan(",
         "int32_t transform(",
-        "render_receipts::register_receipt(",
+        "render_receipts::register_scene_receipt(",
+        "render_receipts::register_unbound_receipt(",
         "staged_source_pin",
         "thread_local std::vector<ItemRenderStackKey> g_render_stack",
         "resolve_plan(snapshot, plan)",
@@ -181,8 +182,9 @@ def test_shipped_worker_wires_scene_metadata_providers():
     assert "staged_effect_identity_for_render_ref(render_ref)" in (
         ROOT / "minihost/src/worker_classic_render_runtime.cpp"
     ).read_text(encoding="utf-8")
-    assert "instance_slot->render_ref = *effect" in scene
-    assert "instance_slot->render_ref = *duplicate" in scene
+    assert scene.count("candidate.render_ref = published") >= 2
+    assert "*effect = published" in scene
+    assert "*duplicate = published" in scene
     assert "update_composition_item_render_metadata(" in scene
     assert "active_render_effect_index" not in scene
     assert "aegp_layer_render_runtime::configure({" not in selftests

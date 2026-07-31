@@ -27,15 +27,19 @@ struct Receipt {
 };
 
 std::mutex g_mutex;
+std::mutex g_scene_generation_mutex;
 std::unordered_map<void*, std::unique_ptr<Receipt>> g_receipts;
 std::atomic<uint64_t> g_receipt_generation{1};
 std::atomic<uint64_t> g_world_generation{1};
+std::atomic<SceneGenerationReader> g_scene_generation_reader{};
 uint64_t g_live_bytes{};
 std::size_t g_reserved_count{};
 uint64_t g_reserved_bytes{};
 uint64_t g_created{};
 uint64_t g_checked_in{};
 uint64_t g_invalid_operations{};
+uint64_t g_stale_invalidations{};
+uint64_t g_invalid_handle_operations{};
 
 bool claim_generation(std::atomic<uint64_t>& counter, uint64_t& generation) {
   const uint64_t limit = (std::numeric_limits<uintptr_t>::max)() / 8;
@@ -81,10 +85,30 @@ void release_reservation(uint64_t bytes) {
 
 }  // namespace
 
-int32_t register_receipt(std::unique_ptr<ReceiptDraft> draft, void** output) {
+void configure_scene_generation_reader(
+    SceneGenerationReader reader) noexcept {
+  g_scene_generation_reader.store(reader);
+}
+
+SceneGenerationMutationGuard::SceneGenerationMutationGuard() noexcept
+    : lock_(g_scene_generation_mutex) {}
+
+namespace {
+
+int32_t register_receipt_impl(std::unique_ptr<ReceiptDraft> draft,
+                              void** output) {
   if (output) *output = nullptr;
   if (!output || !draft || draft->pixels.empty() ||
       draft->world.data != draft->pixels.data()) return 4;
+  std::unique_lock<std::mutex> scene_generation_lock;
+  if (draft->scene_bound) {
+    scene_generation_lock =
+        std::unique_lock<std::mutex>(g_scene_generation_mutex);
+    const auto generation_reader = g_scene_generation_reader.load();
+    if (!generation_reader || draft->project_generation == 0 ||
+        generation_reader() != draft->project_generation)
+      return 4;
+  }
   const uint64_t bytes = draft->pixels.size();
   std::unique_ptr<Receipt> receipt;
   try {
@@ -137,14 +161,46 @@ int32_t register_receipt(std::unique_ptr<ReceiptDraft> draft, void** output) {
   return 0;
 }
 
+}  // namespace
+
+int32_t register_unbound_receipt(std::unique_ptr<ReceiptDraft> draft,
+                                 void** output) {
+  if (output) *output = nullptr;
+  if (!draft || draft->scene_bound || draft->project_generation != 0 ||
+      draft->scene_item.kind != scene_model::ObjectKind::none ||
+      draft->scene_effect.kind != scene_model::ObjectKind::none ||
+      draft->scene_project.kind != scene_model::ObjectKind::none)
+    return 4;
+  return register_receipt_impl(std::move(draft), output);
+}
+
+int32_t register_scene_receipt(std::unique_ptr<ReceiptDraft> draft,
+                               uint32_t project_generation, void** output) {
+  if (output) *output = nullptr;
+  if (!draft || project_generation == 0 ||
+      project_generation == (std::numeric_limits<uint32_t>::max)() ||
+      (draft->project_generation != 0 &&
+       draft->project_generation != project_generation))
+    return 4;
+  draft->scene_bound = true;
+  draft->project_generation = project_generation;
+  return register_receipt_impl(std::move(draft), output);
+}
+
 int32_t get_world(void* receipt, void*** world) {
   if (world) *world = nullptr;
-  if (!receipt || !world) return 4;
+  if (!receipt || !world) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ++g_invalid_operations;
+    ++g_invalid_handle_operations;
+    return 4;
+  }
   std::lock_guard<std::mutex> lock(g_mutex);
   const auto found = g_receipts.find(receipt);
   if (found == g_receipts.end() || !found->second->published ||
       !found->second->world_handle) {
     ++g_invalid_operations;
+    ++g_invalid_handle_operations;
     return 4;
   }
   *world = found->second->world_handle;
@@ -152,13 +208,19 @@ int32_t get_world(void* receipt, void*** world) {
 }
 
 int32_t checkin(void* handle) {
-  if (!handle) return 4;
+  if (!handle) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ++g_invalid_operations;
+    ++g_invalid_handle_operations;
+    return 4;
+  }
   decltype(g_receipts)::node_type receipt;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     const auto found = g_receipts.find(handle);
     if (found == g_receipts.end()) {
       ++g_invalid_operations;
+      ++g_invalid_handle_operations;
       return 4;
     }
     receipt = g_receipts.extract(found);
@@ -237,12 +299,78 @@ bool snapshot(void* handle, ReceiptSnapshot& output) {
   output.resolved_depth = receipt.draft->resolved_depth;
   output.stage_kind = receipt.draft->stage_kind;
   output.sampling_policy = receipt.draft->sampling_policy;
+  output.scene_bound = receipt.draft->scene_bound;
+  output.scene_item = receipt.draft->scene_item;
+  output.scene_effect = receipt.draft->scene_effect;
+  output.scene_project = receipt.draft->scene_project;
+  output.effect_order = receipt.draft->effect_order;
+  output.dependency_identity_hash =
+      receipt.draft->dependency_identity_hash;
+  output.effect_order_hash = receipt.draft->effect_order_hash;
   return true;
+}
+
+namespace {
+
+std::size_t invalidate_scene_receipts(uint64_t project_id,
+                                      uint32_t valid_generation,
+                                      bool all_projects) {
+  if ((!all_projects && project_id == 0) || valid_generation == 0) return 0;
+  std::size_t invalidated = 0;
+  for (;;) {
+    decltype(g_receipts)::node_type receipt;
+    {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      const auto found = std::find_if(
+          g_receipts.begin(), g_receipts.end(), [&](const auto& value) {
+            const auto& draft = *value.second->draft;
+            return value.second->published && draft.scene_bound &&
+                (all_projects ||
+                 draft.scene_item.project_id == project_id) &&
+                draft.project_generation != valid_generation;
+          });
+      if (found == g_receipts.end()) break;
+      receipt = g_receipts.extract(found);
+      g_live_bytes -= receipt.mapped()->draft->pixels.size();
+    }
+    const auto result = world_registry::unregister_borrowed_view(
+        receipt.mapped()->world_handle);
+    {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      if (result ==
+          world_registry::UnregisterBorrowedViewResult::ownership_mismatch) {
+        g_live_bytes += receipt.mapped()->draft->pixels.size();
+        g_receipts.insert(std::move(receipt));
+        ++g_invalid_operations;
+        break;
+      }
+      if (result ==
+          world_registry::UnregisterBorrowedViewResult::already_absent)
+        ++g_invalid_operations;
+      ++g_checked_in;
+      ++g_stale_invalidations;
+      ++invalidated;
+    }
+  }
+  return invalidated;
+}
+
+}  // namespace
+
+std::size_t invalidate_scene_generation(uint64_t project_id,
+                                        uint32_t valid_generation) {
+  return invalidate_scene_receipts(
+      project_id, valid_generation, false);
+}
+
+std::size_t invalidate_all_scene_generations(uint32_t valid_generation) {
+  return invalidate_scene_receipts(0, valid_generation, true);
 }
 
 Statistics statistics() {
   std::lock_guard<std::mutex> lock(g_mutex);
   return {g_created, g_checked_in, g_invalid_operations,
+          g_stale_invalidations, g_invalid_handle_operations,
           g_receipts.size() - g_reserved_count, g_live_bytes,
           g_reserved_count, g_reserved_bytes};
 }

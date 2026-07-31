@@ -16,6 +16,7 @@ struct SourceSnapshot {
   int32_t height{};
   int32_t current_time{};
   int32_t time_scale{1};
+  uint32_t project_generation{};
   std::vector<unsigned char> pixels;
 };
 

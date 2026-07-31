@@ -35,7 +35,13 @@ void clear_context() noexcept { g_context = {}; }
 int32_t publish_from_context(const Context& context, const LayerValue& options,
                              void** receipt) {
   if (receipt) *receipt = nullptr;
-  if (!receipt) return 4;
+  if (!receipt || !g_hooks.project_generation ||
+      context.project_generation == 0 ||
+      context.project_generation ==
+          (std::numeric_limits<uint32_t>::max)() ||
+      g_hooks.project_generation() != context.project_generation)
+    return 4;
+  const uint32_t receipt_generation = context.project_generation;
   const int32_t pixel_format = options.world_type == 1 ? world_registry::kPixelFormatArgb32 :
       (options.world_type == 2 ? world_registry::kPixelFormatArgb64 :
        (options.world_type == 3 ? world_registry::kPixelFormatArgb128 : 0));
@@ -137,7 +143,7 @@ int32_t publish_from_context(const Context& context, const LayerValue& options,
       !g_hooks.publish_scheduler_stage(item, stage_kind, effect_instance,
           options.time, options.time_step, 1, 0, pixel_format, width, height,
           width * pixel_bytes, loaded_receipt->pixels.data(),
-          &stage_identity_hash))
+          &stage_identity_hash, receipt_generation))
     return 4;
   loaded_receipt->has_stage_evidence = true;
   loaded_receipt->stage_identity_hash = stage_identity_hash;
@@ -147,7 +153,8 @@ int32_t publish_from_context(const Context& context, const LayerValue& options,
   loaded_receipt->stage_kind = static_cast<uint8_t>(stage_kind);
   loaded_receipt->sampling_policy =
       static_cast<uint8_t>(aegp_staged_item_runtime::SamplingPolicy::exact);
-  return render_receipts::register_receipt(std::move(loaded_receipt), receipt);
+  return render_receipts::register_scene_receipt(
+      std::move(loaded_receipt), receipt_generation, receipt);
 }
 
 int32_t publish(const LayerValue& options, void** receipt) {
@@ -171,7 +178,10 @@ bool capture_async_source(const LayerValue& options,
       (all ? context.all_effects_height : context.source_height);
   const int32_t pixel_bytes = downstream ? context.downstream_pixel_bytes :
       (all ? context.all_effects_pixel_bytes : context.pixel_bytes);
-  if (!context.entry || !pixels || (downstream && !context.downstream_finalized) ||
+  if (!context.entry || !pixels || !g_hooks.project_generation ||
+      context.project_generation == 0 ||
+      g_hooks.project_generation() != context.project_generation ||
+      (downstream && !context.downstream_finalized) ||
       width <= 0 || height <= 0 || pixel_bytes <= 0) return false;
   output.entry = reinterpret_cast<void*>(context.entry);
   output.pixel_bytes = pixel_bytes;
@@ -179,6 +189,7 @@ bool capture_async_source(const LayerValue& options,
   output.height = height;
   output.current_time = context.current_time;
   output.time_scale = context.time_scale;
+  output.project_generation = context.project_generation;
   output.pixels = *pixels;
   return true;
 }
@@ -193,6 +204,7 @@ int32_t publish_async_source(const aegp_async_layer::SourceSnapshot& source,
   context.source_height = source.height;
   context.current_time = source.current_time;
   context.time_scale = source.time_scale;
+  context.project_generation = source.project_generation;
   if (options.effect_boundary == LayerEffectBoundary::downstream) {
     context.downstream_argb = &source.pixels;
     context.downstream_width = source.width;

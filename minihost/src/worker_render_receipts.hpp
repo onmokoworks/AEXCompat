@@ -1,12 +1,14 @@
 #pragma once
 
 #include "worker_aegp_render_options.hpp"
+#include "worker_aegp_scene_model.hpp"
 #include "worker_world_safety.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace aexcompat::render_receipts {
@@ -45,6 +47,13 @@ struct ReceiptDraft {
   uint32_t resolved_depth{};
   uint8_t stage_kind{};
   uint8_t sampling_policy{};
+  bool scene_bound{};
+  scene_model::Identity scene_item{};
+  scene_model::Identity scene_effect{};
+  scene_model::Identity scene_project{};
+  uint32_t effect_order{};
+  uint64_t dependency_identity_hash{};
+  uint64_t effect_order_hash{};
 };
 
 struct ReceiptSnapshot {
@@ -65,23 +74,58 @@ struct ReceiptSnapshot {
   uint32_t resolved_depth{};
   uint8_t stage_kind{};
   uint8_t sampling_policy{};
+  bool scene_bound{};
+  scene_model::Identity scene_item{};
+  scene_model::Identity scene_effect{};
+  scene_model::Identity scene_project{};
+  uint32_t effect_order{};
+  uint64_t dependency_identity_hash{};
+  uint64_t effect_order_hash{};
 };
 
 struct Statistics {
   uint64_t created{};
   uint64_t checked_in{};
   uint64_t invalid_operations{};
+  uint64_t stale_invalidations{};
+  uint64_t invalid_handle_operations{};
   std::size_t live_count{};
   uint64_t live_bytes{};
   std::size_t reserved_count{};
   uint64_t reserved_bytes{};
 };
 
-int32_t register_receipt(std::unique_ptr<ReceiptDraft> draft, void** output);
+using SceneGenerationReader = uint32_t(*)() noexcept;
+
+void configure_scene_generation_reader(
+    SceneGenerationReader reader) noexcept;
+
+class SceneGenerationMutationGuard {
+ public:
+  SceneGenerationMutationGuard() noexcept;
+  SceneGenerationMutationGuard(const SceneGenerationMutationGuard&) = delete;
+  SceneGenerationMutationGuard& operator=(
+      const SceneGenerationMutationGuard&) = delete;
+
+ private:
+  std::unique_lock<std::mutex> lock_;
+};
+
+// Publication is intentionally split into explicit unbound and scene-bound
+// entry points. Scene-derived pixels must supply the generation they were
+// resolved against so registration can revalidate it while holding the
+// generation-publication gate.
+int32_t register_unbound_receipt(std::unique_ptr<ReceiptDraft> draft,
+                                 void** output);
+int32_t register_scene_receipt(std::unique_ptr<ReceiptDraft> draft,
+                               uint32_t project_generation, void** output);
 int32_t get_world(void* receipt, void*** world);
 int32_t checkin(void* receipt);
 bool checkin_if_live(void* receipt);
 bool snapshot(void* receipt, ReceiptSnapshot& output);
+std::size_t invalidate_scene_generation(uint64_t project_id,
+                                        uint32_t valid_generation);
+std::size_t invalidate_all_scene_generations(uint32_t valid_generation);
 Statistics statistics();
 bool lifetimes_balanced();
 

@@ -14,8 +14,11 @@
 #include "worker_world_safety.hpp"
 #include "worker_world_registry.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 
 namespace aexcompat::l2_detail {
 
@@ -86,16 +89,56 @@ bool prepare_scene_staged_item(void* item) {
       policy = SamplingPolicy::nearest;
       break;
   }
-  return aexcompat::aegp_staged_item_runtime::register_item(
-      item, metadata.stable_identity, policy,
-      metadata.direct_dependencies.data(), metadata.direct_dependency_count,
-      metadata.effect_instances.data(), metadata.effect_instance_count);
+  std::array<aexcompat::aegp_staged_item_runtime::OrderedSceneEffect,
+             aexcompat::scene_runtime::kAegpEffectInstanceCapacity>
+      effects{};
+  for (std::size_t index = 0;
+       index < metadata.effect_instance_count; ++index) {
+    effects[index] = {metadata.effect_identities[index],
+                      metadata.effect_orders[index]};
+  }
+  return aexcompat::aegp_staged_item_runtime::register_scene_item(
+      aexcompat::scene_model::registry(), metadata.identity, policy,
+      metadata.dependency_identities.data(),
+      metadata.direct_dependency_count, effects.data(),
+      metadata.effect_instance_count);
 }
 uint64_t current_scene_effect_instance(
     const aexcompat::aegp_layer_render_runtime::Context& context,
     const AegpLayerRenderOptionsValue& options) {
   return staged_effect_instance_identity(
       options, context.active_effect_instance);
+}
+bool publish_scene_scheduler_stage(
+    void* item, aexcompat::aegp_staged_item_runtime::StageKind stage_kind,
+    uint64_t effect_instance, aexcompat::suite_abi::AegpTime time,
+    aexcompat::suite_abi::AegpTime time_step, int8_t quality,
+    uint8_t guide_layers, int32_t pixel_format, int32_t width,
+    int32_t height, int32_t rowbytes, const void* pixels,
+    uint64_t* stage_identity_hash, uint32_t expected_project_generation) {
+  AegpStagedItemMetadata metadata{};
+  if (!snapshot_staged_item_metadata(item, metadata)) return false;
+  aexcompat::scene_model::Identity effect{};
+  if (stage_kind !=
+      aexcompat::aegp_staged_item_runtime::StageKind::final_item) {
+    const auto found = std::find(
+        metadata.effect_instances.begin(),
+        metadata.effect_instances.begin() + metadata.effect_instance_count,
+        effect_instance);
+    if (found == metadata.effect_instances.begin() +
+            metadata.effect_instance_count)
+      return false;
+    const auto index = static_cast<std::size_t>(
+        std::distance(metadata.effect_instances.begin(), found));
+    effect = metadata.effect_identities[index];
+  } else if (effect_instance != 0) {
+    return false;
+  }
+  return aexcompat::aegp_staged_item_runtime::publish_scene_stage_world(
+      aexcompat::scene_model::registry(), metadata.identity, stage_kind,
+      effect, time, time_step, quality, guide_layers, pixel_format, width,
+      height, rowbytes, pixels, stage_identity_hash,
+      expected_project_generation);
 }
 const bool g_item_render_runtime_configured = [] {
   aexcompat::aegp_item_render_runtime::configure({
@@ -110,7 +153,8 @@ const bool g_layer_render_runtime_configured = [] {
       &is_render_worker, &layer_effect_boundary_is_live,
       &aegp_comp_item_handle,
       &prepare_scene_staged_item, &current_scene_effect_instance,
-      &aexcompat::aegp_staged_item_runtime::publish_stage_world});
+      &publish_scene_scheduler_stage,
+      &aexcompat::aegp_external_render_runtime::project_generation});
   return true;
 }();
 int32_t publish_loaded_layer_receipt(

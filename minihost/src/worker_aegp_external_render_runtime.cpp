@@ -58,11 +58,15 @@ bool read_timestamp(const void* timestamp, uint32_t& value) {
 
 }  // namespace
 
-void configure(Hooks hooks) noexcept { g_hooks = hooks; }
+void configure(Hooks hooks) noexcept {
+  g_hooks = hooks;
+  render_receipts::configure_scene_generation_reader(&project_generation);
+}
 
 uint32_t project_generation() noexcept { return g_project_generation.load(); }
 
 void bump_project_generation() noexcept {
+  render_receipts::SceneGenerationMutationGuard publication_guard;
   uint32_t current = g_project_generation.load();
   for (;;) {
     const uint32_t next = current == UINT32_MAX ? UINT32_MAX : current + 1;
@@ -72,6 +76,7 @@ void bump_project_generation() noexcept {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_cache.clear();
       }
+      render_receipts::invalidate_all_scene_generations(current);
       if (g_hooks.invalidate_staged_items) g_hooks.invalidate_staged_items();
       return;
     }
@@ -80,6 +85,7 @@ void bump_project_generation() noexcept {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_cache.clear();
       }
+      render_receipts::invalidate_all_scene_generations(next);
       if (g_hooks.invalidate_staged_items) g_hooks.invalidate_staged_items();
       return;
     }
@@ -146,9 +152,10 @@ int32_t publish_cached_receipt(const ItemValue& options, void** output, bool* ca
   receipt->world.height = backing->world.height;
   receipt->world.extent_hint = {0, 0, backing->world.width, backing->world.height};
   receipt->world.pix_aspect_ratio = {1, 1};
-  std::lock_guard<std::mutex> lock(g_mutex);
   if (current_timestamp != g_project_generation.load() || g_timestamp_exhausted.load()) return 4;
-  if (render_receipts::register_receipt(std::move(receipt), output) != 0) return 4;
+  if (render_receipts::register_scene_receipt(
+          std::move(receipt), current_timestamp, output) != 0)
+    return 4;
   *cache_hit = true;
   return 0;
 }

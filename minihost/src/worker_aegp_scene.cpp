@@ -2,6 +2,10 @@
 // Independent compiled implementation for the AEGP scene family.
 
 #include "worker_aegp_scene.hpp"
+#include "worker_aegp_external_render_runtime.hpp"
+#include "worker_aegp_scene_model.hpp"
+#include "worker_aegp_scene_transaction.hpp"
+#include "worker_mask_runtime_internal.hpp"
 #include "worker_suite_registry.hpp"
 
 #include <algorithm>
@@ -9,8 +13,13 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <utility>
 
 using aexcompat::scene_runtime::scene_runtime_state;
+using aexcompat::scene_model::Identity;
+using aexcompat::scene_model::ItemKind;
+using aexcompat::scene_model::ObjectKind;
+using aexcompat::scene_model::ObjectSnapshot;
 using aexcompat::worker_runtime::UnsupportedSuiteId;
 using aexcompat::worker_runtime::unsupported_suite_slots;
 
@@ -358,6 +367,56 @@ auto& g_aegp_effect = state().effect;
 #define make_utf16_handle(...) scene_context()->hooks.make_utf16_handle(__VA_ARGS__)
 #define free_aegp_mem_handle(...) scene_context()->hooks.free_mem_handle(__VA_ARGS__)
 
+aexcompat::scene_model::Registry& scene_registry() noexcept {
+  return aexcompat::scene_model::registry();
+}
+
+bool resolve_scene_item(void* handle, ObjectSnapshot& output,
+                        uint64_t required_project_id = 0) noexcept {
+  return scene_registry().resolve_item_or_legacy(
+      handle, output, required_project_id);
+}
+
+bool resolve_scene_comp(void* handle, ObjectSnapshot& output,
+                        uint64_t required_project_id = 0) noexcept {
+  return scene_registry().resolve_or_legacy(
+      handle, ObjectKind::composition, output, required_project_id);
+}
+
+bool resolve_scene_project(void* handle, ObjectSnapshot& output) noexcept {
+  return scene_registry().resolve(
+      handle, ObjectKind::project, output);
+}
+
+bool resolve_scene_layer(void* handle, ObjectSnapshot& output,
+                         uint64_t required_project_id = 0) noexcept {
+  if (handle == &g_layer)
+    handle = &g_aegp_layers[0];
+  return scene_registry().resolve_or_legacy(
+      handle, ObjectKind::layer, output, required_project_id);
+}
+
+void* borrow_scene_object(Identity identity) noexcept {
+  return scene_registry().borrow(identity);
+}
+
+std::u16string scene_name(const ObjectSnapshot& snapshot) {
+  const auto end = std::find(
+      snapshot.name.begin(), snapshot.name.end(), char16_t{});
+  return {snapshot.name.begin(), end};
+}
+
+int32_t primary_layer_index(const ObjectSnapshot& snapshot) noexcept {
+  if (snapshot.identity.kind != ObjectKind::layer ||
+      snapshot.identity.project_id != 1 ||
+      snapshot.owner.object_id != 5001 || !snapshot.legacy_handle)
+    return -1;
+  for (std::size_t index = 0; index < g_aegp_layers.size(); ++index)
+    if (snapshot.legacy_handle == &g_aegp_layers[index])
+      return static_cast<int32_t>(index);
+  return -1;
+}
+
 bool& g_aegp_effect_live = scene_runtime_state().effect_live;
 std::array<AegpEffectInstance, kAegpEffectInstanceCapacity>& g_aegp_effect_instances =
     scene_runtime_state().effect_instances;
@@ -365,11 +424,39 @@ std::array<AegpEffectLease, kAegpEffectLeaseCapacity>& g_aegp_effect_leases =
     scene_runtime_state().effect_leases;
 uint32_t& g_aegp_effect_lease_generation = scene_runtime_state().effect_lease_generation;
 
-void* effect_lease_handle(std::size_t slot, uint32_t generation) {
-  const uintptr_t value = (static_cast<uintptr_t>(generation) << 8) |
-      (static_cast<uintptr_t>(slot) << 2) | 1;
-  return value > 1 ? reinterpret_cast<void*>(value) : nullptr;
+enum class AbiPossessionPolicy {
+  explicit_plugin_id,
+  possessed_borrowed_handle,
+};
+
+bool resolve_with_possession_policy(
+    void* handle, ObjectKind kind, AbiPossessionPolicy policy,
+    int32_t plugin_id, ObjectSnapshot& output) {
+  if (policy == AbiPossessionPolicy::explicit_plugin_id)
+    return plugin_id > 0 && scene_registry().resolve_possessed(
+        handle, kind, plugin_id, output);
+  int32_t possession_id = 0;
+  return scene_registry().resolve(handle, kind, output) &&
+      scene_registry().possession(handle, kind, possession_id) &&
+      possession_id > 0;
 }
+
+bool ensure_effect_identity(std::size_t instance_index) {
+  if (instance_index >= g_aegp_effect_instances.size()) return false;
+  auto& instance = g_aegp_effect_instances[instance_index];
+  if (!instance.occupied) return false;
+  ObjectSnapshot existing{};
+  if (instance.identity != Identity{} &&
+      scene_registry().snapshot(instance.identity, existing))
+    return true;
+  ObjectSnapshot layer{};
+  if (!resolve_scene_layer(instance.layer, layer)) return false;
+  return scene_registry().create_child(
+      ObjectKind::effect, layer.identity, static_cast<int32_t>(instance_index),
+      &instance,
+      u"Effect", instance.identity);
+}
+
 const AegpEffectInstance* resolve_effect_instance(void* effect, int32_t owner,
                                                   std::size_t* index) {
   // PF-interface callers historically receive this stable host-owned reference.
@@ -377,32 +464,41 @@ const AegpEffectInstance* resolve_effect_instance(void* effect, int32_t owner,
     if (index) *index = 0;
     return &g_aegp_effect_instances[0];
   }
-  const uintptr_t value = reinterpret_cast<uintptr_t>(effect);
-  if (!effect || (value & 3) != 1) return nullptr;
-  const std::size_t slot = (value >> 2) & 0x3f;
-  const uint32_t generation = static_cast<uint32_t>(value >> 8);
-  if (slot >= g_aegp_effect_leases.size()) return nullptr;
-  const auto& lease = g_aegp_effect_leases[slot];
-  if (!lease.live || lease.generation != generation ||
-      (owner > 0 && lease.owner_plugin_id != owner) ||
-      lease.instance_index >= g_aegp_effect_instances.size()) return nullptr;
-  const auto& instance = g_aegp_effect_instances[lease.instance_index];
-  if (!instance.occupied || instance.generation != lease.instance_generation) return nullptr;
-  if (index) *index = lease.instance_index;
+  ObjectSnapshot resolved{};
+  const auto policy = owner > 0
+      ? AbiPossessionPolicy::explicit_plugin_id
+      : AbiPossessionPolicy::possessed_borrowed_handle;
+  if (!resolve_with_possession_policy(
+          effect, ObjectKind::effect, policy, owner, resolved))
+    return nullptr;
+  if (resolved.local_index < 0 ||
+      static_cast<std::size_t>(resolved.local_index) >=
+          g_aegp_effect_instances.size())
+    return nullptr;
+  const std::size_t instance_index =
+      static_cast<std::size_t>(resolved.local_index);
+  const auto& instance = g_aegp_effect_instances[instance_index];
+  if (!instance.occupied || instance.identity != resolved.identity)
+    return nullptr;
+  if (index) *index = instance_index;
   return &instance;
 }
 bool acquire_effect_lease(int32_t plugin_id, std::size_t instance_index, void** output) {
   if (plugin_id <= 0 || !output || instance_index >= g_aegp_effect_instances.size() ||
-      !g_aegp_effect_instances[instance_index].occupied) return false;
+      !g_aegp_effect_instances[instance_index].occupied ||
+      !ensure_effect_identity(instance_index) ||
+      g_aegp_effect_lease_generation == UINT32_MAX)
+    return false;
   for (std::size_t slot = 0; slot < g_aegp_effect_leases.size(); ++slot) {
     auto& lease = g_aegp_effect_leases[slot];
     if (lease.live) continue;
-    uint32_t generation = ++g_aegp_effect_lease_generation;
-    if (generation == 0) generation = ++g_aegp_effect_lease_generation;
-    void* handle = effect_lease_handle(slot, generation);
+    void* handle = scene_registry().borrow_unique(
+        g_aegp_effect_instances[instance_index].identity, plugin_id);
     if (!handle) return false;
+    const uint32_t generation = ++g_aegp_effect_lease_generation;
     lease = {plugin_id, static_cast<uint32_t>(instance_index),
-             g_aegp_effect_instances[instance_index].generation, generation, true};
+             g_aegp_effect_instances[instance_index].generation, generation,
+             true, handle};
     *output = handle;
     ++g_aegp_effect_acquires;
     return true;
@@ -410,15 +506,17 @@ bool acquire_effect_lease(int32_t plugin_id, std::size_t instance_index, void** 
   return false;
 }
 const AegpEffectLease* resolve_effect_lease(void* effect, std::size_t* slot_out = nullptr) {
-  const uintptr_t value = reinterpret_cast<uintptr_t>(effect);
-  if (!effect || (value & 3) != 1) return nullptr;
-  const std::size_t slot = (value >> 2) & 0x3f;
-  const uint32_t generation = static_cast<uint32_t>(value >> 8);
-  if (slot >= g_aegp_effect_leases.size()) return nullptr;
-  const auto& lease = g_aegp_effect_leases[slot];
-  if (!lease.live || lease.generation != generation) return nullptr;
-  if (slot_out) *slot_out = slot;
-  return &lease;
+  for (std::size_t slot = 0; slot < g_aegp_effect_leases.size(); ++slot) {
+    const auto& lease = g_aegp_effect_leases[slot];
+    ObjectSnapshot resolved{};
+    if (lease.live && lease.handle == effect &&
+        scene_registry().resolve_possessed(
+            effect, ObjectKind::effect, lease.owner_plugin_id, resolved)) {
+      if (slot_out) *slot_out = slot;
+      return &lease;
+    }
+  }
+  return nullptr;
 }
 bool any_effect_lease_live() {
   return std::any_of(g_aegp_effect_leases.begin(), g_aegp_effect_leases.end(),
@@ -440,6 +538,14 @@ bool snapshot_staged_item_metadata(
     void* item, AegpStagedItemMetadata& metadata) noexcept {
   metadata = {};
   auto& runtime = scene_runtime_state();
+  ObjectSnapshot item_snapshot{}, comp_snapshot{};
+  if (!resolve_scene_item(item, item_snapshot) ||
+      !scene_registry().project_identity(
+          item_snapshot.identity.project_id, metadata.project) ||
+      !scene_registry().comp_from_item(
+          item_snapshot.identity, comp_snapshot))
+    return false;
+  metadata.identity = item_snapshot.identity;
   int32_t item_id = 0;
   if (item == composition_item_handle()) {
     item_id = static_cast<int32_t>(runtime.composition_item_identity);
@@ -458,12 +564,62 @@ bool snapshot_staged_item_metadata(
   std::copy_n(runtime.composition_item_dependencies.begin(),
               metadata.direct_dependency_count,
               metadata.direct_dependencies.begin());
-  for (std::size_t index = 0; index < runtime.effect_instances.size(); ++index) {
-    const uint64_t identity =
-        effect_instance_identity(index, runtime.effect_instances[index]);
-    if (identity != 0)
-      metadata.effect_instances[metadata.effect_instance_count++] = identity;
+  for (std::size_t index = 0;
+       index < metadata.direct_dependency_count; ++index) {
+    ObjectSnapshot dependency{};
+    if (!resolve_scene_item(
+            metadata.direct_dependencies[index], dependency))
+      return false;
+    metadata.dependency_identities[index] = dependency.identity;
   }
+  struct OrderedEffectIndex {
+    std::size_t instance_index{};
+    int32_t layer_index{};
+    int32_t stack_order{};
+  };
+  std::array<OrderedEffectIndex, kAegpEffectInstanceCapacity>
+      ordered_effects{};
+  std::size_t ordered_count = 0;
+  for (std::size_t index = 0; index < runtime.effect_instances.size(); ++index) {
+    const auto& instance = runtime.effect_instances[index];
+    const uint64_t identity = effect_instance_identity(index, instance);
+    ObjectSnapshot effect{}, layer{};
+    if (identity == 0 ||
+        !scene_registry().snapshot(instance.identity, effect) ||
+        !scene_registry().snapshot(effect.owner, layer) ||
+        layer.owner != comp_snapshot.identity)
+      continue;
+    ordered_effects[ordered_count++] = {
+        index, layer.local_index, instance.stack_order};
+  }
+  for (std::size_t left = 0; left < ordered_count; ++left) {
+    if (ordered_effects[left].layer_index < 0 ||
+        ordered_effects[left].stack_order < 0)
+      return false;
+    for (std::size_t right = left + 1; right < ordered_count; ++right) {
+      if (ordered_effects[left].layer_index ==
+              ordered_effects[right].layer_index &&
+          ordered_effects[left].stack_order ==
+              ordered_effects[right].stack_order)
+        return false;
+    }
+  }
+  std::sort(ordered_effects.begin(),
+            ordered_effects.begin() + ordered_count,
+            [](const auto& left, const auto& right) {
+              return left.layer_index != right.layer_index
+                  ? left.layer_index < right.layer_index
+                  : left.stack_order < right.stack_order;
+            });
+  for (std::size_t order = 0; order < ordered_count; ++order) {
+    const auto index = ordered_effects[order].instance_index;
+    metadata.effect_instances[order] =
+        effect_instance_identity(index, runtime.effect_instances[index]);
+    metadata.effect_identities[order] =
+        runtime.effect_instances[index].identity;
+    metadata.effect_orders[order] = static_cast<uint32_t>(order);
+  }
+  metadata.effect_instance_count = ordered_count;
   return true;
 }
 uint64_t staged_effect_instance_identity(
@@ -509,18 +665,94 @@ uint32_t& g_aegp_legacy_effect_stream_generation =
 
 int32_t __cdecl aegp_get_active_item(void** item) {
   if (!item) return 4;
-  *item = (g_aegp_update_menu_mode || g_aegp_command_roundtrip_mode ||
-           g_aegp_comp_idle_roundtrip_mode)
-      ? &g_aegp_comp_item : nullptr;
+  if (!(g_aegp_update_menu_mode || g_aegp_command_roundtrip_mode ||
+        g_aegp_comp_idle_roundtrip_mode)) {
+    *item = nullptr;
+    return 0;
+  }
+  void* borrowed = borrow_scene_object(scene_registry().active_item());
+  if (!borrowed) return 4;
+  *item = borrowed;
+  return 0;
+}
+int32_t __cdecl aegp_get_num_projects(int32_t* count) {
+  if (!count || scene_registry().project_count() >
+                    static_cast<std::size_t>(INT32_MAX))
+    return 4;
+  *count = static_cast<int32_t>(scene_registry().project_count());
+  return 0;
+}
+int32_t __cdecl aegp_get_project_by_index(int32_t index, void** project) {
+  ObjectSnapshot resolved{};
+  if (!project || index < 0 ||
+      !scene_registry().project_by_index(
+          static_cast<std::size_t>(index), resolved))
+    return 4;
+  void* borrowed = borrow_scene_object(resolved.identity);
+  if (!borrowed) return 4;
+  *project = borrowed;
+  return 0;
+}
+int32_t __cdecl aegp_get_project_root_folder(void* project, void** folder) {
+  ObjectSnapshot resolved_project{};
+  ObjectSnapshot resolved_folder{};
+  if (!folder || !resolve_scene_project(project, resolved_project) ||
+      !scene_registry().first_child(
+          resolved_project.identity, resolved_folder) ||
+      resolved_folder.identity.kind != ObjectKind::folder)
+    return 4;
+  void* borrowed = borrow_scene_object(resolved_folder.identity);
+  if (!borrowed) return 4;
+  *folder = borrowed;
+  return 0;
+}
+int32_t __cdecl aegp_get_first_project_item(void* project, void** item) {
+  ObjectSnapshot resolved_project{};
+  ObjectSnapshot resolved_item{};
+  if (!item || !resolve_scene_project(project, resolved_project))
+    return 4;
+  *item = nullptr;
+  if (!scene_registry().first_project_item(
+          resolved_project.identity, resolved_item))
+    return 0;
+  void* borrowed = borrow_scene_object(resolved_item.identity);
+  if (!borrowed) return 4;
+  *item = borrowed;
+  return 0;
+}
+int32_t __cdecl aegp_get_next_project_item(
+    void* project, void* item, void** next_item) {
+  ObjectSnapshot resolved_project{};
+  ObjectSnapshot resolved_item{};
+  ObjectSnapshot resolved_next{};
+  if (!next_item || !resolve_scene_project(project, resolved_project) ||
+      !resolve_scene_item(
+          item, resolved_item, resolved_project.identity.project_id))
+    return 4;
+  *next_item = nullptr;
+  if (!scene_registry().next_project_item(
+          resolved_project.identity, resolved_item.identity, resolved_next))
+    return 0;
+  void* borrowed = borrow_scene_object(resolved_next.identity);
+  if (!borrowed) return 4;
+  *next_item = borrowed;
   return 0;
 }
 int32_t __cdecl aegp_get_item_type(void* item, int16_t* item_type);
 AegpItemSuite g_aegp_item_suite{};
 
 int32_t __cdecl aegp_get_item_type(void* item, int16_t* item_type) {
-  if (item != &g_aegp_comp_item || !item_type) return 4;
+  ObjectSnapshot resolved{};
+  if (!item_type || !resolve_scene_item(item, resolved)) return 4;
+  int16_t result = 0;
+  switch (resolved.item_kind) {
+    case ItemKind::folder: result = 1; break;
+    case ItemKind::composition: result = 2; break;
+    case ItemKind::footage: result = 4; break;
+    default: return 4;
+  }
   ++g_aegp_item_type_calls;
-  *item_type = 2;  // AEGP_ItemType_COMP in AE_GeneralPlug.h.
+  *item_type = result;
   return 0;
 }
 AegpLegacyItemSuite6 g_aegp_legacy_item_suite6{};
@@ -531,7 +763,11 @@ std::array<AegpLayerTransform, 3>& g_aegp_layer_transforms = state().layer_trans
 std::array<int32_t, 3>& g_aegp_layer_parent_indices = state().layer_parent_indices;
 
 int32_t __cdecl aegp_get_item_current_time(void* item, AegpTime* time) {
-  if (item != &g_aegp_comp_item || !time) return 4;
+  ObjectSnapshot resolved{};
+  if (!time || !resolve_scene_item(item, resolved) ||
+      resolved.item_kind != ItemKind::composition ||
+      resolved.legacy_handle != &g_aegp_comp_item)
+    return 4;
   ++g_aegp_item_current_time_calls;
   if (g_aegp_first_observed_frame < 0) g_aegp_first_observed_frame = g_aegp_scene_frame;
   g_aegp_last_observed_frame = g_aegp_scene_frame;
@@ -539,8 +775,12 @@ int32_t __cdecl aegp_get_item_current_time(void* item, AegpTime* time) {
   return 0;
 }
 int32_t __cdecl aegp_set_item_current_time(void* item, const AegpTime* time) {
-  if (item != &g_aegp_comp_item || !time || time->scale == 0 || time->value < 0 ||
-      time->value > 300) return 4;
+  ObjectSnapshot resolved{};
+  if (!time || !resolve_scene_item(item, resolved) ||
+      resolved.item_kind != ItemKind::composition ||
+      resolved.legacy_handle != &g_aegp_comp_item || time->scale == 0 ||
+      time->value < 0 || time->value > 300)
+    return 4;
   ++g_aegp_item_set_current_time_calls;
   g_aegp_item_last_set_time_value = time->value;
   g_aegp_item_last_set_time_scale = time->scale;
@@ -550,57 +790,93 @@ int32_t __cdecl aegp_set_item_current_time(void* item, const AegpTime* time) {
   return 0;
 }
 int32_t __cdecl aegp_get_item_id(void* item, int32_t* id) {
-  if (item != &g_aegp_comp_item || !id) return 4;
-  *id = static_cast<int32_t>(scene_runtime_state().composition_item_identity);
+  ObjectSnapshot resolved{};
+  if (!id || !resolve_scene_item(item, resolved) ||
+      resolved.identity.object_id > INT32_MAX)
+    return 4;
+  *id = resolved.legacy_handle == &g_aegp_comp_item
+      ? static_cast<int32_t>(scene_runtime_state().composition_item_identity)
+      : static_cast<int32_t>(resolved.identity.object_id);
   return 0;
 }
 int32_t __cdecl aegp_get_item_name(int32_t plugin_id, void* item, void** name) {
-  if (plugin_id != 1 || item != &g_aegp_comp_item || !name) return 4;
-  if (make_utf16_handle(u"AEXCompat Composition", "item name", name) != 0) return 4;
+  ObjectSnapshot resolved{};
+  if (plugin_id != 1 || !name || !resolve_scene_item(item, resolved))
+    return 4;
+  const std::u16string value = scene_name(resolved);
+  if (value.empty() ||
+      make_utf16_handle(value, "item name", name) != 0)
+    return 4;
   ++g_aegp_item_name_calls;
   return 0;
 }
 int32_t __cdecl aegp_get_item_duration(void* item, AegpTime* duration) {
-  if (item != &g_aegp_comp_item || !duration) return 4;
+  ObjectSnapshot resolved{};
+  if (!duration || !resolve_scene_item(item, resolved) ||
+      resolved.item_kind != ItemKind::composition)
+    return 4;
   *duration = {300, 30};
   ++g_aegp_item_duration_calls;
   return 0;
 }
 int32_t __cdecl aegp_get_comp_from_item(void* item, void** comp) {
-  if (item != &g_aegp_comp_item || !comp) return 4;
+  ObjectSnapshot resolved_item{};
+  ObjectSnapshot resolved_comp{};
+  if (!comp || !resolve_scene_item(item, resolved_item) ||
+      !scene_registry().comp_from_item(
+          resolved_item.identity, resolved_comp))
+    return 4;
+  void* borrowed = borrow_scene_object(resolved_comp.identity);
+  if (!borrowed) return 4;
   ++g_aegp_comp_from_item_calls;
-  *comp = &g_aegp_comp;
+  *comp = borrowed;
   return 0;
 }
 int32_t __cdecl aegp_get_comp_framerate(void* comp, double* fps) {
-  if (comp != &g_aegp_comp || !fps) return 4;
+  ObjectSnapshot resolved{};
+  if (!fps || !resolve_scene_comp(comp, resolved)) return 4;
   ++g_aegp_comp_framerate_calls;
   *fps = 30.0;
   return 0;
 }
 int32_t __cdecl aegp_get_comp_frame_duration(void* comp, AegpTime* duration) {
-  if (comp != &g_aegp_comp || !duration) return 4;
+  ObjectSnapshot resolved{};
+  if (!duration || !resolve_scene_comp(comp, resolved)) return 4;
   *duration = {1, 30};
   return 0;
 }
 int32_t __cdecl aegp_get_comp_num_layers(void* comp, int32_t* count) {
-  if (comp != &g_aegp_comp || !count) return 4;
+  ObjectSnapshot resolved{};
+  if (!count || !resolve_scene_comp(comp, resolved)) return 4;
+  const std::size_t result = scene_registry().layer_count(resolved.identity);
+  if (result > static_cast<std::size_t>(INT32_MAX)) return 4;
   ++g_aegp_layer_count_calls;
-  *count = static_cast<int32_t>(g_aegp_layers.size());
+  *count = static_cast<int32_t>(result);
   return 0;
 }
 int32_t __cdecl aegp_get_comp_layer_by_index(void* comp, int32_t index, void** layer) {
-  if (comp != &g_aegp_comp || index < 0 ||
-      static_cast<std::size_t>(index) >= g_aegp_layers.size() || !layer) return 4;
+  ObjectSnapshot resolved_comp{};
+  ObjectSnapshot resolved_layer{};
+  if (!layer || index < 0 || !resolve_scene_comp(comp, resolved_comp) ||
+      !scene_registry().layer_by_index(
+          resolved_comp.identity, static_cast<std::size_t>(index),
+          resolved_layer))
+    return 4;
+  void* borrowed = borrow_scene_object(resolved_layer.identity);
+  if (!borrowed) return 4;
   ++g_aegp_layer_by_index_calls;
-  *layer = &g_aegp_layers[static_cast<std::size_t>(index)];
+  *layer = borrowed;
   return 0;
 }
 int32_t aegp_layer_index(void* layer) {
   if (layer == &g_layer) return 0;
-  for (std::size_t index = 0; index < g_aegp_layers.size(); ++index)
-    if (layer == &g_aegp_layers[index]) return static_cast<int32_t>(index);
-  return -1;
+  ObjectSnapshot resolved{};
+  if (!resolve_scene_layer(layer, resolved)) return -1;
+  const int32_t primary = primary_layer_index(resolved);
+  if (primary >= 0) return primary;
+  return state().dynamic_camera_live &&
+      resolved.identity == state().dynamic_camera_identity
+      ? resolved.local_index : -1;
 }
 int32_t __cdecl aegp_get_layer_to_world_xform(
     void* layer, const AegpTime* comp_time, AegpMatrix4* transform) {
@@ -612,13 +888,23 @@ int32_t __cdecl aegp_get_layer_to_world_xform(
   return 0;
 }
 int32_t __cdecl aegp_get_item_from_comp(void* comp, void** item) {
-  if (comp != &g_aegp_comp || !item) return 4;
-  *item = &g_aegp_comp_item;
+  ObjectSnapshot resolved_comp{};
+  ObjectSnapshot resolved_item{};
+  if (!item || !resolve_scene_comp(comp, resolved_comp) ||
+      !scene_registry().item_from_comp(
+          resolved_comp.identity, resolved_item))
+    return 4;
+  void* borrowed = borrow_scene_object(resolved_item.identity);
+  if (!borrowed) return 4;
+  *item = borrowed;
   return 0;
 }
 int32_t __cdecl aegp_get_item_dimensions(
     void* item, int32_t* width, int32_t* height) {
-  if (item != &g_aegp_comp_item || !width || !height) return 4;
+  ObjectSnapshot resolved{};
+  if (!width || !height || !resolve_scene_item(item, resolved) ||
+      resolved.item_kind != ItemKind::composition)
+    return 4;
   const int32_t result_width = g_full_resolution_width > 0
       ? g_full_resolution_width : g_smart_width;
   const int32_t result_height = g_full_resolution_height > 0
@@ -658,31 +944,54 @@ int32_t __cdecl aegp_get_active_layer(void** layer) {
   return 0;
 }
 int32_t __cdecl aegp_get_layer_index(void* layer, int32_t* index) {
-  const int32_t found = aegp_layer_index(layer);
-  if (found < 0 || !index) return 4;
-  *index = found;
+  ObjectSnapshot resolved{};
+  if (!index || !resolve_scene_layer(layer, resolved) ||
+      resolved.local_index < 0)
+    return 4;
+  *index = resolved.local_index;
   return 0;
 }
 int32_t __cdecl aegp_get_layer_source_item(void* layer, void** item) {
-  if (aegp_layer_index(layer) < 0 || !item) return 4;
-  *item = composition_item_handle();
+  ObjectSnapshot resolved{};
+  if (!item || !resolve_scene_layer(layer, resolved)) return 4;
+  if (resolved.related_item.kind == ObjectKind::none) {
+    *item = nullptr;
+    ++g_aegp_layer_source_item_calls;
+    return 0;
+  }
+  void* borrowed = borrow_scene_object(resolved.related_item);
+  if (!borrowed) return 4;
+  *item = borrowed;
   ++g_aegp_layer_source_item_calls;
   return 0;
 }
 int32_t __cdecl aegp_get_layer_parent_comp(void* layer, void** comp) {
-  if (aegp_layer_index(layer) < 0 || !comp) return 4;
-  *comp = &g_aegp_comp;
+  ObjectSnapshot resolved{};
+  if (!comp || !resolve_scene_layer(layer, resolved)) return 4;
+  void* borrowed = borrow_scene_object(resolved.owner);
+  if (!borrowed) return 4;
+  *comp = borrowed;
   return 0;
 }
 int32_t __cdecl aegp_get_layer_name(
     int32_t plugin_id, void* layer, void** layer_name, void** source_name) {
-  const int32_t index = aegp_layer_index(layer);
-  if (plugin_id != 1 || index < 0 || !layer_name || !source_name) return 4;
+  ObjectSnapshot resolved{};
+  if (plugin_id != 1 || !layer_name || !source_name ||
+      !resolve_scene_layer(layer, resolved))
+    return 4;
   *layer_name = nullptr;
   *source_name = nullptr;
-  const std::u16string suffix(1, static_cast<char16_t>(u'1' + index));
-  if (make_utf16_handle(u"Layer " + suffix, "layer name", layer_name) != 0) return 4;
-  if (make_utf16_handle(u"Source " + suffix, "source name", source_name) != 0) {
+  const std::u16string layer_value = scene_name(resolved);
+  if (layer_value.empty() ||
+      make_utf16_handle(layer_value, "layer name", layer_name) != 0)
+    return 4;
+  std::u16string source_value = u"Source";
+  ObjectSnapshot source{};
+  if (resolved.related_item.kind != ObjectKind::none &&
+      scene_registry().snapshot(resolved.related_item, source))
+    source_value = scene_name(source);
+  if (source_value.empty() ||
+      make_utf16_handle(source_value, "source name", source_name) != 0) {
     free_aegp_mem_handle(*layer_name);
     *layer_name = nullptr;
     return 4;
@@ -691,28 +1000,174 @@ int32_t __cdecl aegp_get_layer_name(
   return 0;
 }
 int32_t __cdecl aegp_get_layer_parent(void* layer, void** parent) {
-  const int32_t index = aegp_layer_index(layer);
-  if (index < 0 || !parent) return 4;
-  const int32_t parent_index = g_aegp_layer_parent_indices[static_cast<std::size_t>(index)];
-  if (parent_index == -1) {
+  ObjectSnapshot resolved{};
+  if (!parent || !resolve_scene_layer(layer, resolved)) return 4;
+  const int32_t index = primary_layer_index(resolved);
+  Identity parent_identity = resolved.parent_layer;
+  if (index >= 0) {
+    const int32_t parent_index =
+        g_aegp_layer_parent_indices[static_cast<std::size_t>(index)];
+    if (parent_index == -1) {
+      *parent = nullptr;
+      return 0;
+    }
+    if (parent_index < 0 || static_cast<std::size_t>(parent_index) >=
+        g_aegp_layers.size())
+      return 4;
+    ObjectSnapshot parent_snapshot{};
+    if (!resolve_scene_layer(
+            &g_aegp_layers[static_cast<std::size_t>(parent_index)],
+            parent_snapshot, resolved.identity.project_id))
+      return 4;
+    parent_identity = parent_snapshot.identity;
+  }
+  if (parent_identity.kind == ObjectKind::none) {
     *parent = nullptr;
     return 0;
   }
-  if (parent_index < 0 || static_cast<std::size_t>(parent_index) >=
-      g_aegp_layers.size()) return 4;
-  *parent = &g_aegp_layers[static_cast<std::size_t>(parent_index)];
+  if (parent_identity.project_id != resolved.identity.project_id)
+    return 4;
+  void* borrowed = borrow_scene_object(parent_identity);
+  if (!borrowed) return 4;
+  *parent = borrowed;
   return 0;
 }
+int32_t __cdecl aegp_set_layer_parent(void* layer, void* parent) {
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  ObjectSnapshot resolved_layer{};
+  ObjectSnapshot resolved_parent{};
+  if (!resolve_scene_layer(layer, resolved_layer) ||
+      (parent &&
+       !resolve_scene_layer(
+           parent, resolved_parent, resolved_layer.identity.project_id)))
+    return 4;
+  const int32_t layer_index = primary_layer_index(resolved_layer);
+  const int32_t parent_index = parent
+      ? primary_layer_index(resolved_parent) : -1;
+  if (layer_index < 0 || (parent && parent_index < 0))
+    return 4;
+  auto candidate = g_aegp_layer_parent_indices;
+  candidate[static_cast<std::size_t>(layer_index)] = parent_index;
+  int32_t cursor = parent_index;
+  for (std::size_t depth = 0; cursor >= 0 &&
+       depth <= candidate.size(); ++depth) {
+    if (cursor == layer_index) return 4;
+    if (static_cast<std::size_t>(cursor) >= candidate.size()) return 4;
+    cursor = candidate[static_cast<std::size_t>(cursor)];
+  }
+  if (cursor >= 0) return 4;
+  auto& registry = scene_registry();
+  aexcompat::scene_model::Registry::MutationCheckpoint checkpoint{};
+  if (!registry.capture_mutation_checkpoint(checkpoint)) return 4;
+  const auto parents_before = g_aegp_layer_parent_indices;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      registry, resolved_layer.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        if (!registry.set_parent_layer(
+                resolved_layer.identity,
+                parent ? resolved_parent.identity : Identity{}))
+          return false;
+        g_aegp_layer_parent_indices = candidate;
+        return true;
+      },
+      [&]() noexcept {
+        g_aegp_layer_parent_indices = parents_before;
+        return registry.restore_mutation_checkpoint(checkpoint);
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
+}
+int32_t __cdecl aegp_create_camera_in_comp(
+    const char16_t* name, AegpFloatPoint center, void* comp_handle,
+    void** camera) {
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  ObjectSnapshot resolved_comp{};
+  if (!name || !camera || !std::isfinite(center.x) ||
+      !std::isfinite(center.y) ||
+      !resolve_scene_comp(comp_handle, resolved_comp) ||
+      state().dynamic_camera_live ||
+      resolved_comp.identity.project_id != 1 ||
+      !scene_registry().can_create_children(resolved_comp.identity, 1, 1))
+    return 4;
+  std::size_t name_length = 0;
+  while (name_length < 47 && name[name_length] != 0) ++name_length;
+  if (name_length == 0 || name_length >= 47) return 4;
+  const std::u16string_view camera_name{name, name_length};
+  Identity camera_identity{};
+  void* published = nullptr;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), resolved_comp.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  if (!transaction.commit(
+          [&]() noexcept {
+            if (!scene_registry().create_child(
+                    ObjectKind::layer, resolved_comp.identity,
+                    static_cast<int32_t>(
+                        scene_registry().layer_count(resolved_comp.identity)),
+                    &state().dynamic_camera, camera_name,
+                    camera_identity))
+              return false;
+            published = borrow_scene_object(camera_identity);
+            if (!published) {
+              scene_registry().erase_tree(camera_identity);
+              return false;
+            }
+            state().dynamic_camera_live = true;
+            state().dynamic_camera_identity = camera_identity;
+            state().dynamic_camera_zoom = 800.0;
+            return true;
+          },
+          []() noexcept { bump_render_project_timestamp(); }))
+    return 4;
+  *camera = published;
+  return 0;
+}
+int32_t __cdecl aegp_delete_layer(void* layer) {
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  ObjectSnapshot resolved{};
+  if (!resolve_scene_layer(layer, resolved) ||
+      !state().dynamic_camera_live ||
+      resolved.identity != state().dynamic_camera_identity ||
+      (g_aegp_transform_stream.live &&
+       g_aegp_transform_stream.layer == layer))
+    return 4;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), resolved.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        if (!scene_registry().erase_tree(resolved.identity)) return false;
+        state().dynamic_camera_live = false;
+        state().dynamic_camera_identity = {};
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
+}
 int32_t __cdecl aegp_get_layer_from_id(void* comp, int32_t id, void** layer) {
-  const int32_t index = id - 2001;
-  if (comp != &g_aegp_comp || index < 0 ||
-      static_cast<std::size_t>(index) >= g_aegp_layers.size() || !layer) return 4;
-  *layer = &g_aegp_layers[static_cast<std::size_t>(index)];
+  ObjectSnapshot resolved_comp{};
+  ObjectSnapshot resolved_layer{};
+  if (!layer || id <= 0 || !resolve_scene_comp(comp, resolved_comp) ||
+      !scene_registry().layer_from_id(
+          resolved_comp.identity, static_cast<uint64_t>(id), resolved_layer))
+    return 4;
+  void* borrowed = borrow_scene_object(resolved_layer.identity);
+  if (!borrowed) return 4;
+  *layer = borrowed;
   return 0;
 }
 int32_t __cdecl aegp_get_comp_selection(
     int32_t plugin_id, void* comp, void** collection) {
-  if (plugin_id <= 0 || comp != &g_aegp_comp || !collection || g_aegp_selection.live)
+  ObjectSnapshot resolved{};
+  if (plugin_id <= 0 || !collection || g_aegp_selection.live ||
+      !resolve_scene_comp(comp, resolved) ||
+      resolved.legacy_handle != &g_aegp_comp)
     return 4;
   g_aegp_selection.live = true;
   ++g_aegp_collection_creates;
@@ -734,19 +1189,28 @@ int32_t __cdecl aegp_get_collection_item(
     void* collection, uint32_t index, AegpCollectionItem* item) {
   if (collection != &g_aegp_selection || !g_aegp_selection.live || index >= 2 || !item)
     return 4;
+  ObjectSnapshot layer_snapshot{};
+  Identity primary_comp{};
+  if (!scene_registry().identity_for_legacy(
+          &g_aegp_comp, ObjectKind::composition, primary_comp) ||
+      !scene_registry().layer_by_index(primary_comp, index, layer_snapshot))
+    return 4;
+  void* layer = borrow_scene_object(layer_snapshot.identity);
+  if (!layer) return 4;
   *item = {};
   item->type = 1;
-  void* layer = &g_aegp_layers[index];
   std::memcpy(item->item.data(), &layer, sizeof(layer));
   ++g_aegp_collection_item_reads;
   return 0;
 }
 AegpCollectionSuite g_aegp_collection_suite{};
 int32_t __cdecl aegp_get_layer_id(void* layer, int32_t* id) {
-  const int32_t index = aegp_layer_index(layer);
-  if (index < 0 || !id) return 4;
+  ObjectSnapshot resolved{};
+  if (!id || !resolve_scene_layer(layer, resolved) ||
+      resolved.identity.object_id > INT32_MAX)
+    return 4;
   ++g_aegp_layer_id_calls;
-  *id = 2001 + index;
+  *id = static_cast<int32_t>(resolved.identity.object_id);
   return 0;
 }
 int32_t __cdecl aegp_get_layer_flags(void* layer, uint32_t* flags) {
@@ -777,8 +1241,10 @@ int32_t __cdecl aegp_get_layer_transfer_mode(
   return 0;
 }
 int32_t __cdecl aegp_get_layer_object_type(void* layer, int32_t* type) {
-  if (aegp_layer_index(layer) < 0 || !type) return 4;
-  *type = 0;
+  ObjectSnapshot resolved{};
+  if (!type || !resolve_scene_layer(layer, resolved)) return 4;
+  *type = state().dynamic_camera_live &&
+      resolved.identity == state().dynamic_camera_identity ? 2 : 0;
   ++g_aegp_layer_attribute_calls;
   return 0;
 }
@@ -844,38 +1310,64 @@ int32_t __cdecl aegp_get_effect_flags(void* effect, uint32_t* flags) {
   return 0;
 }
 int32_t __cdecl aegp_set_effect_flags(void* effect, uint32_t set_mask, uint32_t flags) {
+  aexcompat::scene_transaction::MutationLock mutation_lock;
   std::size_t instance_index = 0;
   if (!resolve_effect_instance(effect, 0, &instance_index) || (flags & ~set_mask) != 0)
     return 4;
-  auto& instance = g_aegp_effect_instances[instance_index];
-  instance.flags = (instance.flags & ~set_mask) | flags;
-  bump_render_project_timestamp();
-  return 0;
+  ObjectSnapshot identity{};
+  if (!scene_registry().resolve(effect, ObjectKind::effect, identity)) return 4;
+  auto candidate = g_aegp_effect_instances;
+  candidate[instance_index].flags =
+      (candidate[instance_index].flags & ~set_mask) | flags;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), identity.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        g_aegp_effect_instances = candidate;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
 int32_t __cdecl aegp_reorder_effect(void* effect, int32_t target_order) {
+  aexcompat::scene_transaction::MutationLock mutation_lock;
   std::size_t instance_index = 0;
   const auto* resolved = resolve_effect_instance(effect, 0, &instance_index);
   if (!resolved || target_order < 0) return 4;
-  auto& instance = g_aegp_effect_instances[instance_index];
+  ObjectSnapshot identity{};
+  if (!scene_registry().resolve(effect, ObjectKind::effect, identity)) return 4;
+  auto candidate = g_aegp_effect_instances;
+  auto& instance = candidate[instance_index];
   const int32_t count = static_cast<int32_t>(std::count_if(
-      g_aegp_effect_instances.begin(), g_aegp_effect_instances.end(),
+      candidate.begin(), candidate.end(),
       [&](const auto& value) { return value.occupied && value.layer == instance.layer; }));
   if (target_order >= count) return 4;
   const int32_t old_order = instance.stack_order;
   if (target_order < old_order) {
-    for (auto& value : g_aegp_effect_instances)
+    for (auto& value : candidate)
       if (value.occupied && value.layer == instance.layer &&
           value.stack_order >= target_order && value.stack_order < old_order)
         ++value.stack_order;
   } else if (target_order > old_order) {
-    for (auto& value : g_aegp_effect_instances)
+    for (auto& value : candidate)
       if (value.occupied && value.layer == instance.layer &&
           value.stack_order > old_order && value.stack_order <= target_order)
         --value.stack_order;
   }
   instance.stack_order = target_order;
-  if (target_order != old_order) bump_render_project_timestamp();
-  return 0;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), identity.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        g_aegp_effect_instances = candidate;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
 int32_t __cdecl aegp_dispose_effect(void* effect) {
   if (effect == &g_aegp_effect) {
@@ -885,15 +1377,24 @@ int32_t __cdecl aegp_dispose_effect(void* effect) {
     return 0;
   }
   std::size_t slot = 0;
-  if (!resolve_effect_lease(effect, &slot)) return 4;
+  const auto* lease = resolve_effect_lease(effect, &slot);
+  if (!lease || !scene_registry().release(
+          effect, ObjectKind::effect, lease->owner_plugin_id, true))
+    return 4;
   g_aegp_effect_leases[slot].live = false;
+  g_aegp_effect_leases[slot].handle = nullptr;
   ++g_aegp_effect_disposes;
   return 0;
 }
 int32_t __cdecl aegp_apply_effect(
     int32_t plugin_id, void* layer, int32_t installed_key, void** effect) {
-  if (plugin_id <= 0 || aegp_layer_index(layer) < 0 || !effect ||
-      !find_installed_effect(installed_key)) return 4;
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  ObjectSnapshot layer_identity{};
+  if (plugin_id <= 0 || !resolve_scene_layer(layer, layer_identity) ||
+      layer_identity.identity.project_id != 1 ||
+      !effect || !find_installed_effect(installed_key) ||
+      g_aegp_effect_lease_generation == UINT32_MAX)
+    return 4;
   const auto instance_slot = std::find_if(g_aegp_effect_instances.begin(),
       g_aegp_effect_instances.end(), [](const auto& instance) { return !instance.occupied; });
   const auto lease_slot = std::find_if(g_aegp_effect_leases.begin(),
@@ -902,44 +1403,127 @@ int32_t __cdecl aegp_apply_effect(
       lease_slot == g_aegp_effect_leases.end()) return 4;
   const std::size_t instance_index = static_cast<std::size_t>(
       std::distance(g_aegp_effect_instances.begin(), instance_slot));
+  const std::size_t lease_index = static_cast<std::size_t>(
+      std::distance(g_aegp_effect_leases.begin(), lease_slot));
   const int32_t stack_order = static_cast<int32_t>(std::count_if(
       g_aegp_effect_instances.begin(), g_aegp_effect_instances.end(),
       [layer](const auto& instance) { return instance.occupied && instance.layer == layer; }));
-  uint32_t generation = instance_slot->generation + 1;
-  if (generation == 0) generation = 1;
-  *instance_slot = {layer, installed_key, stack_order, 1, generation, true};
-  initialize_effect_parameter_values(*instance_slot);
-  if (!acquire_effect_lease(plugin_id, instance_index, effect)) {
-    *instance_slot = {};
-    instance_slot->generation = generation;
+  if (instance_slot->generation == UINT32_MAX) return 4;
+  const uint32_t instance_generation = instance_slot->generation + 1;
+  auto candidate_instances = g_aegp_effect_instances;
+  auto& candidate = candidate_instances[instance_index];
+  candidate = {layer, installed_key, stack_order, 1,
+               instance_generation, true};
+  initialize_effect_parameter_values(candidate);
+  auto candidate_leases = g_aegp_effect_leases;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), layer_identity.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
+  if (!transaction.stage() ||
+      !transaction.validate(scene_registry().can_create_child(
+          layer_identity.identity)))
     return 4;
-  }
-  instance_slot->render_ref = *effect;
-  bump_render_project_timestamp();
-  return 0;
+  void* published = nullptr;
+  const bool committed = transaction.commit(
+      [&]() noexcept {
+        Identity created{};
+        if (!scene_registry().create_child_borrowed(
+                ObjectKind::effect, layer_identity.identity,
+                static_cast<int32_t>(instance_index),
+                &g_aegp_effect_instances[instance_index],
+                u"Effect", plugin_id, created, published))
+          return false;
+        candidate.identity = created;
+        candidate.render_ref = published;
+        const uint32_t lease_generation =
+            g_aegp_effect_lease_generation + 1;
+        candidate_leases[lease_index] = {
+            plugin_id, static_cast<uint32_t>(instance_index),
+            instance_generation, lease_generation, true, published};
+        g_aegp_effect_instances = candidate_instances;
+        g_aegp_effect_leases = candidate_leases;
+        g_aegp_effect_lease_generation = lease_generation;
+        ++g_aegp_effect_acquires;
+        *effect = published;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); });
+  return committed ? 0 : 4;
 }
 int32_t __cdecl aegp_delete_layer_effect(void* effect) {
+  aexcompat::scene_transaction::MutationLock mutation_lock;
   std::size_t instance_index = 0;
   if (!resolve_effect_instance(effect, 0, &instance_index)) return 4;
-  auto& instance = g_aegp_effect_instances[instance_index];
+  ObjectSnapshot identity{};
+  if (!scene_registry().resolve(effect, ObjectKind::effect, identity)) return 4;
+  auto candidate_instances = g_aegp_effect_instances;
+  auto candidate_leases = g_aegp_effect_leases;
+  auto candidate_transform_stream = g_aegp_transform_stream;
+  auto candidate_legacy_streams = g_aegp_legacy_effect_streams;
+  uint32_t invalidated_streams = 0;
+  uint32_t invalidated_values = 0;
+  uint32_t invalidated_effect_leases = 0;
+  auto& instance = candidate_instances[instance_index];
   void* layer = instance.layer;
   const int32_t deleted_order = instance.stack_order;
-  uint32_t generation = instance.generation + 1;
-  if (generation == 0) generation = 1;
+  if (instance.generation == UINT32_MAX) return 4;
+  const uint32_t generation = instance.generation + 1;
   instance = {};
   instance.generation = generation;
-  for (auto& value : g_aegp_effect_instances)
+  for (auto& value : candidate_instances)
     if (value.occupied && value.layer == layer && value.stack_order > deleted_order)
       --value.stack_order;
-  bump_render_project_timestamp();
-  return 0;
+  for (auto& lease : candidate_leases)
+    if (lease.live && lease.instance_index == instance_index) {
+      ++invalidated_effect_leases;
+      lease.live = false;
+      lease.handle = nullptr;
+    }
+  if (candidate_transform_stream.live &&
+      candidate_transform_stream.effect_param &&
+      candidate_transform_stream.effect_instance_index == instance_index) {
+    ++invalidated_streams;
+    if (candidate_transform_stream.value_live) ++invalidated_values;
+    candidate_transform_stream = {};
+  }
+  for (auto& stream : candidate_legacy_streams)
+    if (stream.live && stream.effect_instance_index == instance_index) {
+      ++invalidated_streams;
+      if (stream.value_live) ++invalidated_values;
+      stream = {};
+    }
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), identity.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        if (!scene_registry().erase_tree(identity.identity)) return false;
+        g_aegp_effect_instances = candidate_instances;
+        g_aegp_effect_leases = candidate_leases;
+        g_aegp_transform_stream = candidate_transform_stream;
+        g_aegp_legacy_effect_streams = candidate_legacy_streams;
+        g_aegp_effect_disposes += invalidated_effect_leases;
+        g_aegp_stream_disposes += invalidated_streams;
+        g_aegp_stream_value_disposes += invalidated_values;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
 int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
   if (!duplicate) return 4;
+  aexcompat::scene_transaction::MutationLock mutation_lock;
   std::size_t original_index = 0;
   const auto* source = resolve_effect_instance(original, 0, &original_index);
   const auto* source_lease = resolve_effect_lease(original);
   if (!source || !source_lease) return 4;
+  ObjectSnapshot source_identity{};
+  if (!scene_registry().resolve(
+          original, ObjectKind::effect, source_identity) ||
+      g_aegp_effect_lease_generation == UINT32_MAX)
+    return 4;
   const auto instance_slot = std::find_if(g_aegp_effect_instances.begin(),
       g_aegp_effect_instances.end(), [](const auto& value) { return !value.occupied; });
   const auto lease_slot = std::find_if(g_aegp_effect_leases.begin(),
@@ -950,27 +1534,57 @@ int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
   const int32_t inserted_order = source->stack_order + 1;
   const int32_t installed_key = source->installed_key;
   const uint32_t flags = source->flags;
-  for (auto& value : g_aegp_effect_instances)
+  auto candidate_instances = g_aegp_effect_instances;
+  auto candidate_leases = g_aegp_effect_leases;
+  for (auto& value : candidate_instances)
     if (value.occupied && value.layer == layer && value.stack_order >= inserted_order)
       ++value.stack_order;
   const std::size_t instance_index = static_cast<std::size_t>(
       std::distance(g_aegp_effect_instances.begin(), instance_slot));
-  uint32_t generation = instance_slot->generation + 1;
-  if (generation == 0) generation = 1;
-  *instance_slot = {const_cast<void*>(layer), installed_key, inserted_order,
-                    flags, generation, true};
-  instance_slot->parameter_values = source->parameter_values;
-  if (!acquire_effect_lease(source_lease->owner_plugin_id, instance_index, duplicate)) {
-    *instance_slot = {};
-    instance_slot->generation = generation;
-    for (auto& value : g_aegp_effect_instances)
-      if (value.occupied && value.layer == layer && value.stack_order > inserted_order)
-        --value.stack_order;
+  if (instance_slot->generation == UINT32_MAX) return 4;
+  const uint32_t generation = instance_slot->generation + 1;
+  auto& candidate = candidate_instances[instance_index];
+  candidate = {const_cast<void*>(layer), installed_key, inserted_order,
+               flags, generation, true};
+  candidate.parameter_values = source->parameter_values;
+  const std::size_t lease_index = static_cast<std::size_t>(
+      std::distance(g_aegp_effect_leases.begin(), lease_slot));
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), source_identity.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
+  if (!transaction.stage() ||
+      !transaction.validate(scene_registry().can_create_child(
+          source_identity.owner)))
     return 4;
-  }
-  instance_slot->render_ref = *duplicate;
-  bump_render_project_timestamp();
-  return 0;
+  void* published = nullptr;
+  const bool committed = transaction.commit(
+      [&]() noexcept {
+        Identity created{};
+        if (!scene_registry().create_child_borrowed(
+                ObjectKind::effect, source_identity.owner,
+                static_cast<int32_t>(instance_index),
+                &g_aegp_effect_instances[instance_index],
+                u"Effect", source_lease->owner_plugin_id,
+                created, published))
+          return false;
+        candidate.identity = created;
+        candidate.render_ref = published;
+        const uint32_t lease_generation =
+            g_aegp_effect_lease_generation + 1;
+        candidate_leases[lease_index] = {
+            source_lease->owner_plugin_id,
+            static_cast<uint32_t>(instance_index), generation,
+            lease_generation, true, published};
+        g_aegp_effect_instances = candidate_instances;
+        g_aegp_effect_leases = candidate_leases;
+        g_aegp_effect_lease_generation = lease_generation;
+        ++g_aegp_effect_acquires;
+        *duplicate = published;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); });
+  return committed ? 0 : 4;
 }
 int32_t __cdecl get_new_effect_for_effect(int32_t plugin_id, void* effect, void** effect_ref) {
   if (plugin_id <= 0 || effect != &g_effect || !effect_ref || g_aegp_effect_live) return 4;
@@ -1059,37 +1673,145 @@ bool supported_transform_stream(int32_t selector) {
   return selector == 0 || selector == 1 || selector == 2 || selector == 3 ||
       selector == 4 || selector == 8 || selector == 9;
 }
+
+aexcompat::scene_model::StreamValueKind stream_value_kind(
+    int32_t type) noexcept {
+  using aexcompat::scene_model::StreamValueKind;
+  switch (type) {
+    case 2:
+    case 3:
+    case 4:
+    case 5: return StreamValueKind::scalar;
+    case 6: return StreamValueKind::color;
+    case 9: return StreamValueKind::layer;
+    case 10: return StreamValueKind::arbitrary;
+    default: return StreamValueKind::none;
+  }
+}
+
+bool effect_stream_parent_live();
+
+bool publish_transform_stream(
+    AegpTransformStream candidate, Identity owner, int32_t plugin_id,
+    int32_t stream_type, bool keyframed, void** output) {
+  const std::size_t child_count = keyframed ? 3 : 1;
+  if (!output || plugin_id <= 0 ||
+      !scene_registry().can_create_children(owner, child_count, 1))
+    return false;
+  void* handle = nullptr;
+  if (!scene_registry().create_child_borrowed(
+          ObjectKind::stream, owner, candidate.selector,
+          &g_aegp_transform_stream, u"Stream", plugin_id,
+          candidate.identity, handle))
+    return false;
+  aexcompat::scene_model::StreamState stream_state{};
+  stream_state.value_kind = stream_value_kind(stream_type);
+  stream_state.dimensions =
+      stream_type == 6 ? 4 : (stream_type == 2 ? 3 :
+      (stream_type == 3 || stream_type == 4 ? 2 : 1));
+  stream_state.temporal_dimensions = 1;
+  if (stream_state.value_kind ==
+          aexcompat::scene_model::StreamValueKind::none ||
+      !scene_registry().initialize_stream_state(
+          candidate.identity, stream_state)) {
+    scene_registry().erase_tree(candidate.identity);
+    return false;
+  }
+  candidate.handle = handle;
+  if (keyframed) {
+    for (std::size_t index = 0;
+         index < candidate.keyframe_identities.size(); ++index) {
+      if (!scene_registry().create_child(
+              ObjectKind::keyframe, candidate.identity,
+              static_cast<int32_t>(index), nullptr, u"Keyframe",
+              candidate.keyframe_identities[index])) {
+        scene_registry().erase_tree(candidate.identity);
+        return false;
+      }
+      aexcompat::scene_model::KeyframeState key{};
+      key.time_value = index == 0 ? 0 : 60;
+      key.time_scale = 30;
+      key.in_interpolation = index == 0 ? 1 : 3;
+      key.out_interpolation = key.in_interpolation;
+      key.temporal_in[0] = {0.0, 33.333333333333336};
+      key.temporal_out[0] = {0.0, 33.333333333333336};
+      if (!scene_registry().initialize_keyframe_state(
+              candidate.keyframe_identities[index], key)) {
+        scene_registry().erase_tree(candidate.identity);
+        return false;
+      }
+    }
+  }
+  g_aegp_transform_stream = candidate;
+  ++g_aegp_stream_acquires;
+  *output = handle;
+  return true;
+}
+
+bool resolve_transform_stream(void* handle, ObjectSnapshot& resolved,
+                              int32_t plugin_id = 0) {
+  const auto policy = plugin_id > 0
+      ? AbiPossessionPolicy::explicit_plugin_id
+      : AbiPossessionPolicy::possessed_borrowed_handle;
+  const bool valid = resolve_with_possession_policy(
+      handle, ObjectKind::stream, policy, plugin_id, resolved);
+  return valid && g_aegp_transform_stream.live &&
+      g_aegp_transform_stream.handle == handle &&
+      g_aegp_transform_stream.identity == resolved.identity &&
+      effect_stream_parent_live();
+}
+
 int32_t __cdecl aegp_get_new_layer_stream(
     int32_t plugin_id, void* layer, int32_t selector, void** stream) {
-  if (plugin_id <= 0 || aegp_layer_index(layer) < 0 || !stream ||
-      !supported_transform_stream(selector) || g_aegp_transform_stream.live) return 4;
-  g_aegp_transform_stream.selector = selector;
-  g_aegp_transform_stream.layer = layer;
-  g_aegp_transform_stream.effect_param = false;
-  g_aegp_transform_stream.live = true;
-  g_aegp_transform_stream.value_live = false;
-  g_aegp_transform_stream.owner_plugin_id = plugin_id;
-  ++g_aegp_stream_acquires;
-  *stream = &g_aegp_transform_stream.object;
-  return 0;
+  ObjectSnapshot layer_identity{};
+  const bool dynamic_camera =
+      resolve_scene_layer(layer, layer_identity) &&
+      state().dynamic_camera_live &&
+      layer_identity.identity == state().dynamic_camera_identity;
+  if (plugin_id <= 0 || !resolve_scene_layer(layer, layer_identity) || !stream ||
+      layer_identity.identity.project_id != 1 ||
+      (!(dynamic_camera && selector == 11) &&
+       !supported_transform_stream(selector)) ||
+      g_aegp_transform_stream.live)
+    return 4;
+  AegpTransformStream candidate{};
+  candidate.selector = selector;
+  candidate.layer = layer;
+  candidate.effect_param = false;
+  candidate.live = true;
+  candidate.value_live = false;
+  candidate.owner_plugin_id = plugin_id;
+  const int32_t type = selector == 11 ? 5 :
+      (selector <= 2 ? 3 : 5);
+  return publish_transform_stream(
+      candidate, layer_identity.identity, plugin_id, type, false, stream)
+      ? 0 : 4;
 }
 int32_t __cdecl aegp_get_new_effect_stream_by_index(
     int32_t plugin_id, void* effect, int32_t index, void** stream) {
   std::size_t instance_index = 0;
   const auto* instance = resolve_effect_instance(effect, plugin_id, &instance_index);
   if (plugin_id <= 0 || !instance ||
-      index < 1 || index > 4 || !stream || g_aegp_transform_stream.live) return 4;
-  g_aegp_transform_stream.selector = index;
-  g_aegp_transform_stream.layer = instance->layer;
-  g_aegp_transform_stream.effect_param = true;
-  g_aegp_transform_stream.live = true;
-  g_aegp_transform_stream.value_live = false;
-  g_aegp_transform_stream.effect_instance_index = static_cast<uint32_t>(instance_index);
-  g_aegp_transform_stream.effect_instance_generation = instance->generation;
-  g_aegp_transform_stream.owner_plugin_id = plugin_id;
-  ++g_aegp_stream_acquires;
-  *stream = &g_aegp_transform_stream.object;
-  return 0;
+      index < 0 || index > 4 || !stream || g_aegp_transform_stream.live) return 4;
+  ObjectSnapshot effect_identity{};
+  if (!scene_registry().resolve_possessed(
+          effect, ObjectKind::effect, plugin_id, effect_identity))
+    return 4;
+  AegpTransformStream candidate{};
+  candidate.selector = index;
+  candidate.layer = instance->layer;
+  candidate.effect_param = true;
+  candidate.live = true;
+  candidate.value_live = false;
+  candidate.effect_instance_index = static_cast<uint32_t>(instance_index);
+  candidate.effect_instance_generation = instance->generation;
+  candidate.owner_plugin_id = plugin_id;
+  const int32_t type = index == 0 ? 9 : (index == 1 ? 5 :
+      (index == 2 ? 4 : (index == 3 ? 2 : 6)));
+  const bool keyframed = index == 1 && instance_index == 0;
+  return publish_transform_stream(
+      candidate, effect_identity.identity, plugin_id, type, keyframed,
+      stream) ? 0 : 4;
 }
 int32_t __cdecl aegp_get_effect_num_param_streams_v6(void* effect, int32_t* count) {
   const auto* instance = resolve_effect_instance(effect);
@@ -1106,11 +1828,14 @@ bool effect_stream_parent_live() {
       instance.generation == g_aegp_transform_stream.effect_instance_generation;
 }
 int32_t __cdecl aegp_get_stream_type(void* stream, int32_t* type) {
-  if (stream != &g_aegp_transform_stream.object || !g_aegp_transform_stream.live ||
-      !effect_stream_parent_live() || !type)
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_stream_type(stream, type);
+  ObjectSnapshot resolved{};
+  if (!type || !resolve_transform_stream(stream, resolved))
     return 4;
   if (g_aegp_transform_stream.effect_param) {
     switch (g_aegp_transform_stream.selector) {
+      case 0: *type = 9; break;
       case 1: *type = 5; break;
       case 2: *type = 4; break;
       case 3: *type = 2; break;
@@ -1118,13 +1843,16 @@ int32_t __cdecl aegp_get_stream_type(void* stream, int32_t* type) {
       default: return 4;
     }
   } else {
-    *type = g_aegp_transform_stream.selector <= 2 ? 3 : 5;
+    *type = g_aegp_transform_stream.selector == 11 ? 5 :
+        (g_aegp_transform_stream.selector <= 2 ? 3 : 5);
   }
   return 0;
 }
 int32_t __cdecl aegp_get_stream_num_keyframes(void* stream, int32_t* count) {
-  if (stream != &g_aegp_transform_stream.object || !g_aegp_transform_stream.live ||
-      !effect_stream_parent_live() || !count)
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_stream_num_keyframes(stream, count);
+  ObjectSnapshot resolved{};
+  if (!count || !resolve_transform_stream(stream, resolved))
     return 4;
   ++g_aegp_keyframe_count_calls;
   if (g_aegp_transform_stream.effect_param && g_aegp_transform_stream.selector == 1 &&
@@ -1137,23 +1865,48 @@ int32_t __cdecl aegp_get_stream_num_keyframes(void* stream, int32_t* count) {
   return 0;
 }
 bool valid_amount_keyframe(void* stream, int32_t index) {
-  return stream == &g_aegp_transform_stream.object && g_aegp_transform_stream.live &&
-      effect_stream_parent_live() &&
+  ObjectSnapshot resolved{};
+  return resolve_transform_stream(stream, resolved) &&
       g_aegp_transform_stream.effect_param && g_aegp_transform_stream.selector == 1 &&
       g_aegp_transform_stream.effect_instance_index == 0 &&
-      index >= 0 && index < 2;
+      index >= 0 && index < 2 &&
+      g_aegp_transform_stream.keyframe_identities[
+          static_cast<std::size_t>(index)] != Identity{};
 }
 int32_t __cdecl aegp_get_keyframe_time(
     void* stream, int32_t index, int32_t time_mode, AegpTime* time) {
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_keyframe_time(
+        stream, index, static_cast<int16_t>(time_mode),
+        reinterpret_cast<aexcompat::l2_detail::HostTime*>(time));
   if (!valid_amount_keyframe(stream, index) || time_mode != 1 || !time) return 4;
-  *time = {index == 0 ? 0 : 60, 30};
+  ObjectSnapshot key{};
+  if (!scene_registry().snapshot(
+          g_aegp_transform_stream.keyframe_identities[
+              static_cast<std::size_t>(index)],
+          key))
+    return 4;
+  *time = {key.keyframe.time_value, key.keyframe.time_scale};
   ++g_aegp_keyframe_time_calls;
   return 0;
 }
 int32_t __cdecl aegp_get_new_keyframe_value(
     int32_t plugin_id, void* stream, int32_t index, AegpStreamValue* value) {
-  if (plugin_id != 1 || !valid_amount_keyframe(stream, index) || !value ||
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_new_keyframe_value(
+        plugin_id, stream, index,
+        reinterpret_cast<aexcompat::l2_detail::StreamValue*>(value));
+  if (plugin_id <= 0 || !valid_amount_keyframe(stream, index) || !value ||
       g_aegp_transform_stream.value_live) return 4;
+  ObjectSnapshot stream_identity{};
+  if (!resolve_transform_stream(stream, stream_identity, plugin_id) ||
+      !scene_registry().create_child(
+          ObjectKind::value,
+          g_aegp_transform_stream.keyframe_identities[
+              static_cast<std::size_t>(index)],
+          index, value,
+          u"Keyframe Value", g_aegp_transform_stream.value_identity))
+    return 4;
   *value = {};
   value->stream = stream;
   const double amount = index == 0 ? 10.0 : 90.0;
@@ -1165,40 +1918,80 @@ int32_t __cdecl aegp_get_new_keyframe_value(
 }
 int32_t __cdecl aegp_get_keyframe_interpolation(
     void* stream, int32_t index, int32_t* in_type, int32_t* out_type) {
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_keyframe_interpolation(
+        stream, index, in_type, out_type);
   if (!valid_amount_keyframe(stream, index) || !in_type || !out_type) return 4;
-  *in_type = index == 0 ? 1 : 3;
-  *out_type = index == 0 ? 1 : 3;
+  ObjectSnapshot key{};
+  if (!scene_registry().snapshot(
+          g_aegp_transform_stream.keyframe_identities[
+              static_cast<std::size_t>(index)],
+          key))
+    return 4;
+  *in_type = key.keyframe.in_interpolation;
+  *out_type = key.keyframe.out_interpolation;
   ++g_aegp_keyframe_interpolation_calls;
   return 0;
 }
 int32_t __cdecl aegp_get_new_stream_value(
     int32_t plugin_id, void* stream, int32_t, const AegpTime* time,
     uint8_t, AegpStreamValue* value) {
-  if (plugin_id <= 0 || stream != &g_aegp_transform_stream.object ||
-      !g_aegp_transform_stream.live || !effect_stream_parent_live() ||
-      plugin_id != g_aegp_transform_stream.owner_plugin_id ||
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::get_new_stream_value(
+        plugin_id, stream, 0,
+        reinterpret_cast<const aexcompat::l2_detail::HostTime*>(time), 0,
+        reinterpret_cast<aexcompat::l2_detail::StreamValue*>(value));
+  ObjectSnapshot stream_identity{};
+  if (plugin_id <= 0 ||
+      !resolve_transform_stream(stream, stream_identity, plugin_id) ||
       g_aegp_transform_stream.value_live || !time ||
       time->scale == 0 || !value) return 4;
+  Identity value_identity{};
+  if (g_aegp_transform_stream.effect_param &&
+      (g_aegp_transform_stream.selector < 0 ||
+       g_aegp_transform_stream.selector > 4))
+    return 4;
+  if (!scene_registry().create_child(
+          ObjectKind::value, stream_identity.identity, 0, value,
+          u"Stream Value", value_identity))
+    return 4;
   value->stream = stream;
   value->value.fill(std::byte{});
   double components[2]{};
   if (g_aegp_transform_stream.effect_param) {
     const int32_t selector = g_aegp_transform_stream.selector;
-    if (selector < 1 || selector > 4) return 4;
     const auto& instance =
         g_aegp_effect_instances[g_aegp_transform_stream.effect_instance_index];
-    std::memcpy(value->value.data(), instance.parameter_values[selector - 1].data(),
-                sizeof(instance.parameter_values[selector - 1]));
+    if (selector == 0) {
+      ObjectSnapshot input_layer{};
+      int32_t layer_id = 0;
+      if (!resolve_scene_layer(instance.layer, input_layer) ||
+          input_layer.identity.object_id > INT32_MAX) {
+        scene_registry().erase_tree(value_identity);
+        return 4;
+      }
+      layer_id = static_cast<int32_t>(input_layer.identity.object_id);
+      std::memcpy(
+          value->value.data(), &layer_id, sizeof(layer_id));
+    } else {
+      std::memcpy(
+          value->value.data(), instance.parameter_values[selector - 1].data(),
+          sizeof(instance.parameter_values[selector - 1]));
+    }
     ++g_aegp_effect_param_value_calls;
   } else switch (g_aegp_transform_stream.selector) {
     case 1: components[0] = 320.0; components[1] = 180.0; break;
     case 2: components[0] = 100.0; components[1] = 100.0; break;
     case 4: components[0] = 100.0; break;
+    case 11:
+      components[0] = state().dynamic_camera_zoom;
+      break;
     default: break;
   }
   if (!g_aegp_transform_stream.effect_param)
     std::memcpy(value->value.data(), components, sizeof(components));
   g_aegp_transform_stream.value_live = true;
+  g_aegp_transform_stream.value_identity = value_identity;
   if (!g_aegp_transform_stream.effect_param)
     g_aegp_stream_sampled_selector_mask |= 1u << g_aegp_transform_stream.selector;
   ++g_aegp_stream_value_acquires;
@@ -1206,14 +1999,15 @@ int32_t __cdecl aegp_get_new_stream_value(
 }
 int32_t __cdecl aegp_get_stream_name(
     int32_t plugin_id, void* stream, uint8_t, void** name_handle) {
-  if (plugin_id <= 0 || stream != &g_aegp_transform_stream.object ||
-      !g_aegp_transform_stream.live || !effect_stream_parent_live() ||
-      plugin_id != g_aegp_transform_stream.owner_plugin_id ||
+  ObjectSnapshot resolved{};
+  if (plugin_id <= 0 ||
+      !resolve_transform_stream(stream, resolved, plugin_id) ||
       !g_aegp_transform_stream.effect_param || !name_handle)
     return 4;
   *name_handle = nullptr;
   std::u16string name;
   switch (g_aegp_transform_stream.selector) {
+    case 0: name = u"Input"; break;
     case 1: name = u"Amount"; break;
     case 2: name = u"Center"; break;
     case 3: name = u"Vector"; break;
@@ -1226,9 +2020,10 @@ int32_t __cdecl aegp_get_stream_name(
 }
 int32_t __cdecl aegp_set_effect_stream_value(
     int32_t plugin_id, void* stream, AegpStreamValue* value) {
-  if (plugin_id <= 0 || stream != &g_aegp_transform_stream.object ||
-      !g_aegp_transform_stream.live || !effect_stream_parent_live() ||
-      plugin_id != g_aegp_transform_stream.owner_plugin_id || !value ||
+  aexcompat::scene_transaction::MutationLock mutation_lock;
+  ObjectSnapshot stream_identity{};
+  if (plugin_id <= 0 ||
+      !resolve_transform_stream(stream, stream_identity, plugin_id) || !value ||
       value->stream != stream || !g_aegp_transform_stream.value_live ||
       !g_aegp_transform_stream.effect_param) return 4;
   const int32_t selector = g_aegp_transform_stream.selector;
@@ -1238,34 +2033,63 @@ int32_t __cdecl aegp_set_effect_stream_value(
   std::memcpy(candidate.data(), value->value.data(), sizeof(candidate));
   for (int32_t index = 0; index < selector; ++index)
     if (!std::isfinite(candidate[static_cast<std::size_t>(index)])) return 4;
-  auto& instance =
-      g_aegp_effect_instances[g_aegp_transform_stream.effect_instance_index];
-  instance.parameter_values[selector - 1] = candidate;
-  bump_render_project_timestamp();
-  return 0;
+  auto candidate_instances = g_aegp_effect_instances;
+  candidate_instances[g_aegp_transform_stream.effect_instance_index]
+      .parameter_values[selector - 1] = candidate;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), stream_identity.identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        g_aegp_effect_instances = candidate_instances;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
 int32_t __cdecl aegp_dispose_stream_value(AegpStreamValue* value) {
-  if (!value || value->stream != &g_aegp_transform_stream.object ||
-      !g_aegp_transform_stream.live || !g_aegp_transform_stream.value_live) return 4;
+  if (value && aexcompat::l2_detail::find_stream(value->stream))
+    return aexcompat::l2_detail::dispose_stream_value(
+        reinterpret_cast<aexcompat::l2_detail::StreamValue*>(value));
+  ObjectSnapshot stream_identity{};
+  ObjectSnapshot value_identity{};
+  ObjectSnapshot value_owner{};
+  Identity value_id{};
+  if (!value ||
+      !resolve_transform_stream(value->stream, stream_identity) ||
+      !g_aegp_transform_stream.value_live ||
+      !scene_registry().identity_for_legacy(
+          value, ObjectKind::value, value_id) ||
+      !scene_registry().snapshot(value_id, value_identity) ||
+      value_identity.identity != g_aegp_transform_stream.value_identity ||
+      (value_identity.owner != stream_identity.identity &&
+       (!scene_registry().snapshot(value_identity.owner, value_owner) ||
+        value_owner.identity.kind != ObjectKind::keyframe ||
+        value_owner.owner != stream_identity.identity)) ||
+      !scene_registry().erase_tree(value_identity.identity))
+    return 4;
   value->stream = nullptr;
   g_aegp_transform_stream.value_live = false;
+  g_aegp_transform_stream.value_identity = {};
   ++g_aegp_stream_value_disposes;
   return 0;
 }
 int32_t __cdecl aegp_dispose_stream(void* stream) {
-  if (stream != &g_aegp_transform_stream.object || !g_aegp_transform_stream.live ||
-      g_aegp_transform_stream.value_live) return 4;
-  g_aegp_transform_stream.live = false;
+  if (aexcompat::l2_detail::find_stream(stream))
+    return aexcompat::l2_detail::dispose_stream(stream);
+  ObjectSnapshot resolved{};
+  if (!resolve_transform_stream(stream, resolved) ||
+      g_aegp_transform_stream.value_live ||
+      !scene_registry().erase_tree(resolved.identity))
+    return 4;
+  g_aegp_transform_stream = {};
   g_aegp_transform_stream.selector = -1;
-  g_aegp_transform_stream.layer = nullptr;
-  g_aegp_transform_stream.effect_param = false;
-  g_aegp_transform_stream.effect_instance_index = 0;
-  g_aegp_transform_stream.effect_instance_generation = 0;
-  g_aegp_transform_stream.owner_plugin_id = 0;
   ++g_aegp_stream_disposes;
   return 0;
 }
 
+std::array<void*, 14> g_aegp_project_suite6{};
 std::array<void*, 41> g_aegp_comp_suite10{};
 std::array<void*, 28> g_aegp_comp_suite4{};
 std::array<void*, 44> g_aegp_comp_suite11{};
@@ -1279,6 +2103,7 @@ std::array<void*, 22> g_aegp_effect_suite4{};
 std::array<void*, 22> g_aegp_stream_suite2{};
 std::array<void*, 23> g_aegp_stream_suite6{};
 std::array<void*, 22> g_aegp_keyframe_suite5{};
+static_assert(sizeof(g_aegp_project_suite6) == 14 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite10) == 41 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite4) == 28 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite11) == 352);
@@ -1302,10 +2127,27 @@ SceneSuiteAcquireResult scene_acquire_suite(
   };
   const auto& factory = scene_context()->hooks.suite_factory;
 
+  if (named("AEGP Proj Suite") && version == 9 &&
+      state().comp_idle_roundtrip_mode) {
+    g_aegp_project_suite6 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_proj_9, 14>();
+    g_aegp_project_suite6[0] =
+        reinterpret_cast<void*>(&aegp_get_num_projects);
+    g_aegp_project_suite6[1] =
+        reinterpret_cast<void*>(&aegp_get_project_by_index);
+    g_aegp_project_suite6[4] =
+        reinterpret_cast<void*>(&aegp_get_project_root_folder);
+    *suite = g_aegp_project_suite6.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
   if (named("AEGP Item Suite") && version == 14 &&
       (state().active_idle_roundtrip_mode || state().comp_idle_roundtrip_mode)) {
     std::copy_n(unsupported_suite_slots<UnsupportedSuiteId::aegp_item_14, 26>().data(),
                 26, reinterpret_cast<void**>(&g_aegp_item_suite));
+    reinterpret_cast<void**>(&g_aegp_item_suite)[0] =
+        reinterpret_cast<void*>(&aegp_get_first_project_item);
+    reinterpret_cast<void**>(&g_aegp_item_suite)[1] =
+        reinterpret_cast<void*>(&aegp_get_next_project_item);
     g_aegp_item_suite.get_active_item = &aegp_get_active_item;
     g_aegp_item_suite.get_item_type = &aegp_get_item_type;
     g_aegp_item_suite.after_get_item_type[1] = reinterpret_cast<void*>(&aegp_get_item_name);
@@ -1336,6 +2178,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
         unsupported_suite_slots<UnsupportedSuiteId::aegp_comp_25, 44>();
     g_aegp_comp_suite11[0] = reinterpret_cast<void*>(&aegp_get_comp_from_item);
     g_aegp_comp_suite11[11] = reinterpret_cast<void*>(&aegp_get_comp_framerate);
+    g_aegp_comp_suite11[23] =
+        reinterpret_cast<void*>(&aegp_create_camera_in_comp);
     g_aegp_comp_suite11[26] = reinterpret_cast<void*>(&aegp_get_comp_selection);
     g_aegp_comp_suite11[37] = reinterpret_cast<void*>(&aegp_get_comp_frame_duration);
     *suite = g_aegp_comp_suite11.data();
@@ -1385,6 +2229,10 @@ SceneSuiteAcquireResult scene_acquire_suite(
         g_aegp_layer_suite9[28] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
         g_aegp_layer_suite9[37] = reinterpret_cast<void*>(&aegp_get_layer_id);
         g_aegp_layer_suite9[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
+        g_aegp_layer_suite9[42] =
+            reinterpret_cast<void*>(&aegp_set_layer_parent);
+        g_aegp_layer_suite9[43] =
+            reinterpret_cast<void*>(&aegp_delete_layer);
         g_aegp_layer_suite9[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
       }
       *suite = g_aegp_layer_suite9.data();
@@ -1491,6 +2339,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_stream_suite6[3] = reinterpret_cast<void*>(&aegp_get_new_layer_stream);
     g_aegp_stream_suite6[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v6);
     g_aegp_stream_suite6[5] = reinterpret_cast<void*>(&aegp_get_new_effect_stream_by_index);
+    g_aegp_stream_suite6[6] =
+        reinterpret_cast<void*>(&aexcompat::l2_detail::get_new_mask_stream);
     g_aegp_stream_suite6[7] = reinterpret_cast<void*>(&aegp_dispose_stream);
     g_aegp_stream_suite6[8] = reinterpret_cast<void*>(&aegp_get_stream_name);
     g_aegp_stream_suite6[12] = reinterpret_cast<void*>(&aegp_get_stream_type);
@@ -1559,18 +2409,26 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   const auto* instance = resolve_effect_instance(effect, plugin_id, &instance_index);
   const auto* parameter = instance
       ? find_effect_parameter(instance->installed_key, index) : nullptr;
-  if (plugin_id <= 0 || !instance || !stream || !parameter) return 4;
+  ObjectSnapshot effect_identity{};
+  if (plugin_id <= 0 || !instance || !stream || !parameter ||
+      !scene_registry().resolve_possessed(
+          effect, ObjectKind::effect, plugin_id, effect_identity) ||
+      g_aegp_legacy_effect_stream_generation == UINT32_MAX)
+    return 4;
   const auto free_slot = std::find_if(g_aegp_legacy_effect_streams.begin(),
       g_aegp_legacy_effect_streams.end(), [](const auto& value) { return !value.live; });
   if (free_slot == g_aegp_legacy_effect_streams.end()) return 4;
   auto& value = *free_slot;
   const std::size_t slot = static_cast<std::size_t>(
       std::distance(g_aegp_legacy_effect_streams.begin(), free_slot));
-  uint32_t generation = ++g_aegp_legacy_effect_stream_generation;
-  if (generation == 0) generation = ++g_aegp_legacy_effect_stream_generation;
-  const uintptr_t encoded = (static_cast<uintptr_t>(generation) << 8) |
-      (static_cast<uintptr_t>(slot) << 2) | 3;
-  if (encoded <= 3) return 4;
+  Identity identity{};
+  void* published = nullptr;
+  if (!scene_registry().create_child_borrowed(
+          ObjectKind::stream, effect_identity.identity,
+          static_cast<int32_t>(slot), &value, u"Effect Stream",
+          plugin_id, identity, published))
+    return 4;
+  const uint32_t generation = ++g_aegp_legacy_effect_stream_generation;
   value.param_index = index;
   value.live = true;
   value.hidden = false;
@@ -1579,23 +2437,48 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   value.effect_instance_generation = instance->generation;
   value.generation = generation;
   value.owner_plugin_id = plugin_id;
+  value.identity = identity;
+  value.handle = published;
+  aexcompat::scene_model::StreamState stream_state{};
+  stream_state.value_kind = stream_value_kind(parameter->type);
+  stream_state.dimensions = parameter->type == 6 ? 4 :
+      (parameter->type == 2 ? 3 : (parameter->type == 4 ? 2 : 1));
+  stream_state.temporal_dimensions = 1;
+  if (stream_state.value_kind ==
+          aexcompat::scene_model::StreamValueKind::none ||
+      !scene_registry().initialize_stream_state(identity, stream_state)) {
+    scene_registry().erase_tree(identity);
+    value = {};
+    return 4;
+  }
   ++g_aegp_stream_acquires;
-  *stream = reinterpret_cast<void*>(encoded);
+  *stream = published;
   return 0;
 }
 AegpLegacyEffectStream* legacy_effect_stream(void* stream) {
-  const uintptr_t encoded = reinterpret_cast<uintptr_t>(stream);
-  if (!stream || (encoded & 3) != 3) return nullptr;
-  const std::size_t slot = (encoded >> 2) & 0x3f;
-  const uint32_t generation = static_cast<uint32_t>(encoded >> 8);
-  if (slot >= g_aegp_legacy_effect_streams.size()) return nullptr;
-  auto& value = g_aegp_legacy_effect_streams[slot];
-  return value.live && value.generation == generation ? &value : nullptr;
+  ObjectSnapshot resolved{};
+  int32_t possession_id = 0;
+  if (!scene_registry().resolve(stream, ObjectKind::stream, resolved) ||
+      !scene_registry().possession(
+          stream, ObjectKind::stream, possession_id) ||
+      resolved.local_index < 0 ||
+      static_cast<std::size_t>(resolved.local_index) >=
+          g_aegp_legacy_effect_streams.size())
+    return nullptr;
+  auto& value = g_aegp_legacy_effect_streams[
+      static_cast<std::size_t>(resolved.local_index)];
+  return value.live && value.handle == stream &&
+      value.identity == resolved.identity &&
+      value.owner_plugin_id == possession_id ? &value : nullptr;
 }
 bool legacy_effect_stream_parent_live(const AegpLegacyEffectStream& stream) {
   if (stream.effect_instance_index >= g_aegp_effect_instances.size()) return false;
   const auto& instance = g_aegp_effect_instances[stream.effect_instance_index];
-  return instance.occupied && instance.generation == stream.effect_instance_generation;
+  ObjectSnapshot resolved{};
+  return instance.occupied &&
+      instance.generation == stream.effect_instance_generation &&
+      scene_registry().snapshot(stream.identity, resolved) &&
+      resolved.owner == instance.identity;
 }
 int32_t __cdecl aegp_get_stream_name_v2(void* stream, uint8_t, char* name) {
   auto* value = legacy_effect_stream(stream);
@@ -1637,21 +2520,39 @@ int32_t __cdecl aegp_get_new_stream_value_v2(
   }
   value->value_live = true;
   value->checked_out_value = output;
+  if (!scene_registry().create_child(
+          ObjectKind::value, value->identity, 0, output,
+          u"Stream Value", value->value_identity)) {
+    value->value_live = false;
+    value->checked_out_value = nullptr;
+    return 4;
+  }
   ++g_aegp_stream_value_acquires;
   return 0;
 }
 int32_t __cdecl aegp_dispose_stream_value_v2(AegpStreamValue* output) {
   if (!output) return 4;
   auto* stream = legacy_effect_stream(output->stream);
-  if (!stream || !stream->value_live || stream->checked_out_value != output) return 4;
+  Identity value_identity{};
+  ObjectSnapshot value_snapshot{};
+  if (!stream || !stream->value_live || stream->checked_out_value != output ||
+      !scene_registry().identity_for_legacy(
+          output, ObjectKind::value, value_identity) ||
+      !scene_registry().snapshot(value_identity, value_snapshot) ||
+      value_identity != stream->value_identity ||
+      value_snapshot.owner != stream->identity ||
+      !scene_registry().erase_tree(value_identity))
+    return 4;
   output->stream = nullptr;
   stream->value_live = false;
   stream->checked_out_value = nullptr;
+  stream->value_identity = {};
   ++g_aegp_stream_value_disposes;
   return 0;
 }
 int32_t __cdecl aegp_set_stream_value_v2(
     int32_t plugin_id, void* stream, AegpStreamValue* input) {
+  aexcompat::scene_transaction::MutationLock mutation_lock;
   auto* value = legacy_effect_stream(stream);
   if (!value || !legacy_effect_stream_parent_live(*value) ||
       plugin_id != value->owner_plugin_id || !value->value_live || !input ||
@@ -1664,31 +2565,58 @@ int32_t __cdecl aegp_set_stream_value_v2(
   std::memcpy(candidate.data(), input->value.data(), sizeof(candidate));
   for (std::size_t index = 0; index < candidate.size(); ++index)
     if (!std::isfinite(candidate[static_cast<std::size_t>(index)])) return 4;
-  auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  instance.parameter_values[static_cast<std::size_t>(value->param_index - 1)] = candidate;
-  bump_render_project_timestamp();
-  return 0;
+  auto candidate_instances = g_aegp_effect_instances;
+  candidate_instances[value->effect_instance_index]
+      .parameter_values[static_cast<std::size_t>(value->param_index - 1)] =
+          candidate;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), value->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        g_aegp_effect_instances = candidate_instances;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
 int32_t __cdecl aegp_dispose_stream_v2(void* stream) {
   auto* value = legacy_effect_stream(stream);
-  if (!value || value->value_live) return 4;
+  if (!value || value->value_live ||
+      !scene_registry().erase_tree(value->identity))
+    return 4;
   value->live = false;
   value->param_index = -1;
   value->effect_instance_index = 0;
   value->effect_instance_generation = 0;
   value->checked_out_value = nullptr;
   value->owner_plugin_id = 0;
+  value->identity = {};
+  value->value_identity = {};
+  value->handle = nullptr;
   ++g_aegp_stream_disposes;
   return 0;
 }
 int32_t __cdecl aegp_set_dynamic_stream_flag_v2(
     void* stream, uint32_t one_flag, uint8_t undoable, uint8_t set) {
+  aexcompat::scene_transaction::MutationLock mutation_lock;
   auto* value = legacy_effect_stream(stream);
   constexpr uint32_t kHidden = 1u << 1;
   if (!value || !legacy_effect_stream_parent_live(*value) ||
       one_flag != kHidden || undoable > 1 || set > 1) return 4;
-  value->hidden = set != 0;
-  return 0;
+  const bool hidden = set != 0;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      scene_registry(), value->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation,
+      std::move(mutation_lock));
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        value->hidden = hidden;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
 int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
     int32_t plugin_id, void* effect, int32_t index, int32_t* type, void* param_union) {

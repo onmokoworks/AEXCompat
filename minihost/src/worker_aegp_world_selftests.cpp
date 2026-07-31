@@ -1,5 +1,6 @@
 #include "worker_aegp_world_selftests.hpp"
 
+#include "worker_render_receipts.hpp"
 #include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
 
@@ -165,6 +166,8 @@ bool verify_world_suite3(const Hooks& h) {
       aegp_world_new_platform(1, 1, kSyntheticCompWidth, kSyntheticCompHeight, &platform) != 0 ||
       aegp_world_reference_platform(1, platform, &reference) != 0 ||
       aegp_world_get_base_addr8(reference, &pixels) != 0 || !pixels) return reject(h, "cache-setup");
+  uint32_t cached_generation = 0;
+  std::memcpy(&cached_generation, timestamp.data(), sizeof(cached_generation));
   const std::array<uint8_t, 4> external_sentinel{{231, 17, 91, 203}};
   std::memcpy(pixels, external_sentinel.data(), external_sentinel.size());
   if (h.checkin_rendered(options, timestamp.data(), 1, platform) != 0 ||
@@ -172,12 +175,23 @@ bool verify_world_suite3(const Hooks& h) {
   uint8_t worthwhile = 1;
   if (h.worthwhile(options, timestamp.data(), &worthwhile) != 0 || worthwhile != 0) return reject(h, "cache-worthwhile");
   void* cached_receipt = nullptr; void** cached_world = nullptr; void* cached_pixels = nullptr;
+  render_receipts::ReceiptSnapshot cached_snapshot{};
   if (h.checkout_frame(options, &cached_receipt) != 0 || !cached_receipt ||
       h.get_receipt_world(cached_receipt, &cached_world) != 0 ||
       aegp_world_get_base_addr8(cached_world, &cached_pixels) != 0 || !cached_pixels ||
       std::memcmp(cached_pixels, external_sentinel.data(), external_sentinel.size()) != 0 ||
-      h.checkin_frame(cached_receipt) != 0 || aegp_world_dispose(reference) != 0) return reject(h, "cache-checkout");
+      !render_receipts::snapshot(cached_receipt, cached_snapshot) ||
+      !cached_snapshot.scene_bound ||
+      cached_snapshot.project_generation != cached_generation ||
+      aegp_world_dispose(reference) != 0) return reject(h, "cache-checkout");
   h.bump_project_timestamp();
+  render_receipts::ReceiptSnapshot stale_cached_snapshot{};
+  void** stale_cached_world =
+      reinterpret_cast<void**>(static_cast<uintptr_t>(1));
+  if (render_receipts::snapshot(cached_receipt, stale_cached_snapshot) ||
+      h.get_receipt_world(cached_receipt, &stale_cached_world) == 0 ||
+      stale_cached_world != nullptr)
+    return reject(h, "cache-generation-binding");
   if (aegp_world_new_platform(1, 1, 1, 1, &platform) != 0 ||
       h.checkin_rendered(options, timestamp.data(), 1, platform) == 0 ||
       aegp_world_dispose_platform(platform) != 0 || h.dispose_item_options(options) != 0) return reject(h, "cache-stale");

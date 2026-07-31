@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Update="..\ResizerPiPL.r">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </CustomBuild>
+    <ResourceCompile Remove="ResizerPiPL.rc" />
+    <ResourceCompile Include="$(AEXCompatIssue26PiPLRc)" />
+  </ItemGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <DisableSpecificWarnings>4103;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>

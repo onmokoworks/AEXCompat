@@ -847,6 +847,18 @@ int main() {
       missing_report.find("\"missing_suites_truncated\":true") !=
           std::string::npos;
 
+  {
+    const auto baseline = registry.snapshot();
+    suite = nullptr;
+    passed = passed &&
+        registry.acquire("Known Suite", 1, &suite, &resolve_known,
+                         nullptr, nullptr) == 0 &&
+        registry.acquire("Known Suite", 1, &suite, &resolve_known,
+                         nullptr, nullptr) == 0 &&
+        registry.release_since(baseline, nullptr) == 2 &&
+        registry.balanced();
+  }
+
   for (int index = 0; index < 300; ++index) {
     suite = nullptr;
     passed = passed &&

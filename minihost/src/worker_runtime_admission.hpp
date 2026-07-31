@@ -24,6 +24,9 @@ struct RuntimeAdmissionRequest {
   std::filesystem::path plugin_argument;
   std::string expected_sha256;
   bool authorize_runtime_modules{};
+  // AEGP admission is opt-in and is set only by the worker's explicit AEGP
+  // invocation modes. PF routes retain the pre-execution AEGP rejection gate.
+  bool allow_aegp_plugin{};
   std::filesystem::path authorization_manifest;
 };
 

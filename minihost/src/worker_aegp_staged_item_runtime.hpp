@@ -1,6 +1,7 @@
 #pragma once
 
 #include "worker_aegp_render_options.hpp"
+#include "worker_aegp_scene_model.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -49,6 +50,19 @@ struct Diagnostics {
   uint64_t last_stage_identity_hash{};
   uint32_t last_resolved_stages{};
   uint32_t max_resolved_depth{};
+  uint32_t typed_registrations{};
+  uint32_t identity_mismatch_rejections{};
+  uint32_t duplicate_identity_rejections{};
+  uint32_t cross_project_rejections{};
+  uint32_t registration_cycle_rejections{};
+  uint32_t stale_stage_invalidations{};
+  uint32_t stale_receipt_invalidations{};
+  uint32_t invalid_handle_rejections{};
+};
+
+struct OrderedSceneEffect {
+  scene_model::Identity identity{};
+  uint32_t order{};
 };
 
 void configure(Hooks hooks) noexcept;
@@ -57,11 +71,24 @@ bool has_item_registration(void* item) noexcept;
 bool register_item(void* item, uint64_t stable_identity, SamplingPolicy policy,
                    void* const* dependencies, std::size_t dependency_count,
                    const uint64_t* effect_instances, std::size_t effect_count);
+bool register_scene_item(
+    scene_model::Registry& registry, scene_model::Identity item,
+    SamplingPolicy policy, const scene_model::Identity* dependencies,
+    std::size_t dependency_count, const OrderedSceneEffect* effects,
+    std::size_t effect_count);
 bool publish_stage_world(void* item, StageKind stage_kind, uint64_t effect_instance,
                          suite_abi::AegpTime time, suite_abi::AegpTime time_step,
                          int8_t quality, uint8_t guide_layers, int32_t pixel_format,
                          int32_t width, int32_t height, int32_t rowbytes,
                          const void* pixels, uint64_t* stage_identity_hash = nullptr);
+bool publish_scene_stage_world(
+    scene_model::Registry& registry, scene_model::Identity item,
+    StageKind stage_kind, scene_model::Identity effect,
+    suite_abi::AegpTime time, suite_abi::AegpTime time_step,
+    int8_t quality, uint8_t guide_layers, int32_t pixel_format,
+    int32_t width, int32_t height, int32_t rowbytes, const void* pixels,
+    uint64_t* stage_identity_hash = nullptr,
+    uint32_t expected_project_generation = 0);
 bool publish_world(void* item, suite_abi::AegpTime time, suite_abi::AegpTime time_step,
                    int8_t quality, uint8_t guide_layers, int32_t pixel_format,
                    int32_t width, int32_t height, int32_t rowbytes, const void* pixels);
@@ -70,6 +97,8 @@ int32_t publish_registered_receipt(const render_options::ItemValue& options,
 int32_t publish_receipt(void* options, void** receipt);
 bool verify_recursion_guard(void* item, suite_abi::AegpTime time,
                             void* options, Checkout checkout);
+void invalidate_scene_generation(uint64_t project_id,
+                                 uint32_t valid_generation) noexcept;
 Diagnostics diagnostics() noexcept;
 
 }  // namespace aexcompat::aegp_staged_item_runtime

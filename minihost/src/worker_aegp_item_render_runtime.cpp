@@ -129,7 +129,8 @@ int32_t publish_synthetic(int32_t pixel_format, void** output,
   receipt->world.extent_hint = {0, 0, width, height};
   receipt->world.pix_aspect_ratio = {1, 1};
   if (options) populate_synthetic_pixels(*receipt, type, width, height);
-  return render_receipts::register_receipt(std::move(receipt), output);
+  return render_receipts::register_unbound_receipt(
+      std::move(receipt), output);
 }
 
 int32_t publish_receipt(void* options, void** receipt) {

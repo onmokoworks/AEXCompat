@@ -446,6 +446,8 @@ CONTRACTS = {
     ),
     "worker_runtime_admission": (
         "minihost/src/l2_main.cpp",
+        "minihost/src/l2_main_support.inc",
+        "minihost/src/l2_main_entry.inc",
         "minihost/src/worker_entry_admission.cpp",
     ),
 }

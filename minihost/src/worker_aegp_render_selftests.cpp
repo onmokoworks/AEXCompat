@@ -1,4 +1,5 @@
 #include "worker_aegp_render_selftests.hpp"
+#include "worker_aegp_external_render_runtime.hpp"
 #include "worker_aegp_render_options.hpp"
 #include "worker_aegp_layer_render_runtime.hpp"
 #include "worker_aegp_scene.hpp"
@@ -15,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -59,6 +61,12 @@ int32_t __cdecl render_checkout_frame_reject(void*, AegpRenderCancelV1, void*, v
 void clear_staged_item_worlds_for_test();
 bool verify_item_render_cycle_contract(void*);
 bool prepare_scene_staged_item(void*);
+bool snapshot_layer_render_options(
+    void*, aexcompat::render_options::LayerValue&);
+bool publish_scene_scheduler_stage(
+    void*, aexcompat::aegp_staged_item_runtime::StageKind, uint64_t,
+    AegpTime, AegpTime, int8_t, uint8_t, int32_t, int32_t, int32_t,
+    int32_t, const void*, uint64_t*, uint32_t);
 
 void write_staged_test_channel(std::byte* pixel, int32_t pixel_bytes,
                                int channel, float value) {
@@ -281,6 +289,9 @@ bool verify_aegp_item_staged_worlds() {
   if (!render_options_lifetimes_balanced() || !async_receipt_lifetimes_balanced())
     return false;
   clear_staged_item_worlds_for_test();
+  struct StagedWorldCleanup final {
+    ~StagedWorldCleanup() { clear_staged_item_worlds_for_test(); }
+  } staged_world_cleanup;
   const AegpTime time{5, 24}, step{1, 24};
   constexpr int32_t width = 5, height = 4;
   auto fixture = [=](int32_t pixel_bytes) {
@@ -302,6 +313,17 @@ bool verify_aegp_item_staged_worlds() {
     return false;
   const uint64_t production_effect_identity =
       (static_cast<uint64_t>(g_aegp_effect_instances[0].generation) << 32) | 1;
+  const uint32_t active_project_generation =
+      aexcompat::aegp_external_render_runtime::project_generation();
+  const auto stale_generation_probe = fixture(4);
+  if (active_project_generation == (std::numeric_limits<uint32_t>::max)() ||
+      publish_scene_scheduler_stage(
+          aegp_comp_item_handle(),
+          aexcompat::aegp_staged_item_runtime::StageKind::final_item, 0,
+          time, step, 1, 0, formats[0], width, height, width * 4,
+          stale_generation_probe.data(), nullptr,
+          active_project_generation + 1))
+    return false;
   for (int32_t depth = 0; depth < 3; ++depth) {
     const int32_t pixel_bytes = 4 << depth;
     const auto pixels = fixture(pixel_bytes);
@@ -309,14 +331,20 @@ bool verify_aegp_item_staged_worlds() {
              aexcompat::aegp_staged_item_runtime::StageKind::upstream,
              aexcompat::aegp_staged_item_runtime::StageKind::all_effects,
              aexcompat::aegp_staged_item_runtime::StageKind::downstream}) {
-      if (!aexcompat::aegp_staged_item_runtime::publish_stage_world(
+      if (!publish_scene_scheduler_stage(
               aegp_comp_item_handle(), kind, production_effect_identity,
               time, step, 1, 0, formats[depth], width, height,
-              width * pixel_bytes, pixels.data()))
+              width * pixel_bytes, pixels.data(), nullptr,
+              aexcompat::aegp_external_render_runtime::project_generation()))
         return false;
     }
-    if (!aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(), time, step, 1, 0,
-            formats[depth], width, height, width * pixel_bytes, pixels.data())) return false;
+    if (!publish_scene_scheduler_stage(
+            aegp_comp_item_handle(),
+            aexcompat::aegp_staged_item_runtime::StageKind::final_item, 0,
+            time, step, 1, 0, formats[depth], width, height,
+            width * pixel_bytes, pixels.data(), nullptr,
+            aexcompat::aegp_external_render_runtime::project_generation()))
+      return false;
   }
   void* options = nullptr;
   if (render_options_new_from_item(1, aegp_comp_item_handle(), &options) != 0 ||
@@ -886,14 +914,9 @@ bool verify_aegp_item_staged_worlds() {
   clear_staged_item_worlds_for_test();
   void* const direct_item = reinterpret_cast<void*>(0xc100);
   std::array<void*, 1> direct_dependency{{direct_item}};
-  if (!aexcompat::aegp_staged_item_runtime::register_item(
+  if (aexcompat::aegp_staged_item_runtime::register_item(
           direct_item, 3001, SamplingPolicy::exact, direct_dependency.data(),
-          direct_dependency.size(), nullptr, 0) ||
-      !publish_scheduler_stage(direct_item, StageKind::final_item, 0, time, 61))
-    return false;
-  rejected = reinterpret_cast<void*>(1);
-  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
-          make_request(direct_item, time), &rejected) == 0 || rejected)
+          direct_dependency.size(), nullptr, 0))
     return false;
   clear_staged_item_worlds_for_test();
   void* const indirect_a = reinterpret_cast<void*>(0xc200);
@@ -903,15 +926,9 @@ bool verify_aegp_item_staged_worlds() {
   if (!aexcompat::aegp_staged_item_runtime::register_item(
           indirect_a, 3002, SamplingPolicy::exact, a_dependency.data(), 1,
           nullptr, 0) ||
-      !aexcompat::aegp_staged_item_runtime::register_item(
+      aexcompat::aegp_staged_item_runtime::register_item(
           indirect_b, 3003, SamplingPolicy::exact, b_dependency.data(), 1,
-          nullptr, 0) ||
-      !publish_scheduler_stage(indirect_b, StageKind::final_item, 0, time, 62) ||
-      !publish_scheduler_stage(indirect_a, StageKind::final_item, 0, time, 63))
-    return false;
-  rejected = reinterpret_cast<void*>(1);
-  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
-          make_request(indirect_a, time), &rejected) == 0 || rejected)
+          nullptr, 0))
     return false;
   clear_staged_item_worlds_for_test();
   std::array<void*, 9> deep_items{};
@@ -1014,6 +1031,8 @@ bool verify_aegp_layer_render_options_suite2() {
   g_aegp_effect_live = true;
   g_aegp_effect_instances[0] = {
       &g_aegp_layers[0], kAegpInstalledEffects[0].key, 0, 1, 1, true};
+  g_aegp_effect_instances[0].identity =
+      saved_effect_instances[0].identity;
   g_aegp_effect_instances[0].render_ref = scene_context()->pf_effect;
   for (std::size_t index = 1; index < g_aegp_effect_instances.size(); ++index)
     g_aegp_effect_instances[index] = {};
@@ -1055,6 +1074,8 @@ bool verify_aegp_layer_render_options_suite2() {
   context.all_effects_finalized = true;
   context.active_effect_instance = staged_effect_identity_for_render_ref(
       second_render_effect);
+  context.project_generation =
+      aexcompat::aegp_external_render_runtime::project_generation();
   aexcompat::aegp_layer_render_runtime::context() = context;
 
   const void* acquired = nullptr;
@@ -1138,6 +1159,21 @@ bool verify_aegp_layer_render_options_suite2() {
         static_cast<std::size_t>(async_width) * async_height * 8);
   ok = ok && async_hash == downstream_hash &&
       checkin_frame(async_result.receipt) == 0;
+  aexcompat::render_options::LayerValue stale_async_options{};
+  aexcompat::aegp_async_layer::SourceSnapshot stale_async_source{};
+  const bool stale_async_captured =
+      snapshot_layer_render_options(
+          downstream, stale_async_options) &&
+      aexcompat::aegp_layer_render_runtime::capture_async_source(
+          stale_async_options, stale_async_source);
+  aexcompat::aegp_external_render_runtime::bump_project_generation();
+  void* stale_async_receipt =
+      reinterpret_cast<void*>(static_cast<uintptr_t>(1));
+  ok = ok && stale_async_captured &&
+      aexcompat::aegp_layer_render_runtime::publish_async_source(
+          stale_async_source, stale_async_options,
+          &stale_async_receipt) != 0 &&
+      stale_async_receipt == nullptr;
   g_aegp_effect_live = false;
   rejected = reinterpret_cast<void*>(1);
   ok = ok && render_checkout_layer_v5(upstream, nullptr, nullptr, &rejected) != 0 &&
