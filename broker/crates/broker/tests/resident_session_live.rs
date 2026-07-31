@@ -80,6 +80,13 @@ mod windows_e2e {
             plugin_path: &aex,
             plugin_sha256: &sha,
             parameters: Some(&declared),
+            selection: aexcompat_broker::image_render::InteractiveSessionSelection::new(
+                aexcompat_broker::image_render::InteractiveRenderPath::Classic,
+                aexcompat_broker::image_render::InteractiveCapabilitySource::AdvertisedClassic,
+                1,
+                0,
+            )
+            .expect("valid classic selection"),
             dependencies: Vec::new(),
             width,
             height,
@@ -177,6 +184,13 @@ mod windows_e2e {
             plugin_path: &aex,
             plugin_sha256: &sha,
             parameters: Some(&declared),
+            selection: aexcompat_broker::image_render::InteractiveSessionSelection::new(
+                aexcompat_broker::image_render::InteractiveRenderPath::Classic,
+                aexcompat_broker::image_render::InteractiveCapabilitySource::AdvertisedClassic,
+                1,
+                0,
+            )
+            .expect("valid classic selection"),
             dependencies: Vec::new(),
             width,
             height,

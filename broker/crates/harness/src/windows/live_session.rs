@@ -2,6 +2,76 @@
 /// broker's interactive one-shot timeout.
 const LIVE_RENDER_FRAME_DEADLINE_MS: u64 = 30_000;
 
+const INTERACTIVE_CAPABILITY_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InspectedRenderCapability {
+    smart_render_advertised: bool,
+    out_flags2: u64,
+}
+
+fn inspected_render_capability(
+    report: &serde_json::Value,
+) -> Result<InspectedRenderCapability, String> {
+    let diagnostics = report
+        .get("worker_diagnostics")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("inspection has no worker diagnostics")?;
+    let out_flags2 = diagnostics
+        .get("advertised_out_flags2")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("inspection has no valid advertised_out_flags2")?;
+    let smart_render_advertised = diagnostics
+        .get("smart_render_advertised")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or("inspection has no valid smart_render_advertised")?;
+    let bit_advertised = out_flags2 & (1 << 10) != 0;
+    if smart_render_advertised != bit_advertised {
+        return Err("inspection SmartFX capability contradicts advertised_out_flags2".into());
+    }
+    Ok(InspectedRenderCapability {
+        smart_render_advertised,
+        out_flags2,
+    })
+}
+
+fn selected_interactive_session_selection(
+    capability: InspectedRenderCapability,
+    requested_smart: bool,
+    manual_override: bool,
+) -> Result<aexcompat_broker::image_render::InteractiveSessionSelection, String> {
+    use aexcompat_broker::image_render::{
+        InteractiveCapabilitySource, InteractiveRenderPath, InteractiveSessionSelection,
+    };
+    // A descriptor proves only its advertised path.  Keep the GUI override
+    // state for diagnostics, but reject a cross-path choice before either the
+    // resident or isolated one-shot transport can dispatch it.  A same-path
+    // explicit choice is still meaningful provenance in the receipt.
+    if requested_smart != capability.smart_render_advertised {
+        return Err(
+            "unsupported_override: requested path is not advertised by the inspected AEX".into(),
+        );
+    }
+    let path = if requested_smart {
+        InteractiveRenderPath::SmartFx
+    } else {
+        InteractiveRenderPath::Classic
+    };
+    let source = match (manual_override, requested_smart) {
+        (false, true) => InteractiveCapabilitySource::AdvertisedSmart,
+        (false, false) => InteractiveCapabilitySource::AdvertisedClassic,
+        (true, true) => InteractiveCapabilitySource::ManualSmart,
+        (true, false) => InteractiveCapabilitySource::ManualClassic,
+    };
+    InteractiveSessionSelection::new(
+        path,
+        source,
+        INTERACTIVE_CAPABILITY_VERSION,
+        capability.out_flags2,
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// Static configuration a resident render session was opened with (issue
 /// #107). A key change means the running worker cannot carry the next render:
 /// the session thread closes it and opens a fresh one (SEQUENCE_SETUP runs
@@ -17,6 +87,9 @@ struct LiveSessionKey {
     /// Parameter structure only (slots, kinds, ranges, choices); values ride
     /// each frame's v:2 message and must not force a reopen.
     parameter_signature: String,
+    /// The inspection snapshot includes path, provenance, schema version, and
+    /// capability identity, so each of those changes forces a clean reopen.
+    selection: aexcompat_broker::image_render::InteractiveSessionSelection,
     width: u32,
     height: u32,
     pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
@@ -57,6 +130,7 @@ struct LiveRenderRequest {
     plugin_sha256: String,
     dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
     parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+    selection: aexcompat_broker::image_render::InteractiveSessionSelection,
     input_path: PathBuf,
     timing: aexcompat_broker::image_render::RenderTiming,
     pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
@@ -194,6 +268,7 @@ fn live_render(
             })
             .collect(),
         parameter_signature: parameter_structure_signature(&request.parameters),
+        selection: request.selection,
         width,
         height,
         pixel_format: request.pixel_format,
@@ -218,14 +293,23 @@ fn live_render(
                 &request.output,
                 &request.parameters,
                 request.timing,
-                false,
+                request.selection.path.is_smart(),
                 request.pixel_format,
                 None,
                 None,
                 aexcompat_broker::image_render::RenderGpuBackend::Auto,
                 request.dependencies.clone(),
             )
-            .map_err(|error| format!("{error} (after resident session fallback: {reason})"))?;
+            .map_err(|error| {
+                interactive_selection_failure(
+                    request.selection,
+                    format!("{error} (after resident session fallback: {reason})"),
+                )
+            })?;
+        aexcompat_broker::image_render::annotate_interactive_selection(
+            &mut report,
+            request.selection,
+        );
         report["resident_session_fallback"] = serde_json::json!(reason);
         let body = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
         Ok((body, Some(request.output.clone())))
@@ -237,6 +321,7 @@ fn live_render(
             plugin_path: &request.plugin_path,
             plugin_sha256: &request.plugin_sha256,
             parameters: (!request.parameters.is_empty()).then_some(request.parameters.as_slice()),
+            selection: request.selection,
             dependencies: request.dependencies.clone(),
             width,
             height,
@@ -275,7 +360,7 @@ fn live_render(
             } else {
                 // Frame-local compatibility error: the session stays open and
                 // the failure reports like a one-shot render failure.
-                Err(body)
+                Err(interactive_selection_failure(request.selection, body))
             }
         }
         Err(error) => {
@@ -289,10 +374,30 @@ fn live_render(
             } else {
                 // Rejected request (bad timing or parameter set); the session
                 // itself is still usable for the next render.
-                Err(format!("resident session rejected the render: {error}"))
+                Err(interactive_selection_failure(
+                    request.selection,
+                    format!("resident session rejected the render: {error}"),
+                ))
             }
         }
     }
+}
+
+fn interactive_selection_failure(
+    selection: aexcompat_broker::image_render::InteractiveSessionSelection,
+    error: String,
+) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "stage": "interactive_image_render",
+        "passed": false,
+        "error": error,
+        "render_path": selection.path.report_name(),
+        "smart_capability_source": selection.source.report_name(),
+        "smart_capability_identity": selection.capability_identity,
+        "smart_capability_version": selection.capability_version,
+    }))
+    .unwrap_or_else(|error| format!("interactive render failed: {error}"))
 }
 
 #[cfg(windows)]

@@ -34,20 +34,89 @@ mod tests {
     }
 
     #[test]
-    fn advertised_smart_render_reads_inspection_diagnostics_only() {
-        let smart = serde_json::json!({
-            "worker_diagnostics": { "smart_render_advertised": true }
-        });
-        assert_eq!(advertised_smart_render(&smart), Some(true));
-        let classic = serde_json::json!({
-            "worker_diagnostics": { "smart_render_advertised": false }
-        });
-        assert_eq!(advertised_smart_render(&classic), Some(false));
-        // Reports from older workers without the field must not force a
-        // default-path change.
-        let missing = serde_json::json!({ "worker_diagnostics": {} });
-        assert_eq!(advertised_smart_render(&missing), None);
-        assert_eq!(advertised_smart_render(&serde_json::json!({})), None);
+    fn resident_session_selection_rejects_unknown_or_unsupported_capabilities() {
+        let smart = InspectedRenderCapability {
+            smart_render_advertised: true,
+            out_flags2: 1 << 10,
+        };
+        let auto = selected_interactive_session_selection(smart, true, false)
+            .expect("advertised SmartFX selects SmartFX");
+        assert_eq!(auto.path.report_name(), "smartfx");
+        assert_eq!(auto.source.report_name(), "advertised_smart");
+        let manual = selected_interactive_session_selection(smart, true, true)
+            .expect("a valid manual SmartFX choice is retained as manual");
+        assert_eq!(manual.source.report_name(), "manual_smart");
+        let key = |selection| LiveSessionKey {
+            plugin_sha256: "a".repeat(64),
+            dependency_identities: vec![],
+            parameter_signature: "[]".into(),
+            selection,
+            width: 16,
+            height: 16,
+            pixel_format: aexcompat_broker::image_render::RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 1,
+            time_scale: 1,
+        };
+        // The only difference is the typed provenance. This must change the
+        // resident key so `render_live_request` closes and reopens instead of
+        // reporting a new source from a stale session.
+        assert!(key(auto) != key(manual));
+        assert!(selected_interactive_session_selection(smart, false, true).is_err());
+
+        let classic = InspectedRenderCapability {
+            smart_render_advertised: false,
+            out_flags2: 0,
+        };
+        assert_eq!(
+            selected_interactive_session_selection(classic, false, false)
+                .expect("advertised classic selects classic")
+                .source
+                .report_name(),
+            "advertised_classic"
+        );
+        assert_eq!(
+            selected_interactive_session_selection(classic, false, true)
+                .expect("an explicit same-path Classic selection is retained")
+                .source
+                .report_name(),
+            "manual_classic"
+        );
+        assert!(selected_interactive_session_selection(classic, true, true).is_err());
+    }
+
+    #[test]
+    fn inspection_capability_rejects_missing_malformed_and_contradictory_facts() {
+        for report in [
+            serde_json::json!({}),
+            serde_json::json!({"worker_diagnostics":{"advertised_out_flags2":"1024","smart_render_advertised":true}}),
+            serde_json::json!({"worker_diagnostics":{"advertised_out_flags2":0,"smart_render_advertised":true}}),
+        ] {
+            assert!(inspected_render_capability(&report).is_err(), "{report}");
+        }
+    }
+
+    #[test]
+    fn selection_failure_keeps_the_open_time_snapshot() {
+        let selection = selected_interactive_session_selection(
+            InspectedRenderCapability {
+                smart_render_advertised: true,
+                out_flags2: 1 << 10,
+            },
+            true,
+            true,
+        )
+        .expect("same-path manual SmartFX selection");
+        let report: serde_json::Value = serde_json::from_str(&interactive_selection_failure(
+            selection,
+            "session invalidated; fallback failed".into(),
+        ))
+        .expect("structured failure report");
+        assert_eq!(report["passed"], false);
+        assert_eq!(report["render_path"], "smartfx");
+        assert_eq!(report["smart_capability_source"], "manual_smart");
+        assert_eq!(report["smart_capability_identity"], 1 << 10);
+        assert_eq!(report["smart_capability_version"], 1);
     }
 
     fn temporary_directory(name: &str) -> PathBuf {

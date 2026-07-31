@@ -26,6 +26,8 @@ struct HarnessApp {
     host_context: Option<aexcompat_broker::render_request::HostContext>,
     smart_render: bool,
     smart_render_advertised: Option<bool>,
+    smart_render_capability: Option<InspectedRenderCapability>,
+    smart_render_manual_override: bool,
     pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
     gpu_backend: aexcompat_broker::image_render::RenderGpuBackend,
     frame: i32,
@@ -98,6 +100,8 @@ impl HarnessApp {
             host_context: None,
             smart_render: false,
             smart_render_advertised: None,
+            smart_render_capability: None,
+            smart_render_manual_override: false,
             pixel_format: aexcompat_broker::image_render::RenderPixelFormat::Argb8,
             gpu_backend: aexcompat_broker::image_render::RenderGpuBackend::Auto,
             frame: 0,
@@ -248,6 +252,8 @@ impl HarnessApp {
         self.audio_effect_only = false;
         self.smart_render = false;
         self.smart_render_advertised = None;
+        self.smart_render_capability = None;
+        self.smart_render_manual_override = false;
         self.host_context = None;
         self.choose_aex();
     }
@@ -682,7 +688,10 @@ impl HarnessApp {
                 self.parameters.clear();
                 self.audio_input = None;
                 self.audio_effect_only = false;
+                self.smart_render = false;
                 self.smart_render_advertised = None;
+                self.smart_render_capability = None;
+                self.smart_render_manual_override = false;
                 self.host_context = None;
                 self.output_image = None;
                 self.preview = None;
@@ -1268,13 +1277,33 @@ impl HarnessApp {
         let Some(input) = self.input_image.clone() else {
             return;
         };
+        let Some(capability) = self.smart_render_capability else {
+            self.status =
+                "Render blocked: no valid SmartFX/classic capability inspection is available."
+                    .into();
+            self.report = "render capability is missing, malformed, or stale; reload Effect Controls before rendering".into();
+            return;
+        };
+        let interactive_selection = match selected_interactive_session_selection(
+            capability,
+            self.smart_render,
+            self.smart_render_manual_override,
+        ) {
+            Ok(selection) => selection,
+            Err(error) => {
+                self.status =
+                    "Render blocked: selected path is unsupported by the inspected AEX.".into();
+                self.report = error;
+                return;
+            }
+        };
         let repository = self.repository.clone();
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         let registered = selection.profile == Some("scattermap");
         let parameters = self.parameters.clone();
         let host_context = self.host_context.clone();
-        let smart = self.smart_render;
+        let smart = interactive_selection.path.is_smart();
         let pixel_format = self.pixel_format;
         let gpu_backend = self.gpu_backend;
         let audio_sidecar = self.audio_input.clone();
@@ -1325,14 +1354,14 @@ impl HarnessApp {
             && custom_ui_action.is_none()
             && pixel_format == aexcompat_broker::image_render::RenderPixelFormat::Argb8
             && audio_sidecar.is_none();
-        // Resident-session eligibility mirrors the broker's length-1 wrapper:
-        // plain classic CPU renders only. Anything else keeps the one-shot
-        // transport below (issue #107). The session transport is
+        // The resident-session selector path follows the existing inspection
+        // result and explicit GUI override.  SmartFX-capable AEXes must open a
+        // Smart session: routing them through Classic RENDER can yield a
+        // no-op frame that looks successful (#606). The session transport is
         // Windows-only; other targets always render one-shot.
         #[cfg(windows)]
         {
-            let live_eligible = !smart
-                && host_context.is_none()
+            let live_eligible = host_context.is_none()
                 && custom_ui_action.is_none()
                 && audio_sidecar.is_none()
                 && gpu_backend == aexcompat_broker::image_render::RenderGpuBackend::Auto
@@ -1358,6 +1387,7 @@ impl HarnessApp {
                     plugin_sha256: hash,
                     dependencies,
                     parameters,
+                    selection: interactive_selection,
                     input_path: input,
                     timing,
                     pixel_format,
@@ -1430,7 +1460,12 @@ impl HarnessApp {
                     dependencies,
                 )
             }
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| interactive_selection_failure(interactive_selection, error.to_string()))?;
+            let mut report = report;
+            aexcompat_broker::image_render::annotate_interactive_selection(
+                &mut report,
+                interactive_selection,
+            );
             let body = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
             Ok((body, Some(output)))
         });
@@ -2056,28 +2091,56 @@ impl HarnessApp {
                 }
             }
         }
-        let effect_controls_ready = task_kind == TaskKind::InspectParameters && result.success;
-        if effect_controls_ready {
-            if let Ok(report) = serde_json::from_str::<serde_json::Value>(&result.body) {
-                if let Ok(parameters) = serde_json::from_value(report["parameters"].clone()) {
-                    self.parameters = parameters;
-                    self.parameter_defaults = self.parameters.clone();
-                    self.audio_effect_only = report["worker_diagnostics"]["audio_effect_only"]
+        let mut effect_controls_ready = false;
+        let mut inspection_blocker = None;
+        if task_kind == TaskKind::InspectParameters {
+            // Inspection is the sole capability authority.  Clear every
+            // path/source/override before accepting new facts so a failed,
+            // missing, malformed, or contradictory result cannot inherit the
+            // previously selected plug-in's route.
+            self.close_live_session();
+            self.smart_render = false;
+            self.smart_render_advertised = None;
+            self.smart_render_capability = None;
+            self.smart_render_manual_override = false;
+            if result.success {
+                let accepted = (|| -> Result<_, String> {
+                    let report = serde_json::from_str::<serde_json::Value>(&result.body)
+                        .map_err(|error| format!("inspection report is invalid JSON: {error}"))?;
+                    let capability = inspected_render_capability(&report)?;
+                    let parameters = serde_json::from_value(report["parameters"].clone())
+                        .map_err(|error| format!("inspection parameters are invalid: {error}"))?;
+                    let audio_effect_only = report["worker_diagnostics"]["audio_effect_only"]
                         .as_bool()
                         .unwrap_or(false);
-                    self.smart_render_advertised = advertised_smart_render(&report);
-                    if let Some(advertised) = self.smart_render_advertised {
-                        self.smart_render = advertised;
+                    Ok((capability, parameters, audio_effect_only))
+                })();
+                match accepted {
+                    Ok((capability, parameters, audio_effect_only)) => {
+                        self.parameters = parameters;
+                        self.parameter_defaults = self.parameters.clone();
+                        self.audio_effect_only = audio_effect_only;
+                        self.smart_render = capability.smart_render_advertised;
+                        self.smart_render_advertised = Some(capability.smart_render_advertised);
+                        self.smart_render_capability = Some(capability);
+                        effect_controls_ready = true;
+                        self.status = format!(
+                            "Effect Controls ready: {} editable parameter(s). Render path: {}.",
+                            self.parameters.len(),
+                            if self.smart_render {
+                                "SmartFX"
+                            } else {
+                                "Classic"
+                            }
+                        );
                     }
-                    self.status = format!(
-                        "Effect Controls ready: {} editable parameter(s). Render path: {}.",
-                        self.parameters.len(),
-                        if self.smart_render {
-                            "SmartFX"
-                        } else {
-                            "Classic"
-                        }
-                    );
+                    Err(error) => {
+                        self.parameters.clear();
+                        self.parameter_defaults.clear();
+                        self.audio_effect_only = false;
+                        self.status = "Effect Controls capability inspection failed safely; rendering is blocked.".into();
+                        inspection_blocker = Some(error);
+                    }
                 }
             }
         }
@@ -2096,7 +2159,7 @@ impl HarnessApp {
         if let Ok(report) = serde_json::from_str(&result.body) {
             apply_dynamic_ui_report(&mut self.parameters, &report);
         }
-        self.report = result.body;
+        self.report = inspection_blocker.unwrap_or(result.body);
         self.receiver = None;
         self.task_kind = TaskKind::Generic;
         if inspect_selected_aex {
@@ -2533,12 +2596,25 @@ impl eframe::App for HarnessApp {
                     }
                     ui.horizontal(|ui| {
                         ui.label("Render path:");
-                        ui.selectable_value(&mut self.smart_render, false, "Classic");
-                        ui.selectable_value(&mut self.smart_render, true, "SmartFX");
+                        let classic_changed = ui
+                            .selectable_value(&mut self.smart_render, false, "Classic")
+                            .changed();
+                        let smart_changed = ui
+                            .selectable_value(&mut self.smart_render, true, "SmartFX")
+                            .changed();
+                        if classic_changed || smart_changed {
+                            // Preserve the pre-resident GUI policy: choosing a
+                            // different path is an explicit override, and
+                            // changing it always tears down the old worker.
+                            self.smart_render_manual_override = self
+                                .smart_render_advertised
+                                .is_some_and(|advertised| self.smart_render != advertised);
+                            self.close_live_session();
+                        }
                         if let Some(advertised) = self.smart_render_advertised {
                             ui.weak(if advertised { "advertised: SmartFX" } else { "advertised: Classic" });
                             if self.smart_render != advertised {
-                                ui.colored_label(egui::Color32::from_rgb(230, 180, 60), "manual override");
+                                ui.colored_label(egui::Color32::from_rgb(230, 180, 60), "unsupported override: render blocked");
                             }
                         }
                     });

@@ -417,6 +417,15 @@ mod worker {
             "handle_lifetimes_balanced": true,
             "world_lifetimes_balanced": true,
             "param_checkouts_balanced": true,
+            // The fixture has no AEX entry point, but it does receive the
+            // exact classic or SmartFX session command the broker selected.
+            // Publish bounded path counters so the integration test can prove
+            // that route instead of inferring it from a success status.
+            "selector_counters": {
+                "classic_render": if smart { 0 } else { frames },
+                "smart_pre_render": if smart { frames } else { 0 },
+                "smart_render": if smart { frames } else { 0 }
+            },
             "module_audit": module_audit
         });
         report

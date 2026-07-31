@@ -1721,44 +1721,90 @@ mod windows_e2e {
         let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let parameters = [float_parameter(1)];
-        let mut session = InteractiveRenderSession::open(InteractiveSessionOpen {
-            repository: &repository.0,
-            plugin_id: "experimental",
-            plugin_path: &plugin,
-            plugin_sha256: &sha,
-            parameters: Some(&parameters),
-            dependencies: Vec::new(),
-            width: WIDTH,
-            height: HEIGHT,
-            pixel_format: RenderPixelFormat::Argb8,
-            time_step: 1,
-            total_time: 300,
-            time_scale: 30,
-            timeout_ms: 30_000,
-        })
-        .expect("open interactive session");
-        assert!(!session.invalidated());
-
         let input = input_pattern(53);
         let mut updated = float_parameter(1);
         updated.value = 7.5;
-        for (frame, time) in [(0u32, 0i32), (1, 1)] {
-            let output = repository.0.join(format!("live-{frame}.png"));
-            let report = session
-                .render(&input, time, Some(std::slice::from_ref(&updated)), &output)
-                .expect("interactive frame renders");
-            assert_eq!(report["stage"], "interactive_image_render");
-            assert_eq!(report["render_path"], "classic");
-            assert_eq!(report["worker_classification"], "resident_session");
-            assert_eq!(report["passed"], true);
-            assert_eq!(report["resident_session"]["frame_index"], frame);
-            assert_eq!(report["resident_session"]["parameter_update"], true);
-            assert!(output.is_file(), "preview PNG is written per frame");
+        for (smart, capability_source, render_path, capability_identity) in [
+            (false, "advertised_classic", "classic", 0),
+            // This fixture supports the SmartFX session protocol.  The
+            // assertion proves InteractiveRenderSession does not silently
+            // send an advertised SmartFX selection to Classic RENDER (#606).
+            (true, "advertised_smart", "smartfx", 1 << 10),
+        ] {
+            let mut session = InteractiveRenderSession::open(InteractiveSessionOpen {
+                repository: &repository.0,
+                plugin_id: "experimental",
+                plugin_path: &plugin,
+                plugin_sha256: &sha,
+                parameters: Some(&parameters),
+                selection: aexcompat_broker::image_render::InteractiveSessionSelection::new(
+                    if smart {
+                        aexcompat_broker::image_render::InteractiveRenderPath::SmartFx
+                    } else {
+                        aexcompat_broker::image_render::InteractiveRenderPath::Classic
+                    },
+                    if smart {
+                        aexcompat_broker::image_render::InteractiveCapabilitySource::AdvertisedSmart
+                    } else {
+                        aexcompat_broker::image_render::InteractiveCapabilitySource::AdvertisedClassic
+                    },
+                    1,
+                    capability_identity,
+                )
+                .expect("valid inspection-bound selection"),
+                dependencies: Vec::new(),
+                width: WIDTH,
+                height: HEIGHT,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                timeout_ms: 30_000,
+            })
+            .expect("open interactive session");
+            assert!(!session.invalidated());
+
+            for (frame, time) in [(0u32, 0i32), (1, 1)] {
+                let output = repository.0.join(format!("live-{render_path}-{frame}.png"));
+                let report = session
+                    .render(&input, time, Some(std::slice::from_ref(&updated)), &output)
+                    .expect("interactive frame renders");
+                assert_eq!(report["stage"], "interactive_image_render");
+                assert_eq!(report["render_path"], render_path);
+                assert_eq!(report["smart_capability_source"], capability_source);
+                assert_eq!(report["smart_capability_identity"], capability_identity);
+                assert_eq!(report["smart_capability_version"], 1);
+                assert_eq!(report["worker_classification"], "resident_session");
+                assert_eq!(report["passed"], true);
+                assert_eq!(report["resident_session"]["frame_index"], frame);
+                assert_eq!(report["resident_session"]["parameter_update"], true);
+                assert!(output.is_file(), "preview PNG is written per frame");
+            }
+            let close = session.close();
+            assert_eq!(close["frames_ok"], 2);
+            assert_eq!(close["parameter_update_frames"], 2);
+            assert_eq!(close["render_path"], render_path);
+            assert_eq!(close["smart_capability_source"], capability_source);
+            assert_eq!(close["smart_capability_identity"], capability_identity);
+            assert_eq!(close["smart_capability_version"], 1);
+            let selector_count = |selector: &str| {
+                close["final_report"]["selector_counters"][selector]
+                    .as_u64()
+                    .expect("worker must return bounded selector counter evidence")
+            };
+            if smart {
+                assert_eq!(close["final_report"]["session_mode"], true);
+                assert_eq!(selector_count("classic_render"), 0);
+                assert!(selector_count("smart_pre_render") >= 2);
+                assert!(selector_count("smart_render") >= 2);
+            } else {
+                assert!(close["final_report"]["session_mode"].is_null());
+                assert_eq!(selector_count("smart_pre_render"), 0);
+                assert_eq!(selector_count("smart_render"), 0);
+                assert!(selector_count("classic_render") >= 2);
+            }
+            assert_eq!(close["session_clean"], true, "close: {close}");
         }
-        let close = session.close();
-        assert_eq!(close["frames_ok"], 2);
-        assert_eq!(close["parameter_update_frames"], 2);
-        assert_eq!(close["session_clean"], true, "close: {close}");
     }
 
     #[test]
