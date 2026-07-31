@@ -8,6 +8,7 @@ namespace {
 
 using aexcompat::host_core::AdapterLoadStatus;
 using aexcompat::host_core::AdapterV1;
+using aexcompat::host_core::ApiV1;
 using aexcompat::host_core::Invocation;
 using aexcompat::host_core::SehCallResult;
 
@@ -286,6 +287,82 @@ int wmain(int argc, wchar_t **argv) {
     return 2;
   }
   verifier.Require("adapter must own a complete API", adapter.loaded());
+  const AexHostCoreAbiDescriptorV1 descriptor = adapter.descriptor();
+  verifier.Require(
+      "adapter must copy the exact compatible ABI descriptor",
+      AdapterV1::IsCompatibleDescriptor(descriptor) &&
+          descriptor.magic == AEXCOMPAT_HOST_CORE_ABI_DESCRIPTOR_MAGIC &&
+          descriptor.abi_version == AEXCOMPAT_HOST_CORE_ABI_VERSION &&
+          descriptor.struct_size == sizeof(AexHostCoreAbiDescriptorV1) &&
+          descriptor.call_context_size == sizeof(AexHostCallContext) &&
+          descriptor.call_context_alignment == alignof(AexHostCallContext) &&
+          descriptor.call_status_size == sizeof(AexHostCallStatus) &&
+          descriptor.call_status_alignment == alignof(AexHostCallStatus) &&
+          descriptor.opaque_handle_size == sizeof(AexHostOpaqueHandle) &&
+          descriptor.opaque_handle_alignment == alignof(AexHostOpaqueHandle) &&
+          descriptor.report_snapshot_size == sizeof(AexHostReportSnapshot) &&
+          descriptor.report_snapshot_alignment ==
+              alignof(AexHostReportSnapshot) &&
+          descriptor.capabilities ==
+              AEXCOMPAT_HOST_CORE_CAPABILITY_SESSION_LIFECYCLE_V1);
+  const auto require_descriptor_rejection =
+      [&verifier](const char *label,
+                  AexHostCoreAbiDescriptorV1 candidate) {
+        verifier.Require(label,
+                         !AdapterV1::IsCompatibleDescriptor(candidate));
+      };
+  AexHostCoreAbiDescriptorV1 incompatible = descriptor;
+  ++incompatible.magic;
+  require_descriptor_rejection("wrong descriptor magic must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  ++incompatible.abi_version;
+  require_descriptor_rejection("wrong descriptor ABI version must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  ++incompatible.struct_size;
+  require_descriptor_rejection("wrong descriptor size must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  ++incompatible.call_context_size;
+  require_descriptor_rejection("wrong context size must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  ++incompatible.call_context_alignment;
+  require_descriptor_rejection("wrong context alignment must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  ++incompatible.call_status_size;
+  require_descriptor_rejection("wrong status size must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  ++incompatible.call_status_alignment;
+  require_descriptor_rejection("wrong status alignment must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  ++incompatible.opaque_handle_size;
+  require_descriptor_rejection("wrong handle size must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  ++incompatible.opaque_handle_alignment;
+  require_descriptor_rejection("wrong handle alignment must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  ++incompatible.report_snapshot_size;
+  require_descriptor_rejection("wrong report size must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  ++incompatible.report_snapshot_alignment;
+  require_descriptor_rejection("wrong report alignment must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  incompatible.capabilities = 0;
+  require_descriptor_rejection("missing capability must fail closed",
+                               incompatible);
+  incompatible = descriptor;
+  incompatible.capabilities |= UINT64_C(2);
+  require_descriptor_rejection("unknown capability must fail closed",
+                               incompatible);
   const wchar_t *loaded_path = adapter.absolute_path();
   verifier.Require("adapter must retain an absolute DLL path",
                    loaded_path[0] != L'\0' &&
@@ -310,13 +387,19 @@ int wmain(int argc, wchar_t **argv) {
         swprintf_s(kernel32_path, L"%ls\\kernel32.dll", system_directory);
     AdapterV1 incomplete_adapter;
     verifier.Require(
-        "DLL without the six host-core exports must fail closed",
+        "DLL without the host-core ABI descriptor must fail closed",
         written > 0 &&
             AdapterV1::Load(kernel32_path, &incomplete_adapter) ==
-                AdapterLoadStatus::kMissingExport &&
+                AdapterLoadStatus::kMissingAbiDescriptor &&
             incomplete_adapter.native_error() == ERROR_PROC_NOT_FOUND &&
             !incomplete_adapter.loaded());
   }
+  ApiV1 incomplete_api = adapter.api();
+  incomplete_api.session_dispose = nullptr;
+  verifier.Require(
+      "descriptor-compatible API missing one function must fail closed",
+      AdapterV1::ValidateApi(incomplete_api) ==
+          AdapterLoadStatus::kMissingExport);
 
   NativeSessionOracle oracle;
   const AexHostCallContext context{
