@@ -11,7 +11,10 @@ use aexcompat_host_core::boundary::{
 use aexcompat_host_core::error::{HostError, HostErrorCode};
 use aexcompat_host_core::handle::{HandleKind, HandleRegistry, OwnerId};
 use aexcompat_host_core::report::{HostReport, HostReportSnapshot, ReportCounters, ReportPhase};
-use aexcompat_host_core::scene::{HostSceneIdentity, HostSceneIdentityAbiDescriptorV1};
+use aexcompat_host_core::scene::{
+    HostSceneIdentity, HostSceneIdentityAbiDescriptorV1, HostSceneOwnerRelation,
+    HostSceneOwnerRelationAbiDescriptorV1,
+};
 use aexcompat_host_core::session::{HostSession, SessionState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -23,6 +26,10 @@ pub static AEX_HOST_CORE_ABI_DESCRIPTOR_V1: HostCoreAbiDescriptorV1 =
 #[unsafe(export_name = "aex_host_core_scene_identity_abi_descriptor_v1")]
 pub static AEX_HOST_CORE_SCENE_IDENTITY_ABI_DESCRIPTOR_V1: HostSceneIdentityAbiDescriptorV1 =
     HostSceneIdentityAbiDescriptorV1::current();
+
+#[unsafe(export_name = "aex_host_core_scene_owner_relation_abi_descriptor_v1")]
+pub static AEX_HOST_CORE_SCENE_OWNER_RELATION_ABI_DESCRIPTOR_V1:
+    HostSceneOwnerRelationAbiDescriptorV1 = HostSceneOwnerRelationAbiDescriptorV1::current();
 
 struct SessionRecord {
     session: HostSession,
@@ -137,6 +144,20 @@ unsafe fn read_scene_identity(
     let identity = unsafe { identity.read() };
     identity.validate()?;
     Ok(identity)
+}
+
+unsafe fn read_scene_owner_relation(
+    relation: *const HostSceneOwnerRelation,
+    operation: &'static str,
+) -> Result<HostSceneOwnerRelation, HostError> {
+    if relation.is_null() {
+        return Err(HostError::new(HostErrorCode::InvalidArgument, operation));
+    }
+    // SAFETY: The thin C++ adapter owns pointer validity and places this read
+    // inside its SEH frame. Rust validates the copied pointer-free relation.
+    let relation = unsafe { relation.read() };
+    relation.validate()?;
+    Ok(relation)
 }
 
 fn create_session(context: HostCallContext) -> CallOutcome {
@@ -559,6 +580,29 @@ pub unsafe extern "C" fn aex_host_core_scene_identity_match_v1(
     }
 }
 
+/// Matches a caller-held object-to-owner edge against the current C++ snapshot.
+///
+/// # Safety
+///
+/// Both pointers must be aligned and valid for one `HostSceneOwnerRelation`
+/// read. The native adapter must place the call inside its Windows SEH boundary.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aex_host_core_scene_owner_relation_match_v1(
+    current: *const HostSceneOwnerRelation,
+    candidate: *const HostSceneOwnerRelation,
+) -> i32 {
+    match contain_panic("ffi_scene_owner_relation_match", || {
+        let current =
+            unsafe { read_scene_owner_relation(current, "read_current_scene_owner_relation") }?;
+        let candidate =
+            unsafe { read_scene_owner_relation(candidate, "read_candidate_scene_owner_relation") }?;
+        current.match_candidate(&candidate)
+    }) {
+        Ok(()) => HostErrorCode::Ok as i32,
+        Err(error) => error.code() as i32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,6 +617,10 @@ mod tests {
         assert_eq!(
             AEX_HOST_CORE_SCENE_IDENTITY_ABI_DESCRIPTOR_V1,
             HostSceneIdentityAbiDescriptorV1::current()
+        );
+        assert_eq!(
+            AEX_HOST_CORE_SCENE_OWNER_RELATION_ABI_DESCRIPTOR_V1,
+            HostSceneOwnerRelationAbiDescriptorV1::current()
         );
     }
 
@@ -593,6 +641,35 @@ mod tests {
             );
             assert_eq!(
                 aex_host_core_scene_identity_match_v1(std::ptr::null(), &candidate),
+                HostErrorCode::InvalidArgument as i32
+            );
+        }
+    }
+
+    #[test]
+    fn exported_scene_owner_relation_matcher_is_value_only_and_fail_closed() {
+        let owner = HostSceneIdentity::new(
+            17,
+            101,
+            4,
+            aexcompat_host_core::scene::object_kind::COMPOSITION,
+        );
+        let object =
+            HostSceneIdentity::new(17, 103, 2, aexcompat_host_core::scene::object_kind::LAYER);
+        let current = HostSceneOwnerRelation::new(object, owner);
+        let mut candidate = current;
+        unsafe {
+            assert_eq!(
+                aex_host_core_scene_owner_relation_match_v1(&current, &candidate),
+                HostErrorCode::Ok as i32
+            );
+            candidate.owner.generation -= 1;
+            assert_eq!(
+                aex_host_core_scene_owner_relation_match_v1(&current, &candidate),
+                HostErrorCode::StaleHandle as i32
+            );
+            assert_eq!(
+                aex_host_core_scene_owner_relation_match_v1(std::ptr::null(), &candidate),
                 HostErrorCode::InvalidArgument as i32
             );
         }
