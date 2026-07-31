@@ -2,15 +2,74 @@
 /// broker's interactive one-shot timeout.
 const LIVE_RENDER_FRAME_DEADLINE_MS: u64 = 30_000;
 
-/// Preserve the existing inspection/default/override policy as reportable
-/// provenance.  A missing field is the established classic-default contract;
-/// it is not treated as a guessed SmartFX capability.
-fn selected_smart_capability_source(advertised: Option<bool>, selected: bool) -> &'static str {
-    match advertised {
-        Some(value) if value == selected => "inspection_out_flags2",
-        Some(_) => "explicit_gui_override",
-        None => "classic_default_no_capability_report",
+const INTERACTIVE_CAPABILITY_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InspectedRenderCapability {
+    smart_render_advertised: bool,
+    out_flags2: u64,
+}
+
+fn inspected_render_capability(
+    report: &serde_json::Value,
+) -> Result<InspectedRenderCapability, String> {
+    let diagnostics = report
+        .get("worker_diagnostics")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("inspection has no worker diagnostics")?;
+    let out_flags2 = diagnostics
+        .get("advertised_out_flags2")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("inspection has no valid advertised_out_flags2")?;
+    let smart_render_advertised = diagnostics
+        .get("smart_render_advertised")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or("inspection has no valid smart_render_advertised")?;
+    let bit_advertised = out_flags2 & (1 << 10) != 0;
+    if smart_render_advertised != bit_advertised {
+        return Err("inspection SmartFX capability contradicts advertised_out_flags2".into());
     }
+    Ok(InspectedRenderCapability {
+        smart_render_advertised,
+        out_flags2,
+    })
+}
+
+fn selected_interactive_session_selection(
+    capability: InspectedRenderCapability,
+    requested_smart: bool,
+    manual_override: bool,
+) -> Result<aexcompat_broker::image_render::InteractiveSessionSelection, String> {
+    use aexcompat_broker::image_render::{
+        InteractiveCapabilitySource, InteractiveRenderPath, InteractiveSessionSelection,
+    };
+    // The inspection contract only asserts one supported selector sequence.
+    // Until a future descriptor provides a separate dual-capability fact, an
+    // override to the other sequence is unsafe and is rejected before either
+    // resident or one-shot dispatch.
+    if requested_smart != capability.smart_render_advertised {
+        return Err(
+            "requested render path is not supported by the inspected AEX capability".into(),
+        );
+    }
+    let path = if requested_smart {
+        InteractiveRenderPath::SmartFx
+    } else {
+        InteractiveRenderPath::Classic
+    };
+    let source = match (manual_override, requested_smart) {
+        (false, true) => InteractiveCapabilitySource::AdvertisedSmart,
+        (false, false) => InteractiveCapabilitySource::AdvertisedClassic,
+        (true, true) => InteractiveCapabilitySource::ManualSmart,
+        (true, false) => InteractiveCapabilitySource::ManualClassic,
+    };
+    InteractiveSessionSelection::new(
+        path,
+        source,
+        INTERACTIVE_CAPABILITY_VERSION,
+        capability.out_flags2,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Static configuration a resident render session was opened with (issue
@@ -28,10 +87,9 @@ struct LiveSessionKey {
     /// Parameter structure only (slots, kinds, ranges, choices); values ride
     /// each frame's v:2 message and must not force a reopen.
     parameter_signature: String,
-    /// The inspection-selected or explicitly overridden selector path is a
-    /// session property: changing it must never reuse a worker opened for the
-    /// other dispatch protocol.
-    smart: bool,
+    /// The inspection snapshot includes path, provenance, schema version, and
+    /// capability identity, so each of those changes forces a clean reopen.
+    selection: aexcompat_broker::image_render::InteractiveSessionSelection,
     width: u32,
     height: u32,
     pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
@@ -72,8 +130,7 @@ struct LiveRenderRequest {
     plugin_sha256: String,
     dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
     parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
-    smart: bool,
-    smart_capability_source: String,
+    selection: aexcompat_broker::image_render::InteractiveSessionSelection,
     input_path: PathBuf,
     timing: aexcompat_broker::image_render::RenderTiming,
     pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
@@ -211,7 +268,7 @@ fn live_render(
             })
             .collect(),
         parameter_signature: parameter_structure_signature(&request.parameters),
-        smart: request.smart,
+        selection: request.selection,
         width,
         height,
         pixel_format: request.pixel_format,
@@ -236,7 +293,7 @@ fn live_render(
                 &request.output,
                 &request.parameters,
                 request.timing,
-                request.smart,
+                request.selection.path.is_smart(),
                 request.pixel_format,
                 None,
                 None,
@@ -255,8 +312,7 @@ fn live_render(
             plugin_path: &request.plugin_path,
             plugin_sha256: &request.plugin_sha256,
             parameters: (!request.parameters.is_empty()).then_some(request.parameters.as_slice()),
-            smart: request.smart,
-            smart_capability_source: &request.smart_capability_source,
+            selection: request.selection,
             dependencies: request.dependencies.clone(),
             width,
             height,

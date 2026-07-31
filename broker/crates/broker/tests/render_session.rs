@@ -1724,12 +1724,12 @@ mod windows_e2e {
         let input = input_pattern(53);
         let mut updated = float_parameter(1);
         updated.value = 7.5;
-        for (smart, capability_source, render_path) in [
-            (false, "test_classic_fixture", "classic"),
+        for (smart, capability_source, render_path, capability_identity) in [
+            (false, "advertised_classic", "classic", 0),
             // This fixture supports the SmartFX session protocol.  The
             // assertion proves InteractiveRenderSession does not silently
             // send an advertised SmartFX selection to Classic RENDER (#606).
-            (true, "test_smartfx_fixture", "smartfx"),
+            (true, "advertised_smart", "smartfx", 1 << 10),
         ] {
             let mut session = InteractiveRenderSession::open(InteractiveSessionOpen {
                 repository: &repository.0,
@@ -1737,8 +1737,21 @@ mod windows_e2e {
                 plugin_path: &plugin,
                 plugin_sha256: &sha,
                 parameters: Some(&parameters),
-                smart,
-                smart_capability_source: capability_source,
+                selection: aexcompat_broker::image_render::InteractiveSessionSelection::new(
+                    if smart {
+                        aexcompat_broker::image_render::InteractiveRenderPath::SmartFx
+                    } else {
+                        aexcompat_broker::image_render::InteractiveRenderPath::Classic
+                    },
+                    if smart {
+                        aexcompat_broker::image_render::InteractiveCapabilitySource::AdvertisedSmart
+                    } else {
+                        aexcompat_broker::image_render::InteractiveCapabilitySource::AdvertisedClassic
+                    },
+                    1,
+                    capability_identity,
+                )
+                .expect("valid inspection-bound selection"),
                 dependencies: Vec::new(),
                 width: WIDTH,
                 height: HEIGHT,
@@ -1759,6 +1772,8 @@ mod windows_e2e {
                 assert_eq!(report["stage"], "interactive_image_render");
                 assert_eq!(report["render_path"], render_path);
                 assert_eq!(report["smart_capability_source"], capability_source);
+                assert_eq!(report["smart_capability_identity"], capability_identity);
+                assert_eq!(report["smart_capability_version"], 1);
                 assert_eq!(report["worker_classification"], "resident_session");
                 assert_eq!(report["passed"], true);
                 assert_eq!(report["resident_session"]["frame_index"], frame);
@@ -1770,6 +1785,13 @@ mod windows_e2e {
             assert_eq!(close["parameter_update_frames"], 2);
             assert_eq!(close["render_path"], render_path);
             assert_eq!(close["smart_capability_source"], capability_source);
+            assert_eq!(close["smart_capability_identity"], capability_identity);
+            assert_eq!(close["smart_capability_version"], 1);
+            if smart {
+                assert_eq!(close["final_report"]["session_mode"], true);
+            } else {
+                assert!(close["final_report"]["session_mode"].is_null());
+            }
             assert_eq!(close["session_clean"], true, "close: {close}");
         }
     }

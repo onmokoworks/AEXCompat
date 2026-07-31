@@ -5,35 +5,53 @@ ROOT = Path(__file__).resolve().parents[1]
 BROKER_SESSION = ROOT / "broker" / "crates" / "broker" / "src" / "image_render" / "session.rs"
 LIVE_SESSION = ROOT / "broker" / "crates" / "harness" / "src" / "windows" / "live_session.rs"
 APP = ROOT / "broker" / "crates" / "harness" / "src" / "windows" / "app.rs"
+INSPECTION = ROOT / "broker" / "crates" / "broker" / "src" / "image_render" / "inspection_and_probes.rs"
 
 
 def test_resident_session_uses_the_existing_smart_selection_and_reports_it():
     broker_session = BROKER_SESSION.read_text(encoding="utf-8")
     live_session = LIVE_SESSION.read_text(encoding="utf-8")
     app = APP.read_text(encoding="utf-8")
+    inspection = INSPECTION.read_text(encoding="utf-8")
 
-    # The session receives the already-decided path; it does not infer support
-    # from a plug-in name or choose a separate resident-only policy.
-    assert "smart: request.smart" in broker_session
-    assert '"render_path": if self.smart { "smartfx" } else { "classic" }' in broker_session
-    assert '"smart_capability_source": self.smart_capability_source' in broker_session
+    # The session receives a closed, validated selection snapshot; it cannot
+    # pair a caller-provided free-form source with an arbitrary selector path.
+    assert "pub enum InteractiveCapabilitySource" in broker_session
+    assert "pub struct InteractiveSessionSelection" in broker_session
+    assert "interactive render capability selection is invalid" in broker_session
+    assert "smart: request.selection.path.is_smart()" in broker_session
+    assert '"render_path": self.selection.path.report_name()' in broker_session
+    assert '"smart_capability_source": self.selection.source.report_name()' in broker_session
+    assert '"smart_capability_identity": self.selection.capability_identity' in broker_session
+    assert '"smart_capability_version": self.selection.capability_version' in broker_session
     assert 'summary["smart_capability_source"]' in broker_session
 
-    # A SmartFX selection is session-keyed and reaches both the resident open
-    # and its one-shot infrastructure fallback without being changed to classic.
-    assert "smart: request.smart," in live_session
-    assert "smart_capability_source: &request.smart_capability_source," in live_session
-    assert "request.smart," in live_session
-    assert "smart: bool," in live_session
+    # A SmartFX selection is session-keyed and reaches both resident open and
+    # the one-shot infrastructure fallback without being changed to classic.
+    assert "selection: request.selection," in live_session
+    assert "request.selection.path.is_smart()," in live_session
+    assert "selection: aexcompat_broker::image_render::InteractiveSessionSelection" in live_session
+    assert "INTERACTIVE_CAPABILITY_VERSION" in live_session
+    assert "out_flags2" in live_session
 
-    # Inspection remains the normal source, with an explicit GUI override and
-    # the pre-existing no-capability classic default recorded rather than guessed.
-    assert "selected_smart_capability_source" in app
+    # Inspection is the only capability authority. Missing, malformed, stale,
+    # or contradictory facts clear the prior state and block every render path.
+    assert "inspected_render_capability" in app
+    assert "self.smart_render_capability = None;" in app
+    assert "no valid SmartFX/classic capability inspection is available" in app
+    assert "requested render path is not supported" in live_session
+    assert "inspection report has no valid out_flags2" in inspection
+    assert ".get(\"out_flags2\")" in inspection
+    capability_slice = inspection[
+        inspection.index('let advertised_out_flags ='):inspection.index('let audio_effect_only =')
+    ]
+    assert ".unwrap_or(0)" not in capability_slice
     assert "let live_eligible = host_context.is_none()" in app
     assert "let live_eligible = !smart" not in app
     for source in (
-        "inspection_out_flags2",
-        "explicit_gui_override",
-        "classic_default_no_capability_report",
+        "advertised_smart",
+        "advertised_classic",
+        "manual_smart",
+        "manual_classic",
     ):
-        assert source in live_session
+        assert source in broker_session

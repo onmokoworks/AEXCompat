@@ -905,14 +905,10 @@ pub struct InteractiveSessionOpen<'a> {
     /// Declared parameter set; launch values double as the fallback for
     /// frames rendered without a per-frame update.
     pub parameters: Option<&'a [InteractiveParameter]>,
-    /// Selected from the existing parameter-inspection capability report, or
-    /// from the GUI's explicit render-path override.  The resident transport
-    /// must preserve this decision instead of assuming Classic RENDER.
-    pub smart: bool,
-    /// Provenance for `smart`, retained in the public per-frame and close
-    /// reports so a rendered frame cannot hide which capability decision
-    /// selected its selector sequence.
-    pub smart_capability_source: &'a str,
+    /// A validated, closed selection snapshot.  Callers cannot pair an
+    /// arbitrary source string with a path or reopen a session with stale
+    /// inspection state.
+    pub selection: InteractiveSessionSelection,
     pub dependencies: Vec<ApprovedImageArtifact>,
     pub width: u32,
     pub height: u32,
@@ -933,8 +929,7 @@ pub struct InteractiveSessionOpen<'a> {
 pub struct InteractiveRenderSession {
     session: crate::render_session::RenderSession,
     plugin_id: String,
-    smart: bool,
-    smart_capability_source: String,
+    selection: InteractiveSessionSelection,
     pixel_format: RenderPixelFormat,
     width: u32,
     height: u32,
@@ -967,7 +962,7 @@ impl InteractiveRenderSession {
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
                 layers: &[],
-                smart: request.smart,
+                smart: request.selection.path.is_smart(),
                 gpu_backend: RenderGpuBackend::Auto,
                 gpu_runtime_policy: None,
                 dependencies: request.dependencies,
@@ -983,8 +978,7 @@ impl InteractiveRenderSession {
         Ok(Self {
             session,
             plugin_id: request.plugin_id.to_owned(),
-            smart: request.smart,
-            smart_capability_source: request.smart_capability_source.to_owned(),
+            selection: request.selection,
             pixel_format: request.pixel_format,
             width: request.width,
             height: request.height,
@@ -1084,8 +1078,10 @@ impl InteractiveRenderSession {
                     "schema_version": 1,
                     "stage": "interactive_image_render",
                     "plugin_id": self.plugin_id,
-                    "render_path": if self.smart { "smartfx" } else { "classic" },
-                    "smart_capability_source": self.smart_capability_source,
+                    "render_path": self.selection.path.report_name(),
+                    "smart_capability_source": self.selection.source.report_name(),
+                    "smart_capability_identity": self.selection.capability_identity,
+                    "smart_capability_version": self.selection.capability_version,
                     "pixel_format": self.pixel_format.report_name(),
                     "width": frame_width,
                     "height": frame_height,
@@ -1124,8 +1120,10 @@ impl InteractiveRenderSession {
                     "schema_version": 1,
                     "stage": "interactive_image_render",
                     "plugin_id": self.plugin_id,
-                    "render_path": if self.smart { "smartfx" } else { "classic" },
-                    "smart_capability_source": self.smart_capability_source,
+                    "render_path": self.selection.path.report_name(),
+                    "smart_capability_source": self.selection.source.report_name(),
+                    "smart_capability_identity": self.selection.capability_identity,
+                    "smart_capability_version": self.selection.capability_version,
                     "pixel_format": self.pixel_format.report_name(),
                     "current_time": current_time,
                     "worker_classification": "resident_session",
@@ -1142,15 +1140,101 @@ impl InteractiveRenderSession {
     /// report and the `session_clean` verdict (`render_session.rs`).
     pub fn close(self) -> Value {
         let Self {
-            session,
-            smart,
-            smart_capability_source,
-            ..
+            session, selection, ..
         } = self;
         let mut summary = session.close();
-        summary["render_path"] = json!(if smart { "smartfx" } else { "classic" });
-        summary["smart_capability_source"] = json!(smart_capability_source);
+        summary["render_path"] = json!(selection.path.report_name());
+        summary["smart_capability_source"] = json!(selection.source.report_name());
+        summary["smart_capability_identity"] = json!(selection.capability_identity);
+        summary["smart_capability_version"] = json!(selection.capability_version);
         summary
+    }
+}
+
+/// The only selector paths supported by the resident image session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InteractiveRenderPath {
+    Classic,
+    SmartFx,
+}
+
+impl InteractiveRenderPath {
+    pub fn is_smart(self) -> bool {
+        matches!(self, Self::SmartFx)
+    }
+
+    pub fn report_name(self) -> &'static str {
+        if self.is_smart() {
+            "smartfx"
+        } else {
+            "classic"
+        }
+    }
+}
+
+/// Provenance is deliberately closed: receipts cannot claim an unrecognised
+/// capability source supplied by a caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InteractiveCapabilitySource {
+    AdvertisedSmart,
+    AdvertisedClassic,
+    ManualSmart,
+    ManualClassic,
+}
+
+impl InteractiveCapabilitySource {
+    pub fn report_name(self) -> &'static str {
+        match self {
+            Self::AdvertisedSmart => "advertised_smart",
+            Self::AdvertisedClassic => "advertised_classic",
+            Self::ManualSmart => "manual_smart",
+            Self::ManualClassic => "manual_classic",
+        }
+    }
+
+    fn matches_path(self, path: InteractiveRenderPath) -> bool {
+        matches!(
+            (self, path),
+            (
+                Self::AdvertisedSmart | Self::ManualSmart,
+                InteractiveRenderPath::SmartFx
+            ) | (
+                Self::AdvertisedClassic | Self::ManualClassic,
+                InteractiveRenderPath::Classic
+            )
+        )
+    }
+}
+
+/// Inspection-bound path choice supplied to an interactive session.  Version
+/// and identity are part of the session key in the harness, so a changed
+/// descriptor cannot reuse a worker opened from an older observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InteractiveSessionSelection {
+    pub path: InteractiveRenderPath,
+    pub source: InteractiveCapabilitySource,
+    pub capability_version: u32,
+    pub capability_identity: u64,
+}
+
+impl InteractiveSessionSelection {
+    pub fn new(
+        path: InteractiveRenderPath,
+        source: InteractiveCapabilitySource,
+        capability_version: u32,
+        capability_identity: u64,
+    ) -> io::Result<Self> {
+        if capability_version == 0 || !source.matches_path(path) {
+            return Err(invalid(
+                "interactive render capability selection is invalid",
+            ));
+        }
+        Ok(Self {
+            path,
+            source,
+            capability_version,
+            capability_identity,
+        })
     }
 }
 

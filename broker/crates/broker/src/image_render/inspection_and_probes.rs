@@ -93,11 +93,14 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     if let Some(summary) = report.get("module_audit").and_then(module_audit_summary) {
         diagnostics["module_audit"] = summary;
     }
-    let advertised_out_flags = report.get("out_flags").and_then(Value::as_u64).unwrap_or(0);
+    let advertised_out_flags = report
+        .get("out_flags")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid("inspection report has no valid out_flags"))?;
     let advertised_out_flags2 = report
         .get("out_flags2")
         .and_then(Value::as_u64)
-        .unwrap_or(0);
+        .ok_or_else(|| invalid("inspection report has no valid out_flags2"))?;
     let audio_effect_only = advertised_out_flags & (1_u64 << 31) != 0;
     diagnostics["advertised_out_flags"] = json!(advertised_out_flags);
     diagnostics["advertised_out_flags2"] = json!(advertised_out_flags2);

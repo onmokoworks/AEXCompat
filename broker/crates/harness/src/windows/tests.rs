@@ -34,42 +34,43 @@ mod tests {
     }
 
     #[test]
-    fn advertised_smart_render_reads_inspection_diagnostics_only() {
-        let smart = serde_json::json!({
-            "worker_diagnostics": { "smart_render_advertised": true }
-        });
-        assert_eq!(advertised_smart_render(&smart), Some(true));
-        let classic = serde_json::json!({
-            "worker_diagnostics": { "smart_render_advertised": false }
-        });
-        assert_eq!(advertised_smart_render(&classic), Some(false));
-        // Reports from older workers without the field must not force a
-        // default-path change.
-        let missing = serde_json::json!({ "worker_diagnostics": {} });
-        assert_eq!(advertised_smart_render(&missing), None);
-        assert_eq!(advertised_smart_render(&serde_json::json!({})), None);
+    fn resident_session_selection_rejects_unknown_or_unsupported_capabilities() {
+        let smart = InspectedRenderCapability {
+            smart_render_advertised: true,
+            out_flags2: 1 << 10,
+        };
+        let auto = selected_interactive_session_selection(smart, true, false)
+            .expect("advertised SmartFX selects SmartFX");
+        assert_eq!(auto.path.report_name(), "smartfx");
+        assert_eq!(auto.source.report_name(), "advertised_smart");
+        let manual = selected_interactive_session_selection(smart, true, true)
+            .expect("a valid manual SmartFX choice is retained as manual");
+        assert_eq!(manual.source.report_name(), "manual_smart");
+        assert!(selected_interactive_session_selection(smart, false, true).is_err());
+
+        let classic = InspectedRenderCapability {
+            smart_render_advertised: false,
+            out_flags2: 0,
+        };
+        assert_eq!(
+            selected_interactive_session_selection(classic, false, false)
+                .expect("advertised classic selects classic")
+                .source
+                .report_name(),
+            "advertised_classic"
+        );
+        assert!(selected_interactive_session_selection(classic, true, true).is_err());
     }
 
     #[test]
-    fn resident_session_path_keeps_inspection_and_override_provenance() {
-        assert_eq!(
-            selected_smart_capability_source(Some(true), true),
-            "inspection_out_flags2"
-        );
-        assert_eq!(
-            selected_smart_capability_source(Some(false), false),
-            "inspection_out_flags2"
-        );
-        assert_eq!(
-            selected_smart_capability_source(Some(true), false),
-            "explicit_gui_override"
-        );
-        // The existing missing-capability contract stays classic; no path is
-        // inferred from the AEX name or a missing descriptor field.
-        assert_eq!(
-            selected_smart_capability_source(None, false),
-            "classic_default_no_capability_report"
-        );
+    fn inspection_capability_rejects_missing_malformed_and_contradictory_facts() {
+        for report in [
+            serde_json::json!({}),
+            serde_json::json!({"worker_diagnostics":{"advertised_out_flags2":"1024","smart_render_advertised":true}}),
+            serde_json::json!({"worker_diagnostics":{"advertised_out_flags2":0,"smart_render_advertised":true}}),
+        ] {
+            assert!(inspected_render_capability(&report).is_err(), "{report}");
+        }
     }
 
     fn temporary_directory(name: &str) -> PathBuf {

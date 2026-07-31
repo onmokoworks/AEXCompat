@@ -1183,9 +1183,3 @@ fn apply_dynamic_ui_report(
     }
     true
 }
-
-/// The AEX's own SUPPORTS_SMART_RENDER declaration from the parameter
-/// inspection diagnostics; None until an inspection has completed (issue #105).
-fn advertised_smart_render(report: &serde_json::Value) -> Option<bool> {
-    report["worker_diagnostics"]["smart_render_advertised"].as_bool()
-}
