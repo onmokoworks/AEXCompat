@@ -200,7 +200,7 @@ fn smart_final_report_clean_requires_the_session_fields() {
 }
 
 #[test]
-fn final_report_clean_accepts_only_explicit_nonfaulting_suite_lease_warning() {
+fn classic_final_report_accepts_only_explicit_nonfaulting_suite_lease_warning() {
     let mut warned = serde_json::json!({
         "status": "render_completed",
         "global_setdown_error": 0,
@@ -215,18 +215,36 @@ fn final_report_clean_accepts_only_explicit_nonfaulting_suite_lease_warning() {
         "handle_lifetimes_balanced": true,
         "world_lifetimes_balanced": true,
         "param_checkouts_balanced": true,
-        "session_mode": true,
-        "session_render_error": 0,
-        "session_sequence_setup_error": 0,
-        "session_sequence_setdown_error": 0,
+        "render_error": 0,
+        "persistent_sequence_setup_error": 0,
+        "persistent_sequence_setdown_error": 0,
     });
     assert_eq!(
-        validate_final_report(&warned, true),
+        validate_final_report(&warned, false),
         Ok(FinalReportValidation::CleanWithSuiteLeaseWarning {
             suite_acquires: 123,
             suite_releases: 24,
             live_suite_lease_count: 1,
         })
+    );
+
+    let mut smart_warned = warned.clone();
+    smart_warned.as_object_mut().unwrap().remove("render_error");
+    smart_warned
+        .as_object_mut()
+        .unwrap()
+        .remove("persistent_sequence_setup_error");
+    smart_warned
+        .as_object_mut()
+        .unwrap()
+        .remove("persistent_sequence_setdown_error");
+    smart_warned["session_mode"] = serde_json::json!(true);
+    smart_warned["session_render_error"] = serde_json::json!(0);
+    smart_warned["session_sequence_setup_error"] = serde_json::json!(0);
+    smart_warned["session_sequence_setdown_error"] = serde_json::json!(0);
+    assert_eq!(
+        validate_final_report(&smart_warned, true),
+        Err(CloseReportInvariant::UnexpectedLiveSuiteLease)
     );
 
     for (key, value) in [
@@ -237,7 +255,10 @@ fn final_report_clean_accepts_only_explicit_nonfaulting_suite_lease_warning() {
         ("live_suite_leases", serde_json::json!("")),
     ] {
         warned[key] = value;
-        assert!(!final_report_clean(&warned, true), "{key} must fail closed");
+        assert!(
+            !final_report_clean(&warned, false),
+            "{key} must fail closed"
+        );
         warned[key] = match key {
             "suite_lease_warning" => serde_json::json!(true),
             "suite_fault_observed" => serde_json::json!(false),
