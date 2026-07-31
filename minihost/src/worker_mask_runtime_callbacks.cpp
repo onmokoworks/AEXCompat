@@ -2,6 +2,10 @@
 
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
+#include "worker_aegp_external_render_runtime.hpp"
+#include "worker_aegp_scene.hpp"
+#include "worker_aegp_scene_model.hpp"
+#include "worker_aegp_scene_transaction.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_pf_path_runtime.hpp"
@@ -9,8 +13,11 @@
 #include "worker_world_safety.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
+#include <limits>
 #include <new>
+#include <utility>
 
 namespace aexcompat::l2_detail {
 
@@ -27,11 +34,17 @@ uint32_t g_invalid_outline_operations{}, g_outline_mutations{}, g_mask_mutations
     g_invalid_dynamic_stream_operations{}, g_layer_dynamic_flags{},
     g_mask_parade_dynamic_flags{};
 int32_t g_next_mask_id{1}, g_next_stream_id{1};
+int32_t g_keyframe_apply_failure_after{-1};
 std::list<AddKeyframesTransaction> g_add_keyframe_transactions;
+
+bool is_primary_mask_layer(void* layer) {
+  return layer == aexcompat::mask_runtime::host_context().layer ||
+      aegp_layer_index(layer) == 0;
+}
 
 int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
   const auto host = aexcompat::mask_runtime::host_context();
-  if (layer != host.layer || !count) return 4;
+  if (!is_primary_mask_layer(layer) || !count) return 4;
   if (aexcompat::mask_runtime::fault() == aexcompat::mask_runtime::Fault::CountCrash) {
     if (host.raise_access_violation) host.raise_access_violation();
     return 4;
@@ -43,7 +56,7 @@ int32_t __cdecl get_layer_num_masks(void* layer, int32_t* count) {
 }
 
 int32_t __cdecl get_layer_mask_by_index(void* layer, int32_t index, void** mask) {
-  if (layer != aexcompat::mask_runtime::host_context().layer || index < 0 || !mask) return 4;
+  if (!is_primary_mask_layer(layer) || index < 0 || !mask) return 4;
   const auto masks = ordered_active_masks();
   if (static_cast<std::size_t>(index) >= masks.size()) return 4;
   auto& record = *masks[static_cast<std::size_t>(index)];
@@ -104,7 +117,7 @@ int32_t __cdecl get_mask_id(void* handle, int32_t* value) {
   *value = mask->id; return 0;
 }
 int32_t __cdecl create_new_mask(void* layer, void** handle, int32_t* index) {
-  if (layer != aexcompat::mask_runtime::host_context().layer || !handle ||
+  if (!is_primary_mask_layer(layer) || !handle ||
       g_mask_scene.size() >= kMaxHostMasks) {
     ++g_invalid_mask_operations; return 4;
   }
@@ -192,9 +205,37 @@ int32_t stream_identity(const HostMask* mask, DynamicNodeKind kind) {
 int32_t create_stream_ref(HostMask* mask, DynamicNodeKind kind, int32_t selector, void** stream) {
   if (!stream || g_stream_refs.size() >= 64) return 4;
   g_stream_refs.push_back({{}, mask, selector, stream_identity(mask, kind), 0, kind});
+  auto& record = g_stream_refs.back();
+  aexcompat::scene_model::Identity owner{};
+  auto& registry = aexcompat::scene_model::registry();
+  if (!registry.identity_for_object(
+          1, 2001, aexcompat::scene_model::ObjectKind::layer, owner) ||
+      !registry.create_child_borrowed(
+          aexcompat::scene_model::ObjectKind::stream, owner,
+          record.unique_id, &record, u"Mask Stream", 1,
+          record.identity, record.handle)) {
+    g_stream_refs.pop_back();
+    return 4;
+  }
+  aexcompat::scene_model::StreamState stream_state{};
+  using aexcompat::scene_model::StreamValueKind;
+  stream_state.value_kind =
+      kind == DynamicNodeKind::MaskOutline ? StreamValueKind::mask :
+      (kind == DynamicNodeKind::LayerRoot ||
+       kind == DynamicNodeKind::MaskParade ||
+       kind == DynamicNodeKind::MaskAtom
+           ? StreamValueKind::arbitrary : StreamValueKind::scalar);
+  stream_state.dimensions =
+      kind == DynamicNodeKind::MaskFeather ? 2 : 1;
+  stream_state.temporal_dimensions = 1;
+  if (!registry.initialize_stream_state(record.identity, stream_state)) {
+    registry.erase_tree(record.identity);
+    g_stream_refs.pop_back();
+    return 4;
+  }
   if (mask) mask->stream_live = true;
   ++g_mask_lifetime.streams_acquired;
-  *stream = &g_stream_refs.back().opaque;
+  *stream = record.handle;
   return 0;
 }
 int32_t __cdecl get_new_mask_stream(int32_t plugin_id, void* mask, int32_t selector, void** stream) {
@@ -223,6 +264,10 @@ int32_t __cdecl dispose_stream(void* stream) {
     ++g_invalid_stream_operations; return 4;
   }
   HostMask* mask = record->mask;
+  if (!aexcompat::scene_model::registry().erase_tree(record->identity)) {
+    ++g_invalid_stream_operations;
+    return 4;
+  }
   g_stream_refs.erase(std::find_if(g_stream_refs.begin(), g_stream_refs.end(),
       [record](auto& candidate) { return &candidate == record; }));
   if (mask) mask->stream_live = std::any_of(g_stream_refs.begin(), g_stream_refs.end(),
@@ -245,11 +290,19 @@ int32_t __cdecl get_new_stream_value(int32_t plugin_id, void* stream, int32_t,
     outline = sampled_outline(record, time, owned);
     if (!outline) { ++g_invalid_stream_operations; return 4; }
   } else if (!dynamic_leaf(record->kind)) { ++g_invalid_stream_operations; return 4; }
+  aexcompat::scene_model::Identity value_identity{};
+  if (!aexcompat::scene_model::registry().create_child(
+          aexcompat::scene_model::ObjectKind::value, record->identity, 0,
+          value, u"Stream Value", value_identity)) {
+    ++g_invalid_stream_operations;
+    return 4;
+  }
   ++record->live_values;
   record->mask->value_live = true;
-  g_stream_values.emplace(value, CheckedStreamValue{record, outline, nullptr, std::move(owned)});
+  g_stream_values.emplace(value, CheckedStreamValue{
+      record, outline, nullptr, std::move(owned), value_identity});
   ++g_mask_lifetime.values_acquired;
-  value->stream = &record->opaque;
+  value->stream = record->handle;
   std::memset(value->raw_value, 0, sizeof(value->raw_value));
   if (outline) value->value = &outline->outline;
   else if (record->kind == DynamicNodeKind::MaskOpacity) value->one_d = record->mask->opacity;
@@ -266,7 +319,9 @@ int32_t __cdecl dispose_stream_value(StreamValue* value) {
       ? find_outline(value->value) : nullptr;
   if (owned == g_stream_values.end() || !stream_record || owned->second.stream != stream_record ||
       (owned->second.outline && owned->second.outline != outline_record) ||
-      stream_record->live_values == 0) {
+      stream_record->live_values == 0 ||
+      !aexcompat::scene_model::registry().erase_tree(
+          owned->second.identity)) {
     ++g_invalid_stream_operations; return 4;
   }
   --stream_record->live_values;
@@ -403,35 +458,47 @@ bool valid_outline_snapshot(const OutlineData& outline) {
 int32_t __cdecl set_stream_value(int32_t plugin_id, void* stream, StreamValue* value) {
   HostStreamRef* record = find_stream(stream);
   const auto checked = value ? g_stream_values.find(value) : g_stream_values.end();
-  if (plugin_id != 1 || !record || !value || value->stream != &record->opaque ||
+  if (plugin_id != 1 || !record || !value || value->stream != record->handle ||
       !usable_mask(record->mask) || !dynamic_leaf(record->kind) ||
       checked == g_stream_values.end() || checked->second.stream != record ||
       !record->mask->keyframes.empty()) {
     ++g_invalid_stream_operations; return 4;
   }
+  HostMask candidate = *record->mask;
   if (record->kind == DynamicNodeKind::MaskOpacity) {
     if (!std::isfinite(value->one_d) || value->one_d < 0 || value->one_d > 100) {
       ++g_invalid_stream_operations; return 4;
     }
-    record->mask->opacity = value->one_d;
+    candidate.opacity = value->one_d;
   } else if (record->kind == DynamicNodeKind::MaskExpansion) {
     if (!std::isfinite(value->one_d)) { ++g_invalid_stream_operations; return 4; }
-    record->mask->expansion = value->one_d;
+    candidate.expansion = value->one_d;
   } else if (record->kind == DynamicNodeKind::MaskFeather) {
     if (!std::isfinite(value->two_d[0]) || !std::isfinite(value->two_d[1])) {
       ++g_invalid_stream_operations; return 4;
     }
-    record->mask->feather = {value->two_d[0], value->two_d[1]};
+    candidate.feather = {value->two_d[0], value->two_d[1]};
   } else {
-    OutlineData* candidate = checked->second.outline;
-    if (!candidate || value->value != &candidate->outline ||
-        find_outline(value->value) != candidate || !valid_outline_snapshot(*candidate)) {
+    OutlineData* outline_candidate = checked->second.outline;
+    if (!outline_candidate || value->value != &outline_candidate->outline ||
+        find_outline(value->value) != outline_candidate ||
+        !valid_outline_snapshot(*outline_candidate)) {
       ++g_invalid_stream_operations; return 4;
     }
-    static_cast<OutlineData&>(*record->mask) = *candidate;
+    static_cast<OutlineData&>(candidate) = *outline_candidate;
   }
-  record->mask->dynamic_modified = true; ++g_dynamic_stream_mutations;
-  bump_render_project_timestamp(); return 0;
+  candidate.dynamic_modified = true;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      aexcompat::scene_model::registry(), record->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        *record->mask = std::move(candidate);
+        ++g_dynamic_stream_mutations;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
 int32_t __cdecl unsupported_layer_stream_value(void*, int32_t, int32_t, const void*,
                                                uint8_t, void* value, int32_t* type) {
@@ -457,8 +524,19 @@ int32_t __cdecl reject_expression_state(int32_t plugin_id, void* stream, uint8_t
       (enabled && record->mask->expressions[static_cast<std::size_t>(index)].empty())) {
     ++g_invalid_stream_operations; return 4;
   }
-  record->mask->expression_enabled[static_cast<std::size_t>(index)] = enabled != 0;
-  record->mask->dynamic_modified = true; return 0;
+  const bool candidate_enabled = enabled != 0;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      aexcompat::scene_model::registry(), record->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        record->mask->expression_enabled[static_cast<std::size_t>(index)] =
+            candidate_enabled;
+        record->mask->dynamic_modified = true;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
 int32_t __cdecl unsupported_get_expression(int32_t plugin_id, void* stream, void** expression) {
   if (expression) *expression = nullptr;
@@ -472,23 +550,37 @@ int32_t __cdecl unsupported_set_expression(int32_t plugin_id, void* stream, cons
   if (plugin_id != 1 || !record || !record->mask || index < 0 || !expression) return 4;
   std::size_t length = 0; while (length <= 4096 && expression[length]) ++length;
   if (length > 4096) { ++g_invalid_stream_operations; return 4; }
-  auto& stored = record->mask->expressions[static_cast<std::size_t>(index)];
-  stored.assign(reinterpret_cast<const char16_t*>(expression), length);
-  record->mask->expression_enabled[static_cast<std::size_t>(index)] = !stored.empty();
-  record->mask->dynamic_modified = true; return 0;
+  std::u16string candidate(
+      reinterpret_cast<const char16_t*>(expression), length);
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      aexcompat::scene_model::registry(), record->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        record->mask->expressions[static_cast<std::size_t>(index)] =
+            std::move(candidate);
+        record->mask->expression_enabled[static_cast<std::size_t>(index)] =
+            !record->mask->expressions[
+                static_cast<std::size_t>(index)].empty();
+        record->mask->dynamic_modified = true;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
 int32_t __cdecl duplicate_stream_ref(int32_t plugin_id, void* stream, void** duplicate) {
   HostStreamRef* original = find_stream(stream);
   if (plugin_id != 1 || !original || !duplicate || g_stream_refs.size() >= 64) {
-    if (duplicate) *duplicate = nullptr;
     ++g_invalid_stream_operations;
     return 4;
   }
-  g_stream_refs.push_back({{}, original->mask, original->selector, original->unique_id, 0,
-                           original->kind});
-  ++g_mask_lifetime.streams_acquired;
+  if (create_stream_ref(
+          original->mask, original->kind, original->selector,
+          duplicate) != 0) {
+    ++g_invalid_stream_operations;
+    return 4;
+  }
   ++g_stream_duplicates;
-  *duplicate = &g_stream_refs.back().opaque;
   return 0;
 }
 int32_t __cdecl get_unique_stream_id(void* stream, int32_t* id) {
@@ -562,6 +654,76 @@ HostKeyframe* keyframe_at(HostStreamRef* stream, int32_t index) {
   std::advance(item, index);
   return &*item;
 }
+
+aexcompat::scene_model::KeyframeState keyframe_state(
+    const HostKeyframe& key) {
+  aexcompat::scene_model::KeyframeState state{};
+  state.time_value = key.time.value;
+  state.time_scale = key.time.scale;
+  state.in_interpolation = key.in_interpolation;
+  state.out_interpolation = key.out_interpolation;
+  state.flags = static_cast<uint32_t>(key.flags);
+  state.label = key.label;
+  if (!key.spatial_in.vertices.empty()) {
+    const auto& vertex = key.spatial_in.vertices.front();
+    state.spatial_in = {
+        vertex.x, vertex.y, vertex.tangent_in_x, vertex.tangent_in_y};
+  }
+  if (!key.spatial_out.vertices.empty()) {
+    const auto& vertex = key.spatial_out.vertices.front();
+    state.spatial_out = {
+        vertex.x, vertex.y, vertex.tangent_out_x, vertex.tangent_out_y};
+  }
+  state.temporal_in[0] = {
+      key.temporal_in[0].speed, key.temporal_in[0].influence};
+  state.temporal_out[0] = {
+      key.temporal_out[0].speed, key.temporal_out[0].influence};
+  return state;
+}
+
+bool ensure_keyframe_identity(HostStreamRef* stream, HostKeyframe* key,
+                              int32_t index) {
+  if (!stream || !key || index < 0) return false;
+  aexcompat::scene_model::ObjectSnapshot snapshot{};
+  auto& registry = aexcompat::scene_model::registry();
+  if (key->identity != aexcompat::scene_model::Identity{} &&
+      registry.snapshot(key->identity, snapshot))
+    return snapshot.owner == stream->identity;
+  if (!registry.create_child(
+          aexcompat::scene_model::ObjectKind::keyframe,
+          stream->identity, index, key, u"Mask Keyframe",
+          key->identity))
+    return false;
+  return registry.initialize_keyframe_state(
+      key->identity, keyframe_state(*key));
+}
+
+bool commit_keyframe_candidate(HostStreamRef* stream, HostKeyframe* key,
+                               HostKeyframe candidate) {
+  if (!stream || !key) return false;
+  aexcompat::scene_model::ObjectSnapshot identity{};
+  auto& registry = aexcompat::scene_model::registry();
+  if (!registry.snapshot(key->identity, identity)) return false;
+  auto staged_identity = identity;
+  staged_identity.keyframe = keyframe_state(candidate);
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      registry, stream->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
+  if (!transaction.stage() || !transaction.validate(true)) return false;
+  return transaction.commit(
+      [&]() noexcept {
+        aexcompat::scene_model::Identity replacement{};
+        if (!registry.replace_snapshot(
+                identity.identity, staged_identity, replacement))
+          return false;
+        candidate.identity = replacement;
+        *key = std::move(candidate);
+        ++g_keyframe_mutations;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); });
+}
+
 AddKeyframesTransaction* find_add_transaction(void* handle) {
   const auto found = std::find_if(g_add_keyframe_transactions.begin(),
       g_add_keyframe_transactions.end(), [handle](auto& item) { return handle == &item.opaque; });
@@ -578,6 +740,11 @@ HostKeyframe snapshot_keyframe(const HostMask& mask, const HostTime& time) {
 int32_t __cdecl get_stream_num_keyframes(void* stream, int32_t* count) {
   HostStreamRef* record = find_stream(stream);
   if (!record || !count) return 4;
+  if (record->kind == DynamicNodeKind::MaskOutline) {
+    int32_t index = 0;
+    for (auto& key : record->mask->keyframes)
+      if (!ensure_keyframe_identity(record, &key, index++)) return 4;
+  }
   *count = record->kind == DynamicNodeKind::MaskOutline
       ? static_cast<int32_t>(record->mask->keyframes.size()) : 0;
   return 0;
@@ -585,7 +752,11 @@ int32_t __cdecl get_stream_num_keyframes(void* stream, int32_t* count) {
 int32_t __cdecl get_keyframe_time(void* stream, int32_t index, int16_t time_mode,
                                   HostTime* time) {
   HostKeyframe* key = keyframe_at(find_stream(stream), index);
-  if (!key || !time || time_mode < 0 || time_mode > 1) return 4;
+  HostStreamRef* record = find_stream(stream);
+  key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index) ||
+      !time || time_mode < 0 || time_mode > 1)
+    return 4;
   *time = key->time;
   return 0;
 }
@@ -604,48 +775,186 @@ int32_t __cdecl insert_keyframe(void* stream, int16_t time_mode, const HostTime*
   if (position != record->mask->keyframes.end() && time_equal(position->time, *time)) {
     *index = found_index; return 0;
   }
-  record->mask->keyframes.insert(position, snapshot_keyframe(*record->mask, *time));
-  *index = found_index;
-  ++g_keyframe_mutations;
-  return 0;
+  HostKeyframe candidate = snapshot_keyframe(*record->mask, *time);
+  auto& registry = aexcompat::scene_model::registry();
+  if (!registry.can_create_child(record->identity)) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      registry, record->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  const bool committed = transaction.commit(
+      [&]() noexcept {
+        if (!registry.create_child(
+                aexcompat::scene_model::ObjectKind::keyframe,
+                record->identity, found_index, nullptr, u"Mask Keyframe",
+                candidate.identity) ||
+            !registry.initialize_keyframe_state(
+                candidate.identity, keyframe_state(candidate)))
+          return false;
+        record->mask->keyframes.insert(position, std::move(candidate));
+        ++g_keyframe_mutations;
+        *index = found_index;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); });
+  return committed ? 0 : 4;
+}
+void inject_keyframe_apply_failure_after(int32_t applied_count) noexcept {
+  g_keyframe_apply_failure_after = applied_count > 0 ? applied_count : -1;
+}
+uint64_t mask_scene_fingerprint() noexcept {
+  uint64_t hash = UINT64_C(14695981039346656037);
+  const auto mix = [&hash](const auto& value) {
+    const auto* bytes =
+        reinterpret_cast<const unsigned char*>(&value);
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+      hash ^= bytes[index];
+      hash *= UINT64_C(1099511628211);
+    }
+  };
+  const auto mix_outline = [&](const OutlineData& outline) {
+    mix(outline.open);
+    const auto vertex_count = outline.vertices.size();
+    const auto feather_count = outline.feathers.size();
+    mix(vertex_count);
+    mix(feather_count);
+    for (const auto& vertex : outline.vertices) {
+      mix(vertex.x);
+      mix(vertex.y);
+      mix(vertex.tangent_in_x);
+      mix(vertex.tangent_in_y);
+      mix(vertex.tangent_out_x);
+      mix(vertex.tangent_out_y);
+    }
+    for (const auto& feather : outline.feathers) {
+      mix(feather.segment);
+      mix(feather.segment_s);
+      mix(feather.radius);
+      mix(feather.ui_corner_angle);
+      mix(feather.tension);
+      mix(feather.interp);
+      mix(feather.type);
+    }
+  };
+  const auto mask_count = g_mask_scene.size();
+  mix(mask_count);
+  for (const auto& mask : g_mask_scene) {
+    mix_outline(mask);
+    mix(mask.mask_live);
+    mix(mask.stream_live);
+    mix(mask.value_live);
+    mix(mask.deleted);
+    mix(mask.invert);
+    mix(mask.locked);
+    mix(mask.roto_bezier);
+    mix(mask.motion_blur);
+    mix(mask.feather_falloff);
+    mix(mask.mode);
+    mix(mask.id);
+    mix(mask.opacity);
+    for (const auto value : mask.feather) mix(value);
+    mix(mask.expansion);
+    for (const auto character : mask.dynamic_name) mix(character);
+    for (const auto value : mask.dynamic_flags) mix(value);
+    mix(mask.dynamic_modified);
+    for (const auto& expression : mask.expressions)
+      for (const auto character : expression) mix(character);
+    for (const auto value : mask.expression_enabled) mix(value);
+    for (const auto value : mask.color) mix(value);
+    const auto key_count = mask.keyframes.size();
+    mix(key_count);
+    for (const auto& key : mask.keyframes) {
+      mix_outline(key);
+      mix(key.time.value);
+      mix(key.time.scale);
+      mix(key.flags);
+      mix(key.in_interpolation);
+      mix(key.out_interpolation);
+      mix(key.label);
+      mix_outline(key.spatial_in);
+      mix_outline(key.spatial_out);
+      for (const auto& ease : key.temporal_in) {
+        mix(ease.speed);
+        mix(ease.influence);
+      }
+      for (const auto& ease : key.temporal_out) {
+        mix(ease.speed);
+        mix(ease.influence);
+      }
+      mix(key.identity.project_id);
+      mix(key.identity.object_id);
+      mix(key.identity.generation);
+      mix(key.identity.kind);
+    }
+  }
+  return hash;
 }
 int32_t __cdecl delete_keyframe(void* stream, int32_t index) {
   HostStreamRef* record = find_stream(stream);
   HostKeyframe* key = keyframe_at(record, index);
-  if (!key || std::any_of(g_stream_values.begin(), g_stream_values.end(),
+  if (!key || !ensure_keyframe_identity(record, key, index) ||
+      std::any_of(g_stream_values.begin(), g_stream_values.end(),
       [key](const auto& item) { return item.second.source_keyframe == key; })) {
     ++g_invalid_keyframe_operations; return 4;
   }
   auto position = record->mask->keyframes.begin(); std::advance(position, index);
-  record->mask->keyframes.erase(position);
-  ++g_keyframe_mutations;
-  return 0;
+  const auto identity = key->identity;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      aexcompat::scene_model::registry(), record->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
+  if (!transaction.stage() || !transaction.validate(true)) return 4;
+  return transaction.commit(
+      [&]() noexcept {
+        if (!aexcompat::scene_model::registry().erase_tree(identity))
+          return false;
+        record->mask->keyframes.erase(position);
+        ++g_keyframe_mutations;
+        return true;
+      },
+      []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
 int32_t __cdecl get_new_keyframe_value(int32_t plugin_id, void* stream, int32_t index,
                                        StreamValue* value) {
   HostStreamRef* record = find_stream(stream);
   HostKeyframe* key = keyframe_at(record, index);
-  if (plugin_id != 1 || !record || !key || !value ||
+  if (plugin_id != 1 || !record || !key ||
+      !ensure_keyframe_identity(record, key, index) || !value ||
       g_stream_values.size() >= kMaxCheckedStreamValues ||
       g_stream_values.find(value) != g_stream_values.end()) {
     ++g_invalid_keyframe_operations; return 4;
   }
   auto owned = std::make_unique<OutlineData>(static_cast<const OutlineData&>(*key));
   OutlineData* outline = owned.get();
+  aexcompat::scene_model::Identity value_identity{};
+  if (!aexcompat::scene_model::registry().create_child(
+          aexcompat::scene_model::ObjectKind::value, key->identity,
+          0, value, u"Keyframe Value", value_identity)) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
   ++record->live_values; record->mask->value_live = true;
-  g_stream_values.emplace(value, CheckedStreamValue{record, outline, key, std::move(owned)});
+  g_stream_values.emplace(value, CheckedStreamValue{
+      record, outline, key, std::move(owned), value_identity});
   ++g_mask_lifetime.values_acquired;
-  value->stream = &record->opaque; value->value = &outline->outline;
+  value->stream = record->handle; value->value = &outline->outline;
   return 0;
 }
 int32_t __cdecl set_keyframe_value(void* stream, int32_t index, const StreamValue* value) {
   HostStreamRef* record = find_stream(stream);
   HostKeyframe* key = keyframe_at(record, index);
   OutlineData* source = value ? find_outline(value->value) : nullptr;
-  if (!key || !source || source == key) { ++g_invalid_keyframe_operations; return 4; }
-  static_cast<OutlineData&>(*key) = *source;
-  ++g_keyframe_mutations;
-  return 0;
+  if (!key || !ensure_keyframe_identity(record, key, index) ||
+      !source || source == key) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
+  HostKeyframe candidate = *key;
+  static_cast<OutlineData&>(candidate) = *source;
+  return commit_keyframe_candidate(record, key, std::move(candidate))
+      ? 0 : 4;
 }
 int32_t __cdecl get_stream_value_dimensionality(void* stream, int16_t* dimensions) {
   if (!find_stream(stream) || !dimensions) return 4;
@@ -655,14 +964,70 @@ int32_t __cdecl get_stream_temporal_dimensionality(void* stream, int16_t* dimens
   if (!find_stream(stream) || !dimensions) return 4;
   *dimensions = kHostTemporalDimensions; return 0;
 }
-bool register_keyframe_stream_value(HostStreamRef* stream, HostKeyframe* key,
-                                    const OutlineData& source, StreamValue* value) {
-  auto owned = std::make_unique<OutlineData>(source);
-  OutlineData* outline = owned.get();
-  g_stream_values.emplace(value, CheckedStreamValue{stream, outline, key, std::move(owned)});
-  ++stream->live_values; stream->mask->value_live = true;
-  ++g_mask_lifetime.values_acquired;
-  value->stream = &stream->opaque; value->value = &outline->outline;
+bool register_keyframe_stream_values_atomic(
+    HostStreamRef* stream, HostKeyframe* key,
+    StreamValue* in_value, StreamValue* out_value) {
+  std::array<StreamValue*, 2> values{};
+  std::array<const OutlineData*, 2> sources{};
+  std::size_t requested = 0;
+  if (in_value) {
+    values[requested] = in_value;
+    sources[requested++] = &key->spatial_in;
+  }
+  if (out_value) {
+    values[requested] = out_value;
+    sources[requested++] = &key->spatial_out;
+  }
+
+  auto& registry = aexcompat::scene_model::registry();
+  if (requested == 0 ||
+      !registry.can_create_children(key->identity, requested))
+    return false;
+
+  std::size_t reserved_values = 0;
+  try {
+    g_stream_values.reserve(g_stream_values.size() + requested);
+    for (; reserved_values < requested; ++reserved_values) {
+      auto owned = std::make_unique<OutlineData>(*sources[reserved_values]);
+      OutlineData* outline = owned.get();
+      const auto inserted = g_stream_values.emplace(
+          values[reserved_values],
+          CheckedStreamValue{
+              stream, outline, key, std::move(owned), {}});
+      if (!inserted.second) break;
+    }
+  } catch (...) {
+  }
+  if (reserved_values != requested) {
+    for (std::size_t index = 0; index < reserved_values; ++index)
+      g_stream_values.erase(values[index]);
+    return false;
+  }
+
+  std::array<aexcompat::scene_model::Identity, 2> identities{};
+  const bool registered = requested == 2
+      ? registry.create_child_pair(
+            aexcompat::scene_model::ObjectKind::value, key->identity,
+            {0, 1}, {values[0], values[1]},
+            u"Keyframe Tangent", identities)
+      : registry.create_child(
+            aexcompat::scene_model::ObjectKind::value, key->identity,
+            0, values[0], u"Keyframe Tangent", identities[0]);
+  if (!registered) {
+    for (std::size_t index = 0; index < requested; ++index)
+      g_stream_values.erase(values[index]);
+    return false;
+  }
+
+  for (std::size_t index = 0; index < requested; ++index) {
+    auto& checked = g_stream_values.find(values[index])->second;
+    checked.identity = identities[index];
+    values[index]->stream = stream->handle;
+    values[index]->value = &checked.outline->outline;
+  }
+  stream->live_values += static_cast<uint32_t>(requested);
+  stream->mask->value_live = true;
+  g_mask_lifetime.values_acquired += static_cast<uint32_t>(requested);
   return true;
 }
 int32_t __cdecl get_new_keyframe_spatial_tangents(int32_t plugin_id, void* stream,
@@ -671,14 +1036,27 @@ int32_t __cdecl get_new_keyframe_spatial_tangents(int32_t plugin_id, void* strea
   HostStreamRef* record = find_stream(stream);
   HostKeyframe* key = keyframe_at(record, index);
   const std::size_t requested = (in_value ? 1u : 0u) + (out_value ? 1u : 0u);
-  if (plugin_id != 1 || !record || !key || requested == 0 || in_value == out_value ||
+  if (plugin_id != 1 || !record || !key ||
+      requested == 0 || in_value == out_value ||
       g_stream_values.size() + requested > kMaxCheckedStreamValues ||
       (in_value && g_stream_values.find(in_value) != g_stream_values.end()) ||
       (out_value && g_stream_values.find(out_value) != g_stream_values.end())) {
     ++g_invalid_keyframe_operations; return 4;
   }
-  if (in_value) register_keyframe_stream_value(record, key, key->spatial_in, in_value);
-  if (out_value) register_keyframe_stream_value(record, key, key->spatial_out, out_value);
+  auto& registry = aexcompat::scene_model::registry();
+  aexcompat::scene_model::ObjectSnapshot registered_key{};
+  if ((!registry.snapshot(key->identity, registered_key) &&
+       !registry.can_create_children(
+           record->identity, requested + 1)) ||
+      !ensure_keyframe_identity(record, key, index)) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
+  if (!register_keyframe_stream_values_atomic(
+          record, key, in_value, out_value)) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
   return 0;
 }
 int32_t __cdecl set_keyframe_spatial_tangents(void* stream, int32_t index,
@@ -690,25 +1068,30 @@ int32_t __cdecl set_keyframe_spatial_tangents(void* stream, int32_t index,
     if (!value) return nullptr;
     const auto found = g_stream_values.find(const_cast<StreamValue*>(value));
     return found != g_stream_values.end() && found->second.stream == record &&
-        value->stream == &record->opaque && found->second.outline &&
+        value->stream == record->handle && found->second.outline &&
         value->value == &found->second.outline->outline
         ? found->second.outline : nullptr;
   };
   OutlineData* in_outline = checked_for_stream(in_value);
   OutlineData* out_outline = checked_for_stream(out_value);
-  if (!key || (!in_value && !out_value) || (in_value && !in_outline) ||
+  if (!key || !ensure_keyframe_identity(record, key, index) ||
+      (!in_value && !out_value) || (in_value && !in_outline) ||
       (out_value && !out_outline)) {
     ++g_invalid_keyframe_operations; return 4;
   }
-  if (in_outline) key->spatial_in = *in_outline;
-  if (out_outline) key->spatial_out = *out_outline;
-  ++g_keyframe_mutations; return 0;
+  HostKeyframe candidate = *key;
+  if (in_outline) candidate.spatial_in = *in_outline;
+  if (out_outline) candidate.spatial_out = *out_outline;
+  return commit_keyframe_candidate(record, key, std::move(candidate))
+      ? 0 : 4;
 }
 int32_t __cdecl get_keyframe_temporal_ease(void* stream, int32_t index, int32_t dimension,
                                             KeyframeEase* in_ease,
                                             KeyframeEase* out_ease) {
-  HostKeyframe* key = keyframe_at(find_stream(stream), index);
-  if (!key || dimension < 0 || dimension >= kHostTemporalDimensions ||
+  HostStreamRef* record = find_stream(stream);
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index) ||
+      dimension < 0 || dimension >= kHostTemporalDimensions ||
       (!in_ease && !out_ease)) {
     ++g_invalid_keyframe_operations; return 4;
   }
@@ -719,48 +1102,80 @@ int32_t __cdecl get_keyframe_temporal_ease(void* stream, int32_t index, int32_t 
 int32_t __cdecl set_keyframe_temporal_ease(void* stream, int32_t index, int32_t dimension,
                                             const KeyframeEase* in_ease,
                                             const KeyframeEase* out_ease) {
-  HostKeyframe* key = keyframe_at(find_stream(stream), index);
-  if (!key || dimension < 0 || dimension >= kHostTemporalDimensions ||
-      (!in_ease && !out_ease)) {
+  HostStreamRef* record = find_stream(stream);
+  HostKeyframe* key = keyframe_at(record, index);
+  const auto valid_ease = [](const KeyframeEase* ease) {
+    return !ease || (std::isfinite(ease->speed) &&
+        std::isfinite(ease->influence) && ease->influence >= 0.0 &&
+        ease->influence <= 100.0);
+  };
+  if (!key || !ensure_keyframe_identity(record, key, index) ||
+      dimension < 0 || dimension >= kHostTemporalDimensions ||
+      (!in_ease && !out_ease) || !valid_ease(in_ease) ||
+      !valid_ease(out_ease)) {
     ++g_invalid_keyframe_operations; return 4;
   }
-  if (in_ease) key->temporal_in[dimension] = *in_ease;
-  if (out_ease) key->temporal_out[dimension] = *out_ease;
-  ++g_keyframe_mutations; return 0;
+  HostKeyframe candidate = *key;
+  if (in_ease) candidate.temporal_in[dimension] = *in_ease;
+  if (out_ease) candidate.temporal_out[dimension] = *out_ease;
+  return commit_keyframe_candidate(record, key, std::move(candidate))
+      ? 0 : 4;
 }
 int32_t __cdecl get_keyframe_flags(void* stream, int32_t index, int32_t* flags) {
-  HostKeyframe* key = keyframe_at(find_stream(stream), index);
-  if (!key || !flags) return 4;
+  HostStreamRef* record = find_stream(stream);
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index) || !flags)
+    return 4;
   *flags = key->flags; return 0;
 }
 int32_t __cdecl set_keyframe_flag(void* stream, int32_t index, int32_t flag, uint8_t enabled) {
-  HostKeyframe* key = keyframe_at(find_stream(stream), index);
-  if (!key || flag == 0 || (flag & ~0x1f) != 0 || (flag & (flag - 1)) != 0) {
+  HostStreamRef* record = find_stream(stream);
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index) ||
+      flag == 0 || (flag & ~0x1f) != 0 ||
+      (flag & (flag - 1)) != 0 || enabled > 1) {
     ++g_invalid_keyframe_operations; return 4;
   }
-  if (enabled) key->flags |= flag; else key->flags &= ~flag;
-  ++g_keyframe_mutations; return 0;
+  HostKeyframe candidate = *key;
+  if (enabled) candidate.flags |= flag;
+  else candidate.flags &= ~flag;
+  return commit_keyframe_candidate(record, key, std::move(candidate))
+      ? 0 : 4;
 }
 int32_t __cdecl get_keyframe_interpolation(void* stream, int32_t index,
                                            int32_t* in_interp, int32_t* out_interp) {
-  HostKeyframe* key = keyframe_at(find_stream(stream), index);
-  if (!key || (!in_interp && !out_interp)) return 4;
+  HostStreamRef* record = find_stream(stream);
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index) ||
+      (!in_interp && !out_interp))
+    return 4;
   if (in_interp) *in_interp = key->in_interpolation;
   if (out_interp) *out_interp = key->out_interpolation;
   return 0;
 }
 int32_t __cdecl set_keyframe_interpolation(void* stream, int32_t index,
                                            int32_t in_interp, int32_t out_interp) {
-  HostKeyframe* key = keyframe_at(find_stream(stream), index);
-  if (!key || in_interp < 0 || in_interp > 3 || out_interp < 0 || out_interp > 3) {
+  HostStreamRef* record = find_stream(stream);
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index) ||
+      in_interp < 0 || in_interp > 3 ||
+      out_interp < 0 || out_interp > 3) {
     ++g_invalid_keyframe_operations; return 4;
   }
-  key->in_interpolation = in_interp; key->out_interpolation = out_interp;
-  ++g_keyframe_mutations; return 0;
+  HostKeyframe candidate = *key;
+  candidate.in_interpolation = in_interp;
+  candidate.out_interpolation = out_interp;
+  return commit_keyframe_candidate(record, key, std::move(candidate))
+      ? 0 : 4;
+}
+bool usable_keyframe_stream(const HostStreamRef* stream) {
+  return stream && stream->kind == DynamicNodeKind::MaskOutline &&
+      stream->mask && usable_mask(stream->mask);
 }
 int32_t __cdecl start_add_keyframes(void* stream, void** transaction) {
   HostStreamRef* record = find_stream(stream);
-  if (!record || !transaction || g_add_keyframe_transactions.size() >= 8) {
+  if (!usable_keyframe_stream(record) || !transaction ||
+      g_add_keyframe_transactions.size() >= 8) {
     ++g_invalid_keyframe_operations; return 4;
   }
   g_add_keyframe_transactions.push_back({{}, record, {}});
@@ -770,7 +1185,8 @@ int32_t __cdecl start_add_keyframes(void* stream, void** transaction) {
 int32_t __cdecl add_keyframes(void* handle, int16_t time_mode, const HostTime* time,
                               int32_t* index) {
   AddKeyframesTransaction* transaction = find_add_transaction(handle);
-  if (!transaction || time_mode < 0 || time_mode > 1 || !valid_time(time) || !index ||
+  if (!transaction || !usable_keyframe_stream(transaction->stream) ||
+      time_mode < 0 || time_mode > 1 || !valid_time(time) || !index ||
       transaction->stream->mask->keyframes.size() + transaction->staged.size() >=
           kMaxKeyframesPerStream) {
     ++g_invalid_keyframe_operations; return 4;
@@ -787,7 +1203,9 @@ int32_t __cdecl add_keyframes(void* handle, int16_t time_mode, const HostTime* t
 int32_t __cdecl set_add_keyframe(void* handle, int32_t index, const StreamValue* value) {
   AddKeyframesTransaction* transaction = find_add_transaction(handle);
   OutlineData* source = value ? find_outline(value->value) : nullptr;
-  if (!transaction || index < 0 || static_cast<std::size_t>(index) >= transaction->staged.size() ||
+  if (!transaction || !usable_keyframe_stream(transaction->stream) ||
+      index < 0 ||
+      static_cast<std::size_t>(index) >= transaction->staged.size() ||
       !source) { ++g_invalid_keyframe_operations; return 4; }
   static_cast<OutlineData&>(transaction->staged[index]) = *source;
   return 0;
@@ -795,31 +1213,127 @@ int32_t __cdecl set_add_keyframe(void* handle, int32_t index, const StreamValue*
 int32_t __cdecl end_add_keyframes(uint8_t add, void* handle) {
   AddKeyframesTransaction* transaction = find_add_transaction(handle);
   if (!transaction) { ++g_invalid_keyframe_operations; return 4; }
-  if (add) {
-    for (auto& staged : transaction->staged) {
-      auto position = transaction->stream->mask->keyframes.begin();
-      while (position != transaction->stream->mask->keyframes.end() &&
-             time_less(position->time, staged.time)) ++position;
-      if (position == transaction->stream->mask->keyframes.end() ||
-          !time_equal(position->time, staged.time)) {
-        transaction->stream->mask->keyframes.insert(position, std::move(staged));
-        ++g_keyframe_mutations;
-      }
+  struct CleanupGuard {
+    AddKeyframesTransaction* transaction;
+    ~CleanupGuard() {
+      const auto found = std::find_if(
+          g_add_keyframe_transactions.begin(),
+          g_add_keyframe_transactions.end(),
+          [this](auto& item) { return &item == transaction; });
+      if (found != g_add_keyframe_transactions.end())
+        g_add_keyframe_transactions.erase(found);
+    }
+  } cleanup{transaction};
+  if (add > 1) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
+  auto* stream = transaction->stream;
+  if (!usable_keyframe_stream(stream)) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
+  auto staged = transaction->staged;
+  auto& registry = aexcompat::scene_model::registry();
+  aexcompat::scene_transaction::AtomicSceneTransaction atomic(
+      registry, stream->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
+  if (!atomic.stage()) return 4;
+  if (!add) {
+    atomic.cancel();
+  } else {
+    std::size_t new_count = 0;
+    for (const auto& candidate : staged) {
+      const auto duplicate = std::find_if(
+          stream->mask->keyframes.begin(),
+          stream->mask->keyframes.end(),
+          [&](const auto& key) {
+            return time_equal(key.time, candidate.time);
+          });
+      if (duplicate == stream->mask->keyframes.end()) ++new_count;
+    }
+    if (!atomic.validate(
+            new_count == 0 ||
+            registry.can_create_children(
+                stream->identity, new_count))) {
+      ++g_invalid_keyframe_operations;
+      return 4;
+    }
+    aexcompat::scene_model::Registry::MutationCheckpoint
+        registry_checkpoint{};
+    if (!registry.capture_mutation_checkpoint(registry_checkpoint)) {
+      ++g_invalid_keyframe_operations;
+      return 4;
+    }
+    auto keyframes_before_apply = stream->mask->keyframes;
+    const uint32_t mutations_before_apply = g_keyframe_mutations;
+    std::size_t applied_count = 0;
+    if (!atomic.commit(
+            [&]() noexcept {
+              for (auto& candidate : staged) {
+                auto position = stream->mask->keyframes.begin();
+                int32_t key_index = 0;
+                while (position != stream->mask->keyframes.end() &&
+                       time_less(position->time, candidate.time)) {
+                  ++position;
+                  ++key_index;
+                }
+                if (position != stream->mask->keyframes.end() &&
+                    time_equal(position->time, candidate.time))
+                  continue;
+                if (!registry.create_child(
+                        aexcompat::scene_model::ObjectKind::keyframe,
+                        stream->identity, key_index, nullptr,
+                        u"Mask Keyframe", candidate.identity) ||
+                    !registry.initialize_keyframe_state(
+                        candidate.identity,
+                        keyframe_state(candidate)))
+                  return false;
+                stream->mask->keyframes.insert(
+                    position, std::move(candidate));
+                ++g_keyframe_mutations;
+                ++applied_count;
+                if (g_keyframe_apply_failure_after > 0 &&
+                    applied_count >= static_cast<std::size_t>(
+                        g_keyframe_apply_failure_after)) {
+                  g_keyframe_apply_failure_after = -1;
+                  return false;
+                }
+              }
+              return true;
+            },
+            [&]() noexcept {
+              stream->mask->keyframes.swap(keyframes_before_apply);
+              g_keyframe_mutations = mutations_before_apply;
+              return registry.restore_mutation_checkpoint(
+                  registry_checkpoint);
+            },
+            []() noexcept { bump_render_project_timestamp(); })) {
+      ++g_invalid_keyframe_operations;
+      return 4;
     }
   }
-  g_add_keyframe_transactions.erase(std::find_if(g_add_keyframe_transactions.begin(),
-      g_add_keyframe_transactions.end(), [transaction](auto& item) { return &item == transaction; }));
   return 0;
 }
 int32_t __cdecl get_keyframe_label(void* stream, int32_t index, int32_t* label) {
-  HostKeyframe* key = keyframe_at(find_stream(stream), index);
-  if (!key || !label) return 4;
+  HostStreamRef* record = find_stream(stream);
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index) || !label)
+    return 4;
   *label = key->label; return 0;
 }
 int32_t __cdecl set_keyframe_label(void* stream, int32_t index, int32_t label) {
-  HostKeyframe* key = keyframe_at(find_stream(stream), index);
-  if (!key || label < 0 || label > 16) { ++g_invalid_keyframe_operations; return 4; }
-  key->label = label; ++g_keyframe_mutations; return 0;
+  HostStreamRef* record = find_stream(stream);
+  HostKeyframe* key = keyframe_at(record, index);
+  if (!key || !ensure_keyframe_identity(record, key, index) ||
+      label < 0 || label > 16) {
+    ++g_invalid_keyframe_operations;
+    return 4;
+  }
+  HostKeyframe candidate = *key;
+  candidate.label = label;
+  return commit_keyframe_candidate(record, key, std::move(candidate))
+      ? 0 : 4;
 }
 
 
@@ -855,6 +1369,17 @@ uint32_t* dynamic_flags(HostStreamRef* stream) {
       stream->kind == DynamicNodeKind::MaskOpacity ? 2 :
       stream->kind == DynamicNodeKind::MaskExpansion ? 3 : 4;
   return &stream->mask->dynamic_flags[index];
+}
+template <typename Apply>
+bool commit_dynamic_stream_mutation(HostStreamRef* stream, Apply&& apply) {
+  if (!stream || stream->identity.project_id == 0) return false;
+  aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+      aexcompat::scene_model::registry(), stream->identity.project_id,
+      &aexcompat::aegp_external_render_runtime::project_generation);
+  if (!transaction.stage() || !transaction.validate(true)) return false;
+  return transaction.commit(
+      std::forward<Apply>(apply),
+      []() noexcept { bump_render_project_timestamp(); });
 }
 int32_t __cdecl get_new_dynamic_stream_for_layer(int32_t plugin_id, void* layer, void** stream) {
   if (plugin_id != 1 || layer != &g_layer || !stream) return 4;
@@ -892,12 +1417,20 @@ int32_t __cdecl get_dynamic_stream_flags(void* stream, uint32_t* flags) {
 int32_t __cdecl set_dynamic_stream_flag(void* stream, uint32_t flag, uint8_t undoable,
                                         uint8_t set) {
   HostStreamRef* record = find_stream(stream); uint32_t* stored = dynamic_flags(record);
-  if (!stored || (flag != 1 && flag != 2) || (!undoable && flag != 2)) {
+  if (!stored || (flag != 1 && flag != 2) || undoable > 1 || set > 1 ||
+      (!undoable && flag != 2)) {
     ++g_invalid_dynamic_stream_operations; return 4;
   }
-  if (set) *stored |= flag; else *stored &= ~flag;
-  if (record->mask) record->mask->dynamic_modified = true;
-  ++g_dynamic_stream_mutations; bump_render_project_timestamp(); return 0;
+  uint32_t candidate = *stored;
+  if (set) candidate |= flag; else candidate &= ~flag;
+  return commit_dynamic_stream_mutation(
+      record,
+      [record, stored, candidate]() noexcept {
+        *stored = candidate;
+        if (record->mask) record->mask->dynamic_modified = true;
+        ++g_dynamic_stream_mutations;
+        return true;
+      }) ? 0 : 4;
 }
 int32_t dynamic_child(HostStreamRef* parent, int32_t index, HostMask*& mask,
                       DynamicNodeKind& kind) {
@@ -920,7 +1453,7 @@ int32_t __cdecl get_new_dynamic_stream_by_index(int32_t plugin_id, void* parent_
                                                 int32_t index, void** stream) {
   HostStreamRef* parent = find_stream(parent_stream); HostMask* mask{}; DynamicNodeKind kind{};
   if (plugin_id != 1 || !stream || dynamic_child(parent, index, mask, kind) != 0) {
-    if (stream) *stream = nullptr; return 4;
+    return 4;
   }
   ++g_dynamic_stream_queries;
   return create_stream_ref(mask, kind, kind == DynamicNodeKind::MaskOutline ? 400 :
@@ -933,7 +1466,7 @@ int32_t __cdecl get_new_dynamic_stream_by_match_name(int32_t plugin_id, void* pa
   if (plugin_id != 1 || !parent || !match_name || !stream ||
       std::strlen(match_name) >= 40 || dynamic_leaf(parent->kind) ||
       parent->kind == DynamicNodeKind::MaskParade) {
-    if (stream) *stream = nullptr; return 4;
+    return 4;
   }
   const int32_t count = parent->kind == DynamicNodeKind::LayerRoot ? 1 : 4;
   for (int32_t index = 0; index < count; ++index) {
@@ -942,7 +1475,7 @@ int32_t __cdecl get_new_dynamic_stream_by_match_name(int32_t plugin_id, void* pa
         std::strcmp(match_name, dynamic_match_name(kind)) == 0)
       return get_new_dynamic_stream_by_index(plugin_id, parent_stream, index, stream);
   }
-  *stream = nullptr; return 4;
+  return 4;
 }
 int32_t __cdecl delete_dynamic_stream(void* stream) {
   HostStreamRef* record = find_stream(stream);
@@ -952,10 +1485,23 @@ int32_t __cdecl delete_dynamic_stream(void* stream) {
     ++g_invalid_dynamic_stream_operations; return 4;
   }
   const int32_t deleted_order = record->mask->dynamic_order;
-  record->mask->deleted = true; record->mask->dynamic_modified = true;
-  for (auto& candidate : g_mask_scene)
-    if (!candidate.deleted && candidate.dynamic_order > deleted_order) --candidate.dynamic_order;
-  ++g_dynamic_stream_mutations; bump_render_project_timestamp(); return 0;
+  std::array<int32_t, kMaxHostMasks> staged_orders{};
+  for (std::size_t index = 0; index < g_mask_scene.size(); ++index) {
+    const auto& candidate = g_mask_scene[index];
+    staged_orders[index] = !candidate.deleted &&
+            candidate.dynamic_order > deleted_order
+        ? candidate.dynamic_order - 1 : candidate.dynamic_order;
+  }
+  return commit_dynamic_stream_mutation(
+      record,
+      [record, staged_orders]() noexcept {
+        record->mask->deleted = true;
+        record->mask->dynamic_modified = true;
+        for (std::size_t index = 0; index < g_mask_scene.size(); ++index)
+          g_mask_scene[index].dynamic_order = staged_orders[index];
+        ++g_dynamic_stream_mutations;
+        return true;
+      }) ? 0 : 4;
 }
 int32_t __cdecl reorder_dynamic_stream(void* stream, int32_t new_index) {
   HostStreamRef* record = find_stream(stream); const auto masks = ordered_active_masks();
@@ -964,29 +1510,60 @@ int32_t __cdecl reorder_dynamic_stream(void* stream, int32_t new_index) {
     ++g_invalid_dynamic_stream_operations; return 4;
   }
   const int32_t old_index = record->mask->dynamic_order;
-  for (auto* mask : masks) {
-    if (old_index < new_index && mask->dynamic_order > old_index && mask->dynamic_order <= new_index)
-      --mask->dynamic_order;
-    else if (old_index > new_index && mask->dynamic_order >= new_index && mask->dynamic_order < old_index)
-      ++mask->dynamic_order;
+  std::array<int32_t, kMaxHostMasks> staged_orders{};
+  for (std::size_t index = 0; index < g_mask_scene.size(); ++index) {
+    const auto& mask = g_mask_scene[index];
+    staged_orders[index] = mask.dynamic_order;
+    if (old_index < new_index && mask.dynamic_order > old_index &&
+        mask.dynamic_order <= new_index)
+      --staged_orders[index];
+    else if (old_index > new_index && mask.dynamic_order >= new_index &&
+             mask.dynamic_order < old_index)
+      ++staged_orders[index];
   }
-  record->mask->dynamic_order = new_index; record->mask->dynamic_modified = true;
-  ++g_dynamic_stream_mutations; bump_render_project_timestamp(); return 0;
+  const std::size_t record_index =
+      static_cast<std::size_t>(record->mask - g_mask_scene.data());
+  staged_orders[record_index] = new_index;
+  return commit_dynamic_stream_mutation(
+      record,
+      [record, staged_orders]() noexcept {
+        for (std::size_t index = 0; index < g_mask_scene.size(); ++index)
+          g_mask_scene[index].dynamic_order = staged_orders[index];
+        record->mask->dynamic_modified = true;
+        ++g_dynamic_stream_mutations;
+        return true;
+      }) ? 0 : 4;
 }
 int32_t __cdecl duplicate_dynamic_stream(int32_t plugin_id, void* stream, int32_t* new_index) {
   HostStreamRef* record = find_stream(stream);
   if (plugin_id != 1 || !record || record->kind != DynamicNodeKind::MaskAtom || !record->mask ||
-      g_mask_scene.size() >= kMaxHostMasks) {
+      g_mask_scene.size() >= kMaxHostMasks ||
+      g_mask_scene.capacity() < kMaxHostMasks ||
+      g_next_mask_id <= 0 ||
+      g_next_mask_id > std::numeric_limits<int32_t>::max() - 0x10000000 ||
+      g_next_stream_id <= 0 ||
+      g_next_stream_id > std::numeric_limits<int32_t>::max() - 3) {
     ++g_invalid_dynamic_stream_operations; return 4;
   }
   HostMask copy = *record->mask;
   copy.mask_live = false; copy.stream_live = false; copy.value_live = false; copy.deleted = false;
-  copy.id = g_next_mask_id++; copy.outline_stream_id = g_next_stream_id++;
-  copy.feather_stream_id = g_next_stream_id++; copy.opacity_stream_id = g_next_stream_id++;
-  copy.expansion_stream_id = g_next_stream_id++; copy.dynamic_order = static_cast<int32_t>(active_mask_count());
-  copy.dynamic_modified = true; g_mask_scene.push_back(std::move(copy));
-  if (new_index) *new_index = g_mask_scene.back().dynamic_order;
-  ++g_dynamic_stream_mutations; bump_render_project_timestamp(); return 0;
+  copy.id = g_next_mask_id; copy.outline_stream_id = g_next_stream_id;
+  copy.feather_stream_id = g_next_stream_id + 1;
+  copy.opacity_stream_id = g_next_stream_id + 2;
+  copy.expansion_stream_id = g_next_stream_id + 3;
+  copy.dynamic_order = static_cast<int32_t>(active_mask_count());
+  copy.dynamic_modified = true;
+  const int32_t candidate_index = copy.dynamic_order;
+  return commit_dynamic_stream_mutation(
+      record,
+      [&copy, new_index, candidate_index]() noexcept {
+        g_mask_scene.push_back(std::move(copy));
+        ++g_next_mask_id;
+        g_next_stream_id += 4;
+        if (new_index) *new_index = candidate_index;
+        ++g_dynamic_stream_mutations;
+        return true;
+      }) ? 0 : 4;
 }
 int32_t __cdecl set_dynamic_stream_name(void* stream, const uint16_t* name) {
   HostStreamRef* record = find_stream(stream);
@@ -995,9 +1572,16 @@ int32_t __cdecl set_dynamic_stream_name(void* stream, const uint16_t* name) {
   }
   std::size_t length = 0; while (length <= 127 && name[length]) ++length;
   if (length > 127) { ++g_invalid_dynamic_stream_operations; return 4; }
-  record->mask->dynamic_name.assign(reinterpret_cast<const char16_t*>(name), length);
-  record->mask->dynamic_modified = true; ++g_dynamic_stream_mutations;
-  bump_render_project_timestamp(); return 0;
+  std::u16string candidate(
+      reinterpret_cast<const char16_t*>(name), length);
+  return commit_dynamic_stream_mutation(
+      record,
+      [record, candidate = std::move(candidate)]() mutable noexcept {
+        record->mask->dynamic_name = std::move(candidate);
+        record->mask->dynamic_modified = true;
+        ++g_dynamic_stream_mutations;
+        return true;
+      }) ? 0 : 4;
 }
 int32_t __cdecl can_add_dynamic_stream(void* stream, const char* match_name, uint8_t* can_add) {
   HostStreamRef* record = find_stream(stream);
@@ -1010,14 +1594,53 @@ int32_t __cdecl add_dynamic_stream(int32_t plugin_id, void* stream, const char* 
                                    void** added) {
   HostStreamRef* group = find_stream(stream); uint8_t can_add{};
   if (plugin_id != 1 || !added || can_add_dynamic_stream(stream, match_name, &can_add) != 0 ||
-      !can_add || !group) { if (added) *added = nullptr; ++g_invalid_dynamic_stream_operations; return 4; }
-  HostMask mask; mask.id = g_next_mask_id++; mask.outline_stream_id = g_next_stream_id++;
-  mask.feather_stream_id = g_next_stream_id++; mask.opacity_stream_id = g_next_stream_id++;
-  mask.expansion_stream_id = g_next_stream_id++; mask.dynamic_order = static_cast<int32_t>(active_mask_count());
-  mask.dynamic_modified = true; g_mask_scene.push_back(std::move(mask));
-  ++g_dynamic_stream_mutations;
-  bump_render_project_timestamp();
-  return create_stream_ref(&g_mask_scene.back(), DynamicNodeKind::MaskAtom, -1, added);
+      !can_add || !group || group->kind != DynamicNodeKind::MaskParade ||
+      g_stream_refs.size() >= 64 ||
+      g_mask_scene.capacity() < kMaxHostMasks ||
+      g_next_mask_id <= 0 ||
+      g_next_mask_id > std::numeric_limits<int32_t>::max() - 0x10000000 ||
+      g_next_stream_id <= 0 ||
+      g_next_stream_id > std::numeric_limits<int32_t>::max() - 3) {
+    ++g_invalid_dynamic_stream_operations;
+    return 4;
+  }
+  auto& registry = aexcompat::scene_model::registry();
+  aexcompat::scene_model::Identity layer{};
+  if (!registry.identity_for_object(
+          1, 2001, aexcompat::scene_model::ObjectKind::layer, layer) ||
+      !registry.can_create_children(layer, 1, 1)) {
+    ++g_invalid_dynamic_stream_operations;
+    return 4;
+  }
+  HostMask mask;
+  mask.id = g_next_mask_id;
+  mask.outline_stream_id = g_next_stream_id;
+  mask.feather_stream_id = g_next_stream_id + 1;
+  mask.opacity_stream_id = g_next_stream_id + 2;
+  mask.expansion_stream_id = g_next_stream_id + 3;
+  mask.dynamic_order = static_cast<int32_t>(active_mask_count());
+  mask.dynamic_modified = true;
+  return commit_dynamic_stream_mutation(
+      group,
+      [&mask, added]() noexcept {
+        const int32_t saved_mask_id = g_next_mask_id;
+        const int32_t saved_stream_id = g_next_stream_id;
+        g_mask_scene.push_back(std::move(mask));
+        ++g_next_mask_id;
+        g_next_stream_id += 4;
+        void* created = nullptr;
+        if (create_stream_ref(
+                &g_mask_scene.back(), DynamicNodeKind::MaskAtom,
+                -1, &created) != 0) {
+          g_mask_scene.pop_back();
+          g_next_mask_id = saved_mask_id;
+          g_next_stream_id = saved_stream_id;
+          return false;
+        }
+        *added = created;
+        ++g_dynamic_stream_mutations;
+        return true;
+      }) ? 0 : 4;
 }
 int32_t __cdecl get_dynamic_match_name(void* stream, char* match_name) {
   HostStreamRef* record = find_stream(stream);
@@ -1028,7 +1651,7 @@ int32_t __cdecl get_dynamic_match_name(void* stream, char* match_name) {
 int32_t __cdecl get_new_parent_dynamic_stream(int32_t plugin_id, void* stream, void** parent) {
   HostStreamRef* record = find_stream(stream);
   if (plugin_id != 1 || !record || !parent || record->kind == DynamicNodeKind::LayerRoot) {
-    if (parent) *parent = nullptr; return 4;
+    return 4;
   }
   DynamicNodeKind kind = record->kind == DynamicNodeKind::MaskParade ? DynamicNodeKind::LayerRoot :
       record->kind == DynamicNodeKind::MaskAtom ? DynamicNodeKind::MaskParade : DynamicNodeKind::MaskAtom;
@@ -1404,6 +2027,11 @@ bool configure_mask_scene(const std::string& scene_id) {
       {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world});
   if (!g_stream_refs.empty() || !g_stream_values.empty() ||
       !g_add_keyframe_transactions.empty()) return false;
+  try {
+    g_stream_values.reserve(kMaxCheckedStreamValues);
+  } catch (...) {
+    return false;
+  }
   aexcompat::mask_runtime::SceneSeed seed;
   if (!aexcompat::mask_runtime::build_scene_seed(scene_id, seed)) return false;
   g_mask_scene.clear();
@@ -1444,9 +2072,23 @@ HostMask* find_mask(void* handle) {
   return found == g_mask_scene.end() ? nullptr : &*found;
 }
 HostStreamRef* find_stream(void* handle) {
-  const auto found = std::find_if(g_stream_refs.begin(), g_stream_refs.end(),
-      [handle](auto& stream) { return handle == &stream.opaque; });
-  return found == g_stream_refs.end() ? nullptr : &*found;
+  aexcompat::scene_model::ObjectSnapshot resolved{};
+  int32_t possession_id = 0;
+  auto& registry = aexcompat::scene_model::registry();
+  if (!registry.resolve(handle, aexcompat::scene_model::ObjectKind::stream,
+                        resolved) ||
+      !registry.possession(
+          handle, aexcompat::scene_model::ObjectKind::stream,
+          possession_id) ||
+      possession_id != 1)
+    return nullptr;
+  auto* record = static_cast<HostStreamRef*>(resolved.legacy_handle);
+  const auto found = std::find_if(
+      g_stream_refs.begin(), g_stream_refs.end(),
+      [record](auto& stream) { return record == &stream; });
+  return found == g_stream_refs.end() ||
+      found->identity != resolved.identity ||
+      found->handle != handle ? nullptr : &*found;
 }
 OutlineData* find_outline(void* handle) {
   const auto found = std::find_if(g_mask_scene.begin(), g_mask_scene.end(),

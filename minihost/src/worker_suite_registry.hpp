@@ -26,6 +26,7 @@ using SuiteResolver = SuiteResolveResult (*)(
     void* context, const char* name, int32_t version, const void** suite);
 
 enum class UnsupportedSuiteId : uint8_t {
+  aegp_proj_9,
   aegp_item_14,
   aegp_item_10,
   aegp_comp_25,
@@ -90,6 +91,10 @@ class SuiteRegistry final {
   uint32_t release_count() const;
   std::string live_summary() const;
   suite_runtime::SuiteLeaseSnapshot snapshot() const;
+  uint32_t release_since(
+      const suite_runtime::SuiteLeaseSnapshot& baseline,
+      TraceWriter* trace_writer);
+  uint32_t force_release_all() noexcept;
   std::string missing_suites_report_json() const;
   std::string unsupported_suite_calls_report_json() const;
   std::string suite_timeline_report_json() const;

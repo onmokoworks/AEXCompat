@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/schemas/aegp-scene-model-selftest.schema.json",
+  "title": "AEXCompat AEGP scene model self-test evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "aegp_scene_model",
+    "fixture",
+    "identity",
+    "cycles",
+    "order",
+    "generation",
+    "hashes",
+    "diagnostics",
+    "cleanup",
+    "unsupported_slot",
+    "unsupported_slots_preserved"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "aegp_scene_model": {"const": "passed"},
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projects", "mask_api", "parent_camera_zoom_api", "effect_count"],
+      "properties": {
+        "projects": {"const": 2},
+        "mask_api": {"const": true},
+        "parent_camera_zoom_api": {"const": true},
+        "effect_count": {"type": "integer", "minimum": 2, "maximum": 8}
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "typed",
+        "fixture_lookup",
+        "effect_suite_acquired",
+        "effect_applied",
+        "pointer_id_mismatch_rejected",
+        "duplicate_stable_id_rejected"
+      ],
+      "properties": {
+        "typed": {"const": true},
+        "fixture_lookup": {"const": true},
+        "effect_suite_acquired": {"const": true},
+        "effect_applied": {"const": true},
+        "pointer_id_mismatch_rejected": {"const": true},
+        "duplicate_stable_id_rejected": {"const": true}
+      }
+    },
+    "cycles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direct_rejected", "indirect_rejected", "cross_project_rejected"],
+      "properties": {
+        "direct_rejected": {"const": true},
+        "indirect_rejected": {"const": true},
+        "cross_project_rejected": {"const": true}
+      }
+    },
+    "order": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_effect_order",
+        "duplicate_layer_stack_rejected",
+        "failure_state_unchanged",
+        "failure_receipt_unchanged",
+        "concurrent_effect_flags_serialized",
+        "effect_order_hash"
+      ],
+      "properties": {
+        "registry_effect_order": {"const": true},
+        "duplicate_layer_stack_rejected": {"const": true},
+        "failure_state_unchanged": {"const": true},
+        "failure_receipt_unchanged": {"const": true},
+        "concurrent_effect_flags_serialized": {"const": true},
+        "effect_order_hash": {"$ref": "#/$defs/hash64"}
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before", "after", "old_stage_invalidated", "old_receipt_invalidated", "direct_bump_receipt_invalidated", "in_flight_receipt_rejected"],
+      "properties": {
+        "before": {"type": "integer", "minimum": 1},
+        "after": {"type": "integer", "minimum": 2},
+        "old_stage_invalidated": {"const": true},
+        "old_receipt_invalidated": {"const": true},
+        "direct_bump_receipt_invalidated": {"const": true},
+        "in_flight_receipt_rejected": {"const": true}
+      }
+    },
+    "hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage_identity", "trace", "dependencies"],
+      "properties": {
+        "stage_identity": {"$ref": "#/$defs/hash64"},
+        "trace": {"$ref": "#/$defs/hash64"},
+        "dependencies": {"$ref": "#/$defs/hash64"}
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "typed_registrations",
+        "identity_mismatch_rejections",
+        "duplicate_identity_rejections",
+        "cross_project_rejections",
+        "registration_cycle_rejections",
+        "stale_stage_invalidations",
+        "stale_receipt_invalidations",
+        "invalid_handle_rejections"
+      ],
+      "properties": {
+        "typed_registrations": {"type": "integer", "minimum": 2},
+        "identity_mismatch_rejections": {"type": "integer", "minimum": 0},
+        "duplicate_identity_rejections": {"type": "integer", "minimum": 1},
+        "cross_project_rejections": {"type": "integer", "minimum": 1},
+        "registration_cycle_rejections": {"type": "integer", "minimum": 2},
+        "stale_stage_invalidations": {"type": "integer", "minimum": 1},
+        "stale_receipt_invalidations": {"type": "integer", "minimum": 1},
+        "invalid_handle_rejections": {"type": "integer", "minimum": 1}
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "balanced",
+        "live_receipts",
+        "live_bytes",
+        "reserved_receipts",
+        "invalid_handle_distinguished"
+      ],
+      "properties": {
+        "balanced": {"const": true},
+        "live_receipts": {"const": 0},
+        "live_bytes": {"const": 0},
+        "reserved_receipts": {"const": 0},
+        "invalid_handle_distinguished": {"const": true}
+      }
+    },
+    "unsupported_slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observed",
+        "suite",
+        "version",
+        "slot",
+        "error",
+        "call_count",
+        "distinct_from_invalid_handle"
+      ],
+      "properties": {
+        "observed": {"const": true},
+        "suite": {"const": "AEGP Effect Suite"},
+        "version": {"const": 4},
+        "slot": {"const": 7},
+        "error": {"const": 4},
+        "call_count": {"const": 1},
+        "distinct_from_invalid_handle": {"const": true}
+      }
+    },
+    "unsupported_slots_preserved": {"const": true}
+  },
+  "$defs": {
+    "hash64": {
+      "type": "string",
+      "pattern": "^(?!0{16}$)[0-9a-f]{16}$"
+    }
+  }
+}

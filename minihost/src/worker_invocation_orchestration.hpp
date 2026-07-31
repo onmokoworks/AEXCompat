@@ -113,6 +113,7 @@ struct InvocationState {
     bool aegp_switch_roundtrip_mode{};
     bool aegp_comp_idle_roundtrip_mode{};
     bool aegp_init_mode{};
+    bool aegp_boundary_regression_mode{};
     bool skip_about_mode{};
     bool user_changed_param_requested{};
     int32_t user_changed_param_slot{-1};

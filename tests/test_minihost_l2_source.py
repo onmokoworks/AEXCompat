@@ -169,6 +169,8 @@ class MinihostL2SourceTests(unittest.TestCase):
         for marker in ("struct Request", "struct Hooks", "struct Result"):
             self.assertIn(marker, header)
         for marker in ('L"--self-test-aegp-layer-source-item"',
+                       'L"--self-test-aegp-scene-registry-suites"',
+                       'L"--self-test-aegp-scene-mutation-transactions"',
                        'L"--self-test-pf-path-data-hardening"',
                        'L"--self-test-pf-world-registry"',
                        'L"--self-test-pf-ae-channel-transport"',
@@ -197,6 +199,7 @@ class MinihostL2SourceTests(unittest.TestCase):
                      "verify_aegp_apply_effect",
                      "verify_aegp_effect_stack",
                      "verify_aegp_projector_levels",
+                     "verify_aegp_scene_registry_suites",
                      "verify_aegp_effect_param_union_suite4",
                      "verify_aegp_installed_effect_catalog_suite4"):
             self.assertIn(f"bool {name}()", implementation)
@@ -1138,9 +1141,9 @@ class MinihostL2SourceTests(unittest.TestCase):
         text = l2_family_source()
         for marker in ('L"--aegp-active-idle-roundtrip"', '"AEGP Item Suite"',
                        "version == 14", "static_assert(sizeof(AegpItemSuite) == 208)",
-                       "*item = (g_aegp_update_menu_mode || g_aegp_command_roundtrip_mode ||",
+                       "if (!(g_aegp_update_menu_mode || g_aegp_command_roundtrip_mode ||",
                        "g_aegp_comp_idle_roundtrip_mode)",
-                       "? &g_aegp_comp_item : nullptr",
+                       "borrow_scene_object(scene_registry().active_item())",
                        "Always toggle OFF before unload"):
             self.assertIn(marker, text)
 
@@ -1155,8 +1158,8 @@ class MinihostL2SourceTests(unittest.TestCase):
                        "sizeof(g_aegp_layer_suite8) == 400",
                        "sizeof(g_aegp_effect_suite4) == 176",
                        "sizeof(g_aegp_stream_suite6) == 184",
-                       "item != &g_aegp_comp_item", "comp != &g_aegp_comp",
-                       "g_aegp_layers.size()", "aegp_layer_index(layer)",
+                       "resolve_scene_item", "resolve_scene_comp",
+                       "scene_registry().layer_count", "aegp_layer_index(layer)",
                        "aegp_get_active_layer", "aegp_get_layer_parent_comp",
                        "aegp_get_layer_parent", "aegp_get_layer_from_id",
                        "g_aegp_layer_suite5[4] =",
@@ -1200,9 +1203,9 @@ class MinihostL2SourceTests(unittest.TestCase):
                        "g_aegp_collection_creates == g_aegp_collection_disposes",
                        '"collection_lifetimes_balanced\\\":"',
                        '"aegp_memory_lifetimes_balanced\\\":"',
-                       "aegp_get_layer_name", "make_utf16_handle(u\"Layer \"",
-                       "make_utf16_handle(u\"Source \"", '"layer_name_calls\\\":"',
-                       "make_utf16_handle(u\"AEXCompat Composition\"",
+                       "aegp_get_layer_name", "make_utf16_handle(layer_value",
+                       "make_utf16_handle(source_value", '"layer_name_calls\\\":"',
+                       "make_utf16_handle(value, \"item name\"",
                        '"item_name_calls\\\":"', '"item_duration_calls\\\":"',
                        'name = u"Amount"', 'name = u"Center"',
                        'name = u"Vector"', 'name = u"Tint"',

@@ -27,6 +27,7 @@ class SuiteLeaseTracker {
   uint32_t release_count() const;
   std::string live_summary() const;
   SuiteLeaseSnapshot snapshot() const;
+  uint32_t force_release_all() noexcept;
 
  private:
   mutable std::mutex mutex_;

@@ -54,10 +54,16 @@ def test_pf_admission_rejects_aegp_before_executable_load():
     assert '"dnik", 4' in preflight
     assert '"xgEA", 4' in preflight
     assert "FreeLibrary(preflight_module)" in preflight
-    admission = SOURCE[SOURCE.index("if (is_aegp_candidate_without_execution"):
+    admission = SOURCE[SOURCE.index("if (!request.allow_aegp_plugin"):
                         SOURCE.index("if (!SetDefaultDllDirectories")]
+    assert "!request.allow_aegp_plugin" in admission
     assert 'plugin_kind:aegp_candidate\\n' in admission
     assert "return 12" in admission
+
+
+def test_only_explicit_aegp_modes_opt_in_to_aegp_admission():
+    assert "bool allow_aegp_plugin{}" in HEADER
+    assert "runtime_request.allow_aegp_plugin = g_aegp_init_mode;" in MAIN
 
 
 def test_admission_keeps_runtime_path_data_out_of_serialized_diagnostics():

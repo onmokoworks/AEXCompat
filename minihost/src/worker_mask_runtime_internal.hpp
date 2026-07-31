@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "worker_aegp_scene_model.hpp"
+
 namespace aexcompat::l2_detail {
 
 struct OpaqueHostObject { uint32_t tag; };
@@ -30,6 +32,7 @@ struct HostKeyframe : OutlineData {
   OutlineData spatial_in; OutlineData spatial_out;
   std::array<KeyframeEase, kHostTemporalDimensions> temporal_in{};
   std::array<KeyframeEase, kHostTemporalDimensions> temporal_out{};
+  aexcompat::scene_model::Identity identity{};
 };
 struct HostMask : OutlineData {
   OpaqueHostObject mask{0x4d41534b};
@@ -50,6 +53,9 @@ enum class DynamicNodeKind { MaskOutline, LayerRoot, MaskParade, MaskAtom,
 struct HostStreamRef {
   OpaqueHostObject opaque{0x5354524d}; HostMask* mask{}; int32_t selector{}, unique_id{};
   uint32_t live_values{}; DynamicNodeKind kind{DynamicNodeKind::MaskOutline};
+  int32_t owner_plugin_id{1};
+  aexcompat::scene_model::Identity identity{};
+  void* handle{};
 };
 struct StreamValue {
   void* stream; union { void* value; double one_d; double two_d[2]; std::byte raw_value[32]; };
@@ -57,6 +63,7 @@ struct StreamValue {
 struct CheckedStreamValue {
   HostStreamRef* stream{}; OutlineData* outline{}; HostKeyframe* source_keyframe{};
   std::unique_ptr<OutlineData> owned_outline;
+  aexcompat::scene_model::Identity identity{};
 };
 struct MaskLifetimeCounts {
   uint32_t masks_acquired{}, masks_disposed{}, streams_acquired{}, streams_disposed{},
@@ -77,6 +84,7 @@ extern uint32_t g_invalid_outline_operations, g_outline_mutations, g_mask_mutati
     g_dynamic_stream_queries, g_dynamic_stream_mutations, g_invalid_dynamic_stream_operations,
     g_layer_dynamic_flags, g_mask_parade_dynamic_flags;
 extern int32_t g_next_mask_id, g_next_stream_id;
+extern int32_t g_keyframe_apply_failure_after;
 inline constexpr std::size_t kMaxHostMasks = 8, kMaxOutlineVertices = 64,
     kMaxOutlineFeathers = 64, kMaxKeyframesPerStream = 64, kMaxCheckedStreamValues = 256;
 extern std::list<AddKeyframesTransaction> g_add_keyframe_transactions;
@@ -93,6 +101,10 @@ bool dynamic_leaf(DynamicNodeKind kind);
 OutlineData* sampled_outline(HostStreamRef*, const HostTime*, std::unique_ptr<OutlineData>&);
 int32_t create_stream_ref(HostMask*, DynamicNodeKind, int32_t, void**);
 HostKeyframe* keyframe_at(HostStreamRef*, int32_t);
+bool ensure_keyframe_identity(HostStreamRef*, HostKeyframe*, int32_t);
+AddKeyframesTransaction* find_add_transaction(void*);
+void inject_keyframe_apply_failure_after(int32_t applied_count) noexcept;
+uint64_t mask_scene_fingerprint() noexcept;
 bool valid_time_mode(int16_t mode);
 bool valid_stream_plugin(int32_t plugin_id);
 int32_t __cdecl get_mask_outline_vertex_info(void*, int32_t, MaskVertex*);

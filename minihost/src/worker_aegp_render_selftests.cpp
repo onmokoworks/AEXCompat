@@ -59,6 +59,10 @@ int32_t __cdecl render_checkout_frame_reject(void*, AegpRenderCancelV1, void*, v
 void clear_staged_item_worlds_for_test();
 bool verify_item_render_cycle_contract(void*);
 bool prepare_scene_staged_item(void*);
+bool publish_scene_scheduler_stage(
+    void*, aexcompat::aegp_staged_item_runtime::StageKind, uint64_t,
+    AegpTime, AegpTime, int8_t, uint8_t, int32_t, int32_t, int32_t,
+    int32_t, const void*, uint64_t*);
 
 void write_staged_test_channel(std::byte* pixel, int32_t pixel_bytes,
                                int channel, float value) {
@@ -281,6 +285,9 @@ bool verify_aegp_item_staged_worlds() {
   if (!render_options_lifetimes_balanced() || !async_receipt_lifetimes_balanced())
     return false;
   clear_staged_item_worlds_for_test();
+  struct StagedWorldCleanup final {
+    ~StagedWorldCleanup() { clear_staged_item_worlds_for_test(); }
+  } staged_world_cleanup;
   const AegpTime time{5, 24}, step{1, 24};
   constexpr int32_t width = 5, height = 4;
   auto fixture = [=](int32_t pixel_bytes) {
@@ -309,14 +316,18 @@ bool verify_aegp_item_staged_worlds() {
              aexcompat::aegp_staged_item_runtime::StageKind::upstream,
              aexcompat::aegp_staged_item_runtime::StageKind::all_effects,
              aexcompat::aegp_staged_item_runtime::StageKind::downstream}) {
-      if (!aexcompat::aegp_staged_item_runtime::publish_stage_world(
+      if (!publish_scene_scheduler_stage(
               aegp_comp_item_handle(), kind, production_effect_identity,
               time, step, 1, 0, formats[depth], width, height,
-              width * pixel_bytes, pixels.data()))
+              width * pixel_bytes, pixels.data(), nullptr))
         return false;
     }
-    if (!aexcompat::aegp_staged_item_runtime::publish_world(aegp_comp_item_handle(), time, step, 1, 0,
-            formats[depth], width, height, width * pixel_bytes, pixels.data())) return false;
+    if (!publish_scene_scheduler_stage(
+            aegp_comp_item_handle(),
+            aexcompat::aegp_staged_item_runtime::StageKind::final_item, 0,
+            time, step, 1, 0, formats[depth], width, height,
+            width * pixel_bytes, pixels.data(), nullptr))
+      return false;
   }
   void* options = nullptr;
   if (render_options_new_from_item(1, aegp_comp_item_handle(), &options) != 0 ||
@@ -886,14 +897,9 @@ bool verify_aegp_item_staged_worlds() {
   clear_staged_item_worlds_for_test();
   void* const direct_item = reinterpret_cast<void*>(0xc100);
   std::array<void*, 1> direct_dependency{{direct_item}};
-  if (!aexcompat::aegp_staged_item_runtime::register_item(
+  if (aexcompat::aegp_staged_item_runtime::register_item(
           direct_item, 3001, SamplingPolicy::exact, direct_dependency.data(),
-          direct_dependency.size(), nullptr, 0) ||
-      !publish_scheduler_stage(direct_item, StageKind::final_item, 0, time, 61))
-    return false;
-  rejected = reinterpret_cast<void*>(1);
-  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
-          make_request(direct_item, time), &rejected) == 0 || rejected)
+          direct_dependency.size(), nullptr, 0))
     return false;
   clear_staged_item_worlds_for_test();
   void* const indirect_a = reinterpret_cast<void*>(0xc200);
@@ -903,15 +909,9 @@ bool verify_aegp_item_staged_worlds() {
   if (!aexcompat::aegp_staged_item_runtime::register_item(
           indirect_a, 3002, SamplingPolicy::exact, a_dependency.data(), 1,
           nullptr, 0) ||
-      !aexcompat::aegp_staged_item_runtime::register_item(
+      aexcompat::aegp_staged_item_runtime::register_item(
           indirect_b, 3003, SamplingPolicy::exact, b_dependency.data(), 1,
-          nullptr, 0) ||
-      !publish_scheduler_stage(indirect_b, StageKind::final_item, 0, time, 62) ||
-      !publish_scheduler_stage(indirect_a, StageKind::final_item, 0, time, 63))
-    return false;
-  rejected = reinterpret_cast<void*>(1);
-  if (aexcompat::aegp_staged_item_runtime::publish_registered_receipt(
-          make_request(indirect_a, time), &rejected) == 0 || rejected)
+          nullptr, 0))
     return false;
   clear_staged_item_worlds_for_test();
   std::array<void*, 9> deep_items{};

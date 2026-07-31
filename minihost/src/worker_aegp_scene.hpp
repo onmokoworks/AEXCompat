@@ -113,15 +113,29 @@ inline constexpr unsigned kAegpSceneLegacyEffectStreamLimit = 16;
 
 struct AegpStagedItemMetadata {
   uint64_t stable_identity{};
+  aexcompat::scene_model::Identity identity{};
+  aexcompat::scene_model::Identity project{};
   aexcompat::scene_runtime::AegpItemSamplingPolicy sampling_policy{
       aexcompat::scene_runtime::AegpItemSamplingPolicy::exact};
   std::array<void*, 3> direct_dependencies{};
+  std::array<aexcompat::scene_model::Identity, 3> dependency_identities{};
   std::size_t direct_dependency_count{};
   std::array<uint64_t,
              aexcompat::scene_runtime::kAegpEffectInstanceCapacity>
       effect_instances{};
+  std::array<aexcompat::scene_model::Identity,
+             aexcompat::scene_runtime::kAegpEffectInstanceCapacity>
+      effect_identities{};
+  std::array<uint32_t,
+             aexcompat::scene_runtime::kAegpEffectInstanceCapacity>
+      effect_orders{};
   std::size_t effect_instance_count{};
 };
+struct AegpFloatPoint {
+  float x{};
+  float y{};
+};
+static_assert(sizeof(AegpFloatPoint) == 8);
 
 using AegpTime = aexcompat::suite_abi::AegpTime;
 using AegpLayerEffectBoundary = aexcompat::render_options::LayerEffectBoundary;
@@ -144,6 +158,7 @@ extern std::array<int32_t, 3>& g_aegp_layer_parent_indices;
 extern AegpItemSuite g_aegp_item_suite;
 extern AegpLegacyItemSuite6 g_aegp_legacy_item_suite6;
 extern AegpCollectionSuite g_aegp_collection_suite;
+extern std::array<void*, 14> g_aegp_project_suite6;
 extern std::array<void*, 41> g_aegp_comp_suite10;
 extern std::array<void*, 28> g_aegp_comp_suite4;
 extern std::array<void*, 44> g_aegp_comp_suite11;
@@ -196,6 +211,8 @@ int32_t __cdecl aegp_get_layer_source_item(void* layer, void** item);
 int32_t __cdecl aegp_get_layer_parent_comp(void* layer, void** comp);
 int32_t __cdecl aegp_get_layer_name(int32_t, void*, void**, void**);
 int32_t __cdecl aegp_get_layer_parent(void* layer, void** parent);
+int32_t __cdecl aegp_set_layer_parent(void* layer, void* parent);
+int32_t __cdecl aegp_delete_layer(void* layer);
 int32_t __cdecl aegp_get_layer_from_id(void* comp, int32_t id, void** layer);
 int32_t __cdecl aegp_get_comp_selection(int32_t, void*, void**);
 int32_t __cdecl aegp_dispose_collection(void* collection);

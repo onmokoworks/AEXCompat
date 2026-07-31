@@ -128,11 +128,31 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
       collection_lifetimes_balanced &&
       aegp_memory_lifetimes_balanced && async_receipt_lifetimes_balanced() &&
       module_audit_ok;
+  const bool boundary_regression_passed =
+      in.boundary_regression_mode && in.entry_invoked && init_error != 0 &&
+      in.entry_fault !=
+          aexcompat::worker_runtime::aegp_entry_guard::FaultKind::none &&
+      leases_balanced && effect_lifetimes_balanced &&
+      stream_lifetimes_balanced && collection_lifetimes_balanced &&
+      aegp_memory_lifetimes_balanced && async_receipt_lifetimes_balanced() &&
+      module_audit_ok;
   std::cout << "{\"schema_version\":1,\"stage\":\"aegp_init\",\"status\":\""
             << (passed ? ((g_aegp_update_menu_mode || g_aegp_idle_mode || g_aegp_command_roundtrip_mode || g_aegp_active_idle_roundtrip_mode || g_aegp_comp_idle_roundtrip_mode) ? "event_completed" : "initialized") : "initialization_failed")
             << "\",\"identity_verified\":true,\"entrypoint\":\"EntryPointFunc\""
             << ",\"driver_major_version\":24,\"driver_minor_version\":0"
             << ",\"plugin_id\":1,\"init_error\":" << init_error
+            << ",\"entry_invoked\":" << (in.entry_invoked ? "true" : "false")
+            << ",\"entry_fault\":\""
+            << aexcompat::worker_runtime::aegp_entry_guard::fault_name(
+                   in.entry_fault)
+            << "\""
+            << ",\"entry_exception_code\":" << in.entry_exception_code
+            << ",\"forced_suite_releases\":"
+            << in.forced_suite_releases
+            << ",\"boundary_regression_mode\":"
+            << (in.boundary_regression_mode ? "true" : "false")
+            << ",\"boundary_regression_passed\":"
+            << (boundary_regression_passed ? "true" : "false")
             << ",\"global_refcon_nonnull\":" << (in.global_refcon_nonnull ? "true" : "false")
             << ",\"commands_created\":" << g_aegp_commands_created
             << ",\"menu_commands_inserted\":" << g_aegp_menu_commands_inserted
@@ -250,7 +270,7 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
             << ",\"render_performed\":"
             << (aexcompat::render_receipts::statistics().created > 0 ? "true" : "false")
             << ",\"module_audit\":" << module_audit_json() << "}\n";
-  return passed;
+  return passed || boundary_regression_passed;
 }
 
 }  // namespace aexcompat::l2_detail

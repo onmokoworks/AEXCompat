@@ -106,6 +106,7 @@
 #include "worker_aegp_render_selftests.hpp"
 #include "worker_aegp_async_layer_runtime.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
+#include "worker_aegp_scene_transaction.hpp"
 #include "worker_aegp_external_render_runtime.hpp"
 #include "worker_aegp_layer_render_runtime.hpp"
 #include "worker_aegp_item_render_runtime.hpp"

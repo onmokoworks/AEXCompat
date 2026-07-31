@@ -66,7 +66,10 @@ int parse_l2_modes(int argc, wchar_t** argv, InvocationState& target,
       (std::wstring(argv[1]) == L"--aegp-comp-idle-roundtrip" ||
        target.aegp_keyframe_roundtrip_mode || target.aegp_seek_roundtrip_mode ||
        target.aegp_trim_roundtrip_mode || target.aegp_switch_roundtrip_mode);
+  target.aegp_boundary_regression_mode = argc == 4 &&
+      std::wstring(argv[1]) == L"--aegp-init-boundary-test";
   target.aegp_init_mode = (argc == 4 && std::wstring(argv[1]) == L"--aegp-init") ||
+      target.aegp_boundary_regression_mode ||
       target.aegp_update_menu_mode || target.aegp_idle_mode ||
       target.aegp_command_roundtrip_mode || target.aegp_active_idle_roundtrip_mode ||
       target.aegp_comp_idle_roundtrip_mode;

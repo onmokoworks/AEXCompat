@@ -73,4 +73,13 @@ SuiteLeaseSnapshot SuiteLeaseTracker::snapshot() const {
   return result;
 }
 
+uint32_t SuiteLeaseTracker::force_release_all() noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  uint32_t released = 0;
+  for (const auto& entry : leases_) released += entry.second;
+  releases_ += released;
+  leases_.clear();
+  return released;
+}
+
 }  // namespace aexcompat::suite_runtime

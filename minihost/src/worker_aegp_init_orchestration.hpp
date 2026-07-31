@@ -1,5 +1,6 @@
 #pragma once
 
+#include "worker_aegp_entry_guard.hpp"
 #include "worker_aegp_init_execution.hpp"
 
 #include <cstdint>
@@ -31,6 +32,10 @@ struct OrchestrationRequest {
 struct OrchestrationResult {
   void* global_refcon{};
   int32_t init_error{};
+  aegp_entry_guard::FaultKind entry_fault{aegp_entry_guard::FaultKind::none};
+  uint32_t entry_exception_code{};
+  bool entry_invoked{};
+  uint32_t forced_suite_releases{};
   int32_t event_error{};
   int32_t death_error{};
   uint32_t hooks_invoked{};
