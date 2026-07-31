@@ -119,6 +119,7 @@ pub struct WgpuArtifactEvidence {
     pub toolchain_mode: String,
     pub source_sha256: String,
     pub compiler_sha256: String,
+    pub provenance_sha256: String,
     pub raw_spirv_sha256: String,
     pub normalized_options: Vec<String>,
 }

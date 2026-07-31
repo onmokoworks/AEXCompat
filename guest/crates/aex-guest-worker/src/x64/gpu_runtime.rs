@@ -227,9 +227,20 @@ impl GpuRuntime {
         backend_kind: GpuRuntimeBackendKind,
         device_index: u32,
     ) -> Result<GpuDeviceTokens, String> {
-        if self.backend.is_some() {
-            return Err("GPU runtime is already active".into());
-        }
+        self.begin_with_wgpu_config_loader(
+            backend_kind,
+            device_index,
+            WgpuCompilerConfig::from_process_env,
+        )
+    }
+
+    fn begin_with_wgpu_config_loader(
+        &mut self,
+        backend_kind: GpuRuntimeBackendKind,
+        device_index: u32,
+        load_wgpu_config: impl FnOnce() -> Result<WgpuCompilerConfig, String>,
+    ) -> Result<GpuDeviceTokens, String> {
+        self.prepare_begin_attempt()?;
         let (backend, opencl_evidence, wgpu_evidence) = match backend_kind {
             GpuRuntimeBackendKind::AppleOpenCl => {
                 let session = Session::select_gpu(device_index as usize)
@@ -250,7 +261,7 @@ impl GpuRuntime {
                 )
             }
             GpuRuntimeBackendKind::WgpuMetal => {
-                let config = WgpuCompilerConfig::from_process_env()?;
+                let config = load_wgpu_config()?;
                 let executor = WgpuExecutor::new(device_index, config)?;
                 let evidence = executor.initial_evidence();
                 (
@@ -266,18 +277,25 @@ impl GpuRuntime {
         let tokens = self.allocate_device_tokens()?;
         self.opencl_evidence = opencl_evidence;
         *self.wgpu_evidence.borrow_mut() = wgpu_evidence;
-        *self.wgpu_sticky_error.borrow_mut() = None;
         self.backend = Some(backend);
         self.device_index = Some(device_index);
         self.device_tokens = Some(tokens);
         Ok(tokens)
     }
 
-    #[cfg(test)]
-    pub(crate) fn begin_mock(&mut self, device_index: u32) -> Result<GpuDeviceTokens, String> {
+    fn prepare_begin_attempt(&mut self) -> Result<(), String> {
         if self.backend.is_some() {
             return Err("GPU runtime is already active".into());
         }
+        self.opencl_evidence = OpenClBridgeEvidence::default();
+        *self.wgpu_evidence.borrow_mut() = None;
+        *self.wgpu_sticky_error.borrow_mut() = None;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_mock(&mut self, device_index: u32) -> Result<GpuDeviceTokens, String> {
+        self.prepare_begin_attempt()?;
         let tokens = self.allocate_device_tokens()?;
         self.opencl_evidence = OpenClBridgeEvidence {
             device_index: Some(device_index),
@@ -290,8 +308,6 @@ impl GpuRuntime {
         self.backend = Some(GpuBackend::Mock);
         self.device_index = Some(device_index);
         self.device_tokens = Some(tokens);
-        *self.wgpu_evidence.borrow_mut() = None;
-        *self.wgpu_sticky_error.borrow_mut() = None;
         Ok(tokens)
     }
 
@@ -1295,7 +1311,8 @@ impl GpuRuntime {
             if let Some(live) = wgpu_live {
                 replace_resource_counts(&mut evidence.live_resources, live);
             }
-            evidence.cleanup_balanced = evidence.live_resources.is_zero();
+            evidence.cleanup_balanced =
+                evidence.live_resources.is_zero() && wgpu_sticky_error.is_none();
         }
         if let Some(detail) = wgpu_sticky_error {
             return Err(detail);
@@ -1469,6 +1486,51 @@ mod gpu_runtime_tests {
         first.finish().unwrap();
         assert_eq!(first.end().unwrap(), ObjectCounts::default());
         assert!(!first.is_active());
+    }
+
+    #[test]
+    fn failed_second_begin_clears_prior_evidence_before_config_loading() {
+        let mut runtime = GpuRuntime::default();
+        runtime.begin_mock(3).unwrap();
+        runtime.record_opencl_api_call("priorCall");
+        runtime.end().unwrap();
+        *runtime.wgpu_evidence.borrow_mut() = Some(WgpuRuntimeEvidence {
+            executor_available: true,
+            ..WgpuRuntimeEvidence::default()
+        });
+        *runtime.wgpu_sticky_error.borrow_mut() = Some("prior sticky error".into());
+        assert!(!runtime.opencl_evidence.api_calls.is_empty());
+
+        let error = runtime
+            .begin_with_wgpu_config_loader(GpuRuntimeBackendKind::WgpuMetal, 0, || {
+                Err("new configuration failure".into())
+            })
+            .unwrap_err();
+
+        assert_eq!(error, "new configuration failure");
+        assert_eq!(runtime.opencl_evidence, OpenClBridgeEvidence::default());
+        assert!(runtime.wgpu_evidence.borrow().is_none());
+        assert!(runtime.wgpu_sticky_error.borrow().is_none());
+        assert!(!runtime.is_active());
+    }
+
+    #[test]
+    fn sticky_wgpu_error_cannot_serialize_cleanup_as_balanced() {
+        let mut runtime = GpuRuntime::default();
+        runtime.begin_mock(0).unwrap();
+        *runtime.wgpu_evidence.borrow_mut() = Some(WgpuRuntimeEvidence {
+            executor_available: true,
+            cleanup_balanced: true,
+            ..WgpuRuntimeEvidence::default()
+        });
+        runtime.record_wgpu_sticky_error("proof dispatch failed");
+
+        assert_eq!(runtime.end().unwrap_err(), "proof dispatch failed");
+        let evidence = runtime.wgpu_evidence().unwrap();
+        assert!(!evidence.cleanup_balanced);
+        assert_eq!(evidence.last_error.as_deref(), Some("proof dispatch failed"));
+        let json = serde_json::to_value(evidence).unwrap();
+        assert_eq!(json["cleanup_balanced"], false);
     }
 
     #[test]

@@ -6,8 +6,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use aex_clspv::{
-    CompileRequest, CompilerIdentity, CompilerOutput, KernelArgumentKind, KernelReflection,
-    PinnedCompiler, SourceIdentity, ValidatedArtifact, validate_precompiled,
+    ArtifactProvenance, CompileRequest, CompilerIdentity, CompilerOutput, KernelArgumentKind,
+    KernelReflection, PinnedCompiler, SourceIdentity, ValidatedArtifact, validate_precompiled,
 };
 use aex_wgpu_compute::{
     BindingAccess, BufferBinding, DispatchReport, NagaDispatchDescriptor, ObjectCounts, Session,
@@ -32,6 +32,7 @@ const PRECOMPILED_SPIRV_ENV: &str = "AEXCOMPAT_WGPU_PRECOMPILED_SPIRV";
 const PRECOMPILED_SOURCE_SHA256_ENV: &str = "AEXCOMPAT_WGPU_PRECOMPILED_SOURCE_SHA256";
 const PRECOMPILED_SPIRV_SHA256_ENV: &str = "AEXCOMPAT_WGPU_PRECOMPILED_SPIRV_SHA256";
 const PRECOMPILED_COMPILER_SHA256_ENV: &str = "AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256";
+const PRECOMPILED_PROVENANCE_SHA256_ENV: &str = "AEXCOMPAT_WGPU_PRECOMPILED_PROVENANCE_SHA256";
 const MAX_PRECOMPILED_SPIRV_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WGPU_ARTIFACT_EVIDENCE: usize = 256;
 const MAX_WGPU_DISPATCH_EVIDENCE: usize = 1_024;
@@ -48,6 +49,7 @@ pub(super) enum WgpuCompilerConfig {
         source_sha256: [u8; 32],
         spirv_sha256: [u8; 32],
         compiler_sha256: [u8; 32],
+        provenance_sha256: [u8; 32],
     },
 }
 
@@ -63,12 +65,15 @@ impl WgpuCompilerConfig {
         let precompiled_source = read_env_value(&mut lookup, PRECOMPILED_SOURCE_SHA256_ENV)?;
         let precompiled_spirv = read_env_value(&mut lookup, PRECOMPILED_SPIRV_SHA256_ENV)?;
         let precompiled_compiler = read_env_value(&mut lookup, PRECOMPILED_COMPILER_SHA256_ENV)?;
+        let precompiled_provenance =
+            read_env_value(&mut lookup, PRECOMPILED_PROVENANCE_SHA256_ENV)?;
 
         let local_present = local_path.is_some() || local_sha.is_some();
         let precompiled_present = precompiled_path.is_some()
             || precompiled_source.is_some()
             || precompiled_spirv.is_some()
-            || precompiled_compiler.is_some();
+            || precompiled_compiler.is_some()
+            || precompiled_provenance.is_some();
         if local_present && precompiled_present {
             return Err("wgpu compiler configuration sets both local and precompiled modes".into());
         }
@@ -94,6 +99,10 @@ impl WgpuCompilerConfig {
             compiler_sha256: required_env_sha256(
                 precompiled_compiler,
                 PRECOMPILED_COMPILER_SHA256_ENV,
+            )?,
+            provenance_sha256: required_env_sha256(
+                precompiled_provenance,
+                PRECOMPILED_PROVENANCE_SHA256_ENV,
             )?,
         })
     }
@@ -145,6 +154,7 @@ enum WgpuToolchain {
         raw_spirv: Vec<u8>,
         source_sha256: [u8; 32],
         compiler: CompilerIdentity,
+        provenance_sha256: [u8; 32],
     },
 }
 
@@ -173,6 +183,7 @@ impl WgpuExecutor {
                 source_sha256,
                 spirv_sha256,
                 compiler_sha256,
+                provenance_sha256,
             } => {
                 let raw_spirv = read_precompiled_spirv(&spirv_path)?;
                 let actual_sha256: [u8; 32] = Sha256::digest(&raw_spirv).into();
@@ -187,6 +198,7 @@ impl WgpuExecutor {
                     raw_spirv,
                     source_sha256,
                     compiler: CompilerIdentity::for_precompiled(compiler_sha256),
+                    provenance_sha256,
                 }
             }
         };
@@ -235,6 +247,7 @@ impl WgpuExecutor {
                 raw_spirv,
                 source_sha256,
                 compiler,
+                provenance_sha256,
             } => {
                 if source_identity.as_bytes() != source_sha256 {
                     return Err(format!(
@@ -243,6 +256,7 @@ impl WgpuExecutor {
                         source_identity.to_hex()
                     ));
                 }
+                validate_precompiled_provenance(&request, compiler, provenance_sha256)?;
                 let output =
                     CompilerOutput::from_precompiled(raw_spirv.clone(), &request, compiler.clone())
                         .map_err(|error| error.to_string())?;
@@ -257,6 +271,7 @@ impl WgpuExecutor {
             toolchain_mode: mode.into(),
             source_sha256: provenance.source.to_hex(),
             compiler_sha256: provenance.compiler.binary_sha256_hex(),
+            provenance_sha256: provenance.cache_key_hex(),
             raw_spirv_sha256: hex_digest(artifact.raw_spirv_sha256()),
             normalized_options: provenance.normalized_options.clone(),
         };
@@ -291,6 +306,29 @@ impl WgpuExecutor {
     pub(super) fn live_objects(&self) -> ObjectCounts {
         self.session.live_objects()
     }
+}
+
+fn validate_precompiled_provenance(
+    request: &CompileRequest,
+    compiler: &CompilerIdentity,
+    expected_sha256: &[u8; 32],
+) -> Result<ArtifactProvenance, String> {
+    let provenance = ArtifactProvenance {
+        source: SourceIdentity::from_source(request.source()),
+        normalized_options: request
+            .normalized_options()
+            .map_err(|error| error.to_string())?,
+        compiler: compiler.clone(),
+    };
+    let actual_sha256 = provenance.cache_key();
+    if &actual_sha256 != expected_sha256 {
+        return Err(format!(
+            "precompiled provenance SHA-256 mismatch: expected {}, actual {}",
+            hex_digest(expected_sha256),
+            hex_digest(&actual_sha256)
+        ));
+    }
+    Ok(provenance)
 }
 
 fn read_precompiled_spirv(path: &Path) -> Result<Vec<u8>, String> {
@@ -926,6 +964,18 @@ fn hex_digest(digest: &[u8; 32]) -> String {
 mod tests {
     use super::*;
 
+    fn absolute_test_path(file_name: &str) -> String {
+        let temporary = std::env::temp_dir();
+        let absolute = if temporary.is_absolute() {
+            temporary
+        } else {
+            std::env::current_dir()
+                .expect("test current directory")
+                .join(temporary)
+        };
+        absolute.join(file_name).to_string_lossy().into_owned()
+    }
+
     fn config(values: &[(&str, &str)]) -> Result<WgpuCompilerConfig, String> {
         WgpuCompilerConfig::from_lookup(|key| {
             values
@@ -937,43 +987,120 @@ mod tests {
 
     #[test]
     fn compiler_config_rejects_missing_partial_and_mixed_modes() {
+        let compiler_path = absolute_test_path("aexcompat-test-clspv");
+        let spirv_path = absolute_test_path("aexcompat-test-kernel.spv");
         assert!(config(&[]).unwrap_err().contains("missing"));
         assert!(
-            config(&[(LOCAL_COMPILER_PATH_ENV, "/tmp/clspv")])
+            config(&[(LOCAL_COMPILER_PATH_ENV, compiler_path.as_str())])
                 .unwrap_err()
                 .contains(LOCAL_COMPILER_SHA256_ENV)
         );
         assert!(
             config(&[
-                (LOCAL_COMPILER_PATH_ENV, "/tmp/clspv"),
+                (LOCAL_COMPILER_PATH_ENV, compiler_path.as_str()),
                 (LOCAL_COMPILER_SHA256_ENV, &"11".repeat(32)),
-                (PRECOMPILED_SPIRV_ENV, "/tmp/kernel.spv"),
+                (PRECOMPILED_SPIRV_ENV, spirv_path.as_str()),
             ])
             .unwrap_err()
             .contains("both")
+        );
+        assert!(
+            config(&[
+                (PRECOMPILED_SPIRV_ENV, spirv_path.as_str()),
+                (PRECOMPILED_SOURCE_SHA256_ENV, &"22".repeat(32)),
+                (PRECOMPILED_SPIRV_SHA256_ENV, &"33".repeat(32)),
+                (PRECOMPILED_COMPILER_SHA256_ENV, &"44".repeat(32)),
+            ])
+            .unwrap_err()
+            .contains(PRECOMPILED_PROVENANCE_SHA256_ENV)
         );
     }
 
     #[test]
     fn compiler_config_accepts_complete_modes_without_exposing_paths() {
+        let compiler_path = absolute_test_path("aexcompat-test-clspv");
+        let spirv_path = absolute_test_path("aexcompat-test-kernel.spv");
         let local = config(&[
-            (LOCAL_COMPILER_PATH_ENV, "/tmp/clspv"),
+            (LOCAL_COMPILER_PATH_ENV, compiler_path.as_str()),
             (LOCAL_COMPILER_SHA256_ENV, &"11".repeat(32)),
         ])
         .unwrap();
         assert!(matches!(local, WgpuCompilerConfig::Local { .. }));
 
         let precompiled = config(&[
-            (PRECOMPILED_SPIRV_ENV, "/tmp/kernel.spv"),
+            (PRECOMPILED_SPIRV_ENV, spirv_path.as_str()),
             (PRECOMPILED_SOURCE_SHA256_ENV, &"22".repeat(32)),
             (PRECOMPILED_SPIRV_SHA256_ENV, &"33".repeat(32)),
             (PRECOMPILED_COMPILER_SHA256_ENV, &"44".repeat(32)),
+            (PRECOMPILED_PROVENANCE_SHA256_ENV, &"55".repeat(32)),
         ])
         .unwrap();
         assert!(matches!(
             precompiled,
             WgpuCompilerConfig::Precompiled { .. }
         ));
+    }
+
+    #[test]
+    fn precompiled_provenance_attests_canonical_options_and_fast_math() {
+        let source_sha256 =
+            parse_sha256("989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937")
+                .unwrap();
+        let compiler = CompilerIdentity::for_precompiled(
+            parse_sha256("6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a")
+                .unwrap(),
+        );
+        let request_with_fast_math = CompileRequest::new(
+            Vec::new(),
+            vec![
+                "-cl-single-precision-constant".to_string(),
+                "-cl-fast-relaxed-math".to_string(),
+            ],
+        );
+        let fixture_provenance = ArtifactProvenance {
+            source: SourceIdentity::from_sha256(source_sha256),
+            normalized_options: request_with_fast_math.normalized_options().unwrap(),
+            compiler: compiler.clone(),
+        };
+        assert_eq!(
+            fixture_provenance.cache_key_hex(),
+            "0372c252499d01cf530a2f8fd0365ca21355dd55eca758ae031d078d74522765"
+        );
+
+        let request_without_fast_math = CompileRequest::new(
+            Vec::new(),
+            vec!["-cl-single-precision-constant".to_string()],
+        );
+        let without_fast_math = ArtifactProvenance {
+            source: SourceIdentity::from_sha256(source_sha256),
+            normalized_options: request_without_fast_math.normalized_options().unwrap(),
+            compiler,
+        };
+        assert_ne!(
+            fixture_provenance.cache_key(),
+            without_fast_math.cache_key()
+        );
+    }
+
+    #[test]
+    fn precompiled_provenance_mismatch_fails_before_artifact_admission() {
+        let request = CompileRequest::new(
+            b"kernel void proof(global uint *value) { value[0] = 7; }".to_vec(),
+            vec!["-cl-fast-relaxed-math".to_string()],
+        );
+        let compiler = CompilerIdentity::for_precompiled([0x44; 32]);
+        let expected = ArtifactProvenance {
+            source: SourceIdentity::from_source(request.source()),
+            normalized_options: request.normalized_options().unwrap(),
+            compiler: compiler.clone(),
+        }
+        .cache_key();
+        validate_precompiled_provenance(&request, &compiler, &expected).unwrap();
+
+        let without_fast_math = CompileRequest::new(request.source().to_vec(), Vec::new());
+        let error =
+            validate_precompiled_provenance(&without_fast_math, &compiler, &expected).unwrap_err();
+        assert!(error.contains("precompiled provenance SHA-256 mismatch"));
     }
 
     #[test]
@@ -988,7 +1115,7 @@ mod tests {
                 "-cl-fast-relaxed-math".to_string()
             ]
         );
-        assert!(normalize_guest_build_options(Some("-I/tmp")).is_err());
+        assert!(normalize_guest_build_options(Some("-Iinjected")).is_err());
         assert!(
             normalize_guest_build_options(Some("-cl-fast-relaxed-math -cl-fast-relaxed-math"))
                 .is_err()
