@@ -13,6 +13,15 @@ DEFAULT_RGBA = "6f24052bf442cc05899fdfe3779514c610652c6ab1d8dcba083dbf36f9ad0617
 BRIGHTNESS_RAW = "d6f672fae016974aec384a4533a02ea56c46322d3e31b8b923f0c9b4c122455a"
 BRIGHTNESS_RGBA = "6677d579bc6680478e5bd53897795d726ff999ff3af13c482686fa799c55e6f8"
 OLMBLUR_RAW = "3f174ac3d9c0cc8d573dbb4424982e7465a2628e07327e200a8256b59aa96693"
+IMPLEMENTATION_HEAD = "c6a4181daf1af49372b115444b8982039f4bd418"
+BASE_HEAD = "93cfbb7e9f25f296636444cc54d1a97624e12bfb"
+PROVENANCE_SHA256 = "0372c252499d01cf530a2f8fd0365ca21355dd55eca758ae031d078d74522765"
+LIVE_RESOURCE_SCOPE = (
+    "Counts cover AEXCompat-owned dispatch-scoped wgpu handles only, not session "
+    "handles or wgpu/Metal driver allocations. Zero means synchronous dispatch "
+    "exited without retaining tracked dispatch handles; backend caches and deferred "
+    "destruction are excluded."
+)
 
 
 def _reject_duplicate_keys(pairs):
@@ -51,12 +60,15 @@ def test_schema_and_pinned_fixture_provenance_are_self_contained():
         "wgpu_renders",
         "oracle_comparison",
         "cpu_non_regression",
+        "distribution",
         "validation",
     }
-    assert result["schema_version"] == 1
+    assert result["schema_version"] == 2
     assert result["issue"] == 615
     assert GIT_SHA.fullmatch(result["repository_head"])
     assert GIT_SHA.fullmatch(result["base_head"])
+    assert result["repository_head"] == IMPLEMENTATION_HEAD
+    assert result["base_head"] == BASE_HEAD
     assert result["host"] == {
         "os": "macOS 15.7.2 (24G325)",
         "architecture": "arm64",
@@ -82,6 +94,7 @@ def test_schema_and_pinned_fixture_provenance_are_self_contained():
         "sha256": "989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937",
     }
     assert SHA256.fullmatch(fixture["precompiled_spirv"]["sha256"])
+    assert fixture["precompiled_spirv"]["provenance_sha256"] == PROVENANCE_SHA256
     assert SHA256.fullmatch(fixture["compiler"]["binary_sha256"])
     assert fixture["precompiled_spirv"]["entry_points"] == [
         "ProcAmp2Kernel",
@@ -202,6 +215,7 @@ def test_wgpu_metal_artifact_dispatch_geometry_and_resources_are_bounded():
     assert artifact["source_sha256"] == fixture["opencl_source"]["sha256"]
     assert artifact["raw_spirv_sha256"] == fixture["precompiled_spirv"]["sha256"]
     assert artifact["compiler_sha256"] == fixture["compiler"]["binary_sha256"]
+    assert artifact["provenance_sha256"] == PROVENANCE_SHA256
     assert artifact["normalized_options"] == fixture["compiler"]["normalized_options"]
 
     dispatches = wgpu["dispatches"]
@@ -223,6 +237,7 @@ def test_wgpu_metal_artifact_dispatch_geometry_and_resources_are_bounded():
     assert wgpu["download_bytes"] == sum(item["download_bytes"] for item in dispatches)
     assert all(value > 0 for value in wgpu["created_resources"].values())
     _assert_zero_counts(wgpu["live_resources"])
+    assert wgpu["live_resource_scope"] == LIVE_RESOURCE_SCOPE
     assert wgpu["cleanup_balanced"] is True
     assert result["normal_effect_entry"]["cleanup_complete"] is True
 
@@ -308,23 +323,125 @@ def test_cpu_regression_commands_and_validation_status_are_explicit():
         environment["AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256"]
         == result["fixture"]["compiler"]["binary_sha256"]
     )
+    assert (
+        environment["AEXCOMPAT_WGPU_PRECOMPILED_PROVENANCE_SHA256"]
+        == result["fixture"]["precompiled_spirv"]["provenance_sha256"]
+        == PROVENANCE_SHA256
+    )
+    builds = reproduction["build_commands"]
+    default_build = builds["default_worker"]
+    experimental_build = builds["wgpu_metal_experimental_worker"]
+    assert "--no-default-features" in default_build
+    assert "--features wgpu-metal-experimental" not in default_build
+    assert "--target-dir target/issue615-default-worker" in default_build
+    assert "--features wgpu-metal-experimental" in experimental_build
+    assert "--target-dir target/issue615-wgpu-worker" in experimental_build
+
     commands = reproduction["commands"]
     input_path = result["fixture"]["input"]["path"]
     assert all(input_path in command for command in commands.values())
     assert "--render-backend wgpu-metal" in commands["wgpu_default"]
     assert "AEXCOMPAT_WGPU_PRECOMPILED_SPIRV=" in commands["wgpu_default"]
+    assert (
+        f"AEXCOMPAT_WGPU_PRECOMPILED_PROVENANCE_SHA256={PROVENANCE_SHA256}"
+        in commands["wgpu_default"]
+    )
+    assert "target/issue615-wgpu-worker/release/aex-guest-worker" in commands[
+        "wgpu_default"
+    ]
     assert "Brightness=25" in commands["wgpu_brightness_25"]
     assert "--render-backend opencl" in commands["apple_opencl_default"]
+    assert "target/issue615-default-worker/release/aex-guest-worker" in commands[
+        "apple_opencl_default"
+    ]
     assert "Brightness=25" in commands["apple_opencl_brightness_25"]
     assert f'"{cpu["fixture"]}"' in commands["olmblur_cpu"]
     assert "--render-backend cpu" in commands["olmblur_cpu"]
 
+    distribution = result["distribution"]
+    assert distribution["publication_status"] == "local-only"
+    assert distribution["required_feature"] == "wgpu-metal-experimental"
+    assert distribution["default_enabled"] is False
+    assert distribution["shipping_status"] == "non-shipping"
+    assert distribution["product_distribution"] == "hold"
+    assert "does not establish" in distribution["hold_reason"]
+    dependency_graph = distribution["default_dependency_graph"]
+    assert dependency_graph["status"] == "pass"
+    assert dependency_graph["excluded_packages"] == [
+        "aex-clspv",
+        "aex-wgpu-compute",
+        "codespan-reporting",
+        "spirv",
+    ]
+    feature_off = distribution["feature_off_wgpu_request"]
+    assert feature_off == {
+        "status": "pass",
+        "result": "explicitly-unsupported",
+        "exit_code": 1,
+        "fallback_used": False,
+        "runtime_active": False,
+        "output_created": False,
+        "cleanup_complete": True,
+    }
+
     validation = result["validation"]
     assert validation["guest_worker_tests"] == {
-        "status": "pass",
-        "passed_tests": 183,
+        "default_feature_off": {
+            "status": "pass",
+            "library_passed_tests": 181,
+            "cli_passed_tests": 9,
+            "total_passed_tests": 190,
+        },
+        "wgpu_metal_experimental": {
+            "status": "pass",
+            "library_passed_tests": 187,
+            "cli_passed_tests": 9,
+            "total_passed_tests": 196,
+        },
     }
-    assert validation["guest_worker_release_build"] == "pass"
-    assert validation["remaining_workspace_validation"] == "pending"
-    assert validation["latest_head_review"] == "pending"
+    assert validation["guest_worker_release_build"] == {
+        "default_feature_off": "pass",
+        "wgpu_metal_experimental": "pass",
+    }
+    assert validation["guest_workspace_serial"] == {
+        "status": "pass",
+        "passed_tests": 233,
+        "ignored_tests": 1,
+    }
+    assert validation["external_clspv_fixture"] == {
+        "status": "pass",
+        "passed_tests": 1,
+    }
+    assert validation["python_focused_evidence_contract"] == {
+        "status": "pass",
+        "passed_tests": 5,
+        "failed_tests": 0,
+    }
+    assert validation["python_full_suite"]["status"] == (
+        "known-baseline-or-platform-failures"
+    )
+    assert validation["python_full_suite"]["issue_615_focused_failures"] == 0
+    assert validation["python_full_suite"]["origin_main_baseline"] == {
+        "head": BASE_HEAD,
+        "passed_tests": 1965,
+        "skipped_tests": 200,
+        "failed_tests": 68,
+        "passed_subtests": 391,
+    }
+    assert validation["normal_effect_entry_acceptance"] == "pass"
+    assert validation["apple_opencl_non_regression"] == "pass"
+    assert validation["cpu_olmblur_non_regression"] == "pass"
+    assert validation["default_dependency_graph"] == "pass"
+    assert validation["macos_x64_native_carrier_check"] == "pass"
+    assert validation["windows_x64_bounded_crate_checks"] == {
+        "aex-clspv": "pass",
+        "aex-wgpu-compute": "pass",
+        "full_worker": "not-run: known external Windows CRT header block",
+    }
+    assert validation["abi_generator_check"] == "pass"
+    assert validation["latest_head_review"] == {
+        "status": "pending",
+        "unresolved_p1": None,
+        "unresolved_p2": None,
+    }
     assert validation["ci"] == "ignored under the repository billing policy"

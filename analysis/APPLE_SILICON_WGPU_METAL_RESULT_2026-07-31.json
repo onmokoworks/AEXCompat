@@ -1,9 +1,9 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "issue": 615,
-  "observed_utc": "2026-07-31T07:05:22Z",
-  "repository_head": "2935f7ab7de22c0363e6ddd350dc575551a54ef5",
-  "base_head": "8fcd3cfeb1c5267f170407278c3b5060711feec6",
+  "observed_utc": "2026-07-31T07:45:41Z",
+  "repository_head": "c6a4181daf1af49372b115444b8982039f4bd418",
+  "base_head": "93cfbb7e9f25f296636444cc54d1a97624e12bfb",
   "host": {
     "os": "macOS 15.7.2 (24G325)",
     "architecture": "arm64",
@@ -31,6 +31,7 @@
       "path_kind": "repository_relative_provenance",
       "bytes": 7120,
       "sha256": "05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb",
+      "provenance_sha256": "0372c252499d01cf530a2f8fd0365ca21355dd55eca758ae031d078d74522765",
       "spirv_version": "1.0",
       "validation_targets": [
         "spv1.0",
@@ -58,18 +59,23 @@
   },
   "reproduction": {
     "working_directory": "repository root",
+    "build_commands": {
+      "default_worker": "cargo build --manifest-path guest/Cargo.toml --locked -p aex-guest-worker --release --no-default-features --target-dir target/issue615-default-worker",
+      "wgpu_metal_experimental_worker": "cargo build --manifest-path guest/Cargo.toml --locked -p aex-guest-worker --release --no-default-features --features wgpu-metal-experimental --target-dir target/issue615-wgpu-worker"
+    },
     "wgpu_environment": {
       "AEXCOMPAT_WGPU_PRECOMPILED_SPIRV": "$PWD/target/issue615-clspv-proof/SDK_Invert_ProcAmp_OpenCL.pod-ubo.spv",
       "AEXCOMPAT_WGPU_PRECOMPILED_SOURCE_SHA256": "989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937",
       "AEXCOMPAT_WGPU_PRECOMPILED_SPIRV_SHA256": "05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb",
-      "AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256": "6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a"
+      "AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256": "6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a",
+      "AEXCOMPAT_WGPU_PRECOMPILED_PROVENANCE_SHA256": "0372c252499d01cf530a2f8fd0365ca21355dd55eca758ae031d078d74522765"
     },
     "commands": {
-      "wgpu_default": "env AEXCOMPAT_WGPU_PRECOMPILED_SPIRV=\"$PWD/target/issue615-clspv-proof/SDK_Invert_ProcAmp_OpenCL.pod-ubo.spv\" AEXCOMPAT_WGPU_PRECOMPILED_SOURCE_SHA256=989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937 AEXCOMPAT_WGPU_PRECOMPILED_SPIRV_SHA256=05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256=6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a guest/target/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/wgpu-default.png --pixel-format argb32f --render-backend wgpu-metal --gpu-device-index 0",
-      "wgpu_brightness_25": "env AEXCOMPAT_WGPU_PRECOMPILED_SPIRV=\"$PWD/target/issue615-clspv-proof/SDK_Invert_ProcAmp_OpenCL.pod-ubo.spv\" AEXCOMPAT_WGPU_PRECOMPILED_SOURCE_SHA256=989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937 AEXCOMPAT_WGPU_PRECOMPILED_SPIRV_SHA256=05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256=6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a guest/target/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/wgpu-brightness25.png --pixel-format argb32f --render-backend wgpu-metal --gpu-device-index 0 Brightness=25",
-      "apple_opencl_default": "guest/target/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/opencl-default.png --pixel-format argb32f --render-backend opencl --gpu-device-index 0",
-      "apple_opencl_brightness_25": "guest/target/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/opencl-brightness25.png --pixel-format argb32f --render-backend opencl --gpu-device-index 0 Brightness=25",
-      "olmblur_cpu": "guest/target/release/aex-guest-worker render-png \"/Users/onmk/Documents/Projects/Personal/OLM as/plugins_2025/OLMBlur.aex\" target/issue615-windows-source/probe-invert.png target/issue615-acceptance/olmblur-cpu.png --pixel-format argb8 --render-backend cpu"
+      "wgpu_default": "env -u AEXCOMPAT_CLSPV_PATH -u AEXCOMPAT_CLSPV_SHA256 AEXCOMPAT_WGPU_PRECOMPILED_SPIRV=\"$PWD/target/issue615-clspv-proof/SDK_Invert_ProcAmp_OpenCL.pod-ubo.spv\" AEXCOMPAT_WGPU_PRECOMPILED_SOURCE_SHA256=989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937 AEXCOMPAT_WGPU_PRECOMPILED_SPIRV_SHA256=05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256=6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a AEXCOMPAT_WGPU_PRECOMPILED_PROVENANCE_SHA256=0372c252499d01cf530a2f8fd0365ca21355dd55eca758ae031d078d74522765 target/issue615-wgpu-worker/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/final-wgpu-default.png --pixel-format argb32f --render-backend wgpu-metal --gpu-device-index 0",
+      "wgpu_brightness_25": "env -u AEXCOMPAT_CLSPV_PATH -u AEXCOMPAT_CLSPV_SHA256 AEXCOMPAT_WGPU_PRECOMPILED_SPIRV=\"$PWD/target/issue615-clspv-proof/SDK_Invert_ProcAmp_OpenCL.pod-ubo.spv\" AEXCOMPAT_WGPU_PRECOMPILED_SOURCE_SHA256=989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937 AEXCOMPAT_WGPU_PRECOMPILED_SPIRV_SHA256=05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb AEXCOMPAT_WGPU_PRECOMPILED_COMPILER_SHA256=6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a AEXCOMPAT_WGPU_PRECOMPILED_PROVENANCE_SHA256=0372c252499d01cf530a2f8fd0365ca21355dd55eca758ae031d078d74522765 target/issue615-wgpu-worker/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/final-wgpu-brightness25.png --pixel-format argb32f --render-backend wgpu-metal --gpu-device-index 0 Brightness=25",
+      "apple_opencl_default": "target/issue615-default-worker/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/final-opencl-default.png --pixel-format argb32f --render-backend opencl --gpu-device-index 0",
+      "apple_opencl_brightness_25": "target/issue615-default-worker/release/aex-guest-worker render-png target/issue615-windows-source/SDK_Invert_ProcAmp_OpenCL.aex target/issue615-windows-source/probe-invert.png target/issue615-acceptance/final-opencl-brightness25.png --pixel-format argb32f --render-backend opencl --gpu-device-index 0 Brightness=25",
+      "olmblur_cpu": "target/issue615-default-worker/release/aex-guest-worker render-png \"/Users/onmk/Documents/Projects/Personal/OLM as/plugins_2025/OLMBlur.aex\" target/issue615-windows-source/probe-invert.png target/issue615-acceptance/final-olmblur-cpu.png --pixel-format argb8 --render-backend cpu"
     }
   },
   "normal_effect_entry": {
@@ -194,6 +200,7 @@
           "source_sha256": "989aab007e3fa9df453e39ea9aeb0a4e5b126cad49238bba6f197aae6c831937",
           "compiler_sha256": "6e8fb9174040a204a121b034187025c7a0d01be415d77ecc3597cf0945e32c4a",
           "raw_spirv_sha256": "05ecbf48a2991f955bd0b1c3ff420dcd0b43c3a1d862b51f691da28597b5f5cb",
+          "provenance_sha256": "0372c252499d01cf530a2f8fd0365ca21355dd55eca758ae031d078d74522765",
           "normalized_options": [
             "-cl-std=CL1.2",
             "-cl-kernel-arg-info",
@@ -275,6 +282,7 @@
         "bind_groups": 0,
         "command_buffers": 0
       },
+      "live_resource_scope": "Counts cover AEXCompat-owned dispatch-scoped wgpu handles only, not session handles or wgpu/Metal driver allocations. Zero means synchronous dispatch exited without retaining tracked dispatch handles; backend caches and deferred destruction are excluded.",
       "cleanup_balanced": true
     },
     "cleanup_complete": true,
@@ -368,14 +376,101 @@
     "guards_intact": true,
     "cleanup_complete": true
   },
+  "distribution": {
+    "publication_status": "local-only",
+    "required_feature": "wgpu-metal-experimental",
+    "default_enabled": false,
+    "shipping_status": "non-shipping",
+    "product_distribution": "hold",
+    "hold_reason": "Feature gating removes the experimental dependencies from the default worker graph but does not establish that a feature-enabled binary is redistributable under the GPL-2.0-only product distribution gate.",
+    "default_dependency_graph": {
+      "status": "pass",
+      "command": "cargo tree --manifest-path guest/Cargo.toml --locked -p aex-guest-worker --no-default-features --edges normal",
+      "excluded_packages": [
+        "aex-clspv",
+        "aex-wgpu-compute",
+        "codespan-reporting",
+        "spirv"
+      ]
+    },
+    "feature_off_wgpu_request": {
+      "status": "pass",
+      "result": "explicitly-unsupported",
+      "exit_code": 1,
+      "fallback_used": false,
+      "runtime_active": false,
+      "output_created": false,
+      "cleanup_complete": true
+    }
+  },
   "validation": {
     "guest_worker_tests": {
-      "status": "pass",
-      "passed_tests": 183
+      "default_feature_off": {
+        "status": "pass",
+        "library_passed_tests": 181,
+        "cli_passed_tests": 9,
+        "total_passed_tests": 190
+      },
+      "wgpu_metal_experimental": {
+        "status": "pass",
+        "library_passed_tests": 187,
+        "cli_passed_tests": 9,
+        "total_passed_tests": 196
+      }
     },
-    "guest_worker_release_build": "pass",
-    "remaining_workspace_validation": "pending",
-    "latest_head_review": "pending",
+    "guest_worker_release_build": {
+      "default_feature_off": "pass",
+      "wgpu_metal_experimental": "pass"
+    },
+    "guest_workspace_serial": {
+      "status": "pass",
+      "passed_tests": 233,
+      "ignored_tests": 1
+    },
+    "external_clspv_fixture": {
+      "status": "pass",
+      "passed_tests": 1
+    },
+    "python_focused_evidence_contract": {
+      "status": "pass",
+      "passed_tests": 5,
+      "failed_tests": 0
+    },
+    "python_full_suite": {
+      "status": "known-baseline-or-platform-failures",
+      "passed_tests": 1970,
+      "skipped_tests": 200,
+      "failed_tests": 68,
+      "passed_subtests": 391,
+      "issue_615_focused_failures": 0,
+      "origin_main_baseline": {
+        "head": "93cfbb7e9f25f296636444cc54d1a97624e12bfb",
+        "passed_tests": 1965,
+        "skipped_tests": 200,
+        "failed_tests": 68,
+        "passed_subtests": 391
+      },
+      "notes": [
+        "four failures require unavailable PowerShell on macOS",
+        "origin/main records the same failure count; the Issue #615 branch adds five passing focused evidence tests and no new failure"
+      ]
+    },
+    "normal_effect_entry_acceptance": "pass",
+    "apple_opencl_non_regression": "pass",
+    "cpu_olmblur_non_regression": "pass",
+    "default_dependency_graph": "pass",
+    "macos_x64_native_carrier_check": "pass",
+    "windows_x64_bounded_crate_checks": {
+      "aex-clspv": "pass",
+      "aex-wgpu-compute": "pass",
+      "full_worker": "not-run: known external Windows CRT header block"
+    },
+    "abi_generator_check": "pass",
+    "latest_head_review": {
+      "status": "pending",
+      "unresolved_p1": null,
+      "unresolved_p2": null
+    },
     "ci": "ignored under the repository billing policy"
   }
 }
