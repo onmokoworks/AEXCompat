@@ -41,6 +41,14 @@ struct ApiV1 {
   AexHostCoreSceneIdentityMatchV1Fn scene_identity_match = nullptr;
   AexHostCoreSceneOwnerRelationMatchV1Fn scene_owner_relation_match = nullptr;
   AexHostCoreSceneTopologySummarizeV1Fn scene_topology_summarize = nullptr;
+  AexHostCoreSceneTopologySnapshotCreateV1Fn scene_topology_snapshot_create =
+      nullptr;
+  AexHostCoreSceneTopologySnapshotQueryV1Fn scene_topology_snapshot_query =
+      nullptr;
+  AexHostCoreSceneTopologySnapshotSummaryV1Fn scene_topology_snapshot_summary =
+      nullptr;
+  AexHostCoreSceneTopologySnapshotDestroyV1Fn
+      scene_topology_snapshot_destroy = nullptr;
 
   bool complete() const noexcept {
     return session_create != nullptr && session_open != nullptr &&
@@ -48,7 +56,11 @@ struct ApiV1 {
            session_end_callback != nullptr && session_close != nullptr &&
            session_dispose != nullptr && scene_identity_match != nullptr &&
            scene_owner_relation_match != nullptr &&
-           scene_topology_summarize != nullptr;
+           scene_topology_summarize != nullptr &&
+           scene_topology_snapshot_create != nullptr &&
+           scene_topology_snapshot_query != nullptr &&
+           scene_topology_snapshot_summary != nullptr &&
+           scene_topology_snapshot_destroy != nullptr;
   }
 };
 
@@ -76,6 +88,24 @@ struct SceneOwnerRelationInvocation {
 };
 
 struct SceneTopologyInvocation {
+  int32_t return_code = AEX_HOST_INVALID_STATE;
+  uint32_t exception_code = 0;
+  AexHostSceneTopologySummary summary{};
+};
+
+struct SceneTopologySnapshotCreateInvocation {
+  int32_t return_code = AEX_HOST_INVALID_STATE;
+  uint32_t exception_code = 0;
+  AexHostOpaqueHandle handle{};
+};
+
+struct SceneTopologySnapshotEntryInvocation {
+  int32_t return_code = AEX_HOST_INVALID_STATE;
+  uint32_t exception_code = 0;
+  AexHostSceneTopologyEntry entry{};
+};
+
+struct SceneTopologySnapshotSummaryInvocation {
   int32_t return_code = AEX_HOST_INVALID_STATE;
   uint32_t exception_code = 0;
   AexHostSceneTopologySummary summary{};
@@ -170,7 +200,8 @@ class AdapterV1 {
                AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPACITY &&
            descriptor.reserved == 0 &&
            descriptor.capabilities ==
-               AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPABILITY_SUMMARY_V1;
+               (AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPABILITY_SUMMARY_V1 |
+                AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPABILITY_OWNED_SNAPSHOT_V1);
   }
 
   static AdapterLoadStatus ValidateApi(const ApiV1 &api) noexcept {
@@ -331,6 +362,18 @@ class AdapterV1 {
     api.scene_topology_summarize =
         Resolve<AexHostCoreSceneTopologySummarizeV1Fn>(
             module, "aex_host_core_scene_topology_summarize_v1");
+    api.scene_topology_snapshot_create =
+        Resolve<AexHostCoreSceneTopologySnapshotCreateV1Fn>(
+            module, "aex_host_core_scene_topology_snapshot_create_v1");
+    api.scene_topology_snapshot_query =
+        Resolve<AexHostCoreSceneTopologySnapshotQueryV1Fn>(
+            module, "aex_host_core_scene_topology_snapshot_query_v1");
+    api.scene_topology_snapshot_summary =
+        Resolve<AexHostCoreSceneTopologySnapshotSummaryV1Fn>(
+            module, "aex_host_core_scene_topology_snapshot_summary_v1");
+    api.scene_topology_snapshot_destroy =
+        Resolve<AexHostCoreSceneTopologySnapshotDestroyV1Fn>(
+            module, "aex_host_core_scene_topology_snapshot_destroy_v1");
     if (ValidateApi(api) != AdapterLoadStatus::kOk) {
       output->native_error_ = ERROR_PROC_NOT_FOUND;
       FreeLibrary(module);
@@ -449,6 +492,47 @@ class AdapterV1 {
     return invocation;
   }
 
+  SceneTopologySnapshotCreateInvocation CreateSceneTopologySnapshot(
+      AexHostCallContext context,
+      AexHostSceneTopologySnapshot snapshot) const noexcept {
+    SceneTopologySnapshotCreateInvocation invocation;
+    const SehCallResult result = InvokeSceneTopologySnapshotCreateRaw(
+        api_.scene_topology_snapshot_create, &context, &snapshot,
+        &invocation.handle);
+    invocation.return_code = result.return_code;
+    invocation.exception_code = result.exception_code;
+    return invocation;
+  }
+
+  SceneTopologySnapshotEntryInvocation QuerySceneTopologySnapshot(
+      AexHostCallContext context, AexHostOpaqueHandle handle,
+      uint32_t index) const noexcept {
+    SceneTopologySnapshotEntryInvocation invocation;
+    const SehCallResult result = InvokeSceneTopologySnapshotQueryRaw(
+        api_.scene_topology_snapshot_query, &context, handle, index,
+        &invocation.entry);
+    invocation.return_code = result.return_code;
+    invocation.exception_code = result.exception_code;
+    return invocation;
+  }
+
+  SceneTopologySnapshotSummaryInvocation StoredSceneTopologySummary(
+      AexHostCallContext context, AexHostOpaqueHandle handle) const noexcept {
+    SceneTopologySnapshotSummaryInvocation invocation;
+    const SehCallResult result = InvokeSceneTopologySnapshotSummaryRaw(
+        api_.scene_topology_snapshot_summary, &context, handle,
+        &invocation.summary);
+    invocation.return_code = result.return_code;
+    invocation.exception_code = result.exception_code;
+    return invocation;
+  }
+
+  SehCallResult DestroySceneTopologySnapshot(
+      AexHostCallContext context, AexHostOpaqueHandle handle) const noexcept {
+    return InvokeSceneTopologySnapshotDestroyRaw(
+        api_.scene_topology_snapshot_destroy, &context, handle);
+  }
+
   // Low-level ABI conformance hooks. Each non-null pointer must remain valid;
   // production callers should prefer the value-taking methods above.
   static SehCallResult InvokeCreateRaw(AexHostCoreSessionCreateV1Fn function,
@@ -551,6 +635,93 @@ class AdapterV1 {
       if (summary != nullptr) {
         *summary = AexHostSceneTopologySummary{};
       }
+    }
+    return result;
+  }
+
+  static SehCallResult InvokeSceneTopologySnapshotCreateRaw(
+      AexHostCoreSceneTopologySnapshotCreateV1Fn function,
+      const AexHostCallContext *context,
+      const AexHostSceneTopologySnapshot *snapshot,
+      AexHostOpaqueHandle *handle) noexcept {
+    if (handle != nullptr) {
+      *handle = AexHostOpaqueHandle{};
+    }
+    if (function == nullptr) {
+      return SehCallResult{AEX_HOST_INVALID_STATE, 0};
+    }
+    SehCallResult result{AEX_HOST_SEH_FAULT, 0};
+    __try {
+      result.return_code = function(context, snapshot, handle);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      result.return_code = AEX_HOST_SEH_FAULT;
+      result.exception_code = static_cast<uint32_t>(GetExceptionCode());
+    }
+    if (result.return_code != AEX_HOST_OK && handle != nullptr) {
+      *handle = AexHostOpaqueHandle{};
+    }
+    return result;
+  }
+
+  static SehCallResult InvokeSceneTopologySnapshotQueryRaw(
+      AexHostCoreSceneTopologySnapshotQueryV1Fn function,
+      const AexHostCallContext *context, AexHostOpaqueHandle handle,
+      uint32_t index, AexHostSceneTopologyEntry *entry) noexcept {
+    if (entry != nullptr) {
+      *entry = AexHostSceneTopologyEntry{};
+    }
+    if (function == nullptr) {
+      return SehCallResult{AEX_HOST_INVALID_STATE, 0};
+    }
+    SehCallResult result{AEX_HOST_SEH_FAULT, 0};
+    __try {
+      result.return_code = function(context, handle, index, entry);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      result.return_code = AEX_HOST_SEH_FAULT;
+      result.exception_code = static_cast<uint32_t>(GetExceptionCode());
+    }
+    if (result.return_code != AEX_HOST_OK && entry != nullptr) {
+      *entry = AexHostSceneTopologyEntry{};
+    }
+    return result;
+  }
+
+  static SehCallResult InvokeSceneTopologySnapshotSummaryRaw(
+      AexHostCoreSceneTopologySnapshotSummaryV1Fn function,
+      const AexHostCallContext *context, AexHostOpaqueHandle handle,
+      AexHostSceneTopologySummary *summary) noexcept {
+    if (summary != nullptr) {
+      *summary = AexHostSceneTopologySummary{};
+    }
+    if (function == nullptr) {
+      return SehCallResult{AEX_HOST_INVALID_STATE, 0};
+    }
+    SehCallResult result{AEX_HOST_SEH_FAULT, 0};
+    __try {
+      result.return_code = function(context, handle, summary);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      result.return_code = AEX_HOST_SEH_FAULT;
+      result.exception_code = static_cast<uint32_t>(GetExceptionCode());
+    }
+    if (result.return_code != AEX_HOST_OK && summary != nullptr) {
+      *summary = AexHostSceneTopologySummary{};
+    }
+    return result;
+  }
+
+  static SehCallResult InvokeSceneTopologySnapshotDestroyRaw(
+      AexHostCoreSceneTopologySnapshotDestroyV1Fn function,
+      const AexHostCallContext *context,
+      AexHostOpaqueHandle handle) noexcept {
+    if (function == nullptr) {
+      return SehCallResult{AEX_HOST_INVALID_STATE, 0};
+    }
+    SehCallResult result{AEX_HOST_SEH_FAULT, 0};
+    __try {
+      result.return_code = function(context, handle);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      result.return_code = AEX_HOST_SEH_FAULT;
+      result.exception_code = static_cast<uint32_t>(GetExceptionCode());
     }
     return result;
   }
