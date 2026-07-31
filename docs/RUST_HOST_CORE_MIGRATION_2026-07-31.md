@@ -96,6 +96,38 @@ broker. Scene/world/parameter semantic migration still waits for the
 unresolved #26 / PR #571 correctness work, and resident integration remains
 outside #98. Production worker routing remains unchanged.
 
+## Phase 3 native fault-boundary gate (Issue #623)
+
+Phase 3 extracts the DLL loading and native call boundary from the Phase 1
+self-test into the reusable C++ adapter
+`aexcompat_host_core_adapter.hpp`. The adapter owns one DLL lifetime and a
+complete version-1 function table. It resolves the input to an absolute path,
+loads dependencies only from that DLL directory and System32, and rejects a
+module unless all six session exports are present. It is intentionally limited
+to Windows compilers with MSVC-compatible structured exception handling.
+
+Every Rust entry call is made inside the adapter's SEH frame. If a native fault
+occurs, a create output token is cleared and the adapter publishes a stable
+`SEH_FAULT` status plus a boundary-phase fault report. A report ID zero
+explicitly means the fault occurred before Rust could allocate a report; the
+status and snapshot IDs remain correlated. Rust panics continue to be handled
+separately by `contain_panic` inside the DLL.
+
+Normal adapter methods copy the call context by value and keep output storage
+inside the SEH frame. The raw-pointer invocation helpers remain available only
+for ABI conformance tests, with the same validity precondition as the C ABI.
+
+The native dual-run now consumes this adapter rather than maintaining its own
+loader and SEH helpers. It proves missing-export rejection with a real
+non-host-core DLL and raises a synthetic SEH exception through the invocation
+path to verify token cleanup and normalized status/report fields. The original
+independent session oracle comparison remains unchanged.
+
+No Adobe SDK-shaped value enters this adapter. Production worker routing
+remains unchanged, scene/world/parameter semantics still wait for #26 / PR
+#571, resident integration remains outside #98, and #614/wgpu/GPU remains
+untouched.
+
 ## Later phases
 
 1. After #26 / PR #571 lands, define value-only scene/world/parameter snapshots
