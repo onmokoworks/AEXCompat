@@ -21,6 +21,8 @@ enum class AdapterLoadStatus : uint32_t {
   kPathResolutionFailed = 2,
   kLoadLibraryFailed = 3,
   kMissingExport = 4,
+  kMissingAbiDescriptor = 5,
+  kIncompatibleAbiDescriptor = 6,
 };
 
 struct ApiV1 {
@@ -74,8 +76,31 @@ class AdapterV1 {
     return *this;
   }
 
+  static bool IsCompatibleDescriptor(
+      const AexHostCoreAbiDescriptorV1 &descriptor) noexcept {
+    return descriptor.magic == AEXCOMPAT_HOST_CORE_ABI_DESCRIPTOR_MAGIC &&
+           descriptor.abi_version == AEXCOMPAT_HOST_CORE_ABI_VERSION &&
+           descriptor.struct_size == sizeof(AexHostCoreAbiDescriptorV1) &&
+           descriptor.call_context_size == sizeof(AexHostCallContext) &&
+           descriptor.call_context_alignment == alignof(AexHostCallContext) &&
+           descriptor.call_status_size == sizeof(AexHostCallStatus) &&
+           descriptor.call_status_alignment == alignof(AexHostCallStatus) &&
+           descriptor.opaque_handle_size == sizeof(AexHostOpaqueHandle) &&
+           descriptor.opaque_handle_alignment == alignof(AexHostOpaqueHandle) &&
+           descriptor.report_snapshot_size == sizeof(AexHostReportSnapshot) &&
+           descriptor.report_snapshot_alignment ==
+               alignof(AexHostReportSnapshot) &&
+           descriptor.capabilities ==
+               AEXCOMPAT_HOST_CORE_CAPABILITY_SESSION_LIFECYCLE_V1;
+  }
+
+  static AdapterLoadStatus ValidateApi(const ApiV1 &api) noexcept {
+    return api.complete() ? AdapterLoadStatus::kOk
+                          : AdapterLoadStatus::kMissingExport;
+  }
+
   static AdapterLoadStatus Load(const wchar_t *dll_path,
-                                AdapterV1 *output) noexcept {
+                                 AdapterV1 *output) noexcept {
     if (output == nullptr) {
       return AdapterLoadStatus::kInvalidArgument;
     }
@@ -106,6 +131,30 @@ class AdapterV1 {
       return AdapterLoadStatus::kLoadLibraryFailed;
     }
 
+    const FARPROC descriptor_symbol =
+        GetProcAddress(module, "aex_host_core_abi_descriptor_v1");
+    if (descriptor_symbol == nullptr) {
+      output->native_error_ = ERROR_PROC_NOT_FOUND;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kMissingAbiDescriptor;
+    }
+    const auto *published_descriptor =
+        reinterpret_cast<const AexHostCoreAbiDescriptorV1 *>(
+            descriptor_symbol);
+    AexHostCoreAbiDescriptorV1 descriptor{};
+    DWORD descriptor_error = ERROR_SUCCESS;
+    if (!CopyDescriptor(published_descriptor, &descriptor,
+                        &descriptor_error)) {
+      output->native_error_ = descriptor_error;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kIncompatibleAbiDescriptor;
+    }
+    if (!IsCompatibleDescriptor(descriptor)) {
+      output->native_error_ = ERROR_BAD_FORMAT;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kIncompatibleAbiDescriptor;
+    }
+
     ApiV1 api;
     api.session_create = Resolve<AexHostCoreSessionCreateV1Fn>(
         module, "aex_host_core_session_create_v1");
@@ -119,7 +168,7 @@ class AdapterV1 {
         module, "aex_host_core_session_close_v1");
     api.session_dispose = Resolve<AexHostCoreSessionCallV1Fn>(
         module, "aex_host_core_session_dispose_v1");
-    if (!api.complete()) {
+    if (ValidateApi(api) != AdapterLoadStatus::kOk) {
       output->native_error_ = ERROR_PROC_NOT_FOUND;
       FreeLibrary(module);
       return AdapterLoadStatus::kMissingExport;
@@ -127,11 +176,15 @@ class AdapterV1 {
 
     output->module_ = module;
     output->api_ = api;
+    output->descriptor_ = descriptor;
     output->native_error_ = ERROR_SUCCESS;
     return AdapterLoadStatus::kOk;
   }
 
-  bool loaded() const noexcept { return module_ != nullptr && api_.complete(); }
+  bool loaded() const noexcept {
+    return module_ != nullptr && IsCompatibleDescriptor(descriptor_) &&
+           api_.complete();
+  }
 
   DWORD native_error() const noexcept { return native_error_; }
 
@@ -140,6 +193,10 @@ class AdapterV1 {
   }
 
   const ApiV1 &api() const noexcept { return api_; }
+
+  const AexHostCoreAbiDescriptorV1 &descriptor() const noexcept {
+    return descriptor_;
+  }
 
   // Normal callers use value copies so the pointers passed to Rust always
   // refer to adapter-owned storage inside the SEH frame.
@@ -226,6 +283,32 @@ class AdapterV1 {
   }
 
  private:
+  static bool CopyDescriptor(
+      const AexHostCoreAbiDescriptorV1 *source,
+      AexHostCoreAbiDescriptorV1 *destination,
+      DWORD *native_error) noexcept {
+    if (source == nullptr || destination == nullptr || native_error == nullptr) {
+      return false;
+    }
+    bool copied = false;
+    __try {
+      // Read only the fixed identity prefix until the publisher proves that
+      // the complete v1 descriptor is present.
+      destination->magic = source->magic;
+      destination->abi_version = source->abi_version;
+      destination->struct_size = source->struct_size;
+      if (destination->magic == AEXCOMPAT_HOST_CORE_ABI_DESCRIPTOR_MAGIC &&
+          destination->abi_version == AEXCOMPAT_HOST_CORE_ABI_VERSION &&
+          destination->struct_size == sizeof(AexHostCoreAbiDescriptorV1)) {
+        *destination = *source;
+      }
+      copied = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      *native_error = static_cast<DWORD>(GetExceptionCode());
+    }
+    return copied;
+  }
+
   static Invocation InvokeSession(AexHostCoreSessionCallV1Fn function,
                                   AexHostCallContext context,
                                   AexHostOpaqueHandle session) noexcept {
@@ -282,6 +365,7 @@ class AdapterV1 {
     }
     module_ = nullptr;
     api_ = ApiV1{};
+    descriptor_ = AexHostCoreAbiDescriptorV1{};
     absolute_path_.fill(L'\0');
     native_error_ = ERROR_SUCCESS;
   }
@@ -289,16 +373,19 @@ class AdapterV1 {
   void MoveFrom(AdapterV1 &&other) noexcept {
     module_ = other.module_;
     api_ = other.api_;
+    descriptor_ = other.descriptor_;
     absolute_path_ = other.absolute_path_;
     native_error_ = other.native_error_;
     other.module_ = nullptr;
     other.api_ = ApiV1{};
+    other.descriptor_ = AexHostCoreAbiDescriptorV1{};
     other.absolute_path_.fill(L'\0');
     other.native_error_ = ERROR_SUCCESS;
   }
 
   HMODULE module_ = nullptr;
   ApiV1 api_;
+  AexHostCoreAbiDescriptorV1 descriptor_{};
   std::array<wchar_t, 32768> absolute_path_{};
   DWORD native_error_ = ERROR_SUCCESS;
 };

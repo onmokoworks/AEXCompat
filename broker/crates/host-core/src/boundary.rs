@@ -5,10 +5,13 @@
 //! returning through that adapter so Rust unwinding never crosses a C ABI.
 
 use crate::error::{HostError, HostErrorCode};
+use crate::report::HostReportSnapshot;
 use std::mem::{align_of, offset_of, size_of};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 pub const HOST_CORE_ABI_VERSION: u32 = 1;
+pub const HOST_CORE_ABI_DESCRIPTOR_MAGIC: u64 = 0x4145_5848_434f_5245;
+pub const HOST_CORE_CAPABILITY_SESSION_LIFECYCLE_V1: u64 = 1;
 
 /// Adapter-supplied value context. No SDK pointer or host-owned address is
 /// admitted into the Rust core.
@@ -86,6 +89,45 @@ impl HostCallStatus {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct HostOpaqueHandle(pub u64);
 
+/// Pointer-free identity for the exact value ABI exported by the host-core
+/// DLL. Native code copies and validates this value before casting any
+/// function export.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostCoreAbiDescriptorV1 {
+    pub magic: u64,
+    pub abi_version: u32,
+    pub struct_size: u32,
+    pub call_context_size: u32,
+    pub call_context_alignment: u32,
+    pub call_status_size: u32,
+    pub call_status_alignment: u32,
+    pub opaque_handle_size: u32,
+    pub opaque_handle_alignment: u32,
+    pub report_snapshot_size: u32,
+    pub report_snapshot_alignment: u32,
+    pub capabilities: u64,
+}
+
+impl HostCoreAbiDescriptorV1 {
+    pub const fn current() -> Self {
+        Self {
+            magic: HOST_CORE_ABI_DESCRIPTOR_MAGIC,
+            abi_version: HOST_CORE_ABI_VERSION,
+            struct_size: size_of::<Self>() as u32,
+            call_context_size: size_of::<HostCallContext>() as u32,
+            call_context_alignment: align_of::<HostCallContext>() as u32,
+            call_status_size: size_of::<HostCallStatus>() as u32,
+            call_status_alignment: align_of::<HostCallStatus>() as u32,
+            opaque_handle_size: size_of::<HostOpaqueHandle>() as u32,
+            opaque_handle_alignment: align_of::<HostOpaqueHandle>() as u32,
+            report_snapshot_size: size_of::<HostReportSnapshot>() as u32,
+            report_snapshot_alignment: align_of::<HostReportSnapshot>() as u32,
+            capabilities: HOST_CORE_CAPABILITY_SESSION_LIFECYCLE_V1,
+        }
+    }
+}
+
 pub fn contain_panic<T>(
     operation: &'static str,
     callback: impl FnOnce() -> Result<T, HostError>,
@@ -126,6 +168,21 @@ const _: () = {
 
     assert!(size_of::<HostOpaqueHandle>() == 8);
     assert!(align_of::<HostOpaqueHandle>() == 8);
+
+    assert!(size_of::<HostCoreAbiDescriptorV1>() == 56);
+    assert!(align_of::<HostCoreAbiDescriptorV1>() == 8);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, magic) == 0);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, abi_version) == 8);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, struct_size) == 12);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, call_context_size) == 16);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, call_context_alignment) == 20);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, call_status_size) == 24);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, call_status_alignment) == 28);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, opaque_handle_size) == 32);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, opaque_handle_alignment) == 36);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, report_snapshot_size) == 40);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, report_snapshot_alignment) == 44);
+    assert!(offset_of!(HostCoreAbiDescriptorV1, capabilities) == 48);
 };
 
 #[cfg(test)]
@@ -142,6 +199,29 @@ mod tests {
         assert_eq!(offset_of!(HostCallStatus, code), 8);
         assert_eq!(offset_of!(HostCallStatus, report_id), 16);
         assert_eq!(size_of::<HostOpaqueHandle>(), 8);
+    }
+
+    #[test]
+    fn abi_descriptor_identifies_the_exact_shared_value_layouts() {
+        let descriptor = HostCoreAbiDescriptorV1::current();
+        assert_eq!(size_of::<HostCoreAbiDescriptorV1>(), 56);
+        assert_eq!(align_of::<HostCoreAbiDescriptorV1>(), 8);
+        assert_eq!(offset_of!(HostCoreAbiDescriptorV1, capabilities), 48);
+        assert_eq!(descriptor.magic, HOST_CORE_ABI_DESCRIPTOR_MAGIC);
+        assert_eq!(descriptor.abi_version, HOST_CORE_ABI_VERSION);
+        assert_eq!(descriptor.struct_size, 56);
+        assert_eq!(descriptor.call_context_size, 24);
+        assert_eq!(descriptor.call_context_alignment, 8);
+        assert_eq!(descriptor.call_status_size, 24);
+        assert_eq!(descriptor.call_status_alignment, 8);
+        assert_eq!(descriptor.opaque_handle_size, 8);
+        assert_eq!(descriptor.opaque_handle_alignment, 8);
+        assert_eq!(descriptor.report_snapshot_size, 72);
+        assert_eq!(descriptor.report_snapshot_alignment, 8);
+        assert_eq!(
+            descriptor.capabilities,
+            HOST_CORE_CAPABILITY_SESSION_LIFECYCLE_V1
+        );
     }
 
     #[test]

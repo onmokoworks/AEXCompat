@@ -5,7 +5,8 @@
 //! Rust session handles, and prevents Rust unwinding from crossing `extern "C"`.
 
 use aexcompat_host_core::boundary::{
-    HOST_CORE_ABI_VERSION, HostCallContext, HostCallStatus, HostOpaqueHandle, contain_panic,
+    HOST_CORE_ABI_VERSION, HostCallContext, HostCallStatus, HostCoreAbiDescriptorV1,
+    HostOpaqueHandle, contain_panic,
 };
 use aexcompat_host_core::error::{HostError, HostErrorCode};
 use aexcompat_host_core::handle::{HandleKind, HandleRegistry, OwnerId};
@@ -13,6 +14,10 @@ use aexcompat_host_core::report::{HostReport, HostReportSnapshot, ReportCounters
 use aexcompat_host_core::session::{HostSession, SessionState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+
+#[unsafe(export_name = "aex_host_core_abi_descriptor_v1")]
+pub static AEX_HOST_CORE_ABI_DESCRIPTOR_V1: HostCoreAbiDescriptorV1 =
+    HostCoreAbiDescriptorV1::current();
 
 struct SessionRecord {
     session: HostSession,
@@ -518,6 +523,14 @@ pub unsafe extern "C" fn aex_host_core_session_dispose_v1(
 mod tests {
     use super::*;
     use aexcompat_host_core::report::ReportOutcome;
+
+    #[test]
+    fn exported_descriptor_matches_the_compiled_value_abi() {
+        assert_eq!(
+            AEX_HOST_CORE_ABI_DESCRIPTOR_V1,
+            HostCoreAbiDescriptorV1::current()
+        );
+    }
 
     #[test]
     fn exported_lifecycle_is_fail_closed() {
