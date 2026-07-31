@@ -1,6 +1,6 @@
-use crate::host_core::error::{HostError, HostErrorCode};
-use crate::host_core::handle::HandleKind;
-use crate::host_core::session::SessionState;
+use crate::error::{HostError, HostErrorCode};
+use crate::handle::HandleKind;
+use crate::session::SessionState;
 use serde::Serialize;
 use std::mem::{align_of, offset_of, size_of};
 

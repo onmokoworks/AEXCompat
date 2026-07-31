@@ -1,3 +1,5 @@
+//! Stable fail-closed errors shared by the Rust core and its C adapter.
+
 use std::fmt;
 
 /// Stable error codes shared with the future thin C++ adapter.

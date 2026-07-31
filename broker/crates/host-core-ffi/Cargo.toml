@@ -8,4 +8,4 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-aexcompat-broker = { path = "../broker" }
+aexcompat-host-core = { path = "../host-core" }

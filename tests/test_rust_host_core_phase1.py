@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT / "broker/Cargo.toml"
 CRATE = ROOT / "broker/crates/host-core-ffi"
-CORE = ROOT / "broker/crates/broker/src/host_core"
+CORE = ROOT / "broker/crates/host-core/src"
 HEADER = ROOT / "broker/crates/broker/include/aexcompat_host_core_abi.h"
 NATIVE = ROOT / "tests/native/rust_host_core_ffi_dual_run_selftest.cpp"
 CMAKE = ROOT / "minihost/CMakeLists.txt"
@@ -28,7 +28,7 @@ class RustHostCorePhase1Tests(unittest.TestCase):
         library = (CRATE / "src/lib.rs").read_text(encoding="utf-8")
         self.assertIn('"crates/host-core-ffi"', workspace)
         self.assertIn('crate-type = ["cdylib", "rlib"]', manifest)
-        self.assertIn("aexcompat-broker", manifest)
+        self.assertIn("aexcompat-host-core", manifest)
         for export in EXPORTS:
             self.assertIn(f'pub unsafe extern "C" fn {export}', library)
             self.assertIn(export, HEADER.read_text(encoding="utf-8"))

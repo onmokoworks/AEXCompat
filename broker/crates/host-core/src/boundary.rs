@@ -4,7 +4,7 @@
 //! the C++ adapter. Rust entry points must call [`contain_panic`] before
 //! returning through that adapter so Rust unwinding never crosses a C ABI.
 
-use crate::host_core::error::{HostError, HostErrorCode};
+use crate::error::{HostError, HostErrorCode};
 use std::mem::{align_of, offset_of, size_of};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

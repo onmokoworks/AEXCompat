@@ -4,15 +4,13 @@
 //! C++ responsibilities. This layer validates nulls and value contracts, owns
 //! Rust session handles, and prevents Rust unwinding from crossing `extern "C"`.
 
-use aexcompat_broker::host_core::boundary::{
+use aexcompat_host_core::boundary::{
     HOST_CORE_ABI_VERSION, HostCallContext, HostCallStatus, HostOpaqueHandle, contain_panic,
 };
-use aexcompat_broker::host_core::error::{HostError, HostErrorCode};
-use aexcompat_broker::host_core::handle::{HandleKind, HandleRegistry, OwnerId};
-use aexcompat_broker::host_core::report::{
-    HostReport, HostReportSnapshot, ReportCounters, ReportPhase,
-};
-use aexcompat_broker::host_core::session::{HostSession, SessionState};
+use aexcompat_host_core::error::{HostError, HostErrorCode};
+use aexcompat_host_core::handle::{HandleKind, HandleRegistry, OwnerId};
+use aexcompat_host_core::report::{HostReport, HostReportSnapshot, ReportCounters, ReportPhase};
+use aexcompat_host_core::session::{HostSession, SessionState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -519,7 +517,7 @@ pub unsafe extern "C" fn aex_host_core_session_dispose_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aexcompat_broker::host_core::report::ReportOutcome;
+    use aexcompat_host_core::report::ReportOutcome;
 
     #[test]
     fn exported_lifecycle_is_fail_closed() {

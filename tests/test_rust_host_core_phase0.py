@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE = ROOT / "broker/crates/broker/src/host_core"
+CORE = ROOT / "broker/crates/host-core/src"
 DOC = ROOT / "docs/RUST_HOST_CORE_MIGRATION_2026-07-31.md"
 HEADER = ROOT / "broker/crates/broker/include/aexcompat_host_core_abi.h"
 NATIVE_SELFTEST = ROOT / "tests/native/rust_host_core_abi_selftest.cpp"
