@@ -57,10 +57,16 @@ class RustHostCorePhase0Tests(unittest.TestCase):
             self.assertIn(f"{rust_name} = {value}", errors)
             self.assertIn(f"{c_name} = {value}", header)
         self.assertIn("size_of::<HostCallContext>() == 24", boundary)
-        self.assertNotIn("*", "\n".join(
-            line for line in header.splitlines()
-            if line.startswith("  ") and not line.startswith("  AEX_")
-        ))
+        for struct_name in (
+            "AexHostCallContext",
+            "AexHostCallStatus",
+            "AexHostOpaqueHandle",
+            "AexHostReportSnapshot",
+        ):
+            body = header.split(
+                f"typedef struct {struct_name} {{", maxsplit=1
+            )[1].split(f"}} {struct_name};", maxsplit=1)[0]
+            self.assertNotIn("*", body)
         for sdk_marker in ("PF_", "AEGP_", "SPBasic"):
             self.assertNotIn(sdk_marker, header)
         cmake = CMAKE.read_text(encoding="utf-8")

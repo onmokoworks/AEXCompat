@@ -49,15 +49,39 @@ Adobe SDK layouts. Existing observed Adobe layout constants in
 `guest/crates/aex-abi` remain byte-offset evidence only. SDK-shaped callback
 tables and raw pointers stay in C++.
 
+## Phase 1 adapter gate (Issue #619)
+
+Phase 1 adds `broker/crates/host-core-ffi`, a dedicated Rust `cdylib` with six
+versioned session lifecycle entry points. The entry points accept only the
+phase 0 value ABI, keep session objects behind registry-bound opaque tokens,
+validate ABI version/size, owner, token, origin thread, state, and stale
+generation, and project every completed call into a fixed 72-byte report
+snapshot. Rust panic containment runs before an `extern "C"` return; a panic
+is never converted to success.
+
+`rust_host_core_ffi_dual_run_selftest` is a thin C++ dynamic loader. It resolves
+the six exports at runtime, invokes them inside a native Windows SEH frame, and
+runs the same normalized lifecycle and error trace through an independent C++
+session oracle. The comparison covers null/version/size rejection, malformed
+and stale handles, owner and logical/actual thread mismatches, invalid
+transitions, callback counters, disposal, status/report correlation, and
+monotonic report identity. Opaque token bits and report IDs are intentionally
+checked as identities, not for byte-for-byte equality with the C++ oracle.
+
+This gate does not pass Adobe SDK pointers into Rust, and production worker
+routing remains unchanged. It is a pre-routing compatibility proof rather than
+an actual AE launch requirement. The resident protocol (#98), active scene
+model (#26 / PR #571), and #614/wgpu/GPU scope remain untouched.
+
 ## Later phases
 
 1. After #26 / PR #571 lands, define value-only scene/world/parameter snapshots
    and run the Rust model beside the C++ owner. Compare normalized state,
    lifecycle counters, error class, and report fields; do not require pixel
    identity when the phase does not render.
-2. Move session/report/error decision logic behind the adapter while C++ still
-   owns SDK allocation and callbacks. Dual-run mismatches fail the migration
-   gate without changing production output.
+2. Add an explicitly opt-in worker dual-run call site only after its ownership
+   and resident-session dependencies no longer overlap #26 or #98. Any
+   mismatch must fail that migration gate without changing production output.
 3. Move selected world/parameter state owners only after layout, ownership,
    callback, cleanup, and thread tests pass for that slice.
 4. Keep SDK ABI tables and SEH frames in C++ unless a specific, reviewed
@@ -66,4 +90,7 @@ tables and raw pointers stay in C++.
 
 Each phase requires one Issue and one PR, focused Rust tests, relevant native
 Release self-tests when native code is touched, source-contract tests,
-independent review with no unresolved P1/P2, and green CI before merge.
+and independent review with no unresolved P1/P2. For Issue #619, GitHub Actions
+are explicitly disabled/non-gating by user policy; the merge gate is the
+focused Release build/tests, latest-head independent review, resolved threads,
+and CLEAN/MERGEABLE GitHub state.

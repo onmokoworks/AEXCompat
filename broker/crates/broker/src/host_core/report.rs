@@ -2,23 +2,26 @@ use crate::host_core::error::{HostError, HostErrorCode};
 use crate::host_core::handle::HandleKind;
 use crate::host_core::session::SessionState;
 use serde::Serialize;
+use std::mem::{align_of, offset_of, size_of};
 
 pub const HOST_REPORT_SCHEMA_VERSION: u32 = 1;
 
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportPhase {
-    Boundary,
-    Handle,
-    Session,
+    Boundary = 1,
+    Handle = 2,
+    Session = 3,
 }
 
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportOutcome {
-    Passed,
-    Rejected,
-    Faulted,
+    Passed = 1,
+    Rejected = 2,
+    Faulted = 3,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -45,14 +48,35 @@ pub struct HostReport {
     pub counters: ReportCounters,
 }
 
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandleKindReport {
-    Scene,
-    World,
-    Parameter,
-    Session,
-    Report,
+    Scene = 1,
+    World = 2,
+    Parameter = 3,
+    Session = 4,
+    Report = 5,
+}
+
+/// Fixed C ABI projection of [`HostReport`]. Optional enum fields use zero as
+/// `none`; error code zero means the call passed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostReportSnapshot {
+    pub abi_version: u32,
+    pub struct_size: u32,
+    pub schema_version: u32,
+    pub phase: u32,
+    pub outcome: u32,
+    pub error_code: i32,
+    pub handle_kind: u32,
+    pub session_state: u32,
+    pub report_id: u64,
+    pub handles_created: u64,
+    pub handles_disposed: u64,
+    pub callbacks_attempted: u64,
+    pub callbacks_completed: u64,
 }
 
 impl From<HandleKind> for HandleKindReport {
@@ -105,7 +129,33 @@ impl HostReport {
             counters,
         }
     }
+
+    pub fn snapshot(&self, abi_version: u32) -> HostReportSnapshot {
+        HostReportSnapshot {
+            abi_version,
+            struct_size: size_of::<HostReportSnapshot>() as u32,
+            schema_version: self.schema_version,
+            phase: self.phase as u32,
+            outcome: self.outcome as u32,
+            error_code: self.error_code.unwrap_or(HostErrorCode::Ok as i32),
+            handle_kind: self.handle_kind.map_or(0, |kind| kind as u32),
+            session_state: self.session_state.map_or(0, |state| state as u32),
+            report_id: self.report_id,
+            handles_created: self.counters.handles_created,
+            handles_disposed: self.counters.handles_disposed,
+            callbacks_attempted: self.counters.callbacks_attempted,
+            callbacks_completed: self.counters.callbacks_completed,
+        }
+    }
 }
+
+const _: () = {
+    assert!(size_of::<HostReportSnapshot>() == 72);
+    assert!(align_of::<HostReportSnapshot>() == 8);
+    assert!(offset_of!(HostReportSnapshot, error_code) == 20);
+    assert!(offset_of!(HostReportSnapshot, report_id) == 32);
+    assert!(offset_of!(HostReportSnapshot, callbacks_completed) == 64);
+};
 
 #[cfg(test)]
 mod tests {
@@ -149,5 +199,21 @@ mod tests {
             assert_eq!(report.outcome, ReportOutcome::Faulted);
             assert_ne!(report.error_code, Some(HostErrorCode::Ok as i32));
         }
+    }
+
+    #[test]
+    fn fixed_snapshot_layout_and_optional_sentinels_are_stable() {
+        assert_eq!(size_of::<HostReportSnapshot>(), 72);
+        assert_eq!(align_of::<HostReportSnapshot>(), 8);
+        assert_eq!(offset_of!(HostReportSnapshot, error_code), 20);
+        assert_eq!(offset_of!(HostReportSnapshot, report_id), 32);
+        assert_eq!(offset_of!(HostReportSnapshot, callbacks_completed), 64);
+
+        let snapshot =
+            HostReport::passed(9, ReportPhase::Session, ReportCounters::default()).snapshot(1);
+        assert_eq!(snapshot.struct_size, 72);
+        assert_eq!(snapshot.error_code, HostErrorCode::Ok as i32);
+        assert_eq!(snapshot.handle_kind, 0);
+        assert_eq!(snapshot.session_state, 0);
     }
 }

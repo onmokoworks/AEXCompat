@@ -3,14 +3,15 @@ use crate::host_core::error::{HostError, HostErrorCode};
 use serde::Serialize;
 use std::thread::{self, ThreadId};
 
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
-    Created,
-    Open,
-    InCallback,
-    Closed,
-    Faulted,
+    Created = 1,
+    Open = 2,
+    InCallback = 3,
+    Closed = 4,
+    Faulted = 5,
 }
 
 pub struct HostSession {

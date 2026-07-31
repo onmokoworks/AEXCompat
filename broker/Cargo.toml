@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/broker", "crates/dummy-workers", "crates/harness"]
+members = ["crates/broker", "crates/dummy-workers", "crates/harness", "crates/host-core-ffi"]
 resolver = "2"
 
 [workspace.package]
