@@ -546,9 +546,16 @@
     },
     "abi_generator_check": "pass",
     "latest_head_review": {
-      "status": "pending",
-      "unresolved_p1": null,
-      "unresolved_p2": null
+      "reviewed_head": "4268add1fff9168155f2cd91b0100ca1253c7540",
+      "status": "pass",
+      "unresolved_p1": 0,
+      "unresolved_p2": 0,
+      "latest_head_reviewer": "codex-evidence",
+      "supporting_reviews": [
+        "codex-runtime",
+        "codex-portability",
+        "claude-opus"
+      ]
     },
     "ci": "ignored under the repository billing policy"
   }

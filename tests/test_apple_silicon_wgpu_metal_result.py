@@ -520,8 +520,15 @@ def test_cpu_regression_commands_and_validation_status_are_explicit():
     }
     assert validation["abi_generator_check"] == "pass"
     assert validation["latest_head_review"] == {
-        "status": "pending",
-        "unresolved_p1": None,
-        "unresolved_p2": None,
+        "reviewed_head": "4268add1fff9168155f2cd91b0100ca1253c7540",
+        "status": "pass",
+        "unresolved_p1": 0,
+        "unresolved_p2": 0,
+        "latest_head_reviewer": "codex-evidence",
+        "supporting_reviews": [
+            "codex-runtime",
+            "codex-portability",
+            "claude-opus",
+        ],
     }
     assert validation["ci"] == "ignored under the repository billing policy"
