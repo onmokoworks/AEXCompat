@@ -23,6 +23,8 @@ enum class AdapterLoadStatus : uint32_t {
   kMissingExport = 4,
   kMissingAbiDescriptor = 5,
   kIncompatibleAbiDescriptor = 6,
+  kMissingSceneIdentityAbiDescriptor = 7,
+  kIncompatibleSceneIdentityAbiDescriptor = 8,
 };
 
 struct ApiV1 {
@@ -32,12 +34,13 @@ struct ApiV1 {
   AexHostCoreSessionCallV1Fn session_end_callback = nullptr;
   AexHostCoreSessionCallV1Fn session_close = nullptr;
   AexHostCoreSessionCallV1Fn session_dispose = nullptr;
+  AexHostCoreSceneIdentityMatchV1Fn scene_identity_match = nullptr;
 
   bool complete() const noexcept {
     return session_create != nullptr && session_open != nullptr &&
            session_begin_callback != nullptr &&
            session_end_callback != nullptr && session_close != nullptr &&
-           session_dispose != nullptr;
+           session_dispose != nullptr && scene_identity_match != nullptr;
   }
 };
 
@@ -52,6 +55,11 @@ struct Invocation {
   AexHostCallStatus status{};
   AexHostReportSnapshot report{};
   AexHostOpaqueHandle created_handle{};
+};
+
+struct SceneIdentityInvocation {
+  int32_t return_code = AEX_HOST_INVALID_STATE;
+  uint32_t exception_code = 0;
 };
 
 // Owns one loaded host-core DLL and its complete v1 function table. Callers
@@ -92,6 +100,20 @@ class AdapterV1 {
                alignof(AexHostReportSnapshot) &&
            descriptor.capabilities ==
                AEXCOMPAT_HOST_CORE_CAPABILITY_SESSION_LIFECYCLE_V1;
+  }
+
+  static bool IsCompatibleSceneIdentityDescriptor(
+      const AexHostSceneIdentityAbiDescriptorV1 &descriptor) noexcept {
+    return descriptor.magic ==
+               AEXCOMPAT_HOST_CORE_SCENE_IDENTITY_ABI_DESCRIPTOR_MAGIC &&
+           descriptor.abi_version ==
+               AEXCOMPAT_HOST_CORE_SCENE_IDENTITY_ABI_VERSION &&
+           descriptor.struct_size ==
+               sizeof(AexHostSceneIdentityAbiDescriptorV1) &&
+           descriptor.identity_size == sizeof(AexHostSceneIdentity) &&
+           descriptor.identity_alignment == alignof(AexHostSceneIdentity) &&
+           descriptor.capabilities ==
+               AEXCOMPAT_HOST_CORE_SCENE_IDENTITY_CAPABILITY_MATCH_V1;
   }
 
   static AdapterLoadStatus ValidateApi(const ApiV1 &api) noexcept {
@@ -155,6 +177,31 @@ class AdapterV1 {
       return AdapterLoadStatus::kIncompatibleAbiDescriptor;
     }
 
+    const FARPROC scene_descriptor_symbol = GetProcAddress(
+        module, "aex_host_core_scene_identity_abi_descriptor_v1");
+    if (scene_descriptor_symbol == nullptr) {
+      output->native_error_ = ERROR_PROC_NOT_FOUND;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kMissingSceneIdentityAbiDescriptor;
+    }
+    const auto *published_scene_descriptor =
+        reinterpret_cast<const AexHostSceneIdentityAbiDescriptorV1 *>(
+            scene_descriptor_symbol);
+    AexHostSceneIdentityAbiDescriptorV1 scene_descriptor{};
+    DWORD scene_descriptor_error = ERROR_SUCCESS;
+    if (!CopySceneIdentityDescriptor(published_scene_descriptor,
+                                     &scene_descriptor,
+                                     &scene_descriptor_error)) {
+      output->native_error_ = scene_descriptor_error;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kIncompatibleSceneIdentityAbiDescriptor;
+    }
+    if (!IsCompatibleSceneIdentityDescriptor(scene_descriptor)) {
+      output->native_error_ = ERROR_BAD_FORMAT;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kIncompatibleSceneIdentityAbiDescriptor;
+    }
+
     ApiV1 api;
     api.session_create = Resolve<AexHostCoreSessionCreateV1Fn>(
         module, "aex_host_core_session_create_v1");
@@ -168,6 +215,8 @@ class AdapterV1 {
         module, "aex_host_core_session_close_v1");
     api.session_dispose = Resolve<AexHostCoreSessionCallV1Fn>(
         module, "aex_host_core_session_dispose_v1");
+    api.scene_identity_match = Resolve<AexHostCoreSceneIdentityMatchV1Fn>(
+        module, "aex_host_core_scene_identity_match_v1");
     if (ValidateApi(api) != AdapterLoadStatus::kOk) {
       output->native_error_ = ERROR_PROC_NOT_FOUND;
       FreeLibrary(module);
@@ -177,12 +226,14 @@ class AdapterV1 {
     output->module_ = module;
     output->api_ = api;
     output->descriptor_ = descriptor;
+    output->scene_identity_descriptor_ = scene_descriptor;
     output->native_error_ = ERROR_SUCCESS;
     return AdapterLoadStatus::kOk;
   }
 
   bool loaded() const noexcept {
     return module_ != nullptr && IsCompatibleDescriptor(descriptor_) &&
+           IsCompatibleSceneIdentityDescriptor(scene_identity_descriptor_) &&
            api_.complete();
   }
 
@@ -196,6 +247,11 @@ class AdapterV1 {
 
   const AexHostCoreAbiDescriptorV1 &descriptor() const noexcept {
     return descriptor_;
+  }
+
+  const AexHostSceneIdentityAbiDescriptorV1 &
+  scene_identity_descriptor() const noexcept {
+    return scene_identity_descriptor_;
   }
 
   // Normal callers use value copies so the pointers passed to Rust always
@@ -234,6 +290,15 @@ class AdapterV1 {
   Invocation Dispose(AexHostCallContext context,
                      AexHostOpaqueHandle session) const noexcept {
     return InvokeSession(api_.session_dispose, context, session);
+  }
+
+  SceneIdentityInvocation MatchSceneIdentity(
+      AexHostSceneIdentity current,
+      AexHostSceneIdentity candidate) const noexcept {
+    const SehCallResult result = InvokeSceneIdentityRaw(
+        api_.scene_identity_match, &current, &candidate);
+    return SceneIdentityInvocation{result.return_code,
+                                   result.exception_code};
   }
 
   // Low-level ABI conformance hooks. Each non-null pointer must remain valid;
@@ -282,6 +347,24 @@ class AdapterV1 {
     return result;
   }
 
+  static SehCallResult InvokeSceneIdentityRaw(
+      AexHostCoreSceneIdentityMatchV1Fn function,
+      const AexHostSceneIdentity *current,
+      const AexHostSceneIdentity *candidate) noexcept {
+    if (function == nullptr) {
+      return SehCallResult{AEX_HOST_INVALID_STATE, 0};
+    }
+
+    SehCallResult result{AEX_HOST_SEH_FAULT, 0};
+    __try {
+      result.return_code = function(current, candidate);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      result.return_code = AEX_HOST_SEH_FAULT;
+      result.exception_code = static_cast<uint32_t>(GetExceptionCode());
+    }
+    return result;
+  }
+
  private:
   static bool CopyDescriptor(
       const AexHostCoreAbiDescriptorV1 *source,
@@ -300,6 +383,35 @@ class AdapterV1 {
       if (destination->magic == AEXCOMPAT_HOST_CORE_ABI_DESCRIPTOR_MAGIC &&
           destination->abi_version == AEXCOMPAT_HOST_CORE_ABI_VERSION &&
           destination->struct_size == sizeof(AexHostCoreAbiDescriptorV1)) {
+        *destination = *source;
+      }
+      copied = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      *native_error = static_cast<DWORD>(GetExceptionCode());
+    }
+    return copied;
+  }
+
+  static bool CopySceneIdentityDescriptor(
+      const AexHostSceneIdentityAbiDescriptorV1 *source,
+      AexHostSceneIdentityAbiDescriptorV1 *destination,
+      DWORD *native_error) noexcept {
+    if (source == nullptr || destination == nullptr || native_error == nullptr) {
+      return false;
+    }
+    bool copied = false;
+    __try {
+      // Copy the full descriptor only after its fixed identity prefix proves
+      // that the publisher exposes the complete version-1 value.
+      destination->magic = source->magic;
+      destination->abi_version = source->abi_version;
+      destination->struct_size = source->struct_size;
+      if (destination->magic ==
+              AEXCOMPAT_HOST_CORE_SCENE_IDENTITY_ABI_DESCRIPTOR_MAGIC &&
+          destination->abi_version ==
+              AEXCOMPAT_HOST_CORE_SCENE_IDENTITY_ABI_VERSION &&
+          destination->struct_size ==
+              sizeof(AexHostSceneIdentityAbiDescriptorV1)) {
         *destination = *source;
       }
       copied = true;
@@ -366,6 +478,7 @@ class AdapterV1 {
     module_ = nullptr;
     api_ = ApiV1{};
     descriptor_ = AexHostCoreAbiDescriptorV1{};
+    scene_identity_descriptor_ = AexHostSceneIdentityAbiDescriptorV1{};
     absolute_path_.fill(L'\0');
     native_error_ = ERROR_SUCCESS;
   }
@@ -374,11 +487,14 @@ class AdapterV1 {
     module_ = other.module_;
     api_ = other.api_;
     descriptor_ = other.descriptor_;
+    scene_identity_descriptor_ = other.scene_identity_descriptor_;
     absolute_path_ = other.absolute_path_;
     native_error_ = other.native_error_;
     other.module_ = nullptr;
     other.api_ = ApiV1{};
     other.descriptor_ = AexHostCoreAbiDescriptorV1{};
+    other.scene_identity_descriptor_ =
+        AexHostSceneIdentityAbiDescriptorV1{};
     other.absolute_path_.fill(L'\0');
     other.native_error_ = ERROR_SUCCESS;
   }
@@ -386,6 +502,7 @@ class AdapterV1 {
   HMODULE module_ = nullptr;
   ApiV1 api_;
   AexHostCoreAbiDescriptorV1 descriptor_{};
+  AexHostSceneIdentityAbiDescriptorV1 scene_identity_descriptor_{};
   std::array<wchar_t, 32768> absolute_path_{};
   DWORD native_error_ = ERROR_SUCCESS;
 };

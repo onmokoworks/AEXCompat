@@ -11,6 +11,7 @@ use aexcompat_host_core::boundary::{
 use aexcompat_host_core::error::{HostError, HostErrorCode};
 use aexcompat_host_core::handle::{HandleKind, HandleRegistry, OwnerId};
 use aexcompat_host_core::report::{HostReport, HostReportSnapshot, ReportCounters, ReportPhase};
+use aexcompat_host_core::scene::{HostSceneIdentity, HostSceneIdentityAbiDescriptorV1};
 use aexcompat_host_core::session::{HostSession, SessionState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -18,6 +19,10 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 #[unsafe(export_name = "aex_host_core_abi_descriptor_v1")]
 pub static AEX_HOST_CORE_ABI_DESCRIPTOR_V1: HostCoreAbiDescriptorV1 =
     HostCoreAbiDescriptorV1::current();
+
+#[unsafe(export_name = "aex_host_core_scene_identity_abi_descriptor_v1")]
+pub static AEX_HOST_CORE_SCENE_IDENTITY_ABI_DESCRIPTOR_V1: HostSceneIdentityAbiDescriptorV1 =
+    HostSceneIdentityAbiDescriptorV1::current();
 
 struct SessionRecord {
     session: HostSession,
@@ -118,6 +123,20 @@ unsafe fn read_context(
     let context = unsafe { context.read() };
     context.validate()?;
     Ok(context)
+}
+
+unsafe fn read_scene_identity(
+    identity: *const HostSceneIdentity,
+    operation: &'static str,
+) -> Result<HostSceneIdentity, HostError> {
+    if identity.is_null() {
+        return Err(HostError::new(HostErrorCode::InvalidArgument, operation));
+    }
+    // SAFETY: The thin C++ adapter owns pointer validity and places this read
+    // inside its SEH frame. Rust validates the copied integer-only value.
+    let identity = unsafe { identity.read() };
+    identity.validate()?;
+    Ok(identity)
 }
 
 fn create_session(context: HostCallContext) -> CallOutcome {
@@ -519,6 +538,27 @@ pub unsafe extern "C" fn aex_host_core_session_dispose_v1(
     }
 }
 
+/// Matches a caller-held identity against the current C++ registry identity.
+///
+/// # Safety
+///
+/// Both pointers must be aligned and valid for one `HostSceneIdentity` read.
+/// The native adapter must place the call inside its Windows SEH boundary.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aex_host_core_scene_identity_match_v1(
+    current: *const HostSceneIdentity,
+    candidate: *const HostSceneIdentity,
+) -> i32 {
+    match contain_panic("ffi_scene_identity_match", || {
+        let current = unsafe { read_scene_identity(current, "read_current_scene_identity") }?;
+        let candidate = unsafe { read_scene_identity(candidate, "read_candidate_scene_identity") }?;
+        current.match_candidate(&candidate)
+    }) {
+        Ok(()) => HostErrorCode::Ok as i32,
+        Err(error) => error.code() as i32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +570,32 @@ mod tests {
             AEX_HOST_CORE_ABI_DESCRIPTOR_V1,
             HostCoreAbiDescriptorV1::current()
         );
+        assert_eq!(
+            AEX_HOST_CORE_SCENE_IDENTITY_ABI_DESCRIPTOR_V1,
+            HostSceneIdentityAbiDescriptorV1::current()
+        );
+    }
+
+    #[test]
+    fn exported_scene_identity_matcher_is_value_only_and_fail_closed() {
+        let current =
+            HostSceneIdentity::new(17, 103, 4, aexcompat_host_core::scene::object_kind::LAYER);
+        let mut candidate = current;
+        unsafe {
+            assert_eq!(
+                aex_host_core_scene_identity_match_v1(&current, &candidate),
+                HostErrorCode::Ok as i32
+            );
+            candidate.generation -= 1;
+            assert_eq!(
+                aex_host_core_scene_identity_match_v1(&current, &candidate),
+                HostErrorCode::StaleHandle as i32
+            );
+            assert_eq!(
+                aex_host_core_scene_identity_match_v1(std::ptr::null(), &candidate),
+                HostErrorCode::InvalidArgument as i32
+            );
+        }
     }
 
     #[test]
