@@ -123,6 +123,22 @@ impl<T> HandleRegistry<T> {
             .ok_or_else(|| HostError::new(HostErrorCode::StaleHandle, "resolve_handle"))
     }
 
+    pub fn get_mut(
+        &mut self,
+        handle: HostOpaqueHandle,
+        owner: OwnerId,
+        expected_kind: HandleKind,
+    ) -> Result<&mut T, HostError> {
+        let slot = {
+            let (slot, _) = self.resolve(handle, owner, expected_kind, "resolve_handle_mut")?;
+            slot
+        };
+        self.entries[slot]
+            .value
+            .as_mut()
+            .ok_or_else(|| HostError::new(HostErrorCode::StaleHandle, "resolve_handle_mut"))
+    }
+
     pub fn remove(
         &mut self,
         handle: HostOpaqueHandle,

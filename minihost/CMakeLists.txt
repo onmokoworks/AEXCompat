@@ -220,6 +220,15 @@ target_compile_features(rust_host_core_abi_selftest PRIVATE cxx_std_17)
 target_include_directories(rust_host_core_abi_selftest PRIVATE
   ../broker/crates/broker/include)
 
+add_executable(rust_host_core_ffi_dual_run_selftest
+  ../tests/native/rust_host_core_ffi_dual_run_selftest.cpp
+)
+target_compile_features(rust_host_core_ffi_dual_run_selftest PRIVATE cxx_std_17)
+target_compile_definitions(rust_host_core_ffi_dual_run_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(rust_host_core_ffi_dual_run_selftest PRIVATE
+  ../broker/crates/broker/include)
+
 add_executable(extended_inter_memory_selftest
   ../tests/native/extended_inter_memory_selftest.cpp
   src/extended_inter_memory.cpp

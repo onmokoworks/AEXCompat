@@ -148,6 +148,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aexcompat-host-core-ffi"
+version = "0.1.0"
+dependencies = [
+ "aexcompat-broker",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

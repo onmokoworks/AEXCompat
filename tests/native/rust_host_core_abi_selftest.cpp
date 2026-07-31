@@ -11,13 +11,22 @@ int main() {
       sizeof(AexHostCallStatus) == 24 &&
       offsetof(AexHostCallStatus, code) == 8 &&
       offsetof(AexHostCallStatus, report_id) == 16 &&
-      sizeof(AexHostOpaqueHandle) == 8;
+      sizeof(AexHostOpaqueHandle) == 8 &&
+      sizeof(AexHostReportSnapshot) == 72 &&
+      offsetof(AexHostReportSnapshot, error_code) == 20 &&
+      offsetof(AexHostReportSnapshot, report_id) == 32 &&
+      offsetof(AexHostReportSnapshot, callbacks_completed) == 64;
   const bool codes_ok =
       AEX_HOST_OK == 0 &&
       AEX_HOST_WRONG_THREAD == 3 &&
       AEX_HOST_WRONG_OWNER == 5 &&
       AEX_HOST_STALE_HANDLE == 7 &&
       AEX_HOST_PANIC == 8 &&
-      AEX_HOST_SEH_FAULT == 9;
+      AEX_HOST_SEH_FAULT == 9 &&
+      AEX_HOST_REPORT_PHASE_SESSION == 3 &&
+      AEX_HOST_REPORT_OUTCOME_PASSED == 1 &&
+      AEX_HOST_HANDLE_KIND_SESSION == 4 &&
+      AEX_HOST_SESSION_STATE_CREATED == 1 &&
+      AEX_HOST_SESSION_STATE_FAULTED == 5;
   return layout_ok && codes_ok ? 0 : 1;
 }
