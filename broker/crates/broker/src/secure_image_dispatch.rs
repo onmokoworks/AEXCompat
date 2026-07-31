@@ -281,10 +281,8 @@ fn dispatch_secure_cluster_image_session_with_policy(
     // entry (design §2.3): written to a broker-owned staging source, copied
     // and hash-verified by the tree, then the source is removed. The worker
     // receives only the staged path inside the sealed root.
-    let staging_source = crate::cluster_manifest::ClusterManifestTransport::write(
-        input.repository,
-        &manifest,
-    )?;
+    let staging_source =
+        crate::cluster_manifest::ClusterManifestTransport::write(input.repository, &manifest)?;
     let manifest_bytes = std::fs::read(staging_source.path())?;
     let manifest_entry = LoadEntry {
         source: staging_source.path().to_path_buf(),
@@ -357,7 +355,14 @@ fn dispatch_secure_cluster_image_session_with_policy(
 }
 
 pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<SecureLaunchResult> {
-    dispatch_secure_image_with_resources(input, Vec::new())
+    dispatch_secure_image_impl(input, Vec::new(), None)
+}
+
+pub(crate) fn dispatch_secure_image_with_process_memory_limit(
+    input: SecureImageDispatch<'_>,
+    process_memory_limit: usize,
+) -> io::Result<SecureLaunchResult> {
+    dispatch_secure_image_impl(input, Vec::new(), Some(process_memory_limit))
 }
 
 /// Resource-carrying variant of `dispatch_secure_image` (issue #362): the
@@ -366,6 +371,14 @@ pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<Secur
 pub fn dispatch_secure_image_with_resources(
     input: SecureImageDispatch<'_>,
     resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
+) -> io::Result<SecureLaunchResult> {
+    dispatch_secure_image_impl(input, resources, None)
+}
+
+fn dispatch_secure_image_impl(
+    input: SecureImageDispatch<'_>,
+    resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
+    process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
     crate::trace_policy::validate_broker_trace_directory(input.repository)?;
     let worker_program = input
@@ -392,7 +405,16 @@ pub fn dispatch_secure_image_with_resources(
         repository: input.repository,
         require_module_audit: true,
     };
-    secure_launch(tree, request, input.timeout)
+    if let Some(limit) = process_memory_limit {
+        crate::secure_launch::secure_launch_with_process_memory_limit(
+            tree,
+            request,
+            input.timeout,
+            limit,
+        )
+    } else {
+        secure_launch(tree, request, input.timeout)
+    }
 }
 
 /// Admits the locally built worker by reading it exactly once. The returned

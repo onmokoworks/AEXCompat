@@ -43,6 +43,7 @@ use windows_sys::Win32::System::Threading::{
 pub const STDOUT_CAPTURE_LIMIT: usize = 24 * 1024 * 1024;
 const STDERR_CAPTURE_LIMIT: usize = 64 * 1024;
 const PROCESS_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
+const MAX_PROBE_PROCESS_MEMORY_LIMIT: usize = 2 * 1024 * 1024 * 1024;
 const TERMINATION_GRACE_MS: u32 = 5_000;
 // See memory_limit_reached: the largest single failed allocation the
 // detection tolerates between the recorded peak and the cap.
@@ -529,6 +530,7 @@ pub fn run_isolated(
         None,
         WorkerDesktopPolicy::Dedicated,
         None,
+        PROCESS_MEMORY_LIMIT,
     )
 }
 
@@ -548,6 +550,34 @@ pub fn run_isolated_with_restricted_token(
         Some(token.worker_sid()),
         WorkerDesktopPolicy::Dedicated,
         Some(repository),
+        PROCESS_MEMORY_LIMIT,
+    )
+}
+
+pub(crate) fn run_isolated_with_restricted_token_and_memory_limit(
+    program: &Path,
+    args: &[String],
+    timeout: Option<Duration>,
+    token: &RestrictedWorkerToken,
+    current_directory: &Path,
+    repository: &Path,
+    process_memory_limit: usize,
+) -> io::Result<ProcessResult> {
+    if !(PROCESS_MEMORY_LIMIT..=MAX_PROBE_PROCESS_MEMORY_LIMIT).contains(&process_memory_limit) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "probe process memory limit is outside the bounded range",
+        ));
+    }
+    run_isolated_impl(
+        program,
+        args,
+        timeout,
+        Some((token.as_raw_handle(), current_directory)),
+        Some(token.worker_sid()),
+        WorkerDesktopPolicy::Dedicated,
+        Some(repository),
+        process_memory_limit,
     )
 }
 
@@ -559,6 +589,7 @@ fn run_isolated_impl(
     worker_sid: Option<&RestrictedWorkerSid>,
     desktop_policy: WorkerDesktopPolicy,
     repository: Option<&Path>,
+    process_memory_limit: usize,
 ) -> io::Result<ProcessResult> {
     launch_isolated_impl(
         program,
@@ -568,6 +599,7 @@ fn run_isolated_impl(
         worker_sid,
         desktop_policy,
         repository,
+        process_memory_limit,
     )?
     .wait_and_collect(timeout)
 }
@@ -597,6 +629,7 @@ pub struct LaunchedIsolatedProcess {
     // after `wait_and_collect` finalizes the capture into a `.dmp`. `None` for
     // the render-session path and whenever no repository was supplied.
     minidump_file: Option<crate::minidump_policy::MinidumpLaunchFile>,
+    process_memory_limit: usize,
 }
 
 impl LaunchedIsolatedProcess {
@@ -665,6 +698,7 @@ impl LaunchedIsolatedProcess {
             stdout_reader,
             stderr_reader,
             minidump_file,
+            process_memory_limit,
             dialog_sweep,
         } = self;
         // `INFINITE` is `u32::MAX`, so a `None` deadline and a clamped very long
@@ -734,7 +768,7 @@ impl LaunchedIsolatedProcess {
         // the job aggregate, so a descendant blowing the cap does not implicate
         // the worker.
         let memory_limit_reached = worker_peak_commit_bytes
-            .is_some_and(|peak| peak >= PROCESS_MEMORY_LIMIT as u64 - MEMORY_LIMIT_DETECTION_SLACK);
+            .is_some_and(|peak| peak >= process_memory_limit as u64 - MEMORY_LIMIT_DETECTION_SLACK);
         let kill_reason = if timed_out {
             Some("timeout")
         } else if classification != ExitClassification::Ok && memory_limit_reached {
@@ -774,7 +808,7 @@ impl LaunchedIsolatedProcess {
             worker_peak_commit_bytes,
             peak_process_memory_bytes,
             peak_job_memory_bytes,
-            process_memory_limit_bytes: PROCESS_MEMORY_LIMIT as u64,
+            process_memory_limit_bytes: process_memory_limit as u64,
             memory_limit_reached,
             dismissed_windows,
         })
@@ -846,6 +880,7 @@ fn launch_isolated_session_with_desktop_policy(
         Some(token.worker_sid()),
         desktop_policy,
         Some(repository),
+        PROCESS_MEMORY_LIMIT,
     )
 }
 
@@ -857,6 +892,7 @@ fn launch_isolated_impl(
     worker_sid: Option<&RestrictedWorkerSid>,
     desktop_policy: WorkerDesktopPolicy,
     repository: Option<&Path>,
+    process_memory_limit: usize,
 ) -> io::Result<LaunchedIsolatedProcess> {
     let trace_file = crate::trace_policy::create_trace_file_for_launch()?;
     let mut minidump_file = repository
@@ -880,7 +916,7 @@ fn launch_isolated_impl(
     let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
     limits.BasicLimitInformation.LimitFlags =
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-    limits.ProcessMemoryLimit = PROCESS_MEMORY_LIMIT;
+    limits.ProcessMemoryLimit = process_memory_limit;
     if unsafe {
         SetInformationJobObject(
             job.raw(),
@@ -1072,6 +1108,7 @@ fn launch_isolated_impl(
         stdout_reader,
         stderr_reader,
         minidump_file,
+        process_memory_limit,
     })
 }
 

@@ -1,5 +1,5 @@
-pub mod conformance;
 pub mod cluster_manifest;
+pub mod conformance;
 pub mod cuda_compute_probe;
 pub mod fixture_profiles;
 pub mod gpu_platform_collector;
@@ -41,6 +41,7 @@ pub mod staging_trust;
 mod test_pe;
 pub mod trace_policy;
 pub mod trusted_worker_stage;
+pub mod wgpu_dx12_pf_probe;
 #[cfg(windows)]
 pub mod windows_process;
 pub mod worker_dialog;

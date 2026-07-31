@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aexcompat.local/schemas/wgpu-dx12-pf-probe.schema.json",
+  "title": "AEXCompat sealed PF wgpu/DX12 compute probe",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "probe",
+    "backend",
+    "wgpu_version",
+    "build_manifest_sha256",
+    "artifacts",
+    "sources",
+    "driver_identity",
+    "worker_exit",
+    "worker_exit_code",
+    "process_memory_limit_bytes",
+    "worker_peak_commit_bytes",
+    "memory_limit_reached",
+    "stdout_truncated",
+    "stderr_truncated",
+    "lifecycle",
+    "module_audit",
+    "global_setup",
+    "global_setdown",
+    "wgpu_compute_ready",
+    "backend_ready",
+    "passed"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "probe": { "const": "aexcompat.pf-wgpu-dx12-compute" },
+    "backend": { "const": "dx12" },
+    "wgpu_version": { "const": "0.19.4" },
+    "build_manifest_sha256": { "$ref": "#/$defs/sha256" },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["aex", "runtime"],
+      "properties": {
+        "aex": { "$ref": "#/$defs/artifact" },
+        "runtime": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "aex_cpp",
+        "runtime_cargo_toml",
+        "runtime_rust",
+        "cargo_lock"
+      ],
+      "properties": {
+        "aex_cpp": { "$ref": "#/$defs/artifact" },
+        "runtime_cargo_toml": { "$ref": "#/$defs/artifact" },
+        "runtime_rust": { "$ref": "#/$defs/artifact" },
+        "cargo_lock": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "driver_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "backend",
+        "adapter_luid",
+        "pci_vendor_id",
+        "pci_device_id",
+        "pci_subsystem_id",
+        "pci_revision_id",
+        "driver_inf",
+        "driver_catalog_sha256",
+        "driver_version",
+        "os_build"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "backend": { "const": "directx" },
+        "adapter_luid": { "$ref": "#/$defs/luid" },
+        "pci_vendor_id": { "type": "string", "pattern": "^[0-9a-f]{4}$" },
+        "pci_device_id": { "type": "string", "pattern": "^[0-9a-f]{4}$" },
+        "pci_subsystem_id": { "type": "string", "pattern": "^[0-9a-f]{8}$" },
+        "pci_revision_id": { "type": "string", "pattern": "^[0-9a-f]{2}$" },
+        "driver_inf": { "type": "string", "pattern": "^[A-Za-z0-9._-]+\\.inf$" },
+        "driver_catalog_sha256": { "$ref": "#/$defs/sha256" },
+        "driver_version": { "type": "string", "pattern": "^[0-9.]+$" },
+        "os_build": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "worker_exit": { "const": "ok" },
+    "worker_exit_code": { "const": 0 },
+    "process_memory_limit_bytes": {
+      "type": "integer",
+      "minimum": 536870912,
+      "maximum": 2147483648
+    },
+    "worker_peak_commit_bytes": {
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "memory_limit_reached": { "const": false },
+    "stdout_truncated": { "const": false },
+    "stderr_truncated": { "const": false },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "global_setup_error",
+        "params_setup_error",
+        "global_setdown_error"
+      ],
+      "properties": {
+        "status": { "const": "parameters_inspected" },
+        "global_setup_error": { "const": 0 },
+        "params_setup_error": { "const": 0 },
+        "global_setdown_error": { "const": 0 }
+      }
+    },
+    "module_audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "phase_count", "unknown_count", "plugin_modules"],
+      "properties": {
+        "status": { "const": "passed" },
+        "phase_count": { "type": "integer", "minimum": 3 },
+        "unknown_count": { "const": 0 },
+        "plugin_modules": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 512,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+          "allOf": [
+            { "contains": { "const": "pf_wgpu_dx12_probe.aex" } },
+            { "contains": { "const": "aexcompat_wgpu_dx12_runtime.dll" } }
+          ]
+        }
+      }
+    },
+    "global_setup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "stage",
+        "backend",
+        "wgpu_version",
+        "wgsl_sha256",
+        "element_count",
+        "expected_values",
+        "actual_values",
+        "expected_sha256",
+        "actual_sha256",
+        "adapter",
+        "wgpu_compute_ready",
+        "error"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "stage": { "const": "compute_readback_complete" },
+        "backend": { "const": "dx12" },
+        "wgpu_version": { "const": "0.19.4" },
+        "wgsl_sha256": { "$ref": "#/$defs/sha256" },
+        "element_count": { "const": 64 },
+        "expected_values": { "$ref": "#/$defs/readback" },
+        "actual_values": { "$ref": "#/$defs/readback" },
+        "expected_sha256": { "$ref": "#/$defs/sha256" },
+        "actual_sha256": { "$ref": "#/$defs/sha256" },
+        "adapter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "adapter_luid",
+            "vendor_id",
+            "device_id",
+            "device_type",
+            "driver",
+            "driver_info",
+            "backend"
+          ],
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "adapter_luid": { "$ref": "#/$defs/luid" },
+            "vendor_id": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+            "device_id": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+            "device_type": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "driver": { "type": "string", "maxLength": 256 },
+            "driver_info": { "type": "string", "maxLength": 512 },
+            "backend": { "const": "dx12" }
+          }
+        },
+        "wgpu_compute_ready": { "const": true },
+        "error": { "type": "null" }
+      }
+    },
+    "global_setdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "stage",
+        "cleanup_complete",
+        "live_state_after_setdown",
+        "error"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "stage": { "const": "global_setdown" },
+        "cleanup_complete": { "const": true },
+        "live_state_after_setdown": { "const": false },
+        "error": { "type": "null" }
+      }
+    },
+    "wgpu_compute_ready": { "const": true },
+    "backend_ready": { "const": false },
+    "passed": { "const": true }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "luid": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._/-]+$"
+        },
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "readback": {
+      "type": "array",
+      "minItems": 64,
+      "maxItems": 64,
+      "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+    }
+  }
+}

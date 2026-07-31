@@ -31,3 +31,7 @@ path = "src/bin/opencl_runtime_probe_worker.rs"
 [[bin]]
 name = "cuda-compute-probe-worker"
 path = "src/bin/cuda_compute_probe_worker.rs"
+
+[[bin]]
+name = "wgpu-dx12-pf-probe"
+path = "src/bin/wgpu_dx12_pf_probe.rs"
