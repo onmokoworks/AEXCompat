@@ -74,6 +74,9 @@ pub enum RenderBackendRequest {
     OpenCl {
         device_index: u32,
     },
+    WgpuMetal {
+        device_index: u32,
+    },
 }
 
 impl RenderBackendRequest {
@@ -81,11 +84,19 @@ impl RenderBackendRequest {
         match self {
             Self::Cpu => "cpu",
             Self::OpenCl { .. } => "opencl",
+            Self::WgpuMetal { .. } => "wgpu-metal",
         }
     }
 
     pub fn is_gpu(self) -> bool {
-        matches!(self, Self::OpenCl { .. })
+        matches!(self, Self::OpenCl { .. } | Self::WgpuMetal { .. })
+    }
+
+    pub fn plugin_framework(self) -> Option<&'static str> {
+        match self {
+            Self::Cpu => None,
+            Self::OpenCl { .. } | Self::WgpuMetal { .. } => Some("opencl"),
+        }
     }
 }
 
@@ -124,6 +135,8 @@ pub struct GpuRenderDiagnostic {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub framework: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_framework: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub device_index: Option<u32>,
     pub setup: GpuSelectorDiagnostic,
     pub pre_render: GpuSelectorDiagnostic,
@@ -154,13 +167,16 @@ pub struct GpuRenderDiagnostic {
 
 impl GpuRenderDiagnostic {
     pub fn pending(request: RenderBackendRequest) -> Self {
-        let (framework, device_index) = match request {
-            RenderBackendRequest::Cpu => (None, None),
-            RenderBackendRequest::OpenCl { device_index } => (Some("opencl"), Some(device_index)),
+        let device_index = match request {
+            RenderBackendRequest::Cpu => None,
+            RenderBackendRequest::OpenCl { device_index }
+            | RenderBackendRequest::WgpuMetal { device_index } => Some(device_index),
         };
+        let plugin_framework = request.plugin_framework();
         Self {
             requested_backend: request.backend_name(),
-            framework,
+            framework: plugin_framework,
+            plugin_framework,
             device_index,
             setup: GpuSelectorDiagnostic::pending("GPU_DEVICE_SETUP"),
             pre_render: GpuSelectorDiagnostic::pending("SMART_PRE_RENDER"),
@@ -252,7 +268,8 @@ pub(crate) fn run_smart_lifecycle<T, E>(
     let mut diagnostic = GpuRenderDiagnostic::pending(request);
     let context = match request {
         RenderBackendRequest::Cpu => None,
-        RenderBackendRequest::OpenCl { device_index } => {
+        RenderBackendRequest::OpenCl { device_index }
+        | RenderBackendRequest::WgpuMetal { device_index } => {
             diagnostic.setup.begin();
             let setup = match dispatch(LifecycleCall::Setup {
                 framework: opencl_framework,
@@ -482,6 +499,21 @@ mod tests {
         assert!(!execution.diagnostic.setup.attempted);
         assert!(!execution.diagnostic.setdown.attempted);
         assert_eq!(execution.diagnostic.requested_backend, "cpu");
+        assert_eq!(execution.diagnostic.plugin_framework, None);
+    }
+
+    #[test]
+    fn wgpu_metal_reports_the_opencl_plugin_framework() {
+        let request = RenderBackendRequest::WgpuMetal { device_index: 5 };
+        let diagnostic = GpuRenderDiagnostic::pending(request);
+
+        assert_eq!(request.backend_name(), "wgpu-metal");
+        assert!(request.is_gpu());
+        assert_eq!(diagnostic.requested_backend, "wgpu-metal");
+        assert_eq!(diagnostic.framework, Some("opencl"));
+        assert_eq!(diagnostic.plugin_framework, Some("opencl"));
+        assert_eq!(diagnostic.device_index, Some(5));
+        assert!(!diagnostic.cleanup_complete);
     }
 
     #[test]

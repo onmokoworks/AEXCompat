@@ -1165,6 +1165,12 @@ impl ClassicHost {
         backend: RenderBackendRequest,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
         self.last_gpu_diagnostic = GpuRenderDiagnostic::pending(backend);
+        if matches!(backend, RenderBackendRequest::WgpuMetal { .. }) {
+            let message = "wgpu-metal runtime integration is not available yet";
+            self.last_gpu_diagnostic.runtime_begin_error = Some(message.into());
+            self.last_gpu_diagnostic.cleanup_complete = true;
+            return Err(ClassicError::Input(message.into()));
+        }
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
             return Err(ClassicError::Input(format!(
                 "dimensions must be within 1x1..={MAX_RENDER_WIDTH}x{MAX_RENDER_HEIGHT}, got {width}x{height}"
