@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aexcompat-host-core = { path = "../host-core" }
 windows-sys.workspace = true
 windows.workspace = true
 serde = { version = "1", features = ["derive"] }

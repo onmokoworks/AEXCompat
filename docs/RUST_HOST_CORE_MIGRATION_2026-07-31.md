@@ -31,7 +31,9 @@ Rust is wrapped by the Rust panic boundary before control returns to C++.
 
 ## Phase 0 contract
 
-`broker/crates/broker/src/host_core` now owns:
+The Phase 0 contract now lives in `broker/crates/host-core/src` after the
+Phase 2 ownership extraction. `aexcompat_broker::host_core` compatibility
+re-exports preserve the original module paths. The contract owns:
 
 - versioned `#[repr(C)]` value-only call context, status, and opaque token;
 - stable error codes for argument, state, thread, handle, panic, and SEH faults;
@@ -73,6 +75,27 @@ routing remains unchanged. It is a pre-routing compatibility proof rather than
 an actual AE launch requirement. The resident protocol (#98), active scene
 model (#26 / PR #571), and #614/wgpu/GPU scope remain untouched.
 
+## Phase 2 core ownership gate (Issue #621)
+
+Phase 2 moves the value boundary, stable errors, opaque handle registry,
+fixed report projection, and session state machine into the
+dependency-minimal `aexcompat-host-core` library crate. The FFI `cdylib` now
+depends directly on that crate instead of compiling through
+`aexcompat-broker` and its image, Windows orchestration, tracing, hashing, and
+worker dependency graph.
+
+The broker retains its original public module paths through a compatibility
+re-export of the exact core modules, so this extraction does not create a
+second type universe or change callers. ABI symbols, enum values, layouts,
+panic behavior, opaque token ownership, session transitions, and report
+snapshots remain the Phase 1 contract. The existing C++ DLL dual-run is the
+runtime equivalence gate.
+
+Parameter transport and approved-artifact/descriptor policy remain in the
+broker. Scene/world/parameter semantic migration still waits for the
+unresolved #26 / PR #571 correctness work, and resident integration remains
+outside #98. Production worker routing remains unchanged.
+
 ## Later phases
 
 1. After #26 / PR #571 lands, define value-only scene/world/parameter snapshots
@@ -90,7 +113,7 @@ model (#26 / PR #571), and #614/wgpu/GPU scope remain untouched.
 
 Each phase requires one Issue and one PR, focused Rust tests, relevant native
 Release self-tests when native code is touched, source-contract tests,
-and independent review with no unresolved P1/P2. For Issue #619, GitHub Actions
-are explicitly disabled/non-gating by user policy; the merge gate is the
-focused Release build/tests, latest-head independent review, resolved threads,
-and CLEAN/MERGEABLE GitHub state.
+and independent review with no unresolved P1/P2. For this migration task,
+GitHub Actions are explicitly disabled/non-gating by user policy; the merge
+gate is the focused Release build/tests, latest-head independent review,
+resolved threads, and CLEAN/MERGEABLE GitHub state.

@@ -1,5 +1,5 @@
-use crate::host_core::boundary::HostOpaqueHandle;
-use crate::host_core::error::{HostError, HostErrorCode};
+use crate::boundary::HostOpaqueHandle;
+use crate::error::{HostError, HostErrorCode};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 // Internal token layout: registry | generation | one-based slot | kind.

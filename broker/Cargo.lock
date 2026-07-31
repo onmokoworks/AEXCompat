@@ -120,6 +120,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "aexcompat-broker"
 version = "0.1.0"
 dependencies = [
+ "aexcompat-host-core",
  "image",
  "object",
  "rand 0.9.5",
@@ -148,10 +149,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aexcompat-host-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aexcompat-host-core-ffi"
 version = "0.1.0"
 dependencies = [
- "aexcompat-broker",
+ "aexcompat-host-core",
 ]
 
 [[package]]

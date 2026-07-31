@@ -1,5 +1,5 @@
-use crate::host_core::boundary::contain_panic;
-use crate::host_core::error::{HostError, HostErrorCode};
+use crate::boundary::contain_panic;
+use crate::error::{HostError, HostErrorCode};
 use serde::Serialize;
 use std::thread::{self, ThreadId};
 
