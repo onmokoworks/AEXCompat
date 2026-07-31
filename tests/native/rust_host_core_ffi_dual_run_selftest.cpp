@@ -1,12 +1,53 @@
-#include "aexcompat_host_core_abi.h"
-
-#include <windows.h>
+#include "aexcompat_host_core_adapter.hpp"
 
 #include <cstdint>
 #include <cstdio>
 #include <thread>
 
 namespace {
+
+using aexcompat::host_core::AdapterLoadStatus;
+using aexcompat::host_core::AdapterV1;
+using aexcompat::host_core::Invocation;
+using aexcompat::host_core::SehCallResult;
+
+constexpr DWORD kSyntheticSehCode = 0xE0421001UL;
+
+int32_t AEXCOMPAT_HOST_CORE_CALL SyntheticSehCreate(
+    const AexHostCallContext *context, AexHostOpaqueHandle *session,
+    AexHostCallStatus *status, AexHostReportSnapshot *report) {
+  (void)context;
+  if (session != nullptr) {
+    session->value = ~uint64_t{0};
+  }
+  if (status != nullptr) {
+    status->code = AEX_HOST_OK;
+    status->report_id = ~uint64_t{0};
+  }
+  if (report != nullptr) {
+    report->outcome = AEX_HOST_REPORT_OUTCOME_PASSED;
+    report->report_id = ~uint64_t{0};
+  }
+#if defined(_MSC_VER)
+  RaiseException(kSyntheticSehCode, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+#endif
+  return AEX_HOST_SEH_FAULT;
+}
+
+Invocation InvokeRawCreate(const AdapterV1 &adapter,
+                           const AexHostCallContext *context,
+                           AexHostOpaqueHandle *session) {
+  Invocation invocation;
+  const SehCallResult result = AdapterV1::InvokeCreateRaw(
+      adapter.api().session_create, context, session, &invocation.status,
+      &invocation.report);
+  invocation.return_code = result.return_code;
+  invocation.exception_code = result.exception_code;
+  if (session != nullptr) {
+    invocation.created_handle = *session;
+  }
+  return invocation;
+}
 
 struct ExpectedCounters {
   uint64_t handles_created = 0;
@@ -37,8 +78,7 @@ class NativeSessionOracle {
  public:
   ExpectedCall Create(const AexHostCallContext *context, bool has_output) {
     if (!has_output || !ValidContext(context)) {
-      return Failure(AEX_HOST_INVALID_ARGUMENT,
-                     AEX_HOST_SESSION_STATE_NONE);
+      return Failure(AEX_HOST_INVALID_ARGUMENT, AEX_HOST_SESSION_STATE_NONE);
     }
     owner_ = context->session_id;
     caller_thread_token_ = context->caller_thread_token;
@@ -50,8 +90,7 @@ class NativeSessionOracle {
     return Success(state_);
   }
 
-  ExpectedCall Call(const AexHostCallContext *context,
-                    OracleHandle handle,
+  ExpectedCall Call(const AexHostCallContext *context, OracleHandle handle,
                     SessionOperation operation) {
     const ExpectedCall resolution = Resolve(context, handle);
     if (resolution.code != AEX_HOST_OK) {
@@ -89,8 +128,7 @@ class NativeSessionOracle {
     return Success(state_);
   }
 
-  ExpectedCall Dispose(const AexHostCallContext *context,
-                       OracleHandle handle) {
+  ExpectedCall Dispose(const AexHostCallContext *context, OracleHandle handle) {
     const ExpectedCall resolution = Resolve(context, handle);
     if (resolution.code != AEX_HOST_OK) {
       return resolution;
@@ -116,12 +154,10 @@ class NativeSessionOracle {
   ExpectedCall Resolve(const AexHostCallContext *context,
                        OracleHandle handle) const {
     if (!ValidContext(context)) {
-      return Failure(AEX_HOST_INVALID_ARGUMENT,
-                     AEX_HOST_SESSION_STATE_NONE);
+      return Failure(AEX_HOST_INVALID_ARGUMENT, AEX_HOST_SESSION_STATE_NONE);
     }
     if (handle == OracleHandle::Invalid || !known_) {
-      return Failure(AEX_HOST_INVALID_HANDLE,
-                     AEX_HOST_SESSION_STATE_NONE);
+      return Failure(AEX_HOST_INVALID_HANDLE, AEX_HOST_SESSION_STATE_NONE);
     }
     if (!live_) {
       return Failure(AEX_HOST_STALE_HANDLE, AEX_HOST_SESSION_STATE_NONE);
@@ -153,86 +189,9 @@ class NativeSessionOracle {
   ExpectedCounters counters_;
 };
 
-struct SehCallResult {
-  int32_t return_code;
-  uint32_t exception_code;
-};
-
-SehCallResult CallCreateInsideSeh(
-    AexHostCoreSessionCreateV1Fn function,
-    const AexHostCallContext *context,
-    AexHostOpaqueHandle *session,
-    AexHostCallStatus *status,
-    AexHostReportSnapshot *report) noexcept {
-  SehCallResult result{AEX_HOST_SEH_FAULT, 0};
-#if defined(_MSC_VER)
-  __try {
-    result.return_code = function(context, session, status, report);
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
-    result.return_code = AEX_HOST_SEH_FAULT;
-    result.exception_code = static_cast<uint32_t>(GetExceptionCode());
-  }
-#else
-  result.return_code = function(context, session, status, report);
-#endif
-  return result;
-}
-
-SehCallResult CallSessionInsideSeh(
-    AexHostCoreSessionCallV1Fn function,
-    const AexHostCallContext *context,
-    AexHostOpaqueHandle session,
-    AexHostCallStatus *status,
-    AexHostReportSnapshot *report) noexcept {
-  SehCallResult result{AEX_HOST_SEH_FAULT, 0};
-#if defined(_MSC_VER)
-  __try {
-    result.return_code = function(context, session, status, report);
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
-    result.return_code = AEX_HOST_SEH_FAULT;
-    result.exception_code = static_cast<uint32_t>(GetExceptionCode());
-  }
-#else
-  result.return_code = function(context, session, status, report);
-#endif
-  return result;
-}
-
-struct Invocation {
-  int32_t return_code = AEX_HOST_INVALID_STATE;
-  uint32_t exception_code = 0;
-  AexHostCallStatus status{};
-  AexHostReportSnapshot report{};
-};
-
-Invocation InvokeCreate(AexHostCoreSessionCreateV1Fn function,
-                        const AexHostCallContext *context,
-                        AexHostOpaqueHandle *session) {
-  Invocation invocation;
-  const SehCallResult result =
-      CallCreateInsideSeh(function, context, session, &invocation.status,
-                          &invocation.report);
-  invocation.return_code = result.return_code;
-  invocation.exception_code = result.exception_code;
-  return invocation;
-}
-
-Invocation InvokeSession(AexHostCoreSessionCallV1Fn function,
-                         const AexHostCallContext *context,
-                         AexHostOpaqueHandle session) {
-  Invocation invocation;
-  const SehCallResult result =
-      CallSessionInsideSeh(function, context, session, &invocation.status,
-                           &invocation.report);
-  invocation.return_code = result.return_code;
-  invocation.exception_code = result.exception_code;
-  return invocation;
-}
-
 class Verifier {
  public:
-  void Verify(const char *label,
-              const Invocation &actual,
+  void Verify(const char *label, const Invocation &actual,
               const ExpectedCall &expected) {
     Equal(label, "SEH exception", actual.exception_code, 0);
     Equal(label, "return code", actual.return_code, expected.code);
@@ -250,9 +209,8 @@ class Verifier {
     Equal(label, "report phase", actual.report.phase,
           AEX_HOST_REPORT_PHASE_SESSION);
     Equal(label, "report outcome", actual.report.outcome,
-          expected.code == AEX_HOST_OK
-              ? AEX_HOST_REPORT_OUTCOME_PASSED
-              : AEX_HOST_REPORT_OUTCOME_REJECTED);
+          expected.code == AEX_HOST_OK ? AEX_HOST_REPORT_OUTCOME_PASSED
+                                       : AEX_HOST_REPORT_OUTCOME_REJECTED);
     Equal(label, "report error", actual.report.error_code, expected.code);
     Equal(label, "handle kind", actual.report.handle_kind,
           AEX_HOST_HANDLE_KIND_SESSION);
@@ -262,11 +220,9 @@ class Verifier {
           expected.counters.handles_created);
     Equal(label, "disposed count", actual.report.handles_disposed,
           expected.counters.handles_disposed);
-    Equal(label, "callbacks attempted",
-          actual.report.callbacks_attempted,
+    Equal(label, "callbacks attempted", actual.report.callbacks_attempted,
           expected.counters.callbacks_attempted);
-    Equal(label, "callbacks completed",
-          actual.report.callbacks_completed,
+    Equal(label, "callbacks completed", actual.report.callbacks_completed,
           expected.counters.callbacks_completed);
     if (actual.status.report_id == 0 ||
         actual.status.report_id != actual.report.report_id ||
@@ -296,9 +252,7 @@ class Verifier {
 
  private:
   template <typename Actual, typename Expected>
-  void Equal(const char *label,
-             const char *field,
-             Actual actual,
+  void Equal(const char *label, const char *field, Actual actual,
              Expected expected) {
     const long long actual_value = static_cast<long long>(actual);
     const long long expected_value = static_cast<long long>(expected);
@@ -313,13 +267,6 @@ class Verifier {
   uint64_t last_report_id_ = 0;
 };
 
-template <typename Function>
-Function LoadFunction(HMODULE module, const char *name, Verifier *verifier) {
-  const FARPROC address = GetProcAddress(module, name);
-  verifier->Require(name, address != nullptr);
-  return reinterpret_cast<Function>(address);
-}
-
 }  // namespace
 
 int wmain(int argc, wchar_t **argv) {
@@ -330,27 +277,45 @@ int wmain(int argc, wchar_t **argv) {
   }
 
   Verifier verifier;
-  HMODULE module = LoadLibraryW(argv[1]);
-  if (module == nullptr) {
-    std::fprintf(stderr, "LoadLibraryW failed: %lu\n", GetLastError());
+  AdapterV1 adapter;
+  const AdapterLoadStatus load_status = AdapterV1::Load(argv[1], &adapter);
+  if (load_status != AdapterLoadStatus::kOk) {
+    std::fprintf(stderr,
+                 "host-core adapter load failed: status=%u native=%lu\n",
+                 static_cast<unsigned>(load_status), adapter.native_error());
     return 2;
   }
+  verifier.Require("adapter must own a complete API", adapter.loaded());
+  const wchar_t *loaded_path = adapter.absolute_path();
+  verifier.Require("adapter must retain an absolute DLL path",
+                   loaded_path[0] != L'\0' &&
+                       (loaded_path[1] == L':' ||
+                        (loaded_path[0] == L'\\' && loaded_path[1] == L'\\')));
 
-  const auto create = LoadFunction<AexHostCoreSessionCreateV1Fn>(
-      module, "aex_host_core_session_create_v1", &verifier);
-  const auto open = LoadFunction<AexHostCoreSessionCallV1Fn>(
-      module, "aex_host_core_session_open_v1", &verifier);
-  const auto begin_callback = LoadFunction<AexHostCoreSessionCallV1Fn>(
-      module, "aex_host_core_session_begin_callback_v1", &verifier);
-  const auto end_callback = LoadFunction<AexHostCoreSessionCallV1Fn>(
-      module, "aex_host_core_session_end_callback_v1", &verifier);
-  const auto close = LoadFunction<AexHostCoreSessionCallV1Fn>(
-      module, "aex_host_core_session_close_v1", &verifier);
-  const auto dispose = LoadFunction<AexHostCoreSessionCallV1Fn>(
-      module, "aex_host_core_session_dispose_v1", &verifier);
-  if (verifier.failures() != 0) {
-    FreeLibrary(module);
-    return 1;
+  AdapterV1 invalid_adapter;
+  verifier.Require("null DLL path must fail closed",
+                   AdapterV1::Load(nullptr, &invalid_adapter) ==
+                           AdapterLoadStatus::kInvalidArgument &&
+                       !invalid_adapter.loaded());
+
+  wchar_t system_directory[MAX_PATH]{};
+  wchar_t kernel32_path[MAX_PATH]{};
+  const UINT system_directory_length =
+      GetSystemDirectoryW(system_directory, MAX_PATH);
+  verifier.Require(
+      "GetSystemDirectoryW failed",
+      system_directory_length != 0 && system_directory_length < MAX_PATH);
+  if (system_directory_length != 0 && system_directory_length < MAX_PATH) {
+    const int written =
+        swprintf_s(kernel32_path, L"%ls\\kernel32.dll", system_directory);
+    AdapterV1 incomplete_adapter;
+    verifier.Require(
+        "DLL without the six host-core exports must fail closed",
+        written > 0 &&
+            AdapterV1::Load(kernel32_path, &incomplete_adapter) ==
+                AdapterLoadStatus::kMissingExport &&
+            incomplete_adapter.native_error() == ERROR_PROC_NOT_FOUND &&
+            !incomplete_adapter.loaded());
   }
 
   NativeSessionOracle oracle;
@@ -361,66 +326,76 @@ int wmain(int argc, wchar_t **argv) {
       91001,
   };
 
+  const Invocation unloaded = invalid_adapter.Create(context);
+  verifier.Require(
+      "unloaded adapter invocation must fail closed",
+      unloaded.return_code == AEX_HOST_INVALID_STATE &&
+          unloaded.exception_code == 0 &&
+          unloaded.created_handle.value == 0 &&
+          unloaded.status.code == AEX_HOST_INVALID_STATE &&
+          unloaded.status.report_id == 0 &&
+          unloaded.report.phase == AEX_HOST_REPORT_PHASE_BOUNDARY &&
+          unloaded.report.outcome == AEX_HOST_REPORT_OUTCOME_REJECTED &&
+          unloaded.report.error_code == AEX_HOST_INVALID_STATE &&
+          unloaded.report.report_id == 0);
+
   AexHostOpaqueHandle untouched{0x55aa55aa55aa55aaULL};
   AexHostReportSnapshot ignored_report{};
   const SehCallResult null_status =
-      CallCreateInsideSeh(create, &context, &untouched, nullptr,
-                          &ignored_report);
+      AdapterV1::InvokeCreateRaw(adapter.api().session_create, &context,
+                                 &untouched, nullptr, &ignored_report);
   verifier.Require("null status must fail before mutation",
                    null_status.return_code == AEX_HOST_INVALID_ARGUMENT &&
                        null_status.exception_code == 0 &&
                        untouched.value == 0x55aa55aa55aa55aaULL);
   AexHostCallStatus ignored_status{};
   const SehCallResult null_report =
-      CallCreateInsideSeh(create, &context, &untouched, &ignored_status,
-                          nullptr);
+      AdapterV1::InvokeCreateRaw(adapter.api().session_create, &context,
+                                 &untouched, &ignored_status, nullptr);
   verifier.Require("null report must fail before mutation",
                    null_report.return_code == AEX_HOST_INVALID_ARGUMENT &&
                        null_report.exception_code == 0 &&
                        untouched.value == 0x55aa55aa55aa55aaULL);
 
-  Invocation actual =
-      InvokeCreate(create, &context, static_cast<AexHostOpaqueHandle *>(nullptr));
+  Invocation actual = InvokeRawCreate(adapter, &context, nullptr);
   verifier.Verify("create/null-output", actual, oracle.Create(&context, false));
 
   AexHostCallContext bad_version = context;
   bad_version.abi_version += 1;
-  AexHostOpaqueHandle invalid_create_handle{~uint64_t{0}};
-  actual = InvokeCreate(create, &bad_version, &invalid_create_handle);
+  actual = adapter.Create(bad_version);
   verifier.Verify("create/bad-version", actual,
                   oracle.Create(&bad_version, true));
   verifier.Require("bad version must zero the output token",
-                   invalid_create_handle.value == 0);
+                   actual.created_handle.value == 0);
 
   AexHostCallContext bad_size = context;
   bad_size.struct_size = 0;
-  invalid_create_handle.value = ~uint64_t{0};
-  actual = InvokeCreate(create, &bad_size, &invalid_create_handle);
+  actual = adapter.Create(bad_size);
   verifier.Verify("create/bad-size", actual, oracle.Create(&bad_size, true));
   verifier.Require("bad size must zero the output token",
-                   invalid_create_handle.value == 0);
+                   actual.created_handle.value == 0);
 
-  invalid_create_handle.value = ~uint64_t{0};
-  actual = InvokeCreate(create, nullptr, &invalid_create_handle);
-  verifier.Verify("create/null-context", actual,
-                  oracle.Create(nullptr, true));
+  AexHostOpaqueHandle invalid_create_handle{~uint64_t{0}};
+  actual = InvokeRawCreate(adapter, nullptr, &invalid_create_handle);
+  verifier.Verify("create/null-context", actual, oracle.Create(nullptr, true));
   verifier.Require("null context must zero the output token",
-                   invalid_create_handle.value == 0);
+                   invalid_create_handle.value == 0 &&
+                       actual.created_handle.value == 0);
 
-  AexHostOpaqueHandle session{};
-  actual = InvokeCreate(create, &context, &session);
+  actual = adapter.Create(context);
+  const AexHostOpaqueHandle session = actual.created_handle;
   verifier.Verify("create/valid", actual, oracle.Create(&context, true));
   verifier.Require("create must return an opaque non-pointer token",
                    session.value != 0);
 
-  actual = InvokeSession(open, &context, AexHostOpaqueHandle{0});
+  actual = adapter.Open(context, AexHostOpaqueHandle{0});
   verifier.Verify(
       "open/invalid-handle", actual,
       oracle.Call(&context, OracleHandle::Invalid, SessionOperation::Open));
 
   AexHostCallContext wrong_token = context;
   ++wrong_token.caller_thread_token;
-  actual = InvokeSession(open, &wrong_token, session);
+  actual = adapter.Open(wrong_token, session);
   verifier.Verify(
       "open/wrong-token", actual,
       oracle.Call(&wrong_token, OracleHandle::Session, SessionOperation::Open));
@@ -428,63 +403,83 @@ int wmain(int argc, wchar_t **argv) {
   Invocation foreign_actual;
   ExpectedCall foreign_expected;
   std::thread foreign_thread([&]() {
-    foreign_actual = InvokeSession(open, &context, session);
+    foreign_actual = adapter.Open(context, session);
     foreign_expected =
         oracle.Call(&context, OracleHandle::Session, SessionOperation::Open);
   });
   foreign_thread.join();
   verifier.Verify("open/foreign-thread", foreign_actual, foreign_expected);
 
-  actual = InvokeSession(open, &context, session);
+  actual = adapter.Open(context, session);
   verifier.Verify(
       "open/valid", actual,
       oracle.Call(&context, OracleHandle::Session, SessionOperation::Open));
 
-  actual = InvokeSession(end_callback, &context, session);
-  verifier.Verify(
-      "end/invalid-state", actual,
-      oracle.Call(&context, OracleHandle::Session,
-                  SessionOperation::EndCallback));
+  actual = adapter.EndCallback(context, session);
+  verifier.Verify("end/invalid-state", actual,
+                  oracle.Call(&context, OracleHandle::Session,
+                              SessionOperation::EndCallback));
 
-  actual = InvokeSession(begin_callback, &context, session);
-  verifier.Verify(
-      "begin/valid", actual,
-      oracle.Call(&context, OracleHandle::Session,
-                  SessionOperation::BeginCallback));
+  actual = adapter.BeginCallback(context, session);
+  verifier.Verify("begin/valid", actual,
+                  oracle.Call(&context, OracleHandle::Session,
+                              SessionOperation::BeginCallback));
 
-  actual = InvokeSession(close, &context, session);
+  actual = adapter.Close(context, session);
   verifier.Verify(
       "close/in-callback", actual,
       oracle.Call(&context, OracleHandle::Session, SessionOperation::Close));
 
-  actual = InvokeSession(end_callback, &context, session);
-  verifier.Verify(
-      "end/valid", actual,
-      oracle.Call(&context, OracleHandle::Session,
-                  SessionOperation::EndCallback));
+  actual = adapter.EndCallback(context, session);
+  verifier.Verify("end/valid", actual,
+                  oracle.Call(&context, OracleHandle::Session,
+                              SessionOperation::EndCallback));
 
-  actual = InvokeSession(close, &context, session);
+  actual = adapter.Close(context, session);
   verifier.Verify(
       "close/valid", actual,
       oracle.Call(&context, OracleHandle::Session, SessionOperation::Close));
 
   AexHostCallContext wrong_owner = context;
   ++wrong_owner.session_id;
-  actual = InvokeSession(dispose, &wrong_owner, session);
+  actual = adapter.Dispose(wrong_owner, session);
   verifier.Verify("dispose/wrong-owner", actual,
                   oracle.Dispose(&wrong_owner, OracleHandle::Session));
 
-  actual = InvokeSession(dispose, &context, session);
+  actual = adapter.Dispose(context, session);
   verifier.Verify("dispose/valid", actual,
                   oracle.Dispose(&context, OracleHandle::Session));
 
-  actual = InvokeSession(open, &context, session);
+  actual = adapter.Open(context, session);
   verifier.Verify(
       "open/stale", actual,
       oracle.Call(&context, OracleHandle::Session, SessionOperation::Open));
 
-  const BOOL unloaded = FreeLibrary(module);
-  verifier.Require("FreeLibrary failed", unloaded != FALSE);
+#if defined(_MSC_VER)
+  AexHostOpaqueHandle seh_handle{0x55aa55aa55aa55aaULL};
+  AexHostCallStatus seh_status{};
+  AexHostReportSnapshot seh_report{};
+  const SehCallResult seh_result = AdapterV1::InvokeCreateRaw(
+      SyntheticSehCreate, &context, &seh_handle, &seh_status, &seh_report);
+  verifier.Require(
+      "synthetic SEH must be normalized into stable boundary values",
+      seh_result.return_code == AEX_HOST_SEH_FAULT &&
+          seh_result.exception_code == kSyntheticSehCode &&
+          seh_handle.value == 0 &&
+          seh_status.abi_version == AEXCOMPAT_HOST_CORE_ABI_VERSION &&
+          seh_status.struct_size == sizeof(AexHostCallStatus) &&
+          seh_status.code == AEX_HOST_SEH_FAULT && seh_status.report_id == 0 &&
+          seh_report.abi_version == AEXCOMPAT_HOST_CORE_ABI_VERSION &&
+          seh_report.struct_size == sizeof(AexHostReportSnapshot) &&
+          seh_report.schema_version == 1 &&
+          seh_report.phase == AEX_HOST_REPORT_PHASE_BOUNDARY &&
+          seh_report.outcome == AEX_HOST_REPORT_OUTCOME_FAULTED &&
+          seh_report.error_code == AEX_HOST_SEH_FAULT &&
+          seh_report.handle_kind == AEX_HOST_HANDLE_KIND_NONE &&
+          seh_report.session_state == AEX_HOST_SESSION_STATE_NONE &&
+          seh_report.report_id == 0);
+#endif
+
   if (verifier.failures() != 0) {
     return 1;
   }

@@ -7,6 +7,7 @@ WORKSPACE = ROOT / "broker/Cargo.toml"
 CRATE = ROOT / "broker/crates/host-core-ffi"
 CORE = ROOT / "broker/crates/host-core/src"
 HEADER = ROOT / "broker/crates/broker/include/aexcompat_host_core_abi.h"
+ADAPTER = ROOT / "broker/crates/broker/include/aexcompat_host_core_adapter.hpp"
 NATIVE = ROOT / "tests/native/rust_host_core_ffi_dual_run_selftest.cpp"
 CMAKE = ROOT / "minihost/CMakeLists.txt"
 DOC = ROOT / "docs/RUST_HOST_CORE_MIGRATION_2026-07-31.md"
@@ -71,14 +72,12 @@ class RustHostCorePhase1Tests(unittest.TestCase):
 
     def test_native_test_is_a_dynamic_seh_contained_dual_run(self):
         native = NATIVE.read_text(encoding="utf-8")
+        adapter = ADAPTER.read_text(encoding="utf-8")
         for export in EXPORTS:
-            self.assertIn(f'"{export}"', native)
+            self.assertIn(f'"{export}"', adapter)
         for marker in (
             "NativeSessionOracle",
-            "LoadLibraryW",
-            "GetProcAddress",
-            "__try",
-            "EXCEPTION_EXECUTE_HANDLER",
+            "aexcompat_host_core_adapter.hpp",
             "create/bad-version",
             "create/bad-size",
             "open/invalid-handle",
@@ -89,6 +88,13 @@ class RustHostCorePhase1Tests(unittest.TestCase):
             "callbacks_completed",
         ):
             self.assertIn(marker, native)
+        for marker in (
+            "LoadLibraryExW",
+            "GetProcAddress",
+            "__try",
+            "EXCEPTION_EXECUTE_HANDLER",
+        ):
+            self.assertIn(marker, adapter)
         cmake = CMAKE.read_text(encoding="utf-8")
         for marker in (
             "add_executable(rust_host_core_ffi_dual_run_selftest",
