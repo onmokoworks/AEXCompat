@@ -213,6 +213,13 @@ target_include_directories(aex_string_table_selftest PRIVATE src)
 target_compile_definitions(aex_string_table_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
+add_executable(rust_host_core_abi_selftest
+  ../tests/native/rust_host_core_abi_selftest.cpp
+)
+target_compile_features(rust_host_core_abi_selftest PRIVATE cxx_std_17)
+target_include_directories(rust_host_core_abi_selftest PRIVATE
+  ../broker/crates/broker/include)
+
 add_executable(extended_inter_memory_selftest
   ../tests/native/extended_inter_memory_selftest.cpp
   src/extended_inter_memory.cpp

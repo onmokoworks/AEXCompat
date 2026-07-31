@@ -7,6 +7,7 @@ CORE = ROOT / "broker/crates/broker/src/host_core"
 DOC = ROOT / "docs/RUST_HOST_CORE_MIGRATION_2026-07-31.md"
 HEADER = ROOT / "broker/crates/broker/include/aexcompat_host_core_abi.h"
 NATIVE_SELFTEST = ROOT / "tests/native/rust_host_core_abi_selftest.cpp"
+CMAKE = ROOT / "minihost/CMakeLists.txt"
 
 
 class RustHostCorePhase0Tests(unittest.TestCase):
@@ -62,6 +63,13 @@ class RustHostCorePhase0Tests(unittest.TestCase):
         ))
         for sdk_marker in ("PF_", "AEGP_", "SPBasic"):
             self.assertNotIn(sdk_marker, header)
+        cmake = CMAKE.read_text(encoding="utf-8")
+        for marker in (
+            "add_executable(rust_host_core_abi_selftest",
+            "../tests/native/rust_host_core_abi_selftest.cpp",
+            "../broker/crates/broker/include",
+        ):
+            self.assertIn(marker, cmake)
 
     def test_ownership_thread_and_value_only_report_are_explicit(self):
         handle = (CORE / "handle.rs").read_text(encoding="utf-8")
