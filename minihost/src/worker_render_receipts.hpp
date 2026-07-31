@@ -111,7 +111,14 @@ class SceneGenerationMutationGuard {
   std::unique_lock<std::mutex> lock_;
 };
 
-int32_t register_receipt(std::unique_ptr<ReceiptDraft> draft, void** output);
+// Publication is intentionally split into explicit unbound and scene-bound
+// entry points. Scene-derived pixels must supply the generation they were
+// resolved against so registration can revalidate it while holding the
+// generation-publication gate.
+int32_t register_unbound_receipt(std::unique_ptr<ReceiptDraft> draft,
+                                 void** output);
+int32_t register_scene_receipt(std::unique_ptr<ReceiptDraft> draft,
+                               uint32_t project_generation, void** output);
 int32_t get_world(void* receipt, void*** world);
 int32_t checkin(void* receipt);
 bool checkin_if_live(void* receipt);

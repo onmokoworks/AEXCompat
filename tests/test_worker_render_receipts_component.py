@@ -21,17 +21,24 @@ REGISTRATION_SOURCES = MAIN + "\n" + "\n".join(
 )
 
 
-def test_receipt_registry_is_a_compiled_owner_with_one_registration_path():
+def test_receipt_registry_is_a_compiled_owner_with_explicit_binding_paths():
     assert CMAKE.count("src/worker_render_receipts.cpp") == 1
     assert '#include "worker_render_receipts.hpp"' in MAIN
     assert "struct ReceiptDraft" in HEADER
     assert "std::unordered_map<void*, std::unique_ptr<Receipt>> g_receipts" in SOURCE
     assert "g_receipts" not in MAIN
-    assert REGISTRATION_SOURCES.count("render_receipts::register_receipt(") == 4
+    assert REGISTRATION_SOURCES.count(
+        "render_receipts::register_scene_receipt("
+    ) == 3
+    assert REGISTRATION_SOURCES.count(
+        "render_receipts::register_unbound_receipt("
+    ) == 2
+    assert "render_receipts::register_receipt(" not in REGISTRATION_SOURCES
+    assert "register_receipt_impl" in SOURCE
 
 
 def test_registry_never_calls_world_registry_while_holding_receipt_mutex():
-    registration = SOURCE[SOURCE.index("int32_t register_receipt("):
+    registration = SOURCE[SOURCE.index("int32_t register_receipt_impl("):
                           SOURCE.index("int32_t get_world(")]
     assert registration.index("g_receipts.emplace(key") < registration.index(
         "register_borrowed_view(")

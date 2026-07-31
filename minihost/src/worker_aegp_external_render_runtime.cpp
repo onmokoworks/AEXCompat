@@ -153,7 +153,9 @@ int32_t publish_cached_receipt(const ItemValue& options, void** output, bool* ca
   receipt->world.extent_hint = {0, 0, backing->world.width, backing->world.height};
   receipt->world.pix_aspect_ratio = {1, 1};
   if (current_timestamp != g_project_generation.load() || g_timestamp_exhausted.load()) return 4;
-  if (render_receipts::register_receipt(std::move(receipt), output) != 0) return 4;
+  if (render_receipts::register_scene_receipt(
+          std::move(receipt), current_timestamp, output) != 0)
+    return 4;
   *cache_hit = true;
   return 0;
 }

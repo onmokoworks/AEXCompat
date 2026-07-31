@@ -291,6 +291,30 @@ def test_scene_mutation_and_receipt_publication_are_generation_serialized() -> N
     external = read(EXTERNAL_RENDER_RUNTIME)
     receipts = read(RENDER_RECEIPTS)
     compat = read(COMPAT_SELFTEST)
+    item_runtime = read(
+        ROOT / "minihost" / "src" / "worker_aegp_item_render_runtime.cpp"
+    )
+    layer_runtime = read(
+        ROOT / "minihost" / "src" / "worker_aegp_layer_render_runtime.cpp"
+    )
+    layer_header = read(
+        ROOT / "minihost" / "src" / "worker_aegp_layer_render_runtime.hpp"
+    )
+    async_layer_header = read(
+        ROOT / "minihost" / "src" / "worker_aegp_async_layer_runtime.hpp"
+    )
+    classic_runtime = read(
+        ROOT / "minihost" / "src" / "worker_classic_render_runtime.cpp"
+    )
+    staged_runtime = read(
+        ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
+    )
+    world_selftest = read(
+        ROOT / "minihost" / "src" / "worker_aegp_world_selftests.cpp"
+    )
+    render_selftest = read(
+        ROOT / "minihost" / "src" / "worker_aegp_render_selftests.cpp"
+    )
 
     setter = scene[
         scene.index("int32_t __cdecl aegp_set_effect_flags"):
@@ -336,7 +360,7 @@ def test_scene_mutation_and_receipt_publication_are_generation_serialized() -> N
     )
     assert "configure_scene_generation_reader(&project_generation)" in external
     registration = receipts[
-        receipts.index("int32_t register_receipt"):
+        receipts.index("int32_t register_receipt_impl"):
         receipts.index("int32_t get_world")
     ]
     assert registration.index("g_scene_generation_mutex") < registration.index(
@@ -355,7 +379,79 @@ def test_scene_mutation_and_receipt_publication_are_generation_serialized() -> N
     assert 0 <= cache_lock < publication.index("receipt->pixel_format")
     assert publication.index(
         "receipt->pixel_format"
-    ) < publication.index("render_receipts::register_receipt")
+    ) < publication.index("render_receipts::register_scene_receipt")
+    assert (
+        "std::move(receipt), current_timestamp, output"
+        in publication
+    )
+    assert "draft->scene_bound = true" in receipts
+    assert "draft->project_generation = project_generation" in receipts
+    assert "register_unbound_receipt" in receipts
+
+    production_receipt_callers = (
+        external,
+        item_runtime,
+        layer_runtime,
+        staged_runtime,
+    )
+    assert sum(
+        caller.count("render_receipts::register_scene_receipt(")
+        for caller in production_receipt_callers
+    ) == 3
+    assert sum(
+        caller.count("render_receipts::register_unbound_receipt(")
+        for caller in production_receipt_callers
+    ) == 2
+    assert all(
+        "render_receipts::register_receipt(" not in caller
+        for caller in production_receipt_callers
+    )
+    assert staged_runtime.count("publish_snapshot(") == 3
+    layer_publication = layer_runtime[
+        layer_runtime.index("int32_t publish_from_context"):
+        layer_runtime.index("int32_t publish(")
+    ]
+    assert layer_publication.index(
+        "const uint32_t receipt_generation = context.project_generation"
+    ) < layer_publication.index("publish_scheduler_stage")
+    assert layer_publication.index(
+        "publish_scheduler_stage"
+    ) < layer_publication.index("register_scene_receipt")
+    assert "&stage_identity_hash, receipt_generation" in layer_publication
+    assert "context.project_generation" in layer_publication
+    assert (
+        "g_hooks.project_generation() != context.project_generation"
+        in layer_publication
+    )
+    assert "uint32_t project_generation{}" in layer_header
+    assert "uint32_t project_generation{}" in async_layer_header
+    assert (
+        "next.project_generation =\n"
+        "        aexcompat::aegp_external_render_runtime::project_generation()"
+        in classic_runtime
+    )
+    assert "output.project_generation = context.project_generation" in layer_runtime
+    assert "context.project_generation = source.project_generation" in layer_runtime
+    assert (
+        "g_hooks.project_generation() != project_generation"
+        in staged_runtime
+    )
+    assert "expected_project_generation" in staged_runtime
+    assert "active_project_generation + 1" in render_selftest
+    assert "stale_async_captured" in render_selftest
+    assert "stale_async_receipt == nullptr" in render_selftest
+    assert (
+        "plan.scene_bound\n"
+        "        ? render_receipts::register_scene_receipt"
+        in staged_runtime
+    )
+    assert "register_unbound_receipt" in item_runtime
+    assert "cached_snapshot.scene_bound" in world_selftest
+    assert (
+        "cached_snapshot.project_generation != cached_generation"
+        in world_selftest
+    )
+    assert "cache-generation-binding" in world_selftest
     assert "in_flight_generation + 1" in compat
     assert "stale_publication_result != 0" in compat
     assert "in_flight_receipt == nullptr" in compat

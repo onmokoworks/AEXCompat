@@ -87,7 +87,8 @@ bool publish_scene_stage_world(
     suite_abi::AegpTime time, suite_abi::AegpTime time_step,
     int8_t quality, uint8_t guide_layers, int32_t pixel_format,
     int32_t width, int32_t height, int32_t rowbytes, const void* pixels,
-    uint64_t* stage_identity_hash = nullptr);
+    uint64_t* stage_identity_hash = nullptr,
+    uint32_t expected_project_generation = 0);
 bool publish_world(void* item, suite_abi::AegpTime time, suite_abi::AegpTime time_step,
                    int8_t quality, uint8_t guide_layers, int32_t pixel_format,
                    int32_t width, int32_t height, int32_t rowbytes, const void* pixels);

@@ -6,6 +6,7 @@
 #include "render_subsystem.h"
 #include "runtime_module_audit.hpp"
 #include "worker_aegp_layer_render_runtime.hpp"
+#include "worker_aegp_external_render_runtime.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_classic_execution.hpp"
@@ -355,6 +356,8 @@ struct ClassicRenderDispatchOwner {
     std::memcpy(&render_ref, input.data() + kInEffectRef, sizeof(render_ref));
     next.active_effect_instance =
         staged_effect_identity_for_render_ref(render_ref);
+    next.project_generation =
+        aexcompat::aegp_external_render_runtime::project_generation();
     LayerContextScope scope(std::move(next));
     classic_context.mark_selector_dispatched();
     return entry(kRender, input.data(), output.data(), params.data(), world.data(), nullptr);

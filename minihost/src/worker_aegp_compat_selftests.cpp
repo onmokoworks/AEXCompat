@@ -2412,8 +2412,9 @@ AegpSceneModelSelftestReport verify_aegp_scene_model() {
     direct_draft->scene_item = active;
     direct_draft->scene_project = direct_project;
     direct_draft->project_generation = direct_generation_before;
-    direct_registered = render_receipts::register_receipt(
-        std::move(direct_draft), &direct_receipt) == 0 &&
+    direct_registered = render_receipts::register_scene_receipt(
+        std::move(direct_draft), direct_generation_before,
+        &direct_receipt) == 0 &&
         direct_receipt;
   }
   const AegpTime direct_time{1, 30};
@@ -2470,8 +2471,9 @@ AegpSceneModelSelftestReport verify_aegp_scene_model() {
   }
   const int32_t stale_publication_result =
       in_flight_mutation
-          ? render_receipts::register_receipt(
-                std::move(in_flight_draft), &in_flight_receipt)
+          ? render_receipts::register_scene_receipt(
+                std::move(in_flight_draft), in_flight_generation,
+                &in_flight_receipt)
           : 4;
   const auto in_flight_stats_after = render_receipts::statistics();
   report.in_flight_receipt_rejected =

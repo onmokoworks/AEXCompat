@@ -93,7 +93,10 @@ void configure_scene_generation_reader(
 SceneGenerationMutationGuard::SceneGenerationMutationGuard() noexcept
     : lock_(g_scene_generation_mutex) {}
 
-int32_t register_receipt(std::unique_ptr<ReceiptDraft> draft, void** output) {
+namespace {
+
+int32_t register_receipt_impl(std::unique_ptr<ReceiptDraft> draft,
+                              void** output) {
   if (output) *output = nullptr;
   if (!output || !draft || draft->pixels.empty() ||
       draft->world.data != draft->pixels.data()) return 4;
@@ -156,6 +159,32 @@ int32_t register_receipt(std::unique_ptr<ReceiptDraft> draft, void** output) {
     *output = key;
   }
   return 0;
+}
+
+}  // namespace
+
+int32_t register_unbound_receipt(std::unique_ptr<ReceiptDraft> draft,
+                                 void** output) {
+  if (output) *output = nullptr;
+  if (!draft || draft->scene_bound || draft->project_generation != 0 ||
+      draft->scene_item.kind != scene_model::ObjectKind::none ||
+      draft->scene_effect.kind != scene_model::ObjectKind::none ||
+      draft->scene_project.kind != scene_model::ObjectKind::none)
+    return 4;
+  return register_receipt_impl(std::move(draft), output);
+}
+
+int32_t register_scene_receipt(std::unique_ptr<ReceiptDraft> draft,
+                               uint32_t project_generation, void** output) {
+  if (output) *output = nullptr;
+  if (!draft || project_generation == 0 ||
+      project_generation == (std::numeric_limits<uint32_t>::max)() ||
+      (draft->project_generation != 0 &&
+       draft->project_generation != project_generation))
+    return 4;
+  draft->scene_bound = true;
+  draft->project_generation = project_generation;
+  return register_receipt_impl(std::move(draft), output);
 }
 
 int32_t get_world(void* receipt, void*** world) {

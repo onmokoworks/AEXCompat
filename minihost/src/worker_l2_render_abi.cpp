@@ -115,7 +115,7 @@ bool publish_scene_scheduler_stage(
     aexcompat::suite_abi::AegpTime time_step, int8_t quality,
     uint8_t guide_layers, int32_t pixel_format, int32_t width,
     int32_t height, int32_t rowbytes, const void* pixels,
-    uint64_t* stage_identity_hash) {
+    uint64_t* stage_identity_hash, uint32_t expected_project_generation) {
   AegpStagedItemMetadata metadata{};
   if (!snapshot_staged_item_metadata(item, metadata)) return false;
   aexcompat::scene_model::Identity effect{};
@@ -137,7 +137,8 @@ bool publish_scene_scheduler_stage(
   return aexcompat::aegp_staged_item_runtime::publish_scene_stage_world(
       aexcompat::scene_model::registry(), metadata.identity, stage_kind,
       effect, time, time_step, quality, guide_layers, pixel_format, width,
-      height, rowbytes, pixels, stage_identity_hash);
+      height, rowbytes, pixels, stage_identity_hash,
+      expected_project_generation);
 }
 const bool g_item_render_runtime_configured = [] {
   aexcompat::aegp_item_render_runtime::configure({
@@ -152,7 +153,8 @@ const bool g_layer_render_runtime_configured = [] {
       &is_render_worker, &layer_effect_boundary_is_live,
       &aegp_comp_item_handle,
       &prepare_scene_staged_item, &current_scene_effect_instance,
-      &publish_scene_scheduler_stage});
+      &publish_scene_scheduler_stage,
+      &aexcompat::aegp_external_render_runtime::project_generation});
   return true;
 }();
 int32_t publish_loaded_layer_receipt(

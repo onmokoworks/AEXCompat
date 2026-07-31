@@ -770,7 +770,8 @@ int32_t transform(const StagedItemWorld& stage, const ItemValue& options,
   receipt->trace_hash = plan.trace_hash;
   receipt->requested_time = options.time;
   receipt->source_time = stage.time;
-  receipt->project_generation = stage.project_generation;
+  receipt->project_generation =
+      plan.scene_bound ? stage.project_generation : 0;
   receipt->resolved_stage_count = plan.resolved_stages;
   receipt->resolved_depth = plan.resolved_depth;
   receipt->stage_kind = static_cast<uint8_t>(stage.stage_kind);
@@ -1114,7 +1115,8 @@ bool publish_stage_world_impl(
     int32_t height, int32_t rowbytes, const void* pixels,
     uint64_t* published_identity_hash, bool scene_bound,
     scene_model::Identity scene_item, scene_model::Identity scene_effect,
-    scene_model::Identity scene_project, uint32_t effect_order) {
+    scene_model::Identity scene_project, uint32_t effect_order,
+    uint32_t expected_project_generation) {
   if (published_identity_hash) *published_identity_hash = 0;
   const int32_t pixel_bytes = pixel_bytes_for(pixel_format);
   const uint64_t tight_rowbytes = static_cast<uint64_t>(width) * pixel_bytes;
@@ -1129,6 +1131,11 @@ bool publish_stage_world_impl(
       (stage_kind == StageKind::final_item && effect_instance != 0) ||
       (stage_kind != StageKind::final_item && effect_instance == 0))
     return false;
+  const uint32_t project_generation = g_hooks.project_generation();
+  if (project_generation == 0 ||
+      (expected_project_generation != 0 &&
+       project_generation != expected_project_generation))
+    return false;
   std::shared_ptr<std::vector<std::byte>> backing;
   try {
     backing = std::make_shared<std::vector<std::byte>>(static_cast<std::size_t>(tight_bytes));
@@ -1137,12 +1144,15 @@ bool publish_stage_world_impl(
           static_cast<const std::byte*>(pixels) + static_cast<std::size_t>(y) * rowbytes,
           static_cast<std::size_t>(tight_rowbytes));
   } catch (...) { return false; }
-  const uint32_t project_generation = g_hooks.project_generation();
-  if (project_generation == 0) return false;
-  ensure_generation(project_generation);
   const uint64_t stage_generation = g_stage_generation.fetch_add(1);
   if (stage_generation == 0) return false;
   std::lock_guard<std::mutex> lock(g_mutex);
+  if (g_hooks.project_generation() != project_generation)
+    return false;
+  if (g_cache_generation != 0 &&
+      g_cache_generation != project_generation)
+    invalidate_generation_locked();
+  g_cache_generation = project_generation;
   if (scene_bound) {
     const auto registration = std::find_if(
         g_items.begin(), g_items.end(), [&](const auto& value) {
@@ -1247,7 +1257,7 @@ bool publish_stage_world(void* item, StageKind stage_kind,
   return publish_stage_world_impl(
       item, stage_kind, effect_instance, time, time_step, quality,
       guide_layers, pixel_format, width, height, rowbytes, pixels,
-      published_identity_hash, false, {}, {}, {}, 0);
+      published_identity_hash, false, {}, {}, {}, 0, 0);
 }
 
 bool publish_scene_stage_world(
@@ -1255,7 +1265,8 @@ bool publish_scene_stage_world(
     StageKind stage_kind, scene_model::Identity effect, AegpTime time,
     AegpTime time_step, int8_t quality, uint8_t guide_layers,
     int32_t pixel_format, int32_t width, int32_t height, int32_t rowbytes,
-    const void* pixels, uint64_t* published_identity_hash) {
+    const void* pixels, uint64_t* published_identity_hash,
+    uint32_t expected_project_generation) {
   if (published_identity_hash) *published_identity_hash = 0;
   scene_model::ObjectSnapshot item_snapshot{};
   scene_model::Identity project{};
@@ -1302,7 +1313,8 @@ bool publish_scene_stage_world(
   return publish_stage_world_impl(
       item_key, stage_kind, effect_instance, time, time_step, quality,
       guide_layers, pixel_format, width, height, rowbytes, pixels,
-      published_identity_hash, true, item, effect, project, effect_order);
+      published_identity_hash, true, item, effect, project, effect_order,
+      expected_project_generation);
 }
 
 bool publish_world(void* item, AegpTime time, AegpTime time_step,
@@ -1344,7 +1356,11 @@ int32_t publish_snapshot(const ItemValue& snapshot, void** receipt,
   if (resolve_plan(snapshot, plan)) {
     std::unique_ptr<ReceiptDraft> draft;
     if (transform(plan.final_stage, snapshot, plan, draft) != 0) return 4;
-    return render_receipts::register_receipt(std::move(draft), receipt);
+    return plan.scene_bound
+        ? render_receipts::register_scene_receipt(
+              std::move(draft), plan.final_stage.project_generation, receipt)
+        : render_receipts::register_unbound_receipt(
+              std::move(draft), receipt);
   }
   if (registered || !allow_test_synthetic ||
       !g_hooks.synthetic_receipts_enabled ||
