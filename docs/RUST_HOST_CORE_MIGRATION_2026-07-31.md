@@ -176,7 +176,10 @@ then classifies foreign project, wrong kind, different object, and stale
 generation using the existing stable host error codes. A standalone native
 Release test runs the Rust matcher beside an independent C++ identity oracle
 using identities created and invalidated by the real #571
-`scene_model::Registry`.
+`scene_model::Registry`. The focused Phase 5 Python gate invokes
+`tools/test-rust-host-core-scene-identity.ps1`, which builds the Release Rust
+DLL and this one native self-test with MSVC `/W4 /WX`; it does not modify or
+depend on the shared minihost CMake definition.
 
 This phase does not move `ObjectSnapshot`, stream/keyframe/parameter values,
 registry mutation, transaction, or snapshot ownership. Production worker

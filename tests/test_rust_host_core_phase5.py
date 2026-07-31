@@ -1,4 +1,8 @@
+import json
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,9 +18,18 @@ NATIVE = (
     / "tests/native/rust_host_core_scene_identity_dual_run_selftest.cpp"
 )
 DOC = ROOT / "docs/RUST_HOST_CORE_MIGRATION_2026-07-31.md"
+STANDALONE_GATE = (
+    ROOT / "tools" / "test-rust-host-core-scene-identity.ps1"
+)
 
 
 class RustHostCorePhase5Tests(unittest.TestCase):
+    @staticmethod
+    def _command_failure(result: subprocess.CompletedProcess) -> str:
+        stdout = (result.stdout or b"").decode("utf-8", errors="replace")
+        stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+        return f"exit={result.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+
     def test_c_abi_freezes_only_the_pointer_free_identity_and_kind_values(self):
         header = ABI_HEADER.read_text(encoding="utf-8")
         match = re.search(
@@ -188,6 +201,70 @@ class RustHostCorePhase5Tests(unittest.TestCase):
             self.assertIn(marker, native)
         for forbidden in ("ObjectSnapshot payload", "PF_", "SPBasic", "wgpu"):
             self.assertNotIn(forbidden, native)
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "the scene identity dual-run requires the Windows MSVC/SEH boundary",
+    )
+    def test_native_gate_compiles_and_runs_standalone_without_shared_cmake(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(
+            prefix="aexcompat-issue628-native-"
+        ) as temporary:
+            result = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(STANDALONE_GATE),
+                    "-BuildDirectory",
+                    temporary,
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                timeout=240,
+            )
+            self.assertEqual(
+                result.returncode, 0, self._command_failure(result)
+            )
+            reports = [
+                json.loads(line)
+                for line in result.stdout.decode(
+                    "utf-8", errors="replace"
+                ).splitlines()
+                if line.startswith("{")
+            ]
+            self.assertEqual(len(reports), 1, self._command_failure(result))
+            report = reports[0]
+            self.assertEqual(
+                report["rust_host_core_scene_identity_dual_run"], "passed"
+            )
+            self.assertGreaterEqual(report["checks"], 29)
+            self.assertIs(report["cpp_registry"], True)
+            self.assertIs(report["balanced"], True)
+
+    def test_standalone_gate_is_bounded_to_the_phase5_native_selftest(self):
+        script = STANDALONE_GATE.read_text(encoding="utf-8")
+        for marker in (
+            "aexcompat-host-core-ffi",
+            "rust_host_core_scene_identity_dual_run_selftest.cpp",
+            "worker_aegp_scene_model.cpp",
+            "/std:c++17 /O2 /DNDEBUG /EHsc /W4 /WX",
+            "rust_host_core_scene_identity_dual_run",
+            "ConvertFrom-Json",
+        ):
+            self.assertIn(marker, script)
+        for forbidden in (
+            "minihost\\CMakeLists.txt",
+            "l2_main.cpp",
+            "extended_inter_memory",
+            "wgpu",
+            "render-session",
+        ):
+            self.assertNotIn(forbidden, script)
 
     def test_document_limits_phase5_to_identity_without_routing_or_pixels(self):
         document = " ".join(DOC.read_text(encoding="utf-8").split())
