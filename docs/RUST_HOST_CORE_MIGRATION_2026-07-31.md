@@ -187,12 +187,44 @@ routing remains unchanged, including every resident and one-shot/session path
 owned by Issue #98. The gate does not require After Effects and does not
 compare pixels.
 
+## Phase 6 scene object owner-edge gate (Issue #630)
+
+Phase 6 projects exactly one additional value from the C++ `ObjectSnapshot`:
+the object identity and its owner identity. The resulting 48-byte
+`AexHostSceneOwnerRelation` contains two Phase 5 identities and no pointer,
+name, Adobe SDK type, `related_item`, `parent_layer`, stream, keyframe,
+parameter, or world value. The all-zero owner sentinel is valid only for a
+project root. Every non-project edge requires a canonical owner in the same
+project and rejects self-ownership.
+
+The Rust matcher compares a C++-owned current edge with a caller-held
+candidate. It reuses the Phase 5 identity classifier for the object and owner,
+maps a substituted owner object to `WRONG_OWNER`, and preserves
+`STALE_HANDLE` for an invalidated owner generation and `WRONG_KIND` for an
+unknown integer kind. The C++ registry remains authoritative for ownership,
+generation propagation, and mutation.
+
+A dedicated owner-edge descriptor is copied inside the native SEH frame and
+must match the 48-byte layout and matcher capability before the function is
+resolved or cast. The Rust export has its own panic boundary. A standalone
+MSVC `/W4 /WX` self-test builds only the Phase 6 dual-run and the existing
+C++ scene registry, then compares Rust with an independent C++ oracle. It
+covers the project-root sentinel, exact child ownership, C++ owner-generation
+invalidation, foreign and substituted owners, wrong/unknown kind, malformed
+values, self-ownership, cross-project ownership, nulls, and synthetic SEH.
+
+This phase does not move registry ownership or mutation and does not change
+`related_item`, `parent_layer`, names, stream/keyframe/parameter/world values,
+reports, or sessions. Production worker routing remains unchanged, including
+every Issue #98 path. It does not require After Effects and does not compare
+pixels.
+
 ## Later phases
 
-1. Define the next bounded value-only scene/world/parameter snapshot payload
-   beyond the Phase 5 identity and run it beside the C++ owner. Compare only
-   the normalized fields owned by that slice; do not require pixel identity
-   when the phase does not render.
+1. Define the next bounded value-only scene/world/parameter payload beyond
+   the Phase 6 owner edge and run it beside the C++ owner. Compare only the
+   normalized fields owned by that slice; do not require pixel identity when
+   the phase does not render.
 2. Add an explicitly opt-in worker dual-run call site only after its ownership
    and resident-session dependencies no longer overlap #26 or #98. Any
    mismatch must fail that migration gate without changing production output.

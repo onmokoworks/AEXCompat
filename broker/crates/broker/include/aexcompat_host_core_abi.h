@@ -11,6 +11,11 @@
 #define AEXCOMPAT_HOST_CORE_SCENE_IDENTITY_ABI_DESCRIPTOR_MAGIC \
   UINT64_C(0x4145585343494431)
 #define AEXCOMPAT_HOST_CORE_SCENE_IDENTITY_CAPABILITY_MATCH_V1 UINT64_C(1)
+#define AEXCOMPAT_HOST_CORE_SCENE_OWNER_RELATION_ABI_VERSION 1u
+#define AEXCOMPAT_HOST_CORE_SCENE_OWNER_RELATION_ABI_DESCRIPTOR_MAGIC \
+  UINT64_C(0x4145584F574E5231)
+#define AEXCOMPAT_HOST_CORE_SCENE_OWNER_RELATION_CAPABILITY_MATCH_V1 \
+  UINT64_C(1)
 
 #if defined(_WIN32)
 #define AEXCOMPAT_HOST_CORE_CALL __cdecl
@@ -107,6 +112,11 @@ typedef struct AexHostSceneIdentity {
   uint8_t reserved[3];
 } AexHostSceneIdentity;
 
+typedef struct AexHostSceneOwnerRelation {
+  AexHostSceneIdentity object;
+  AexHostSceneIdentity owner;
+} AexHostSceneOwnerRelation;
+
 typedef struct AexHostReportSnapshot {
   uint32_t abi_version;
   uint32_t struct_size;
@@ -147,9 +157,20 @@ typedef struct AexHostSceneIdentityAbiDescriptorV1 {
   uint64_t capabilities;
 } AexHostSceneIdentityAbiDescriptorV1;
 
+typedef struct AexHostSceneOwnerRelationAbiDescriptorV1 {
+  uint64_t magic;
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint32_t relation_size;
+  uint32_t relation_alignment;
+  uint64_t capabilities;
+} AexHostSceneOwnerRelationAbiDescriptorV1;
+
 extern const AexHostCoreAbiDescriptorV1 aex_host_core_abi_descriptor_v1;
 extern const AexHostSceneIdentityAbiDescriptorV1
     aex_host_core_scene_identity_abi_descriptor_v1;
+extern const AexHostSceneOwnerRelationAbiDescriptorV1
+    aex_host_core_scene_owner_relation_abi_descriptor_v1;
 
 typedef int32_t(AEXCOMPAT_HOST_CORE_CALL *AexHostCoreSessionCreateV1Fn)(
     const AexHostCallContext *context,
@@ -167,6 +188,11 @@ typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
                     *AexHostCoreSceneIdentityMatchV1Fn)(
     const AexHostSceneIdentity *current,
     const AexHostSceneIdentity *candidate);
+
+typedef int32_t(AEXCOMPAT_HOST_CORE_CALL
+                    *AexHostCoreSceneOwnerRelationMatchV1Fn)(
+    const AexHostSceneOwnerRelation *current,
+    const AexHostSceneOwnerRelation *candidate);
 
 int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_session_create_v1(
     const AexHostCallContext *context,
@@ -208,6 +234,10 @@ int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_scene_identity_match_v1(
     const AexHostSceneIdentity *current,
     const AexHostSceneIdentity *candidate);
 
+int32_t AEXCOMPAT_HOST_CORE_CALL aex_host_core_scene_owner_relation_match_v1(
+    const AexHostSceneOwnerRelation *current,
+    const AexHostSceneOwnerRelation *candidate);
+
 #if defined(__cplusplus)
 }
 #endif
@@ -238,6 +268,11 @@ static_assert(offsetof(AexHostSceneIdentity, object_id) == 8);
 static_assert(offsetof(AexHostSceneIdentity, generation) == 16);
 static_assert(offsetof(AexHostSceneIdentity, kind) == 20);
 static_assert(offsetof(AexHostSceneIdentity, reserved) == 21);
+
+static_assert(sizeof(AexHostSceneOwnerRelation) == 48);
+static_assert(alignof(AexHostSceneOwnerRelation) == 8);
+static_assert(offsetof(AexHostSceneOwnerRelation, object) == 0);
+static_assert(offsetof(AexHostSceneOwnerRelation, owner) == 24);
 
 static_assert(sizeof(AexHostReportSnapshot) == 72);
 static_assert(alignof(AexHostReportSnapshot) == 8);
@@ -278,6 +313,22 @@ static_assert(
     offsetof(AexHostSceneIdentityAbiDescriptorV1, identity_alignment) == 20);
 static_assert(
     offsetof(AexHostSceneIdentityAbiDescriptorV1, capabilities) == 24);
+
+static_assert(sizeof(AexHostSceneOwnerRelationAbiDescriptorV1) == 32);
+static_assert(alignof(AexHostSceneOwnerRelationAbiDescriptorV1) == 8);
+static_assert(
+    offsetof(AexHostSceneOwnerRelationAbiDescriptorV1, magic) == 0);
+static_assert(
+    offsetof(AexHostSceneOwnerRelationAbiDescriptorV1, abi_version) == 8);
+static_assert(
+    offsetof(AexHostSceneOwnerRelationAbiDescriptorV1, struct_size) == 12);
+static_assert(
+    offsetof(AexHostSceneOwnerRelationAbiDescriptorV1, relation_size) == 16);
+static_assert(
+    offsetof(AexHostSceneOwnerRelationAbiDescriptorV1,
+             relation_alignment) == 20);
+static_assert(
+    offsetof(AexHostSceneOwnerRelationAbiDescriptorV1, capabilities) == 24);
 
 static_assert(AEX_HOST_SCENE_OBJECT_KIND_PROJECT == 1);
 static_assert(AEX_HOST_SCENE_OBJECT_KIND_ITEM == 2);
