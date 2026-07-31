@@ -2608,7 +2608,7 @@ impl RenderSession {
             )
             && final_report
                 .as_ref()
-                .is_some_and(|report| final_report_clean(report, self.smart));
+                .is_some_and(|report| validate_final_report(report, self.smart).is_ok());
         json!({
             "stage": "render_session_close",
             "render_path": if self.smart { "smart" } else { "classic" },
@@ -2631,58 +2631,223 @@ impl RenderSession {
     }
 }
 
-/// A clean session close requires the final report to agree, not just the
-/// exit code: the hoisted sequence must have set up and torn down without
-/// error, guards must be intact, and every hard ownership ledger must balance.
-/// The worker contract explicitly classifies a known suite lease residue as a
-/// warning, so that one warning is accepted only when its diagnostics prove it
-/// is an explicit, non-faulting live lease rather than a malformed report.
-/// Missing keys fail closed. The classic and smart workers report session
-/// mechanics under different keys (the classic report reuses its
-/// persistent-sequence fields; the smart report carries dedicated session_*
-/// fields, protocol v1.1).
-fn suite_lease_state_clean(report: &Value) -> bool {
-    if report.get("suite_leases_balanced") == Some(&Value::Bool(true)) {
-        return true;
-    }
-    let acquires = report.get("suite_acquires").and_then(Value::as_u64);
-    let releases = report.get("suite_releases").and_then(Value::as_u64);
-    report.get("suite_leases_balanced") == Some(&Value::Bool(false))
-        && report.get("suite_lease_warning") == Some(&Value::Bool(true))
-        && report.get("suite_fault_observed") == Some(&Value::Bool(false))
-        && acquires
-            .zip(releases)
-            .is_some_and(|(acquires, releases)| acquires > releases)
-        && report
-            .get("live_suite_lease_count")
-            .and_then(Value::as_u64)
-            .is_some_and(|count| count > 0)
-        && report
-            .get("live_suite_leases")
-            .and_then(Value::as_str)
-            .is_some_and(|leases| !leases.is_empty())
+/// The validated source of truth for a render session's close report.  A
+/// non-owned global suite lease is observable but not a host ownership fault;
+/// callers may retain the rendered image only for that explicitly proven case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FinalReportValidation {
+    Clean,
+    CleanWithSuiteLeaseWarning {
+        suite_acquires: u64,
+        suite_releases: u64,
+        live_suite_lease_count: u64,
+    },
 }
 
-fn final_report_clean(report: &Value, smart: bool) -> bool {
-    let shared = report.get("status") == Some(&json!("render_completed"))
-        && report.get("global_setdown_error") == Some(&json!(0))
-        && report.get("guard_bytes_intact") == Some(&Value::Bool(true))
-        && suite_lease_state_clean(report)
-        && report.get("handle_lifetimes_balanced") == Some(&Value::Bool(true))
-        && report.get("world_lifetimes_balanced") == Some(&Value::Bool(true))
-        && report.get("param_checkouts_balanced") == Some(&Value::Bool(true));
-    if smart {
-        shared
-            && report.get("session_mode") == Some(&Value::Bool(true))
-            && report.get("session_render_error") == Some(&json!(0))
-            && report.get("session_sequence_setup_error") == Some(&json!(0))
-            && report.get("session_sequence_setdown_error") == Some(&json!(0))
-    } else {
-        shared
-            && report.get("render_error") == Some(&json!(0))
-            && report.get("persistent_sequence_setup_error") == Some(&json!(0))
-            && report.get("persistent_sequence_setdown_error") == Some(&json!(0))
+/// Bounded names for a rejected close.  They intentionally carry no worker
+/// strings or paths, so the wrapper can expose useful failure evidence without
+/// turning a worker-controlled report into an unbounded diagnostic channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloseReportInvariant {
+    CloseInvalidated,
+    WorkerNotOk,
+    FinalReportMissing,
+    Status,
+    GlobalSetdownError,
+    GuardBytes,
+    SuiteLeaseWarningMetadata,
+    SuiteFaultObserved,
+    SuiteLeaseCounts,
+    SuiteLeaseList,
+    UnexpectedLiveSuiteLease,
+    HandleLifetimes,
+    WorldLifetimes,
+    ParameterCheckouts,
+    ClassicRenderError,
+    ClassicSequenceSetup,
+    ClassicSequenceSetdown,
+    SmartSessionMode,
+    SmartRenderError,
+    SmartSequenceSetup,
+    SmartSequenceSetdown,
+}
+
+impl CloseReportInvariant {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::CloseInvalidated => "close_invalidated",
+            Self::WorkerNotOk => "worker_not_ok",
+            Self::FinalReportMissing => "final_report_missing",
+            Self::Status => "status",
+            Self::GlobalSetdownError => "global_setdown_error",
+            Self::GuardBytes => "guard_bytes_intact",
+            Self::SuiteLeaseWarningMetadata => "suite_lease_warning_metadata",
+            Self::SuiteFaultObserved => "suite_fault_observed",
+            Self::SuiteLeaseCounts => "suite_lease_counts",
+            Self::SuiteLeaseList => "live_suite_leases",
+            Self::UnexpectedLiveSuiteLease => "unexpected_live_suite_lease",
+            Self::HandleLifetimes => "handle_lifetimes_balanced",
+            Self::WorldLifetimes => "world_lifetimes_balanced",
+            Self::ParameterCheckouts => "param_checkouts_balanced",
+            Self::ClassicRenderError => "render_error",
+            Self::ClassicSequenceSetup => "persistent_sequence_setup_error",
+            Self::ClassicSequenceSetdown => "persistent_sequence_setdown_error",
+            Self::SmartSessionMode => "session_mode",
+            Self::SmartRenderError => "session_render_error",
+            Self::SmartSequenceSetup => "session_sequence_setup_error",
+            Self::SmartSequenceSetdown => "session_sequence_setdown_error",
+        }
     }
+}
+
+/// Validates the final report used by both `RenderSession::close` and the
+/// length-one classic wrapper.  Missing fields and an unproven lease warning
+/// fail closed; the typed result prevents wrappers from independently
+/// re-implementing (and drifting from) the suite-lease exception.
+pub(crate) fn validate_final_report(
+    report: &Value,
+    smart: bool,
+) -> Result<FinalReportValidation, CloseReportInvariant> {
+    if report.get("status") != Some(&json!("render_completed")) {
+        return Err(CloseReportInvariant::Status);
+    }
+    if report.get("global_setdown_error") != Some(&json!(0)) {
+        return Err(CloseReportInvariant::GlobalSetdownError);
+    }
+    if report.get("guard_bytes_intact") != Some(&Value::Bool(true)) {
+        return Err(CloseReportInvariant::GuardBytes);
+    }
+    let lease_validation = validate_suite_lease_state(report)?;
+    if report.get("handle_lifetimes_balanced") != Some(&Value::Bool(true)) {
+        return Err(CloseReportInvariant::HandleLifetimes);
+    }
+    if report.get("world_lifetimes_balanced") != Some(&Value::Bool(true)) {
+        return Err(CloseReportInvariant::WorldLifetimes);
+    }
+    if report.get("param_checkouts_balanced") != Some(&Value::Bool(true)) {
+        return Err(CloseReportInvariant::ParameterCheckouts);
+    }
+    if smart {
+        if report.get("session_mode") != Some(&Value::Bool(true)) {
+            return Err(CloseReportInvariant::SmartSessionMode);
+        }
+        if report.get("session_render_error") != Some(&json!(0)) {
+            return Err(CloseReportInvariant::SmartRenderError);
+        }
+        if report.get("session_sequence_setup_error") != Some(&json!(0)) {
+            return Err(CloseReportInvariant::SmartSequenceSetup);
+        }
+        if report.get("session_sequence_setdown_error") != Some(&json!(0)) {
+            return Err(CloseReportInvariant::SmartSequenceSetdown);
+        }
+    } else {
+        if report.get("render_error") != Some(&json!(0)) {
+            return Err(CloseReportInvariant::ClassicRenderError);
+        }
+        if report.get("persistent_sequence_setup_error") != Some(&json!(0)) {
+            return Err(CloseReportInvariant::ClassicSequenceSetup);
+        }
+        if report.get("persistent_sequence_setdown_error") != Some(&json!(0)) {
+            return Err(CloseReportInvariant::ClassicSequenceSetdown);
+        }
+    }
+    Ok(lease_validation)
+}
+
+fn validate_suite_lease_state(
+    report: &Value,
+) -> Result<FinalReportValidation, CloseReportInvariant> {
+    let warning = report.get("suite_lease_warning").and_then(Value::as_bool);
+    let fault_observed = report.get("suite_fault_observed").and_then(Value::as_bool);
+    let live_count = report.get("live_suite_lease_count").and_then(Value::as_u64);
+    let leases = report.get("live_suite_leases").and_then(Value::as_str);
+    match report.get("suite_leases_balanced") {
+        Some(Value::Bool(true)) => {
+            if warning == Some(true)
+                || fault_observed == Some(true)
+                || live_count.is_some_and(|count| count != 0)
+            {
+                return Err(CloseReportInvariant::UnexpectedLiveSuiteLease);
+            }
+            if leases.is_some_and(|leases| !leases.is_empty()) {
+                return Err(CloseReportInvariant::UnexpectedLiveSuiteLease);
+            }
+            Ok(FinalReportValidation::Clean)
+        }
+        Some(Value::Bool(false)) => {
+            if warning != Some(true) {
+                return Err(CloseReportInvariant::SuiteLeaseWarningMetadata);
+            }
+            // Older classic reports do not carry a negative fault observation;
+            // they do carry every positive fault.  Preserve that compatibility
+            // while rejecting an observed fault and while requiring the actual
+            // warning/count/list evidence below.
+            if fault_observed == Some(true) {
+                return Err(CloseReportInvariant::SuiteFaultObserved);
+            }
+            let acquires = report.get("suite_acquires").and_then(Value::as_u64);
+            let releases = report.get("suite_releases").and_then(Value::as_u64);
+            let (Some(acquires), Some(releases), Some(live_suite_lease_count), Some(leases)) =
+                (acquires, releases, live_count, leases)
+            else {
+                return Err(CloseReportInvariant::SuiteLeaseWarningMetadata);
+            };
+            if acquires <= releases
+                || live_suite_lease_count == 0
+                || live_suite_lease_count > acquires.saturating_sub(releases)
+            {
+                return Err(CloseReportInvariant::SuiteLeaseCounts);
+            }
+            // The worker summary has a fixed, small schema.  Keep the common
+            // validator conservative even if a malformed worker tries to turn
+            // the warning exception into a diagnostic payload.
+            if leases.is_empty()
+                || leases.len() > 512
+                || !leases
+                    .bytes()
+                    .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+            {
+                return Err(CloseReportInvariant::SuiteLeaseList);
+            }
+            Ok(FinalReportValidation::CleanWithSuiteLeaseWarning {
+                suite_acquires: acquires,
+                suite_releases: releases,
+                live_suite_lease_count,
+            })
+        }
+        _ => Err(CloseReportInvariant::SuiteLeaseWarningMetadata),
+    }
+}
+
+/// Validates a serialized close summary for consumers that did not retain the
+/// `RenderSession` object.  This deliberately does not trust the convenience
+/// `session_clean` bit: the final report plus worker/invalidation boundary is
+/// the canonical verdict and preserves a valid global-lifetime lease warning.
+pub(crate) fn validate_close_report(
+    close: &Value,
+    smart: bool,
+) -> Result<FinalReportValidation, CloseReportInvariant> {
+    if close.get("invalidated") != Some(&Value::Bool(false)) {
+        return Err(CloseReportInvariant::CloseInvalidated);
+    }
+    if close
+        .get("worker")
+        .and_then(|worker| worker.get("classification"))
+        .and_then(Value::as_str)
+        != Some("ok")
+    {
+        return Err(CloseReportInvariant::WorkerNotOk);
+    }
+    let report = close
+        .get("final_report")
+        .filter(|value| value.is_object())
+        .ok_or(CloseReportInvariant::FinalReportMissing)?;
+    validate_final_report(report, smart)
+}
+
+#[cfg(test)]
+fn final_report_clean(report: &Value, smart: bool) -> bool {
+    validate_final_report(report, smart).is_ok()
 }
 
 #[derive(Deserialize)]

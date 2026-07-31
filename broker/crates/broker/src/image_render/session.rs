@@ -594,7 +594,9 @@ enum SessionWrapperOutcome {
 fn render_classic_via_length_one_session(
     request: &SessionWrapperRequest<'_>,
 ) -> SessionWrapperOutcome {
-    use crate::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
+    use crate::render_session::{
+        FrameStatus, RenderSession, SessionOpenRequest, validate_close_report,
+    };
 
     // Test-only fault injection (debug builds only); a no-op in release.
     if let Some(outcome) = forced_session_fallback() {
@@ -683,11 +685,12 @@ fn render_classic_via_length_one_session(
     // at the expanded dimensions (protocol §3, issue #262), so the session route
     // carries the expand without a re-open (which would replay SEQUENCE/FRAME
     // setup and setdown).
+    // `close` consumes the session before any return below.  In particular a
+    // deadline/crash/invalidation or rejected final report cannot leak a live
+    // worker, its lease state, or the frame pixels into a subsequent render.
     let close = session.close();
-    if close.get("session_clean") != Some(&Value::Bool(true))
-        || close.get("invalidated") != Some(&Value::Bool(false))
-    {
-        return SessionWrapperOutcome::Fallback("the render session did not close cleanly".into());
+    if let Err(invariant) = validate_close_report(&close, request.smart) {
+        return SessionWrapperOutcome::Fallback(close_failure_diagnostic(&close, invariant));
     }
     let Some(final_report) = close
         .get("final_report")
@@ -888,6 +891,41 @@ fn render_classic_via_length_one_session(
     };
     RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     SessionWrapperOutcome::Report(build_interactive_image_report(&final_report, facts))
+}
+
+/// A bounded failure summary for the public one-shot-compatible wrapper.  The
+/// typed invariant comes from `render_session`; the only worker values exposed
+/// are the three small lease counters.  Do not add report strings, paths, or
+/// launch details here: this path is also used after crashes and timeouts.
+fn close_failure_diagnostic(
+    close: &Value,
+    invariant: crate::render_session::CloseReportInvariant,
+) -> String {
+    let report = close.get("final_report");
+    let counter = |key: &str| {
+        report
+            .and_then(|report| report.get(key))
+            .and_then(Value::as_u64)
+            .map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+    };
+    let invalidated = close
+        .get("invalidated")
+        .and_then(Value::as_bool)
+        .map_or("unknown", |value| if value { "true" } else { "false" });
+    let worker_ok = close
+        .get("worker")
+        .and_then(|worker| worker.get("classification"))
+        .and_then(Value::as_str)
+        .is_some_and(|classification| classification == "ok");
+    format!(
+        "render session close rejected invariant={} invalidated={} worker_ok={} suite_acquires={} suite_releases={} live_suite_lease_count={}",
+        invariant.as_str(),
+        invalidated,
+        worker_ok,
+        counter("suite_acquires"),
+        counter("suite_releases"),
+        counter("live_suite_lease_count"),
+    )
 }
 
 /// Static configuration for a resident interactive render session

@@ -101,6 +101,12 @@ fn final_report_clean_fails_closed_on_missing_or_dirty_fields() {
         "persistent_sequence_setdown_error": 0,
         "guard_bytes_intact": true,
         "suite_leases_balanced": true,
+        "suite_lease_warning": false,
+        "suite_fault_observed": false,
+        "suite_acquires": 2,
+        "suite_releases": 2,
+        "live_suite_lease_count": 0,
+        "live_suite_leases": "",
         "handle_lifetimes_balanced": true,
         "world_lifetimes_balanced": true,
         "param_checkouts_balanced": true,
@@ -151,6 +157,12 @@ fn smart_final_report_clean_requires_the_session_fields() {
         "global_setdown_error": 0,
         "guard_bytes_intact": true,
         "suite_leases_balanced": true,
+        "suite_lease_warning": false,
+        "suite_fault_observed": false,
+        "suite_acquires": 2,
+        "suite_releases": 2,
+        "live_suite_lease_count": 0,
+        "live_suite_leases": "",
         "handle_lifetimes_balanced": true,
         "world_lifetimes_balanced": true,
         "param_checkouts_balanced": true,
@@ -208,7 +220,14 @@ fn final_report_clean_accepts_only_explicit_nonfaulting_suite_lease_warning() {
         "session_sequence_setup_error": 0,
         "session_sequence_setdown_error": 0,
     });
-    assert!(final_report_clean(&warned, true));
+    assert_eq!(
+        validate_final_report(&warned, true),
+        Ok(FinalReportValidation::CleanWithSuiteLeaseWarning {
+            suite_acquires: 123,
+            suite_releases: 24,
+            live_suite_lease_count: 1,
+        })
+    );
 
     for (key, value) in [
         ("suite_lease_warning", serde_json::json!(false)),
@@ -228,6 +247,142 @@ fn final_report_clean_accepts_only_explicit_nonfaulting_suite_lease_warning() {
             _ => unreachable!(),
         };
     }
+}
+
+#[test]
+fn close_report_validation_is_typed_and_rejects_unexpected_or_incomplete_leases() {
+    let clean = serde_json::json!({
+        "status": "render_completed",
+        "render_error": 0,
+        "global_setdown_error": 0,
+        "persistent_sequence_setup_error": 0,
+        "persistent_sequence_setdown_error": 0,
+        "guard_bytes_intact": true,
+        "suite_leases_balanced": false,
+        "suite_lease_warning": true,
+        "suite_fault_observed": false,
+        "suite_acquires": 8,
+        "suite_releases": 7,
+        "live_suite_lease_count": 1,
+        "live_suite_leases": "PF Handle Suite@2=1",
+        "handle_lifetimes_balanced": true,
+        "world_lifetimes_balanced": true,
+        "param_checkouts_balanced": true,
+    });
+    let close = serde_json::json!({
+        "invalidated": false,
+        "worker": {"classification": "ok"},
+        "final_report": clean,
+        // Deliberately stale: consumers must use the shared final-report
+        // verdict rather than this convenience field.
+        "session_clean": false,
+    });
+    assert!(matches!(
+        validate_close_report(&close, false),
+        Ok(FinalReportValidation::CleanWithSuiteLeaseWarning { .. })
+    ));
+    // Classic workers published no `suite_fault_observed: false` field before
+    // the warning exception existed.  Its absence is not a claim of safety;
+    // a positive observation still rejects the close, while the independently
+    // required warning/count/list evidence prevents a generic fail-open.
+    let mut classic_legacy = close.clone();
+    classic_legacy["final_report"]
+        .as_object_mut()
+        .unwrap()
+        .remove("suite_fault_observed");
+    assert!(matches!(
+        validate_close_report(&classic_legacy, false),
+        Ok(FinalReportValidation::CleanWithSuiteLeaseWarning { .. })
+    ));
+
+    let cases = [
+        (
+            "suite_fault_observed",
+            serde_json::json!(true),
+            CloseReportInvariant::SuiteFaultObserved,
+        ),
+        (
+            "live_suite_lease_count",
+            serde_json::json!(0),
+            CloseReportInvariant::SuiteLeaseCounts,
+        ),
+        (
+            "live_suite_leases",
+            serde_json::json!(""),
+            CloseReportInvariant::SuiteLeaseList,
+        ),
+        (
+            "handle_lifetimes_balanced",
+            serde_json::json!(false),
+            CloseReportInvariant::HandleLifetimes,
+        ),
+        (
+            "world_lifetimes_balanced",
+            serde_json::json!(false),
+            CloseReportInvariant::WorldLifetimes,
+        ),
+        (
+            "param_checkouts_balanced",
+            serde_json::json!(false),
+            CloseReportInvariant::ParameterCheckouts,
+        ),
+    ];
+    for (key, value, expected) in cases {
+        let mut rejected = close.clone();
+        rejected["final_report"][key] = value;
+        assert_eq!(validate_close_report(&rejected, false), Err(expected));
+    }
+
+    let mut missing_warning_metadata = close.clone();
+    missing_warning_metadata["final_report"]
+        .as_object_mut()
+        .unwrap()
+        .remove("suite_lease_warning");
+    assert_eq!(
+        validate_close_report(&missing_warning_metadata, false),
+        Err(CloseReportInvariant::SuiteLeaseWarningMetadata)
+    );
+    let mut missing_count_metadata = close.clone();
+    missing_count_metadata["final_report"]
+        .as_object_mut()
+        .unwrap()
+        .remove("suite_acquires");
+    assert_eq!(
+        validate_close_report(&missing_count_metadata, false),
+        Err(CloseReportInvariant::SuiteLeaseWarningMetadata)
+    );
+
+    let mut unexpected_live_lease = close.clone();
+    unexpected_live_lease["final_report"]["suite_leases_balanced"] = serde_json::json!(true);
+    unexpected_live_lease["final_report"]["suite_lease_warning"] = serde_json::json!(false);
+    unexpected_live_lease["final_report"]["suite_acquires"] = serde_json::json!(8);
+    unexpected_live_lease["final_report"]["suite_releases"] = serde_json::json!(8);
+    assert_eq!(
+        validate_close_report(&unexpected_live_lease, false),
+        Err(CloseReportInvariant::UnexpectedLiveSuiteLease)
+    );
+}
+
+#[test]
+fn close_report_validation_rejects_crash_and_missing_report() {
+    let crashed = serde_json::json!({
+        "invalidated": true,
+        "worker": {"classification": "crashed"},
+        "final_report": null,
+    });
+    assert_eq!(
+        validate_close_report(&crashed, false),
+        Err(CloseReportInvariant::CloseInvalidated)
+    );
+    let no_report = serde_json::json!({
+        "invalidated": false,
+        "worker": {"classification": "ok"},
+        "final_report": null,
+    });
+    assert_eq!(
+        validate_close_report(&no_report, false),
+        Err(CloseReportInvariant::FinalReportMissing)
+    );
 }
 
 #[test]

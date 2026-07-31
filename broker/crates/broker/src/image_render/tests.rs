@@ -36,6 +36,29 @@ mod tests {
     }
 
     #[test]
+    fn close_failure_diagnostic_names_a_bounded_invariant_without_worker_strings() {
+        let close = json!({
+            "invalidated": false,
+            "worker": {"classification": "ok", "detail": "C:\\\\secret\\\\plugin.aex"},
+            "final_report": {
+                "suite_acquires": 8,
+                "suite_releases": 7,
+                "live_suite_lease_count": 1,
+                "live_suite_leases": "C:\\\\secret\\\\plugin.aex"
+            }
+        });
+        let diagnostic = close_failure_diagnostic(
+            &close,
+            crate::render_session::CloseReportInvariant::SuiteFaultObserved,
+        );
+        assert_eq!(
+            diagnostic,
+            "render session close rejected invariant=suite_fault_observed invalidated=false worker_ok=true suite_acquires=8 suite_releases=7 live_suite_lease_count=1"
+        );
+        assert!(!diagnostic.contains("secret"));
+    }
+
+    #[test]
     fn suite_call_slot_probe_keeps_shape_but_drops_raw_process_values() {
         let raw_sentinel = "0xfeedfacecafebeef";
         let worker_report = json!({
