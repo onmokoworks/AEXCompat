@@ -82,6 +82,27 @@ pub fn secure_launch(
         request.require_module_audit,
         request.repository,
         timeout,
+        None,
+    )
+}
+
+pub(crate) fn secure_launch_with_process_memory_limit(
+    tree: SealedLoadTree,
+    request: SecureLaunchRequest<'_>,
+    timeout: Option<Duration>,
+    process_memory_limit: usize,
+) -> io::Result<SecureLaunchResult> {
+    let args = build_launch_args(&tree, &request)?;
+    secure_launch_impl(
+        tree,
+        request.worker_program,
+        request.worker_expected_sha256,
+        request.worker_expected_size,
+        &args,
+        request.require_module_audit,
+        request.repository,
+        timeout,
+        Some(process_memory_limit),
     )
 }
 
@@ -95,6 +116,7 @@ fn secure_launch_impl(
     require_module_audit: bool,
     repository: &Path,
     timeout: Option<Duration>,
+    process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
     use crate::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
     use crate::restricted_worker_token::create_restricted_worker_token;
@@ -128,16 +150,28 @@ fn secure_launch_impl(
     // directory the one-shot input raws already live in. A staging-root cwd
     // makes that pin unsatisfiable and every one-shot sidecar rejected
     // (issue #141).
-    let result = crate::windows_process::run_isolated_with_restricted_token(
-        worker_stage.worker_path(),
-        args,
-        timeout,
-        &token,
-        // Working directory (issue #141, see above): the repository.
-        repository,
-        // Repository root for the launch-boundary minidump handle (issue #18).
-        repository,
-    )
+    let result = if let Some(limit) = process_memory_limit {
+        crate::windows_process::run_isolated_with_restricted_token_and_memory_limit(
+            worker_stage.worker_path(),
+            args,
+            timeout,
+            &token,
+            repository,
+            repository,
+            limit,
+        )
+    } else {
+        crate::windows_process::run_isolated_with_restricted_token(
+            worker_stage.worker_path(),
+            args,
+            timeout,
+            &token,
+            // Working directory (issue #141, see above): the repository.
+            repository,
+            // Repository root for the launch-boundary minidump handle (issue #18).
+            repository,
+        )
+    }
     .map_err(|error| stage_error("restricted process launch", error))?;
     if require_module_audit && result.classification == ExitClassification::Ok {
         crate::worker_module_audit::validate_required_worker_audit(
@@ -359,6 +393,7 @@ fn secure_launch_impl(
     _require_module_audit: bool,
     _repository: &Path,
     _timeout: Option<Duration>,
+    _process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
