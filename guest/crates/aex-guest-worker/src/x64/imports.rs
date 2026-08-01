@@ -37,6 +37,13 @@ enum LegacyWin64Import {
     VcompForDynamicNext,
     VcompForStaticSimpleInit,
     VcompNoOp,
+    GetSystemTimeAsFileTime,
+    GetCurrentThreadId,
+    GetCurrentProcessId,
+    QueryPerformanceCounter,
+    ExplicitMsvcRuntimeZero,
+    InitializeSListHead,
+    DisableThreadLibraryCalls,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -203,7 +210,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
     // GPU libraries take precedence over legacy symbol-only emulation. This
     // prevents, for example, opencl.dll!malloc from accidentally receiving the
     // CRT allocator solely because its export name happens to match.
-    match classify_gpu_import_library(library) {
+    let normalized_library = normalize_import_library_name(library);
+    match classify_gpu_import_library(&normalized_library) {
         Some(GpuImportLibrary::OpenCl) => {
             return opencl_bridge_symbol(symbol)
                 .map(Win64ImportDispatch::OpenClBridge)
@@ -214,35 +222,65 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         Some(library) => return Win64ImportDispatch::UnsupportedGpuLibrary(library),
         None => {}
     }
-    let legacy = match symbol {
-        "malloc" => LegacyWin64Import::Malloc,
-        "calloc" => LegacyWin64Import::Calloc,
-        "free" => LegacyWin64Import::Free,
-        "_callnewh" => LegacyWin64Import::CallNewHandler,
-        "strncpy" => LegacyWin64Import::Strncpy,
-        "memset" => LegacyWin64Import::Memset,
-        "memcpy" | "memmove" => LegacyWin64Import::MemoryCopy,
-        "_CxxThrowException" => LegacyWin64Import::CxxThrowException,
-        "cosf" => LegacyWin64Import::CosF,
-        "expf" => LegacyWin64Import::ExpF,
-        "floorf" => LegacyWin64Import::FloorF,
-        "powf" => LegacyWin64Import::PowF,
-        "pow" => LegacyWin64Import::Pow,
-        "sinf" => LegacyWin64Import::SinF,
-        "omp_get_max_threads" => LegacyWin64Import::OmpGetMaxThreads,
-        "_vcomp_fork" => LegacyWin64Import::VcompFork,
-        "_vcomp_for_dynamic_init" => LegacyWin64Import::VcompForDynamicInit,
-        "_vcomp_for_dynamic_next" => LegacyWin64Import::VcompForDynamicNext,
-        "_vcomp_for_static_simple_init" => LegacyWin64Import::VcompForStaticSimpleInit,
-        "_vcomp_enter_critsect"
-        | "_vcomp_leave_critsect"
-        | "_vcomp_barrier"
-        | "_vcomp_for_static_end" => LegacyWin64Import::VcompNoOp,
-        name if name.starts_with("_vcomp_") => return Win64ImportDispatch::UnsupportedVcomp,
-        name if msvc_udt_by_value_return_import(name) => {
-            return Win64ImportDispatch::UnsupportedLegacyImport;
+    let legacy = match (normalized_library.as_str(), symbol) {
+        ("kernel32.dll", "GetSystemTimeAsFileTime") => {
+            LegacyWin64Import::GetSystemTimeAsFileTime
         }
-        _ => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
+        ("kernel32.dll", "GetCurrentProcessId") => LegacyWin64Import::GetCurrentProcessId,
+        ("kernel32.dll", "QueryPerformanceCounter") => {
+            LegacyWin64Import::QueryPerformanceCounter
+        }
+        ("kernel32.dll", "InitializeSListHead") => LegacyWin64Import::InitializeSListHead,
+        ("kernel32.dll", "DisableThreadLibraryCalls") => {
+            LegacyWin64Import::DisableThreadLibraryCalls
+        }
+        ("api-ms-win-crt-runtime-l1-1-0.dll", symbol)
+            if matches!(
+                symbol,
+                "_execute_onexit_table"
+                    | "_initialize_onexit_table"
+                    | "_initialize_narrow_environment"
+                    | "_configure_narrow_argv"
+                    | "_initterm_e"
+                    | "_initterm"
+                    | "_cexit"
+            ) =>
+        {
+            LegacyWin64Import::ExplicitMsvcRuntimeZero
+        }
+        (_, symbol) => match symbol {
+            "malloc" => LegacyWin64Import::Malloc,
+            "calloc" => LegacyWin64Import::Calloc,
+            "free" => LegacyWin64Import::Free,
+            "_callnewh" => LegacyWin64Import::CallNewHandler,
+            "strncpy" => LegacyWin64Import::Strncpy,
+            "memset" => LegacyWin64Import::Memset,
+            "memcpy" | "memmove" => LegacyWin64Import::MemoryCopy,
+            "_CxxThrowException" => LegacyWin64Import::CxxThrowException,
+            "cosf" => LegacyWin64Import::CosF,
+            "expf" => LegacyWin64Import::ExpF,
+            "floorf" => LegacyWin64Import::FloorF,
+            "powf" => LegacyWin64Import::PowF,
+            "pow" => LegacyWin64Import::Pow,
+            "sinf" => LegacyWin64Import::SinF,
+            "omp_get_max_threads" => LegacyWin64Import::OmpGetMaxThreads,
+            "_vcomp_fork" => LegacyWin64Import::VcompFork,
+            "_vcomp_for_dynamic_init" => LegacyWin64Import::VcompForDynamicInit,
+            "_vcomp_for_dynamic_next" => LegacyWin64Import::VcompForDynamicNext,
+            "_vcomp_for_static_simple_init" => LegacyWin64Import::VcompForStaticSimpleInit,
+            "_vcomp_enter_critsect"
+            | "_vcomp_leave_critsect"
+            | "_vcomp_barrier"
+            | "_vcomp_for_static_end" => LegacyWin64Import::VcompNoOp,
+            name if name.starts_with("_vcomp_") => {
+                return Win64ImportDispatch::UnsupportedVcomp;
+            }
+            name if msvc_udt_by_value_return_import(name) => {
+                return Win64ImportDispatch::UnsupportedLegacyImport;
+            }
+            _ => return Win64ImportDispatch::UnsupportedLegacyImport,
+        },
     };
     Win64ImportDispatch::LegacyImplemented(legacy)
 }
@@ -408,6 +446,59 @@ fn install_win64_import(
                 // The worker is deliberately single-threaded, so these
                 // synchronization/end helpers are deterministic no-ops.
             }
+            LegacyWin64Import::GetSystemTimeAsFileTime => {
+                uc(
+                    "write GetSystemTimeAsFileTime return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetSystemTimeAsFileTime import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_system_time_as_file_time(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetCurrentThreadId | LegacyWin64Import::GetCurrentProcessId => {
+                uc(
+                    "install deterministic Windows identity import",
+                    unicorn.mem_write(stub, &deterministic_i32_stub(1)),
+                )?;
+            }
+            LegacyWin64Import::QueryPerformanceCounter => {
+                uc(
+                    "write QueryPerformanceCounter return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install QueryPerformanceCounter import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_query_performance_counter(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::ExplicitMsvcRuntimeZero => {
+                // This finite allowlist mirrors the prior deterministic-zero
+                // behavior for CRT startup/teardown only. Every other unknown
+                // import remains a typed trap.
+            }
+            LegacyWin64Import::InitializeSListHead => {
+                uc(
+                    "write InitializeSListHead return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install InitializeSListHead import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_initialize_slist_head(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::DisableThreadLibraryCalls => {
+                uc(
+                    "install deterministic DisableThreadLibraryCalls import",
+                    unicorn.mem_write(stub, &deterministic_i32_stub(1)),
+                )?;
+            }
         },
         Win64ImportDispatch::OpenClBridge(symbol) => {
             install_opencl_import_bridge(unicorn, stub, symbol)?;
@@ -428,6 +519,62 @@ fn install_win64_import(
         }
     }
     Ok(dispatch)
+}
+
+fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
+    // A fixed, nonzero Windows FILETIME keeps compatibility deterministic and
+    // avoids exposing host wall-clock state to the emulated guest.
+    const FIXED_FILETIME: u64 = 132_223_104_000_000_000;
+    let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
+        if output == 0 {
+            return Err("GetSystemTimeAsFileTime output pointer is null".to_string());
+        }
+        unicorn
+            .mem_write(output, &FIXED_FILETIME.to_le_bytes())
+            .map_err(|error| {
+                format!("GetSystemTimeAsFileTime output {output:#x} is not writable: {error}")
+            })
+    });
+    if let Err(error) = result {
+        unicorn.get_data_mut().callback_error = Some(error);
+    }
+}
+
+fn emulate_query_performance_counter(unicorn: &mut Unicorn<'_, GuestState>) {
+    const FIXED_COUNTER: u64 = 1;
+    let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
+        if output == 0 {
+            return Err("QueryPerformanceCounter output pointer is null".to_string());
+        }
+        unicorn
+            .mem_write(output, &FIXED_COUNTER.to_le_bytes())
+            .map_err(|error| {
+                format!("QueryPerformanceCounter output {output:#x} is not writable: {error}")
+            })
+    });
+    match result {
+        Ok(()) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().callback_error = Some(error);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+    }
+}
+
+fn emulate_initialize_slist_head(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
+        if output == 0 {
+            return Err("InitializeSListHead output pointer is null".to_string());
+        }
+        unicorn.mem_write(output, &[0; 16]).map_err(|error| {
+            format!("InitializeSListHead output {output:#x} is not writable: {error}")
+        })
+    });
+    if let Err(error) = result {
+        unicorn.get_data_mut().callback_error = Some(error);
+    }
 }
 
 fn read_win64_import_argument(

@@ -140,10 +140,19 @@ repeated resident lifecycle, native failure to Unicorn fallback, and stable dyld
 snapshots. Release builds exercise staged arm64 and Rosetta workers from private
 session directories.
 
-The private frozen corpus is not stored in this repository. Its locator/input
-were absent in this worktree, so a fresh corpus success-set and byte-exact replay
-must be run by the corpus custodian before publication. Unit/source contracts
-for byte semantics pass, but they are not a substitute for that gate.
+The private frozen corpus is not stored in this repository and its five-entry
+locator was absent in this worktree. Spotlight did locate SHA-matching frozen
+copies of `olm-blur` and `olm-colorkeep` plus a pre-existing campaign input.
+Both rendered successfully twice through the arm64 Unicorn worker and each pair
+was byte-identical (`OLMBlur` PNG SHA-256
+`3c414b56060f87664018d89bbce18c681d6f7662b9b991d353812c4eadd22f6d`;
+`ColorKeep` PNG SHA-256
+`b1a5bbb1bc106c433d1d239b074427c7685edc4af4d3a06234bc30ac0e683242`).
+This caught and corrected an over-broad unknown-import rejection by replacing
+generic zero behavior with a finite, library-qualified set of typed or
+deterministic Windows runtime callbacks. The remaining three frozen identities
+and the canonical matrix still require the corpus custodian's full replay before
+publication; the two-case smoke test is not a substitute for that gate.
 
 The x86_64 Release test binary also exposed a host/Rosetta issue during the full
 parallel suite: after many passing cases it entered an uninterruptible state and
@@ -173,4 +182,3 @@ Post-release work is a narrowly entitled App Sandbox helper prototype,
 `MAP_JIT`/write-protect integration that removes the arm64 unsigned-executable-
 memory exception, stronger native library admission before execution, and a
 packaged crash-diagnostic consent/redaction workflow.
-
