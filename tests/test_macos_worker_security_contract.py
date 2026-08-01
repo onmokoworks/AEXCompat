@@ -62,6 +62,10 @@ def test_hardened_runtime_entitlements_are_minimal_and_distinct():
     }
     assert forbidden.isdisjoint(arm)
     assert forbidden.isdisjoint(native)
+    verifier = source("tools/verify-macos-aex-carriers.sh")
+    assert "/usr/libexec/PlistBuddy" in verifier
+    assert 'codesign --verify --strict' in verifier
+    assert "disable-library-validation" in verifier
 
 
 def test_guest_execution_admission_is_fail_closed():

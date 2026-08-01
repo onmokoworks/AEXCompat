@@ -22,14 +22,17 @@ verify_one() {
   codesign --verify --strict --verbose=2 "$worker"
   codesign -d --entitlements :- "$worker" >"$plist" 2>/dev/null
   plutil -lint "$plist" >/dev/null
-  [ "$(plutil -extract "$required_key" raw -o - "$plist")" = "true" ]
+  if [ "$(/usr/libexec/PlistBuddy -c "Print :$required_key" "$plist")" != "true" ]; then
+    echo "missing required entitlement on $worker: $required_key" >&2
+    exit 1
+  fi
   codesign -dvv "$worker" 2>&1 | grep -q 'flags=.*runtime'
 
   for forbidden in com.apple.security.get-task-allow \
     com.apple.security.cs.disable-library-validation \
     com.apple.security.cs.disable-executable-page-protection \
     com.apple.security.cs.allow-dyld-environment-variables; do
-    if plutil -extract "$forbidden" raw -o - "$plist" >/dev/null 2>&1; then
+    if /usr/libexec/PlistBuddy -c "Print :$forbidden" "$plist" >/dev/null 2>&1; then
       echo "forbidden entitlement on $worker: $forbidden" >&2
       exit 1
     fi
