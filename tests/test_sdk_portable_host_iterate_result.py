@@ -5,7 +5,7 @@ import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_PORTABLE_HOST_ITERATE_RESULT_2026-07-15.json"
-SOURCE = source_owners.L2_MAIN
+SOURCE = source_owners.L2_SOURCE
 PF_ANSI_RUNTIME = ROOT / "minihost" / "src" / "worker_pf_ansi_runtime.cpp"
 RENDER_REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
 

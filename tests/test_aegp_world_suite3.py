@@ -5,7 +5,7 @@ import source_owners
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
+SOURCE = source_owners.L2_SOURCE
 ABI_SOURCE = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 ABI_OWNER = ROOT / "minihost" / "src" / "worker_suite_abi.cpp"
 CATALOG_OWNER = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"

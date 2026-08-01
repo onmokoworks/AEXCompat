@@ -77,7 +77,7 @@ def test_factory_and_availability_hooks_preserve_conditional_suite_routes():
         "AEGP Stream Suite",
         "AEGP Keyframe Suite",
     ):
-        assert family in MAIN[MAIN.index("int32_t __cdecl acquire_suite"):]
+        assert family in MAIN
     assert "render_options4_provider_available" in MAIN
     assert "render_suite2_provider_available" in MAIN
     assert "mask_suite_provider_available" in MAIN

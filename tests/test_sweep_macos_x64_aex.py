@@ -413,6 +413,7 @@ def test_unicorn_only_resolves_and_hashes_only_selected_worker(tmp_path, monkeyp
     assert hashed == [unicorn.resolve()]
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="POSIX process-group contract is macOS-only")
 def test_spawn_worker_uses_an_isolated_process_group(tmp_path):
     process = SWEEP.spawn_worker(
         Path(sys.executable),
@@ -478,6 +479,7 @@ def test_signal_evidence_is_classified_as_crash():
     assert SWEEP.classify_failure("signal=SIGSEGV(11)") == "crash"
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="POSIX process-group contract is macOS-only")
 def test_runner_initiated_termination_is_not_classified_as_guest_crash():
     process = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],

@@ -4,7 +4,7 @@ import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = source_owners.L2_MAIN
+WORKER = source_owners.L2_SOURCE
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "l2.rs"
 PROFILES = ROOT / "broker" / "crates" / "broker" / "src" / "fixture_profiles" / "mod.rs"
 RESULT = ROOT / "analysis" / "SCATTERMAP_L2_RESULT_2026-07-13.md"

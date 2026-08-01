@@ -3,7 +3,7 @@ import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
+SOURCE = source_owners.L2_SOURCE
 ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
 RENDER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"

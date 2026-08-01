@@ -440,6 +440,7 @@ def _stage_verified_file(
         raise TraceRunnerError(f"stage {label} failed") from error
     if actual_sha256 != expected_sha256:
         try:
+            os.chmod(destination, 0o700)
             destination.unlink()
         except FileNotFoundError:
             pass

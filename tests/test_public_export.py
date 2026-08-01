@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("public_export", ROOT / "tools/public_export.py")
@@ -18,6 +20,7 @@ def git(repository: Path, *args: str) -> str:
 
 
 def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path):
+    pytest.importorskip("git_filter_repo")
     source = tmp_path / "source"
     source.mkdir()
     git(source, "init", "-b", "main")

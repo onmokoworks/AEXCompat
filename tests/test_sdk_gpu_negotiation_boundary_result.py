@@ -5,7 +5,7 @@ import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "analysis" / "SDK_GPU_NEGOTIATION_BOUNDARY_RESULT_2026-07-15.json"
-SOURCE = source_owners.L2_MAIN
+SOURCE = source_owners.L2_SOURCE
 SMART_DISPATCH = ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp"
 SMART_FINALIZE = ROOT / "minihost" / "src" / "worker_smart_finalize.cpp"
 TRANSPORT = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"

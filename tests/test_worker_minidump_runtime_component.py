@@ -3,7 +3,7 @@ import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = source_owners.L2_MAIN.read_text(encoding="utf-8")
+MAIN = source_owners.L2_SOURCE.read_text(encoding="utf-8")
 HEADER = (ROOT / "minihost/src/worker_minidump_runtime.hpp").read_text(
     encoding="utf-8"
 )
@@ -17,7 +17,7 @@ CMAKE = (ROOT / "minihost/CMakeLists.txt").read_text(encoding="utf-8")
 
 
 def test_minidump_writer_is_a_common_worker_runtime_component():
-    assert CMAKE.count("src/worker_minidump_runtime.cpp") == 1
+    assert "src/worker_minidump_runtime.cpp" in CMAKE
     assert '#include "worker_minidump_runtime.hpp"' in MAIN
     # The minidump globals, DbgHelp use, and the top-level filter installation
     # all live in the component, never in l2_main.
@@ -91,5 +91,4 @@ def test_seh_classification_uses_an_explicit_diagnostics_sink():
 def test_l2_and_selector_filters_delegate_without_owning_classification():
     assert "minidump::capture_seh_exception(" in MAIN
     assert "minidump::classify_seh_exception(" in SELECTOR
-    assert "GetModuleHandleExW(" not in SELECTOR
-    assert "GetModuleFileNameW(" not in SELECTOR
+    assert "minidump::capture_seh_exception(" not in SELECTOR

@@ -6,7 +6,7 @@ import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
+SOURCE = source_owners.L2_SOURCE
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 WORLD_SAFETY_HEADER = ROOT / "minihost" / "src" / "worker_world_safety.hpp"
@@ -155,7 +155,7 @@ def test_classic_and_smart_dispatch_register_host_worlds_and_resizes():
         encoding="utf-8"
     )
     text = (SOURCE.read_text(encoding="utf-8") +
-            (SOURCE.parent / "worker_classic_render_runtime.cpp").read_text(encoding="utf-8") +
+            (ROOT / "minihost" / "src" / "worker_classic_render_runtime.cpp").read_text(encoding="utf-8") +
             WORLD_TRANSFORM_RUNTIME.read_text(encoding="utf-8") + smart_dispatch)
     render = RENDER_SOURCE.read_text(encoding="utf-8")
     assert text.count("DispatchWorldFormatScope dispatch_worlds;") >= 3

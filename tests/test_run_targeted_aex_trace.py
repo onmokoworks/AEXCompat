@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import stat
 import subprocess
@@ -168,10 +169,7 @@ def test_failure_extracts_structured_crash_and_redacts_paths(tmp_path, monkeypat
     assert result["crash_snapshot"]["registers"]["rip"] == 0
     assert result["crash_snapshot"]["module"] == "<plugin>"
     assert result["partial_report"]["setup"]["execution_backend"] == "unicorn-x86_64"
-    assert (
-        result["partial_report"]["output_png"]
-        == "<absolute-path>"
-    )
+    assert result["partial_report"]["output_png"].startswith("<home>")
     assert str(tmp_path) not in output.read_text()
 
 
@@ -587,9 +585,11 @@ def test_worker_launch_uses_verified_private_staged_sources(
         assert staged_worker.read_bytes() == original_bytes["worker"]
         assert staged_plugin.read_bytes() == original_bytes["plugin"]
         assert staged_input.read_bytes() == original_bytes["input"]
-        assert stat.S_IMODE(staged_worker.stat().st_mode) == 0o500
-        assert stat.S_IMODE(staged_plugin.stat().st_mode) == 0o400
-        assert stat.S_IMODE(staged_input.stat().st_mode) == 0o400
+        expected_worker_mode = 0o444 if os.name == "nt" else 0o500
+        expected_data_mode = 0o444 if os.name == "nt" else 0o400
+        assert stat.S_IMODE(staged_worker.stat().st_mode) == expected_worker_mode
+        assert stat.S_IMODE(staged_plugin.stat().st_mode) == expected_data_mode
+        assert stat.S_IMODE(staged_input.stat().st_mode) == expected_data_mode
         Image.new("RGBA", (1, 1), (1, 2, 3, 255)).save(command[4], "PNG")
         return (
             subprocess.CompletedProcess(

@@ -5,9 +5,10 @@ ROOT = Path(__file__).resolve().parents[1]
 RESOLVER = (
     ROOT / "broker" / "crates" / "broker" / "src" / "plugin_dependency_closure.rs"
 ).read_text(encoding="utf-8")
-MULTIFILTER = (
-    ROOT / "bridges" / "aviutl2-multifilter" / "src" / "lib.rs"
-).read_text(encoding="utf-8")
+MULTIFILTER = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in (ROOT / "bridges" / "aviutl2-multifilter" / "src").glob("*.rs")
+)
 SWEEP = (
     ROOT / "bridges" / "aviutl2-multifilter" / "examples" / "discover_sweep.rs"
 ).read_text(encoding="utf-8")

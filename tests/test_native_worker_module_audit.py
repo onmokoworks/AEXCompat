@@ -4,7 +4,7 @@ import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = source_owners.L2_MAIN.read_text(encoding="utf-8")
+MAIN = source_owners.L2_SOURCE.read_text(encoding="utf-8")
 ENTRY_BOOTSTRAP = (ROOT / "minihost" / "src" / "worker_entry_bootstrap.cpp").read_text(
     encoding="utf-8"
 )

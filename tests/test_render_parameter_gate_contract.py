@@ -7,7 +7,7 @@ import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = source_owners.L2_MAIN
+WORKER = source_owners.L2_SOURCE
 CLI_DISPATCH = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 RUNTIME_ADMISSION = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
 ENTRY_ADMISSION = ROOT / "minihost" / "src" / "worker_entry_admission.cpp"

@@ -5,7 +5,7 @@ import source_owners
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "minihost" / "src" / "gpu_cuda_backend.hpp"
 SOURCE = ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp"
-MAIN = source_owners.L2_MAIN
+MAIN = source_owners.L2_SOURCE
 SMART_DISPATCH = ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp"
 TRANSPORT = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"

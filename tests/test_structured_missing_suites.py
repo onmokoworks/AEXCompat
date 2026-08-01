@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_production_worker_reports_bounded_missing_suites():
-    source = source_owners.L2_MAIN.read_text(encoding="utf-8")
+    source = source_owners.L2_SOURCE.read_text(encoding="utf-8")
     report = (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text(
         encoding="utf-8"
     )
@@ -54,7 +54,7 @@ def test_unsupported_suite_slots_flow_from_worker_report_to_broker_diagnostics()
     registry = (ROOT / "minihost" / "src" / "worker_suite_registry.cpp").read_text(
         encoding="utf-8"
     )
-    source = source_owners.L2_MAIN.read_text(encoding="utf-8")
+    source = source_owners.L2_SOURCE.read_text(encoding="utf-8")
     l2_report_header = (ROOT / "minihost" / "src" / "worker_report.hpp").read_text(
         encoding="utf-8"
     )
