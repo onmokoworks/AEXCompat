@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::gui_state::{GuiParameter, LiveRenderState, ViewerMode, reset_all};
+use crate::macos_worker_controller::{SecurityTier, run_staged_setup};
 
 const MAX_WIDTH: u32 = 1920;
 const MAX_HEIGHT: u32 = 1080;
@@ -1451,11 +1452,36 @@ fn discover_parameters(
     aex: &Path,
 ) -> Result<(Vec<GuiParameter>, String), String> {
     let workers = guest_worker_candidates(repository)?;
-    let process = run_guest_workers(
-        &workers,
-        &["setup".to_string(), aex.to_string_lossy().into_owned()],
-        NATIVE_SETUP_DEADLINE,
-    )?;
+    let mut failures = Vec::new();
+    let mut process = None;
+    for candidate in &workers {
+        let deadline = if candidate.native {
+            NATIVE_SETUP_DEADLINE
+        } else {
+            RESIDENT_RENDER_DEADLINE
+        };
+        match run_staged_setup(&candidate.path, aex, candidate.security_tier(), deadline) {
+            Ok(output) if output.status.success() => {
+                process = Some(output);
+                break;
+            }
+            Ok(output) => failures.push(format!(
+                "{} [{}] exited {}: {}; worker stdout: {}",
+                candidate.path.display(),
+                candidate.security_tier().as_str(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim(),
+                String::from_utf8_lossy(&output.stdout).trim(),
+            )),
+            Err(error) => failures.push(format!(
+                "{} [{}]: {error}",
+                candidate.path.display(),
+                candidate.security_tier().as_str(),
+            )),
+        }
+    }
+    let process = process
+        .ok_or_else(|| format!("all staged setup workers failed: {}", failures.join(" | ")))?;
     let report = String::from_utf8(process.stdout)
         .map_err(|error| format!("worker setup report is not UTF-8: {error}"))?;
     let value: serde_json::Value =
@@ -1557,6 +1583,16 @@ fn parse_argb8_parameter(parameter: &Value, field: &str, name: &str) -> Result<[
 struct GuestWorkerCandidate {
     path: PathBuf,
     native: bool,
+}
+
+impl GuestWorkerCandidate {
+    fn security_tier(&self) -> SecurityTier {
+        if self.native {
+            SecurityTier::NativeCarrierTrustedOnly
+        } else {
+            SecurityTier::UnicornGuest
+        }
+    }
 }
 
 fn guest_worker_candidates(repository: &Path) -> Result<Vec<GuestWorkerCandidate>, String> {

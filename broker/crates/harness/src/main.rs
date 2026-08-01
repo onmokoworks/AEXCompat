@@ -6,6 +6,9 @@ mod gui_state;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(target_os = "macos")]
+mod macos_worker_controller;
+
 #[cfg(windows)]
 include!("windows.rs");
 
