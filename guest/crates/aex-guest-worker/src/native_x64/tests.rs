@@ -8,6 +8,19 @@ fn loaded_image_snapshot_is_stable_without_guest_execution() {
     assert_eq!(first, second);
 }
 
+#[test]
+fn loaded_image_audit_rejects_every_image_added_after_admission() {
+    let baseline = BTreeSet::from(["/usr/lib/libSystem.B.dylib".to_string()]);
+    let current = BTreeSet::from([
+        "/tmp/untrusted.dylib".to_string(),
+        "/usr/lib/libSystem.B.dylib".to_string(),
+    ]);
+    assert_eq!(
+        unexpected_loaded_images(&baseline, &current),
+        ["/tmp/untrusted.dylib"]
+    );
+}
+
 fn write_blend_world(
     arena: &mut [u8],
     descriptor_offset: usize,

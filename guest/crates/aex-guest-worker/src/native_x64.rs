@@ -112,6 +112,13 @@ fn loaded_image_snapshot() -> BTreeSet<String> {
         .collect()
 }
 
+fn unexpected_loaded_images(
+    baseline: &BTreeSet<String>,
+    current: &BTreeSet<String>,
+) -> Vec<String> {
+    current.difference(baseline).cloned().collect()
+}
+
 #[derive(Debug, Error)]
 pub enum GuestError {
     #[error("native carrier mapping failed: {0}")]
@@ -548,10 +555,7 @@ impl GuestEngine<'static> {
         );
         ACTIVE_STATE.with(|slot| slot.set(previous));
         let loaded_images = loaded_image_snapshot();
-        let unexpected = loaded_images
-            .difference(&self.loaded_images)
-            .cloned()
-            .collect::<Vec<_>>();
+        let unexpected = unexpected_loaded_images(&self.loaded_images, &loaded_images);
         if !unexpected.is_empty() {
             return Err(GuestError::Callback(format!(
                 "native guest loaded unexpected Mach-O images: {}",
