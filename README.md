@@ -6,7 +6,7 @@
 [日本語](#日本語) | [English](#english) | [AEX移植解析ガイド](docs/aex-porting-dossier.md) | [互換性ステータス](docs/COMPATIBILITY_STATUS_2026-07-16.md) | [プロジェクト方針](docs/PROJECT_DIRECTION.md)
 
 > [!WARNING]
-> 開発中の実験的ソフトウェアです。未知のAEXはネイティブコードとして実行されます。隔離機構はありますが、完全なsecurity sandboxではありません。
+> 開発中の実験的ソフトウェアです。AEXは第三者のネイティブコードとして実行されます。各backendにはcrash containmentと境界検証がありますが、機密性を保証する完全なsecurity sandboxではありません。特にApple Siliconのx86_64 native carrierは明示opt-inの高速経路であり、信頼できるAEXにのみ使用してください。
 
 ## 日本語
 
@@ -42,31 +42,54 @@ AEXCompatは、Adobe After EffectsのEffect AEXをAfter Effects本体の外で�
 - 8/16/32 bpcの6-case互換matrix
 - After Effects参照画像とのpixel比較
 - custom UI、PF Suite、selector lifecycleの診断probe
-- restricted worker、timeout、Job Object、ACL、sealed load tree、pixel guard
+- Windows x64のrestricted worker、timeout、Job Object、ACL、sealed load tree、module audit、pixel guard
+- Apple Siliconのarm64 Unicorn backendと、明示opt-inのRosetta x86_64 native carrier
 - crash、hang、selector error、host validation errorの分類表示
 
 ### 対応環境
 
 | 項目 | 現在の対象 |
 |---|---|
-| OS | Windows x64 |
+| Windows x64 | primary。Rust broker / harness + C++ / MSVC x64 worker |
+| macOS Apple Silicon | experimental。arm64 Unicorn backend、任意でRosetta x86_64 native carrier |
+| Windows ARM64 | 未対応 |
 | SDK | Adobe After Effects SDK 2025を基準に検証 |
 | UI / broker | Rust 2024 edition |
-| native worker | C++ / MSVC x64 |
 | 入力画像 | PNG、JPEG、BMP、TIFF、WebP |
 | 出力画像 | PNG |
 
-macOS、Apple Silicon、Windows ARM64は現時点で対象外です。After Effects本体は通常のharness実行には不要ですが、AE oracleの取得とpixel一致検証には必要です。
+Apple Siliconでは、通常はarm64 Unicorn workerがWindows x64 AEXをguestとして実行します。`AEXCOMPAT_NATIVE_CARRIER=1`を設定すると、Rosettaが利用可能な環境では独立したx86_64 native carrierを先に試し、setup・launch・deadline・signal等の失敗時はUnicorn候補へ進みます。native carrierは高速ですが、Windows restricted workerやUnicorn guest-memory isolationと同等のsecurity boundaryではありません。
+
+After Effects本体は通常のharness実行には不要ですが、AE oracleの取得とpixel一致検証には必要です。
+
+### backendと安全境界
+
+| backend | 状態 | 主な境界 | 非保証 |
+|---|---|---|---|
+| Windows x64 native worker | primary | restricted token、sealed-tree ACL、trusted worker staging、Job Object、deadline、memory/output bound、module audit | confidentiality sandboxではない |
+| Apple Silicon arm64 Unicorn | experimental | 別process、guest memory、typed callback mediation、deadline、bounded host state、strict response validation | macOSのfilesystem/network権限制限はWindows相当ではない |
+| Apple Silicon x86_64 native carrier | experimental / opt-in | 別process、bounded arena、deadline、PE section protection、危険import/ABIの事前拒否 | 未信頼AEX向けsandboxではない。Rosetta、署名・notarization条件にも依存 |
+
+隔離の主目的は、壊れたAEXや未対応ABIによるcrash、hang、境界外書き込み、無制限出力を局所化し、互換性不足を明示的なfailureへ変換することです。悪意あるAEXからユーザーのファイルや秘密を守ることは保証しません。Apple Silicon側のprocess hardeningはIssue #637で追跡しています。
 
 ### クイックスタート
 
 #### 必要なもの
+
+Windowsの場合:
 
 - Windows 10または11 x64
 - Rust toolchainとCargo
 - Visual Studio（MSVC C++ toolchain。必要なedition・toolsetはコンポーネントごとに異なる）
 - CMake
 - ローカルのAfter Effects SDK（probeやSDK fixtureをbuildする場合。minihost workerのbuildには不要）
+
+Apple Siliconの場合:
+
+- Apple Silicon Mac
+- Rust toolchainとCargo
+- arm64 Unicorn workerのbuild環境
+- x86_64 native carrierを使う場合はRosettaとx86_64 worker build
 
 コンポーネント別の詳細な要件（SDKの世代、Visual Studioのバージョンとtoolset、CMakeの条件など）は[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
 
@@ -76,7 +99,7 @@ SDKを使うテスト・ビルドの前に、SDKルートをユーザー環境�
 [Environment]::SetEnvironmentVariable('AFTER_EFFECTS_SDK_ROOT', 'C:\path\to\AfterEffectsSDK', 'User')
 ```
 
-#### UIを起動
+#### Windows UIを起動
 
 ```powershell
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -84,7 +107,23 @@ cd AEXCompat\broker
 cargo run -p aexcompat-harness
 ```
 
-#### release build
+#### Apple Silicon UIを起動
+
+```sh
+git clone https://github.com/onmokoworks/AEXCompat.git
+cd AEXCompat
+tools/build-macos-aex-carriers.sh
+cargo run --release --manifest-path broker/Cargo.toml -p aexcompat-harness
+```
+
+Rosetta x86_64 native carrierを明示的に有効化する場合:
+
+```sh
+AEXCOMPAT_NATIVE_CARRIER=1 \
+  cargo run --release --manifest-path broker/Cargo.toml -p aexcompat-harness
+```
+
+#### Windows release build
 
 ```powershell
 cd broker
@@ -122,23 +161,22 @@ Desktop Harness / CLI
         |
         v
 Rust Broker
-request validation / identity / sealed transport
+request validation / identity / transport
+        |
+        +--> Windows: restricted native worker -> Clean-room C++ Effect Host
+        |
+        +--> Apple Silicon: arm64 Unicorn guest worker
+        |                    or opt-in Rosetta x86_64 native carrier
         |
         v
-Restricted Worker Process
-        |
-        v
-Clean-room C++ Effect Host
-selectors / PF worlds / parameters / suites
-        |
-        v
-Selected AEX -> image / audio / diagnostic report
+Selected AEX -> validated image / audio / diagnostic report
 ```
 
 | ディレクトリ | 役割 |
 |---|---|
 | `broker/` | Rust broker、隔離起動、デスクトップharness |
-| `minihost/` | AE Effect ABIとPF Suiteを提供するC++ worker |
+| `minihost/` | Windows向けAE Effect ABIとPF Suiteを提供するC++ worker |
+| `guest/` | Apple Silicon上でWindows x64 AEXを実行するguest worker群 |
 | `instruments/` | SDK ABI、Suite、selectorを測定するprobe AEX |
 | `tests/` | 契約、境界、回帰、fail-closedテスト |
 | `analysis/` | AE oracle、runtime結果、互換性の証拠 |
@@ -151,9 +189,12 @@ Selected AEX -> image / audio / diagnostic report
 - 「workerが完走した」「画像が生成された」「AEとpixel一致した」は別の到達段階です。
 - custom UI、GPU backend、深度、複数入力、sequence semanticsはAEXごとに対応状況が異なります。
 - AEGPはEffectデバッグに必要な補助経路のみを優先しています。
+- WindowsとApple Siliconでは隔離強度が異なります。Apple Siliconのnative carrierは既定OFFで、信頼済みAEX向けです。
+- Apple Siliconのarm64 UnicornはRosetta非依存ですが、互換性は対応ISA、typed import / callback、host contract、resource limitの範囲に限られます。
+- macOS向けDeveloper ID署名、Hardened Runtime、notarizationを含む配布artifactは未確立です。
 - 隔離は偶発的なcrashや多くの不正動作の影響を減らしますが、信頼できないバイナリの安全を保証しません。
 
-詳細は[互換性ステータス](docs/COMPATIBILITY_STATUS_2026-07-16.md)と[Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md)を参照してください。
+詳細は[互換性ステータス](docs/COMPATIBILITY_STATUS_2026-07-16.md)、[Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md)、[Apple Silicon durable backend decision](analysis/APPLE_SILICON_X64_DURABLE_BACKEND_DECISION_2026-07-28.md)を参照してください。
 
 ### 開発方針
 
@@ -195,6 +236,9 @@ AEXCompat is a clean-room compatibility host for running Adobe After Effects Eff
 
 The goal is practical, faithful compatibility with general Effect AEX plug-ins, not an emulator for one fixture. Recreating the complete After Effects application, AEP editor, or full AEGP host is not the current focus.
 
+> [!WARNING]
+> AEX binaries execute as third-party native code. Each backend provides crash containment and boundary validation, but none is a complete confidentiality sandbox. The Apple Silicon x86_64 native carrier is an explicit opt-in acceleration path and should only be used with trusted plug-ins.
+
 ### Basic Workflow
 
 1. Select an AEX.
@@ -216,25 +260,39 @@ The goal is practical, faithful compatibility with general Effect AEX plug-ins, 
 - Six-case 8/16/32 bpc compatibility matrix
 - Pixel comparison against After Effects reference output
 - Custom UI, PF Suite, and selector-lifecycle probes
-- Restricted workers, timeouts, Job Objects, ACLs, sealed load trees, and pixel guards
+- Windows restricted workers, timeouts, Job Objects, ACLs, sealed load trees, module audits, and pixel guards
+- Apple Silicon arm64 Unicorn backend and optional Rosetta x86_64 native carrier
 - Separate reporting for crashes, hangs, selector errors, and host validation errors
 
 ### Supported Environment
 
 | Component | Current target |
 |---|---|
-| OS | Windows x64 |
+| Windows x64 | Primary: Rust broker / harness and C++ / MSVC x64 worker |
+| macOS Apple Silicon | Experimental: arm64 Unicorn backend, optionally Rosetta x86_64 native carrier |
+| Windows ARM64 | Unsupported |
 | SDK baseline | Adobe After Effects SDK 2025 |
 | UI / broker | Rust 2024 edition |
-| native worker | C++ / MSVC x64 |
 | image input | PNG, JPEG, BMP, TIFF, WebP |
 | image output | PNG |
 
-macOS, Apple Silicon, and Windows ARM64 are not currently supported. After Effects itself is not required for ordinary harness runs, but it is required to capture AE oracles and establish pixel equivalence.
+On Apple Silicon, the normal backend is the arm64 Unicorn worker, which executes Windows x64 AEX code as a guest. With `AEXCOMPAT_NATIVE_CARRIER=1`, the harness tries a separate Rosetta x86_64 carrier first where available and proceeds to Unicorn after launch, setup, deadline, signal, or nonzero-exit failure. The native carrier is faster but does not provide the same isolation boundary as the Windows restricted worker or Unicorn guest memory.
+
+After Effects itself is not required for ordinary harness runs, but it is required to capture AE oracles and establish pixel equivalence.
+
+### Backend Safety Boundaries
+
+| Backend | Status | Main boundaries | Not guaranteed |
+|---|---|---|---|
+| Windows x64 native worker | Primary | restricted token, sealed-tree ACL, trusted worker staging, Job Object, deadlines, memory/output bounds, module audit | not a confidentiality sandbox |
+| Apple Silicon arm64 Unicorn | Experimental | separate process, guest memory, typed callback mediation, deadlines, bounded host state, strict response validation | macOS filesystem/network restrictions are not Windows-equivalent |
+| Apple Silicon x86_64 native carrier | Experimental / opt-in | separate process, bounded arena, deadlines, PE section protection, pre-entry rejection of known-dangerous imports and ABIs | not a sandbox for untrusted AEX; also depends on Rosetta and distribution signing conditions |
+
+The isolation model is primarily intended to localize crashes, hangs, out-of-bounds writes, and unbounded output from malformed or unsupported plug-ins, and to turn compatibility gaps into explicit failures. It does not guarantee protection of user files or secrets from a hostile AEX. macOS process hardening is tracked in Issue #637.
 
 ### Quick Start
 
-Requirements: Windows x64, Rust/Cargo, Visual Studio with the MSVC C++ toolchain (the required edition and toolset vary by component), CMake, and a local After Effects SDK when building probes or SDK fixtures (not needed for minihost worker builds). See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for per-component details, SDK generation, and toolset requirements.
+Windows requirements: Windows x64, Rust/Cargo, Visual Studio with the MSVC C++ toolchain, CMake, and a local After Effects SDK when building probes or SDK fixtures. Apple Silicon requires an Apple Silicon Mac and the Rust/Cargo toolchain; the optional x86_64 native carrier additionally requires Rosetta and an x86_64 worker build. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for details.
 
 Before SDK-backed tests or builds, set the SDK root as a user environment variable and reopen PowerShell:
 
@@ -242,13 +300,31 @@ Before SDK-backed tests or builds, set the SDK root as a user environment variab
 [Environment]::SetEnvironmentVariable('AFTER_EFFECTS_SDK_ROOT', 'C:\path\to\AfterEffectsSDK', 'User')
 ```
 
+Windows:
+
 ```powershell
 git clone https://github.com/onmokoworks/AEXCompat.git
 cd AEXCompat\broker
 cargo run -p aexcompat-harness
 ```
 
-Release build:
+Apple Silicon:
+
+```sh
+git clone https://github.com/onmokoworks/AEXCompat.git
+cd AEXCompat
+tools/build-macos-aex-carriers.sh
+cargo run --release --manifest-path broker/Cargo.toml -p aexcompat-harness
+```
+
+Optional Rosetta native carrier:
+
+```sh
+AEXCOMPAT_NATIVE_CARRIER=1 \
+  cargo run --release --manifest-path broker/Cargo.toml -p aexcompat-harness
+```
+
+Windows release build:
 
 ```powershell
 cd broker
@@ -270,7 +346,7 @@ Tests that need local artifacts are split in two: `--run-built-artifact-tests` r
 
 Note that a clean clone without the SDK does not reach 0 failures: SDK-header ABI tests skip explicitly, but the tests that actually build probes / fixtures fail when the SDK is absent (this is the expected outcome). See `docs/BUILD_REQUIREMENTS.md` for the expected results of source-only versus SDK-backed verification.
 
-CI (GitHub Actions) runs two Windows workflows: `windows-clean-clone.yml` for source-only verification (pytest and `cargo test` without the SDK), and `ae-sdk-tests.yml`, which fetches the AE SDK from a private release asset, sets `AFTER_EFFECTS_SDK_ROOT`, and runs pytest with `--run-sdk-tests` (see "CI (GitHub Actions)" in `docs/BUILD_REQUIREMENTS.md`).
+CI (GitHub Actions) runs two Windows workflows: `windows-clean-clone.yml` for source-only verification (pytest and `cargo test` without the SDK), and `ae-sdk-tests.yml`, which fetches the AE SDK from a private release asset, sets `AFTER_EFFECTS_SDK_ROOT`, and runs pytest with `--run-sdk-tests`.
 
 ### DirectX SDK fixture
 
@@ -287,8 +363,9 @@ The recorded device selection, shader build, worker identity, and render result 
 ```text
 Desktop Harness / CLI
         -> Rust Broker
-        -> Restricted Worker Process
-        -> Clean-room C++ Effect Host
+        -> Windows restricted native worker
+           or Apple Silicon arm64 Unicorn / opt-in x86_64 native carrier
+        -> Clean-room Effect Host boundary
         -> Selected AEX
         -> Validated image / audio / diagnostics
 ```
@@ -300,9 +377,12 @@ Desktop Harness / CLI
 - “Worker completed,” “image produced,” and “pixel-equivalent to AE” are separate maturity levels.
 - Custom UI, GPU backends, pixel depths, multiple inputs, and sequence semantics vary by plug-in.
 - AEGP work is limited to helper routes useful for Effect debugging.
+- Isolation strength differs between Windows and Apple Silicon. The native carrier is disabled by default and intended for trusted plug-ins.
+- The arm64 Unicorn backend is independent of Rosetta, but compatibility is limited to the supported ISA, typed imports/callbacks, host contracts, and resource limits.
+- A Developer ID-signed, Hardened Runtime, notarized macOS distribution artifact has not yet been established.
 - Isolation reduces the impact of accidental crashes and many forms of misbehavior; it is not a complete security sandbox.
 
-See [Compatibility Status](docs/COMPATIBILITY_STATUS_2026-07-16.md), [Project Direction](docs/PROJECT_DIRECTION.md), and the [Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md).
+See [Compatibility Status](docs/COMPATIBILITY_STATUS_2026-07-16.md), [Project Direction](docs/PROJECT_DIRECTION.md), the [Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md), and the [Apple Silicon durable backend decision](analysis/APPLE_SILICON_X64_DURABLE_BACKEND_DECISION_2026-07-28.md).
 
 For reproducing After Effects-dependent oracle captures on another Windows machine, see the [AE Oracle Cross-Machine Runbook](docs/AE_ORACLE_CROSS_MACHINE_RUNBOOK_2026-07-18.md). It defines the required AE build, AEX SHA-256, plug-in load gate, CDB/native tools, renderer metadata, retained artifacts, and return statuses.
 
