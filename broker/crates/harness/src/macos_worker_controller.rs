@@ -580,6 +580,16 @@ mod tests {
     }
 
     #[test]
+    fn session_artifact_count_and_bytes_are_structurally_classified() {
+        let session = WorkerSession::create().unwrap();
+        fs::write(session.root().join("unexpected.bin"), b"x").unwrap();
+        let count_error = session.audit_tree_with_limits(0, u64::MAX).unwrap_err();
+        assert!(count_error.contains("macos_worker_artifact_limit"));
+        let size_error = session.audit_tree_with_limits(usize::MAX, 0).unwrap_err();
+        assert!(size_error.contains("macos_worker_artifact_limit"));
+    }
+
+    #[test]
     fn staged_release_worker_executes_from_private_session() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let worker = repository.join("guest/target/release/aex-guest-worker");
