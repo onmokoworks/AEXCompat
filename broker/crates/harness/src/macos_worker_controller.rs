@@ -160,6 +160,10 @@ impl WorkerSession {
     }
 
     pub(crate) fn audit_tree(&self) -> Result<(), String> {
+        self.audit_tree_with_limits(MAX_SESSION_FILES, MAX_SESSION_BYTES)
+    }
+
+    fn audit_tree_with_limits(&self, max_files: usize, max_bytes: u64) -> Result<(), String> {
         let mut count = 0usize;
         let mut bytes = 0u64;
         for entry in fs::read_dir(&self.root)
@@ -186,9 +190,9 @@ impl WorkerSession {
                 .checked_add(metadata.len())
                 .ok_or_else(|| "macos_worker_artifact_limit: byte count overflow".to_string())?;
         }
-        if count > MAX_SESSION_FILES || bytes > MAX_SESSION_BYTES {
+        if count > max_files || bytes > max_bytes {
             return Err(format!(
-                "macos_worker_artifact_limit: session has {count} files/{bytes} bytes; limits are {MAX_SESSION_FILES}/{MAX_SESSION_BYTES}"
+                "macos_worker_artifact_limit: session has {count} files/{bytes} bytes; limits are {max_files}/{max_bytes}"
             ));
         }
         Ok(())
@@ -409,12 +413,26 @@ pub(crate) fn run_staged_setup(
             .map_err(|error| format!("macos_worker_launch: {error}"))?,
         deadline,
     );
+    let audit = session.audit_tree_with_limits(2, MAX_SESSION_BYTES);
     let cleanup = session.cleanup();
-    match (result, cleanup) {
-        (Ok(output), Ok(())) => Ok(output),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(cleanup)) => Err(cleanup),
-        (Err(error), Err(cleanup)) => Err(format!("{error}; {cleanup}")),
+    match (result, audit, cleanup) {
+        (Ok(output), Ok(()), Ok(())) => Ok(output),
+        (Err(error), Ok(()), Ok(())) => Err(error),
+        (Ok(_), Err(audit), Ok(())) => Err(audit),
+        (Ok(_), Ok(()), Err(cleanup)) => Err(cleanup),
+        (result, audit, cleanup) => {
+            let mut errors = Vec::new();
+            if let Err(error) = result {
+                errors.push(error);
+            }
+            if let Err(error) = audit {
+                errors.push(error);
+            }
+            if let Err(error) = cleanup {
+                errors.push(error);
+            }
+            Err(errors.join("; "))
+        }
     }
 }
 
@@ -559,6 +577,50 @@ mod tests {
         let error = session.cleanup().unwrap_err();
         assert!(error.contains("macos_worker_cleanup"), "{error}");
         fs::remove_file(root).unwrap();
+    }
+
+    #[test]
+    fn staged_release_worker_executes_from_private_session() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let worker = repository.join("guest/target/release/aex-guest-worker");
+        if !worker.is_file() {
+            eprintln!("skipping staged worker smoke test until the guest Release build exists");
+            return;
+        }
+        let fixture = WorkerSession::create().unwrap();
+        let malformed = fixture.root().join("malformed.aex");
+        fs::write(&malformed, b"not a PE image").unwrap();
+        let output = run_staged_setup(
+            &worker,
+            &malformed,
+            SecurityTier::UnicornGuest,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid PE"));
+    }
+
+    #[test]
+    fn staged_x86_64_worker_executes_under_rosetta_when_built() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let worker = repository.join("guest/target/x86_64-apple-darwin/release/aex-guest-worker");
+        if !worker.is_file() {
+            eprintln!("skipping staged x86_64 smoke test until the native carrier exists");
+            return;
+        }
+        let fixture = WorkerSession::create().unwrap();
+        let malformed = fixture.root().join("malformed.aex");
+        fs::write(&malformed, b"not a PE image").unwrap();
+        let output = run_staged_setup(
+            &worker,
+            &malformed,
+            SecurityTier::NativeCarrierTrustedOnly,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid PE"));
     }
 
     #[test]
