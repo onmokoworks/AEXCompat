@@ -20,16 +20,15 @@ def _function(source: str, name: str) -> str:
 
 
 def test_unicorn_is_default_and_native_carrier_is_explicitly_opt_in():
-    candidates = _function(
-        MACOS_HARNESS.read_text(encoding="utf-8"), "guest_worker_candidates"
-    )
+    source = MACOS_HARNESS.read_text(encoding="utf-8")
+    candidates = _function(source, "guest_worker_candidates")
+    native_gate = _function(source, "native_carrier_opted_in")
 
-    native_gate = candidates.index('var_os("AEXCOMPAT_NATIVE_CARRIER")')
-    native_worker = candidates.index("x86_64-apple-darwin", native_gate)
+    assert 'var_os("AEXCOMPAT_NATIVE_CARRIER")' in native_gate
+    assert 'var_os("AEXCOMPAT_NATIVE_CARRIER_TRUSTED")' in native_gate
+    assert "native_carrier_opted_in_values" in native_gate
+    native_worker = candidates.index("x86_64-apple-darwin")
     unicorn_release = candidates.index("guest/target/release/aex-guest-worker")
-    assert native_gate < native_worker < unicorn_release
-    assert 'is_some_and(|value| value == "1")' in candidates
-
-
-
+    assert native_worker < unicorn_release
+    assert "if native_carrier_opted_in()?" in candidates
 

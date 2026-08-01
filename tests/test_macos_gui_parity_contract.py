@@ -9,8 +9,6 @@ DECISION = ROOT / "analysis/MACOS_WINDOWS_GUI_PARITY_2026-07-25.md"
 
 
 
-
-
 def test_parity_decision_separates_editing_from_windows_only_diagnostics():
     decision = DECISION.read_text(encoding="utf-8")
 
