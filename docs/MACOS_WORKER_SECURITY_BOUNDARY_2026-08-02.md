@@ -154,13 +154,17 @@ deterministic Windows runtime callbacks. The remaining three frozen identities
 and the canonical matrix still require the corpus custodian's full replay before
 publication; the two-case smoke test is not a substitute for that gate.
 
-The x86_64 Release test binary also exposed a host/Rosetta issue during the full
-parallel suite: after many passing cases it entered an uninterruptible state and
-remained after SIGKILL. Focused native tests and the staged Rosetta launch pass,
-but publication must not treat the full native suite as green until this is
-reproduced after reboot with `--test-threads=1` and the process leaves no
-residual. This is exactly the failure class the production controller reports
-and refuses to reuse.
+The x86_64 Release test binary also exposed a host/Rosetta issue. A parallel run
+left several concurrent Unicorn initialization/OpenCL threads uninterruptible;
+a later `--test-threads=1` run isolated a reproducible stop in
+`win64_import_bridge_executes_real_apple_gpu_kernel_and_cleans_up`. Each process
+remained in `UE` state after SIGKILL. The 18 native-carrier-specific tests and
+the staged Rosetta launch pass; the blocked test is the Unicorn real-Apple-GPU
+bridge compiled for x86_64, not a native-carrier callback. Publication must not
+call the complete x86_64 suite green until the host is rebooted, the residuals
+are gone, and that Rosetta/OpenCL combination is either made interruptible or
+excluded with an explicit architecture rationale. This is exactly the residual
+failure class the production controller reports and refuses to reuse.
 
 ## Diagnostics and data handling
 
@@ -173,8 +177,9 @@ artifacts are deleted after the structured result is captured.
 ## Remaining limits and roadmap
 
 Pre-publication blockers are: a credentialed Developer ID + notarization run on
-the final package; frozen-corpus success-set and byte-exact replay; and a clean
-single-thread/full native Release test after reboot with zero residual process.
+the final package; the remaining three frozen identities plus canonical
+success-set/byte-exact replay; and a reboot followed by a zero-residual decision
+for the x86_64/Rosetta Unicorn real-OpenCL test.
 The existing controller, local Hardened Runtime signing test, distinct tiers,
 and documented non-guarantees are otherwise a sufficient minimum boundary.
 
