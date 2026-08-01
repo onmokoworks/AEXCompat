@@ -16,8 +16,8 @@
 use aex_abi::x86_64_windows as abi;
 use aex_apple_opencl::ObjectCounts;
 use std::cell::Cell;
-use std::collections::HashMap;
-use std::ffi::{c_int, c_void};
+use std::collections::{BTreeSet, HashMap};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::marker::PhantomData;
 use std::ptr;
 use thiserror::Error;
@@ -43,10 +43,7 @@ use crate::plugin_data::{
 pub use crate::x64::{
     ExecutionTrace, GuestCensus, GuestParam, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
 };
-use crate::x64::{
-    msvc_udt_by_value_return_import, record_suite_request, record_unsupported_suite_call,
-    utility_suite_layout,
-};
+use crate::x64::{record_suite_request, record_unsupported_suite_call, utility_suite_layout};
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
 #[cfg(test)]
@@ -97,6 +94,22 @@ unsafe extern "C" {
     fn pthread_self() -> *mut c_void;
     fn pthread_get_stackaddr_np(thread: *mut c_void) -> *mut c_void;
     fn pthread_get_stacksize_np(thread: *mut c_void) -> usize;
+    fn _dyld_image_count() -> u32;
+    fn _dyld_get_image_name(image_index: u32) -> *const c_char;
+}
+
+fn loaded_image_snapshot() -> BTreeSet<String> {
+    let count = unsafe { _dyld_image_count() };
+    (0..count)
+        .filter_map(|index| {
+            let name = unsafe { _dyld_get_image_name(index) };
+            (!name.is_null()).then(|| {
+                unsafe { CStr::from_ptr(name) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Error)]
@@ -283,6 +296,7 @@ pub struct GuestEngine<'a> {
     image: Mapping,
     arena: Mapping,
     state: NativeState,
+    loaded_images: BTreeSet<String>,
     dllmain_attached: bool,
     lifetime: PhantomData<&'a ()>,
 }
@@ -346,6 +360,7 @@ impl GuestEngine<'static> {
                 image_end: image.image_base() + image_size as u64,
                 ..NativeState::default()
             },
+            loaded_images: loaded_image_snapshot(),
             dllmain_attached: image.dll_entry_address().is_none(),
             lifetime: PhantomData,
         };
@@ -532,6 +547,17 @@ impl GuestEngine<'static> {
             || unsafe { function(args[0], args[1], args[2], args[3], args[4], args[5]) },
         );
         ACTIVE_STATE.with(|slot| slot.set(previous));
+        let loaded_images = loaded_image_snapshot();
+        let unexpected = loaded_images
+            .difference(&self.loaded_images)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unexpected.is_empty() {
+            return Err(GuestError::Callback(format!(
+                "native guest loaded unexpected Mach-O images: {}",
+                unexpected.join(", ")
+            )));
+        }
         if let Some(error) = self.state.callback_error.take() {
             Err(GuestError::Callback(error))
         } else {

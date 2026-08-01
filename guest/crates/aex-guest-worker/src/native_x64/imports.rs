@@ -14,12 +14,9 @@ pub(super) fn validate_native_import(name: &str) -> Result<(), GuestError> {
     if native_import_is_implemented(name) {
         return Ok(());
     }
-    if name.starts_with("_vcomp_") || msvc_udt_by_value_return_import(name) {
-        return Err(GuestError::UnsupportedImport {
-            name: name.to_string(),
-        });
-    }
-    Ok(())
+    Err(GuestError::UnsupportedImport {
+        name: name.to_string(),
+    })
 }
 
 pub(super) fn native_import_is_implemented(name: &str) -> bool {
@@ -52,7 +49,7 @@ pub(super) fn native_import_callback(name: &str) -> u64 {
         "powf" => callback_address!(native_powf),
         "pow" => callback_address!(native_pow),
         "omp_get_max_threads" => callback_address!(native_omp_get_max_threads),
-        _ => callback_address!(noop_import),
+        _ => callback_address!(poison_callback),
     }
 }
 

@@ -91,10 +91,7 @@ fn gpu_suite_exposes_backend_neutral_opencl_device_info() {
     );
     engine.read(suite_output, &mut pointer).unwrap();
     assert_eq!(u64::from_le_bytes(pointer), 0);
-    assert_eq!(
-        engine.end_gpu_runtime().unwrap(),
-        ObjectCounts::default()
-    );
+    assert_eq!(engine.end_gpu_runtime().unwrap(), ObjectCounts::default());
     assert!(engine.opencl_bridge_evidence().cleanup_balanced);
 }
 
@@ -273,8 +270,7 @@ fn gpu_world_roundtrip_uses_buffer_tokens_and_cleans_every_failure_path() {
     );
     assert_eq!(
         i32::from_le_bytes(
-            definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET
-                ..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4]
+            definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4]
                 .try_into()
                 .unwrap()
         ),
@@ -282,8 +278,8 @@ fn gpu_world_roundtrip_uses_buffer_tokens_and_cleans_every_failure_path() {
     );
     assert_eq!(
         u32::from_le_bytes(
-            definition[abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4
-                ..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 8]
+            definition
+                [abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4..abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 8]
                 .try_into()
                 .unwrap()
         ),
@@ -399,12 +395,13 @@ fn opencl_shutdown_rejects_live_or_release_failed_native_objects() {
             ..ObjectCounts::default()
         },
     ] {
-        let error =
-            finish_gpu_runtime_shutdown(GpuRuntimeBackendKind::AppleOpenCl, counts, None)
-                .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("OpenCL runtime cleanup is unbalanced"));
+        let error = finish_gpu_runtime_shutdown(GpuRuntimeBackendKind::AppleOpenCl, counts, None)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("OpenCL runtime cleanup is unbalanced")
+        );
     }
     assert_eq!(
         finish_gpu_runtime_shutdown(
@@ -440,9 +437,11 @@ fn opencl_shutdown_reports_unfreed_device_suite_allocation_and_deactivates_runti
     assert!(!before.cleanup_balanced);
 
     let error = engine.end_gpu_runtime().unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("GPU Device Suite cleanup is unbalanced"));
+    assert!(
+        error
+            .to_string()
+            .contains("GPU Device Suite cleanup is unbalanced")
+    );
     assert!(!engine.unicorn.get_data().gpu_runtime.is_active());
     let after = engine.gpu_suite_evidence();
     assert_eq!(after.allocations_created, 1);
@@ -664,7 +663,7 @@ fn remaining_cuda_toolkit_dll_family_boundaries_are_bounded() {
     ] {
         assert_eq!(
             dispatch_win64_import(library, "same_symbol"),
-            Win64ImportDispatch::LegacyZero,
+            Win64ImportDispatch::UnsupportedLegacyImport,
             "{library}"
         );
     }

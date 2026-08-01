@@ -39,6 +39,8 @@ pub enum PeError {
     SectionFileRange { name: String },
     #[error("section {name} virtual range is outside the mapped image")]
     SectionImageRange { name: String },
+    #[error("section {name} requests writable and executable memory")]
+    WritableExecutableSection { name: String },
     #[error(
         "effect discovery export was not found (tried EffectMain, entryPointFunc, entry_point, PluginDataEntryFunction2, PluginDataEntryFunction)"
     )]
@@ -144,6 +146,11 @@ impl PeImage {
         mapped[..header_size].copy_from_slice(&file[..header_size]);
         for section in &pe.sections {
             let name = section.name().unwrap_or("<invalid>").to_string();
+            if section.characteristics & IMAGE_SCN_MEM_EXECUTE != 0
+                && section.characteristics & IMAGE_SCN_MEM_WRITE != 0
+            {
+                return Err(PeError::WritableExecutableSection { name });
+            }
             let raw_start = section.pointer_to_raw_data as usize;
             let raw_size = section.size_of_raw_data as usize;
             let raw_end = raw_start

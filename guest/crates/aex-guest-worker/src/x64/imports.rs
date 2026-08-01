@@ -46,7 +46,6 @@ enum Win64ImportDispatch {
     UnsupportedGpuLibrary(GpuImportLibrary),
     UnsupportedLegacyImport,
     UnsupportedVcomp,
-    LegacyZero,
 }
 
 const MAX_WIN64_IMPORT_ARGUMENTS: usize = 12;
@@ -159,8 +158,8 @@ fn classify_gpu_import_library(library: &str) -> Option<GpuImportLibrary> {
             .iter()
             .any(|family| is_versioned_cuda_dll_without_arch(&library, family))
         || VERSIONED_CUDA_64_DLL_FAMILIES
-        .iter()
-        .any(|family| is_versioned_cuda_dll(&library, family))
+            .iter()
+            .any(|family| is_versioned_cuda_dll(&library, family))
         || VERSIONED_NPP_64_DLL_FAMILIES
             .iter()
             .any(|family| is_versioned_cuda_dll(&library, family))
@@ -243,7 +242,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         name if msvc_udt_by_value_return_import(name) => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
-        _ => return Win64ImportDispatch::LegacyZero,
+        _ => return Win64ImportDispatch::UnsupportedLegacyImport,
     };
     Win64ImportDispatch::LegacyImplemented(legacy)
 }
@@ -427,7 +426,6 @@ fn install_win64_import(
                 "unsupported VCOMP import: {symbol}"
             )));
         }
-        Win64ImportDispatch::LegacyZero => {}
     }
     Ok(dispatch)
 }

@@ -1184,11 +1184,11 @@
         );
         assert_eq!(
             dispatch_win64_import("fixture.dll", "unknown_scalar"),
-            Win64ImportDispatch::LegacyZero
+            Win64ImportDispatch::UnsupportedLegacyImport
         );
         assert_eq!(
             dispatch_win64_import("KERNEL32.DLL", "unknown_system_symbol"),
-            Win64ImportDispatch::LegacyZero
+            Win64ImportDispatch::UnsupportedLegacyImport
         );
         assert_eq!(
             canonical_import_trace_label(
@@ -1321,7 +1321,7 @@
         ] {
             assert_eq!(
                 dispatch_win64_import(library, "same_symbol"),
-                Win64ImportDispatch::LegacyZero
+                Win64ImportDispatch::UnsupportedLegacyImport
             );
         }
     }

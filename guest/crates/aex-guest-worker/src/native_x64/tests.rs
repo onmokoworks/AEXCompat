@@ -1,5 +1,13 @@
 use super::*;
 
+#[test]
+fn loaded_image_snapshot_is_stable_without_guest_execution() {
+    let first = loaded_image_snapshot();
+    let second = loaded_image_snapshot();
+    assert!(!first.is_empty());
+    assert_eq!(first, second);
+}
+
 fn write_blend_world(
     arena: &mut [u8],
     descriptor_offset: usize,
@@ -897,9 +905,10 @@ fn openmp_thread_count_is_positive_and_deterministic() {
     let omp_callback: unsafe extern "win64" fn(u64, u64, u64, u64, u64, u64) -> u64 =
         unsafe { std::mem::transmute(native_import_callback("omp_get_max_threads")) };
     assert_eq!(unsafe { omp_callback(0, 0, 0, 0, 0, 0) }, 1);
-    let unknown_callback: unsafe extern "win64" fn(u64, u64, u64, u64, u64, u64) -> u64 =
-        unsafe { std::mem::transmute(native_import_callback("unknown_import")) };
-    assert_eq!(unsafe { unknown_callback(0, 0, 0, 0, 0, 0) }, 0);
+    assert_eq!(
+        native_import_callback("unknown_import"),
+        callback_address!(poison_callback)
+    );
 }
 
 #[test]
@@ -910,8 +919,14 @@ fn native_imports_reject_cxx_exception_dispatch_but_preserve_ordinary_callbacks(
     ));
     // These are object-file aliases/decorations rather than names emitted
     // by the AMD64 PE import directory and must not broaden the match.
-    assert!(validate_native_import("__imp__CxxThrowException").is_ok());
-    assert!(validate_native_import("__CxxThrowException@8").is_ok());
+    assert!(matches!(
+        validate_native_import("__imp__CxxThrowException"),
+        Err(GuestError::UnsupportedImport { .. })
+    ));
+    assert!(matches!(
+        validate_native_import("__CxxThrowException@8"),
+        Err(GuestError::UnsupportedImport { .. })
+    ));
 
     assert!(validate_native_import("malloc").is_ok());
     assert_eq!(
@@ -919,10 +934,9 @@ fn native_imports_reject_cxx_exception_dispatch_but_preserve_ordinary_callbacks(
         callback_address!(native_crt_malloc)
     );
     assert!(validate_native_import("omp_get_max_threads").is_ok());
-    assert_eq!(
-        native_import_callback("omp_get_max_threads"),
-        callback_address!(native_omp_get_max_threads)
-    );
+    let omp_callback: unsafe extern "win64" fn(u64, u64, u64, u64, u64, u64) -> u64 =
+        unsafe { std::mem::transmute(native_import_callback("omp_get_max_threads")) };
+    assert_eq!(unsafe { omp_callback(0, 0, 0, 0, 0, 0) }, 1);
 
     for name in [
         "?GetEntry@DebugDatabase@debug@dvacore@@QEBA?AVstring@std@@XZ",
@@ -935,8 +949,8 @@ fn native_imports_reject_cxx_exception_dispatch_but_preserve_ordinary_callbacks(
         ));
     }
 
-    // UDTs behind references/pointers retain scalar ABI, as do ordinary
-    // decorated scalar functions and unrelated similarly named imports.
+    // Every decorated or otherwise unknown import is rejected unless it has
+    // an explicit typed implementation above.
     for name in [
         "?GetValue@Thing@@QEBAHAEBVOther@@@Z",
         "?GetValue@Thing@@QEBAHPEBVOther@@@Z",
@@ -945,7 +959,10 @@ fn native_imports_reject_cxx_exception_dispatch_but_preserve_ordinary_callbacks(
         "?GetValue@Thing@@QEBAHXZ",
         "my_vcomp_helper",
     ] {
-        assert!(validate_native_import(name).is_ok(), "{name}");
+        assert!(matches!(
+            validate_native_import(name),
+            Err(GuestError::UnsupportedImport { name: rejected }) if rejected == name
+        ));
     }
 }
 

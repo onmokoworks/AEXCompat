@@ -234,6 +234,8 @@ pub enum GuestError {
     },
     #[error("mapped PE image is not page aligned")]
     ImageAlignment,
+    #[error("invalid PE memory protection policy: {0}")]
+    ImageProtection(String),
     #[error("import stub capacity exceeded")]
     StubCapacity,
     #[error("IAT entry is outside the mapped image")]
@@ -269,7 +271,7 @@ impl GuestError {
     pub fn diagnostic_category(&self) -> &'static str {
         match self {
             Self::Unicorn { .. } => "emulation",
-            Self::ImageAlignment | Self::AvxStateCapacity => "image",
+            Self::ImageAlignment | Self::ImageProtection(_) | Self::AvxStateCapacity => "image",
             Self::StubCapacity | Self::IatRange | Self::UnsupportedImport { .. } => "import",
             Self::DataCapacity => "memory",
             Self::Callback(_) => "callback",
