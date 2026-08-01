@@ -264,6 +264,19 @@ fn install_resource_limits(command: &mut Command, limits: ResourceLimits) {
     // returns an io::Error without allocation in the child-before-exec path.
     unsafe {
         command.pre_exec(move || {
+            // Explicitly make every inherited non-standard descriptor
+            // close-on-exec. This includes descriptors opened without
+            // O_CLOEXEC by the GUI or a native framework; the Command-owned
+            // error pipe remains usable until exec and then closes as well.
+            let descriptor_limit = libc::getdtablesize();
+            for descriptor in 3..descriptor_limit {
+                if libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::EBADF) {
+                        return Err(error);
+                    }
+                }
+            }
             // RLIMIT_RSS is declared by macOS but setrlimit returns EINVAL on
             // supported releases; memory therefore needs broker-side resident
             // accounting. RLIMIT_AS also cannot safely be lowered after the
@@ -547,6 +560,7 @@ pub(crate) fn staged_name(prefix: &str, source: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::IntoRawFd;
 
     fn fixture_shell(_session: &WorkerSession) -> PathBuf {
         // macOS platform binaries are subject to path-sensitive signature
@@ -642,10 +656,17 @@ mod tests {
             SecurityTier::UnicornGuest,
             ResourceLimits::default(),
         );
+        let inherited_fd = fs::File::open("/dev/null").unwrap().into_raw_fd();
+        // SAFETY: inherited_fd is live and F_SETFD only changes its descriptor
+        // flags. Clearing CLOEXEC creates the exact hostile inheritance case.
+        assert_eq!(unsafe { libc::fcntl(inherited_fd, libc::F_SETFD, 0) }, 0);
         command
             .arg("-c")
-            .arg("pwd; printf 'tier=%s\\ntmp=%s\\nhome=%s\\nssh=%s\\n' \"$AEXCOMPAT_MACOS_SECURITY_TIER\" \"$TMPDIR\" \"$HOME\" \"$SSH_AUTH_SOCK\"; python_fd=3; if test -e /dev/fd/$python_fd; then exit 91; fi");
-        let output = wait_bounded(command.spawn().unwrap(), Duration::from_secs(2)).unwrap();
+            .arg(format!("pwd; printf 'tier=%s\\ntmp=%s\\nhome=%s\\nssh=%s\\n' \"$AEXCOMPAT_MACOS_SECURITY_TIER\" \"$TMPDIR\" \"$HOME\" \"$SSH_AUTH_SOCK\"; if test -e /dev/fd/{inherited_fd}; then exit 91; fi"));
+        let child = command.spawn().unwrap();
+        // SAFETY: ownership of inherited_fd is raw and this is its only close.
+        assert_eq!(unsafe { libc::close(inherited_fd) }, 0);
+        let output = wait_bounded(child, Duration::from_secs(2)).unwrap();
         assert!(output.status.success(), "{:?}", output);
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.lines().next().unwrap().contains(SESSION_PREFIX));

@@ -15,6 +15,8 @@ def test_macos_controller_keeps_process_and_resource_bounds_explicit():
         '.current_dir(&self.root)',
         ".env_clear()",
         ".process_group(0)",
+        "F_SETFD",
+        "FD_CLOEXEC",
         "RLIMIT_CPU",
         "RLIMIT_NOFILE",
         "RLIMIT_FSIZE",
