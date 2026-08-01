@@ -22,3 +22,4 @@ cargo build \
 
 echo "Unicorn fallback: $root/guest/target/release/aex-guest-worker"
 echo "Native carrier:   $root/guest/target/x86_64-apple-darwin/release/aex-guest-worker"
+echo "Sign and verify:   $root/tools/sign-macos-aex-carriers.sh"
