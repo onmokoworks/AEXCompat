@@ -106,6 +106,7 @@ def test_ae_sdk_workflow_runs_native_parameter_animation_coverage_after_clean_bu
     workflow = (ROOT / ".github/workflows/ae-sdk-tests.yml").read_text(
         encoding="utf-8"
     )
+    assert "github.event.repository.private" in workflow
     assert "cmake -S minihost -B target\\minihost-build -G Ninja" in workflow
     assert "build-pf-layer-param-probe" in workflow
     assert "build-pf-param-utils-animation-probe" in workflow

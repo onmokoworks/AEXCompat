@@ -105,7 +105,7 @@ Therefore #487 must not select Rosetta as the durable backend.
 
 All timings below were collected on the same Apple Silicon Mac with the
 unchanged AEX at
-`/Users/onmk/Documents/Projects/Personal/OLM as/plugins_2025/OLMBlur.aex`.
+`<redacted-home>/Documents/Projects/Personal/OLM as/plugins_2025/OLMBlur.aex`.
 Its SHA-256 was
 `f0611785b97b37405444e3298a78edeea36773185d9cf9fed4734f812b782586`.
 

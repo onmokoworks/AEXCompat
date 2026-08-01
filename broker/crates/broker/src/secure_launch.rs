@@ -143,20 +143,19 @@ fn secure_launch_impl(
         &worker_sid,
     )
     .map_err(|error| stage_error("trusted worker staging", error))?;
-    // One-shot workers run with the repository as their working directory,
-    // exactly like session workers (`secure_launch_session`): the native
-    // parameter-animation loader only accepts sidecars whose parent is
-    // current_path()/target/image-transport, the same broker-owned transport
-    // directory the one-shot input raws already live in. A staging-root cwd
-    // makes that pin unsatisfiable and every one-shot sidecar rejected
-    // (issue #141).
+    // Never expose the repository root as a worker CWD. The native sidecar
+    // loader pins relative access to <cwd>/image-transport, which is the same
+    // broker-owned <repository>/target/image-transport boundary as before.
+    let worker_cwd = repository.join("target");
+    std::fs::create_dir_all(&worker_cwd)
+        .map_err(|error| stage_error("worker cwd creation", error))?;
     let result = if let Some(limit) = process_memory_limit {
         crate::windows_process::run_isolated_with_restricted_token_and_memory_limit(
             worker_stage.worker_path(),
             args,
             timeout,
             &token,
-            repository,
+            &worker_cwd,
             repository,
             limit,
         )
@@ -166,8 +165,7 @@ fn secure_launch_impl(
             args,
             timeout,
             &token,
-            // Working directory (issue #141, see above): the repository.
-            repository,
+            &worker_cwd,
             // Repository root for the launch-boundary minidump handle (issue #18).
             repository,
         )
@@ -339,22 +337,21 @@ fn secure_launch_session_with_desktop_policy(
         &worker_sid,
     )
     .map_err(|error| stage_error("trusted worker staging", error))?;
-    // Session workers run with the repository as their working directory: the
-    // native parameter-animation loader only accepts sidecars whose parent is
-    // current_path()/target/image-transport, the same broker-owned transport
-    // directory the one-shot input raws already live in. A staging-root cwd
-    // makes that pin unsatisfiable and every session sidecar rejected.
+    // Session workers share the same non-root CWD and transport boundary as
+    // one-shot workers.
+    let worker_cwd = request.repository.join("target");
+    std::fs::create_dir_all(&worker_cwd)
+        .map_err(|error| stage_error("session worker cwd creation", error))?;
     let launched = match desktop_policy {
         crate::windows_process::WorkerDesktopPolicy::Dedicated => {
             crate::windows_process::launch_isolated_session_with_restricted_token(
                 worker_stage.worker_path(),
                 &args,
                 &token,
-                // Working directory (see above): the repository.
-                request.repository,
+                &worker_cwd,
                 session,
                 // Repository root for the launch-boundary minidump handle (issue #18/#224).
-                request.repository,
+                &worker_cwd,
             )
         }
         crate::windows_process::WorkerDesktopPolicy::Current => {

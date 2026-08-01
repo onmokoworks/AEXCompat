@@ -7,7 +7,7 @@ use aexcompat_broker::image_render::{
 use serde_json::Value;
 
 /// Broker-driven regression for issue #141: the worker's native sidecar loader
-/// pins the sidecar parent to current_path()/target/image-transport, so a
+/// pins the sidecar parent to current_path()/image-transport, so a
 /// launch whose cwd is the staging root (the pre-fix behavior) rejects every
 /// `--parameter-animation-v1` dispatch with parse error 3 before rendering.
 /// Driving the real render worker through the full broker pipeline proves the

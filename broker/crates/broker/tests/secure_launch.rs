@@ -192,6 +192,47 @@ mod windows_e2e {
     }
 
     #[test]
+    fn timeout_kills_worker_descendant_process_too() {
+        if crate::common::skip_without_restricted_token_launch(
+            "timeout_kills_worker_descendant_process_too",
+        ) {
+            return;
+        }
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+        const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+        let _lock = SECURE_LAUNCH_LOCK.lock().unwrap();
+        let worker_dir = TempDir::new("aexcompat-secure-launch-child-timeout");
+        let marker = worker_dir.0.join("started.marker");
+        let child_pid = marker.with_extension("child.pid");
+        let worker = build_marker_worker(&worker_dir.0);
+        let worker_bytes = fs::read(&worker).unwrap();
+        let tree = plugin_tree(b"authenticated plugin");
+        let before = vec![marker.to_string_lossy().into_owned()];
+        let after = vec!["child".to_owned()];
+        let request = SecureLaunchRequest {
+            worker_program: &worker,
+            worker_expected_sha256: Sha256::digest(&worker_bytes).into(),
+            worker_expected_size: worker_bytes.len() as u64,
+            plugin_basename: Some("fixture.plugin"),
+            args_before_plugin: &before,
+            args_after_plugin: &after,
+            repository: &worker_dir.0,
+            require_module_audit: false,
+        };
+
+        let result = secure_launch(tree, request, Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(result.classification, ExitClassification::TimeoutKilled);
+        let pid: u32 = fs::read_to_string(&child_pid).unwrap().parse().unwrap();
+        let process = unsafe { OpenProcess(SYNCHRONIZE_ACCESS, 0, pid) };
+        if !process.is_null() {
+            assert_eq!(unsafe { WaitForSingleObject(process, 0) }, WAIT_OBJECT_0);
+            unsafe { CloseHandle(process) };
+        }
+    }
+
+    #[test]
     fn modal_ui_worker_is_started_on_a_private_desktop_before_timeout() {
         if crate::common::skip_without_restricted_token_launch(
             "modal_ui_worker_is_started_on_a_private_desktop_before_timeout",
@@ -281,8 +322,22 @@ mod windows_e2e {
             &source,
             r#"fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--child") {
+        std::fs::write(&args[1], std::process::id().to_string()).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
     std::fs::write(&args[0], b"started").unwrap();
     if args.get(2).is_some_and(|arg| arg == "sleep") {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+    if args.get(2).is_some_and(|arg| arg == "child") {
+        let pid_path = std::path::Path::new(&args[0]).with_extension("child.pid");
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--child")
+            .arg(pid_path)
+            .spawn()
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_secs(30));
     }
 }"#,
@@ -416,13 +471,13 @@ fn main() {
     let args: Vec<_> = all_args.collect();
     let argv0 = std::path::PathBuf::from(argv0);
     assert!(argv0.is_absolute());
-    // The executed binary is the staged copy, but the working directory is
-    // the repository the broker passed as args[0] (issue #141), so relative
-    // target/image-transport pins resolve against broker-owned transport.
+    // The executed binary is the staged copy and the working directory is the
+    // broker-owned target directory, never the repository root.
     assert_eq!(argv0.file_name().unwrap(), "trusted-worker.exe");
     assert_eq!(args.len(), 3);
     let current = std::env::current_dir().unwrap();
-    assert_eq!(current, std::path::PathBuf::from(&args[0]));
+    assert_eq!(current, std::path::PathBuf::from(&args[0]).join("target"));
+    assert_ne!(current, std::path::PathBuf::from(&args[0]));
     assert_ne!(argv0.parent(), Some(current.as_path()));
     assert_eq!(args[2], "after");
     let bytes = std::fs::read(&args[1]).expect("read sealed plugin");

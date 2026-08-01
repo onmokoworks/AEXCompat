@@ -1,0 +1,34 @@
+name: Bug report
+description: Report a reproducible AEXCompat defect using public, synthetic inputs
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not attach proprietary AEX files, Adobe SDK content, DLLs, dumps,
+        private assets/corpora, secrets, license keys, personal paths, or
+        unredacted diagnostics.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the problem without private or proprietary data.
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Synthetic reproducer
+      description: Provide minimal steps and public or synthetic fixture details.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: AEXCompat commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Redacted environment
+      description: Windows version and toolchain only; remove usernames and paths.

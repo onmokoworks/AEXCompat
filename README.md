@@ -17,6 +17,11 @@
 
 AEXCompatは、Adobe After EffectsのEffect AEXをAfter Effects本体の外で実行するためのクリーンルーム互換ホストです。画像や音声をAEXへ入力し、結果の表示・保存・AE実機との比較・selector/Suite診断を行えます。
 
+> **Public contribution safety:** proprietary AEX、Adobe SDK、DLL、dump、
+> private asset/corpus、秘密情報、個人パスをIssueやPRへ投稿しないでください。
+> 公開準備の境界と未解決のlicense判断は
+> [docs/PUBLIC_RELEASE_AUDIT.md](docs/PUBLIC_RELEASE_AUDIT.md) を参照してください。
+
 目標は特定のfixture専用エミュレーターではなく、一般のEffect AEXを実用的かつ忠実に動かすことです。After Effects全体、AEP編集環境、AEGP host全体の再実装は現在の主目的ではありません。
 
 ### スクリーン上の基本フロー
@@ -192,6 +197,12 @@ Adobe、After Effects、および関連する製品名は各権利者の商標�
 ### Overview
 
 AEXCompat is a clean-room compatibility host for running Adobe After Effects Effect AEX plug-ins outside After Effects. It sends image or audio data to an AEX and supports output preview, file export, comparison with AE, and selector/suite diagnostics.
+
+> **Public contribution safety:** do not post proprietary AEX plug-ins, Adobe
+> SDK content, DLLs, dumps, private assets/corpora, secrets, or personal paths
+> in issues or pull requests. See
+> [the public release audit](docs/PUBLIC_RELEASE_AUDIT.md) for the publication
+> boundary and unresolved licensing decisions.
 
 The goal is practical, faithful compatibility with general Effect AEX plug-ins, not an emulator for one fixture. Recreating the complete After Effects application, AEP editor, or full AEGP host is not the current focus.
 

@@ -476,7 +476,7 @@ mod worker {
                     let sidecar = std::path::Path::new(value);
                     let pinned = std::env::current_dir()
                         .ok()
-                        .and_then(|cwd| cwd.join("target/image-transport").canonicalize().ok());
+                        .and_then(|cwd| cwd.join("image-transport").canonicalize().ok());
                     let parent = sidecar
                         .parent()
                         .and_then(|parent| parent.canonicalize().ok());
