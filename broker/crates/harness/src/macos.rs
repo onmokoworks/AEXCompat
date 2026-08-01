@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +13,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::gui_state::{GuiParameter, LiveRenderState, ViewerMode, reset_all};
-use crate::macos_worker_controller::{SecurityTier, run_staged_setup};
+use crate::macos_worker_controller::{
+    MAX_STDERR_BYTES, ResourceLimits, SecurityTier, WorkerSession, audit_process, read_bounded,
+    run_staged_setup, terminate_process_group,
+};
 
 const MAX_WIDTH: u32 = 1920;
 const MAX_HEIGHT: u32 = 1080;
@@ -21,6 +25,7 @@ const RESIDENT_START_DEADLINE: Duration = Duration::from_secs(10);
 const RESIDENT_RENDER_DEADLINE: Duration = Duration::from_secs(30);
 const RESIDENT_CLOSE_DEADLINE: Duration = Duration::from_secs(2);
 const RESIDENT_RESPONSE_POLL: Duration = Duration::from_millis(10);
+const MAX_RESIDENT_PROTOCOL_BYTES: usize = 1024 * 1024;
 
 struct RenderResult {
     report: String,
@@ -883,6 +888,14 @@ fn write_control_message(writer: &mut ChildStdin, value: &Value) -> Result<(), S
 }
 
 fn read_control_message(reader: &mut impl Read) -> Result<Option<Value>, String> {
+    let mut total = 0;
+    read_control_message_accounted(reader, &mut total)
+}
+
+fn read_control_message_accounted(
+    reader: &mut impl Read,
+    total: &mut usize,
+) -> Result<Option<Value>, String> {
     let mut prefix = [0u8; 4];
     match reader.read_exact(&mut prefix) {
         Ok(()) => {}
@@ -892,6 +905,14 @@ fn read_control_message(reader: &mut impl Read) -> Result<Option<Value>, String>
     let length = u32::from_le_bytes(prefix) as usize;
     if length == 0 || length > 64 * 1024 {
         return Err(format!("resident response length is invalid: {length}"));
+    }
+    *total = total
+        .checked_add(length + prefix.len())
+        .ok_or_else(|| "macos_worker_protocol_limit: byte accounting overflow".to_string())?;
+    if *total > MAX_RESIDENT_PROTOCOL_BYTES {
+        return Err(format!(
+            "macos_worker_protocol_limit: resident responses exceeded {MAX_RESIDENT_PROTOCOL_BYTES} bytes"
+        ));
     }
     let mut bytes = vec![0u8; length];
     reader
@@ -980,19 +1001,24 @@ struct StartedResidentWorker {
     child: Child,
     stdin: ChildStdin,
     response_receiver: Receiver<Result<Option<Value>, String>>,
-    stderr_receiver: Receiver<String>,
+    stderr_receiver: Receiver<Result<String, String>>,
     worker_pid: u32,
+    session: WorkerSession,
+    output_slot: PathBuf,
+    width: u32,
+    height: u32,
+    security_tier: SecurityTier,
+    fallback_reasons: Vec<String>,
 }
 
 fn start_resident_worker(
     candidates: &[GuestWorkerCandidate],
-    arguments: &[String],
-    width: u32,
-    height: u32,
+    aex: &Path,
+    input: &Path,
 ) -> Result<StartedResidentWorker, String> {
     let mut failures = Vec::new();
     for candidate in candidates {
-        let mut probe_worker = match launch_resident_candidate(candidate, arguments) {
+        let mut probe_worker = match launch_resident_candidate(candidate, aex, input) {
             Ok(worker) => worker,
             Err(error) => {
                 failures.push(format!(
@@ -1016,7 +1042,12 @@ fn start_resident_worker(
                         .map_err(|error| format!("probe response timeout: {error}"))?
                         .map_err(|error| format!("probe response reader: {error}"))?
                         .ok_or_else(|| "worker closed before session_probed".to_string())?;
-                    validate_resident_probe(&response, probe_worker.worker_pid, width, height)
+                    validate_resident_probe(
+                        &response,
+                        probe_worker.worker_pid,
+                        probe_worker.width,
+                        probe_worker.height,
+                    )
                 });
         if let Err(error) = admission {
             let stderr = terminate_resident_worker(probe_worker);
@@ -1047,8 +1078,11 @@ fn start_resident_worker(
             ));
             continue;
         }
-        match launch_resident_candidate(candidate, arguments) {
-            Ok(fresh_worker) => return Ok(fresh_worker),
+        match launch_resident_candidate(candidate, aex, input) {
+            Ok(mut fresh_worker) => {
+                fresh_worker.fallback_reasons = failures;
+                return Ok(fresh_worker);
+            }
             Err(error) => {
                 failures.push(format!(
                     "{} ({}): fresh session after probe failed: {error}",
@@ -1070,28 +1104,52 @@ fn start_resident_worker(
 
 fn launch_resident_candidate(
     candidate: &GuestWorkerCandidate,
-    arguments: &[String],
+    aex: &Path,
+    input: &Path,
 ) -> Result<StartedResidentWorker, String> {
-    let mut child = Command::new(&candidate.path)
+    let session = WorkerSession::create()?;
+    let worker = session.stage_file(&candidate.path, "worker")?;
+    let plugin = session.stage_file(aex, "plugin.aex")?;
+    let input_slot = session.root().join("input.argb8");
+    let output_slot = session.root().join("output.argb8");
+    let (width, height) = write_argb8_slot(input, &input_slot)?;
+    std::fs::write(
+        &output_slot,
+        vec![0u8; width as usize * height as usize * 4],
+    )
+    .map_err(|error| format!("initialize resident output slot: {error}"))?;
+    let arguments = [
+        "session".to_string(),
+        plugin.to_string_lossy().into_owned(),
+        input_slot.to_string_lossy().into_owned(),
+        output_slot.to_string_lossy().into_owned(),
+        width.to_string(),
+        height.to_string(),
+        "30".to_string(),
+    ];
+    let mut command = session.command(
+        &worker,
+        candidate.security_tier(),
+        ResourceLimits::default(),
+    );
+    let mut child = command
         .args(arguments)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("spawn: {error}"))?;
+        .map_err(|error| format!("macos_worker_launch: {error}"))?;
     let worker_pid = child.id();
     let (Some(stdin), Some(mut stdout), Some(mut stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = terminate_process_group(&mut child);
         return Err("one or more resident worker pipes are unavailable".into());
     };
     let (response_sender, response_receiver) = mpsc::channel();
     let (stderr_sender, stderr_receiver) = mpsc::channel();
     thread::spawn(move || {
+        let mut protocol_bytes = 0;
         loop {
-            let response = read_control_message(&mut stdout);
+            let response = read_control_message_accounted(&mut stdout, &mut protocol_bytes);
             let terminal = !matches!(response, Ok(Some(_)));
             if response_sender.send(response).is_err() || terminal {
                 break;
@@ -1099,8 +1157,11 @@ fn launch_resident_candidate(
         }
     });
     thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
+        let text =
+            read_bounded(&mut stderr, MAX_STDERR_BYTES, "resident stderr").and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|error| format!("resident stderr is not UTF-8: {error}"))
+            });
         let _ = stderr_sender.send(text);
     });
     let ready = response_receiver
@@ -1113,10 +1174,11 @@ fn launch_resident_candidate(
         .and_then(|response| validate_resident_ready(&response, worker_pid));
     if let Err(error) = ready {
         drop(stdin);
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = terminate_process_group(&mut child);
         let stderr = stderr_receiver
             .recv_timeout(Duration::from_millis(200))
+            .ok()
+            .and_then(Result::ok)
             .unwrap_or_default();
         return Err(format!(
             "{error}{}",
@@ -1127,23 +1189,34 @@ fn launch_resident_candidate(
             }
         ));
     }
+    if let Err(error) = session.audit_tree() {
+        drop(stdin);
+        let _ = terminate_process_group(&mut child);
+        return Err(error);
+    }
     Ok(StartedResidentWorker {
         child,
         stdin,
         response_receiver,
         stderr_receiver,
         worker_pid,
+        session,
+        output_slot,
+        width,
+        height,
+        security_tier: candidate.security_tier(),
+        fallback_reasons: Vec::new(),
     })
 }
 
 fn terminate_resident_worker(mut worker: StartedResidentWorker) -> Option<String> {
     drop(worker.stdin);
-    let _ = worker.child.kill();
-    let _ = worker.child.wait();
+    let _ = terminate_process_group(&mut worker.child);
     worker
         .stderr_receiver
         .recv_timeout(Duration::from_millis(200))
         .ok()
+        .and_then(Result::ok)
 }
 
 fn close_probe_worker(mut worker: StartedResidentWorker) -> Result<(), String> {
@@ -1172,7 +1245,8 @@ fn close_probe_worker(mut worker: StartedResidentWorker) -> Result<(), String> {
     let stderr = worker
         .stderr_receiver
         .recv_timeout(RESIDENT_CLOSE_DEADLINE)
-        .unwrap_or_else(|error| format!("probe stderr collection failed: {error}"));
+        .unwrap_or_else(|error| Err(format!("probe stderr collection failed: {error}")))
+        .unwrap_or_else(|error| error);
     if !stderr.trim().is_empty() {
         errors.push(format!("probe worker stderr: {}", stderr.trim()));
     }
@@ -1198,15 +1272,13 @@ fn wait_or_kill_resident_child(
                 thread::sleep(Duration::from_millis(5));
             }
             _ => {
-                let reaped = kill_and_reap_or_transfer(child, NATIVE_DEADLINE_REAP_BUDGET);
+                let termination = terminate_process_group(&mut child);
                 return Err(format!(
-                    "resident worker exceeded the {} ms close deadline and was terminated{}",
+                    "resident worker exceeded the {} ms close deadline; process-group cleanup: {}",
                     deadline.as_millis(),
-                    if reaped {
-                        ""
-                    } else {
-                        " (child cleanup still pending)"
-                    }
+                    termination
+                        .map(|()| "complete".to_string())
+                        .unwrap_or_else(|error| error)
                 ));
             }
         }
@@ -1258,6 +1330,16 @@ fn recv_resident_response(
             terminate_shared_resident_child(child);
             return Err("resident render cancelled for session shutdown".into());
         }
+        let worker_pid = match child.lock() {
+            Ok(child) => child.as_ref().map(Child::id),
+            Err(error) => error.into_inner().as_ref().map(Child::id),
+        };
+        if let Some(worker_pid) = worker_pid
+            && let Err(error) = audit_process(worker_pid)
+        {
+            terminate_shared_resident_child(child);
+            return Err(error);
+        }
         let remaining = deadline.saturating_sub(started.elapsed());
         if remaining.is_zero() {
             terminate_shared_resident_child(child);
@@ -1285,37 +1367,15 @@ fn start_resident_session(
     candidates: &[GuestWorkerCandidate],
     aex: &Path,
     input: &Path,
-    output_directory: &Path,
+    _output_directory: &Path,
 ) -> Result<ResidentSessionHandle, String> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let input_slot = output_directory.join(format!("resident-{nonce}-input.argb8"));
-    let output_slot = output_directory.join(format!("resident-{nonce}-output.argb8"));
-    let (width, height) = write_argb8_slot(input, &input_slot)?;
-    std::fs::write(
-        &output_slot,
-        vec![0u8; width as usize * height as usize * 4],
-    )
-    .map_err(|error| format!("initialize resident output slot: {error}"))?;
-    let arguments = [
-        "session".to_string(),
-        aex.to_string_lossy().into_owned(),
-        input_slot.to_string_lossy().into_owned(),
-        output_slot.to_string_lossy().into_owned(),
-        width.to_string(),
-        height.to_string(),
-        "30".to_string(),
-    ];
-    let started = match start_resident_worker(candidates, &arguments, width, height) {
-        Ok(started) => started,
-        Err(error) => {
-            let _ = std::fs::remove_file(&input_slot);
-            let _ = std::fs::remove_file(&output_slot);
-            return Err(error);
-        }
-    };
+    let started = start_resident_worker(candidates, aex, input)?;
+    let width = started.width;
+    let height = started.height;
+    let output_slot = started.output_slot.clone();
+    let session = started.session;
+    let security_tier = started.security_tier;
+    let fallback_reasons = started.fallback_reasons;
     let child = Arc::new(Mutex::new(Some(started.child)));
     let controller_child = Arc::clone(&child);
     let worker_pid = started.worker_pid;
@@ -1327,6 +1387,9 @@ fn start_resident_session(
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     let worker_shutdown_requested = Arc::clone(&shutdown_requested);
     let join = thread::spawn(move || {
+        // Session ownership follows the controller thread so all exits remove
+        // staged worker/plugin/slots only after process-group cleanup.
+        let mut session = session;
         let mut running = true;
         let mut close_reply = None;
         while running {
@@ -1355,6 +1418,7 @@ fn start_resident_session(
                             .ok_or_else(|| "resident worker closed stdout".to_string())?;
                         let expected_checksum =
                             validate_resident_frame(&response, frame_index, width, height)?;
+                        session.audit_tree()?;
                         let observed_checksum =
                             save_argb8_slot(&output_slot, &output, width, height)?;
                         if observed_checksum != expected_checksum {
@@ -1366,6 +1430,10 @@ fn start_resident_session(
                             report: serde_json::to_string_pretty(&json!({
                                 "schema": "aexcompat.macos-resident-render",
                                 "worker_pid": worker_pid,
+                                "security_tier": security_tier.as_str(),
+                                "native_carrier": security_tier == SecurityTier::NativeCarrierTrustedOnly,
+                                "native_carrier_trusted_only": security_tier == SecurityTier::NativeCarrierTrustedOnly,
+                                "fallback_reasons": fallback_reasons,
                                 "frame": response,
                             }))
                             .expect("resident report is serializable"),
@@ -1410,19 +1478,16 @@ fn start_resident_session(
         }
         let stderr = stderr_receiver
             .recv_timeout(RESIDENT_CLOSE_DEADLINE)
-            .unwrap_or_else(|error| format!("stderr collection failed: {error}"));
+            .unwrap_or_else(|error| Err(format!("stderr collection failed: {error}")))
+            .unwrap_or_else(|error| error);
         if !stderr.trim().is_empty() {
             close_errors.push(format!(
                 "resident worker {worker_pid} stderr: {}",
                 stderr.trim()
             ));
         }
-        for slot in [&input_slot, &output_slot] {
-            if let Err(error) = std::fs::remove_file(slot)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                close_errors.push(format!("remove resident slot {}: {error}", slot.display()));
-            }
+        if let Err(error) = session.cleanup() {
+            close_errors.push(error);
         }
         let close_outcome = if close_errors.is_empty() {
             Ok(())
@@ -1454,6 +1519,7 @@ fn discover_parameters(
     let workers = guest_worker_candidates(repository)?;
     let mut failures = Vec::new();
     let mut process = None;
+    let mut selected_tier = None;
     for candidate in &workers {
         let deadline = if candidate.native {
             NATIVE_SETUP_DEADLINE
@@ -1463,6 +1529,7 @@ fn discover_parameters(
         match run_staged_setup(&candidate.path, aex, candidate.security_tier(), deadline) {
             Ok(output) if output.status.success() => {
                 process = Some(output);
+                selected_tier = Some(candidate.security_tier());
                 break;
             }
             Ok(output) => failures.push(format!(
@@ -1484,8 +1551,23 @@ fn discover_parameters(
         .ok_or_else(|| format!("all staged setup workers failed: {}", failures.join(" | ")))?;
     let report = String::from_utf8(process.stdout)
         .map_err(|error| format!("worker setup report is not UTF-8: {error}"))?;
-    let value: serde_json::Value =
+    let mut value: serde_json::Value =
         serde_json::from_str(&report).map_err(|error| format!("parse setup report: {error}"))?;
+    let tier = selected_tier.expect("a successful process records its security tier");
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "setup report root is not an object".to_string())?;
+    object.insert(
+        "macos_security".into(),
+        json!({
+            "security_tier": tier.as_str(),
+            "native_carrier": tier == SecurityTier::NativeCarrierTrustedOnly,
+            "native_carrier_trusted_only": tier == SecurityTier::NativeCarrierTrustedOnly,
+            "fallback_reasons": failures,
+        }),
+    );
+    let report = serde_json::to_string_pretty(&value)
+        .map_err(|error| format!("serialize macOS setup report: {error}"))?;
     Ok((gui_parameters_from_setup(&value)?, report))
 }
 
@@ -1598,10 +1680,11 @@ impl GuestWorkerCandidate {
 fn guest_worker_candidates(repository: &Path) -> Result<Vec<GuestWorkerCandidate>, String> {
     if let Some(path) = std::env::var_os("AEXCOMPAT_GUEST_WORKER").map(PathBuf::from) {
         if path.is_file() {
-            return Ok(vec![GuestWorkerCandidate {
-                path,
-                native: false,
-            }]);
+            let native = thin_macho_is_x86_64(&path)?;
+            if native && !native_carrier_opted_in()? {
+                return Err("x86_64 AEXCOMPAT_GUEST_WORKER requires AEXCOMPAT_NATIVE_CARRIER=1 and AEXCOMPAT_NATIVE_CARRIER_TRUSTED=1".into());
+            }
+            return Ok(vec![GuestWorkerCandidate { path, native }]);
         }
         return Err(format!(
             "AEXCOMPAT_GUEST_WORKER does not identify a file: {}",
@@ -1609,7 +1692,7 @@ fn guest_worker_candidates(repository: &Path) -> Result<Vec<GuestWorkerCandidate
         ));
     }
     let mut candidates = Vec::new();
-    if std::env::var_os("AEXCOMPAT_NATIVE_CARRIER").is_some_and(|value| value == "1") {
+    if native_carrier_opted_in()? {
         candidates.push(GuestWorkerCandidate {
             path: repository.join("guest/target/x86_64-apple-darwin/release/aex-guest-worker"),
             native: true,
@@ -1640,6 +1723,46 @@ fn guest_worker_candidates(repository: &Path) -> Result<Vec<GuestWorkerCandidate
     } else {
         Ok(existing)
     }
+}
+
+fn native_carrier_opted_in() -> Result<bool, String> {
+    let enabled = std::env::var_os("AEXCOMPAT_NATIVE_CARRIER");
+    let trusted = std::env::var_os("AEXCOMPAT_NATIVE_CARRIER_TRUSTED");
+    native_carrier_opted_in_values(enabled.as_deref(), trusted.as_deref())
+}
+
+fn native_carrier_opted_in_values(
+    enabled: Option<&std::ffi::OsStr>,
+    trusted: Option<&std::ffi::OsStr>,
+) -> Result<bool, String> {
+    if enabled.is_none() && trusted.is_none() {
+        return Ok(false);
+    }
+    if enabled.as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return Err("AEXCOMPAT_NATIVE_CARRIER must be exactly 1 when set".into());
+    }
+    if trusted.as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return Err("native carrier is trusted-plug-ins-only; set AEXCOMPAT_NATIVE_CARRIER_TRUSTED=1 to acknowledge that boundary".into());
+    }
+    Ok(true)
+}
+
+fn thin_macho_is_x86_64(path: &Path) -> Result<bool, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("read guest worker architecture {}: {error}", path.display()))?;
+    if bytes.len() < 8 {
+        return Err(format!(
+            "guest worker is too small to be Mach-O: {}",
+            path.display()
+        ));
+    }
+    let magic = u32::from_le_bytes(bytes[0..4].try_into().expect("four-byte slice"));
+    let cpu = match magic {
+        0xfeedfacf => u32::from_le_bytes(bytes[4..8].try_into().expect("four-byte slice")),
+        0xcffaedfe => u32::from_be_bytes(bytes[4..8].try_into().expect("four-byte slice")),
+        _ => return Ok(false),
+    };
+    Ok(cpu == 0x0100_0007)
 }
 
 fn run_guest_workers(
@@ -1683,10 +1806,12 @@ fn take_shared_resident_child(child: &SharedResidentChild) -> Option<Child> {
 }
 
 fn terminate_shared_resident_child(child: &SharedResidentChild) -> bool {
-    let Some(child) = take_shared_resident_child(child) else {
+    let Some(mut child) = take_shared_resident_child(child) else {
         return false;
     };
-    kill_and_reap_or_transfer(child, NATIVE_DEADLINE_REAP_BUDGET);
+    if let Err(error) = terminate_process_group(&mut child) {
+        eprintln!("aexcompat resident process-group cleanup failed: {error}");
+    }
     true
 }
 
@@ -1855,9 +1980,38 @@ fn repository_root() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    fn fixture_resident_child() -> Child {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("5").process_group(0);
+        command.spawn().unwrap()
+    }
+
     #[test]
     fn repository_root_is_found_from_worktree() {
         assert!(repository_root().is_some());
+    }
+
+    #[test]
+    fn native_carrier_requires_explicit_trusted_plugin_acknowledgement() {
+        let one = std::ffi::OsStr::new("1");
+        assert_eq!(native_carrier_opted_in_values(None, None), Ok(false));
+        assert!(native_carrier_opted_in_values(Some(one), None).is_err());
+        assert!(native_carrier_opted_in_values(None, Some(one)).is_err());
+        assert_eq!(
+            native_carrier_opted_in_values(Some(one), Some(one)),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn explicit_worker_architecture_detects_thin_x86_64() {
+        let session = WorkerSession::create().unwrap();
+        let x86 = session.root().join("x86-worker");
+        let arm = session.root().join("arm-worker");
+        std::fs::write(&x86, [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01]).unwrap();
+        std::fs::write(&arm, [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01]).unwrap();
+        assert!(thin_macho_is_x86_64(&x86).unwrap());
+        assert!(!thin_macho_is_x86_64(&arm).unwrap());
     }
 
     #[test]
@@ -2114,7 +2268,7 @@ mod tests {
 
     #[test]
     fn resident_close_timeout_terminates_the_worker() {
-        let child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        let child = fixture_resident_child();
         let started = Instant::now();
         assert!(wait_or_kill_resident_child(child, Duration::from_millis(20)).is_err());
         assert!(started.elapsed() < Duration::from_millis(500));
@@ -2153,9 +2307,7 @@ mod tests {
         let (result_sender, result_receiver) = mpsc::channel();
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let worker_shutdown_requested = Arc::clone(&shutdown_requested);
-        let child = Arc::new(Mutex::new(Some(
-            Command::new("/bin/sleep").arg("5").spawn().unwrap(),
-        )));
+        let child = Arc::new(Mutex::new(Some(fixture_resident_child())));
         let worker_child = Arc::clone(&child);
         let join = thread::spawn(move || {
             let (_response_sender, response_receiver) = mpsc::channel();
@@ -2216,9 +2368,7 @@ mod tests {
         let (command_sender, _command_receiver) = mpsc::channel();
         let (_result_sender, result_receiver) = mpsc::channel();
         let shutdown_requested = Arc::new(AtomicBool::new(false));
-        let child = Arc::new(Mutex::new(Some(
-            Command::new("/bin/sleep").arg("5").spawn().unwrap(),
-        )));
+        let child = Arc::new(Mutex::new(Some(fixture_resident_child())));
         let observer_child = Arc::clone(&child);
         let (finished_sender, finished_receiver) = mpsc::channel();
         let join = thread::spawn(move || {

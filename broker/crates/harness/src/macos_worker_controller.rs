@@ -14,10 +14,46 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 const SESSION_PREFIX: &str = "aexcompat-macos-worker";
 const TERM_GRACE: Duration = Duration::from_millis(150);
 pub(crate) const MAX_STDOUT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_STDERR_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_SESSION_FILES: usize = 4;
+pub(crate) const MAX_SESSION_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_RESIDENT_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) const MAX_CHILD_PROCESSES: usize = 0;
+
+#[repr(C)]
+#[derive(Default)]
+struct RusageInfoV0 {
+    uuid: [u8; 16],
+    user_time: u64,
+    system_time: u64,
+    package_idle_wakeups: u64,
+    interrupt_wakeups: u64,
+    pageins: u64,
+    wired_size: u64,
+    resident_size: u64,
+    physical_footprint: u64,
+    process_start_absolute_time: u64,
+    process_exit_absolute_time: u64,
+}
+
+#[link(name = "proc")]
+unsafe extern "C" {
+    fn proc_pid_rusage(
+        pid: libc::c_int,
+        flavor: libc::c_int,
+        buffer: *mut libc::c_void,
+    ) -> libc::c_int;
+    fn proc_listchildpids(
+        pid: libc::pid_t,
+        buffer: *mut libc::c_void,
+        buffer_size: libc::c_int,
+    ) -> libc::c_int;
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SecurityTier {
@@ -111,7 +147,71 @@ impl WorkerSession {
         })?;
         fs::set_permissions(&destination, metadata.permissions())
             .map_err(|error| format!("preserve staged file permissions: {error}"))?;
+        let source_digest = hash_file(source)?;
+        let destination_digest = hash_file(&destination)?;
+        if source_digest != destination_digest {
+            let _ = fs::remove_file(&destination);
+            return Err(format!(
+                "macos_worker_stage_identity: copied bytes differ for {}",
+                source.display()
+            ));
+        }
         Ok(destination)
+    }
+
+    pub(crate) fn audit_tree(&self) -> Result<(), String> {
+        let mut count = 0usize;
+        let mut bytes = 0u64;
+        for entry in fs::read_dir(&self.root)
+            .map_err(|error| format!("macos_worker_cleanup: enumerate session: {error}"))?
+        {
+            let entry = entry
+                .map_err(|error| format!("macos_worker_cleanup: read session entry: {error}"))?;
+            let metadata = entry.metadata().map_err(|error| {
+                format!(
+                    "macos_worker_cleanup: inspect session entry {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+            if !metadata.is_file() {
+                return Err(format!(
+                    "macos_worker_artifact_limit: unexpected non-file {}",
+                    entry.path().display()
+                ));
+            }
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| "macos_worker_artifact_limit: file count overflow".to_string())?;
+            bytes = bytes
+                .checked_add(metadata.len())
+                .ok_or_else(|| "macos_worker_artifact_limit: byte count overflow".to_string())?;
+        }
+        if count > MAX_SESSION_FILES || bytes > MAX_SESSION_BYTES {
+            return Err(format!(
+                "macos_worker_artifact_limit: session has {count} files/{bytes} bytes; limits are {MAX_SESSION_FILES}/{MAX_SESSION_BYTES}"
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup(&mut self) -> Result<(), String> {
+        if self.root.as_os_str().is_empty() {
+            return Ok(());
+        }
+        match fs::remove_dir_all(&self.root) {
+            Ok(()) => {
+                self.root.clear();
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.root.clear();
+                Ok(())
+            }
+            Err(error) => Err(format!(
+                "macos_worker_cleanup: remove session {}: {error}",
+                self.root.display()
+            )),
+        }
     }
 
     pub(crate) fn command(
@@ -138,6 +238,23 @@ impl WorkerSession {
     }
 }
 
+fn hash_file(path: &Path) -> Result<[u8; 32], String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("open staged identity source {}: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("hash staged file {}: {error}", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hasher.finalize().into())
+}
+
 fn install_resource_limits(command: &mut Command, limits: ResourceLimits) {
     // SAFETY: this closure performs only async-signal-safe libc calls and
     // returns an io::Error without allocation in the child-before-exec path.
@@ -157,13 +274,8 @@ fn install_resource_limits(command: &mut Command, limits: ResourceLimits) {
 
 impl Drop for WorkerSession {
     fn drop(&mut self) {
-        if let Err(error) = fs::remove_dir_all(&self.root)
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            eprintln!(
-                "aexcompat macOS worker cleanup failed for {}: {error}",
-                self.root.display()
-            );
+        if let Err(error) = self.cleanup() {
+            eprintln!("aexcompat macOS worker cleanup failed: {error}");
         }
     }
 }
@@ -206,7 +318,13 @@ pub(crate) fn wait_bounded(mut child: Child, deadline: Duration) -> Result<Bound
             .map_err(|error| format!("poll macOS worker: {error}"))?
         {
             Some(status) => break status,
-            None if started.elapsed() < deadline => thread::sleep(Duration::from_millis(5)),
+            None if started.elapsed() < deadline => {
+                if let Err(error) = audit_process(child.id()) {
+                    terminate_process_group(&mut child)?;
+                    return Err(error);
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
             None => {
                 terminate_process_group(&mut child)?;
                 return Err(format!(
@@ -229,26 +347,82 @@ pub(crate) fn wait_bounded(mut child: Child, deadline: Duration) -> Result<Bound
     })
 }
 
+pub(crate) fn audit_process(pid: u32) -> Result<(), String> {
+    let mut usage = RusageInfoV0::default();
+    // SAFETY: usage is a correctly sized writable RUSAGE_INFO_V0 buffer.
+    let usage_result = unsafe {
+        proc_pid_rusage(
+            pid as libc::c_int,
+            0,
+            (&mut usage as *mut RusageInfoV0).cast(),
+        )
+    };
+    if usage_result != 0 {
+        return Err(format!(
+            "macos_worker_resource_accounting: proc_pid_rusage({pid}): {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let observed_memory = usage.resident_size.max(usage.physical_footprint);
+    if observed_memory > MAX_RESIDENT_BYTES {
+        return Err(format!(
+            "macos_worker_memory_limit: pid {pid} uses {observed_memory} bytes; limit is {MAX_RESIDENT_BYTES}"
+        ));
+    }
+    let mut children = [0 as libc::pid_t; MAX_CHILD_PROCESSES + 1];
+    // SAFETY: children is a writable pid_t array and its byte length is exact.
+    let child_count = unsafe {
+        proc_listchildpids(
+            pid as libc::pid_t,
+            children.as_mut_ptr().cast(),
+            std::mem::size_of_val(&children) as libc::c_int,
+        )
+    };
+    if child_count < 0 {
+        return Err(format!(
+            "macos_worker_resource_accounting: proc_listchildpids({pid}): {}",
+            io::Error::last_os_error()
+        ));
+    }
+    if child_count as usize > MAX_CHILD_PROCESSES {
+        return Err(format!(
+            "macos_worker_child_limit: pid {pid} has at least {child_count} child processes; limit is {MAX_CHILD_PROCESSES}"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn run_staged_setup(
     worker: &Path,
     plugin: &Path,
     tier: SecurityTier,
     deadline: Duration,
 ) -> Result<BoundedOutput, String> {
-    let session = WorkerSession::create()?;
+    let mut session = WorkerSession::create()?;
     let staged_worker = session.stage_file(worker, "worker")?;
     let staged_plugin = session.stage_file(plugin, &staged_name("plugin", plugin))?;
     let mut command = session.command(&staged_worker, tier, ResourceLimits::default());
     command.arg("setup").arg(staged_plugin);
-    wait_bounded(
+    let result = wait_bounded(
         command
             .spawn()
             .map_err(|error| format!("macos_worker_launch: {error}"))?,
         deadline,
-    )
+    );
+    let cleanup = session.cleanup();
+    match (result, cleanup) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Err(error), Err(cleanup)) => Err(format!("{error}; {cleanup}")),
+    }
 }
 
-fn read_bounded(mut reader: impl Read, limit: usize, stream: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn read_bounded(
+    mut reader: impl Read,
+    limit: usize,
+    stream: &str,
+) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
@@ -270,14 +444,40 @@ fn read_bounded(mut reader: impl Read, limit: usize, stream: &str) -> Result<Vec
 pub(crate) fn terminate_process_group(child: &mut Child) -> Result<(), String> {
     let pid = child.id() as libc::pid_t;
     signal_group(pid, libc::SIGTERM)?;
-    if wait_for_exit(child, TERM_GRACE)? {
+    let leader_reaped = wait_for_exit(child, TERM_GRACE)?;
+    if leader_reaped && !process_group_exists(pid)? {
         return Ok(());
     }
     signal_group(pid, libc::SIGKILL)?;
-    child
-        .wait()
-        .map(|_| ())
-        .map_err(|error| format!("macos_worker_residual_process: reap group {pid}: {error}"))
+    if !leader_reaped {
+        child.wait().map_err(|error| {
+            format!("macos_worker_residual_process: reap leader {pid}: {error}")
+        })?;
+    }
+    let started = Instant::now();
+    while process_group_exists(pid)? {
+        if started.elapsed() >= Duration::from_secs(2) {
+            return Err(format!(
+                "macos_worker_residual_process: process group {pid} remains after SIGKILL"
+            ));
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
+fn process_group_exists(pid: libc::pid_t) -> Result<bool, String> {
+    // SAFETY: signal 0 performs an existence/permission probe without delivery.
+    let result = unsafe { libc::kill(-pid, 0) };
+    if result == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(format!("probe macOS worker process group {pid}: {error}")),
+    }
 }
 
 fn signal_group(pid: libc::pid_t, signal: libc::c_int) -> Result<(), String> {
@@ -351,6 +551,17 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_failure_is_structurally_classified() {
+        let mut session = WorkerSession::create().unwrap();
+        let root = session.root().to_path_buf();
+        fs::remove_dir(&root).unwrap();
+        fs::write(&root, b"not a directory").unwrap();
+        let error = session.cleanup().unwrap_err();
+        assert!(error.contains("macos_worker_cleanup"), "{error}");
+        fs::remove_file(root).unwrap();
+    }
+
+    #[test]
     fn command_has_session_cwd_minimal_environment_and_fd_allowlist() {
         let session = WorkerSession::create().unwrap();
         let shell = fixture_shell(&session);
@@ -361,15 +572,15 @@ mod tests {
         );
         command
             .arg("-c")
-            .arg("pwd; env | sort; python_fd=3; if test -e /dev/fd/$python_fd; then exit 91; fi");
+            .arg("pwd; printf 'tier=%s\\ntmp=%s\\nhome=%s\\nssh=%s\\n' \"$AEXCOMPAT_MACOS_SECURITY_TIER\" \"$TMPDIR\" \"$HOME\" \"$SSH_AUTH_SOCK\"; python_fd=3; if test -e /dev/fd/$python_fd; then exit 91; fi");
         let output = wait_bounded(command.spawn().unwrap(), Duration::from_secs(2)).unwrap();
         assert!(output.status.success(), "{:?}", output);
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.lines().next().unwrap().contains(SESSION_PREFIX));
-        assert!(text.contains("AEXCOMPAT_MACOS_SECURITY_TIER=apple_silicon_unicorn_guest"));
-        assert!(text.contains("TMPDIR="));
-        assert!(!text.contains("HOME="));
-        assert!(!text.contains("SSH_"));
+        assert!(text.contains("tier=apple_silicon_unicorn_guest"));
+        assert!(text.contains("tmp="));
+        assert!(text.contains("home=\n"));
+        assert!(text.contains("ssh=\n"));
     }
 
     #[test]
@@ -384,7 +595,7 @@ mod tests {
         );
         command
             .arg("-c")
-            .arg("sleep 30 & echo $! > child-started; wait");
+            .arg("echo $$ > child-started; while :; do :; done");
         let child = command.spawn().unwrap();
         let pid = child.id();
         let error = wait_bounded(child, Duration::from_millis(100)).unwrap_err();
@@ -396,6 +607,36 @@ mod tests {
     }
 
     #[test]
+    fn child_spawn_is_classified_and_contained() {
+        let session = WorkerSession::create().unwrap();
+        let shell = fixture_shell(&session);
+        let mut command = session.command(
+            &shell,
+            SecurityTier::NativeCarrierTrustedOnly,
+            ResourceLimits::default(),
+        );
+        let marker = session.root().join("child-pid");
+        command
+            .arg("-c")
+            .arg("sleep 30 & echo $! > child-pid; wait");
+        let child = command.spawn().unwrap();
+        let pid = child.id();
+        let error = wait_bounded(child, Duration::from_secs(2)).unwrap_err();
+        assert!(error.contains("macos_worker_child_limit"), "{error}");
+        let child_pid = fs::read_to_string(marker)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        // SAFETY: signal 0 only probes existence of the exact former leader.
+        let probe = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        assert_eq!(probe, -1, "worker leader {pid} still exists");
+        // SAFETY: signal 0 only probes existence of the exact recorded child.
+        let child_probe = unsafe { libc::kill(child_pid, 0) };
+        assert_eq!(child_probe, -1, "worker child {child_pid} still exists");
+    }
+
+    #[test]
     fn stdout_flood_is_classified() {
         let session = WorkerSession::create().unwrap();
         let shell = fixture_shell(&session);
@@ -404,10 +645,9 @@ mod tests {
             SecurityTier::UnicornGuest,
             ResourceLimits::default(),
         );
-        command.arg("-c").arg(format!(
-            "dd if=/dev/zero bs={} count=1 2>/dev/null",
-            MAX_STDOUT_BYTES + 1
-        ));
+        command
+            .arg("-c")
+            .arg(format!("printf '%*s' {} ''", MAX_STDOUT_BYTES + 1));
         let error = wait_bounded(command.spawn().unwrap(), Duration::from_secs(2)).unwrap_err();
         assert!(error.contains("macos_worker_output_limit"), "{error}");
     }
