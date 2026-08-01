@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 
 const SESSION_PREFIX: &str = "aexcompat-macos-worker";
 const TERM_GRACE: Duration = Duration::from_millis(150);
+const MAX_TRACKED_DESCENDANTS: usize = 64;
 pub(crate) const MAX_STDOUT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_STDERR_BYTES: usize = 128 * 1024;
 pub(crate) const MAX_SESSION_FILES: usize = 4;
@@ -39,6 +40,13 @@ struct RusageInfoV0 {
     physical_footprint: u64,
     process_start_absolute_time: u64,
     process_exit_absolute_time: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessIdentity {
+    pid: libc::pid_t,
+    uuid: [u8; 16],
+    start_time: u64,
 }
 
 #[link(name = "proc")]
@@ -474,11 +482,18 @@ pub(crate) fn read_bounded(
 
 pub(crate) fn terminate_process_group(child: &mut Child) -> Result<(), String> {
     let pid = child.id() as libc::pid_t;
+    // Snapshot descendants before signaling the leader. A child may create a
+    // new process group/session, so group signaling alone is not a complete
+    // lifecycle boundary. UUID/start-time checks prevent signaling a reused
+    // PID after the snapshot.
+    let descendants = descendant_identities(pid)?;
+    signal_identities(&descendants, libc::SIGTERM)?;
     signal_group(pid, libc::SIGTERM)?;
     let leader_reaped = wait_for_exit(child, TERM_GRACE)?;
-    if leader_reaped && !process_group_exists(pid)? {
+    if leader_reaped && !process_group_exists(pid)? && !identities_exist(&descendants)? {
         return Ok(());
     }
+    signal_identities(&descendants, libc::SIGKILL)?;
     signal_group(pid, libc::SIGKILL)?;
     if !leader_reaped {
         child.wait().map_err(|error| {
@@ -486,13 +501,107 @@ pub(crate) fn terminate_process_group(child: &mut Child) -> Result<(), String> {
         })?;
     }
     let started = Instant::now();
-    while process_group_exists(pid)? {
+    while process_group_exists(pid)? || identities_exist(&descendants)? {
         if started.elapsed() >= Duration::from_secs(2) {
             return Err(format!(
-                "macos_worker_residual_process: process group {pid} remains after SIGKILL"
+                "macos_worker_residual_process: process group {pid} or an observed descendant remains after SIGKILL"
             ));
         }
         thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
+fn descendant_identities(root: libc::pid_t) -> Result<Vec<ProcessIdentity>, String> {
+    let mut pending = vec![root];
+    let mut descendants = Vec::new();
+    while let Some(parent) = pending.pop() {
+        let mut children = [0 as libc::pid_t; MAX_TRACKED_DESCENDANTS];
+        // SAFETY: children is a correctly sized writable pid_t array.
+        let count = unsafe {
+            proc_listchildpids(
+                parent,
+                children.as_mut_ptr().cast(),
+                std::mem::size_of_val(&children) as libc::c_int,
+            )
+        };
+        if count < 0 {
+            return Err(format!(
+                "macos_worker_resource_accounting: proc_listchildpids({parent}): {}",
+                io::Error::last_os_error()
+            ));
+        }
+        if count as usize >= children.len() {
+            return Err(format!(
+                "macos_worker_child_limit: pid {parent} has at least {count} children; tracking limit is {MAX_TRACKED_DESCENDANTS}"
+            ));
+        }
+        for &child in &children[..count as usize] {
+            if descendants.len() >= MAX_TRACKED_DESCENDANTS {
+                return Err(format!(
+                    "macos_worker_child_limit: descendant tracking exceeded {MAX_TRACKED_DESCENDANTS} processes"
+                ));
+            }
+            if let Some(identity) = process_identity(child)? {
+                descendants.push(identity);
+                pending.push(child);
+            }
+        }
+    }
+    Ok(descendants)
+}
+
+fn process_identity(pid: libc::pid_t) -> Result<Option<ProcessIdentity>, String> {
+    let mut usage = RusageInfoV0::default();
+    // SAFETY: usage is a correctly sized writable RUSAGE_INFO_V0 buffer.
+    let result = unsafe { proc_pid_rusage(pid, 0, (&mut usage as *mut RusageInfoV0).cast()) };
+    if result == 0 {
+        return Ok(Some(ProcessIdentity {
+            pid,
+            uuid: usage.uuid,
+            start_time: usage.process_start_absolute_time,
+        }));
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(None)
+    } else {
+        Err(format!(
+            "macos_worker_resource_accounting: proc_pid_rusage({pid}): {error}"
+        ))
+    }
+}
+
+fn identity_exists(identity: ProcessIdentity) -> Result<bool, String> {
+    Ok(process_identity(identity.pid)?.is_some_and(|current| current == identity))
+}
+
+fn identities_exist(identities: &[ProcessIdentity]) -> Result<bool, String> {
+    for &identity in identities {
+        if identity_exists(identity)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn signal_identities(identities: &[ProcessIdentity], signal: libc::c_int) -> Result<(), String> {
+    for &identity in identities.iter().rev() {
+        if !identity_exists(identity)? {
+            continue;
+        }
+        // SAFETY: the PID still has the UUID/start time captured while it was
+        // a descendant, so this does not target a recycled unrelated process.
+        let result = unsafe { libc::kill(identity.pid, signal) };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(format!(
+                    "signal macOS worker descendant {}: {error}",
+                    identity.pid
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -727,6 +836,31 @@ mod tests {
         // SAFETY: signal 0 only probes existence of the exact recorded child.
         let child_probe = unsafe { libc::kill(child_pid, 0) };
         assert_eq!(child_probe, -1, "worker child {child_pid} still exists");
+    }
+
+    #[test]
+    fn child_that_escapes_the_process_group_is_still_contained() {
+        let session = WorkerSession::create().unwrap();
+        let shell = fixture_shell(&session);
+        let mut command = session.command(
+            &shell,
+            SecurityTier::NativeCarrierTrustedOnly,
+            ResourceLimits::default(),
+        );
+        let marker = session.root().join("escaped-child-pid");
+        command.arg("-c").arg(
+            "/usr/bin/python3 -c 'import os,time; os.setsid(); time.sleep(30)' & echo $! > escaped-child-pid; wait",
+        );
+        let child = command.spawn().unwrap();
+        let error = wait_bounded(child, Duration::from_secs(2)).unwrap_err();
+        assert!(error.contains("macos_worker_child_limit"), "{error}");
+        let child_pid = fs::read_to_string(marker)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        // SAFETY: signal 0 only probes the exact recorded fixture PID.
+        assert_eq!(unsafe { libc::kill(child_pid, 0) }, -1);
     }
 
     #[test]

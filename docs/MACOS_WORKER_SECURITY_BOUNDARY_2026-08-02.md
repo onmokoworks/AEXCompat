@@ -31,7 +31,10 @@ Both setup and resident workers go through
   streams and the resident protocol pipes created for that session.
 * Every worker is a process-group leader. Timeout, disconnect, and owner drop
   send group `SIGTERM`, allow 150 ms, send group `SIGKILL`, reap the leader, and
-  probe the process group for residual members. A residual is
+  probe the process group for residual members. Descendants observed through
+  public `proc_listchildpids` are also signaled individually, including a child
+  that created a different process group/session; UUID and process-start-time
+  checks prevent a recycled PID from being targeted. A residual is
   `macos_worker_residual_process`, never a reusable session.
 * Cleanup is explicit on success and failure, with a `Drop` fallback. Cleanup
   errors are preserved as `macos_worker_cleanup` instead of being rounded to
@@ -137,8 +140,9 @@ arena/allocation bounds, stdout flood, child spawn and group cleanup, artifact
 tree overflow, broker disconnect/drop, worker timeout/crash, residual detection,
 cleanup failure classification, bounded protocol frames and cumulative reports,
 repeated resident lifecycle, native failure to Unicorn fallback, and stable dyld
-snapshots. Release builds exercise staged arm64 and Rosetta workers from private
-session directories.
+snapshots. The child fixture also creates a new session to prove that observed
+descendants are killed independently of process-group membership. Release builds
+exercise staged arm64 and Rosetta workers from private session directories.
 
 The private frozen corpus is not stored in this repository and its five-entry
 locator was absent in this worktree. Spotlight did locate SHA-matching frozen
