@@ -49,6 +49,8 @@ pub enum PeError {
     DuplicateExport(String),
     #[error("export {0} does not point into an executable image section")]
     NonExecutableExport(String),
+    #[error("DLL entry RVA {0:#x} does not point into an executable image section")]
+    NonExecutableDllEntry(usize),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -187,14 +189,7 @@ impl PeImage {
             }
         }
         let executable_export = |name: &str, rva: usize| {
-            section_protections
-                .iter()
-                .any(|section| {
-                    section.executable
-                        && rva >= section.virtual_address
-                        && rva < section.virtual_address.saturating_add(section.virtual_size)
-                })
-                .then_some((name.to_string(), rva))
+            rva_is_executable(&section_protections, rva).then_some((name.to_string(), rva))
         };
         for (name, rva) in &exports {
             if ["EffectMain", "entryPointFunc", "entry_point"]
@@ -205,6 +200,9 @@ impl PeImage {
             {
                 return Err(PeError::NonExecutableExport(name.clone()));
             }
+        }
+        if dll_entry_rva != 0 && !rva_is_executable(&section_protections, dll_entry_rva) {
+            return Err(PeError::NonExecutableDllEntry(dll_entry_rva));
         }
 
         let direct_candidates = ["EffectMain", "entryPointFunc", "entry_point"];
@@ -287,7 +285,9 @@ impl PeImage {
     }
 
     pub fn dll_entry_address(&self) -> Option<u64> {
-        (self.dll_entry_rva != 0).then_some(self.image_base + self.dll_entry_rva as u64)
+        (self.dll_entry_rva != 0)
+            .then(|| self.image_base.checked_add(self.dll_entry_rva as u64))
+            .flatten()
     }
 
     pub fn imports(&self) -> &[ImportLibrary] {
@@ -319,6 +319,14 @@ impl PeImage {
             has_exception_directory: self.has_exception_directory,
         }
     }
+}
+
+fn rva_is_executable(sections: &[SectionProtection], rva: usize) -> bool {
+    sections.iter().any(|section| {
+        section.executable
+            && rva >= section.virtual_address
+            && rva < section.virtual_address.saturating_add(section.virtual_size)
+    })
 }
 
 enum StringCandidate {
@@ -475,6 +483,20 @@ mod tests {
             PeImage::parse_and_map(b"not a PE image"),
             Err(PeError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn entry_rva_must_be_inside_an_executable_section() {
+        let sections = [SectionProtection {
+            virtual_address: 0x1000,
+            virtual_size: 0x200,
+            executable: true,
+            writable: false,
+        }];
+        assert!(rva_is_executable(&sections, 0x1000));
+        assert!(rva_is_executable(&sections, 0x11ff));
+        assert!(!rva_is_executable(&sections, 0x0fff));
+        assert!(!rva_is_executable(&sections, 0x1200));
     }
 
     #[test]
