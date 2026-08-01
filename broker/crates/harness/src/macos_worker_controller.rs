@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -365,6 +366,18 @@ pub(crate) fn wait_bounded(mut child: Child, deadline: Duration) -> Result<Bound
     let stderr = stderr_reader
         .join()
         .map_err(|_| "macos_worker_output_limit: stderr reader panicked".to_string())??;
+    if status.signal() == Some(libc::SIGXCPU) {
+        return Err(format!(
+            "macos_worker_cpu_limit: worker exceeded its CPU limit; stderr: {}",
+            String::from_utf8_lossy(&stderr).trim()
+        ));
+    }
+    if status.signal() == Some(libc::SIGXFSZ) {
+        return Err(format!(
+            "macos_worker_output_file_limit: worker exceeded its output-file limit; stderr: {}",
+            String::from_utf8_lossy(&stderr).trim()
+        ));
+    }
     Ok(BoundedOutput {
         status,
         stdout,
@@ -877,5 +890,40 @@ mod tests {
             .arg(format!("printf '%*s' {} ''", MAX_STDOUT_BYTES + 1));
         let error = wait_bounded(command.spawn().unwrap(), Duration::from_secs(2)).unwrap_err();
         assert!(error.contains("macos_worker_output_limit"), "{error}");
+    }
+
+    #[test]
+    fn stderr_flood_is_classified() {
+        let session = WorkerSession::create().unwrap();
+        let shell = fixture_shell(&session);
+        let mut command = session.command(
+            &shell,
+            SecurityTier::UnicornGuest,
+            ResourceLimits::default(),
+        );
+        command
+            .arg("-c")
+            .arg(format!("printf '%*s' {} '' >&2", MAX_STDERR_BYTES + 1));
+        let error = wait_bounded(command.spawn().unwrap(), Duration::from_secs(2)).unwrap_err();
+        assert!(error.contains("macos_worker_output_limit"), "{error}");
+    }
+
+    #[test]
+    fn output_file_rlimit_is_structurally_classified() {
+        let session = WorkerSession::create().unwrap();
+        let shell = fixture_shell(&session);
+        let mut command = session.command(
+            &shell,
+            SecurityTier::UnicornGuest,
+            ResourceLimits {
+                output_file_bytes: 1024,
+                ..ResourceLimits::default()
+            },
+        );
+        command
+            .arg("-c")
+            .arg("while :; do printf '0123456789abcdef'; done > oversized.bin");
+        let error = wait_bounded(command.spawn().unwrap(), Duration::from_secs(2)).unwrap_err();
+        assert!(error.contains("macos_worker_output_file_limit"), "{error}");
     }
 }

@@ -29,6 +29,8 @@ def test_macos_controller_keeps_process_and_resource_bounds_explicit():
         "MAX_SESSION_BYTES",
         "SIGTERM",
         "SIGKILL",
+        "macos_worker_cpu_limit",
+        "macos_worker_output_file_limit",
         "macos_worker_residual_process",
     ):
         assert contract in controller

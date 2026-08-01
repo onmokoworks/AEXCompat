@@ -61,7 +61,8 @@ lifecycle boundary, not a confidentiality sandbox.
 
 macOS-only failure prefixes include `macos_worker_launch`,
 `macos_worker_timeout`, `macos_worker_memory_limit`,
-`macos_worker_child_limit`, `macos_worker_output_limit`,
+`macos_worker_cpu_limit`, `macos_worker_child_limit`,
+`macos_worker_output_limit`, `macos_worker_output_file_limit`,
 `macos_worker_protocol_limit`, `macos_worker_artifact_limit`,
 `macos_worker_cleanup`, and `macos_worker_residual_process`.
 
@@ -136,7 +137,8 @@ Apple references:
 
 Self-authored/generated fixtures cover malformed PE, writable-executable PE,
 invalid entry/range checks, unsupported import, Unicorn infinite-loop timeout,
-arena/allocation bounds, stdout flood, child spawn and group cleanup, artifact
+arena/allocation bounds, stdout/stderr flood, output-file `RLIMIT_FSIZE`, child
+spawn and group cleanup, artifact
 tree overflow, broker disconnect/drop, worker timeout/crash, residual detection,
 cleanup failure classification, bounded protocol frames and cumulative reports,
 repeated resident lifecycle, native failure to Unicorn fallback, and stable dyld
