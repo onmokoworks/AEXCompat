@@ -36,7 +36,9 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "-m",
         "built under C:\\Users\\alice\\checkout\n\n"
         "Co-authored-by: Test <test@host.tailbe216f.ts.net>\n"
-        "Reviewed-by: Alice <alice@workstation.local>",
+        "Reviewed-by: Alice <alice@workstation.local>\n"
+        "Public: Alice Local <alice.local@example.com>\n"
+        "Public: Named User <naari.named@gmail.com>",
     )
     git(source, "config", "user.email", "tagger@workstation.local")
     git(source, "tag", "-a", "inner", "-m", "inner release")
@@ -68,11 +70,12 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert "private.dll" not in git(output, "log", "--all", "--name-only", "--format=")
     assert (output / "machine.txt").read_text(encoding="utf-8") == "public payload\n"
     exported_messages = git(output, "log", "--all", "--format=%B")
-    assert "alice" not in exported_messages
     assert "tailbe216f.ts.net" not in exported_messages
     assert "workstation.local" not in exported_messages
     assert "<redacted-home>" in exported_messages
     assert "<redacted-private-email>" in exported_messages
+    assert "alice.local@example.com" in exported_messages
+    assert "naari.named@gmail.com" in exported_messages
     assert public_export.scan_export(output) == []
     git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
 
@@ -131,6 +134,14 @@ def test_single_label_host_email_is_private(tmp_path):
         "private email in reachable commit" in item
         for item in public_export.scan_export(repository)
     )
+
+
+@pytest.mark.parametrize(
+    "email", ["alice.local@example.com", "naari.named@gmail.com"]
+)
+def test_public_dotted_domain_email_is_not_private(email):
+    assert public_export.PRIVATE_EMAIL.search(email) is None
+    assert public_export.PRIVATE_EMAIL_IN_PAYLOAD.search(email.encode()) is None
 
 
 def test_scan_finds_prohibited_path_created_by_merge_resolution(tmp_path):

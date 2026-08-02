@@ -37,7 +37,7 @@ SECRET_PATTERNS = {
     "Slack token": re.compile(rb"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
 }
 PRIVATE_EMAIL = re.compile(
-    r"(?i)(?:\.tail[0-9a-z]+\.ts\.net|\.local|^[^@\s]+@[^.@\s]+$)"
+    r"(?i)^[^@\s]+@(?:[^.@\s]+|[^@\s]+(?:\.tail[0-9a-z]+\.ts\.net|\.local))$"
 )
 PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
     rb"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:"
@@ -67,6 +67,19 @@ PERSONAL_PATH_PATTERNS = {
 INTENTIONAL_SCANNER_FIXTURES = {
     "tests/test_public_export.py",
     "tools/public_export.py",
+}
+INTENTIONAL_SECRET_BLOB_OIDS = {
+    "tests/test_public_export.py": frozenset({
+        # Historical blobs containing only synthetic scanner fixtures.
+        "01febeefd79326a34b8e1d0724bd2f9489010e47",
+        "26c779edb7ceec0558280af3dd6a0c30d9cb7230",
+        "30b7ecad253a3a6f2a3f60dce889543a1e071c99",
+        "7cebcd8eefbd914814c3d128fe49f5a09f929b83",
+        "97319ce947875e4b28f5cd413acce163a793619f",
+        "cd3e69d575db44223e9d4b98afa0526b25644af6",
+        "cec025b719117a1d8f4ff9dc4449d95aac794fd3",
+        "dba9f31a1df3884528a5480d94d6daa3e96e8513",
+    }),
 }
 INTENTIONAL_PERSONAL_PATH_DIGESTS = {
     "broker/crates/broker/src/opencl_runtime_probe.rs": frozenset({
@@ -470,7 +483,16 @@ def scan_export(repository: Path) -> list[str]:
                     f"private email in reachable {expected_kind} {expected_oid}"
                 )
             for label, pattern in SECRET_PATTERNS.items():
-                if pattern.search(scan_payload):
+                for _match in pattern.finditer(scan_payload):
+                    if (
+                        expected_kind == "blob"
+                        and object_paths
+                        and all(
+                            expected_oid in INTENTIONAL_SECRET_BLOB_OIDS.get(path, ())
+                            for path in object_paths
+                        )
+                    ):
+                        continue
                     findings.append(
                         f"{label} candidate in reachable {expected_kind} {expected_oid}"
                     )
@@ -537,7 +559,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             "[A-Za-z0-9.-]+(?:\\.tail[0-9a-z]+\\.ts\\.net|\\.local)"
             "==><redacted-private-email>\n"
             "regex:[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
-            "[A-Za-z0-9_-]+==><redacted-private-email>\n",
+            "[A-Za-z0-9_-]+\\b(?!\\.)==><redacted-private-email>\n",
             encoding="utf-8",
         )
         source_replacements = temporary / "source-replacements.txt"
@@ -554,6 +576,8 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             "D:/Projects/01_Project/04_Tools/WizTree MCP/exports"
             "==>external WizTree export directory\n"
             "D:\\Projects\\01_Project\\04_Tools==>external project directory\n"
+            r"D:\\Projects\\01_Project\\04_Tools\\AEXCompat"
+            "==><redacted-windows-path>\n"
             "H:\\04_software\\YukkuriMovieMaker_v4_Lite\\"
             "==>$(AEXCOMPAT_YMM4_DIR)\n",
             encoding="utf-8",
