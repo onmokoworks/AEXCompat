@@ -186,7 +186,8 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
         + 'Projects/current/result","workspace":"/'
         + 'workspaces/alice/build",'
         '"owner":"alice@workstation",'
-        '"tailscale_owner":"alice@host.tail123.ts.net",'
+        '"tailscale_owner":"alice@host.'
+        + 'tail123.ts.net",'
         '"digit_owner":"alice@3dworkstation",'
         '"tagged_owner":"alice!tag@workstation","suite":"Suite@2",'
         '"protocol":"v2|brightness@1"}\n',
