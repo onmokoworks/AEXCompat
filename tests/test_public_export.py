@@ -68,7 +68,13 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
 
 
 def test_rejects_implicit_or_unsafe_tag_names():
-    for tag in ("", "../wip", "bad tag", "refs/tags/v1"):
+    for tag in (
+        "",
+        "../wip",
+        "bad tag",
+        "refs/tags/v1",
+        "ghp_" + "abcdefghijklmnopqrstuvwxyz123456",
+    ):
         try:
             public_export.validate_tag(tag)
         except ValueError:
@@ -217,6 +223,34 @@ def test_public_documentation_path_literal_is_not_private_diagnostic(tmp_path):
 
     assert not any(
         "Windows absolute path in reachable blob" in item
+        for item in public_export.scan_export(repository)
+    )
+
+
+def test_symlink_target_is_always_scanned_for_personal_paths(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    target = "/home/alice/private/AEXCompat"
+    oid = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=repository,
+        input=target,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo", "120000", oid, "checkout-link"],
+        cwd=repository,
+        check=True,
+    )
+    git(repository, "commit", "-m", "add checkout symlink")
+
+    assert any(
+        "Linux user path in reachable blob" in item
         for item in public_export.scan_export(repository)
     )
 

@@ -71,6 +71,22 @@ def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
     return False
 
 
+def symlink_oids_from_tree(payload: bytes, oid_size: int) -> set[str]:
+    symlinks: set[str] = set()
+    cursor = 0
+    while cursor < len(payload):
+        mode_end = payload.find(b" ", cursor)
+        name_end = payload.find(b"\0", mode_end + 1)
+        if mode_end < 0 or name_end < 0 or name_end + 1 + oid_size > len(payload):
+            raise RuntimeError("malformed reachable tree payload")
+        mode = payload[cursor:mode_end]
+        oid = payload[name_end + 1 : name_end + 1 + oid_size]
+        if mode == b"120000":
+            symlinks.add(oid.hex())
+        cursor = name_end + 1 + oid_size
+    return symlinks
+
+
 def run(argv: list[str], *, cwd: Path | None = None, text: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(argv, cwd=cwd, check=True, capture_output=True, text=text)
 
@@ -82,6 +98,10 @@ def validate_tag(tag: str) -> str:
         or tag.startswith("refs/")
     ):
         raise ValueError(f"invalid tag name: {tag!r}")
+    encoded = tag.encode("utf-8")
+    for label, pattern in {**SECRET_PATTERNS, **PERSONAL_PATH_PATTERNS}.items():
+        if pattern.search(encoded):
+            raise ValueError(f"unsafe tag name ({label}): {tag!r}")
     return tag
 
 
@@ -148,6 +168,13 @@ def discard_exact(stream, size: int) -> None:
 
 def scan_export(repository: Path) -> list[str]:
     findings: list[str] = []
+    for ref in run(
+        ["git", "for-each-ref", "--format=%(refname)"], cwd=repository
+    ).stdout.splitlines():
+        encoded_ref = ref.encode("utf-8")
+        for label, pattern in {**SECRET_PATTERNS, **PERSONAL_PATH_PATTERNS}.items():
+            if pattern.search(encoded_ref):
+                findings.append(f"{label} in reachable ref {ref}")
     paths = run(
         ["git", "log", "--all", "-m", "--pretty=format:", "--name-only"], cwd=repository
     ).stdout.splitlines()
@@ -159,6 +186,7 @@ def scan_export(repository: Path) -> list[str]:
         for oid, kind, paths in reachable_objects(repository)
         if kind in {"blob", "commit", "tag", "tree"}
     ]
+    scanned_objects.sort(key=lambda item: item[1] != "tree")
     if scanned_objects:
         # One batch process is material on Windows: a large history can contain
         # tens of thousands of blobs, and spawning twice per blob made the
@@ -171,6 +199,11 @@ def scan_export(repository: Path) -> list[str]:
             stderr=subprocess.PIPE,
         )
         assert batch.stdin is not None and batch.stdout is not None
+        object_format = run(
+            ["git", "rev-parse", "--show-object-format"], cwd=repository
+        ).stdout.strip()
+        oid_size = 20 if object_format == "sha1" else 32
+        symlink_oids: set[str] = set()
         for expected_oid, expected_kind, object_paths in scanned_objects:
             batch.stdin.write(f"{expected_oid}\n".encode("ascii"))
             batch.stdin.flush()
@@ -193,13 +226,18 @@ def scan_export(repository: Path) -> list[str]:
             payload = read_exact(batch.stdout, size)
             if batch.stdout.read(1) != b"\n":
                 raise RuntimeError("git cat-file batch framing error")
+            if expected_kind == "tree":
+                symlink_oids.update(symlink_oids_from_tree(payload, oid_size))
             for label, pattern in SECRET_PATTERNS.items():
                 if pattern.search(payload):
                     findings.append(
                         f"{label} candidate in reachable {expected_kind} {expected_oid}"
                     )
             for label, pattern in PERSONAL_PATH_PATTERNS.items():
-                if scans_personal_paths(expected_kind, object_paths) and pattern.search(payload) and not (
+                if (
+                    expected_oid in symlink_oids
+                    or scans_personal_paths(expected_kind, object_paths)
+                ) and pattern.search(payload) and not (
                     expected_kind == "blob"
                     and object_paths
                     and object_paths <= INTENTIONAL_SCANNER_FIXTURES
