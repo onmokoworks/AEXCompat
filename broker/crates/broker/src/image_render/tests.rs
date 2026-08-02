@@ -379,10 +379,11 @@ mod tests {
         let slots = HashSet::from([6]);
         validate_timed_layer_identities(&[timed_layer(6, 1, 2), timed_layer(6, 3, 4)], &slots)
             .unwrap();
-        assert!(
-            validate_timed_layer_identities(&[timed_layer(6, 1, 2), timed_layer(6, 2, 4)], &slots,)
-                .is_err()
-        );
+        assert!(validate_timed_layer_identities(
+            &[timed_layer(6, 1, 2), timed_layer(6, 2, 4)],
+            &slots,
+        )
+        .is_err());
         assert!(validate_timed_layer_identities(&[timed_layer(7, 1, 2)], &slots).is_err());
         assert!(validate_timed_layer_identities(&[timed_layer(6, 1, 0)], &slots).is_err());
         assert!(validate_timed_layer_identities(&vec![timed_layer(6, 1, 2); 65], &slots).is_err());
@@ -470,12 +471,10 @@ mod tests {
 
         assert_eq!(fs::read(&target).unwrap(), b"target");
         if linked {
-            assert!(
-                fs::symlink_metadata(&link)
-                    .unwrap()
-                    .file_type()
-                    .is_symlink()
-            );
+            assert!(fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -1026,24 +1025,20 @@ mod tests {
 
     #[test]
     fn render_timing_is_bounded_and_monotonic() {
-        assert!(
-            RenderTiming {
-                current_time: 3,
-                time_step: 1,
-                total_time: 4,
-                time_scale: 30,
-            }
-            .is_valid()
-        );
-        assert!(
-            !RenderTiming {
-                current_time: 3,
-                time_step: 0,
-                total_time: 2,
-                time_scale: 0,
-            }
-            .is_valid()
-        );
+        assert!(RenderTiming {
+            current_time: 3,
+            time_step: 1,
+            total_time: 4,
+            time_scale: 30,
+        }
+        .is_valid());
+        assert!(!RenderTiming {
+            current_time: 3,
+            time_step: 0,
+            total_time: 2,
+            time_scale: 0,
+        }
+        .is_valid());
     }
 
     #[test]
@@ -1102,6 +1097,44 @@ mod tests {
         assert!(resolve_world_dump_dir(&repository, &outside).is_err());
         assert!(!outside.exists() || fs::remove_dir_all(&outside).is_ok());
         fs::remove_dir_all(repository).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn world_dump_dir_accepts_existing_directory_beneath_target_junction() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let repository =
+            std::env::temp_dir().join(format!("aexcompat-world-dump-junction-repository-{nonce}"));
+        let junction_target =
+            std::env::temp_dir().join(format!("aexcompat-world-dump-junction-target-{nonce}"));
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(junction_target.join("existing")).unwrap();
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(repository.join("target"))
+            .arg(&junction_target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let accepted =
+            resolve_managed_dump_dir(&repository, &repository.join("target/existing"), true)
+                .unwrap();
+        assert_eq!(
+            accepted.path,
+            strip_extended_prefix(&junction_target.join("existing").canonicalize().unwrap())
+        );
+
+        fs::remove_dir(repository.join("target")).unwrap();
+        fs::remove_dir_all(repository).unwrap();
+        fs::remove_dir_all(junction_target).unwrap();
     }
 
     #[test]
@@ -1427,11 +1460,9 @@ mod tests {
             records[1]["version_at_entry"]["same_value_as_global_setup_entry"],
             true
         );
-        assert!(
-            !records[1]["global_data_handoff"]
-                .to_string()
-                .contains("raw_pointer")
-        );
+        assert!(!records[1]["global_data_handoff"]
+            .to_string()
+            .contains("raw_pointer"));
     }
 
     #[test]
@@ -1488,12 +1519,10 @@ mod tests {
         });
         let mut diagnostics = json!({});
         propagate_selector_invocations(&mut diagnostics, &report);
-        assert!(
-            diagnostics["selector_invocations"]["records"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(diagnostics["selector_invocations"]["records"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         assert_eq!(diagnostics["selector_invocations"]["truncated"], true);
     }
 
@@ -1547,18 +1576,14 @@ mod tests {
         });
         let mut diagnostics = json!({});
         propagate_selector_invocations(&mut diagnostics, &report);
-        assert!(
-            diagnostics["selector_invocations"]["records"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(diagnostics["selector_invocations"]["records"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         assert_eq!(diagnostics["selector_invocations"]["truncated"], true);
-        assert!(
-            !diagnostics["selector_invocations"]
-                .to_string()
-                .contains("0x1234")
-        );
+        assert!(!diagnostics["selector_invocations"]
+            .to_string()
+            .contains("0x1234"));
     }
 
     #[test]
@@ -1577,24 +1602,20 @@ mod tests {
         });
         assert_eq!(safe_application_id_entry(&expected), Some(expected));
         assert_eq!(safe_application_id_entry(&escaped), Some(escaped));
-        assert!(
-            safe_application_id_entry(&json!({
-                "printable_code": "PrMr",
-                "hex_u32": "0x46585443",
-                "same_value_as_global_setup_entry": false,
-                "host_setting_source": "worker_effect_bootstrap"
-            }))
-            .is_none()
-        );
-        assert!(
-            safe_application_id_entry(&json!({
-                "printable_code": "FXTC",
-                "hex_u32": "0x46585443",
-                "same_value_as_global_setup_entry": false,
-                "host_setting_source": "unknown"
-            }))
-            .is_none()
-        );
+        assert!(safe_application_id_entry(&json!({
+            "printable_code": "PrMr",
+            "hex_u32": "0x46585443",
+            "same_value_as_global_setup_entry": false,
+            "host_setting_source": "worker_effect_bootstrap"
+        }))
+        .is_none());
+        assert!(safe_application_id_entry(&json!({
+            "printable_code": "FXTC",
+            "hex_u32": "0x46585443",
+            "same_value_as_global_setup_entry": false,
+            "host_setting_source": "unknown"
+        }))
+        .is_none());
     }
 
     #[test]
@@ -1631,26 +1652,22 @@ mod tests {
         assert_eq!(safe_spec_version_entry(&changed), Some(changed));
         assert_eq!(safe_spec_version_entry(&zero), Some(zero));
         assert_eq!(safe_spec_version_entry(&invalid), Some(invalid));
-        assert!(
-            safe_spec_version_entry(&json!({
-                "raw_packed_u32": "0x001d000d",
-                "major": 13,
-                "minor": 28,
-                "same_value_as_global_setup_entry": false,
-                "host_setting_source": "worker_effect_bootstrap"
-            }))
-            .is_none()
-        );
-        assert!(
-            safe_spec_version_entry(&json!({
-                "raw_packed_u32": "0x001d000d",
-                "major": 13,
-                "minor": 29,
-                "same_value_as_global_setup_entry": true,
-                "host_setting_source": "unknown"
-            }))
-            .is_none()
-        );
+        assert!(safe_spec_version_entry(&json!({
+            "raw_packed_u32": "0x001d000d",
+            "major": 13,
+            "minor": 28,
+            "same_value_as_global_setup_entry": false,
+            "host_setting_source": "worker_effect_bootstrap"
+        }))
+        .is_none());
+        assert!(safe_spec_version_entry(&json!({
+            "raw_packed_u32": "0x001d000d",
+            "major": 13,
+            "minor": 29,
+            "same_value_as_global_setup_entry": true,
+            "host_setting_source": "unknown"
+        }))
+        .is_none());
     }
 
     #[test]
@@ -1712,11 +1729,9 @@ mod tests {
         assert_eq!(records[2]["classification"], "fallback");
         assert_eq!(records[2]["call_count"], 3);
         assert_eq!(diagnostics["host_callback_timeline"]["truncated"], true);
-        assert!(
-            !diagnostics["host_callback_timeline"]
-                .to_string()
-                .contains("0x1234")
-        );
+        assert!(!diagnostics["host_callback_timeline"]
+            .to_string()
+            .contains("0x1234"));
     }
 
     #[test]
@@ -1788,11 +1803,9 @@ mod tests {
         });
         let mut near_miss_diagnostics = json!({});
         propagate_compute_cache_timeline(&mut near_miss_diagnostics, &near_miss);
-        assert!(
-            near_miss_diagnostics
-                .get("compute_cache_timeline")
-                .is_none()
-        );
+        assert!(near_miss_diagnostics
+            .get("compute_cache_timeline")
+            .is_none());
 
         let malformed = json!({
             "compute_cache_timeline": {
@@ -1820,11 +1833,9 @@ mod tests {
             malformed_diagnostics["compute_cache_timeline"]["truncated"],
             true
         );
-        assert!(
-            !malformed_diagnostics["compute_cache_timeline"]
-                .to_string()
-                .contains("0x1234")
-        );
+        assert!(!malformed_diagnostics["compute_cache_timeline"]
+            .to_string()
+            .contains("0x1234"));
 
         let wrong_container = json!({
             "compute_cache_timeline": {
@@ -1844,11 +1855,9 @@ mod tests {
             wrong_container_diagnostics["compute_cache_timeline"]["truncated"],
             true
         );
-        assert!(
-            !wrong_container_diagnostics["compute_cache_timeline"]
-                .to_string()
-                .contains("private")
-        );
+        assert!(!wrong_container_diagnostics["compute_cache_timeline"]
+            .to_string()
+            .contains("private"));
 
         let overflow_records = (0..=MAX_COMPUTE_CACHE_TIMELINE_RECORDS)
             .map(|sequence| {
@@ -1959,11 +1968,9 @@ mod tests {
         });
         let mut near_miss_diagnostics = json!({});
         propagate_extended_lookup_timeline(&mut near_miss_diagnostics, &near_miss_key);
-        assert!(
-            near_miss_diagnostics
-                .get("extended_lookup_timeline")
-                .is_none()
-        );
+        assert!(near_miss_diagnostics
+            .get("extended_lookup_timeline")
+            .is_none());
 
         let invalid_record = json!({
             "extended_lookup_timeline": {
@@ -1993,11 +2000,9 @@ mod tests {
             invalid_record_diagnostics["extended_lookup_timeline"]["truncated"],
             true
         );
-        assert!(
-            !invalid_record_diagnostics["extended_lookup_timeline"]
-                .to_string()
-                .contains("must-not-propagate")
-        );
+        assert!(!invalid_record_diagnostics["extended_lookup_timeline"]
+            .to_string()
+            .contains("must-not-propagate"));
 
         let malformed = json!({
             "extended_lookup_timeline": {
@@ -2017,11 +2022,9 @@ mod tests {
             malformed_diagnostics["extended_lookup_timeline"]["truncated"],
             true
         );
-        assert!(
-            !malformed_diagnostics["extended_lookup_timeline"]
-                .to_string()
-                .contains("private")
-        );
+        assert!(!malformed_diagnostics["extended_lookup_timeline"]
+            .to_string()
+            .contains("private"));
 
         let overflow_records = (0..=MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS)
             .map(|sequence| {
@@ -2142,11 +2145,9 @@ mod tests {
             diagnostics["extended_allocation_timeline"]["truncated"],
             true
         );
-        assert!(
-            !diagnostics["extended_allocation_timeline"]
-                .to_string()
-                .contains("size")
-        );
+        assert!(!diagnostics["extended_allocation_timeline"]
+            .to_string()
+            .contains("size"));
     }
 
     #[test]

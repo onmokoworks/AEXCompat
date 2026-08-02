@@ -274,6 +274,12 @@ def test_prohibited_path_recognizes_conventional_after_effects_sdk_directory():
     )
 
 
+def test_native_headers_are_scanned_for_private_host_identities():
+    assert public_export.scans_all_personal_paths(
+        "blob", frozenset({"include/probe.hpp"})
+    )
+
+
 def test_tree_name_scan_excludes_binary_object_ids():
     binary_oid = b"j1@k" + bytes(16)
     payload = b"100644 safe.txt\0" + binary_oid

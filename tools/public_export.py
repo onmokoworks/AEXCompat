@@ -325,7 +325,10 @@ PUBLIC_NOTE_SUFFIXES = {".md", ".rst"}
 PUBLICATION_TEXT_SUFFIXES = {".adoc", ".md", ".rst", ".txt"}
 CONFIG_SUFFIXES = {".cfg", ".conf", ".ini", ".toml", ".yaml", ".yml"}
 PATH_BEARING_METADATA = {".gitmodules", ".mailmap", ".gitconfig"}
-PATH_BEARING_SOURCE_SUFFIXES = {".cpp", ".csproj", ".jsx", ".rs"}
+PATH_BEARING_SOURCE_SUFFIXES = {
+    ".cpp", ".csproj", ".h", ".hh", ".hpp", ".hxx", ".jsx", ".rs",
+}
+NATIVE_HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx"}
 HIGH_CONFIDENCE_SOURCE_PATH_LABELS = {
     "Windows user path",
     "macOS user path",
@@ -383,6 +386,8 @@ def scans_all_personal_paths(kind: str, paths: frozenset[str]) -> bool:
         if candidate.name.lower() in PATH_BEARING_METADATA:
             return True
         if candidate.suffix.lower() in CONFIG_SUFFIXES:
+            return True
+        if candidate.suffix.lower() in NATIVE_HEADER_SUFFIXES:
             return True
         if candidate.suffix.lower() == ".csproj":
             return True

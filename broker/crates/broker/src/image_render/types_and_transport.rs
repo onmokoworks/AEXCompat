@@ -198,7 +198,7 @@ pub(crate) fn resolve_managed_dump_dir(
     let (resolved, target_root) = if requested.is_absolute() && requested.exists() {
         (
             strip_extended_prefix(&requested.canonicalize()?),
-            repository_root.join("target"),
+            strip_extended_prefix(&repository_root.join("target").canonicalize()?),
         )
     } else if requested.is_absolute() {
         (requested, lexical_repository_root.join("target"))
