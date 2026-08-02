@@ -115,6 +115,7 @@ INTENTIONAL_PRIVATE_EMAIL_DIGESTS = {
 }
 DIAGNOSTIC_SUFFIXES = {".json", ".jsonl", ".log"}
 DIAGNOSTIC_PARTS = {"analysis", "corpus", "diagnostics", "results"}
+PATH_BEARING_METADATA = {".gitmodules", ".mailmap", ".gitconfig"}
 
 
 def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
@@ -124,6 +125,8 @@ def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
         if path in INTENTIONAL_SCANNER_FIXTURES:
             return True
         candidate = PurePosixPath(path)
+        if candidate.name.lower() in PATH_BEARING_METADATA:
+            return True
         if candidate.suffix.lower() in DIAGNOSTIC_SUFFIXES:
             return True
         if {part.lower() for part in candidate.parts} & DIAGNOSTIC_PARTS:

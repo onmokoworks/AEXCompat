@@ -344,6 +344,24 @@ def test_newline_diagnostic_path_and_private_email_are_scanned(tmp_path):
     assert any("private email in reachable blob" in item for item in findings)
 
 
+@pytest.mark.parametrize("metadata_name", [".gitmodules", ".mailmap"])
+def test_repository_metadata_is_scanned_for_personal_paths(tmp_path, metadata_name):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    private_url = "/" + "home/alice/private/dep"
+    (repository / metadata_name).write_text(f"url = {private_url}\n", encoding="utf-8")
+    git(repository, "add", metadata_name)
+    git(repository, "commit", "-m", "add repository metadata")
+
+    assert any(
+        "Linux user path in reachable blob" in item
+        for item in public_export.scan_export(repository)
+    )
+
+
 def test_scan_discards_oversized_blob_in_bounded_chunks(tmp_path):
     repository = tmp_path / "repository"
     repository.mkdir()
