@@ -130,7 +130,12 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     old_contents = "token = 'ghp_" + "abcdefghijklmnopqrstuvwxyz123456'\n"
     fixture.write_text(old_contents, encoding="utf-8")
     diagnostic.write_text('{"path":"C:/' + 'Users/alice/private"}\n', encoding="utf-8")
-    diagnostic_toml.write_text("owner='alice!tag@workstation'\n", encoding="utf-8")
+    diagnostic_toml.write_text(
+        "owner='alice!tag@workstation'\n"
+        "equals='alice=tag@workstation'\n"
+        "query='alice?tag@workstation'\n",
+        encoding="utf-8",
+    )
     git(
         source,
         "add",
@@ -175,6 +180,8 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     )
     assert (output / "analysis" / "result.toml").read_text(encoding="utf-8") == (
         "owner='<redacted-private-email>'\n"
+        "equals='<redacted-private-email>'\n"
+        "query='<redacted-private-email>'\n"
     )
     assert old_oid not in git(output, "rev-list", "--objects", "--all")
     assert old_diagnostic_oid not in git(output, "rev-list", "--objects", "--all")
