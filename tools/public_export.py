@@ -180,11 +180,7 @@ def scan_export(repository: Path) -> list[str]:
             if batch.stdout.read(1) != b"\n":
                 raise RuntimeError("git cat-file batch framing error")
             for label, pattern in SECRET_PATTERNS.items():
-                if pattern.search(payload) and not (
-                    expected_kind == "blob"
-                    and object_paths
-                    and object_paths <= INTENTIONAL_SCANNER_FIXTURES
-                ):
+                if pattern.search(payload):
                     findings.append(
                         f"{label} candidate in reachable {expected_kind} {expected_oid}"
                     )

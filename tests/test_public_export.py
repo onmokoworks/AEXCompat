@@ -156,6 +156,27 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     assert any("GitHub token candidate in reachable tree" in item for item in findings)
 
 
+def test_scanner_fixture_path_does_not_exempt_real_secret(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    fixture = repository / "tests" / "test_public_export.py"
+    fixture.parent.mkdir()
+    fixture.write_text(
+        "credential = 'ghp_" + "abcdefghijklmnopqrstuvwxyz123456'\n",
+        encoding="utf-8",
+    )
+    git(repository, "add", "tests/test_public_export.py")
+    git(repository, "commit", "-m", "accidental credential")
+
+    assert any(
+        "GitHub token candidate in reachable blob" in item
+        for item in public_export.scan_export(repository)
+    )
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
