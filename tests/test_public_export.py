@@ -44,7 +44,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     git(source, "tag", "-d", "inner")
     git(source, "config", "user.email", "public-tagger@example.invalid")
     git(source, "tag", "-a", "v1", "-m", "public release", inner_oid)
-    git(source, "config", "user.email", "test@host.tailbe216f.ts.net")
+    git(source, "config", "user.email", "alice@workstation")
     git(source, "tag", "internal-wip")
     (source / "private.dll").unlink()
     git(source, "add", "-u")
@@ -104,6 +104,23 @@ def test_rejects_selected_tag_that_does_not_resolve_to_commit(tmp_path):
 
     with pytest.raises(ValueError, match="does not resolve to a commit"):
         public_export.validate_selected_tags(repository, ["blob-tag"])
+
+
+def test_single_label_host_email_is_private(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Alice")
+    git(repository, "config", "user.email", "alice@workstation")
+    (repository / "README.md").write_text("public\n", encoding="utf-8")
+    git(repository, "add", "README.md")
+    git(repository, "commit", "-m", "local identity")
+
+    assert public_export.PRIVATE_EMAIL.search("alice@workstation")
+    assert any(
+        "private email in reachable commit" in item
+        for item in public_export.scan_export(repository)
+    )
 
 
 def test_scan_finds_prohibited_path_created_by_merge_resolution(tmp_path):

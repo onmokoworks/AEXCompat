@@ -36,10 +36,13 @@ SECRET_PATTERNS = {
     "AWS access key": re.compile(rb"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
     "Slack token": re.compile(rb"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
 }
-PRIVATE_EMAIL = re.compile(r"(?i)(?:\.tail[0-9a-z]+\.ts\.net|\.local)$")
+PRIVATE_EMAIL = re.compile(
+    r"(?i)(?:\.tail[0-9a-z]+\.ts\.net|\.local|^[^@\s]+@[^.@\s]+$)"
+)
 PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
-    rb"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
-    rb"[A-Za-z0-9.-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)\b",
+    rb"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:"
+    rb"[A-Za-z0-9.-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)\b|"
+    rb"[A-Za-z0-9_-]+\b(?!\.))",
     re.I,
 )
 PERSONAL_PATH_PATTERNS = {
@@ -451,7 +454,9 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n"
             "regex:[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
             "[A-Za-z0-9.-]+(?:\\.tail[0-9a-z]+\\.ts\\.net|\\.local)"
-            "==><redacted-private-email>\n",
+            "==><redacted-private-email>\n"
+            "regex:[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+            "[A-Za-z0-9_-]+==><redacted-private-email>\n",
             encoding="utf-8",
         )
         source_replacements = temporary / "source-replacements.txt"
