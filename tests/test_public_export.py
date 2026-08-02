@@ -124,6 +124,7 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
         (b"-----BEGIN DSA PRIVATE KEY-----", "private key candidate"),
         (b"-----BEGIN ENCRYPTED PRIVATE KEY-----", "private key candidate"),
         (b"checkout /home/alice/private/AEXCompat", "Linux user path"),
+        (b"checkout /root/private/AEXCompat", "Linux root path"),
         (b"checkout D:/Projects/alice/private/AEXCompat", "Windows absolute path"),
     ],
 )
@@ -153,6 +154,24 @@ def test_scan_discards_oversized_blob_in_bounded_chunks(tmp_path):
     findings = public_export.scan_export(repository)
 
     assert any("oversized reachable blob" in item for item in findings)
+
+
+def test_scan_discards_oversized_tag_metadata_in_bounded_chunks(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    (repository / "README.md").write_text("public\n", encoding="utf-8")
+    git(repository, "add", "README.md")
+    git(repository, "commit", "-m", "fixture")
+    message = repository / "large-tag-message.txt"
+    message.write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+    git(repository, "tag", "-a", "large-tag", "-F", str(message))
+
+    findings = public_export.scan_export(repository)
+
+    assert any("oversized reachable tag" in item for item in findings)
 
 
 def test_script_has_no_push_implementation():

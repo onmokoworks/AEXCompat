@@ -48,6 +48,7 @@ PERSONAL_PATH_PATTERNS = {
     ),
     "macOS user path": re.compile(b"/" + rb"Users/[^/\r\n]+"),
     "Linux user path": re.compile(b"/" + rb"home/[^/\r\n]+"),
+    "Linux root path": re.compile(b"/" + rb"root(?:/[^\s`\"']*)?"),
     "Tailscale hostname": re.compile(rb"\b[A-Za-z0-9._-]+\.tail[0-9a-z]+\.ts\.net\b", re.I),
 }
 
@@ -159,11 +160,13 @@ def scan_export(repository: Path) -> list[str]:
             ):
                 raise RuntimeError(f"unexpected git cat-file header: {header}")
             size = int(header[2])
-            if expected_kind == "blob" and size > 8 * 1024 * 1024:
+            if size > 8 * 1024 * 1024:
                 discard_exact(batch.stdout, size)
                 if batch.stdout.read(1) != b"\n":
                     raise RuntimeError("git cat-file batch framing error")
-                findings.append(f"oversized reachable blob: {expected_oid} ({size} bytes)")
+                findings.append(
+                    f"oversized reachable {expected_kind}: {expected_oid} ({size} bytes)"
+                )
                 continue
             payload = read_exact(batch.stdout, size)
             if batch.stdout.read(1) != b"\n":
@@ -216,6 +219,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             "regex:(?i)\\\\{2,}[^\\\\/\\s`\"']+\\\\+[^\\s`\"']+==><redacted-unc-path>\n"
             "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
             "regex:/home/[^/\\r\\n]+==><redacted-home>\n"
+            "regex:/root(?:/[^\\s`\"']*)?==><redacted-home>\n"
             "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n",
             encoding="utf-8",
         )
