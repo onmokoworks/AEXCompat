@@ -10,7 +10,6 @@ history, and scans the resulting history before reporting success.
 from __future__ import annotations
 
 import argparse
-import io
 import os
 import re
 import shutil
@@ -28,7 +27,9 @@ PROHIBITED_PARTS = {"private", "proprietary", "adobe-sdk", "after-effects-sdk"}
 SECRET_PATTERNS = {
     # Split the marker so the scanner's own source is not a finding.
     "private key": re.compile(b"-----BEGIN " + rb"(?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-    "GitHub token": re.compile(rb"\b(?:ghp|github_pat)_[A-Za-z0-9_]{20,}\b"),
+    "GitHub token": re.compile(
+        rb"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+    ),
     "AWS access key": re.compile(rb"\bAKIA[0-9A-Z]{16}\b"),
     "Slack token": re.compile(rb"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
 }
@@ -36,6 +37,9 @@ PRIVATE_EMAIL = re.compile(r"(?i)(?:\.tail[0-9a-z]+\.ts\.net|\.local)$")
 PERSONAL_PATH_PATTERNS = {
     "Windows user path": re.compile(
         rb"\b[A-Za-z]:\\+Users\\+[^\\/\r\n]+", re.I
+    ),
+    "Windows absolute path": re.compile(
+        rb"\b[A-Za-z]:\\+[^\s`\"']+", re.I
     ),
     "macOS user path": re.compile(b"/" + rb"Users/[^/\r\n]+"),
     "Tailscale hostname": re.compile(rb"\b[A-Za-z0-9._-]+\.tail[0-9a-z]+\.ts\.net\b", re.I),
@@ -98,16 +102,18 @@ def scan_export(repository: Path) -> list[str]:
         # One batch process is material on Windows: a large history can contain
         # tens of thousands of blobs, and spawning twice per blob made the
         # post-export gate take longer than ten minutes.
-        batch = subprocess.run(
+        batch = subprocess.Popen(
             ["git", "cat-file", "--batch"],
             cwd=repository,
-            input="".join(f"{oid}\n" for oid, _ in scanned_objects).encode("ascii"),
-            check=True,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
-        stream = io.BytesIO(batch.stdout)
+        assert batch.stdin is not None and batch.stdout is not None
         for expected_oid, expected_kind in scanned_objects:
-            header = stream.readline().decode("ascii").strip().split()
+            batch.stdin.write(f"{expected_oid}\n".encode("ascii"))
+            batch.stdin.flush()
+            header = batch.stdout.readline().decode("ascii").strip().split()
             if (
                 len(header) != 3
                 or header[0] != expected_oid
@@ -115,8 +121,8 @@ def scan_export(repository: Path) -> list[str]:
             ):
                 raise RuntimeError(f"unexpected git cat-file header: {header}")
             size = int(header[2])
-            payload = stream.read(size)
-            if stream.read(1) != b"\n":
+            payload = batch.stdout.read(size)
+            if batch.stdout.read(1) != b"\n":
                 raise RuntimeError("git cat-file batch framing error")
             if expected_kind == "blob" and size > 8 * 1024 * 1024:
                 findings.append(f"oversized reachable blob: {expected_oid} ({size} bytes)")
@@ -131,6 +137,12 @@ def scan_export(repository: Path) -> list[str]:
                     findings.append(
                         f"{label} in reachable {expected_kind} {expected_oid}"
                     )
+        batch.stdin.close()
+        stderr = batch.stderr.read() if batch.stderr is not None else b""
+        if batch.wait() != 0:
+            raise RuntimeError(
+                "git cat-file failed: " + stderr.decode("utf-8", errors="replace")
+            )
     return findings
 
 
@@ -159,6 +171,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         replacements = temporary / "replacements.txt"
         replacements.write_text(
             "regex:(?i)[A-Za-z]:\\\\+Users\\\\+[^\\\\/\\r\\n]+==><redacted-home>\n"
+            "regex:(?i)\\b[A-Za-z]:\\\\+[^\\s`\"']+==><redacted-windows-path>\n"
             "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
             "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n",
             encoding="utf-8",

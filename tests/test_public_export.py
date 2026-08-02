@@ -28,7 +28,9 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     git(source, "config", "user.email", "test@host.tailbe216f.ts.net")
     (source / "README.md").write_text("public\n", encoding="utf-8")
     (source / "machine.txt").write_text(
-        "C:\\Users\\alice\\private and /Users/bob/private\n", encoding="utf-8"
+        "C:\\Users\\alice\\private and /Users/bob/private and "
+        "D:\\Projects\\private-checkout\n",
+        encoding="utf-8",
     )
     (source / "private.dll").write_bytes(b"not public")
     git(source, "add", ".")
@@ -57,6 +59,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     exported_text = (output / "machine.txt").read_text(encoding="utf-8")
     assert "alice" not in exported_text and "bob" not in exported_text
     assert exported_text.count("<redacted-home>") == 2
+    assert "<redacted-windows-path>" in exported_text
     assert public_export.scan_export(output) == []
     git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
 
@@ -79,9 +82,11 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     git(repository, "config", "user.email", "test@example.invalid")
     (repository / "README.md").write_text("public\n", encoding="utf-8")
     (repository / "diagnostic.json").write_text(
-        r'{"path":"C:\\users\\alice\\checkout"}', encoding="utf-8"
+        r'{"home":"C:\\users\\alice\\checkout",'
+        r'"workspace":"D:\\Projects\\private-checkout"}',
+        encoding="utf-8",
     )
-    secret_name = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    secret_name = "gho_abcdefghijklmnopqrstuvwxyz123456"
     (repository / secret_name).write_text("empty payload\n", encoding="utf-8")
     git(repository, "add", "README.md", "diagnostic.json", secret_name)
     git(repository, "commit", "-m", r"built under C:\Users\alice\checkout")
@@ -91,6 +96,7 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
 
     assert any("Windows user path in reachable commit" in item for item in findings)
     assert any("Windows user path in reachable blob" in item for item in findings)
+    assert any("Windows absolute path in reachable blob" in item for item in findings)
     assert any("GitHub token candidate in reachable tag" in item for item in findings)
     assert any("GitHub token candidate in reachable tree" in item for item in findings)
 
