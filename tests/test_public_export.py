@@ -31,6 +31,10 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     workflow = source / ".github" / "workflows" / "ci.yml"
     workflow.parent.mkdir(parents=True)
     workflow.write_text("- uses: actions/checkout@v4\n", encoding="utf-8")
+    schema = source / "schemas" / "probe.schema.json"
+    schema.parent.mkdir(parents=True)
+    schema_contents = '{"pattern":"^[^/\\\\:]+\\.inf$"}\n'
+    schema.write_text(schema_contents, encoding="utf-8")
     worker_source = source / "worker.cpp"
     pipe_literal = 'L"\\\\.\\pipe\\ae-timeline-sync"\n'
     worker_source.write_text(pipe_literal, encoding="utf-8")
@@ -79,6 +83,9 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         encoding="utf-8"
     ) == "- uses: actions/checkout@v4\n"
     assert (output / "worker.cpp").read_text(encoding="utf-8") == pipe_literal
+    assert (output / "schemas" / "probe.schema.json").read_text(
+        encoding="utf-8"
+    ) == schema_contents
     exported_messages = git(output, "log", "--all", "--format=%B")
     assert "tailbe216f.ts.net" not in exported_messages
     assert "workstation.local" not in exported_messages

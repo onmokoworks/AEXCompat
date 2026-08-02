@@ -289,6 +289,19 @@ def scans_all_personal_paths(kind: str, paths: frozenset[str]) -> bool:
     return False
 
 
+def is_schema_path(path: str) -> bool:
+    return PurePosixPath(path).name.lower().endswith((".schema.json", ".schema.jsonl"))
+
+
+def should_scan_personal_path(
+    label: str, kind: str, paths: frozenset[str]
+) -> bool:
+    if label in HIGH_CONFIDENCE_SOURCE_PATH_LABELS:
+        return scans_personal_paths(kind, paths)
+    non_schema_paths = frozenset(path for path in paths if not is_schema_path(path))
+    return bool(non_schema_paths) and scans_all_personal_paths(kind, non_schema_paths)
+
+
 PERSONAL_PATH_REDACTIONS = {
     "Windows user path": b"<redacted-home>",
     "Windows absolute path": b"<redacted-windows-path>",
@@ -310,15 +323,20 @@ def redact_personal_paths(payload: bytes) -> bytes:
 def historical_path_cleanup_paths(repository: Path) -> set[str]:
     cleanup: set[str] = set()
     for oid, kind, paths in reachable_objects(repository):
+        if kind != "blob" or not scans_all_personal_paths(kind, paths):
+            continue
+        payload = run(
+            ["git", "cat-file", "blob", oid], cwd=repository, text=False
+        ).stdout
         eligible = {
             path for path in paths
-            if scans_all_personal_paths(kind, frozenset({path}))
+            if not is_schema_path(path)
+            and scans_all_personal_paths(kind, frozenset({path}))
+            and any(pattern.search(payload) for pattern in PERSONAL_PATH_PATTERNS.values())
         }
         if not eligible:
             continue
-        payload = run(["git", "cat-file", "blob", oid], cwd=repository, text=False).stdout
-        if any(pattern.search(payload) for pattern in PERSONAL_PATH_PATTERNS.values()):
-            cleanup.update(eligible)
+        cleanup.update(eligible)
     return cleanup
 
 
@@ -620,10 +638,8 @@ def scan_export(repository: Path) -> list[str]:
             for label, pattern in PERSONAL_PATH_PATTERNS.items():
                 if not (
                     expected_oid in symlink_oids
-                    or scans_all_personal_paths(expected_kind, object_paths)
-                    or (
-                        label in HIGH_CONFIDENCE_SOURCE_PATH_LABELS
-                        and scans_personal_paths(expected_kind, object_paths)
+                    or should_scan_personal_path(
+                        label, expected_kind, object_paths
                     )
                 ):
                     continue
