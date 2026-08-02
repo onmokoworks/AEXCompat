@@ -55,6 +55,8 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "Public: Unicode Local <álîce@example.com>\n"
         "Private: Unicode Local <álîce@workstation>\n"
         "Private: Digit Host <alice@3dworkstation>\n"
+        "Private: Tagged Local <alice!tag@workstation>\n"
+        "Public: Tagged Local <alice!tag@example.com>\n"
         "Protocol: Suite@2",
     )
     git(source, "config", "user.email", "tagger@workstation.local")
@@ -106,6 +108,8 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert "álîce@example.com" in exported_messages
     assert "álîce@workstation" not in exported_messages
     assert "alice@3dworkstation" not in exported_messages
+    assert "alice!tag@workstation" not in exported_messages
+    assert "alice!tag@example.com" in exported_messages
     assert "Suite@2" in exported_messages
     assert public_export.scan_export(output) == []
     git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
@@ -134,7 +138,8 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     diagnostic.write_text(
         '{"path":"D:/'
         + 'Projects/current/result","owner":"alice@workstation",'
-        '"digit_owner":"alice@3dworkstation","suite":"Suite@2",'
+        '"digit_owner":"alice@3dworkstation",'
+        '"tagged_owner":"alice!tag@workstation","suite":"Suite@2",'
         '"protocol":"v2|brightness@1"}\n',
         encoding="utf-8",
     )
@@ -149,7 +154,8 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     assert (output / "tests" / "test_public_export.py").read_bytes() == tip_contents
     assert (output / "analysis" / "result.json").read_text(encoding="utf-8") == (
         '{"path":"<redacted-windows-path>","owner":"<redacted-private-email>",'
-        '"digit_owner":"<redacted-private-email>","suite":"Suite@2",'
+        '"digit_owner":"<redacted-private-email>",'
+        '"tagged_owner":"<redacted-private-email>","suite":"Suite@2",'
         '"protocol":"v2|brightness@1"}\n'
     )
     assert old_oid not in git(output, "rev-list", "--objects", "--all")
@@ -220,6 +226,7 @@ def test_single_label_host_email_is_private(tmp_path):
         "alice@build-host.example.com",
         "alice@bücher.example",
         "álîce@example.com",
+        "alice!tag@example.com",
     ]
 )
 def test_public_dotted_domain_email_is_not_private(email):
