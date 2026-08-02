@@ -6,7 +6,7 @@
 [日本語](#日本語) | [English](#english) | [AEX移植解析ガイド](docs/aex-porting-dossier.md) | [互換性ステータス](docs/COMPATIBILITY_STATUS_2026-07-16.md) | [プロジェクト方針](docs/PROJECT_DIRECTION.md)
 
 > [!WARNING]
-> 開発中の実験的ソフトウェアです。未知のAEXはネイティブコードとして実行されます。隔離機構はありますが、完全なsecurity sandboxではありません。
+> **Experimental / pre-alpha:** 未知のAEXはネイティブコードまたはguest codeとして実行されます。隔離機構はありますが、完全なsecurity sandboxではありません。Apple Siliconのx86_64 native carrierはtrusted plug-insにのみ使用してください。
 
 ## 日本語
 
@@ -54,14 +54,16 @@ AEXCompatは、Adobe After EffectsのEffect AEXをAfter Effects本体の外で�
 
 | 項目 | 現在の対象 |
 |---|---|
-| OS | Windows x64 |
+| Windows x64 | primary。Rust broker / harness + C++ / MSVC x64 worker |
+| macOS Apple Silicon | experimental。arm64 Unicorn backend、任意でRosetta x86_64 native carrier |
+| Windows ARM64 | 未対応 |
 | SDK | Adobe After Effects SDK 2025を基準に検証 |
 | UI / broker | Rust 2024 edition |
 | native worker | C++ / MSVC x64 |
 | 入力画像 | PNG、JPEG、BMP、TIFF、WebP |
 | 出力画像 | PNG |
 
-macOS、Apple Silicon、Windows ARM64は現時点で対象外です。After Effects本体は通常のharness実行には不要ですが、AE oracleの取得とpixel一致検証には必要です。
+Apple Siliconではarm64 Unicorn workerがWindows x64 AEXをguestとして実行します。`AEXCOMPAT_NATIVE_CARRIER=1`を設定すると、Rosettaが利用可能な環境ではx86_64 native carrierを試します。このcarrierは明示opt-inの高速経路であり、未信頼AEX向けsandboxではないためtrusted plug-insにのみ使用してください。After Effects本体は通常のharness実行には不要ですが、AE oracleの取得とpixel一致検証には必要です。
 
 ### クイックスタート
 
@@ -72,6 +74,8 @@ macOS、Apple Silicon、Windows ARM64は現時点で対象外です。After Effe
 - Visual Studio（MSVC C++ toolchain。必要なedition・toolsetはコンポーネントごとに異なる）
 - CMake
 - ローカルのAfter Effects SDK（probeやSDK fixtureをbuildする場合。minihost workerのbuildには不要）
+
+Apple SiliconではApple Silicon MacとRust/Cargoを用意し、`tools/build-macos-aex-carriers.sh`でcarrierをbuildします。任意のnative carrierにはRosettaとx86_64 worker buildも必要です。
 
 コンポーネント別の詳細な要件（SDKの世代、Visual Studioのバージョンとtoolset、CMakeの条件など）は[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
 
@@ -116,9 +120,7 @@ uv run python -m pytest -q
 
 ローカル成果物を要するテストは2つに分かれます。この checkout からビルドした worker / probe を自己計算の期待値で検証するテストは `--run-built-artifact-tests` (CIでも実行)、記録済み evidence をローカル現物と照合する machine-bound テストは `--run-local-artifact-tests` (ローカル専用) を付けて実行します。通常のclean cloneではどちらも理由付きでskipします。
 
-注意: SDKなしのclean cloneでは0 failにはなりません。SDKヘッダのABI検証テストはskipしますが、probe / fixtureを実際にビルドするテスト群はSDK不在でfailします (期待されるfail)。ソースのみ検証とSDK込み検証それぞれの期待結果は `docs/BUILD_REQUIREMENTS.md` を参照してください。
-
-CI (GitHub Actions) はwindows runner上で2本のworkflowを実行します。`windows-clean-clone.yml` がsource-only検証 (SDKなしのpytestと `cargo test`)、`ae-sdk-tests.yml` がAE SDKをprivate release assetから取得して `AFTER_EFFECTS_SDK_ROOT` を設定した `--run-sdk-tests` 付きpytestを担当します (`docs/BUILD_REQUIREMENTS.md` の「CI (GitHub Actions)」を参照)。
+SDKや実AEXのないclean cloneでも、標準の`pytest`は依存テストを理由付きでskipし、0 failで完了します。SDK、checkoutからbuildしたartifact、machine-bound evidenceを使う検証は、それぞれ`--run-sdk-tests`、`--run-built-artifact-tests`、`--run-local-artifact-tests`で明示的にopt-inします。必要条件とCI matrixは[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
 
 ### アーキテクチャ
 
@@ -172,6 +174,16 @@ Selected AEX -> image / audio / diagnostic report
 
 詳細な目標、達成事項、評価基準、roadmapは[プロジェクト方針と現在地](docs/PROJECT_DIRECTION.md)に記載しています。
 
+### Design Principles
+
+- 実測可能な互換性を、fixture固有分岐より優先する。
+- 入力、identity、resource use、出力をboundedかつ検証可能にする。
+- crash containmentとsecurity sandboxを混同しない。
+- SDK、oracle、private asset依存を通常のclean-clone検証から分離する。
+- 実装済み範囲と未検証範囲を同時に記録する。
+
+脆弱性の報告は[SECURITY.md](SECURITY.md)、開発・投稿ルールは[CONTRIBUTING.md](CONTRIBUTING.md)を参照してください。proprietary AEX、Adobe SDK、DLL、dump、private asset、秘密情報、個人パスをIssueやPRへ投稿しないでください。
+
 ### 参考プロジェクト
 
 READMEの構成とAE SDK上の用語は、次の公開プロジェクトを参考にしています。
@@ -183,7 +195,7 @@ READMEの構成とAE SDK上の用語は、次の公開プロジェクトを参�
 
 ### ライセンスと商標
 
-Rust workspaceはMIT Licenseとして設定されています。Adobe SDK由来ファイルはリポジトリへ複製せず、各自のローカルSDKを利用してください。
+`broker/`、`guest/`および一部Rust bridgeはCargo metadataでMITと宣言されています。一方、repository全体、`minihost/`、Python、文書、schema、instrumentには包括的なlicense grantがまだありません。第三者依存やAdobe SDK-backed componentを含む正確な公開条件は[Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md)を参照してください。Adobe SDKは再配布せず、各自の正規なローカルSDKを利用してください。
 
 Adobe、After Effects、および関連する製品名は各権利者の商標です。AEXCompatはAdobeによる公式プロジェクトではありません。
 
@@ -205,6 +217,8 @@ AEXCompat is a clean-room compatibility host for running Adobe After Effects Eff
 > boundary and unresolved licensing decisions.
 
 The goal is practical, faithful compatibility with general Effect AEX plug-ins, not an emulator for one fixture. Recreating the complete After Effects application, AEP editor, or full AEGP host is not the current focus.
+
+This project is experimental and pre-alpha. The optional Apple Silicon x86_64 native carrier is not a sandbox for untrusted code and must only be used with trusted plug-ins.
 
 ### Basic Workflow
 
@@ -234,14 +248,16 @@ The goal is practical, faithful compatibility with general Effect AEX plug-ins, 
 
 | Component | Current target |
 |---|---|
-| OS | Windows x64 |
+| Windows x64 | Primary: Rust broker / harness and C++ / MSVC x64 worker |
+| macOS Apple Silicon | Experimental: arm64 Unicorn backend, optionally Rosetta x86_64 native carrier |
+| Windows ARM64 | Unsupported |
 | SDK baseline | Adobe After Effects SDK 2025 |
 | UI / broker | Rust 2024 edition |
 | native worker | C++ / MSVC x64 |
 | image input | PNG, JPEG, BMP, TIFF, WebP |
 | image output | PNG |
 
-macOS, Apple Silicon, and Windows ARM64 are not currently supported. After Effects itself is not required for ordinary harness runs, but it is required to capture AE oracles and establish pixel equivalence.
+On Apple Silicon, the arm64 Unicorn worker executes Windows x64 AEX code as a guest. Setting `AEXCOMPAT_NATIVE_CARRIER=1` tries the Rosetta x86_64 native carrier where available. This is an explicit opt-in acceleration path, not a sandbox for untrusted AEX, and must only be used with trusted plug-ins. After Effects itself is not required for ordinary harness runs, but it is required to capture AE oracles and establish pixel equivalence.
 
 ### Quick Start
 
@@ -279,9 +295,7 @@ uv run python -m pytest -q
 
 Tests that need local artifacts are split in two: `--run-built-artifact-tests` runs tests that execute workers / probes built from this checkout against self-computed expectations (CI runs these too), while `--run-local-artifact-tests` runs machine-bound tests that authenticate recorded evidence against local files (local-only). A normal clean clone skips both with an explicit reason.
 
-Note that a clean clone without the SDK does not reach 0 failures: SDK-header ABI tests skip explicitly, but the tests that actually build probes / fixtures fail when the SDK is absent (this is the expected outcome). See `docs/BUILD_REQUIREMENTS.md` for the expected results of source-only versus SDK-backed verification.
-
-CI (GitHub Actions) runs two Windows workflows: `windows-clean-clone.yml` for source-only verification (pytest and `cargo test` without the SDK), and `ae-sdk-tests.yml`, which fetches the AE SDK from a private release asset, sets `AFTER_EFFECTS_SDK_ROOT`, and runs pytest with `--run-sdk-tests` (see "CI (GitHub Actions)" in `docs/BUILD_REQUIREMENTS.md`).
+A clean clone without an SDK or real AEX completes the standard `pytest` run with zero failures; dependency-backed tests skip with explicit reasons. Opt in to SDK, checkout-built artifact, or machine-bound evidence tests with `--run-sdk-tests`, `--run-built-artifact-tests`, or `--run-local-artifact-tests`, respectively. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for prerequisites and the CI matrix.
 
 ### DirectX SDK fixture
 
@@ -321,6 +335,8 @@ For reproducing After Effects-dependent oracle captures on another Windows machi
 
 Compatibility work follows a repeatable sequence: reproduce behavior with a real AEX, SDK sample, or self-authored probe; implement a minimal general host capability; add focused boundary tests; compare with an AE oracle where possible; and document both verified and unverified behavior in the same change.
 
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and [CONTRIBUTING.md](CONTRIBUTING.md) for development and submission rules. Do not post proprietary AEX plug-ins, Adobe SDK content, DLLs, dumps, private assets, secrets, or personal paths in issues or pull requests.
+
 ### References
 
 - [ISF4AE](https://github.com/baku89/ISF4AE)
@@ -330,6 +346,6 @@ Compatibility work follows a repeatable sequence: reproduce behavior with a real
 
 ### License and Trademarks
 
-The Rust workspace is configured under the MIT License. Adobe SDK files are not redistributed; contributors must use their own local SDK installation.
+`broker/`, `guest/`, and selected Rust bridges declare MIT in Cargo metadata. The repository as a whole, including `minihost/`, Python, documentation, schemas, and instruments, does not yet have a comprehensive license grant. See the [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md) for the unresolved component and third-party licensing boundary. Adobe SDK files are not redistributed; contributors must use their own legitimate local SDK installation.
 
 Adobe, After Effects, and related product names are trademarks of their respective owners. AEXCompat is not an official Adobe project.
