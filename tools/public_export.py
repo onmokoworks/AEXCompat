@@ -87,6 +87,28 @@ def symlink_oids_from_tree(payload: bytes, oid_size: int) -> set[str]:
     return symlinks
 
 
+def tag_identity(payload: bytes) -> tuple[str, str] | None:
+    match = re.search(rb"(?m)^tagger (.*?) <([^<>]+)> [0-9]+ [+-][0-9]{4}$", payload)
+    if not match:
+        return None
+    return (
+        match.group(1).decode("utf-8", errors="replace"),
+        match.group(2).decode("utf-8", errors="replace"),
+    )
+
+
+def reachable_tag_identities(repository: Path) -> list[tuple[str, str]]:
+    identities: list[tuple[str, str]] = []
+    for oid, kind, _paths in reachable_objects(repository):
+        if kind != "tag":
+            continue
+        payload = run(["git", "cat-file", "tag", oid], cwd=repository, text=False).stdout
+        identity = tag_identity(payload)
+        if identity is not None:
+            identities.append(identity)
+    return identities
+
+
 def run(argv: list[str], *, cwd: Path | None = None, text: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(argv, cwd=cwd, check=True, capture_output=True, text=text)
 
@@ -228,6 +250,12 @@ def scan_export(repository: Path) -> list[str]:
                 raise RuntimeError("git cat-file batch framing error")
             if expected_kind == "tree":
                 symlink_oids.update(symlink_oids_from_tree(payload, oid_size))
+            if expected_kind == "tag":
+                identity = tag_identity(payload)
+                if identity is not None and PRIVATE_EMAIL.search(identity[1]):
+                    findings.append(
+                        f"private tagger email in reachable tag {expected_oid}"
+                    )
             for label, pattern in SECRET_PATTERNS.items():
                 if pattern.search(payload):
                     findings.append(
@@ -259,10 +287,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
     identities = run(
         ["git", "log", "--all", "--format=%an%x00%ae%n%cn%x00%ce"], cwd=repository
     ).stdout.splitlines()
-    identities.extend(run(
-        ["git", "for-each-ref", "--format=%(taggername)%00%(taggeremail)", "refs/tags"],
-        cwd=repository,
-    ).stdout.splitlines())
+    identities.extend(f"{name}\0{email}" for name, email in reachable_tag_identities(repository))
     private_identities = sorted({
         (line.split("\0", 1)[0], line.split("\0", 1)[1].strip("<>"))
         for line in identities

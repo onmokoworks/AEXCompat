@@ -38,7 +38,11 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "Co-authored-by: Test <test@host.tailbe216f.ts.net>",
     )
     git(source, "config", "user.email", "tagger@workstation.local")
-    git(source, "tag", "-a", "v1", "-m", "public release")
+    git(source, "tag", "-a", "inner", "-m", "inner release")
+    inner_oid = git(source, "rev-parse", "refs/tags/inner")
+    git(source, "tag", "-d", "inner")
+    git(source, "config", "user.email", "public-tagger@example.invalid")
+    git(source, "tag", "-a", "v1", "-m", "public release", inner_oid)
     git(source, "config", "user.email", "test@host.tailbe216f.ts.net")
     git(source, "tag", "internal-wip")
     (source / "private.dll").unlink()
@@ -55,8 +59,11 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "public@users.noreply.github.com"
     }
     assert git(output, "for-each-ref", "--format=%(taggeremail)", "refs/tags/v1") == (
-        "<public@users.noreply.github.com>"
+        "<public-tagger@example.invalid>"
     )
+    exported_inner_oid = git(output, "rev-parse", "refs/tags/v1^{tag}")
+    exported_inner_oid = git(output, "cat-file", "-p", exported_inner_oid).splitlines()[0].split()[1]
+    assert "<public@users.noreply.github.com>" in git(output, "cat-file", "-p", exported_inner_oid)
     assert "private.dll" not in git(output, "log", "--all", "--name-only", "--format=")
     assert (output / "machine.txt").read_text(encoding="utf-8") == "public payload\n"
     exported_messages = git(output, "log", "--all", "--format=%B")
