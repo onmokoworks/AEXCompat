@@ -425,7 +425,9 @@ def test_repository_metadata_is_scanned_for_personal_paths(tmp_path, metadata_na
     )
 
 
-@pytest.mark.parametrize("source_name", ["probe.cpp", "runner.jsx"])
+@pytest.mark.parametrize(
+    "source_name", ["probe.cpp", "plugin.csproj", "probe.rs", "runner.jsx"]
+)
 def test_path_bearing_source_is_scanned_for_personal_paths(tmp_path, source_name):
     repository = tmp_path / "repository"
     repository.mkdir()

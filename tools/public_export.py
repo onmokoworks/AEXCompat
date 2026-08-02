@@ -69,6 +69,34 @@ INTENTIONAL_SCANNER_FIXTURES = {
     "tools/public_export.py",
 }
 INTENTIONAL_PERSONAL_PATH_DIGESTS = {
+    "broker/crates/broker/src/opencl_runtime_probe.rs": frozenset({
+        "05e24481d49af5ff4b88980216126fdaa1506fb0e7dcdbc60d64e5bcc5a61312",
+        "143b2a35c870c71948c9adb607c02dd5e1a5caba9c7a5f2a0ea3007b3c129856",
+        "24dce2d613d2d2e15e2c1f9a4d6a6fb9976deb8856b010785d07c0405df6b899",
+        "5f5c467ab82151c736e7d0d9df4d38cfc1f3ee6b29166953003cb187eae4ecd7",
+        "79ed539cf15cd04214a808b3af03ae5e3b0799d95f61c8aa5fa2b18cc712abed",
+        "b997a2dd8b1cf20e9e641dd92747b02e4823228326229dcb20446e8940b0a9a4",
+    }),
+    "imports/aviutlas-rust-contracts/aviutl-rs/examples/aex_image_probe.rs": frozenset({
+        "895be9833f4d131d0b1b3b817f8990b7c3f386cfe6f05790d5521b855b4d44e2",
+        "b89aceec2314b6ec967b354f7561e6a378dc5be81b98f0fa2465bf5e8e6fa5dd",
+        "bcf05e6abd327667a16ec643d61b74d68fe2b146b02692ebf774462a7c31c041",
+    }),
+    "imports/aviutlas-rust-contracts/aviutl-rs/tests/aex_fixture_gate_refresh_audit_contract.rs": frozenset({
+        "94f27c71474b819d2cbe28ffd78d6abd44e9b43fc1f0c0431e18d6ae7703b945",
+        "a99b652e18df81c2dec2461ad438afca96afbd8f3faec4b129e7f7a1455e4035",
+    }),
+    "imports/aviutlas-rust-contracts/aviutl-rs/tests/aex_image_probe_contract.rs": frozenset({
+        "0852eb49ff4033694fbbb9e0e37ab7ae72d5683bf012f7537d879544e7dc53a4",
+        "0b93ed2101f53d543f18ef805b42fac956f87f07e6d8f41b10a3f289e72a376e",
+        "119335d2096813a57e28c9996f2ece37350a53efbcddf1c49a4607f3af8d567d",
+        "3fe1f8c88bc840738504c51c56929877a9b523bdfe8bc75fbca45baef60b378e",
+        "41cc85d81cc165d2fafe4f4c9f9b70ee19a095f940cb59caeb86bb54147ea3de",
+        "483a2e30b315176993be09260e1458d0704c4f1cd0de3839ffe0cc65b68c69df",
+        "6eb8a75638edd992e3f77d5109d49e0dba54838e3b2b7a04c1659c7b1dadfc5f",
+        "8d24447d0091c27473ea8dfba0bb3235a18dacd0708169d744d4adfb3109d5f6",
+        "e90a9771e41d705f0f24e7571a5d9480ba99b27d9d5b7ea5dc57c94a814eaeb1",
+    }),
     "instruments/common/trace_writer_selftest/main.cpp": frozenset({
         "a4fc1f4893afb162e8829785530ef8dc92e418b047b01e5b67ab67c4a08ce17b",
     }),
@@ -83,6 +111,8 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
         "2307dfb012141522a63239579fb4648b52373d42ba7bcd66f9ccff99e59c11ad",
         "5ccd63c1e0fdf546596eb6d6783346d49e96122bf8bd50a7703904b1056e9a3a",
         "ee9b9d34eec0eda397f0c47d1ab42ab9637df3409e8e6a89ce9198c0f885d2b6",
+        "78d570b85717bcadb7dbb21a27c673100ab3445e4c1cae5daeb89e9598ba7415",
+        "f428e77a5477b1ed434a43767e9e03dad99e399124c20ad4fbbed5d2937804bb",
         "5cb8a96e2bfaae670922fc77d3fbd574176382b68e5ce07d694f776ef9f34586",
         "748067ba9c4bac007f896566966e8b7bfee338039fe93fcf9756f8dabb0dee2c",
         "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
@@ -148,7 +178,7 @@ DIAGNOSTIC_SUFFIXES = {".json", ".jsonl", ".log"}
 DIAGNOSTIC_PARTS = {"analysis", "corpus", "diagnostics", "results"}
 PUBLIC_NOTE_SUFFIXES = {".md", ".rst"}
 PATH_BEARING_METADATA = {".gitmodules", ".mailmap", ".gitconfig"}
-PATH_BEARING_SOURCE_SUFFIXES = {".cpp", ".jsx"}
+PATH_BEARING_SOURCE_SUFFIXES = {".cpp", ".csproj", ".jsx", ".rs"}
 
 
 def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
@@ -523,7 +553,9 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins==>target/local-aex\n"
             "D:/Projects/01_Project/04_Tools/WizTree MCP/exports"
             "==>external WizTree export directory\n"
-            "D:\\Projects\\01_Project\\04_Tools==>external project directory\n",
+            "D:\\Projects\\01_Project\\04_Tools==>external project directory\n"
+            "H:\\04_software\\YukkuriMovieMaker_v4_Lite\\"
+            "==>$(AEXCOMPAT_YMM4_DIR)\n",
             encoding="utf-8",
         )
         command = [

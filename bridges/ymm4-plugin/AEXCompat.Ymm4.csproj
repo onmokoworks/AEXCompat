@@ -13,7 +13,7 @@
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
     <EnableDefaultItems>true</EnableDefaultItems>
-    <YMM4DirPath Condition="'$(YMM4DirPath)' == ''">H:\04_software\YukkuriMovieMaker_v4_Lite\</YMM4DirPath>
+    <YMM4DirPath Condition="'$(YMM4DirPath)' == ''">$(AEXCOMPAT_YMM4_DIR)</YMM4DirPath>
     <OutputPath Condition="'$(OutputPath)' == ''">bin\$(Configuration)\</OutputPath>
   </PropertyGroup>
 
