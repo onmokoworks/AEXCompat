@@ -52,6 +52,16 @@ SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
     rb"[A-Za-z0-9_\x80-\xff-]+"
     rb"(?=$|[\x00-\x20<>,;:'\"!?\)\]\}]|\.(?=$|[\x00-\x20]))"
 )
+BACKTICK_PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
+    rb"(?<=`)[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
+    rb"[A-Za-z0-9.\x80-\xff-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)(?=`)",
+    re.I,
+)
+BACKTICK_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
+    rb"(?<=`)[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
+    rb"(?=[A-Za-z0-9_\x80-\xff-]*[A-Za-z_\x80-\xff-])"
+    rb"[A-Za-z0-9_\x80-\xff-]+(?=`)"
+)
 DOTENV_ASSIGNMENT = re.compile(
     rb"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=)(.*)$", re.S
 )
@@ -70,6 +80,14 @@ PATH_REPLACEMENTS_TEXT = (
     "regex:(?i)\\\\{2,}[^\\\\/\\s`\"']+\\\\+[^\\s`\"']+==><redacted-unc-path>\n"
 )
 PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
+    "regex:(?<=`)[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
+    "[A-Za-z0-9.\\x80-\\xff-]+"
+    "(?:\\.tail[0-9a-z]+\\.ts\\.net|\\.local)(?=`)"
+    "==><redacted-private-email>\n"
+    "regex:(?<=`)[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
+    "(?=[A-Za-z0-9_\\x80-\\xff-]*[A-Za-z_\\x80-\\xff-])"
+    "[A-Za-z0-9_\\x80-\\xff-]+(?=`)"
+    "==><redacted-private-email>\n"
     "regex:(?<![A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-])"
     "[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
     "[A-Za-z0-9.\\x80-\\xff-]+"
@@ -355,6 +373,12 @@ def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
         return b"".join(redacted_lines)
     for label, pattern in PERSONAL_PATH_PATTERNS.items():
         payload = pattern.sub(PERSONAL_PATH_REDACTIONS[label], payload)
+    payload = BACKTICK_PRIVATE_EMAIL_IN_PAYLOAD.sub(
+        b"<redacted-private-email>", payload
+    )
+    payload = BACKTICK_SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
+        b"<redacted-private-email>", payload
+    )
     payload = PRIVATE_EMAIL_IN_PAYLOAD.sub(b"<redacted-private-email>", payload)
     payload = SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
         b"<redacted-private-email>", payload
@@ -378,6 +402,8 @@ def historical_path_cleanup_paths(repository: Path) -> set[str]:
                 any(pattern.search(payload) for pattern in PERSONAL_PATH_PATTERNS.values())
                 or PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
                 or SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
+                or BACKTICK_PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
+                or BACKTICK_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
             )
         }
         if not eligible:
@@ -651,29 +677,37 @@ def scan_export(repository: Path) -> list[str]:
                 expected_oid in symlink_oids
                 or scans_personal_paths(expected_kind, object_paths)
             )
-            for match in PRIVATE_EMAIL_IN_PAYLOAD.finditer(scan_payload):
-                if not scans_private_emails:
-                    break
-                if (
-                    expected_kind == "blob"
-                    and object_paths
-                    and all(
-                        hashlib.sha256(match.group(0)).hexdigest()
-                        in INTENTIONAL_PRIVATE_EMAIL_DIGESTS.get(path, ())
-                        for path in object_paths
-                    )
-                ):
-                    continue
-                findings.append(
-                    f"private email in reachable {expected_kind} {expected_oid}"
-                )
-            if scans_all_personal_paths(expected_kind, object_paths):
-                for match in SINGLE_LABEL_EMAIL_IN_PAYLOAD.finditer(scan_payload):
-                    if object_paths and all(is_schema_path(path) for path in object_paths):
+            for pattern in (
+                BACKTICK_PRIVATE_EMAIL_IN_PAYLOAD,
+                PRIVATE_EMAIL_IN_PAYLOAD,
+            ):
+                for match in pattern.finditer(scan_payload):
+                    if not scans_private_emails:
+                        break
+                    if (
+                        expected_kind == "blob"
+                        and object_paths
+                        and all(
+                            hashlib.sha256(match.group(0)).hexdigest()
+                            in INTENTIONAL_PRIVATE_EMAIL_DIGESTS.get(path, ())
+                            for path in object_paths
+                        )
+                    ):
                         continue
                     findings.append(
                         f"private email in reachable {expected_kind} {expected_oid}"
                     )
+            if scans_all_personal_paths(expected_kind, object_paths):
+                for pattern in (
+                    BACKTICK_SINGLE_LABEL_EMAIL_IN_PAYLOAD,
+                    SINGLE_LABEL_EMAIL_IN_PAYLOAD,
+                ):
+                    for match in pattern.finditer(scan_payload):
+                        if object_paths and all(is_schema_path(path) for path in object_paths):
+                            continue
+                        findings.append(
+                            f"private email in reachable {expected_kind} {expected_oid}"
+                        )
             for label, pattern in SECRET_PATTERNS.items():
                 for _match in pattern.finditer(scan_payload):
                     if (
