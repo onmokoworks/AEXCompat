@@ -45,7 +45,7 @@ PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
     re.I,
 )
 SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
-    rb"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9_-]+\b(?!\.)"
+    rb"\b[A-Za-z0-9._%+-]+@[A-Za-z][A-Za-z0-9_-]*\b(?!\.)"
 )
 HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT = (
     "regex:(?i)[A-Za-z]:[\\\\/]+Users[\\\\/]+[^\\\\/\\r\\n]+==><redacted-home>\n"
