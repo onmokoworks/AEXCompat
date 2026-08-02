@@ -28,6 +28,9 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     git(source, "config", "user.email", "test@host.tailbe216f.ts.net")
     (source / "README.md").write_text("public\n", encoding="utf-8")
     (source / "machine.txt").write_text("public payload\n", encoding="utf-8")
+    workflow = source / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("- uses: actions/checkout@v4\n", encoding="utf-8")
     (source / "private.dll").write_bytes(b"not public")
     git(source, "add", ".")
     git(
@@ -69,6 +72,9 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert "<public@users.noreply.github.com>" in git(output, "cat-file", "-p", exported_inner_oid)
     assert "private.dll" not in git(output, "log", "--all", "--name-only", "--format=")
     assert (output / "machine.txt").read_text(encoding="utf-8") == "public payload\n"
+    assert (output / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    ) == "- uses: actions/checkout@v4\n"
     exported_messages = git(output, "log", "--all", "--format=%B")
     assert "tailbe216f.ts.net" not in exported_messages
     assert "workstation.local" not in exported_messages
