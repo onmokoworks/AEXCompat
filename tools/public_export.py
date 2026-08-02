@@ -44,6 +44,9 @@ PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
     rb"[A-Za-z0-9.-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)\b",
     re.I,
 )
+SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
+    rb"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9_-]+\b(?!\.)"
+)
 HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT = (
     "regex:(?i)[A-Za-z]:[\\\\/]+Users[\\\\/]+[^\\\\/\\r\\n]+==><redacted-home>\n"
     "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
@@ -317,6 +320,10 @@ PERSONAL_PATH_REDACTIONS = {
 def redact_personal_paths(payload: bytes) -> bytes:
     for label, pattern in PERSONAL_PATH_PATTERNS.items():
         payload = pattern.sub(PERSONAL_PATH_REDACTIONS[label], payload)
+    payload = PRIVATE_EMAIL_IN_PAYLOAD.sub(b"<redacted-private-email>", payload)
+    payload = SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
+        b"<redacted-private-email>", payload
+    )
     return payload
 
 
@@ -332,7 +339,11 @@ def historical_path_cleanup_paths(repository: Path) -> set[str]:
             path for path in paths
             if not is_schema_path(path)
             and scans_all_personal_paths(kind, frozenset({path}))
-            and any(pattern.search(payload) for pattern in PERSONAL_PATH_PATTERNS.values())
+            and (
+                any(pattern.search(payload) for pattern in PERSONAL_PATH_PATTERNS.values())
+                or PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
+                or SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
+            )
         }
         if not eligible:
             continue
@@ -621,6 +632,13 @@ def scan_export(repository: Path) -> list[str]:
                 findings.append(
                     f"private email in reachable {expected_kind} {expected_oid}"
                 )
+            if scans_all_personal_paths(expected_kind, object_paths):
+                for match in SINGLE_LABEL_EMAIL_IN_PAYLOAD.finditer(scan_payload):
+                    if object_paths and all(is_schema_path(path) for path in object_paths):
+                        continue
+                    findings.append(
+                        f"private email in reachable {expected_kind} {expected_oid}"
+                    )
             for label, pattern in SECRET_PATTERNS.items():
                 for _match in pattern.finditer(scan_payload):
                     if (

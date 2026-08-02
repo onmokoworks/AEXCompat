@@ -117,7 +117,10 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     old_diagnostic_oid = git(source, "hash-object", "analysis/result.json")
     tip_contents = b"safe current scanner fixture\n"
     fixture.write_bytes(tip_contents)
-    diagnostic.write_text('{"path":"D:/' + 'Projects/current/result"}\n', encoding="utf-8")
+    diagnostic.write_text(
+        '{"path":"D:/' + 'Projects/current/result","owner":"alice@workstation"}\n',
+        encoding="utf-8",
+    )
     git(source, "add", "tests/test_public_export.py", "analysis/result.json")
     git(source, "commit", "-m", "split synthetic scanner fixture")
 
@@ -128,7 +131,7 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
 
     assert (output / "tests" / "test_public_export.py").read_bytes() == tip_contents
     assert (output / "analysis" / "result.json").read_text(encoding="utf-8") == (
-        '{"path":"<redacted-windows-path>"}\n'
+        '{"path":"<redacted-windows-path>","owner":"<redacted-private-email>"}\n'
     )
     assert old_oid not in git(output, "rev-list", "--objects", "--all")
     assert old_diagnostic_oid not in git(output, "rev-list", "--objects", "--all")
