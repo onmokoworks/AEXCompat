@@ -850,6 +850,111 @@ def scan_export(repository: Path) -> list[str]:
     return findings
 
 
+def snapshot_ref_files(
+    repository: Path, ref: str, paths: set[str], cleanup_paths: set[str]
+) -> dict[str, tuple[str, bytes]]:
+    if not paths:
+        return {}
+    payload = run(
+        ["git", "ls-tree", "-z", ref, "--", *sorted(paths)],
+        cwd=repository,
+        text=False,
+    ).stdout
+    snapshots: dict[str, tuple[str, bytes]] = {}
+    for entry in payload.split(b"\0"):
+        if not entry:
+            continue
+        metadata, raw_path = entry.split(b"\t", 1)
+        mode, kind, oid = metadata.decode("ascii").split()
+        if kind != "blob":
+            continue
+        path = raw_path.decode("utf-8", errors="surrogateescape")
+        contents = run(
+            ["git", "cat-file", "blob", oid], cwd=repository, text=False
+        ).stdout
+        if path in cleanup_paths:
+            contents = redact_personal_paths(contents, path)
+        snapshots[path] = (mode, contents)
+    return snapshots
+
+
+def hash_object(repository: Path, kind: str, payload: bytes) -> str:
+    return subprocess.run(
+        ["git", "hash-object", "-w", "-t", kind, "--stdin"],
+        cwd=repository,
+        input=payload,
+        check=True,
+        capture_output=True,
+    ).stdout.decode("ascii").strip()
+
+
+def restore_ref_tip_files(
+    repository: Path,
+    ref: str,
+    snapshots: dict[str, tuple[str, bytes]],
+    temporary: Path,
+) -> None:
+    if not snapshots:
+        return
+    commit_oid = run(["git", "rev-parse", f"{ref}^{{commit}}"], cwd=repository).stdout.strip()
+    index_path = temporary / (hashlib.sha256(ref.encode()).hexdigest() + ".index")
+    environment = {**os.environ, "GIT_INDEX_FILE": str(index_path)}
+    subprocess.run(
+        ["git", "read-tree", commit_oid], cwd=repository, env=environment, check=True
+    )
+    for path, (mode, contents) in snapshots.items():
+        blob_oid = hash_object(repository, "blob", contents)
+        subprocess.run(
+            ["git", "update-index", "--add", "--cacheinfo", mode, blob_oid, path],
+            cwd=repository,
+            env=environment,
+            check=True,
+        )
+    tree_oid = subprocess.run(
+        ["git", "write-tree"],
+        cwd=repository,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    commit_payload = run(
+        ["git", "cat-file", "commit", commit_oid], cwd=repository, text=False
+    ).stdout
+    commit_payload = re.sub(
+        rb"\Atree [0-9a-f]+", f"tree {tree_oid}".encode("ascii"), commit_payload, count=1
+    )
+    replacement_oid = hash_object(repository, "commit", commit_payload)
+
+    tag_payloads: list[bytes] = []
+    object_oid = run(["git", "rev-parse", ref], cwd=repository).stdout.strip()
+    original_ref_oid = object_oid
+    while run(["git", "cat-file", "-t", object_oid], cwd=repository).stdout.strip() == "tag":
+        payload = run(
+            ["git", "cat-file", "tag", object_oid], cwd=repository, text=False
+        ).stdout
+        tag_payloads.append(payload)
+        object_oid = re.match(rb"object ([0-9a-f]+)\n", payload).group(1).decode("ascii")
+    for payload in reversed(tag_payloads):
+        payload = re.sub(
+            rb"\Aobject [0-9a-f]+",
+            f"object {replacement_oid}".encode("ascii"),
+            payload,
+            count=1,
+        )
+        replacement_oid = subprocess.run(
+            ["git", "mktag"],
+            cwd=repository,
+            input=payload,
+            check=True,
+            capture_output=True,
+        ).stdout.decode("ascii").strip()
+    run(
+        ["git", "update-ref", ref, replacement_oid, original_ref_oid],
+        cwd=repository,
+    )
+
+
 def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None:
     refs = ["main", *(f"refs/tags/{tag}" for tag in tags)]
     identities = run(
@@ -863,6 +968,13 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         and PRIVATE_EMAIL.search(line.split("\0", 1)[1].strip("<>"))
     })
     cleanup_paths = historical_path_cleanup_paths(repository)
+    restore_paths = INTENTIONAL_SCANNER_FIXTURES | cleanup_paths
+    tag_tip_files = {
+        tag: snapshot_ref_files(
+            repository, f"refs/tags/{tag}^{{commit}}", restore_paths, cleanup_paths
+        )
+        for tag in tags
+    }
     audited_tip_files: dict[str, bytes] = {}
     for path in audited_tip_restore_paths():
         result = subprocess.run(
@@ -925,6 +1037,10 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             command.extend(["--path", path])
         command.extend(["--invert-paths", "--refs", *refs])
         subprocess.run(command, cwd=repository, check=True)
+        for tag, snapshots in tag_tip_files.items():
+            restore_ref_tip_files(
+                repository, f"refs/tags/{tag}", snapshots, temporary
+            )
     for path, contents in audited_tip_files.items():
         destination = repository / path
         destination.parent.mkdir(parents=True, exist_ok=True)

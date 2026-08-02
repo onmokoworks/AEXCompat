@@ -38,6 +38,9 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     worker_source = source / "worker.cpp"
     pipe_literal = 'L"\\\\.\\pipe\\ae-timeline-sync"\n'
     worker_source.write_text(pipe_literal, encoding="utf-8")
+    scanner_fixture = source / "tests" / "test_public_export.py"
+    scanner_fixture.parent.mkdir()
+    scanner_fixture.write_text("tagged fixture\n", encoding="utf-8")
     (source / "private.dll").write_bytes(b"not public")
     git(source, "add", ".")
     git(
@@ -70,6 +73,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     git(source, "tag", "-a", "v1", "-m", "public release", inner_oid)
     git(source, "config", "user.email", "alice@workstation")
     git(source, "tag", "internal-wip")
+    scanner_fixture.write_text("main fixture\n", encoding="utf-8")
     (source / "private.dll").unlink()
     git(source, "add", "-u")
     git(source, "commit", "-m", "remove private payload")
@@ -95,6 +99,15 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         encoding="utf-8"
     ) == "- uses: actions/checkout@v4\n"
     assert (output / "worker.cpp").read_text(encoding="utf-8") == pipe_literal
+    assert scanner_fixture.relative_to(source).as_posix() in git(
+        output, "ls-tree", "-r", "--name-only", "refs/tags/v1^{commit}"
+    )
+    assert git(output, "show", "refs/tags/v1^{commit}:tests/test_public_export.py") == (
+        "tagged fixture"
+    )
+    assert (output / "tests" / "test_public_export.py").read_text(encoding="utf-8") == (
+        "main fixture\n"
+    )
     assert (output / "schemas" / "probe.schema.json").read_text(
         encoding="utf-8"
     ) == schema_contents
