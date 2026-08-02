@@ -265,6 +265,45 @@ def test_symlink_target_is_always_scanned_for_personal_paths(tmp_path):
     )
 
 
+def test_newline_diagnostic_path_and_private_email_are_scanned(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    payload = (
+        b'{"path":"/home/alice/private/AEXCompat",'
+        b'"email":"alice@workstation.local"}'
+    )
+    oid = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=repository,
+        input=payload,
+        capture_output=True,
+        check=True,
+    ).stdout.strip().decode("ascii")
+    tree_oid = subprocess.run(
+        ["git", "mktree", "-z"],
+        cwd=repository,
+        input=f"100644 blob {oid}\tdiagnostic\n.json\0".encode(),
+        capture_output=True,
+        check=True,
+    ).stdout.strip().decode("ascii")
+    commit_oid = subprocess.run(
+        ["git", "commit-tree", tree_oid],
+        cwd=repository,
+        input=b"add unusual diagnostic\n",
+        capture_output=True,
+        check=True,
+    ).stdout.strip().decode("ascii")
+    git(repository, "update-ref", "refs/heads/main", commit_oid)
+
+    findings = public_export.scan_export(repository)
+
+    assert any("Linux user path in reachable blob" in item for item in findings)
+    assert any("private email in reachable blob" in item for item in findings)
+
+
 def test_scan_discards_oversized_blob_in_bounded_chunks(tmp_path):
     repository = tmp_path / "repository"
     repository.mkdir()

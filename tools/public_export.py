@@ -140,10 +140,10 @@ def prohibited_path(path: str) -> bool:
 
 def reachable_objects(repository: Path) -> list[tuple[str, str, frozenset[str]]]:
     paths_by_oid: dict[str, set[str]] = {}
-    for line in run(["git", "rev-list", "--objects", "--all"], cwd=repository).stdout.splitlines():
-        oid, *path = line.split(" ", 1)
-        paths_by_oid.setdefault(oid, set()).update(path)
-    object_ids = sorted(paths_by_oid)
+    object_ids = sorted(set(run(
+        ["git", "rev-list", "--objects", "--all", "--no-object-names"],
+        cwd=repository,
+    ).stdout.splitlines()))
     if not object_ids:
         return []
     request = "".join(f"{oid}\n" for oid in object_ids)
@@ -155,10 +155,25 @@ def reachable_objects(repository: Path) -> list[tuple[str, str, frozenset[str]]]
         capture_output=True,
         text=True,
     )
-    return [
-        (oid, kind, frozenset(paths_by_oid[oid]))
-        for oid, kind in (line.split(" ", 1) for line in proc.stdout.splitlines())
-    ]
+    kinds = dict(line.split(" ", 1) for line in proc.stdout.splitlines())
+    root_trees = set(run(
+        ["git", "log", "--all", "--format=%T"], cwd=repository
+    ).stdout.splitlines())
+    for tree in root_trees:
+        entries = run(
+            ["git", "ls-tree", "-r", "-z", "--full-tree", tree],
+            cwd=repository,
+            text=False,
+        ).stdout
+        for entry in entries.split(b"\0"):
+            if not entry:
+                continue
+            metadata, path = entry.split(b"\t", 1)
+            _mode, _kind, oid = metadata.decode("ascii").split(" ")
+            paths_by_oid.setdefault(oid, set()).add(
+                path.decode("utf-8", errors="surrogateescape")
+            )
+    return [(oid, kinds[oid], frozenset(paths_by_oid.get(oid, set()))) for oid in object_ids]
 
 
 def validate_selected_tags(repository: Path, tags: list[str]) -> None:
@@ -261,7 +276,10 @@ def scan_export(repository: Path) -> list[str]:
                     findings.append(
                         f"private tagger email in reachable tag {expected_oid}"
                     )
-            if expected_kind in {"commit", "tag"} and PRIVATE_EMAIL_IN_PAYLOAD.search(payload):
+            if (
+                expected_oid in symlink_oids
+                or scans_personal_paths(expected_kind, object_paths)
+            ) and PRIVATE_EMAIL_IN_PAYLOAD.search(payload):
                 findings.append(
                     f"private email in reachable {expected_kind} {expected_oid}"
                 )
