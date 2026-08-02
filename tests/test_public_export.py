@@ -93,6 +93,16 @@ def test_rejects_implicit_or_unsafe_tag_names():
             raise AssertionError(f"unsafe tag accepted: {tag!r}")
 
 
+def test_tree_name_scan_excludes_binary_object_ids():
+    binary_oid = b"j1@k" + bytes(16)
+    payload = b"100644 safe.txt\0" + binary_oid
+
+    names = public_export.names_from_tree(payload, 20)
+
+    assert names == b"safe.txt"
+    assert public_export.PRIVATE_EMAIL_IN_PAYLOAD.search(names) is None
+
+
 def test_rejects_selected_tag_that_does_not_resolve_to_commit(tmp_path):
     repository = tmp_path / "repository"
     repository.mkdir()

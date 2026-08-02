@@ -192,6 +192,19 @@ def symlink_oids_from_tree(payload: bytes, oid_size: int) -> set[str]:
     return symlinks
 
 
+def names_from_tree(payload: bytes, oid_size: int) -> bytes:
+    names: list[bytes] = []
+    cursor = 0
+    while cursor < len(payload):
+        mode_end = payload.find(b" ", cursor)
+        name_end = payload.find(b"\0", mode_end + 1)
+        if mode_end < 0 or name_end < 0 or name_end + 1 + oid_size > len(payload):
+            raise RuntimeError("malformed reachable tree payload")
+        names.append(payload[mode_end + 1 : name_end])
+        cursor = name_end + 1 + oid_size
+    return b"\n".join(names)
+
+
 def tag_identity(payload: bytes) -> tuple[str, str] | None:
     match = re.search(rb"(?m)^tagger (.*?) <([^<>]+)> [0-9]+ [+-][0-9]{4}$", payload)
     if not match:
@@ -395,6 +408,11 @@ def scan_export(repository: Path) -> list[str]:
                 raise RuntimeError("git cat-file batch framing error")
             if expected_kind == "tree":
                 symlink_oids.update(symlink_oids_from_tree(payload, oid_size))
+            scan_payload = (
+                names_from_tree(payload, oid_size)
+                if expected_kind == "tree"
+                else payload
+            )
             if expected_kind == "tag":
                 identity = tag_identity(payload)
                 if identity is not None and PRIVATE_EMAIL.search(identity[1]):
@@ -405,7 +423,7 @@ def scan_export(repository: Path) -> list[str]:
                 expected_oid in symlink_oids
                 or scans_personal_paths(expected_kind, object_paths)
             )
-            for match in PRIVATE_EMAIL_IN_PAYLOAD.finditer(payload):
+            for match in PRIVATE_EMAIL_IN_PAYLOAD.finditer(scan_payload):
                 if not scans_private_emails:
                     break
                 if (
@@ -422,7 +440,7 @@ def scan_export(repository: Path) -> list[str]:
                     f"private email in reachable {expected_kind} {expected_oid}"
                 )
             for label, pattern in SECRET_PATTERNS.items():
-                if pattern.search(payload):
+                if pattern.search(scan_payload):
                     findings.append(
                         f"{label} candidate in reachable {expected_kind} {expected_oid}"
                     )
@@ -432,7 +450,7 @@ def scan_export(repository: Path) -> list[str]:
                     or scans_personal_paths(expected_kind, object_paths)
                 ):
                     continue
-                for match in pattern.finditer(payload):
+                for match in pattern.finditer(scan_payload):
                     if (
                         expected_kind == "blob"
                         and object_paths
