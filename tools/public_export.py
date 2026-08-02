@@ -328,7 +328,16 @@ PERSONAL_PATH_REDACTIONS = {
 }
 
 
-def redact_personal_paths(payload: bytes) -> bytes:
+def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
+    if path is not None and Path(path).suffix.lower() == ".env":
+        redacted_lines = []
+        for line in payload.splitlines(keepends=True):
+            if b"=" not in line:
+                redacted_lines.append(line)
+                continue
+            key, value = line.split(b"=", 1)
+            redacted_lines.append(key + b"=" + redact_personal_paths(value))
+        return b"".join(redacted_lines)
     for label, pattern in PERSONAL_PATH_PATTERNS.items():
         payload = pattern.sub(PERSONAL_PATH_REDACTIONS[label], payload)
     payload = PRIVATE_EMAIL_IN_PAYLOAD.sub(b"<redacted-private-email>", payload)
@@ -721,7 +730,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             ["git", "show", f"main:{path}"], cwd=repository, capture_output=True
         )
         if result.returncode == 0:
-            sanitized_tip_files[path] = redact_personal_paths(result.stdout)
+            sanitized_tip_files[path] = redact_personal_paths(result.stdout, path)
     with tempfile.TemporaryDirectory(prefix="aexcompat-public-export-") as temporary:
         temporary = Path(temporary)
         mailmap = temporary / "mailmap"
