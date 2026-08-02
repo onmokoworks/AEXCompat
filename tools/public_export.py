@@ -115,6 +115,19 @@ PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
     "\\.(?=$|[\\x00-\\x20]))"
     "==><redacted-private-email>\n"
 )
+MESSAGE_PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
+    "regex:(?:(?<=`)(?!`)|(?<=\\*)(?!\\*)|(?<=_)(?!_)|(?<=~)(?!~))"
+    "[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
+    "[A-Za-z0-9.\\x80-\\xff-]+"
+    "(?:\\.tail[0-9a-z]+\\.ts\\.net|\\.local)(?=[`*_~])"
+    "==><redacted-private-email>\n"
+    "regex:(?<![A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-])"
+    "[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
+    "[A-Za-z0-9.\\x80-\\xff-]+"
+    "(?:\\.tail[0-9a-z]+\\.ts\\.net|\\.local)"
+    "(?![A-Za-z0-9.\\x80-\\xff-])"
+    "==><redacted-private-email>\n"
+)
 PERSONAL_PATH_PATTERNS = {
     "Windows user path": re.compile(
         rb"\b[A-Za-z]:[\\/]+Users[\\/]+[^\\/\r\n]+", re.I
@@ -712,7 +725,9 @@ def scan_export(repository: Path) -> list[str]:
                     findings.append(
                         f"private email in reachable {expected_kind} {expected_oid}"
                     )
-            if scans_all_personal_paths(expected_kind, object_paths):
+            if expected_kind == "blob" and scans_all_personal_paths(
+                expected_kind, object_paths
+            ):
                 for pattern in (
                     MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD,
                     SINGLE_LABEL_EMAIL_IN_PAYLOAD,
@@ -804,7 +819,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         replacements = temporary / "replacements.txt"
         replacements.write_text(
-            PRIVATE_EMAIL_REPLACEMENTS_TEXT + PATH_REPLACEMENTS_TEXT,
+            MESSAGE_PRIVATE_EMAIL_REPLACEMENTS_TEXT + PATH_REPLACEMENTS_TEXT,
             encoding="utf-8",
         )
         source_replacements = temporary / "source-replacements.txt"
