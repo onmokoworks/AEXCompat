@@ -175,6 +175,15 @@ INTENTIONAL_SECRET_BLOB_OIDS = {
     }),
 }
 INTENTIONAL_PERSONAL_PATH_DIGESTS = {
+    "broker/crates/broker/src/bin/cuda_compute_probe_worker.rs": frozenset({
+        "5f1345634d18239e7f23188a67c7d256a6d599dbce52c550ae9d9f10a91ed470",
+    }),
+    "broker/crates/broker/src/image_render/tests.rs": frozenset({
+        "15eef78600a1ea1784ca9d3ef99f1d111fee85282321a70f4bb8616b61194e6d",
+    }),
+    "imports/aviutlas-rust-contracts/aviutl-rs/examples/aex_effect_worker_stub.rs": frozenset({
+        "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+    }),
     "broker/crates/broker/src/opencl_runtime_probe.rs": frozenset({
         "05e24481d49af5ff4b88980216126fdaa1506fb0e7dcdbc60d64e5bcc5a61312",
         "143b2a35c870c71948c9adb607c02dd5e1a5caba9c7a5f2a0ea3007b3c129856",
@@ -454,30 +463,6 @@ def historical_path_cleanup_paths(repository: Path) -> set[str]:
             continue
         cleanup.update(eligible)
     return cleanup
-
-
-def high_confidence_tip_restore_files(repository: Path) -> dict[str, bytes]:
-    payload = run(
-        ["git", "ls-tree", "-r", "-z", "--name-only", "main"],
-        cwd=repository,
-        text=False,
-    ).stdout
-    restored: dict[str, bytes] = {}
-    for raw_path in payload.split(b"\0"):
-        if not raw_path:
-            continue
-        path = raw_path.decode("utf-8", errors="surrogateescape")
-        if not scans_personal_paths("blob", frozenset({path})):
-            continue
-        result = subprocess.run(
-            ["git", "show", f"main:{path}"], cwd=repository, capture_output=True
-        )
-        if result.returncode == 0 and any(
-            PERSONAL_PATH_PATTERNS[label].search(result.stdout)
-            for label in HIGH_CONFIDENCE_SOURCE_PATH_LABELS
-        ):
-            restored[path] = result.stdout
-    return restored
 
 
 def symlink_oids_from_tree(payload: bytes, oid_size: int) -> set[str]:
@@ -844,7 +829,6 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         if result.returncode == 0:
             audited_tip_files[path] = result.stdout
-    audited_tip_files.update(high_confidence_tip_restore_files(repository))
     sanitized_tip_files: dict[str, bytes] = {}
     for path in sorted(cleanup_paths):
         result = subprocess.run(
