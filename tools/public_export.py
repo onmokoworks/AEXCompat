@@ -322,6 +322,10 @@ INTENTIONAL_PRIVATE_EMAIL_DIGESTS = {
         "81811e6237d4dbdf4c49b5050a466423c07c52c8bfe0d64ec3ef9f81e9e78958",
         "bfdd2835ac0d8ce18be58843fa33afd4ce905b46550723bbded7a2bd262f6edb",
         "92ca5d7ea5ec4783e16b69d97d6a7ee33c1be5894fcb785f26b9877c4a2dc736",
+        "a5502485dfab43ba6a46dd3216373e61affdb56db91dca4e90184abc419a4ad7",
+        "7adf9878f9c0466068841cc3685b04ab49d7a1ef3ebd786b551bec25f220a37e",
+        "c796969d13c97eadc461b32fafb5a10fa2d2adbc464f4516a6088c7ebcccc4ba",
+        "74cc6d181beeeede3d3365df6fc03083b8e3930ed99a85e19a6fa180fc820446",
     }),
 }
 
@@ -837,7 +841,19 @@ def scan_export(repository: Path) -> list[str]:
                 findings.append(
                     f"private email in reachable {expected_kind} {expected_oid}"
                 )
-            if SOURCE_IDENTITY_ASSIGNMENT.search(scan_payload):
+            source_identity_matches = list(SOURCE_IDENTITY_ASSIGNMENT.finditer(scan_payload))
+            if source_identity_matches and not (
+                expected_kind == "blob"
+                and object_paths
+                and all(
+                    all(
+                        hashlib.sha256(match.group(0)).hexdigest()
+                        in INTENTIONAL_PRIVATE_EMAIL_DIGESTS.get(path, ())
+                        for match in source_identity_matches
+                    )
+                    for path in object_paths
+                )
+            ):
                 findings.append(
                     f"private email in reachable {expected_kind} {expected_oid}"
                 )
