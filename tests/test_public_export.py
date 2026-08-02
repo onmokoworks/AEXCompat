@@ -79,9 +79,11 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     git(repository, "config", "user.email", "test@example.invalid")
     (repository / "README.md").write_text("public\n", encoding="utf-8")
     (repository / "diagnostic.json").write_text(
-        r'{"path":"C:\\Users\\alice\\checkout"}', encoding="utf-8"
+        r'{"path":"C:\\users\\alice\\checkout"}', encoding="utf-8"
     )
-    git(repository, "add", "README.md", "diagnostic.json")
+    secret_name = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+    (repository / secret_name).write_text("empty payload\n", encoding="utf-8")
+    git(repository, "add", "README.md", "diagnostic.json", secret_name)
     git(repository, "commit", "-m", r"built under C:\Users\alice\checkout")
     git(repository, "tag", "-a", "v1", "-m", "token ghp_abcdefghijklmnopqrstuvwxyz123456")
 
@@ -90,6 +92,7 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     assert any("Windows user path in reachable commit" in item for item in findings)
     assert any("Windows user path in reachable blob" in item for item in findings)
     assert any("GitHub token candidate in reachable tag" in item for item in findings)
+    assert any("GitHub token candidate in reachable tree" in item for item in findings)
 
 
 def test_script_has_no_push_implementation():

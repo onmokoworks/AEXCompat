@@ -34,7 +34,9 @@ SECRET_PATTERNS = {
 }
 PRIVATE_EMAIL = re.compile(r"(?i)(?:\.tail[0-9a-z]+\.ts\.net|\.local)$")
 PERSONAL_PATH_PATTERNS = {
-    "Windows user path": re.compile(rb"\b[A-Za-z]:\\+Users\\+[^\\/\r\n]+"),
+    "Windows user path": re.compile(
+        rb"\b[A-Za-z]:\\+Users\\+[^\\/\r\n]+", re.I
+    ),
     "macOS user path": re.compile(b"/" + rb"Users/[^/\r\n]+"),
     "Tailscale hostname": re.compile(rb"\b[A-Za-z0-9._-]+\.tail[0-9a-z]+\.ts\.net\b", re.I),
 }
@@ -90,7 +92,7 @@ def scan_export(repository: Path) -> list[str]:
     scanned_objects = [
         (oid, kind)
         for oid, kind in reachable_objects(repository)
-        if kind in {"blob", "commit", "tag"}
+        if kind in {"blob", "commit", "tag", "tree"}
     ]
     if scanned_objects:
         # One batch process is material on Windows: a large history can contain
@@ -156,7 +158,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         replacements = temporary / "replacements.txt"
         replacements.write_text(
-            "regex:[A-Za-z]:\\\\+Users\\\\+[^\\\\/\\r\\n]+==><redacted-home>\n"
+            "regex:(?i)[A-Za-z]:\\\\+Users\\\\+[^\\\\/\\r\\n]+==><redacted-home>\n"
             "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
             "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n",
             encoding="utf-8",
