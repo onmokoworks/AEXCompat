@@ -156,9 +156,15 @@ was byte-identical (`OLMBlur` PNG SHA-256
 `b1a5bbb1bc106c433d1d239b074427c7685edc4af4d3a06234bc30ac0e683242`).
 This caught and corrected an over-broad unknown-import rejection by replacing
 generic zero behavior with a finite, library-qualified set of typed or
-deterministic Windows runtime callbacks. The remaining three frozen identities
-and the canonical matrix still require the corpus custodian's full replay before
-publication; the two-case smoke test is not a substitute for that gate.
+deterministic Windows runtime callbacks. The public `ntsc-rs` v0.9.1 release was
+then recovered from its upstream GitHub release and matched the inventory exactly
+(1,869,312 bytes, SHA-256 `e59c5b46b4a18dc56c037513254020d48049042f43dfc09daab46721ba1276ae`).
+Both an independently built `origin/main` worker and this branch rejected it at
+setup with the same bounded `native AVX state sync point capacity exceeded`
+classification, so it was not in the baseline success set and this hardening did
+not regress it. The two unavailable proprietary Rowbyte identities and the full
+canonical matrix still require the corpus custodian's replay before publication;
+the available-case checks are not a substitute for that gate.
 
 The x86_64 Release test binary also exposed a host/Rosetta issue. A parallel run
 left several concurrent Unicorn initialization/OpenCL threads uninterruptible;
@@ -188,7 +194,7 @@ artifacts are deleted after the structured result is captured.
 ## Remaining limits and roadmap
 
 Pre-publication blockers are: a credentialed Developer ID + notarization run on
-the final package; the remaining three frozen identities plus canonical
+the final package; the two unavailable proprietary Rowbyte identities plus canonical
 success-set/byte-exact replay. The reboot/zero-residual gate is complete, and the
 non-shipping x86_64 Unicorn/OpenCL combination has the architecture exclusion
 described above.
