@@ -454,6 +454,24 @@ def test_scanner_fixture_path_does_not_exempt_real_private_email(tmp_path):
     )
 
 
+def test_scan_rejects_single_label_email_in_config(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    (repository / "config.toml").write_text(
+        'owner = "alice@workstation"\n', encoding="utf-8"
+    )
+    git(repository, "add", "config.toml")
+    git(repository, "commit", "-m", "config fixture")
+
+    assert any(
+        "private email in reachable blob" in item
+        for item in public_export.scan_export(repository)
+    )
+
+
 def test_redaction_preserves_public_prefixes_and_wrapped_package_refs():
     assert public_export.redact_personal_paths(b"/rooted/api") == b"/rooted/api"
     assert public_export.redact_personal_paths(b"`react@canary`") == b"`react@canary`"

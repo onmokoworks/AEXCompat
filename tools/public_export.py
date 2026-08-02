@@ -170,6 +170,9 @@ INTENTIONAL_SECRET_BLOB_OIDS = {
     }),
 }
 INTENTIONAL_PERSONAL_PATH_DIGESTS = {
+    "tests/test_real_aex_corpus.py": frozenset({
+        "23e959658f5082a89c6db72c842271a117887b8658ab703f60eaba650b3d5f20",
+    }),
     "broker/crates/broker/src/bin/cuda_compute_probe_worker.rs": frozenset({
         "5f1345634d18239e7f23188a67c7d256a6d599dbce52c550ae9d9f10a91ed470",
     }),
@@ -312,6 +315,7 @@ DIAGNOSTIC_SUFFIXES = {".json", ".jsonl", ".log"}
 DIAGNOSTIC_PARTS = {"analysis", "corpus", "diagnostics", "results"}
 PUBLIC_NOTE_SUFFIXES = {".md", ".rst"}
 PUBLICATION_TEXT_SUFFIXES = {".adoc", ".md", ".rst", ".txt"}
+CONFIG_SUFFIXES = {".cfg", ".conf", ".ini", ".toml", ".yaml", ".yml"}
 PATH_BEARING_METADATA = {".gitmodules", ".mailmap", ".gitconfig"}
 PATH_BEARING_SOURCE_SUFFIXES = {".cpp", ".csproj", ".jsx", ".rs"}
 HIGH_CONFIDENCE_SOURCE_PATH_LABELS = {
@@ -342,6 +346,8 @@ def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
             return True
         if candidate.suffix.lower() in PUBLICATION_TEXT_SUFFIXES:
             return True
+        if candidate.suffix.lower() in CONFIG_SUFFIXES:
+            return True
         if candidate.suffix.lower() in PATH_BEARING_SOURCE_SUFFIXES:
             return True
         if candidate.suffix.lower() == ".py" and "tools" in {
@@ -367,6 +373,8 @@ def scans_all_personal_paths(kind: str, paths: frozenset[str]) -> bool:
         if is_dotenv_path(candidate):
             return True
         if candidate.name.lower() in PATH_BEARING_METADATA:
+            return True
+        if candidate.suffix.lower() in CONFIG_SUFFIXES:
             return True
         if candidate.suffix.lower() == ".csproj":
             return True
