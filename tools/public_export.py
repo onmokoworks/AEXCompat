@@ -296,6 +296,7 @@ def audited_tip_restore_paths() -> tuple[str, ...]:
 DIAGNOSTIC_SUFFIXES = {".json", ".jsonl", ".log"}
 DIAGNOSTIC_PARTS = {"analysis", "corpus", "diagnostics", "results"}
 PUBLIC_NOTE_SUFFIXES = {".md", ".rst"}
+PUBLICATION_TEXT_SUFFIXES = {".adoc", ".md", ".rst", ".txt"}
 PATH_BEARING_METADATA = {".gitmodules", ".mailmap", ".gitconfig"}
 PATH_BEARING_SOURCE_SUFFIXES = {".cpp", ".csproj", ".jsx", ".rs"}
 HIGH_CONFIDENCE_SOURCE_PATH_LABELS = {
@@ -323,6 +324,8 @@ def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
         if is_dotenv_path(candidate):
             return True
         if candidate.name.lower() in PATH_BEARING_METADATA:
+            return True
+        if candidate.suffix.lower() in PUBLICATION_TEXT_SUFFIXES:
             return True
         if candidate.suffix.lower() in PATH_BEARING_SOURCE_SUFFIXES:
             return True

@@ -495,6 +495,23 @@ def test_public_documentation_path_literal_is_not_private_diagnostic(tmp_path):
     )
 
 
+def test_publication_text_is_scanned_for_high_confidence_personal_paths(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    note = repository / "NOTES.md"
+    note.write_text("checkout /" + "home/alice/private\n", encoding="utf-8")
+    git(repository, "add", "NOTES.md")
+    git(repository, "commit", "-m", "add note")
+
+    assert any(
+        "Linux user path in reachable blob" in item
+        for item in public_export.scan_export(repository)
+    )
+
+
 def test_public_analysis_note_is_not_private_diagnostic(tmp_path):
     repository = tmp_path / "repository"
     repository.mkdir()

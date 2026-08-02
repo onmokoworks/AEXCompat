@@ -4,11 +4,12 @@
 #include "AE_EffectCBSuites.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace {
-constexpr char kResultPath[] =
-    "target/ae-oracles/pf-batch-sampling.result.json";
+constexpr char kResultPathEnvironment[] =
+    "AEXCOMPAT_PF_BATCH_SAMPLING_RESULT";
 
 struct Snapshot {
   PF_SampPB value{};
@@ -98,7 +99,11 @@ PF_Err Render(PF_InData* in, PF_ParamDef* params[], PF_LayerDef* output) {
       ? static_cast<PF_Err>(in->pica_basicP->ReleaseSuite(
             kPFBatchSamplingSuite, kPFBatchSamplingSuiteVersion1))
       : PF_Err_BAD_CALLBACK_PARAM;
-  if (FILE* file = std::fopen(kResultPath, "wb")) {
+  const char* result_path = std::getenv(kResultPathEnvironment);
+  if (!result_path || !result_path[0]) return PF_Err_BAD_CALLBACK_PARAM;
+  FILE* file = std::fopen(result_path, "wb");
+  if (!file) return PF_Err_BAD_CALLBACK_PARAM;
+  {
     std::fprintf(file,
         "{\"schema_version\":1,\"suite_name\":\"%s\",\"suite_version\":%d,"
         "\"available\":%s,\"acquire_err\":%d,\"release_attempted\":%s,"
@@ -119,8 +124,8 @@ PF_Err Render(PF_InData* in, PF_ParamDef* params[], PF_LayerDef* output) {
     std::fputc(',', file);
     WriteSnapshot(file, "samp_pb_after_end", after_end, ChangedBytes(after_begin, after_end));
     std::fputs("}\n", file);
-    std::fclose(file);
   }
+  if (std::fclose(file) != 0) return PF_Err_BAD_CALLBACK_PARAM;
   return PF_Err_NONE;
 }
 }  // namespace
