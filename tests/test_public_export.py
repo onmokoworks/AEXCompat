@@ -395,6 +395,24 @@ def test_scan_discards_oversized_tag_metadata_in_bounded_chunks(tmp_path):
     assert any("oversized reachable tag" in item for item in findings)
 
 
+def test_tag_identity_collection_discards_oversized_messages(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "tagger@workstation.local")
+    (repository / "README.md").write_text("public\n", encoding="utf-8")
+    git(repository, "add", "README.md")
+    git(repository, "commit", "-m", "base")
+    message = tmp_path / "tag-message.txt"
+    message.write_text("x" * (9 * 1024 * 1024), encoding="utf-8")
+    git(repository, "tag", "-a", "large", "-F", str(message))
+
+    assert public_export.reachable_tag_identities(repository) == [
+        ("Test", "tagger@workstation.local")
+    ]
+
+
 def test_script_has_no_push_implementation():
     source = (ROOT / "tools/public_export.py").read_text(encoding="utf-8")
     assert '["git", "push"' not in source

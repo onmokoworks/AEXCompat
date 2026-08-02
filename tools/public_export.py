@@ -162,13 +162,38 @@ def tag_identity(payload: bytes) -> tuple[str, str] | None:
 
 def reachable_tag_identities(repository: Path) -> list[tuple[str, str]]:
     identities: list[tuple[str, str]] = []
-    for oid, kind, _paths in reachable_objects(repository):
-        if kind != "tag":
-            continue
-        payload = run(["git", "cat-file", "tag", oid], cwd=repository, text=False).stdout
-        identity = tag_identity(payload)
+    tag_oids = [oid for oid, kind, _paths in reachable_objects(repository) if kind == "tag"]
+    if not tag_oids:
+        return identities
+    batch = subprocess.Popen(
+        ["git", "cat-file", "--batch"],
+        cwd=repository,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert batch.stdin is not None and batch.stdout is not None
+    for expected_oid in tag_oids:
+        batch.stdin.write(f"{expected_oid}\n".encode("ascii"))
+        batch.stdin.flush()
+        header = batch.stdout.readline().decode("ascii").strip().split()
+        if len(header) != 3 or header[:2] != [expected_oid, "tag"]:
+            raise RuntimeError(f"unexpected git cat-file header: {header}")
+        size = int(header[2])
+        retained_size = min(size, 64 * 1024)
+        header_payload = read_exact(batch.stdout, retained_size)
+        discard_exact(batch.stdout, size - retained_size)
+        if batch.stdout.read(1) != b"\n":
+            raise RuntimeError("git cat-file batch framing error")
+        identity = tag_identity(header_payload)
         if identity is not None:
             identities.append(identity)
+    batch.stdin.close()
+    stderr = batch.stderr.read() if batch.stderr is not None else b""
+    if batch.wait() != 0:
+        raise RuntimeError(
+            "git cat-file failed: " + stderr.decode("utf-8", errors="replace")
+        )
     return identities
 
 
