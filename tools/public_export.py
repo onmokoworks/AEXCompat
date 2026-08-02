@@ -44,16 +44,19 @@ PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
     rb"[A-Za-z0-9.-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)\b",
     re.I,
 )
-PATH_REPLACEMENTS_TEXT = (
+HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT = (
     "regex:(?i)[A-Za-z]:[\\\\/]+Users[\\\\/]+[^\\\\/\\r\\n]+==><redacted-home>\n"
-    "regex:(?i)\\b[A-Za-z]:[\\\\/]+[^\\s`\"']+==><redacted-windows-path>\n"
-    "regex:(?i)\\\\{2,}[^\\\\/\\s`\"']+\\\\+[^\\s`\"']+==><redacted-unc-path>\n"
     "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
     "regex:/home/[^/\\r\\n]+==><redacted-home>\n"
     "regex:/root(?:/[^\\s`\"']*)?==><redacted-home>\n"
     "regex:/(?i:workspace|workspaces|github/workspace|__w)"
     "(?:/[^\\s`\"']*)?==><redacted-workspace>\n"
     "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n"
+)
+PATH_REPLACEMENTS_TEXT = (
+    HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT
+    + "regex:(?i)\\b[A-Za-z]:[\\\\/]+[^\\s`\"']+==><redacted-windows-path>\n"
+    "regex:(?i)\\\\{2,}[^\\\\/\\s`\"']+\\\\+[^\\s`\"']+==><redacted-unc-path>\n"
 )
 PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
     "regex:[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
@@ -647,7 +650,8 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         source_replacements = temporary / "source-replacements.txt"
         source_replacements.write_text(
-            "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
+            HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT
+            + "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
             "pf-batch-sampling.result.json==>target/ae-oracles/"
             "pf-batch-sampling.result.json\n"
             "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
