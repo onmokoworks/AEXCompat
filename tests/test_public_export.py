@@ -128,6 +128,8 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     diagnostic.parent.mkdir()
     diagnostic_toml = source / "analysis" / "result.toml"
     diagnostic_env = source / "analysis" / "result.env"
+    root_dotenv = source / ".env"
+    local_dotenv = source / "analysis" / ".env.local"
     old_contents = "token = 'ghp_" + "abcdefghijklmnopqrstuvwxyz123456'\n"
     fixture.write_text(old_contents, encoding="utf-8")
     diagnostic.write_text('{"path":"C:/' + 'Users/alice/private"}\n', encoding="utf-8")
@@ -142,6 +144,8 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
         "TAGGED=alice=tag@workstation\n",
         encoding="utf-8",
     )
+    root_dotenv.write_text("OWNER=alice@workstation\n", encoding="utf-8")
+    local_dotenv.write_text("OWNER=alice@workstation\n", encoding="utf-8")
     git(
         source,
         "add",
@@ -149,12 +153,16 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
         "analysis/result.json",
         "analysis/result.toml",
         "analysis/result.env",
+        ".env",
+        "analysis/.env.local",
     )
     git(source, "commit", "-m", "old synthetic scanner fixture")
     old_oid = git(source, "hash-object", "tests/test_public_export.py")
     old_diagnostic_oid = git(source, "hash-object", "analysis/result.json")
     old_toml_oid = git(source, "hash-object", "analysis/result.toml")
     old_env_oid = git(source, "hash-object", "analysis/result.env")
+    old_root_dotenv_oid = git(source, "hash-object", ".env")
+    old_local_dotenv_oid = git(source, "hash-object", "analysis/.env.local")
     tip_contents = b"safe current scanner fixture\n"
     fixture.write_bytes(tip_contents)
     diagnostic.write_text(
@@ -172,6 +180,8 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
         "analysis/result.json",
         "analysis/result.toml",
         "analysis/result.env",
+        ".env",
+        "analysis/.env.local",
     )
     git(source, "commit", "-m", "split synthetic scanner fixture")
 
@@ -196,10 +206,18 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
         "OWNER=<redacted-private-email>\n"
         "TAGGED=<redacted-private-email>\n"
     )
+    assert (output / ".env").read_text(encoding="utf-8") == (
+        "OWNER=<redacted-private-email>\n"
+    )
+    assert (output / "analysis" / ".env.local").read_text(encoding="utf-8") == (
+        "OWNER=<redacted-private-email>\n"
+    )
     assert old_oid not in git(output, "rev-list", "--objects", "--all")
     assert old_diagnostic_oid not in git(output, "rev-list", "--objects", "--all")
     assert old_toml_oid not in git(output, "rev-list", "--objects", "--all")
     assert old_env_oid not in git(output, "rev-list", "--objects", "--all")
+    assert old_root_dotenv_oid not in git(output, "rev-list", "--objects", "--all")
+    assert old_local_dotenv_oid not in git(output, "rev-list", "--objects", "--all")
     assert public_export.scan_export(output) == []
 
 

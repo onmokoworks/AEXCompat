@@ -258,6 +258,11 @@ HIGH_CONFIDENCE_SOURCE_PATH_LABELS = {
 }
 
 
+def is_dotenv_path(path: str | PurePosixPath) -> bool:
+    name = PurePosixPath(path).name.lower()
+    return name == ".env" or name.startswith(".env.") or name.endswith(".env")
+
+
 def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
     if kind != "blob":
         return True
@@ -265,6 +270,8 @@ def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
         if path in INTENTIONAL_SCANNER_FIXTURES:
             return True
         candidate = PurePosixPath(path)
+        if is_dotenv_path(candidate):
+            return True
         if candidate.name.lower() in PATH_BEARING_METADATA:
             return True
         if candidate.suffix.lower() in PATH_BEARING_SOURCE_SUFFIXES:
@@ -289,6 +296,8 @@ def scans_all_personal_paths(kind: str, paths: frozenset[str]) -> bool:
     for path in paths:
         candidate = PurePosixPath(path)
         lowered_parts = {part.lower() for part in candidate.parts}
+        if is_dotenv_path(candidate):
+            return True
         if candidate.name.lower() in PATH_BEARING_METADATA:
             return True
         if candidate.suffix.lower() == ".csproj":
@@ -329,7 +338,7 @@ PERSONAL_PATH_REDACTIONS = {
 
 
 def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
-    if path is not None and Path(path).suffix.lower() == ".env":
+    if path is not None and is_dotenv_path(path):
         redacted_lines = []
         for line in payload.splitlines(keepends=True):
             if b"=" not in line:
