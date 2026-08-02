@@ -52,15 +52,15 @@ SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
     rb"[A-Za-z0-9_\x80-\xff-]+"
     rb"(?=$|[\x00-\x20<>,;:'\"!?\)\]\}]|\.(?=$|[\x00-\x20]))"
 )
-BACKTICK_PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
-    rb"(?<=`)[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
-    rb"[A-Za-z0-9.\x80-\xff-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)(?=`)",
+MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
+    rb"(?<=[`*_~])[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
+    rb"[A-Za-z0-9.\x80-\xff-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)(?=[`*_~])",
     re.I,
 )
-BACKTICK_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
-    rb"(?<=`)[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
+MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
+    rb"(?<=[`*_~])[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
     rb"(?=[A-Za-z0-9_\x80-\xff-]*[A-Za-z_\x80-\xff-])"
-    rb"[A-Za-z0-9_\x80-\xff-]+(?=`)"
+    rb"[A-Za-z0-9_\x80-\xff-]+(?=[`*_~])"
 )
 DOTENV_ASSIGNMENT = re.compile(
     rb"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=)(.*)$", re.S
@@ -80,13 +80,13 @@ PATH_REPLACEMENTS_TEXT = (
     "regex:(?i)\\\\{2,}[^\\\\/\\s`\"']+\\\\+[^\\s`\"']+==><redacted-unc-path>\n"
 )
 PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
-    "regex:(?<=`)[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
+    "regex:(?<=[`*_~])[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
     "[A-Za-z0-9.\\x80-\\xff-]+"
-    "(?:\\.tail[0-9a-z]+\\.ts\\.net|\\.local)(?=`)"
+    "(?:\\.tail[0-9a-z]+\\.ts\\.net|\\.local)(?=[`*_~])"
     "==><redacted-private-email>\n"
-    "regex:(?<=`)[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
+    "regex:(?<=[`*_~])[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
     "(?=[A-Za-z0-9_\\x80-\\xff-]*[A-Za-z_\\x80-\\xff-])"
-    "[A-Za-z0-9_\\x80-\\xff-]+(?=`)"
+    "[A-Za-z0-9_\\x80-\\xff-]+(?=[`*_~])"
     "==><redacted-private-email>\n"
     "regex:(?<![A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-])"
     "[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
@@ -373,10 +373,10 @@ def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
         return b"".join(redacted_lines)
     for label, pattern in PERSONAL_PATH_PATTERNS.items():
         payload = pattern.sub(PERSONAL_PATH_REDACTIONS[label], payload)
-    payload = BACKTICK_PRIVATE_EMAIL_IN_PAYLOAD.sub(
+    payload = MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD.sub(
         b"<redacted-private-email>", payload
     )
-    payload = BACKTICK_SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
+    payload = MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
         b"<redacted-private-email>", payload
     )
     payload = PRIVATE_EMAIL_IN_PAYLOAD.sub(b"<redacted-private-email>", payload)
@@ -402,8 +402,8 @@ def historical_path_cleanup_paths(repository: Path) -> set[str]:
                 any(pattern.search(payload) for pattern in PERSONAL_PATH_PATTERNS.values())
                 or PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
                 or SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
-                or BACKTICK_PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
-                or BACKTICK_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
+                or MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
+                or MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
             )
         }
         if not eligible:
@@ -678,7 +678,7 @@ def scan_export(repository: Path) -> list[str]:
                 or scans_personal_paths(expected_kind, object_paths)
             )
             for pattern in (
-                BACKTICK_PRIVATE_EMAIL_IN_PAYLOAD,
+                MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD,
                 PRIVATE_EMAIL_IN_PAYLOAD,
             ):
                 for match in pattern.finditer(scan_payload):
@@ -699,7 +699,7 @@ def scan_export(repository: Path) -> list[str]:
                     )
             if scans_all_personal_paths(expected_kind, object_paths):
                 for pattern in (
-                    BACKTICK_SINGLE_LABEL_EMAIL_IN_PAYLOAD,
+                    MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD,
                     SINGLE_LABEL_EMAIL_IN_PAYLOAD,
                 ):
                     for match in pattern.finditer(scan_payload):

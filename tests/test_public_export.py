@@ -57,6 +57,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "Private: Digit Host <alice@3dworkstation>\n"
         "Private: Tagged Local <alice!tag@workstation>\n"
         "Private Markdown: `alice@workstation`\n"
+        "Private Emphasis: *alice@workstation*\n"
         "Public: Tagged Local <alice!tag@example.com>\n"
         "Protocol: Suite@2",
     )
@@ -111,6 +112,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert "alice@3dworkstation" not in exported_messages
     assert "alice!tag@workstation" not in exported_messages
     assert "`alice@workstation`" not in exported_messages
+    assert "*alice@workstation*" not in exported_messages
     assert "alice!tag@example.com" in exported_messages
     assert "Suite@2" in exported_messages
     assert public_export.scan_export(output) == []
