@@ -342,7 +342,7 @@ def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
         redacted_lines = []
         for line in payload.splitlines(keepends=True):
             if b"=" not in line:
-                redacted_lines.append(line)
+                redacted_lines.append(redact_personal_paths(line))
                 continue
             key, value = line.split(b"=", 1)
             redacted_lines.append(key + b"=" + redact_personal_paths(value))
