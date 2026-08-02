@@ -5,7 +5,7 @@ import source_owners
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 SOURCE = ROOT / "minihost" / "src" / "worker_suite_abi.cpp"
-MAIN = source_owners.L2_MAIN
+MAIN = source_owners.L2_SOURCE
 def test_render_suite_cluster_is_owned_by_worker_suite_abi():
     header = HEADER.read_text(encoding="utf-8")
     source = SOURCE.read_text(encoding="utf-8")

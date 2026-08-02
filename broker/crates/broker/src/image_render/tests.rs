@@ -1104,6 +1104,44 @@ mod tests {
         fs::remove_dir_all(repository).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn world_dump_dir_accepts_existing_directory_beneath_target_junction() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let repository =
+            std::env::temp_dir().join(format!("aexcompat-world-dump-junction-repository-{nonce}"));
+        let junction_target =
+            std::env::temp_dir().join(format!("aexcompat-world-dump-junction-target-{nonce}"));
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(junction_target.join("existing")).unwrap();
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(repository.join("target"))
+            .arg(&junction_target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let accepted =
+            resolve_managed_dump_dir(&repository, &repository.join("target/existing"), true)
+                .unwrap();
+        assert_eq!(
+            accepted.path,
+            strip_extended_prefix(&junction_target.join("existing").canonicalize().unwrap())
+        );
+
+        fs::remove_dir(repository.join("target")).unwrap();
+        fs::remove_dir_all(repository).unwrap();
+        fs::remove_dir_all(junction_target).unwrap();
+    }
+
     #[test]
     fn deep16_png_expands_ae_range_and_counts_overrange_samples() {
         let rgba16 = [0u16, 16_384, 32_768, 65_535]

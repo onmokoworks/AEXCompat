@@ -1411,6 +1411,7 @@ fn invalid(message: &'static str) -> io::Error {
 mod tests {
     use super::*;
     use crate::test_pe::pe64_importing;
+    use std::io::Write;
 
     fn temp_dir(tag: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -2305,6 +2306,14 @@ mod tests {
 
         // Different length, so the cache miss cannot hinge on mtime granularity.
         let image = write_pe(&install, "effect.aex", &["much-longer-dependency-name.dll"]);
+        // The synthetic PE builder pads sections to a fixed size, so make the
+        // file length observably different even on coarse-timestamp filesystems.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&image)
+            .unwrap()
+            .write_all(&[0])
+            .unwrap();
         let second = read_image_dependencies(&image, ImageIdentity::Bind).unwrap();
         crate::staging_trust::set_enabled_override_for_testing(None);
 

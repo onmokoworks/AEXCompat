@@ -1,4 +1,4 @@
-from tests import source_owners
+import source_owners
 
 import json
 from pathlib import Path
@@ -32,7 +32,7 @@ def test_job_object_enforces_memory_and_lifetime_bounds():
     runner = RUNNER.read_text(encoding="utf-8")
     assert evidence["limits"]["process_memory_bytes"] == 512 * 1024 * 1024
     assert "JOB_OBJECT_LIMIT_PROCESS_MEMORY" in runner
-    assert "limits.ProcessMemoryLimit = PROCESS_MEMORY_LIMIT" in runner
+    assert "limits.ProcessMemoryLimit = process_memory_limit" in runner
     assert "terminate_job_and_wait(job.raw(), process_handle.raw(), TERMINATION_GRACE_MS)" in runner
     assert "WaitForSingleObject(process, wait_ms)" in runner
 

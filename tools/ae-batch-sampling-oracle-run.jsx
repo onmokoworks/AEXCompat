@@ -1,5 +1,5 @@
 (function () {
-    var resultPath = "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/pf-batch-sampling-run.result.json";
+    var resultPath = Folder.temp.fsName + "/aexcompat-pf-batch-sampling-run.result.json";
     function writeResult(payload) {
         var file = new File(resultPath); file.encoding = "UTF-8"; file.open("w");
         file.write(JSON.stringify(payload)); file.close();
@@ -12,7 +12,7 @@
         var layer = comp.layers.addSolid([1, 0.5, 0], "Oracle Input", 8, 8, 1);
         var effect = layer.property("ADBE Effect Parade").addProperty("AEXCompat PF Batch Sampling V1");
         if (!effect) throw new Error("oracle effect was not found");
-        var output = new File("D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/pf-batch-sampling.png");
+        var output = new File(Folder.temp.fsName + "/aexcompat-pf-batch-sampling.png");
         comp.saveFrameToPng(0, output);
         writeResult({schema_version: 1, status: "captured", ae_version: app.version,
             effect_name: effect.name, effect_match_name: effect.matchName});

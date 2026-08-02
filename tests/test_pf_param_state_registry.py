@@ -5,7 +5,7 @@ import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
+SOURCE = source_owners.L2_SOURCE
 STATE_SOURCE = ROOT / "minihost" / "src" / "worker_pf_state_runtime.cpp"
 SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_parameter_selftests.cpp"
 

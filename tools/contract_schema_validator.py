@@ -57,7 +57,12 @@ def validate_contract(path: Path) -> list[str]:
         issues.append(f"{path}: top-level JSON value must be an object")
         return issues
 
-    if "schema_version" not in data and "schema_name" not in data:
+    json_schema_version = (
+        isinstance(data.get("$schema"), str)
+        and isinstance(data.get("properties"), dict)
+        and "schema_version" in data["properties"]
+    )
+    if "schema_version" not in data and "schema_name" not in data and not json_schema_version:
         issues.append(f"{path}: missing schema_version or schema_name")
 
     for value_path, value in walk_values(data):

@@ -37,8 +37,11 @@ bool load_parameter_animation(const std::filesystem::path& path,
   std::error_code error;
   const auto absolute = std::filesystem::absolute(path, error);
   const auto canonical = std::filesystem::canonical(path, error);
+  // The broker uses <repository>/target as worker CWD so repository sources
+  // are not ambient relative inputs. The transport boundary remains
+  // <repository>/target/image-transport.
   const auto owned = std::filesystem::canonical(
-      std::filesystem::current_path() / "target" / "image-transport", error);
+      std::filesystem::current_path() / "image-transport", error);
   if (error || !path.is_absolute() || absolute.lexically_normal() != canonical ||
       canonical.parent_path() != owned)
     return false;

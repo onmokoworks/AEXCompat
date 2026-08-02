@@ -477,7 +477,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixture-dossier", required=True, help="Fixture dossier JSON under target/fixture-dossier")
     parser.add_argument("--dependency-review", required=True, help="Dependency review JSON under target/dependency-review")
     parser.add_argument("--load-gate", required=True, help="Load gate JSON under target/load-gate")
-    parser.add_argument("--wiztree-csv", help="Optional WizTree AEX CSV under D:/Projects/01_Project/04_Tools/WizTree MCP/exports")
+    parser.add_argument(
+        "--wiztree-csv", help="Optional WizTree AEX CSV from an external export directory"
+    )
     parser.add_argument("--out", required=True, help="Create-new packet under target/fixture-manual-review")
     return parser.parse_args()
 

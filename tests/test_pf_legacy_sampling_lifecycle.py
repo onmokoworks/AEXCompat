@@ -4,7 +4,7 @@ import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 PF_SUITES = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
-SOURCE = source_owners.L2_MAIN
+SOURCE = source_owners.L2_SOURCE
 SAMPLING_RUNTIME = ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp"
 
 

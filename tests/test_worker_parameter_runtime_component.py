@@ -5,7 +5,7 @@ import source_owners
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = ROOT / "minihost" / "src" / "worker_parameter_runtime.hpp"
 SOURCE = ROOT / "minihost" / "src" / "worker_parameter_runtime.cpp"
-MAIN = source_owners.L2_MAIN
+MAIN = source_owners.L2_SOURCE
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 

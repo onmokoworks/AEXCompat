@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -27,6 +28,13 @@ PROBE_RESOURCE = PROBE.with_name("issue26_scene_probe.rc")
 PROBE_CMAKE = PROBE.with_name("CMakeLists.txt")
 CORPUS = ROOT / "corpus" / "issue26-scene-probe"
 REAL_ARTIFACTS = CORPUS / "artifacts"
+EVIDENCE_SPEC = importlib.util.spec_from_file_location(
+    "issue26_scene_probe_evidence", TOOL
+)
+assert EVIDENCE_SPEC is not None and EVIDENCE_SPEC.loader is not None
+sys.path.insert(0, str(TOOL.parent))
+EVIDENCE = importlib.util.module_from_spec(EVIDENCE_SPEC)
+EVIDENCE_SPEC.loader.exec_module(EVIDENCE)
 
 
 def reject_duplicate_keys(pairs):
@@ -299,42 +307,17 @@ def test_corpus_is_strict_schema_valid_and_derived():
         "sdk-projector-aexcompat.json",
         "sdk-resizer-aexcompat.json",
     ]
-    passing_records = [
-        path
-        for path in records
-        if path.name != "after-effects-26.3-partial.json"
-    ]
-    completed = subprocess.run(
-        [sys.executable, str(TOOL), "validate", *map(str, passing_records)],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
-    partial = subprocess.run(
-        [
-            sys.executable,
-            str(TOOL),
-            "validate",
-            str(CORPUS / "after-effects-26.3-partial.json"),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert partial.returncode != 0
-    assert "status=partial" in partial.stderr
-    corpus_result = subprocess.run(
-        [sys.executable, str(TOOL), "validate", *map(str, records)],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert corpus_result.returncode != 0
-    assert "status=partial" in corpus_result.stderr
+    validator = Draft202012Validator(strict_load(SCHEMA_PATH))
+    expected_readiness_errors = {
+        "aexcompat.json": [],
+        "after-effects-26.3-partial.json": ["status=partial"],
+        "sdk-projector-aexcompat.json": [],
+        "sdk-resizer-aexcompat.json": [],
+    }
+    for path in records:
+        record = strict_load(path)
+        validator.validate(record)
+        assert EVIDENCE.readiness_errors(record) == expected_readiness_errors[path.name]
     by_target = {strict_load(path)["target"]: strict_load(path) for path in records}
     aexcompat = by_target["aexcompat"]
     assert aexcompat["status"] == "passed"
@@ -386,6 +369,13 @@ def test_corpus_is_strict_schema_valid_and_derived():
         projector["execution"]["stdout"] + projector["execution"]["stderr"]
     )
     assert "suite_acquire_failed" in projector["execution"]["stderr"]
+
+
+def test_corpus_machine_bound_receipts_are_authenticated():
+    by_target = {
+        strict_load(path)["target"]: strict_load(path)
+        for path in sorted(CORPUS.glob("*.json"))
+    }
     for target in ("sdk_projector_aexcompat", "sdk_resizer_aexcompat"):
         record = by_target[target]
         assert record["sample_report"]["sdk_source_unchanged"] is True

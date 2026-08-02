@@ -103,7 +103,7 @@
     "cleanup_complete": true
   },
   "cpu_non_regression": {
-    "fixture": "/Users/onmk/Documents/Projects/Personal/OLM as/plugins_2025/OLMBlur.aex",
+    "fixture": "<redacted-home>/Documents/Projects/Personal/OLM as/plugins_2025/OLMBlur.aex",
     "fixture_size": 63488,
     "fixture_sha256": "f0611785e7b14ac4fcfc75f23b8862beb4539eee52d25d472556849535e96e5b",
     "exit_code": 0,

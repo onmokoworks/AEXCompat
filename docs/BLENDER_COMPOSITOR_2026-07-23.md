@@ -32,7 +32,7 @@ foreach ($target in @(@{exe='C:\Program Files\Blender\blender-3.6.12-windows-x64
   New-Item -ItemType Directory -Force $out | Out-Null
   & $target.exe --background --factory-startup --python tools/blender_aexcompat_smoke.py -- --output-dir $out
   $blend = Join-Path $out 'aexcompat_blender_smoke.blend'
-  $expr = "import sys; sys.path.insert(0, r'C:\Users\optim\.codex\worktrees\2666\AEXCompat\blender_addon'); import aexcompat_blender; aexcompat_blender.register(); import bpy; bpy.ops.wm.open_mainfile(filepath=r'$blend')"
+  $expr = "import sys; sys.path.insert(0, r'C:\path\to\AEXCompat\blender_addon'); import aexcompat_blender; aexcompat_blender.register(); import bpy; bpy.ops.wm.open_mainfile(filepath=r'$blend')"
   & $target.exe --background --factory-startup --python-expr $expr --python tools/blender_aexcompat_smoke.py -- --reload --output-dir $out
 }
 ```

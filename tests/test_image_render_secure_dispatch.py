@@ -47,7 +47,8 @@ def test_render_workers_admit_the_local_build_through_dispatch_only():
     # (the diagnostic request routes) and its render-session variant (every
     # image and audio render since #365), and the staged copy must still match
     # the admitted bytes before launch.
-    assert dispatch.count("admit_local_worker(") == 3  # definition + request + session
+    production = dispatch.split("\n#[cfg(test)]", 1)[0]
+    assert production.count("admit_local_worker(") == 3  # definition + request + session
     assert "pub fn dispatch_secure_image_session(" in dispatch
     assert "local worker binary is missing or unreadable" in dispatch
     assert "local worker binary is empty" in dispatch

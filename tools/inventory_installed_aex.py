@@ -478,7 +478,11 @@ def json_safe(value: object) -> object:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--local-root", type=Path, default=Path(r"D:\Projects\01_Project\04_Tools\Ae_Plugins"))
+    parser.add_argument(
+        "--local-root",
+        type=Path,
+        default=Path(os.environ.get("AEXCOMPAT_LOCAL_AEX_ROOT", "target/local-aex")),
+    )
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--output", type=Path, default=Path("target/issue478-installed-aex/inventory.json"))
     parser.add_argument("--list-only", action="store_true", help="write a fast canonical file list without hashing or static reads")

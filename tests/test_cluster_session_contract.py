@@ -46,9 +46,10 @@ CLI_DISPATCH = (MINIHOST / "l2_cli_dispatch.cpp").read_text(encoding="utf-8")
 L2_MAIN = source_owners.l2_translation_unit_text()
 CMAKE = (MINIHOST.parent / "CMakeLists.txt").read_text(encoding="utf-8")
 
-BRIDGE = (
-    ROOT / "bridges" / "aviutl2-multifilter" / "src" / "lib.rs"
-).read_text(encoding="utf-8")
+BRIDGE = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in (ROOT / "bridges" / "aviutl2-multifilter" / "src").glob("*.rs")
+)
 
 
 # --- broker: cluster-manifest-v1 ------------------------------------------

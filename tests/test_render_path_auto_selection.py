@@ -1,4 +1,4 @@
-from tests import source_owners
+import source_owners
 
 import json
 import subprocess
@@ -27,8 +27,8 @@ def test_render_path_auto_selection_is_wired_and_explicit_flags_stay_explicit():
     harness = source_owners.harness_windows_text()
     # The GUI derives its default render path from the inspection diagnostics
     # and keeps the toggle as a manual override (issue #105).
-    assert "fn advertised_smart_render(report: &serde_json::Value)" in harness
-    assert "self.smart_render = advertised;" in harness
+    assert "fn inspected_render_capability(" in harness
+    assert "self.smart_render = capability.smart_render_advertised;" in harness
     # The auto CLI route is a separate opt-in; the historical flags keep their
     # explicit Classic/SmartFX semantics so frozen evidence commands do not
     # silently change paths.

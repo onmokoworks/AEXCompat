@@ -20,7 +20,7 @@ def test_macos_gui_keeps_the_generic_effect_editing_workspace():
         'ViewerMode::Compare, "COMPARE"',
         '"Fit"',
         "show_viewer_texture",
-        "render_parameter_arguments",
+        "parameter_payload",
     ):
         assert contract in source
 

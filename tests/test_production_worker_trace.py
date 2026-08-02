@@ -30,12 +30,12 @@ class ProductionWorkerTraceTests(unittest.TestCase):
                 f"target_link_libraries({worker} PRIVATE bcrypt aexcompat_trace_writer)",
                 cmake,
             )
-        source = source_owners.L2_MAIN.read_text(encoding="utf-8")
+        source = source_owners.L2_SOURCE.read_text(encoding="utf-8")
         self.assertIn('#include "trace_writer.hpp"', source)
         self.assertEqual(source.count("trace_worker_label()"), 2)
 
     def test_selector_and_lease_events_are_recorded_at_ordered_boundaries(self):
-        source = source_owners.L2_MAIN.read_text(encoding="utf-8")
+        source = source_owners.L2_SOURCE.read_text(encoding="utf-8")
         dispatch = (MINIHOST / "src" / "worker_selector_dispatch.cpp").read_text(
             encoding="utf-8"
         )

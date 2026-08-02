@@ -129,6 +129,7 @@ class CombinedSource:
         )
 
 
+L2_SOURCE = CombinedSource(L2_TRANSLATION_UNIT_FILES)
 IMAGE_RENDER_SOURCE = CombinedSource(IMAGE_RENDER_OWNERS)
 RENDER_SESSION_SOURCE = CombinedSource(RENDER_SESSION_OWNERS)
 HARNESS_WINDOWS_SOURCE = CombinedSource(HARNESS_WINDOWS_OWNERS)
@@ -454,7 +455,13 @@ CONTRACTS = {
 
 
 def contract_files(name):
-    return tuple(ROOT / relative for relative in CONTRACTS[name])
+    relatives = []
+    for relative in CONTRACTS[name]:
+        if relative == "minihost/src/l2_main.cpp":
+            relatives.extend(L2_TRANSLATION_UNIT_FILES)
+        else:
+            relatives.append(relative)
+    return tuple(ROOT / relative for relative in dict.fromkeys(relatives))
 
 
 def contract_text(name):

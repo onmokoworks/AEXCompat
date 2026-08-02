@@ -40,7 +40,7 @@ def parse_pipl_identity(path: Path) -> dict[str, str]:
     identity = {}
     for field, key in PROPERTY_KEYS.items():
         match = re.search(
-            rf'"{re.escape(key)}"[^\r\n]*?"((?:\\.|[^"\\])*)"',
+            rf'"{re.escape(key)}"\s*,\s*0\s*,\s*0x0\s*,\s*\d+\s*,\s*0x0\s*,\s*"((?:\\.|[^"\\])*)"',
             source,
         )
         if match is None:

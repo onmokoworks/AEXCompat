@@ -1102,8 +1102,8 @@ mod windows_e2e {
         // Deliberately a plain (non-canonicalized) repository root, unlike the
         // sibling tests' `repository_root()`. On Windows `canonicalize()` yields
         // a `\\?\` verbatim path, and the worker's parameter-animation sidecar
-        // loader pins the sidecar's parent to `current_path()/target/
-        // image-transport`; a verbatim sidecar path fails that string compare
+        // loader pins the sidecar's parent to `current_path()/image-transport`;
+        // a verbatim sidecar path fails that string compare
         // (its `\\?\` prefix survives `canonical()` while the cwd-derived owned
         // path has none), rejecting the launch with exit 3. Production derives
         // the repository from `current_exe()` (a plain path), so this mirrors
