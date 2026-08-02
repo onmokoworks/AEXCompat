@@ -77,9 +77,10 @@ DOTENV_ASSIGNMENT = re.compile(
     rb"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=)(.*)$", re.S
 )
 HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT = (
-    "regex:(?i)[A-Za-z]:[\\\\/]+Users[\\\\/]+[^\\\\/\\r\\n]+==><redacted-home>\n"
-    "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
-    "regex:/home/[^/\\r\\n]+==><redacted-home>\n"
+    "regex:(?i)[A-Za-z]:[\\\\/]+Users[\\\\/]+[^\\\\/\\r\\n`\"',;)\\]}]+"
+    "==><redacted-home>\n"
+    "regex:/Users/[^/\\r\\n`\"',;)\\]}]+==><redacted-home>\n"
+    "regex:/home/[^/\\r\\n`\"',;)\\]}]+==><redacted-home>\n"
     "regex:/root(?=/|[\\x00-\\x20`\"']|$)(?:/[^\\s`\"']*)?==><redacted-home>\n"
     "regex:/(?i:workspaces|workspace|github/workspace|__w)"
     "(?=/|[\\x00-\\x20`\"']|$)"
@@ -139,7 +140,7 @@ MESSAGE_PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
 )
 PERSONAL_PATH_PATTERNS = {
     "Windows user path": re.compile(
-        rb"\b[A-Za-z]:[\\/]+Users[\\/]+[^\\/\r\n]+", re.I
+        rb"\b[A-Za-z]:[\\/]+Users[\\/]+[^\\/\r\n`\"',;)\]}]+", re.I
     ),
     "Windows absolute path": re.compile(
         rb"\b[A-Za-z]:[\\/]+[^\s`\"']+", re.I
@@ -147,8 +148,8 @@ PERSONAL_PATH_PATTERNS = {
     "Windows UNC path": re.compile(
         rb"\\{2,}[^\\/\s`\"']+\\+[^\s`\"']+", re.I
     ),
-    "macOS user path": re.compile(b"/" + rb"Users/[^/\r\n]+"),
-    "Linux user path": re.compile(b"/" + rb"home/[^/\r\n]+"),
+    "macOS user path": re.compile(b"/" + rb"Users/[^/\r\n`\"',;)\]}]+"),
+    "Linux user path": re.compile(b"/" + rb"home/[^/\r\n`\"',;)\]}]+"),
     "Linux root path": re.compile(
         b"/" + rb"root(?=/|[\x00-\x20`\"']|$)(?:/[^\s`\"']*)?"
     ),

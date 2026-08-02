@@ -286,6 +286,14 @@ def test_cuda_path_rejection_fixture_is_restored_at_current_tip():
     )
 
 
+def test_user_home_redaction_preserves_source_delimiters():
+    assert public_export.redact_personal_paths(
+        b'r"C:\\Users\\name", r"/Users/name", r"/home/name"'
+    ) == (
+        b'r"<redacted-home>", r"<redacted-home>", r"<redacted-home>"'
+    )
+
+
 def test_tree_name_scan_excludes_binary_object_ids():
     binary_oid = b"j1@k" + bytes(16)
     payload = b"100644 safe.txt\0" + binary_oid
