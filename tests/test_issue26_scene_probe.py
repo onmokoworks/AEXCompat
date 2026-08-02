@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -27,6 +28,13 @@ PROBE_RESOURCE = PROBE.with_name("issue26_scene_probe.rc")
 PROBE_CMAKE = PROBE.with_name("CMakeLists.txt")
 CORPUS = ROOT / "corpus" / "issue26-scene-probe"
 REAL_ARTIFACTS = CORPUS / "artifacts"
+EVIDENCE_SPEC = importlib.util.spec_from_file_location(
+    "issue26_scene_probe_evidence", TOOL
+)
+assert EVIDENCE_SPEC is not None and EVIDENCE_SPEC.loader is not None
+sys.path.insert(0, str(TOOL.parent))
+EVIDENCE = importlib.util.module_from_spec(EVIDENCE_SPEC)
+EVIDENCE_SPEC.loader.exec_module(EVIDENCE)
 
 
 def reject_duplicate_keys(pairs):
@@ -300,8 +308,16 @@ def test_corpus_is_strict_schema_valid_and_derived():
         "sdk-resizer-aexcompat.json",
     ]
     validator = Draft202012Validator(strict_load(SCHEMA_PATH))
+    expected_readiness_errors = {
+        "aexcompat.json": [],
+        "after-effects-26.3-partial.json": ["status=partial"],
+        "sdk-projector-aexcompat.json": [],
+        "sdk-resizer-aexcompat.json": [],
+    }
     for path in records:
-        validator.validate(strict_load(path))
+        record = strict_load(path)
+        validator.validate(record)
+        assert EVIDENCE.readiness_errors(record) == expected_readiness_errors[path.name]
     by_target = {strict_load(path)["target"]: strict_load(path) for path in records}
     aexcompat = by_target["aexcompat"]
     assert aexcompat["status"] == "passed"
