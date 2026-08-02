@@ -38,10 +38,10 @@ SECRET_PATTERNS = {
 PRIVATE_EMAIL = re.compile(r"(?i)(?:\.tail[0-9a-z]+\.ts\.net|\.local)$")
 PERSONAL_PATH_PATTERNS = {
     "Windows user path": re.compile(
-        rb"\b[A-Za-z]:\\+Users\\+[^\\/\r\n]+", re.I
+        rb"\b[A-Za-z]:[\\/]+Users[\\/]+[^\\/\r\n]+", re.I
     ),
     "Windows absolute path": re.compile(
-        rb"\b[A-Za-z]:\\+[^\s`\"']+", re.I
+        rb"\b[A-Za-z]:[\\/]+[^\s`\"']+", re.I
     ),
     "Windows UNC path": re.compile(
         rb"\\{2,}[^\\/\s`\"']+\\+[^\s`\"']+", re.I
@@ -211,8 +211,8 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         replacements = temporary / "replacements.txt"
         replacements.write_text(
-            "regex:(?i)[A-Za-z]:\\\\+Users\\\\+[^\\\\/\\r\\n]+==><redacted-home>\n"
-            "regex:(?i)\\b[A-Za-z]:\\\\+[^\\s`\"']+==><redacted-windows-path>\n"
+            "regex:(?i)[A-Za-z]:[\\\\/]+Users[\\\\/]+[^\\\\/\\r\\n]+==><redacted-home>\n"
+            "regex:(?i)\\b[A-Za-z]:[\\\\/]+[^\\s`\"']+==><redacted-windows-path>\n"
             "regex:(?i)\\\\{2,}[^\\\\/\\s`\"']+\\\\+[^\\s`\"']+==><redacted-unc-path>\n"
             "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
             "regex:/home/[^/\\r\\n]+==><redacted-home>\n"

@@ -97,6 +97,7 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     (repository / "diagnostic.json").write_text(
         r'{"home":"C:\\users\\alice\\checkout",'
         r'"workspace":"D:\\Projects\\private-checkout",'
+        r'"forward":"E:/Projects/private-checkout",'
         r'"share":"\\\\alice-pc\\private-share\\AEXCompat"}',
         encoding="utf-8",
     )
@@ -123,6 +124,7 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
         (b"-----BEGIN DSA PRIVATE KEY-----", "private key candidate"),
         (b"-----BEGIN ENCRYPTED PRIVATE KEY-----", "private key candidate"),
         (b"checkout /home/alice/private/AEXCompat", "Linux user path"),
+        (b"checkout D:/Projects/alice/private/AEXCompat", "Windows absolute path"),
     ],
 )
 def test_scan_recognizes_publication_sensitive_variants(tmp_path, payload, expected):

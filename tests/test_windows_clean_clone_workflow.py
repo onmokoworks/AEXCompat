@@ -10,10 +10,10 @@ def test_windows_clean_clone_runs_canonical_source_reproducible_gates():
     )
     assert "runs-on: windows-latest" in workflow
     assert "components: rustfmt" in workflow
-    assert """      - name: Check Rust formatting
-        working-directory: broker
-        run: cargo fmt --all --check
-""" in workflow
+    assert "BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}" in workflow
+    assert "git diff --name-only --diff-filter=ACMR $base $env:GITHUB_SHA -- '*.rs'" in workflow
+    assert "rustfmt --edition 2021 --check --config skip_children=true @files" in workflow
+    assert "cargo fmt --all --check" not in workflow
     assert "cargo check --workspace --locked" in workflow
     assert (
         "cargo check --manifest-path bridges/aviutl2/Cargo.toml --all-targets --locked"
