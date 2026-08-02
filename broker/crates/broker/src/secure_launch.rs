@@ -351,7 +351,7 @@ fn secure_launch_session_with_desktop_policy(
                 &worker_cwd,
                 session,
                 // Repository root for the launch-boundary minidump handle (issue #18/#224).
-                &worker_cwd,
+                request.repository,
             )
         }
         crate::windows_process::WorkerDesktopPolicy::Current => {
@@ -359,7 +359,7 @@ fn secure_launch_session_with_desktop_policy(
                 worker_stage.worker_path(),
                 &args,
                 &token,
-                request.repository,
+                &worker_cwd,
                 session,
                 request.repository,
             )

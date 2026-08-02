@@ -26,6 +26,14 @@ def test_worker_cwd_is_not_the_repository_root_and_transport_pin_follows_it():
     )
     assert 'let worker_cwd = repository.join("target")' in launch
     assert 'let worker_cwd = request.repository.join("target")' in launch
+    dedicated_start = launch.index("WorkerDesktopPolicy::Dedicated =>")
+    current_start = launch.index("WorkerDesktopPolicy::Current =>")
+    current_desktop = launch[current_start:]
+    assert "&worker_cwd,\n                session,\n                request.repository," in current_desktop
+    dedicated = launch[dedicated_start:current_start]
+    assert "&worker_cwd,\n                session," in dedicated
+    assert "request.repository," in dedicated
+    assert "&worker_cwd,\n            )" not in dedicated
     assert 'std::filesystem::current_path() / "image-transport"' in transport
     assert 'std::filesystem::current_path() / "target" / "image-transport"' not in transport
 

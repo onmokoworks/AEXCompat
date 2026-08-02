@@ -87,36 +87,48 @@ def scan_export(repository: Path) -> list[str]:
     for path in sorted({path for path in paths if path and prohibited_path(path)}):
         findings.append(f"prohibited historical path: {path}")
 
-    blobs = [oid for oid, kind in reachable_objects(repository) if kind == "blob"]
-    if blobs:
+    scanned_objects = [
+        (oid, kind)
+        for oid, kind in reachable_objects(repository)
+        if kind in {"blob", "commit", "tag"}
+    ]
+    if scanned_objects:
         # One batch process is material on Windows: a large history can contain
         # tens of thousands of blobs, and spawning twice per blob made the
         # post-export gate take longer than ten minutes.
         batch = subprocess.run(
             ["git", "cat-file", "--batch"],
             cwd=repository,
-            input="".join(f"{oid}\n" for oid in blobs).encode("ascii"),
+            input="".join(f"{oid}\n" for oid, _ in scanned_objects).encode("ascii"),
             check=True,
             capture_output=True,
         )
         stream = io.BytesIO(batch.stdout)
-        for expected_oid in blobs:
+        for expected_oid, expected_kind in scanned_objects:
             header = stream.readline().decode("ascii").strip().split()
-            if len(header) != 3 or header[0] != expected_oid or header[1] != "blob":
+            if (
+                len(header) != 3
+                or header[0] != expected_oid
+                or header[1] != expected_kind
+            ):
                 raise RuntimeError(f"unexpected git cat-file header: {header}")
             size = int(header[2])
             payload = stream.read(size)
             if stream.read(1) != b"\n":
                 raise RuntimeError("git cat-file batch framing error")
-            if size > 8 * 1024 * 1024:
+            if expected_kind == "blob" and size > 8 * 1024 * 1024:
                 findings.append(f"oversized reachable blob: {expected_oid} ({size} bytes)")
                 continue
             for label, pattern in SECRET_PATTERNS.items():
                 if pattern.search(payload):
-                    findings.append(f"{label} candidate in reachable blob {expected_oid}")
+                    findings.append(
+                        f"{label} candidate in reachable {expected_kind} {expected_oid}"
+                    )
             for label, pattern in PERSONAL_PATH_PATTERNS.items():
                 if pattern.search(payload):
-                    findings.append(f"{label} in reachable blob {expected_oid}")
+                    findings.append(
+                        f"{label} in reachable {expected_kind} {expected_oid}"
+                    )
     return findings
 
 

@@ -66,6 +66,23 @@ def test_rejects_implicit_or_unsafe_tag_names():
             raise AssertionError(f"unsafe tag accepted: {tag!r}")
 
 
+def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    (repository / "README.md").write_text("public\n", encoding="utf-8")
+    git(repository, "add", "README.md")
+    git(repository, "commit", "-m", r"built under C:\Users\alice\checkout")
+    git(repository, "tag", "-a", "v1", "-m", "token ghp_abcdefghijklmnopqrstuvwxyz123456")
+
+    findings = public_export.scan_export(repository)
+
+    assert any("Windows user path in reachable commit" in item for item in findings)
+    assert any("GitHub token candidate in reachable tag" in item for item in findings)
+
+
 def test_script_has_no_push_implementation():
     source = (ROOT / "tools/public_export.py").read_text(encoding="utf-8")
     assert '["git", "push"' not in source
