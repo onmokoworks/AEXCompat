@@ -177,6 +177,9 @@ INTENTIONAL_SECRET_BLOB_OIDS = {
     }),
 }
 INTENTIONAL_PERSONAL_PATH_DIGESTS = {
+    "broker/crates/broker/src/cuda_compute_probe.rs": frozenset({
+        "5f1345634d18239e7f23188a67c7d256a6d599dbce52c550ae9d9f10a91ed470",
+    }),
     "tests/test_real_aex_corpus.py": frozenset({
         "23e959658f5082a89c6db72c842271a117887b8658ab703f60eaba650b3d5f20",
     }),

@@ -280,6 +280,12 @@ def test_native_headers_are_scanned_for_private_host_identities():
     )
 
 
+def test_cuda_path_rejection_fixture_is_restored_at_current_tip():
+    assert "broker/crates/broker/src/cuda_compute_probe.rs" in (
+        public_export.audited_tip_restore_paths()
+    )
+
+
 def test_tree_name_scan_excludes_binary_object_ids():
     binary_oid = b"j1@k" + bytes(16)
     payload = b"100644 safe.txt\0" + binary_oid
