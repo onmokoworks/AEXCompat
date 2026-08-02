@@ -66,6 +66,11 @@ ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
     rb"(?=[A-Za-z0-9_\x80-\xff-]*[A-Za-z_\x80-\xff-])"
     rb"[A-Za-z0-9_\x80-\xff-]+(?=>)"
 )
+CONTEXTUAL_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
+    rb"(?i)(?P<prefix>\b(?:contact|reviewed-by|co-authored-by|signed-off-by)\s*:\s*)"
+    rb"(?P<email>[A-Za-z0-9.!#$%&*+/=?^_`{|}~-]+@"
+    rb"(?=[A-Za-z0-9_-]*[A-Za-z_-])[A-Za-z0-9_-]+)"
+)
 DOTENV_ASSIGNMENT = re.compile(
     rb"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=)(.*)$", re.S
 )
@@ -431,10 +436,15 @@ def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
     payload = ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
         b"<redacted-private-email>", payload
     )
+    payload = CONTEXTUAL_SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
+        lambda match: match.group("prefix") + b"<redacted-private-email>", payload
+    )
     payload = PRIVATE_EMAIL_IN_PAYLOAD.sub(b"<redacted-private-email>", payload)
     payload = SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
         b"<redacted-private-email>", payload
     )
+    if path is not None and is_schema_path(path):
+        return payload
     for label, pattern in PERSONAL_PATH_PATTERNS.items():
         payload = pattern.sub(PERSONAL_PATH_REDACTIONS[label], payload)
     return payload
@@ -443,21 +453,27 @@ def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
 def historical_path_cleanup_paths(repository: Path) -> set[str]:
     cleanup: set[str] = set()
     for oid, kind, paths in reachable_objects(repository):
-        if kind != "blob" or not scans_all_personal_paths(kind, paths):
+        if kind != "blob":
             continue
         payload = run(
             ["git", "cat-file", "blob", oid], cwd=repository, text=False
         ).stdout
         eligible = {
             path for path in paths
-            if not is_schema_path(path)
-            and scans_all_personal_paths(kind, frozenset({path}))
+            if (
+                scans_all_personal_paths(kind, frozenset({path}))
+                or (
+                    PurePosixPath(path).suffix.lower() in PUBLICATION_TEXT_SUFFIXES
+                    and CONTEXTUAL_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
+                )
+            )
             and (
                 any(pattern.search(payload) for pattern in PERSONAL_PATH_PATTERNS.values())
                 or PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
                 or SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
                 or MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
                 or ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
+                or CONTEXTUAL_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
             )
         }
         if not eligible:
@@ -752,6 +768,10 @@ def scan_export(repository: Path) -> list[str]:
                     findings.append(
                         f"private email in reachable {expected_kind} {expected_oid}"
                     )
+            if CONTEXTUAL_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(scan_payload):
+                findings.append(
+                    f"private email in reachable {expected_kind} {expected_oid}"
+                )
             if expected_kind == "blob" and scans_all_personal_paths(
                 expected_kind, object_paths
             ):
@@ -759,8 +779,6 @@ def scan_export(repository: Path) -> list[str]:
                     SINGLE_LABEL_EMAIL_IN_PAYLOAD,
                 ):
                     for match in pattern.finditer(scan_payload):
-                        if object_paths and all(is_schema_path(path) for path in object_paths):
-                            continue
                         findings.append(
                             f"private email in reachable {expected_kind} {expected_oid}"
                         )

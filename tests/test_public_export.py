@@ -478,6 +478,13 @@ def test_redaction_preserves_public_prefixes_and_wrapped_package_refs():
     assert public_export.redact_personal_paths(b"alice@host.tail123.ts.net") == (
         b"<redacted-private-email>"
     )
+    assert public_export.redact_personal_paths(b"Contact: alice@workstation") == (
+        b"Contact: <redacted-private-email>"
+    )
+    assert public_export.redact_personal_paths(
+        b'{"default":"alice@workstation","pattern":"/rooted"}',
+        "contact.schema.json",
+    ) == b'{"default":"<redacted-private-email>","pattern":"/rooted"}'
 
 
 @pytest.mark.parametrize(
