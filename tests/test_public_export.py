@@ -58,7 +58,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "Private: Tagged Local <alice!tag@workstation>\n"
         "Private Markdown: `alice@workstation`\n"
         "Private Emphasis: *alice@workstation*\n"
-        "Private Strong: **alice@workstation**\n"
+        "Private Strong: **alice_name@workstation**\n"
         "Private Strike: ~~alice@workstation~~\n"
         "Public: Tagged Local <alice!tag@example.com>\n"
         "Protocol: Suite@2",
@@ -116,6 +116,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert "`alice@workstation`" not in exported_messages
     assert "*alice@workstation*" not in exported_messages
     assert "Private Strong: **<redacted-private-email>**" in exported_messages
+    assert "alice_name@workstation" not in exported_messages
     assert "Private Strike: ~~<redacted-private-email>~~" in exported_messages
     assert "alice!tag@example.com" in exported_messages
     assert "Suite@2" in exported_messages
