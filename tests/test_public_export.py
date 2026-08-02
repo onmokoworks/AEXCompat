@@ -35,7 +35,8 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "commit",
         "-m",
         "built under C:\\Users\\alice\\checkout\n\n"
-        "Co-authored-by: Test <test@host.tailbe216f.ts.net>",
+        "Co-authored-by: Test <test@host.tailbe216f.ts.net>\n"
+        "Reviewed-by: Alice <alice@workstation.local>",
     )
     git(source, "config", "user.email", "tagger@workstation.local")
     git(source, "tag", "-a", "inner", "-m", "inner release")
@@ -69,7 +70,9 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     exported_messages = git(output, "log", "--all", "--format=%B")
     assert "alice" not in exported_messages
     assert "tailbe216f.ts.net" not in exported_messages
+    assert "workstation.local" not in exported_messages
     assert "<redacted-home>" in exported_messages
+    assert "<redacted-private-email>" in exported_messages
     assert public_export.scan_export(output) == []
     git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
 

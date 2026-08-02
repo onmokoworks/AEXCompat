@@ -36,6 +36,11 @@ SECRET_PATTERNS = {
     "Slack token": re.compile(rb"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
 }
 PRIVATE_EMAIL = re.compile(r"(?i)(?:\.tail[0-9a-z]+\.ts\.net|\.local)$")
+PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
+    rb"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    rb"[A-Za-z0-9.-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)\b",
+    re.I,
+)
 PERSONAL_PATH_PATTERNS = {
     "Windows user path": re.compile(
         rb"\b[A-Za-z]:[\\/]+Users[\\/]+[^\\/\r\n]+", re.I
@@ -256,6 +261,10 @@ def scan_export(repository: Path) -> list[str]:
                     findings.append(
                         f"private tagger email in reachable tag {expected_oid}"
                     )
+            if expected_kind in {"commit", "tag"} and PRIVATE_EMAIL_IN_PAYLOAD.search(payload):
+                findings.append(
+                    f"private email in reachable {expected_kind} {expected_oid}"
+                )
             for label, pattern in SECRET_PATTERNS.items():
                 if pattern.search(payload):
                     findings.append(
@@ -309,7 +318,10 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
             "regex:/home/[^/\\r\\n]+==><redacted-home>\n"
             "regex:/root(?:/[^\\s`\"']*)?==><redacted-home>\n"
-            "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n",
+            "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n"
+            "regex:[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+            "[A-Za-z0-9.-]+(?:\\.tail[0-9a-z]+\\.ts\\.net|\\.local)"
+            "==><redacted-private-email>\n",
             encoding="utf-8",
         )
         command = [
