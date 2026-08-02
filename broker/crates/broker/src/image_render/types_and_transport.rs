@@ -192,14 +192,15 @@ pub(crate) fn resolve_managed_dump_dir(
     // Normalize every lexical-boundary operand to the same representation so
     // a wrapper that has already canonicalized the directory is not mistaken
     // for an escape from the managed tree (#372).
+    let lexical_repository_root = strip_extended_prefix(repository);
     let repository_root = strip_extended_prefix(&repository.canonicalize()?);
     let requested = strip_extended_prefix(requested);
     let resolved = if requested.is_absolute() {
         requested
     } else {
-        repository_root.join(requested)
+        lexical_repository_root.join(requested)
     };
-    let target_root = repository_root.join("target");
+    let target_root = lexical_repository_root.join("target");
     // Lexical pre-check before creating anything, so a rejected request never
     // leaves a directory outside the broker-managed target tree behind.
     if !resolved.starts_with(&target_root) {
@@ -209,7 +210,7 @@ pub(crate) fn resolve_managed_dump_dir(
     }
     fs::create_dir_all(&resolved)?;
     let canonical = strip_extended_prefix(&resolved.canonicalize()?);
-    let canonical_target = strip_extended_prefix(&target_root.canonicalize()?);
+    let canonical_target = strip_extended_prefix(&repository_root.join("target").canonicalize()?);
     if !canonical.starts_with(&canonical_target) {
         return Err(invalid(
             "world dump directory must stay under the repository target tree",
