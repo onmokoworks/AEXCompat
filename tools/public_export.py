@@ -10,6 +10,7 @@ history, and scans the resulting history before reporting success.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -64,6 +65,47 @@ INTENTIONAL_SCANNER_FIXTURES = {
     "tests/test_public_export.py",
     "tools/public_export.py",
 }
+INTENTIONAL_PERSONAL_PATH_DIGESTS = {
+    "tools/public_export.py": frozenset({
+        "1bffdae4417988548991dba5de1ab86e3063bedcc746ca1f48caeee39de59115",
+        "2307dfb012141522a63239579fb4648b52373d42ba7bcd66f9ccff99e59c11ad",
+        "5ccd63c1e0fdf546596eb6d6783346d49e96122bf8bd50a7703904b1056e9a3a",
+        "ee9b9d34eec0eda397f0c47d1ab42ab9637df3409e8e6a89ce9198c0f885d2b6",
+        "5cb8a96e2bfaae670922fc77d3fbd574176382b68e5ce07d694f776ef9f34586",
+        "748067ba9c4bac007f896566966e8b7bfee338039fe93fcf9756f8dabb0dee2c",
+        "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+        "9c7fe4a6f0da32a1a464d6156eacb0ce18eb04f2ce135b65f97905ee14f3b4b9",
+        "9da1eb87453bacd92d2d9927874a40f7432c59d11604fdba341dbda5249f0832",
+        "a541acfac2e649581bca0cd03e4c3dcf306344915017d9cd6be4ad57a8fd7379",
+        "b5e939a75e230250eaa68340f0e0625f431d7ca981b4bb1772f36d06a583390c",
+        "b9f44d4003eb7edaa205eeed6549e5b1e7acda967aebcef8c689d6762a785524",
+        "c428097596980bfa629b48ad9cfbc6afa3327c8dcdd0946de95e837b176721eb",
+        "c52ddf65534b7b46035084358ab7902be4bfef220bdb503ac7039cc861905b05",
+        "cd4db80677bd42c006117a8326ea55fcb03c39acc98087d16a2b2b8c5d103fc3",
+        "d2f86015d0c19ab337eaa9ad0986f63b10000593d7b5fc812653036a0350c5de",
+    }),
+    "tests/test_public_export.py": frozenset({
+        "018e3b3f571bf13a444cf7ba3688b3e48732883cbe63cbe790ebe13adc55345b",
+        "03b873626405418d0cd6180769893aa897a33193672c9ff9a526ef148fe6884e",
+        "05a54a7be8f16be6296824e1545aa940cf15facbc8d7647621212574f1badcfe",
+        "23e126580f9354884ade6b7f0956e5460b67dc4879f7497d0a5e0ae46907a819",
+        "5792ac3ff48febf1d72854e288c93d8495719e87a901882e2c0cb63afddef210",
+        "5c5ca155691b67b3645774d9cdf5fe82c2baae9f7739f3c4ad8c74f96bf0c5cd",
+        "612b6fc44e3094a36043870b929ac5fb00daf8513229001e92a639fb827cac26",
+        "631b8542bef006819290e438e507f7c7a1033c144fe2de0ec246c01ae980efac",
+        "685fa6b48149400b29410c53a375700d13d0c045f5de94ae847a48b97f0ff9b8",
+        "6fc53fb8381ffd738d7728aeb9cfcabdb7cd11c48e09628d3f0fdbf5c151b0b6",
+        "767367c57e2a600826e0237872a8c29ecc22504170d60860bf3ff06fc902d86c",
+        "9b2de6e64bf69ea17928b77c3ea82fbde120e771abd498cd7263ff35f2c33711",
+        "9f99ec4dad6503d1114aaec6dc8cef3f8f35d6b15ecf66e21c84b544b5ca11f6",
+        "a28b1fb160fdfe1f57631bf998ff974912ac8d9b8c4cc666d288ecb3f9ee3195",
+        "b9345075b3f6a0fd093a3fa878e5a9d71ab6f1ed636b51dfdecc5e89337dcbe2",
+        "d31a0d00d7f0c994da66352dcec58e110f1a3217ecf9ffe033853c5ad940ddb7",
+        "e79c60e7d95fd88c1508f05bd1d846411c682d2ee393b8a79cd3218509ad37bb",
+        "e922f64b0c068649adcefe4516ee40e86a4f41773fca9813e727bf5dbbfa36c6",
+        "edfd8aa05aef948c7a2c18312d7d27a5f8405117d84a01420dd5703f00e4fa12",
+    }),
+}
 DIAGNOSTIC_SUFFIXES = {".json", ".jsonl", ".log"}
 DIAGNOSTIC_PARTS = {"analysis", "corpus", "diagnostics", "results"}
 
@@ -72,6 +114,8 @@ def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
     if kind != "blob":
         return True
     for path in paths:
+        if path in INTENTIONAL_SCANNER_FIXTURES:
+            return True
         candidate = PurePosixPath(path)
         if candidate.suffix.lower() in DIAGNOSTIC_SUFFIXES:
             return True
@@ -160,23 +204,24 @@ def reachable_objects(repository: Path) -> list[tuple[str, str, frozenset[str]]]
         text=True,
     )
     kinds = dict(line.split(" ", 1) for line in proc.stdout.splitlines())
-    root_trees = set(run(
-        ["git", "log", "--all", "--format=%T"], cwd=repository
-    ).stdout.splitlines())
-    for tree in root_trees:
-        entries = run(
-            ["git", "ls-tree", "-r", "-z", "--full-tree", tree],
-            cwd=repository,
-            text=False,
-        ).stdout
-        for entry in entries.split(b"\0"):
-            if not entry:
-                continue
-            metadata, path = entry.split(b"\t", 1)
-            _mode, _kind, oid = metadata.decode("ascii").split(" ")
-            paths_by_oid.setdefault(oid, set()).add(
-                path.decode("utf-8", errors="surrogateescape")
-            )
+    changes = run(
+        [
+            "git", "log", "--all", "-m", "--raw", "-z", "--format=",
+            "--no-renames", "--no-abbrev", "--root",
+        ],
+        cwd=repository,
+        text=False,
+    ).stdout.split(b"\0")
+    for index in range(0, len(changes) - 1, 2):
+        metadata = changes[index].lstrip(b"\n")
+        path = changes[index + 1]
+        if not metadata or not path:
+            continue
+        _old_mode, _new_mode, old_oid, new_oid, _status = metadata[1:].split(b" ", 4)
+        decoded_path = path.decode("utf-8", errors="surrogateescape")
+        for oid in (old_oid.decode("ascii"), new_oid.decode("ascii")):
+            if set(oid) != {"0"}:
+                paths_by_oid.setdefault(oid, set()).add(decoded_path)
     return [(oid, kinds[oid], frozenset(paths_by_oid.get(oid, set()))) for oid in object_ids]
 
 
@@ -293,14 +338,22 @@ def scan_export(repository: Path) -> list[str]:
                         f"{label} candidate in reachable {expected_kind} {expected_oid}"
                     )
             for label, pattern in PERSONAL_PATH_PATTERNS.items():
-                if (
+                if not (
                     expected_oid in symlink_oids
                     or scans_personal_paths(expected_kind, object_paths)
-                ) and pattern.search(payload) and not (
-                    expected_kind == "blob"
-                    and object_paths
-                    and object_paths <= INTENTIONAL_SCANNER_FIXTURES
                 ):
+                    continue
+                for match in pattern.finditer(payload):
+                    if (
+                        expected_kind == "blob"
+                        and object_paths
+                        and all(
+                            hashlib.sha256(match.group(0)).hexdigest()
+                            in INTENTIONAL_PERSONAL_PATH_DIGESTS.get(path, ())
+                            for path in object_paths
+                        )
+                    ):
+                        continue
                     findings.append(
                         f"{label} in reachable {expected_kind} {expected_oid}"
                     )

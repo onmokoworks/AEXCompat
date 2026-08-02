@@ -195,6 +195,25 @@ def test_scanner_fixture_path_does_not_exempt_real_secret(tmp_path):
     )
 
 
+def test_scanner_fixture_path_does_not_exempt_real_personal_path(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    fixture = repository / "tests" / "test_public_export.py"
+    fixture.parent.mkdir()
+    real_path = "/" + "workspace/alice/customer/AEXCompat"
+    fixture.write_text(f"checkout = '{real_path}'\n", encoding="utf-8")
+    git(repository, "add", "tests/test_public_export.py")
+    git(repository, "commit", "-m", "accidental personal path")
+
+    assert any(
+        "container workspace path in reachable blob" in item
+        for item in public_export.scan_export(repository)
+    )
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
