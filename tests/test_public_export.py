@@ -311,6 +311,25 @@ def test_public_documentation_path_literal_is_not_private_diagnostic(tmp_path):
     )
 
 
+def test_public_analysis_note_is_not_private_diagnostic(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    note = repository / "analysis" / "license-note.md"
+    note.parent.mkdir()
+    public_example = "D:\\" + "Projects\\Example\\Plugin.aex"
+    note.write_text(public_example, encoding="utf-8")
+    git(repository, "add", "analysis/license-note.md")
+    git(repository, "commit", "-m", "add public analysis note")
+
+    assert not any(
+        "Windows absolute path in reachable blob" in item
+        for item in public_export.scan_export(repository)
+    )
+
+
 def test_symlink_target_is_always_scanned_for_personal_paths(tmp_path):
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -407,6 +426,25 @@ def test_path_bearing_source_is_scanned_for_personal_paths(tmp_path, source_name
     (repository / source_name).write_text(private_path, encoding="utf-8")
     git(repository, "add", source_name)
     git(repository, "commit", "-m", "add path-bearing source")
+
+    assert any(
+        "Windows absolute path in reachable blob" in item
+        for item in public_export.scan_export(repository)
+    )
+
+
+def test_tool_python_source_is_scanned_for_personal_paths(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    source = repository / "tools" / "probe.py"
+    source.parent.mkdir()
+    private_path = "D:/" + "Projects/alice/private/AEXCompat"
+    source.write_text(f"ROOT = {private_path!r}\n", encoding="utf-8")
+    git(repository, "add", "tools/probe.py")
+    git(repository, "commit", "-m", "add tool source")
 
     assert any(
         "Windows absolute path in reachable blob" in item

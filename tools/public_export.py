@@ -73,6 +73,12 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
         "a4fc1f4893afb162e8829785530ef8dc92e418b047b01e5b67ab67c4a08ce17b",
     }),
     "tools/public_export.py": frozenset({
+        "09ecaeaa0830c5d76af26bc84dbe37be15fa5e7af890148ef14d666945664b3c",
+        "32f58f7dce118a10cf9b323bd23671bd44dfd7d97da484ff0260b7b7d27751e6",
+        "dd948f5bacf2a70a419e66d8e879b20e2feb028377f5ea4d7ad81dd9151a240c",
+        "ded43b390a96207196c332c53742324550433c9154f9df02dd0d66f7f8f5dc40",
+        "5de556e108534f4ea7bdabf9f25adb37f01a114380ad399662c64b31492d0d01",
+        "81b7fb1a49849b37cc4f999d28ed103b8cd526a47637fcab339b78a614c617cb",
         "1bffdae4417988548991dba5de1ab86e3063bedcc746ca1f48caeee39de59115",
         "2307dfb012141522a63239579fb4648b52373d42ba7bcd66f9ccff99e59c11ad",
         "5ccd63c1e0fdf546596eb6d6783346d49e96122bf8bd50a7703904b1056e9a3a",
@@ -89,6 +95,25 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
         "c52ddf65534b7b46035084358ab7902be4bfef220bdb503ac7039cc861905b05",
         "cd4db80677bd42c006117a8326ea55fcb03c39acc98087d16a2b2b8c5d103fc3",
         "d2f86015d0c19ab337eaa9ad0986f63b10000593d7b5fc812653036a0350c5de",
+    }),
+    "tools/aex_dependency_availability_preflight.py": frozenset({
+        "4c754b6dc9cd24a7e1a0801560911fbf9a832bf0f5b3bcba0f3844a71356489c",
+    }),
+    "tools/aex_native_loader_path_policy_selftest.py": frozenset({
+        "0ebc17c6b46a7acf5f8c721666191d070e117c112c21dc5768e8cd4ee290b47e",
+    }),
+    "tools/conformance_bundle_validator.py": frozenset({
+        "2da0adb572c983c5e4451038ea6267e88305bc4875f73684e8372673ab9e8f59",
+        "4078491cd748c7038a076acbd60a86e980f15bafb1b8e9b15278db28abbe4996",
+    }),
+    "tools/issue26_sdk_provenance.py": frozenset({
+        "822628af0a69ff78603fc92f95f1532781e09dd2386dc490d5a92c5319de3f62",
+    }),
+    "tools/run-real-aex-corpus.py": frozenset({
+        "2d434b28530bb818d0131735105c0666b8c970221ebd31fcc7563c269098d7cd",
+        "2da0adb572c983c5e4451038ea6267e88305bc4875f73684e8372673ab9e8f59",
+        "cc2f806732c6860842738f9c74f47c42b9df1c91362d9fce48fae3972ab6a056",
+        "ce54bde369789c0ad1944bd8be8b44987d831633dd6593a85877609a4e2ccb9d",
     }),
     "tests/test_public_export.py": frozenset({
         "018e3b3f571bf13a444cf7ba3688b3e48732883cbe63cbe790ebe13adc55345b",
@@ -121,6 +146,7 @@ INTENTIONAL_PRIVATE_EMAIL_DIGESTS = {
 }
 DIAGNOSTIC_SUFFIXES = {".json", ".jsonl", ".log"}
 DIAGNOSTIC_PARTS = {"analysis", "corpus", "diagnostics", "results"}
+PUBLIC_NOTE_SUFFIXES = {".md", ".rst"}
 PATH_BEARING_METADATA = {".gitmodules", ".mailmap", ".gitconfig"}
 PATH_BEARING_SOURCE_SUFFIXES = {".cpp", ".jsx"}
 
@@ -136,9 +162,16 @@ def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
             return True
         if candidate.suffix.lower() in PATH_BEARING_SOURCE_SUFFIXES:
             return True
+        if candidate.suffix.lower() == ".py" and "tools" in {
+            part.lower() for part in candidate.parts
+        }:
+            return True
         if candidate.suffix.lower() in DIAGNOSTIC_SUFFIXES:
             return True
-        if {part.lower() for part in candidate.parts} & DIAGNOSTIC_PARTS:
+        if (
+            {part.lower() for part in candidate.parts} & DIAGNOSTIC_PARTS
+            and candidate.suffix.lower() not in PUBLIC_NOTE_SUFFIXES
+        ):
             return True
     return False
 
@@ -468,7 +501,11 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             "pf-batch-sampling-run.result.json==>target/ae-oracles/"
             "pf-batch-sampling-run.result.json\n"
             "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
-            "pf-batch-sampling.png==>target/ae-oracles/pf-batch-sampling.png\n",
+            "pf-batch-sampling.png==>target/ae-oracles/pf-batch-sampling.png\n"
+            "D:\\Projects\\01_Project\\04_Tools\\Ae_Plugins==>target/local-aex\n"
+            "D:/Projects/01_Project/04_Tools/WizTree MCP/exports"
+            "==>external WizTree export directory\n"
+            "D:\\Projects\\01_Project\\04_Tools==>external project directory\n",
             encoding="utf-8",
         )
         command = [

@@ -228,7 +228,7 @@ def write_json_create_new(path: Path, payload: dict[str, Any]) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build local no-write AEPX static probe report")
-    parser.add_argument("--input", required=True, help="AEPX file under D:\\Projects\\01_Project\\04_Tools")
+    parser.add_argument("--input", required=True, help="AEPX file to inspect")
     parser.add_argument("--out", required=True, help="Create-new probe JSON under target/aepx-static-probe")
     return parser.parse_args()
 
