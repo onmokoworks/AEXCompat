@@ -167,10 +167,15 @@ a later `--test-threads=1` run isolated a reproducible stop in
 remained in `UE` state after SIGKILL. The 18 native-carrier-specific tests and
 the staged Rosetta launch pass; the blocked test is the Unicorn real-Apple-GPU
 bridge compiled for x86_64, not a native-carrier callback. Publication must not
-call the complete x86_64 suite green until the host is rebooted, the residuals
-are gone, and that Rosetta/OpenCL combination is either made interruptible or
-excluded with an explicit architecture rationale. This is exactly the residual
-failure class the production controller reports and refuses to reuse.
+call the complete x86_64 suite green. The host was rebooted on 2026-08-02 and
+all three recorded PIDs plus every matching x86_64 worker were absent afterward,
+establishing zero residual state. Do not rerun or count this test in the native-
+carrier gate: the shipped correctness backend runs Unicorn and Apple OpenCL as
+arm64, while the shipped x86_64 helper selects the native carrier and does not
+execute the x86_64 Unicorn/OpenCL combination. The arm64 suite, the 18 native-
+carrier-specific x86_64 tests, and the staged Rosetta launch are the architecture-
+relevant gates. This is still exactly the residual failure class the production
+controller reports and refuses to reuse if encountered.
 
 ## Diagnostics and data handling
 
@@ -184,8 +189,9 @@ artifacts are deleted after the structured result is captured.
 
 Pre-publication blockers are: a credentialed Developer ID + notarization run on
 the final package; the remaining three frozen identities plus canonical
-success-set/byte-exact replay; and a reboot followed by a zero-residual decision
-for the x86_64/Rosetta Unicorn real-OpenCL test.
+success-set/byte-exact replay. The reboot/zero-residual gate is complete, and the
+non-shipping x86_64 Unicorn/OpenCL combination has the architecture exclusion
+described above.
 The existing controller, local Hardened Runtime signing test, distinct tiers,
 and documented non-guarantees are otherwise a sufficient minimum boundary.
 
