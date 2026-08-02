@@ -69,9 +69,15 @@ ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
     rb"[A-Za-z0-9_\x80-\xff-]+(?=>)"
 )
 CONTEXTUAL_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
-    rb"(?i)(?P<prefix>\b(?:contact|reviewed-by|co-authored-by|signed-off-by)\s*:\s*)"
+    rb"(?i)(?P<prefix>\b(?:contact|email|maintainer|owner|reviewed-by|co-authored-by|signed-off-by)\s*:\s*)"
     rb"(?P<email>[A-Za-z0-9.!#$%&*+/=?^_`{|}~-]+@"
     rb"(?=[A-Za-z0-9_-]*[A-Za-z_-])[A-Za-z0-9_-]+)"
+)
+SOURCE_IDENTITY_ASSIGNMENT = re.compile(
+    rb"(?i)(?P<prefix>\b(?:contact|email|maintainer|owner)\b"
+    rb"[^\r\n\"']{0,64}[\"'])"
+    rb"(?P<email>[A-Za-z0-9.!#$%&*+/=?^_`{|}~-]+@"
+    rb"(?=[A-Za-z0-9_-]*[A-Za-z_-])[A-Za-z0-9_-]+)(?P<quote>[\"'])"
 )
 DOTENV_ASSIGNMENT = re.compile(
     rb"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=)(.*)$", re.S
@@ -435,6 +441,14 @@ PERSONAL_PATH_REDACTIONS = {
 }
 
 
+def redact_single_label_email(match: re.Match[bytes]) -> bytes:
+    line_start = match.string.rfind(b"\n", 0, match.start()) + 1
+    context = match.string[max(line_start, match.start() - 96):match.start()]
+    if re.search(rb"(?i)\b(?:dependency|package|repository|uses)\b", context):
+        return match.group(0)
+    return b"<redacted-private-email>"
+
+
 def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
     if path is not None and is_dotenv_path(path):
         redacted_lines = []
@@ -456,10 +470,16 @@ def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
     payload = CONTEXTUAL_SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
         lambda match: match.group("prefix") + b"<redacted-private-email>", payload
     )
-    payload = PRIVATE_EMAIL_IN_PAYLOAD.sub(b"<redacted-private-email>", payload)
-    payload = SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
-        b"<redacted-private-email>", payload
+    payload = SOURCE_IDENTITY_ASSIGNMENT.sub(
+        lambda match: (
+            match.group("prefix")
+            + b"<redacted-private-email>"
+            + match.group("quote")
+        ),
+        payload,
     )
+    payload = PRIVATE_EMAIL_IN_PAYLOAD.sub(b"<redacted-private-email>", payload)
+    payload = SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(redact_single_label_email, payload)
     if path is not None and is_schema_path(path):
         return payload
     for label, pattern in PERSONAL_PATH_PATTERNS.items():
@@ -477,6 +497,7 @@ def historical_path_cleanup_paths(repository: Path) -> set[str]:
             for path in paths
             if scans_all_personal_paths(kind, frozenset({path}))
             or PurePosixPath(path).suffix.lower() in PUBLICATION_TEXT_SUFFIXES
+            or PurePosixPath(path).suffix.lower() in PATH_BEARING_SOURCE_SUFFIXES
         }
         if not candidate_paths:
             continue
@@ -491,6 +512,10 @@ def historical_path_cleanup_paths(repository: Path) -> set[str]:
                     PurePosixPath(path).suffix.lower() in PUBLICATION_TEXT_SUFFIXES
                     and CONTEXTUAL_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
                 )
+                or (
+                    PurePosixPath(path).suffix.lower() in PATH_BEARING_SOURCE_SUFFIXES
+                    and SOURCE_IDENTITY_ASSIGNMENT.search(payload)
+                )
             )
             and (
                 any(pattern.search(payload) for pattern in PERSONAL_PATH_PATTERNS.values())
@@ -499,6 +524,7 @@ def historical_path_cleanup_paths(repository: Path) -> set[str]:
                 or MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
                 or ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
                 or CONTEXTUAL_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
+                or SOURCE_IDENTITY_ASSIGNMENT.search(payload)
             )
         }
         if not eligible:
@@ -808,6 +834,10 @@ def scan_export(repository: Path) -> list[str]:
                     for path in object_paths
                 )
             ):
+                findings.append(
+                    f"private email in reachable {expected_kind} {expected_oid}"
+                )
+            if SOURCE_IDENTITY_ASSIGNMENT.search(scan_payload):
                 findings.append(
                     f"private email in reachable {expected_kind} {expected_oid}"
                 )

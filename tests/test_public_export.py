@@ -294,6 +294,20 @@ def test_user_home_redaction_preserves_source_delimiters():
     )
 
 
+def test_explicit_identity_labels_are_redacted_without_touching_package_refs():
+    payload = (
+        b'Email: alice@workstation\nMaintainer: bob@buildhost\n'
+        b'pub const OWNER: &str = "carol@desktop";\n'
+        b'pub const PACKAGE: &str = "react@canary";\n'
+    )
+    assert public_export.redact_personal_paths(payload) == (
+        b'Email: <redacted-private-email>\n'
+        b'Maintainer: <redacted-private-email>\n'
+        b'pub const OWNER: &str = "<redacted-private-email>";\n'
+        b'pub const PACKAGE: &str = "react@canary";\n'
+    )
+
+
 def test_tree_name_scan_excludes_binary_object_ids():
     binary_oid = b"j1@k" + bytes(16)
     payload = b"100644 safe.txt\0" + binary_oid
