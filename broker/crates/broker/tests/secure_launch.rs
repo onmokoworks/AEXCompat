@@ -2,9 +2,9 @@ mod common;
 
 #[cfg(windows)]
 mod windows_e2e {
-    use aexcompat_broker::ExitClassification;
     use aexcompat_broker::sealed_load_tree::{LoadEntry, SealedLoadTree};
-    use aexcompat_broker::secure_launch::{SecureLaunchRequest, secure_launch};
+    use aexcompat_broker::secure_launch::{secure_launch, SecureLaunchRequest};
+    use aexcompat_broker::ExitClassification;
     use sha2::{Digest, Sha256};
     use std::collections::HashSet;
     use std::fs;

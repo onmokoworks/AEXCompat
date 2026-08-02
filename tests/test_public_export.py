@@ -29,7 +29,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     (source / "README.md").write_text("public\n", encoding="utf-8")
     (source / "machine.txt").write_text(
         "C:\\Users\\alice\\private and /Users/bob/private and "
-        "D:\\Projects\\private-checkout\n",
+        "D:\\Projects\\private-checkout and /home/carol/private\n",
         encoding="utf-8",
     )
     (source / "private.dll").write_bytes(b"not public")
@@ -57,8 +57,8 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     )
     assert "private.dll" not in git(output, "log", "--all", "--name-only", "--format=")
     exported_text = (output / "machine.txt").read_text(encoding="utf-8")
-    assert "alice" not in exported_text and "bob" not in exported_text
-    assert exported_text.count("<redacted-home>") == 2
+    assert all(name not in exported_text for name in ("alice", "bob", "carol"))
+    assert exported_text.count("<redacted-home>") == 3
     assert "<redacted-windows-path>" in exported_text
     assert public_export.scan_export(output) == []
     git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
@@ -114,6 +114,28 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     assert any("Windows UNC path in reachable blob" in item for item in findings)
     assert any("GitHub token candidate in reachable tag" in item for item in findings)
     assert any("GitHub token candidate in reachable tree" in item for item in findings)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (b"temporary key ASIAABCDEFGHIJKLMNOP", "AWS access key candidate"),
+        (b"-----BEGIN DSA PRIVATE KEY-----", "private key candidate"),
+        (b"-----BEGIN ENCRYPTED PRIVATE KEY-----", "private key candidate"),
+        (b"checkout /home/alice/private/AEXCompat", "Linux user path"),
+    ],
+)
+def test_scan_recognizes_publication_sensitive_variants(tmp_path, payload, expected):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    (repository / "payload.txt").write_bytes(payload)
+    git(repository, "add", "payload.txt")
+    git(repository, "commit", "-m", "fixture")
+
+    assert any(expected in item for item in public_export.scan_export(repository))
 
 
 def test_scan_discards_oversized_blob_in_bounded_chunks(tmp_path):

@@ -26,11 +26,13 @@ PROHIBITED_SUFFIXES = {
 PROHIBITED_PARTS = {"private", "proprietary", "adobe-sdk", "after-effects-sdk"}
 SECRET_PATTERNS = {
     # Split the marker so the scanner's own source is not a finding.
-    "private key": re.compile(b"-----BEGIN " + rb"(?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    "private key": re.compile(
+        b"-----BEGIN " + rb"(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED) )?PRIVATE KEY-----"
+    ),
     "GitHub token": re.compile(
         rb"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
     ),
-    "AWS access key": re.compile(rb"\bAKIA[0-9A-Z]{16}\b"),
+    "AWS access key": re.compile(rb"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
     "Slack token": re.compile(rb"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
 }
 PRIVATE_EMAIL = re.compile(r"(?i)(?:\.tail[0-9a-z]+\.ts\.net|\.local)$")
@@ -45,6 +47,7 @@ PERSONAL_PATH_PATTERNS = {
         rb"\\{2,}[^\\/\s`\"']+\\+[^\s`\"']+", re.I
     ),
     "macOS user path": re.compile(b"/" + rb"Users/[^/\r\n]+"),
+    "Linux user path": re.compile(b"/" + rb"home/[^/\r\n]+"),
     "Tailscale hostname": re.compile(rb"\b[A-Za-z0-9._-]+\.tail[0-9a-z]+\.ts\.net\b", re.I),
 }
 
@@ -212,6 +215,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             "regex:(?i)\\b[A-Za-z]:\\\\+[^\\s`\"']+==><redacted-windows-path>\n"
             "regex:(?i)\\\\{2,}[^\\\\/\\s`\"']+\\\\+[^\\s`\"']+==><redacted-unc-path>\n"
             "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
+            "regex:/home/[^/\\r\\n]+==><redacted-home>\n"
             "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n",
             encoding="utf-8",
         )

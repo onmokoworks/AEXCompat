@@ -43,12 +43,12 @@
 
 #[cfg(windows)]
 mod worker {
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-    use windows_sys::Win32::System::Memory::{FILE_MAP_ALL_ACCESS, MapViewOfFile};
+    use windows_sys::Win32::System::Memory::{MapViewOfFile, FILE_MAP_ALL_ACCESS};
     use windows_sys::Win32::System::StationsAndDesktops::{
         GetThreadDesktop, GetUserObjectInformationW, UOI_NAME,
     };
@@ -252,7 +252,9 @@ mod worker {
         if !path.is_absolute() || !path.is_file() {
             return None;
         }
-        let sealed_root = path.parent().and_then(|parent| parent.canonicalize().ok())?;
+        let sealed_root = path
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())?;
         let inside_sealed_root = sealed_root
             .file_name()
             .and_then(|name| name.to_str())
@@ -596,14 +598,16 @@ mod worker {
                 .file_name()
                 .and_then(|name| name.to_str())
                 == Some(manifest.plugins[0].0.as_str());
-            let same_sealed_root = cluster_manifest_path.as_deref().is_some_and(|manifest_path| {
-                let canonical_parent = |path: &str| {
-                    std::path::Path::new(path)
-                        .parent()
-                        .and_then(|parent| parent.canonicalize().ok())
-                };
-                canonical_parent(&args[2]) == canonical_parent(manifest_path)
-            });
+            let same_sealed_root = cluster_manifest_path
+                .as_deref()
+                .is_some_and(|manifest_path| {
+                    let canonical_parent = |path: &str| {
+                        std::path::Path::new(path)
+                            .parent()
+                            .and_then(|parent| parent.canonicalize().ok())
+                    };
+                    canonical_parent(&args[2]) == canonical_parent(manifest_path)
+                });
             if !basename_matches
                 || !args[3].eq_ignore_ascii_case(&manifest.plugins[0].1)
                 || !same_sealed_root
@@ -722,7 +726,9 @@ mod worker {
                     let keys_ok = message.as_object().map(|object| object.len()) == Some(3)
                         && message.get("v").is_some()
                         && message.get("plugin_index").is_some();
-                    let Some(new_index) = message["plugin_index"].as_u64().map(|index| index as usize) else {
+                    let Some(new_index) =
+                        message["plugin_index"].as_u64().map(|index| index as usize)
+                    else {
                         return EXIT_PROTOCOL_VIOLATION;
                     };
                     let Some(manifest) = &cluster_manifest else {

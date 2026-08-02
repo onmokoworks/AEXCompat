@@ -1,5 +1,5 @@
-use crate::ExitClassification;
 use crate::sealed_load_tree::SealedLoadTree;
+use crate::ExitClassification;
 use std::io;
 use std::path::Path;
 use std::time::Duration;
@@ -118,7 +118,7 @@ fn secure_launch_impl(
     timeout: Option<Duration>,
     process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
-    use crate::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
+    use crate::restricted_worker_acl::{protect_sealed_load_tree, RestrictedWorkerSid};
     use crate::restricted_worker_token::create_restricted_worker_token;
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
@@ -311,7 +311,7 @@ fn secure_launch_session_with_desktop_policy(
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
 ) -> io::Result<SecureSessionProcess> {
-    use crate::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
+    use crate::restricted_worker_acl::{protect_sealed_load_tree, RestrictedWorkerSid};
     use crate::restricted_worker_token::create_restricted_worker_token;
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
