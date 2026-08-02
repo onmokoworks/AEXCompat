@@ -99,14 +99,19 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     git(source, "config", "user.email", "test@example.invalid")
     fixture = source / "tests" / "test_public_export.py"
     fixture.parent.mkdir()
+    diagnostic = source / "analysis" / "result.json"
+    diagnostic.parent.mkdir()
     old_contents = "token = 'ghp_" + "abcdefghijklmnopqrstuvwxyz123456'\n"
     fixture.write_text(old_contents, encoding="utf-8")
-    git(source, "add", "tests/test_public_export.py")
+    diagnostic.write_text('{"path":"C:/' + 'Users/alice/private"}\n', encoding="utf-8")
+    git(source, "add", "tests/test_public_export.py", "analysis/result.json")
     git(source, "commit", "-m", "old synthetic scanner fixture")
     old_oid = git(source, "hash-object", "tests/test_public_export.py")
+    old_diagnostic_oid = git(source, "hash-object", "analysis/result.json")
     tip_contents = b"safe current scanner fixture\n"
     fixture.write_bytes(tip_contents)
-    git(source, "add", "tests/test_public_export.py")
+    diagnostic.write_text('{"path":"D:/' + 'Projects/current/result"}\n', encoding="utf-8")
+    git(source, "add", "tests/test_public_export.py", "analysis/result.json")
     git(source, "commit", "-m", "split synthetic scanner fixture")
 
     output = tmp_path / "export"
@@ -115,7 +120,11 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     )
 
     assert (output / "tests" / "test_public_export.py").read_bytes() == tip_contents
+    assert (output / "analysis" / "result.json").read_text(encoding="utf-8") == (
+        '{"path":"<redacted-windows-path>"}\n'
+    )
     assert old_oid not in git(output, "rev-list", "--objects", "--all")
+    assert old_diagnostic_oid not in git(output, "rev-list", "--objects", "--all")
     assert public_export.scan_export(output) == []
 
 

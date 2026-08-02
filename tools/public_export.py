@@ -289,6 +289,39 @@ def scans_all_personal_paths(kind: str, paths: frozenset[str]) -> bool:
     return False
 
 
+PERSONAL_PATH_REDACTIONS = {
+    "Windows user path": b"<redacted-home>",
+    "Windows absolute path": b"<redacted-windows-path>",
+    "Windows UNC path": b"<redacted-unc-path>",
+    "macOS user path": b"<redacted-home>",
+    "Linux user path": b"<redacted-home>",
+    "Linux root path": b"<redacted-home>",
+    "container workspace path": b"<redacted-workspace>",
+    "Tailscale hostname": b"<redacted-tailscale-host>",
+}
+
+
+def redact_personal_paths(payload: bytes) -> bytes:
+    for label, pattern in PERSONAL_PATH_PATTERNS.items():
+        payload = pattern.sub(PERSONAL_PATH_REDACTIONS[label], payload)
+    return payload
+
+
+def historical_path_cleanup_paths(repository: Path) -> set[str]:
+    cleanup: set[str] = set()
+    for oid, kind, paths in reachable_objects(repository):
+        eligible = {
+            path for path in paths
+            if scans_all_personal_paths(kind, frozenset({path}))
+        }
+        if not eligible:
+            continue
+        payload = run(["git", "cat-file", "blob", oid], cwd=repository, text=False).stdout
+        if any(pattern.search(payload) for pattern in PERSONAL_PATH_PATTERNS.values()):
+            cleanup.update(eligible)
+    return cleanup
+
+
 def symlink_oids_from_tree(payload: bytes, oid_size: int) -> set[str]:
     symlinks: set[str] = set()
     cursor = 0
@@ -629,6 +662,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         if "\0" in line
         and PRIVATE_EMAIL.search(line.split("\0", 1)[1].strip("<>"))
     })
+    cleanup_paths = historical_path_cleanup_paths(repository)
     audited_tip_files: dict[str, bytes] = {}
     for path in audited_tip_restore_paths():
         result = subprocess.run(
@@ -636,6 +670,13 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         if result.returncode == 0:
             audited_tip_files[path] = result.stdout
+    sanitized_tip_files: dict[str, bytes] = {}
+    for path in sorted(cleanup_paths):
+        result = subprocess.run(
+            ["git", "show", f"main:{path}"], cwd=repository, capture_output=True
+        )
+        if result.returncode == 0:
+            sanitized_tip_files[path] = redact_personal_paths(result.stdout)
     with tempfile.TemporaryDirectory(prefix="aexcompat-public-export-") as temporary:
         temporary = Path(temporary)
         mailmap = temporary / "mailmap"
@@ -679,7 +720,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         for part in sorted(PROHIBITED_PARTS):
             command.extend(["--path-glob", f"{part}/*"])
             command.extend(["--path-glob", f"*/{part}/*"])
-        for path in sorted(INTENTIONAL_SCANNER_FIXTURES):
+        for path in sorted(INTENTIONAL_SCANNER_FIXTURES | cleanup_paths):
             command.extend(["--path", path])
         command.extend(["--invert-paths", "--refs", *refs])
         subprocess.run(command, cwd=repository, check=True)
@@ -687,8 +728,13 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         destination = repository / path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(contents)
-    if audited_tip_files:
-        run(["git", "add", "--", *audited_tip_files], cwd=repository)
+    for path, contents in sanitized_tip_files.items():
+        destination = repository / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(contents)
+    restored_paths = sorted(audited_tip_files.keys() | sanitized_tip_files.keys())
+    if restored_paths:
+        run(["git", "add", "--", *restored_paths], cwd=repository)
         changed = subprocess.run(
             ["git", "diff", "--cached", "--quiet"], cwd=repository
         ).returncode
