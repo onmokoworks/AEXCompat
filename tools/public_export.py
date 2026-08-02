@@ -53,12 +53,12 @@ SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
     rb"(?=$|[\x00-\x20<>,;:'\"!?\)\]\}]|\.(?=$|[\x00-\x20]))"
 )
 MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
-    rb"(?<=[`*_~])[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
+    rb"(?<=[`*_~])[A-Za-z0-9.!#$%&+/=?^{|}\x80-\xff-]+@"
     rb"[A-Za-z0-9.\x80-\xff-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)(?=[`*_~])",
     re.I,
 )
 MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
-    rb"(?<=[`*_~])[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
+    rb"(?<=[`*_~])[A-Za-z0-9.!#$%&+/=?^{|}\x80-\xff-]+@"
     rb"(?=[A-Za-z0-9_\x80-\xff-]*[A-Za-z_\x80-\xff-])"
     rb"[A-Za-z0-9_\x80-\xff-]+(?=[`*_~])"
 )
@@ -80,11 +80,11 @@ PATH_REPLACEMENTS_TEXT = (
     "regex:(?i)\\\\{2,}[^\\\\/\\s`\"']+\\\\+[^\\s`\"']+==><redacted-unc-path>\n"
 )
 PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
-    "regex:(?<=[`*_~])[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
+    "regex:(?<=[`*_~])[A-Za-z0-9.!#$%&+/=?^{|}\\x80-\\xff-]+@"
     "[A-Za-z0-9.\\x80-\\xff-]+"
     "(?:\\.tail[0-9a-z]+\\.ts\\.net|\\.local)(?=[`*_~])"
     "==><redacted-private-email>\n"
-    "regex:(?<=[`*_~])[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
+    "regex:(?<=[`*_~])[A-Za-z0-9.!#$%&+/=?^{|}\\x80-\\xff-]+@"
     "(?=[A-Za-z0-9_\\x80-\\xff-]*[A-Za-z_\\x80-\\xff-])"
     "[A-Za-z0-9_\\x80-\\xff-]+(?=[`*_~])"
     "==><redacted-private-email>\n"
