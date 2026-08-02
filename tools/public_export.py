@@ -231,6 +231,14 @@ DIAGNOSTIC_PARTS = {"analysis", "corpus", "diagnostics", "results"}
 PUBLIC_NOTE_SUFFIXES = {".md", ".rst"}
 PATH_BEARING_METADATA = {".gitmodules", ".mailmap", ".gitconfig"}
 PATH_BEARING_SOURCE_SUFFIXES = {".cpp", ".csproj", ".jsx", ".rs"}
+HIGH_CONFIDENCE_SOURCE_PATH_LABELS = {
+    "Windows user path",
+    "macOS user path",
+    "Linux user path",
+    "Linux root path",
+    "container workspace path",
+    "Tailscale hostname",
+}
 
 
 def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
@@ -252,6 +260,26 @@ def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
             return True
         if (
             {part.lower() for part in candidate.parts} & DIAGNOSTIC_PARTS
+            and candidate.suffix.lower() not in PUBLIC_NOTE_SUFFIXES
+        ):
+            return True
+    return False
+
+
+def scans_all_personal_paths(kind: str, paths: frozenset[str]) -> bool:
+    if kind != "blob":
+        return True
+    for path in paths:
+        candidate = PurePosixPath(path)
+        lowered_parts = {part.lower() for part in candidate.parts}
+        if candidate.name.lower() in PATH_BEARING_METADATA:
+            return True
+        if candidate.suffix.lower() == ".csproj":
+            return True
+        if candidate.suffix.lower() in DIAGNOSTIC_SUFFIXES:
+            return True
+        if (
+            lowered_parts & DIAGNOSTIC_PARTS
             and candidate.suffix.lower() not in PUBLIC_NOTE_SUFFIXES
         ):
             return True
@@ -556,7 +584,11 @@ def scan_export(repository: Path) -> list[str]:
             for label, pattern in PERSONAL_PATH_PATTERNS.items():
                 if not (
                     expected_oid in symlink_oids
-                    or scans_personal_paths(expected_kind, object_paths)
+                    or scans_all_personal_paths(expected_kind, object_paths)
+                    or (
+                        label in HIGH_CONFIDENCE_SOURCE_PATH_LABELS
+                        and scans_personal_paths(expected_kind, object_paths)
+                    )
                 ):
                     continue
                 for match in pattern.finditer(scan_payload):
@@ -615,8 +647,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         source_replacements = temporary / "source-replacements.txt"
         source_replacements.write_text(
-            PATH_REPLACEMENTS_TEXT
-            + "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
+            "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
             "pf-batch-sampling.result.json==>target/ae-oracles/"
             "pf-batch-sampling.result.json\n"
             "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"

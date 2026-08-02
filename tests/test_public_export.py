@@ -31,6 +31,9 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     workflow = source / ".github" / "workflows" / "ci.yml"
     workflow.parent.mkdir(parents=True)
     workflow.write_text("- uses: actions/checkout@v4\n", encoding="utf-8")
+    worker_source = source / "worker.cpp"
+    pipe_literal = 'L"\\\\.\\pipe\\ae-timeline-sync"\n'
+    worker_source.write_text(pipe_literal, encoding="utf-8")
     (source / "private.dll").write_bytes(b"not public")
     git(source, "add", ".")
     git(
@@ -75,6 +78,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert (output / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     ) == "- uses: actions/checkout@v4\n"
+    assert (output / "worker.cpp").read_text(encoding="utf-8") == pipe_literal
     exported_messages = git(output, "log", "--all", "--format=%B")
     assert "tailbe216f.ts.net" not in exported_messages
     assert "workstation.local" not in exported_messages
@@ -480,10 +484,27 @@ def test_path_bearing_source_is_scanned_for_personal_paths(tmp_path, source_name
     git(repository, "init", "-b", "main")
     git(repository, "config", "user.name", "Test")
     git(repository, "config", "user.email", "test@example.invalid")
-    private_path = "D:/" + "Projects/alice/private/AEXCompat"
+    private_path = "C:/" + "Users/alice/private/AEXCompat"
     (repository / source_name).write_text(private_path, encoding="utf-8")
     git(repository, "add", source_name)
     git(repository, "commit", "-m", "add path-bearing source")
+
+    assert any(
+        "Windows user path in reachable blob" in item
+        for item in public_export.scan_export(repository)
+    )
+
+
+def test_project_file_is_scanned_for_arbitrary_absolute_paths(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    path = repository / "plugin.csproj"
+    path.write_text("D:/" + "Projects/alice/private/AEXCompat", encoding="utf-8")
+    git(repository, "add", path.name)
+    git(repository, "commit", "-m", "add project path")
 
     assert any(
         "Windows absolute path in reachable blob" in item
@@ -499,13 +520,13 @@ def test_tool_python_source_is_scanned_for_personal_paths(tmp_path):
     git(repository, "config", "user.email", "test@example.invalid")
     source = repository / "tools" / "probe.py"
     source.parent.mkdir()
-    private_path = "D:/" + "Projects/alice/private/AEXCompat"
+    private_path = "C:/" + "Users/alice/private/AEXCompat"
     source.write_text(f"ROOT = {private_path!r}\n", encoding="utf-8")
     git(repository, "add", "tools/probe.py")
     git(repository, "commit", "-m", "add tool source")
 
     assert any(
-        "Windows absolute path in reachable blob" in item
+        "Windows user path in reachable blob" in item
         for item in public_export.scan_export(repository)
     )
 
