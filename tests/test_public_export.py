@@ -62,6 +62,8 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "Private Strike: ~~alice@workstation~~\n"
         "Public: Tagged Local <alice!tag@example.com>\n"
         "Public: Local Label <alice@foo.local.example.com>\n"
+        "Repository: actions/checkout@v4\n"
+        "Package: react@latest\n"
         "Protocol: Suite@2",
     )
     git(source, "config", "user.email", "tagger@workstation.local")
@@ -121,6 +123,8 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert "Private Strike: ~~<redacted-private-email>~~" in exported_messages
     assert "alice!tag@example.com" in exported_messages
     assert "alice@foo.local.example.com" in exported_messages
+    assert "actions/checkout@v4" in exported_messages
+    assert "react@latest" in exported_messages
     assert "Suite@2" in exported_messages
     assert public_export.scan_export(output) == []
     git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
