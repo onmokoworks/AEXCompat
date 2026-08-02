@@ -456,6 +456,30 @@ def historical_path_cleanup_paths(repository: Path) -> set[str]:
     return cleanup
 
 
+def high_confidence_tip_restore_files(repository: Path) -> dict[str, bytes]:
+    payload = run(
+        ["git", "ls-tree", "-r", "-z", "--name-only", "main"],
+        cwd=repository,
+        text=False,
+    ).stdout
+    restored: dict[str, bytes] = {}
+    for raw_path in payload.split(b"\0"):
+        if not raw_path:
+            continue
+        path = raw_path.decode("utf-8", errors="surrogateescape")
+        if not scans_personal_paths("blob", frozenset({path})):
+            continue
+        result = subprocess.run(
+            ["git", "show", f"main:{path}"], cwd=repository, capture_output=True
+        )
+        if result.returncode == 0 and any(
+            PERSONAL_PATH_PATTERNS[label].search(result.stdout)
+            for label in HIGH_CONFIDENCE_SOURCE_PATH_LABELS
+        ):
+            restored[path] = result.stdout
+    return restored
+
+
 def symlink_oids_from_tree(payload: bytes, oid_size: int) -> set[str]:
     symlinks: set[str] = set()
     cursor = 0
@@ -820,6 +844,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         if result.returncode == 0:
             audited_tip_files[path] = result.stdout
+    audited_tip_files.update(high_confidence_tip_restore_files(repository))
     sanitized_tip_files: dict[str, bytes] = {}
     for path in sorted(cleanup_paths):
         result = subprocess.run(
@@ -841,7 +866,8 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         source_replacements = temporary / "source-replacements.txt"
         source_replacements.write_text(
-            "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
+            HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT
+            + "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
             "pf-batch-sampling.result.json==>target/ae-oracles/"
             "pf-batch-sampling.result.json\n"
             "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
