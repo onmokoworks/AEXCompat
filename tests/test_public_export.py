@@ -50,7 +50,8 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "Public: Alice Local <alice.local@example.com>\n"
         "Public: Named User <naari.named@gmail.com>\n"
         "Public: Build User <alice@build-host.example.com>\n"
-        "Public: Unicode User <alice@bücher.example>",
+        "Public: Unicode User <alice@bücher.example>\n"
+        "Private: Unicode Host <alice@bücher>",
     )
     git(source, "config", "user.email", "tagger@workstation.local")
     git(source, "tag", "-a", "inner", "-m", "inner release")
@@ -97,6 +98,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert "naari.named@gmail.com" in exported_messages
     assert "alice@build-host.example.com" in exported_messages
     assert "alice@bücher.example" in exported_messages
+    assert "alice@bücher>" not in exported_messages
     assert public_export.scan_export(output) == []
     git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
 
