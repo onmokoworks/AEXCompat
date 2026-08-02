@@ -42,7 +42,8 @@ PRIVATE_EMAIL = re.compile(
 PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
     rb"(?<![A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-])"
     rb"[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
-    rb"[A-Za-z0-9.\x80-\xff-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)\b",
+    rb"[A-Za-z0-9.\x80-\xff-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)"
+    rb"(?![A-Za-z0-9.\x80-\xff-])",
     re.I,
 )
 SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
@@ -72,7 +73,8 @@ HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT = (
     "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
     "regex:/home/[^/\\r\\n]+==><redacted-home>\n"
     "regex:/root(?:/[^\\s`\"']*)?==><redacted-home>\n"
-    "regex:/(?i:workspace|workspaces|github/workspace|__w)"
+    "regex:/(?i:workspaces|workspace|github/workspace|__w)"
+    "(?=/|[\\x00-\\x20`\"']|$)"
     "(?:/[^\\s`\"']*)?==><redacted-workspace>\n"
     "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n"
 )
@@ -96,6 +98,7 @@ PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
     "[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
     "[A-Za-z0-9.\\x80-\\xff-]+"
     "(?:\\.tail[0-9a-z]+\\.ts\\.net|\\.local)"
+    "(?![A-Za-z0-9.\\x80-\\xff-])"
     "==><redacted-private-email>\n"
     "regex:(?<![A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-])"
     "[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
@@ -119,7 +122,8 @@ PERSONAL_PATH_PATTERNS = {
     "Linux user path": re.compile(b"/" + rb"home/[^/\r\n]+"),
     "Linux root path": re.compile(b"/" + rb"root(?:/[^\s`\"']*)?"),
     "container workspace path": re.compile(
-        b"/" + rb"(?:workspace|workspaces|github/workspace|__w)(?:/[^\s`\"']*)?",
+        b"/" + rb"(?:workspaces|workspace|github/workspace|__w)"
+        rb"(?=/|[\x00-\x20`\"']|$)(?:/[^\s`\"']*)?",
         re.I,
     ),
     "Tailscale hostname": re.compile(rb"\b[A-Za-z0-9._-]+\.tail[0-9a-z]+\.ts\.net\b", re.I),

@@ -61,6 +61,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "Private Strong: **alice_name@workstation**\n"
         "Private Strike: ~~alice@workstation~~\n"
         "Public: Tagged Local <alice!tag@example.com>\n"
+        "Public: Local Label <alice@foo.local.example.com>\n"
         "Protocol: Suite@2",
     )
     git(source, "config", "user.email", "tagger@workstation.local")
@@ -119,6 +120,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert "alice_name@workstation" not in exported_messages
     assert "Private Strike: ~~<redacted-private-email>~~" in exported_messages
     assert "alice!tag@example.com" in exported_messages
+    assert "alice@foo.local.example.com" in exported_messages
     assert "Suite@2" in exported_messages
     assert public_export.scan_export(output) == []
     git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
@@ -181,7 +183,8 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     fixture.write_bytes(tip_contents)
     diagnostic.write_text(
         '{"path":"D:/'
-        + 'Projects/current/result","owner":"alice@workstation",'
+        + 'Projects/current/result","workspace":"/workspaces/alice/build",'
+        '"owner":"alice@workstation",'
         '"digit_owner":"alice@3dworkstation",'
         '"tagged_owner":"alice!tag@workstation","suite":"Suite@2",'
         '"protocol":"v2|brightness@1"}\n',
@@ -206,7 +209,8 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
 
     assert (output / "tests" / "test_public_export.py").read_bytes() == tip_contents
     assert (output / "analysis" / "result.json").read_text(encoding="utf-8") == (
-        '{"path":"<redacted-windows-path>","owner":"<redacted-private-email>",'
+        '{"path":"<redacted-windows-path>","workspace":"<redacted-workspace>",'
+        '"owner":"<redacted-private-email>",'
         '"digit_owner":"<redacted-private-email>",'
         '"tagged_owner":"<redacted-private-email>","suite":"Suite@2",'
         '"protocol":"v2|brightness@1"}\n'
