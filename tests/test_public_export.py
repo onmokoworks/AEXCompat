@@ -183,7 +183,8 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     fixture.write_bytes(tip_contents)
     diagnostic.write_text(
         '{"path":"D:/'
-        + 'Projects/current/result","workspace":"/workspaces/alice/build",'
+        + 'Projects/current/result","workspace":"/'
+        + 'workspaces/alice/build",'
         '"owner":"alice@workstation",'
         '"digit_owner":"alice@3dworkstation",'
         '"tagged_owner":"alice!tag@workstation","suite":"Suite@2",'
