@@ -39,12 +39,12 @@
 
 use crate::secure_image_dispatch::ApprovedImageArtifact;
 use crate::session_dependency_manifest::{
-    SessionDependencyDto, SessionDependencyManifestDto, validate_with_limit,
+    validate_with_limit, SessionDependencyDto, SessionDependencyManifestDto,
 };
 use crate::staging_trust;
-use object::LittleEndian;
 use object::read::pe::{ImageNtHeaders, PeFile32, PeFile64};
-use serde_json::{Value, json};
+use object::LittleEndian;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1411,6 +1411,7 @@ fn invalid(message: &'static str) -> io::Error {
 mod tests {
     use super::*;
     use crate::test_pe::pe64_importing;
+    use std::io::Write;
 
     fn temp_dir(tag: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -1504,12 +1505,10 @@ mod tests {
             .collect();
         sealed.sort();
         assert_eq!(sealed, vec!["dvacore.dll", "dvaui.dll"]);
-        assert!(
-            closure
-                .provenance()
-                .iter()
-                .all(|source| { source.import_derived && !source.string_derived })
-        );
+        assert!(closure
+            .provenance()
+            .iter()
+            .all(|source| { source.import_derived && !source.string_derived }));
         // No root provides kernel32, so it is not sealed — the worker's own load
         // flags reach System32. It is still reported, because a root that starts
         // providing that name would change what the closure seals.
@@ -1845,13 +1844,11 @@ mod tests {
 
         // A survey answers "how much would one dispatch copy" without hashing or
         // copying anything, including for a closure a caller chose to cap.
-        assert!(
-            resolve_dependency_closure(DependencyClosureRequest {
-                max_dependencies: Some(2),
-                ..DependencyClosureRequest::new(&plugin, &roots)
-            })
-            .is_err()
-        );
+        assert!(resolve_dependency_closure(DependencyClosureRequest {
+            max_dependencies: Some(2),
+            ..DependencyClosureRequest::new(&plugin, &roots)
+        })
+        .is_err());
         let survey = survey_dependency_closure(&plugin, &roots).unwrap();
         assert_eq!(survey.modules.len(), 4);
         assert!(survey.total_bytes > 0);
@@ -2305,6 +2302,14 @@ mod tests {
 
         // Different length, so the cache miss cannot hinge on mtime granularity.
         let image = write_pe(&install, "effect.aex", &["much-longer-dependency-name.dll"]);
+        // The synthetic PE builder pads sections to a fixed size, so make the
+        // file length observably different even on coarse-timestamp filesystems.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&image)
+            .unwrap()
+            .write_all(&[0])
+            .unwrap();
         let second = read_image_dependencies(&image, ImageIdentity::Bind).unwrap();
         crate::staging_trust::set_enabled_override_for_testing(None);
 

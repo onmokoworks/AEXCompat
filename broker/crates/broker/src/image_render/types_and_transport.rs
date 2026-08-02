@@ -195,12 +195,19 @@ pub(crate) fn resolve_managed_dump_dir(
     let lexical_repository_root = strip_extended_prefix(repository);
     let repository_root = strip_extended_prefix(&repository.canonicalize()?);
     let requested = strip_extended_prefix(requested);
-    let resolved = if requested.is_absolute() {
-        requested
+    let (resolved, target_root) = if requested.is_absolute() && requested.exists() {
+        (
+            strip_extended_prefix(&requested.canonicalize()?),
+            repository_root.join("target"),
+        )
+    } else if requested.is_absolute() {
+        (requested, lexical_repository_root.join("target"))
     } else {
-        lexical_repository_root.join(requested)
+        (
+            lexical_repository_root.join(requested),
+            lexical_repository_root.join("target"),
+        )
     };
-    let target_root = lexical_repository_root.join("target");
     // Lexical pre-check before creating anything, so a rejected request never
     // leaves a directory outside the broker-managed target tree behind.
     if !resolved.starts_with(&target_root) {
