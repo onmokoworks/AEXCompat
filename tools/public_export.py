@@ -68,6 +68,11 @@ MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
     rb"(?=[A-Za-z0-9_\x80-\xff-]*[A-Za-z_\x80-\xff-])"
     rb"[A-Za-z0-9_\x80-\xff-]*[A-Za-z0-9\x80-\xff-](?=[`*_~])"
 )
+ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
+    rb"(?<=<)[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
+    rb"(?=[A-Za-z0-9_\x80-\xff-]*[A-Za-z_\x80-\xff-])"
+    rb"[A-Za-z0-9_\x80-\xff-]+(?=>)"
+)
 DOTENV_ASSIGNMENT = re.compile(
     rb"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=)(.*)$", re.S
 )
@@ -116,6 +121,10 @@ PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
     "==><redacted-private-email>\n"
 )
 MESSAGE_PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
+    "regex:(?<=<)[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
+    "(?=[A-Za-z0-9_\\x80-\\xff-]*[A-Za-z_\\x80-\\xff-])"
+    "[A-Za-z0-9_\\x80-\\xff-]+(?=>)"
+    "==><redacted-private-email>\n"
     "regex:(?:(?<=`)(?!`)|(?<=\\*)(?!\\*)|(?<=_)(?!_)|(?<=~)(?!~))"
     "[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
     "[A-Za-z0-9.\\x80-\\xff-]+"
@@ -408,6 +417,9 @@ def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
     payload = MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
         b"<redacted-private-email>", payload
     )
+    payload = ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
+        b"<redacted-private-email>", payload
+    )
     payload = PRIVATE_EMAIL_IN_PAYLOAD.sub(b"<redacted-private-email>", payload)
     payload = SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
         b"<redacted-private-email>", payload
@@ -435,6 +447,7 @@ def historical_path_cleanup_paths(repository: Path) -> set[str]:
                 or SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
                 or MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
                 or MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
+                or ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
             )
         }
         if not eligible:
@@ -709,6 +722,7 @@ def scan_export(repository: Path) -> list[str]:
                 or scans_personal_paths(expected_kind, object_paths)
             )
             for pattern in (
+                ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD,
                 MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD,
                 PRIVATE_EMAIL_IN_PAYLOAD,
             ):
