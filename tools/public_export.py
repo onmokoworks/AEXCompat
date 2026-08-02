@@ -841,8 +841,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         source_replacements = temporary / "source-replacements.txt"
         source_replacements.write_text(
-            HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT
-            + "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
+            "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
             "pf-batch-sampling.result.json==>target/ae-oracles/"
             "pf-batch-sampling.result.json\n"
             "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"

@@ -6,10 +6,30 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace {
 constexpr char kResultPathEnvironment[] =
     "AEXCOMPAT_PF_BATCH_SAMPLING_RESULT";
+constexpr char kTemporaryResultName[] =
+    "aexcompat-pf-batch-sampling.result.json";
+
+bool ResolveResultPath(std::string* result_path) {
+  if (!result_path) return false;
+  if (const char* configured = std::getenv(kResultPathEnvironment);
+      configured && configured[0]) {
+    *result_path = configured;
+    return true;
+  }
+  const char* temporary = std::getenv("TEMP");
+  if (!temporary || !temporary[0]) return false;
+  *result_path = temporary;
+  if (result_path->back() != '\\' && result_path->back() != '/') {
+    result_path->push_back('\\');
+  }
+  result_path->append(kTemporaryResultName);
+  return true;
+}
 
 struct Snapshot {
   PF_SampPB value{};
@@ -99,9 +119,9 @@ PF_Err Render(PF_InData* in, PF_ParamDef* params[], PF_LayerDef* output) {
       ? static_cast<PF_Err>(in->pica_basicP->ReleaseSuite(
             kPFBatchSamplingSuite, kPFBatchSamplingSuiteVersion1))
       : PF_Err_BAD_CALLBACK_PARAM;
-  const char* result_path = std::getenv(kResultPathEnvironment);
-  if (!result_path || !result_path[0]) return PF_Err_BAD_CALLBACK_PARAM;
-  FILE* file = std::fopen(result_path, "wb");
+  std::string result_path;
+  if (!ResolveResultPath(&result_path)) return PF_Err_BAD_CALLBACK_PARAM;
+  FILE* file = std::fopen(result_path.c_str(), "wb");
   if (!file) return PF_Err_BAD_CALLBACK_PARAM;
   {
     std::fprintf(file,
