@@ -301,15 +301,14 @@ def scan_export(repository: Path) -> list[str]:
         for label, pattern in {**SECRET_PATTERNS, **PERSONAL_PATH_PATTERNS}.items():
             if pattern.search(encoded_ref):
                 findings.append(f"{label} in reachable ref {ref}")
-    paths = run(
-        ["git", "log", "--all", "-m", "--pretty=format:", "--name-only"], cwd=repository
-    ).stdout.splitlines()
+    reachable = reachable_objects(repository)
+    paths = {path for _oid, _kind, object_paths in reachable for path in object_paths}
     for path in sorted({path for path in paths if path and prohibited_path(path)}):
         findings.append(f"prohibited historical path: {path}")
 
     scanned_objects = [
         (oid, kind, paths)
-        for oid, kind, paths in reachable_objects(repository)
+        for oid, kind, paths in reachable
         if kind in {"blob", "commit", "tag", "tree"}
     ]
     scanned_objects.sort(key=lambda item: item[1] != "tree")

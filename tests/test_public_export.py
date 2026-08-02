@@ -135,6 +135,23 @@ def test_scan_finds_prohibited_path_created_by_merge_resolution(tmp_path):
     assert any("prohibited historical path: private/payload.txt" in item for item in findings)
 
 
+def test_scan_finds_non_ascii_uppercase_prohibited_suffix(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    prohibited = repository / "秘密.DLL"
+    prohibited.write_bytes(b"not public")
+    git(repository, "add", "秘密.DLL")
+    git(repository, "commit", "-m", "add quoted prohibited path")
+
+    assert any(
+        "prohibited historical path: 秘密.DLL" in item
+        for item in public_export.scan_export(repository)
+    )
+
+
 def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     repository = tmp_path / "repository"
     repository.mkdir()
