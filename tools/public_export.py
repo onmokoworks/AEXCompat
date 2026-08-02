@@ -61,13 +61,6 @@ MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
     rb"[A-Za-z0-9.\x80-\xff-]+(?:\.tail[0-9a-z]+\.ts\.net|\.local)(?=[`*_~])",
     re.I,
 )
-MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
-    rb"(?:(?<=`)(?!`)|(?<=\*)(?!\*)|(?<=_)(?!_)|(?<=~)(?!~))"
-    rb"[A-Za-z0-9.!#$%&*+=?^_`{|}~\x80-\xff-]+@"
-    rb"(?!(?:v[0-9][A-Za-z0-9._-]*|latest|next|stable|beta|alpha|rc)(?=[`*_~]))"
-    rb"(?=[A-Za-z0-9_\x80-\xff-]*[A-Za-z_\x80-\xff-])"
-    rb"[A-Za-z0-9_\x80-\xff-]*[A-Za-z0-9\x80-\xff-](?=[`*_~])"
-)
 ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
     rb"(?<=<)[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
     rb"(?=[A-Za-z0-9_\x80-\xff-]*[A-Za-z_\x80-\xff-])"
@@ -80,7 +73,7 @@ HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT = (
     "regex:(?i)[A-Za-z]:[\\\\/]+Users[\\\\/]+[^\\\\/\\r\\n]+==><redacted-home>\n"
     "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
     "regex:/home/[^/\\r\\n]+==><redacted-home>\n"
-    "regex:/root(?:/[^\\s`\"']*)?==><redacted-home>\n"
+    "regex:/root(?=/|[\\x00-\\x20`\"']|$)(?:/[^\\s`\"']*)?==><redacted-home>\n"
     "regex:/(?i:workspaces|workspace|github/workspace|__w)"
     "(?=/|[\\x00-\\x20`\"']|$)"
     "(?:/[^\\s`\"']*)?==><redacted-workspace>\n"
@@ -149,7 +142,9 @@ PERSONAL_PATH_PATTERNS = {
     ),
     "macOS user path": re.compile(b"/" + rb"Users/[^/\r\n]+"),
     "Linux user path": re.compile(b"/" + rb"home/[^/\r\n]+"),
-    "Linux root path": re.compile(b"/" + rb"root(?:/[^\s`\"']*)?"),
+    "Linux root path": re.compile(
+        b"/" + rb"root(?=/|[\x00-\x20`\"']|$)(?:/[^\s`\"']*)?"
+    ),
     "container workspace path": re.compile(
         b"/" + rb"(?:workspaces|workspace|github/workspace|__w)"
         rb"(?=/|[\x00-\x20`\"']|$)(?:/[^\s`\"']*)?",
@@ -423,9 +418,6 @@ def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
     payload = MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD.sub(
         b"<redacted-private-email>", payload
     )
-    payload = MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
-        b"<redacted-private-email>", payload
-    )
     payload = ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
         b"<redacted-private-email>", payload
     )
@@ -455,7 +447,6 @@ def historical_path_cleanup_paths(repository: Path) -> set[str]:
                 or PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
                 or SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
                 or MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD.search(payload)
-                or MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
                 or ANGLE_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(payload)
             )
         }
@@ -755,7 +746,6 @@ def scan_export(repository: Path) -> list[str]:
                 expected_kind, object_paths
             ):
                 for pattern in (
-                    MARKUP_WRAPPED_SINGLE_LABEL_EMAIL_IN_PAYLOAD,
                     SINGLE_LABEL_EMAIL_IN_PAYLOAD,
                 ):
                     for match in pattern.finditer(scan_payload):
@@ -850,7 +840,8 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         source_replacements = temporary / "source-replacements.txt"
         source_replacements.write_text(
-            HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT
+            MESSAGE_PRIVATE_EMAIL_REPLACEMENTS_TEXT
+            + HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT
             + "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
             "pf-batch-sampling.result.json==>target/ae-oracles/"
             "pf-batch-sampling.result.json\n"

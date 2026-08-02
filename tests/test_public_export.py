@@ -454,6 +454,14 @@ def test_scanner_fixture_path_does_not_exempt_real_private_email(tmp_path):
     )
 
 
+def test_redaction_preserves_public_prefixes_and_wrapped_package_refs():
+    assert public_export.redact_personal_paths(b"/rooted/api") == b"/rooted/api"
+    assert public_export.redact_personal_paths(b"`react@canary`") == b"`react@canary`"
+    assert public_export.redact_personal_paths(b"alice@host.tail123.ts.net") == (
+        b"<redacted-private-email>"
+    )
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
