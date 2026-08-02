@@ -200,6 +200,7 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
         "5f5c467ab82151c736e7d0d9df4d38cfc1f3ee6b29166953003cb187eae4ecd7",
         "79ed539cf15cd04214a808b3af03ae5e3b0799d95f61c8aa5fa2b18cc712abed",
         "b997a2dd8b1cf20e9e641dd92747b02e4823228326229dcb20446e8940b0a9a4",
+        "550bc0f6847e76d51ce076b13f840f2b9e7da6962d1e978e260d11425243abb2",
     }),
     "imports/aviutlas-rust-contracts/aviutl-rs/examples/aex_image_probe.rs": frozenset({
         "895be9833f4d131d0b1b3b817f8990b7c3f386cfe6f05790d5521b855b4d44e2",
@@ -298,6 +299,10 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
         "edfd8aa05aef948c7a2c18312d7d27a5f8405117d84a01420dd5703f00e4fa12",
         "8d10eace3eede3521e71ac191db8a493c168e213dcadbfa834de34096a072034",
         "ed70ff84cd0007fff92162c8ee27b1bfea04aded2546fe1b5dff5ce6250fd1f7",
+        "5f1345634d18239e7f23188a67c7d256a6d599dbce52c550ae9d9f10a91ed470",
+        "35de9c52162ba41eb8265ed81e4e6a27d733ffec5b2dd7f9965b0c1214f66285",
+        "550bc0f6847e76d51ce076b13f840f2b9e7da6962d1e978e260d11425243abb2",
+        "90bde77f37a806d07ff6bc736e5fd373e71b3fcebadaf72ddd564c6c44c0c2d1",
         "d215b67b85fcca0f6a0c95eda143e35b298d3f5ca1e132040ac26a8ba3b23c12",
     }),
 }
