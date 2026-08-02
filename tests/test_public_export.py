@@ -49,7 +49,8 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "Reviewed-by: Alice <alice@workstation.local>\n"
         "Public: Alice Local <alice.local@example.com>\n"
         "Public: Named User <naari.named@gmail.com>\n"
-        "Public: Build User <alice@build-host.example.com>",
+        "Public: Build User <alice@build-host.example.com>\n"
+        "Public: Unicode User <alice@bücher.example>",
     )
     git(source, "config", "user.email", "tagger@workstation.local")
     git(source, "tag", "-a", "inner", "-m", "inner release")
@@ -95,6 +96,7 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert "alice.local@example.com" in exported_messages
     assert "naari.named@gmail.com" in exported_messages
     assert "alice@build-host.example.com" in exported_messages
+    assert "alice@bücher.example" in exported_messages
     assert public_export.scan_export(output) == []
     git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
 
@@ -204,6 +206,7 @@ def test_single_label_host_email_is_private(tmp_path):
         "alice.local@example.com",
         "naari.named@gmail.com",
         "alice@build-host.example.com",
+        "alice@bücher.example",
     ]
 )
 def test_public_dotted_domain_email_is_not_private(email):
