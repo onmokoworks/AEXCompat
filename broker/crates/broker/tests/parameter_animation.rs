@@ -1,8 +1,8 @@
 mod common;
 
 use aexcompat_broker::image_render::{
-    parameter_animation_sidecar_json, AnimationInterpolation, AnimationTime, AnimationValue,
-    ParameterAnimation, ParameterAnimationKey,
+    AnimationInterpolation, AnimationTime, AnimationValue, ParameterAnimation,
+    ParameterAnimationKey, parameter_animation_sidecar_json,
 };
 use serde_json::Value;
 
@@ -21,9 +21,9 @@ use serde_json::Value;
 #[cfg(windows)]
 mod windows_real_worker {
     use aexcompat_broker::image_render::{
-        render_experimental_image, render_experimental_image_with_parameter_animation,
         AnimationInterpolation, AnimationTime, AnimationValue, InteractiveParameter,
-        ParameterAnimation, ParameterAnimationKey, RenderTiming,
+        ParameterAnimation, ParameterAnimationKey, RenderTiming, render_experimental_image,
+        render_experimental_image_with_parameter_animation,
     };
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -399,11 +399,13 @@ fn zero_scale_nonfinite_and_invalid_components_fail_closed() {
         },
     ];
     for key in cases {
-        assert!(parameter_animation_sidecar_json(&[ParameterAnimation {
-            slot: 1,
-            keys: vec![key],
-        }])
-        .is_err());
+        assert!(
+            parameter_animation_sidecar_json(&[ParameterAnimation {
+                slot: 1,
+                keys: vec![key],
+            }])
+            .is_err()
+        );
     }
 }
 

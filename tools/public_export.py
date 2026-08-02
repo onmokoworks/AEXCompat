@@ -51,6 +51,10 @@ PERSONAL_PATH_PATTERNS = {
     "Linux root path": re.compile(b"/" + rb"root(?:/[^\s`\"']*)?"),
     "Tailscale hostname": re.compile(rb"\b[A-Za-z0-9._-]+\.tail[0-9a-z]+\.ts\.net\b", re.I),
 }
+INTENTIONAL_SCANNER_FIXTURES = {
+    "tests/test_public_export.py",
+    "tools/public_export.py",
+}
 
 
 def run(argv: list[str], *, cwd: Path | None = None, text: bool = True) -> subprocess.CompletedProcess:
@@ -73,11 +77,12 @@ def prohibited_path(path: str) -> bool:
     return candidate.suffix.lower() in PROHIBITED_SUFFIXES or bool(lowered & PROHIBITED_PARTS)
 
 
-def reachable_objects(repository: Path) -> list[tuple[str, str]]:
-    output = run(
-        ["git", "rev-list", "--objects", "--no-object-names", "--all"], cwd=repository
-    ).stdout.splitlines()
-    object_ids = sorted(set(output))
+def reachable_objects(repository: Path) -> list[tuple[str, str, frozenset[str]]]:
+    paths_by_oid: dict[str, set[str]] = {}
+    for line in run(["git", "rev-list", "--objects", "--all"], cwd=repository).stdout.splitlines():
+        oid, *path = line.split(" ", 1)
+        paths_by_oid.setdefault(oid, set()).update(path)
+    object_ids = sorted(paths_by_oid)
     if not object_ids:
         return []
     request = "".join(f"{oid}\n" for oid in object_ids)
@@ -89,7 +94,10 @@ def reachable_objects(repository: Path) -> list[tuple[str, str]]:
         capture_output=True,
         text=True,
     )
-    return [tuple(line.split(" ", 1)) for line in proc.stdout.splitlines()]
+    return [
+        (oid, kind, frozenset(paths_by_oid[oid]))
+        for oid, kind in (line.split(" ", 1) for line in proc.stdout.splitlines())
+    ]
 
 
 def validate_selected_tags(repository: Path, tags: list[str]) -> None:
@@ -127,14 +135,14 @@ def discard_exact(stream, size: int) -> None:
 def scan_export(repository: Path) -> list[str]:
     findings: list[str] = []
     paths = run(
-        ["git", "log", "--all", "--pretty=format:", "--name-only"], cwd=repository
+        ["git", "log", "--all", "-m", "--pretty=format:", "--name-only"], cwd=repository
     ).stdout.splitlines()
     for path in sorted({path for path in paths if path and prohibited_path(path)}):
         findings.append(f"prohibited historical path: {path}")
 
     scanned_objects = [
-        (oid, kind)
-        for oid, kind in reachable_objects(repository)
+        (oid, kind, paths)
+        for oid, kind, paths in reachable_objects(repository)
         if kind in {"blob", "commit", "tag", "tree"}
     ]
     if scanned_objects:
@@ -149,7 +157,7 @@ def scan_export(repository: Path) -> list[str]:
             stderr=subprocess.PIPE,
         )
         assert batch.stdin is not None and batch.stdout is not None
-        for expected_oid, expected_kind in scanned_objects:
+        for expected_oid, expected_kind, object_paths in scanned_objects:
             batch.stdin.write(f"{expected_oid}\n".encode("ascii"))
             batch.stdin.flush()
             header = batch.stdout.readline().decode("ascii").strip().split()
@@ -172,12 +180,20 @@ def scan_export(repository: Path) -> list[str]:
             if batch.stdout.read(1) != b"\n":
                 raise RuntimeError("git cat-file batch framing error")
             for label, pattern in SECRET_PATTERNS.items():
-                if pattern.search(payload):
+                if pattern.search(payload) and not (
+                    expected_kind == "blob"
+                    and object_paths
+                    and object_paths <= INTENTIONAL_SCANNER_FIXTURES
+                ):
                     findings.append(
                         f"{label} candidate in reachable {expected_kind} {expected_oid}"
                     )
             for label, pattern in PERSONAL_PATH_PATTERNS.items():
-                if pattern.search(payload):
+                if pattern.search(payload) and not (
+                    expected_kind == "blob"
+                    and object_paths
+                    and object_paths <= INTENTIONAL_SCANNER_FIXTURES
+                ):
                     findings.append(
                         f"{label} in reachable {expected_kind} {expected_oid}"
                     )
@@ -225,11 +241,12 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         command = [
             sys.executable, "-m", "git_filter_repo", "--force",
-            "--mailmap", str(mailmap), "--replace-text", str(replacements),
+            "--mailmap", str(mailmap), "--replace-message", str(replacements),
         ]
         for suffix in sorted(PROHIBITED_SUFFIXES):
             command.extend(["--path-glob", f"*{suffix}"])
         for part in sorted(PROHIBITED_PARTS):
+            command.extend(["--path-glob", f"{part}/*"])
             command.extend(["--path-glob", f"*/{part}/*"])
         command.extend(["--invert-paths", "--refs", *refs])
         subprocess.run(command, cwd=repository, check=True)

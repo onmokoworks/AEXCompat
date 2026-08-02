@@ -19,6 +19,9 @@ mod common;
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::image_render::{
+        AnimationInterpolation, AnimationTime, AnimationValue, InteractiveParameter,
+        ParameterAnimation, ParameterAnimationKey, RENDER_SESSION_WRAPPER_RENDERS,
+        RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction, TimedLayerImage,
         render_experimental_audio, render_experimental_image, render_experimental_image_at_time,
         render_experimental_image_at_time_with_format_and_context,
         render_experimental_image_at_time_with_format_context_and_ui_action,
@@ -26,10 +29,7 @@ mod windows_e2e {
         render_experimental_image_with_audio_sidecar,
         render_experimental_image_with_parameter_animation,
         render_experimental_image_with_timed_layers, render_experimental_smart_image,
-        render_experimental_smart_image_at_time, AnimationInterpolation, AnimationTime,
-        AnimationValue, InteractiveParameter, ParameterAnimation, ParameterAnimationKey,
-        RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction, TimedLayerImage,
-        RENDER_SESSION_WRAPPER_RENDERS,
+        render_experimental_smart_image_at_time,
     };
     // The fault-injection knob exists only in debug builds (image_render.rs), so
     // the test that uses it is gated to debug too.

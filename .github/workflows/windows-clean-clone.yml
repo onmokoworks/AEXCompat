@@ -35,7 +35,7 @@ jobs:
             Write-Host 'No changed Rust files to format-check.'
             exit 0
           }
-          rustfmt --edition 2021 --check --config skip_children=true @files
+          rustfmt --edition 2024 --check --config skip_children=true @files
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: broker

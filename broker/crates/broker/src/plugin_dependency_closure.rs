@@ -39,12 +39,12 @@
 
 use crate::secure_image_dispatch::ApprovedImageArtifact;
 use crate::session_dependency_manifest::{
-    validate_with_limit, SessionDependencyDto, SessionDependencyManifestDto,
+    SessionDependencyDto, SessionDependencyManifestDto, validate_with_limit,
 };
 use crate::staging_trust;
-use object::read::pe::{ImageNtHeaders, PeFile32, PeFile64};
 use object::LittleEndian;
-use serde_json::{json, Value};
+use object::read::pe::{ImageNtHeaders, PeFile32, PeFile64};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1505,10 +1505,12 @@ mod tests {
             .collect();
         sealed.sort();
         assert_eq!(sealed, vec!["dvacore.dll", "dvaui.dll"]);
-        assert!(closure
-            .provenance()
-            .iter()
-            .all(|source| { source.import_derived && !source.string_derived }));
+        assert!(
+            closure
+                .provenance()
+                .iter()
+                .all(|source| { source.import_derived && !source.string_derived })
+        );
         // No root provides kernel32, so it is not sealed — the worker's own load
         // flags reach System32. It is still reported, because a root that starts
         // providing that name would change what the closure seals.
@@ -1844,11 +1846,13 @@ mod tests {
 
         // A survey answers "how much would one dispatch copy" without hashing or
         // copying anything, including for a closure a caller chose to cap.
-        assert!(resolve_dependency_closure(DependencyClosureRequest {
-            max_dependencies: Some(2),
-            ..DependencyClosureRequest::new(&plugin, &roots)
-        })
-        .is_err());
+        assert!(
+            resolve_dependency_closure(DependencyClosureRequest {
+                max_dependencies: Some(2),
+                ..DependencyClosureRequest::new(&plugin, &roots)
+            })
+            .is_err()
+        );
         let survey = survey_dependency_closure(&plugin, &roots).unwrap();
         assert_eq!(survey.modules.len(), 4);
         assert!(survey.total_bytes > 0);

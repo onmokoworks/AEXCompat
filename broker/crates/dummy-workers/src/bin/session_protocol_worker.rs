@@ -43,12 +43,12 @@
 
 #[cfg(windows)]
 mod worker {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-    use windows_sys::Win32::System::Memory::{MapViewOfFile, FILE_MAP_ALL_ACCESS};
+    use windows_sys::Win32::System::Memory::{FILE_MAP_ALL_ACCESS, MapViewOfFile};
     use windows_sys::Win32::System::StationsAndDesktops::{
         GetThreadDesktop, GetUserObjectInformationW, UOI_NAME,
     };

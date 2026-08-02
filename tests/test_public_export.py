@@ -27,14 +27,16 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     git(source, "config", "user.name", "Test")
     git(source, "config", "user.email", "test@host.tailbe216f.ts.net")
     (source / "README.md").write_text("public\n", encoding="utf-8")
-    (source / "machine.txt").write_text(
-        "C:\\Users\\alice\\private and /Users/bob/private and "
-        "D:\\Projects\\private-checkout and /home/carol/private\n",
-        encoding="utf-8",
-    )
+    (source / "machine.txt").write_text("public payload\n", encoding="utf-8")
     (source / "private.dll").write_bytes(b"not public")
     git(source, "add", ".")
-    git(source, "commit", "-m", "initial")
+    git(
+        source,
+        "commit",
+        "-m",
+        "built under C:\\Users\\alice\\checkout\n\n"
+        "Co-authored-by: Test <test@host.tailbe216f.ts.net>",
+    )
     git(source, "config", "user.email", "tagger@workstation.local")
     git(source, "tag", "-a", "v1", "-m", "public release")
     git(source, "config", "user.email", "test@host.tailbe216f.ts.net")
@@ -56,10 +58,11 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
         "<public@users.noreply.github.com>"
     )
     assert "private.dll" not in git(output, "log", "--all", "--name-only", "--format=")
-    exported_text = (output / "machine.txt").read_text(encoding="utf-8")
-    assert all(name not in exported_text for name in ("alice", "bob", "carol"))
-    assert exported_text.count("<redacted-home>") == 3
-    assert "<redacted-windows-path>" in exported_text
+    assert (output / "machine.txt").read_text(encoding="utf-8") == "public payload\n"
+    exported_messages = git(output, "log", "--all", "--format=%B")
+    assert "alice" not in exported_messages
+    assert "tailbe216f.ts.net" not in exported_messages
+    assert "<redacted-home>" in exported_messages
     assert public_export.scan_export(output) == []
     git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
 
@@ -87,6 +90,35 @@ def test_rejects_selected_tag_that_does_not_resolve_to_commit(tmp_path):
         public_export.validate_selected_tags(repository, ["blob-tag"])
 
 
+def test_scan_finds_prohibited_path_created_by_merge_resolution(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    (repository / "README.md").write_text("base\n", encoding="utf-8")
+    git(repository, "add", "README.md")
+    git(repository, "commit", "-m", "base")
+    git(repository, "checkout", "-b", "side")
+    (repository / "side.txt").write_text("side\n", encoding="utf-8")
+    git(repository, "add", "side.txt")
+    git(repository, "commit", "-m", "side")
+    git(repository, "checkout", "main")
+    (repository / "main.txt").write_text("main\n", encoding="utf-8")
+    git(repository, "add", "main.txt")
+    git(repository, "commit", "-m", "main")
+    git(repository, "merge", "--no-commit", "side")
+    private = repository / "private" / "payload.txt"
+    private.parent.mkdir()
+    private.write_text("merge resolution\n", encoding="utf-8")
+    git(repository, "add", "private/payload.txt")
+    git(repository, "commit", "-m", "merge with private resolution")
+
+    findings = public_export.scan_export(repository)
+
+    assert any("prohibited historical path: private/payload.txt" in item for item in findings)
+
+
 def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -101,11 +133,18 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
         r'"share":"\\\\alice-pc\\private-share\\AEXCompat"}',
         encoding="utf-8",
     )
-    secret_name = "gho_abcdefghijklmnopqrstuvwxyz123456"
+    secret_name = "gho_" + "abcdefghijklmnopqrstuvwxyz123456"
     (repository / secret_name).write_text("empty payload\n", encoding="utf-8")
     git(repository, "add", "README.md", "diagnostic.json", secret_name)
     git(repository, "commit", "-m", r"built under C:\Users\alice\checkout")
-    git(repository, "tag", "-a", "v1", "-m", "token ghp_abcdefghijklmnopqrstuvwxyz123456")
+    git(
+        repository,
+        "tag",
+        "-a",
+        "v1",
+        "-m",
+        "token ghp_" + "abcdefghijklmnopqrstuvwxyz123456",
+    )
 
     findings = public_export.scan_export(repository)
 
@@ -120,9 +159,9 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
-        (b"temporary key ASIAABCDEFGHIJKLMNOP", "AWS access key candidate"),
-        (b"-----BEGIN DSA PRIVATE KEY-----", "private key candidate"),
-        (b"-----BEGIN ENCRYPTED PRIVATE KEY-----", "private key candidate"),
+        (b"temporary key ASIA" + b"ABCDEFGHIJKLMNOP", "AWS access key candidate"),
+        (b"-----BEGIN DSA " + b"PRIVATE KEY-----", "private key candidate"),
+        (b"-----BEGIN ENCRYPTED " + b"PRIVATE KEY-----", "private key candidate"),
         (b"checkout /home/alice/private/AEXCompat", "Linux user path"),
         (b"checkout /root/private/AEXCompat", "Linux root path"),
         (b"checkout D:/Projects/alice/private/AEXCompat", "Windows absolute path"),
