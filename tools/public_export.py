@@ -50,7 +50,10 @@ SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
     rb"[A-Za-z0-9.!#$%&*+/=?^_`{|}~\x80-\xff-]+@"
     rb"(?=[A-Za-z0-9_\x80-\xff-]*[A-Za-z_\x80-\xff-])"
     rb"[A-Za-z0-9_\x80-\xff-]+"
-    rb"(?=$|[\x00-\x20<>,;:'\"\)\]\}])"
+    rb"(?=$|[\x00-\x20<>,;:'\"!?\)\]\}]|\.(?=$|[\x00-\x20]))"
+)
+DOTENV_ASSIGNMENT = re.compile(
+    rb"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=)(.*)$", re.S
 )
 HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT = (
     "regex:(?i)[A-Za-z]:[\\\\/]+Users[\\\\/]+[^\\\\/\\r\\n]+==><redacted-home>\n"
@@ -76,7 +79,8 @@ PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
     "[A-Za-z0-9.!#$%&*+/=?^_`{|}~\\x80-\\xff-]+@"
     "(?=[A-Za-z0-9_\\x80-\\xff-]*[A-Za-z_\\x80-\\xff-])"
     "[A-Za-z0-9_\\x80-\\xff-]+"
-    "(?=$|[\\x00-\\x20<>,;:'\"\\)\\]\\}])"
+    "(?=$|[\\x00-\\x20<>,;:'\"!?\\)\\]\\}]|"
+    "\\.(?=$|[\\x00-\\x20]))"
     "==><redacted-private-email>\n"
 )
 PERSONAL_PATH_PATTERNS = {
@@ -341,11 +345,13 @@ def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
     if path is not None and is_dotenv_path(path):
         redacted_lines = []
         for line in payload.splitlines(keepends=True):
-            if b"=" not in line:
+            assignment = DOTENV_ASSIGNMENT.match(line)
+            if assignment is None:
                 redacted_lines.append(redact_personal_paths(line))
                 continue
-            key, value = line.split(b"=", 1)
-            redacted_lines.append(key + b"=" + redact_personal_paths(value))
+            redacted_lines.append(
+                assignment.group(1) + redact_personal_paths(assignment.group(2))
+            )
         return b"".join(redacted_lines)
     for label, pattern in PERSONAL_PATH_PATTERNS.items():
         payload = pattern.sub(PERSONAL_PATH_REDACTIONS[label], payload)

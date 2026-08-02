@@ -146,7 +146,9 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     )
     root_dotenv.write_text("OWNER=alice@workstation\n", encoding="utf-8")
     local_dotenv.write_text(
-        "# Contact alice@workstation\nOWNER=alice@workstation\n",
+        "# Contact alice=tag@workstation.\n"
+        "# Alternate alice@workstation!\n"
+        "OWNER=alice@workstation\n",
         encoding="utf-8",
     )
     git(
@@ -213,7 +215,8 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
         "OWNER=<redacted-private-email>\n"
     )
     assert (output / "analysis" / ".env.local").read_text(encoding="utf-8") == (
-        "# Contact <redacted-private-email>\n"
+        "# Contact <redacted-private-email>.\n"
+        "# Alternate <redacted-private-email>!\n"
         "OWNER=<redacted-private-email>\n"
     )
     assert old_oid not in git(output, "rev-list", "--objects", "--all")
