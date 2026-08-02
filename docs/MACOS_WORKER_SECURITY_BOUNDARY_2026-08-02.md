@@ -162,11 +162,16 @@ then recovered from its upstream GitHub release and matched the inventory exactl
 Both an independently built `origin/main` worker and this branch rejected it at
 setup with the same bounded `native AVX state sync point capacity exceeded`
 classification, so it was not in the baseline success set and this hardening did
-not regress it. The operator confirmed that neither proprietary Rowbyte plug-in
-is owned on this Mac. They cannot be replayed here and are an explicit evidence
-gap, not a requirement to purchase commercial software for this hardening. A
-future corpus custodian who already has licensed copies should replay those two
-identities; the available-case checks must not be presented as evidence for them.
+not regress it. The two proprietary Rowbyte binaries were then located on the
+operator's paired Windows machine and copied only to a mode-0700 private temporary
+directory for this local comparison. `DataGlitch_x64.aex` and `FastBokeh.aex`
+matched the inventory sizes and SHA-256 identities exactly. Both `origin/main`
+and this branch rejected both binaries before lifecycle/matrix execution with the
+same bounded `effect discovery export was not found` loader classification, so
+neither was in the baseline success set. The private copies were deleted after
+validation. Across all five identities, the success set remains the two OLM
+effects and both successful outputs remain byte-identical; all three baseline
+failures retain the same classification.
 
 The x86_64 Release test binary also exposed a host/Rosetta issue. A parallel run
 left several concurrent Unicorn initialization/OpenCL threads uninterruptible;
@@ -195,12 +200,12 @@ artifacts are deleted after the structured result is captured.
 
 ## Remaining limits and roadmap
 
-External release evidence still unavailable on this machine is: a credentialed
-Developer ID + notarization run on the final package, and canonical replay of
-the two unowned proprietary Rowbyte identities. Neither is an unresolved code
-failure; release notes must identify both as unverified rather than claiming a
-green gate. The reboot/zero-residual gate is complete, and the non-shipping
-x86_64 Unicorn/OpenCL combination has the architecture exclusion described above.
+External release evidence still unavailable on this machine is a credentialed
+Developer ID + notarization run on the final package. This is not an unresolved
+code failure; release notes must identify it as unverified rather than claiming
+a notarized gate. The frozen-corpus, reboot/zero-residual, and architecture gates
+are complete, and the non-shipping x86_64 Unicorn/OpenCL combination has the
+architecture exclusion described above.
 The existing controller, local Hardened Runtime signing test, distinct tiers,
 and documented non-guarantees are otherwise a sufficient minimum boundary.
 
