@@ -106,6 +106,13 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
         "edfd8aa05aef948c7a2c18312d7d27a5f8405117d84a01420dd5703f00e4fa12",
     }),
 }
+INTENTIONAL_PRIVATE_EMAIL_DIGESTS = {
+    "tests/test_public_export.py": frozenset({
+        "7f7133531186b4111a5064669ffb421e2d454cd91126d30d872f6f04584520a3",
+        "8127d9e7a091c9e9f50175214c5aaaec1ed598737170686ef3697455bd5404f1",
+        "c01af6ee6d8fa95f05bd62d5e9ce9f5e64009b22132b239e3be6a6de099a7902",
+    }),
+}
 DIAGNOSTIC_SUFFIXES = {".json", ".jsonl", ".log"}
 DIAGNOSTIC_PARTS = {"analysis", "corpus", "diagnostics", "results"}
 
@@ -325,10 +332,23 @@ def scan_export(repository: Path) -> list[str]:
                     findings.append(
                         f"private tagger email in reachable tag {expected_oid}"
                     )
-            if (
+            scans_private_emails = (
                 expected_oid in symlink_oids
                 or scans_personal_paths(expected_kind, object_paths)
-            ) and PRIVATE_EMAIL_IN_PAYLOAD.search(payload):
+            )
+            for match in PRIVATE_EMAIL_IN_PAYLOAD.finditer(payload):
+                if not scans_private_emails:
+                    break
+                if (
+                    expected_kind == "blob"
+                    and object_paths
+                    and all(
+                        hashlib.sha256(match.group(0)).hexdigest()
+                        in INTENTIONAL_PRIVATE_EMAIL_DIGESTS.get(path, ())
+                        for path in object_paths
+                    )
+                ):
+                    continue
                 findings.append(
                     f"private email in reachable {expected_kind} {expected_oid}"
                 )
