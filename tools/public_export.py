@@ -379,8 +379,6 @@ def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
                 assignment.group(1) + redact_personal_paths(assignment.group(2))
             )
         return b"".join(redacted_lines)
-    for label, pattern in PERSONAL_PATH_PATTERNS.items():
-        payload = pattern.sub(PERSONAL_PATH_REDACTIONS[label], payload)
     payload = MARKUP_WRAPPED_PRIVATE_EMAIL_IN_PAYLOAD.sub(
         b"<redacted-private-email>", payload
     )
@@ -391,6 +389,8 @@ def redact_personal_paths(payload: bytes, path: str | None = None) -> bytes:
     payload = SINGLE_LABEL_EMAIL_IN_PAYLOAD.sub(
         b"<redacted-private-email>", payload
     )
+    for label, pattern in PERSONAL_PATH_PATTERNS.items():
+        payload = pattern.sub(PERSONAL_PATH_REDACTIONS[label], payload)
     return payload
 
 

@@ -186,6 +186,7 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
         + 'Projects/current/result","workspace":"/'
         + 'workspaces/alice/build",'
         '"owner":"alice@workstation",'
+        '"tailscale_owner":"alice@host.tail123.ts.net",'
         '"digit_owner":"alice@3dworkstation",'
         '"tagged_owner":"alice!tag@workstation","suite":"Suite@2",'
         '"protocol":"v2|brightness@1"}\n',
@@ -212,6 +213,7 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
     assert (output / "analysis" / "result.json").read_text(encoding="utf-8") == (
         '{"path":"<redacted-windows-path>","workspace":"<redacted-workspace>",'
         '"owner":"<redacted-private-email>",'
+        '"tailscale_owner":"<redacted-private-email>",'
         '"digit_owner":"<redacted-private-email>",'
         '"tagged_owner":"<redacted-private-email>","suite":"Suite@2",'
         '"protocol":"v2|brightness@1"}\n'
