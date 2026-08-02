@@ -304,6 +304,7 @@ INTENTIONAL_PRIVATE_EMAIL_DIGESTS = {
         "6e1f34cab96ab431774dc6e2ff80d29063ea80d1f4702121180d3972adf4a4ad",
         "81811e6237d4dbdf4c49b5050a466423c07c52c8bfe0d64ec3ef9f81e9e78958",
         "bfdd2835ac0d8ce18be58843fa33afd4ce905b46550723bbded7a2bd262f6edb",
+        "92ca5d7ea5ec4783e16b69d97d6a7ee33c1be5894fcb785f26b9877c4a2dc736",
     }),
 }
 
@@ -776,7 +777,21 @@ def scan_export(repository: Path) -> list[str]:
                     findings.append(
                         f"private email in reachable {expected_kind} {expected_oid}"
                     )
-            if CONTEXTUAL_SINGLE_LABEL_EMAIL_IN_PAYLOAD.search(scan_payload):
+            contextual_matches = list(
+                CONTEXTUAL_SINGLE_LABEL_EMAIL_IN_PAYLOAD.finditer(scan_payload)
+            )
+            if contextual_matches and not (
+                expected_kind == "blob"
+                and object_paths
+                and all(
+                    all(
+                        hashlib.sha256(match.group(0)).hexdigest()
+                        in INTENTIONAL_PRIVATE_EMAIL_DIGESTS.get(path, ())
+                        for match in contextual_matches
+                    )
+                    for path in object_paths
+                )
+            ):
                 findings.append(
                     f"private email in reachable {expected_kind} {expected_oid}"
                 )
