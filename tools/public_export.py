@@ -455,11 +455,19 @@ def historical_path_cleanup_paths(repository: Path) -> set[str]:
     for oid, kind, paths in reachable_objects(repository):
         if kind != "blob":
             continue
+        candidate_paths = {
+            path
+            for path in paths
+            if scans_all_personal_paths(kind, frozenset({path}))
+            or PurePosixPath(path).suffix.lower() in PUBLICATION_TEXT_SUFFIXES
+        }
+        if not candidate_paths:
+            continue
         payload = run(
             ["git", "cat-file", "blob", oid], cwd=repository, text=False
         ).stdout
         eligible = {
-            path for path in paths
+            path for path in candidate_paths
             if (
                 scans_all_personal_paths(kind, frozenset({path}))
                 or (
