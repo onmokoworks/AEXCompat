@@ -33,7 +33,9 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     (source / "private.dll").write_bytes(b"not public")
     git(source, "add", ".")
     git(source, "commit", "-m", "initial")
-    git(source, "tag", "v1")
+    git(source, "config", "user.email", "tagger@workstation.local")
+    git(source, "tag", "-a", "v1", "-m", "public release")
+    git(source, "config", "user.email", "test@host.tailbe216f.ts.net")
     git(source, "tag", "internal-wip")
     (source / "private.dll").unlink()
     git(source, "add", "-u")
@@ -48,6 +50,9 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert set(git(output, "log", "--all", "--format=%ae%n%ce").splitlines()) == {
         "public@users.noreply.github.com"
     }
+    assert git(output, "for-each-ref", "--format=%(taggeremail)", "refs/tags/v1") == (
+        "<public@users.noreply.github.com>"
+    )
     assert "private.dll" not in git(output, "log", "--all", "--name-only", "--format=")
     exported_text = (output / "machine.txt").read_text(encoding="utf-8")
     assert "alice" not in exported_text and "bob" not in exported_text
@@ -73,13 +78,17 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     git(repository, "config", "user.name", "Test")
     git(repository, "config", "user.email", "test@example.invalid")
     (repository / "README.md").write_text("public\n", encoding="utf-8")
-    git(repository, "add", "README.md")
+    (repository / "diagnostic.json").write_text(
+        r'{"path":"C:\\Users\\alice\\checkout"}', encoding="utf-8"
+    )
+    git(repository, "add", "README.md", "diagnostic.json")
     git(repository, "commit", "-m", r"built under C:\Users\alice\checkout")
     git(repository, "tag", "-a", "v1", "-m", "token ghp_abcdefghijklmnopqrstuvwxyz123456")
 
     findings = public_export.scan_export(repository)
 
     assert any("Windows user path in reachable commit" in item for item in findings)
+    assert any("Windows user path in reachable blob" in item for item in findings)
     assert any("GitHub token candidate in reachable tag" in item for item in findings)
 
 

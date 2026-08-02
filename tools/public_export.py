@@ -34,7 +34,7 @@ SECRET_PATTERNS = {
 }
 PRIVATE_EMAIL = re.compile(r"(?i)(?:\.tail[0-9a-z]+\.ts\.net|\.local)$")
 PERSONAL_PATH_PATTERNS = {
-    "Windows user path": re.compile(rb"\b[A-Za-z]:\\Users\\[^\\/\r\n]+"),
+    "Windows user path": re.compile(rb"\b[A-Za-z]:\\+Users\\+[^\\/\r\n]+"),
     "macOS user path": re.compile(b"/" + rb"Users/[^/\r\n]+"),
     "Tailscale hostname": re.compile(rb"\b[A-Za-z0-9._-]+\.tail[0-9a-z]+\.ts\.net\b", re.I),
 }
@@ -137,10 +137,15 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
     identities = run(
         ["git", "log", "--all", "--format=%an%x00%ae%n%cn%x00%ce"], cwd=repository
     ).stdout.splitlines()
+    identities.extend(run(
+        ["git", "for-each-ref", "--format=%(taggername)%00%(taggeremail)", "refs/tags"],
+        cwd=repository,
+    ).stdout.splitlines())
     private_identities = sorted({
-        tuple(line.split("\0", 1))
+        (line.split("\0", 1)[0], line.split("\0", 1)[1].strip("<>"))
         for line in identities
-        if "\0" in line and PRIVATE_EMAIL.search(line.split("\0", 1)[1])
+        if "\0" in line
+        and PRIVATE_EMAIL.search(line.split("\0", 1)[1].strip("<>"))
     })
     with tempfile.TemporaryDirectory(prefix="aexcompat-public-export-") as temporary:
         temporary = Path(temporary)
@@ -151,7 +156,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         replacements = temporary / "replacements.txt"
         replacements.write_text(
-            "regex:[A-Za-z]:\\\\Users\\\\[^\\\\/\\r\\n]+==><redacted-home>\n"
+            "regex:[A-Za-z]:\\\\+Users\\\\+[^\\\\/\\r\\n]+==><redacted-home>\n"
             "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
             "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n",
             encoding="utf-8",
@@ -209,6 +214,14 @@ def create_export(source: Path, output: Path, tags: list[str], public_email: str
             email for email in run(["git", "log", "--all", "--format=%ae%n%ce"], cwd=output).stdout.splitlines()
             if PRIVATE_EMAIL.search(email)
         ]
+        private_emails.extend(
+            email.strip("<>")
+            for email in run(
+                ["git", "for-each-ref", "--format=%(taggeremail)", "refs/tags"],
+                cwd=output,
+            ).stdout.splitlines()
+            if PRIVATE_EMAIL.search(email.strip("<>"))
+        )
         if private_emails:
             raise RuntimeError("private host-derived author email remains after rewrite")
         findings = scan_export(output)
