@@ -268,6 +268,12 @@ def test_rejects_implicit_or_unsafe_tag_names():
             raise AssertionError(f"unsafe tag accepted: {tag!r}")
 
 
+def test_prohibited_path_recognizes_conventional_after_effects_sdk_directory():
+    assert public_export.prohibited_path(
+        "AfterEffectsSDK/Examples/Headers/AE_Effect.h"
+    )
+
+
 def test_tree_name_scan_excludes_binary_object_ids():
     binary_oid = b"j1@k" + bytes(16)
     payload = b"100644 safe.txt\0" + binary_oid

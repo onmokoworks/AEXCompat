@@ -24,7 +24,9 @@ PROHIBITED_SUFFIXES = {
     ".aex", ".dll", ".dmp", ".dump", ".pdb", ".lib", ".obj",
     ".exe", ".zip", ".7z", ".rar", ".aep", ".psd", ".pyc", ".pyo",
 }
-PROHIBITED_PARTS = {"private", "proprietary", "adobe-sdk", "after-effects-sdk"}
+PROHIBITED_PARTS = {
+    "private", "proprietary", "adobe-sdk", "after-effects-sdk", "aftereffectssdk",
+}
 SECRET_PATTERNS = {
     # Split the marker so the scanner's own source is not a finding.
     "private key": re.compile(
