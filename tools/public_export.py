@@ -37,7 +37,7 @@ SECRET_PATTERNS = {
     "Slack token": re.compile(rb"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
 }
 PRIVATE_EMAIL = re.compile(
-    r"(?i)^[^@\s]+@(?:[^.@\s]+|[^@\s]+(?:\.tail[0-9a-z]+\.ts\.net|\.local))$"
+    r"(?i)^[^@\r\n]+@(?:[^.@\s]+|[^@\s]+(?:\.tail[0-9a-z]+\.ts\.net|\.local))$"
 )
 PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
     rb"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:"
@@ -280,6 +280,19 @@ def tag_identity(payload: bytes) -> tuple[str, str] | None:
     )
 
 
+def commit_identities(payload: bytes) -> list[tuple[str, str]]:
+    identities = []
+    for match in re.finditer(
+        rb"(?m)^(?:author|committer) (.*?) <([^<>]+)> [0-9]+ [+-][0-9]{4}$",
+        payload,
+    ):
+        identities.append((
+            match.group(1).decode("utf-8", errors="replace"),
+            match.group(2).decode("utf-8", errors="replace"),
+        ))
+    return identities
+
+
 def reachable_tag_identities(repository: Path) -> list[tuple[str, str]]:
     identities: list[tuple[str, str]] = []
     tag_oids = [oid for oid, kind, _paths in reachable_objects(repository) if kind == "tag"]
@@ -478,11 +491,16 @@ def scan_export(repository: Path) -> list[str]:
                 if expected_kind == "tree"
                 else payload
             )
-            if expected_kind == "tag":
-                identity = tag_identity(payload)
-                if identity is not None and PRIVATE_EMAIL.search(identity[1]):
+            metadata_identities = (
+                commit_identities(payload)
+                if expected_kind == "commit"
+                else [identity] if expected_kind == "tag" and (identity := tag_identity(payload))
+                else []
+            )
+            for _name, email in metadata_identities:
+                if PRIVATE_EMAIL.search(email):
                     findings.append(
-                        f"private tagger email in reachable tag {expected_oid}"
+                        f"private identity email in reachable {expected_kind} {expected_oid}"
                     )
             scans_private_emails = (
                 expected_oid in symlink_oids

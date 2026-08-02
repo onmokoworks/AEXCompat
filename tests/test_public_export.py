@@ -153,14 +153,14 @@ def test_single_label_host_email_is_private(tmp_path):
     repository.mkdir()
     git(repository, "init", "-b", "main")
     git(repository, "config", "user.name", "Alice")
-    git(repository, "config", "user.email", "alice@workstation")
+    git(repository, "config", "user.email", "alice @workstation.local")
     (repository / "README.md").write_text("public\n", encoding="utf-8")
     git(repository, "add", "README.md")
     git(repository, "commit", "-m", "local identity")
 
-    assert public_export.PRIVATE_EMAIL.search("alice@workstation")
+    assert public_export.PRIVATE_EMAIL.search("alice @workstation.local")
     assert any(
-        "private email in reachable commit" in item
+        "private identity email in reachable commit" in item
         for item in public_export.scan_export(repository)
     )
 
