@@ -797,7 +797,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         replacements = temporary / "replacements.txt"
         replacements.write_text(
-            PATH_REPLACEMENTS_TEXT + PRIVATE_EMAIL_REPLACEMENTS_TEXT,
+            PRIVATE_EMAIL_REPLACEMENTS_TEXT + PATH_REPLACEMENTS_TEXT,
             encoding="utf-8",
         )
         source_replacements = temporary / "source-replacements.txt"
