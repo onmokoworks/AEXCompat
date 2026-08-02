@@ -47,8 +47,9 @@ PRIVATE_EMAIL_IN_PAYLOAD = re.compile(
 )
 SINGLE_LABEL_EMAIL_IN_PAYLOAD = re.compile(
     rb"(?<![A-Za-z0-9._%+\x80-\xff-])"
-    rb"[A-Za-z0-9._%+\x80-\xff-]+@[A-Za-z\x80-\xff]"
-    rb"[A-Za-z0-9_\x80-\xff-]*"
+    rb"[A-Za-z0-9._%+\x80-\xff-]+@"
+    rb"(?=[A-Za-z0-9_\x80-\xff-]*[A-Za-z_\x80-\xff-])"
+    rb"[A-Za-z0-9_\x80-\xff-]+"
     rb"(?=$|[\x00-\x20<>,;:'\"\)\]\}])"
 )
 HIGH_CONFIDENCE_PATH_REPLACEMENTS_TEXT = (
@@ -73,6 +74,7 @@ PRIVATE_EMAIL_REPLACEMENTS_TEXT = (
     "==><redacted-private-email>\n"
     "regex:(?<![A-Za-z0-9._%+\\x80-\\xff-])"
     "[A-Za-z0-9.!#$%&'*+/=?^_`{|}~\\x80-\\xff-]+@"
+    "(?=[A-Za-z0-9_\\x80-\\xff-]*[A-Za-z_\\x80-\\xff-])"
     "[A-Za-z0-9_\\x80-\\xff-]+"
     "(?=$|[\\x00-\\x20<>,;:'\"\\)\\]\\}])"
     "==><redacted-private-email>\n"
