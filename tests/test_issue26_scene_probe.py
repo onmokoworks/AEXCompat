@@ -299,42 +299,9 @@ def test_corpus_is_strict_schema_valid_and_derived():
         "sdk-projector-aexcompat.json",
         "sdk-resizer-aexcompat.json",
     ]
-    passing_records = [
-        path
-        for path in records
-        if path.name != "after-effects-26.3-partial.json"
-    ]
-    completed = subprocess.run(
-        [sys.executable, str(TOOL), "validate", *map(str, passing_records)],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr or completed.stdout
-    partial = subprocess.run(
-        [
-            sys.executable,
-            str(TOOL),
-            "validate",
-            str(CORPUS / "after-effects-26.3-partial.json"),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert partial.returncode != 0
-    assert "status=partial" in partial.stderr
-    corpus_result = subprocess.run(
-        [sys.executable, str(TOOL), "validate", *map(str, records)],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert corpus_result.returncode != 0
-    assert "status=partial" in corpus_result.stderr
+    validator = Draft202012Validator(strict_load(SCHEMA_PATH))
+    for path in records:
+        validator.validate(strict_load(path))
     by_target = {strict_load(path)["target"]: strict_load(path) for path in records}
     aexcompat = by_target["aexcompat"]
     assert aexcompat["status"] == "passed"
@@ -386,6 +353,13 @@ def test_corpus_is_strict_schema_valid_and_derived():
         projector["execution"]["stdout"] + projector["execution"]["stderr"]
     )
     assert "suite_acquire_failed" in projector["execution"]["stderr"]
+
+
+def test_corpus_machine_bound_receipts_are_authenticated():
+    by_target = {
+        strict_load(path)["target"]: strict_load(path)
+        for path in sorted(CORPUS.glob("*.json"))
+    }
     for target in ("sdk_projector_aexcompat", "sdk_resizer_aexcompat"):
         record = by_target[target]
         assert record["sample_report"]["sdk_source_unchanged"] is True

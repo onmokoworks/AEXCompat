@@ -55,6 +55,20 @@ INTENTIONAL_SCANNER_FIXTURES = {
     "tests/test_public_export.py",
     "tools/public_export.py",
 }
+DIAGNOSTIC_SUFFIXES = {".json", ".jsonl", ".log"}
+DIAGNOSTIC_PARTS = {"analysis", "corpus", "diagnostics", "results"}
+
+
+def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
+    if kind != "blob":
+        return True
+    for path in paths:
+        candidate = PurePosixPath(path)
+        if candidate.suffix.lower() in DIAGNOSTIC_SUFFIXES:
+            return True
+        if {part.lower() for part in candidate.parts} & DIAGNOSTIC_PARTS:
+            return True
+    return False
 
 
 def run(argv: list[str], *, cwd: Path | None = None, text: bool = True) -> subprocess.CompletedProcess:
@@ -185,7 +199,7 @@ def scan_export(repository: Path) -> list[str]:
                         f"{label} candidate in reachable {expected_kind} {expected_oid}"
                     )
             for label, pattern in PERSONAL_PATH_PATTERNS.items():
-                if pattern.search(payload) and not (
+                if scans_personal_paths(expected_kind, object_paths) and pattern.search(payload) and not (
                     expected_kind == "blob"
                     and object_paths
                     and object_paths <= INTENTIONAL_SCANNER_FIXTURES

@@ -194,11 +194,31 @@ def test_scan_recognizes_publication_sensitive_variants(tmp_path, payload, expec
     git(repository, "init", "-b", "main")
     git(repository, "config", "user.name", "Test")
     git(repository, "config", "user.email", "test@example.invalid")
-    (repository / "payload.txt").write_bytes(payload)
-    git(repository, "add", "payload.txt")
+    payload_path = repository / "analysis" / "payload.txt"
+    payload_path.parent.mkdir()
+    payload_path.write_bytes(payload)
+    git(repository, "add", "analysis/payload.txt")
     git(repository, "commit", "-m", "fixture")
 
     assert any(expected in item for item in public_export.scan_export(repository))
+
+
+def test_public_documentation_path_literal_is_not_private_diagnostic(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    docs = repository / "docs" / "BUILD_REQUIREMENTS.md"
+    docs.parent.mkdir()
+    docs.write_text("Install under C:\\Program Files\\Tool\n", encoding="utf-8")
+    git(repository, "add", "docs/BUILD_REQUIREMENTS.md")
+    git(repository, "commit", "-m", "document public install path")
+
+    assert not any(
+        "Windows absolute path in reachable blob" in item
+        for item in public_export.scan_export(repository)
+    )
 
 
 def test_scan_discards_oversized_blob_in_bounded_chunks(tmp_path):
