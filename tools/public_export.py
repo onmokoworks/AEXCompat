@@ -54,6 +54,10 @@ PERSONAL_PATH_PATTERNS = {
     "macOS user path": re.compile(b"/" + rb"Users/[^/\r\n]+"),
     "Linux user path": re.compile(b"/" + rb"home/[^/\r\n]+"),
     "Linux root path": re.compile(b"/" + rb"root(?:/[^\s`\"']*)?"),
+    "container workspace path": re.compile(
+        b"/" + rb"(?:workspace|workspaces|github/workspace|__w)(?:/[^\s`\"']*)?",
+        re.I,
+    ),
     "Tailscale hostname": re.compile(rb"\b[A-Za-z0-9._-]+\.tail[0-9a-z]+\.ts\.net\b", re.I),
 }
 INTENTIONAL_SCANNER_FIXTURES = {
@@ -336,6 +340,8 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
             "regex:/home/[^/\\r\\n]+==><redacted-home>\n"
             "regex:/root(?:/[^\\s`\"']*)?==><redacted-home>\n"
+            "regex:/(?i:workspace|workspaces|github/workspace|__w)"
+            "(?:/[^\\s`\"']*)?==><redacted-workspace>\n"
             "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n"
             "regex:[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
             "[A-Za-z0-9.-]+(?:\\.tail[0-9a-z]+\\.ts\\.net|\\.local)"

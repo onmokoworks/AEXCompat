@@ -146,6 +146,7 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
         r'{"home":"C:\\users\\alice\\checkout",'
         r'"workspace":"D:\\Projects\\private-checkout",'
         r'"forward":"E:/Projects/private-checkout",'
+        r'"container":"/workspace/alice/private/AEXCompat",'
         r'"share":"\\\\alice-pc\\private-share\\AEXCompat"}',
         encoding="utf-8",
     )
@@ -168,6 +169,7 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     assert any("Windows user path in reachable blob" in item for item in findings)
     assert any("Windows absolute path in reachable blob" in item for item in findings)
     assert any("Windows UNC path in reachable blob" in item for item in findings)
+    assert any("container workspace path in reachable blob" in item for item in findings)
     assert any("GitHub token candidate in reachable tag" in item for item in findings)
     assert any("GitHub token candidate in reachable tree" in item for item in findings)
 
