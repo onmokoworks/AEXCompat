@@ -66,6 +66,9 @@ INTENTIONAL_SCANNER_FIXTURES = {
     "tools/public_export.py",
 }
 INTENTIONAL_PERSONAL_PATH_DIGESTS = {
+    "instruments/common/trace_writer_selftest/main.cpp": frozenset({
+        "a4fc1f4893afb162e8829785530ef8dc92e418b047b01e5b67ab67c4a08ce17b",
+    }),
     "tools/public_export.py": frozenset({
         "1bffdae4417988548991dba5de1ab86e3063bedcc746ca1f48caeee39de59115",
         "2307dfb012141522a63239579fb4648b52373d42ba7bcd66f9ccff99e59c11ad",
@@ -116,6 +119,7 @@ INTENTIONAL_PRIVATE_EMAIL_DIGESTS = {
 DIAGNOSTIC_SUFFIXES = {".json", ".jsonl", ".log"}
 DIAGNOSTIC_PARTS = {"analysis", "corpus", "diagnostics", "results"}
 PATH_BEARING_METADATA = {".gitmodules", ".mailmap", ".gitconfig"}
+PATH_BEARING_SOURCE_SUFFIXES = {".cpp", ".jsx"}
 
 
 def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
@@ -126,6 +130,8 @@ def scans_personal_paths(kind: str, paths: frozenset[str]) -> bool:
             return True
         candidate = PurePosixPath(path)
         if candidate.name.lower() in PATH_BEARING_METADATA:
+            return True
+        if candidate.suffix.lower() in PATH_BEARING_SOURCE_SUFFIXES:
             return True
         if candidate.suffix.lower() in DIAGNOSTIC_SUFFIXES:
             return True
@@ -448,9 +454,22 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
             "==><redacted-private-email>\n",
             encoding="utf-8",
         )
+        source_replacements = temporary / "source-replacements.txt"
+        source_replacements.write_text(
+            "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
+            "pf-batch-sampling.result.json==>target/ae-oracles/"
+            "pf-batch-sampling.result.json\n"
+            "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
+            "pf-batch-sampling-run.result.json==>target/ae-oracles/"
+            "pf-batch-sampling-run.result.json\n"
+            "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
+            "pf-batch-sampling.png==>target/ae-oracles/pf-batch-sampling.png\n",
+            encoding="utf-8",
+        )
         command = [
             sys.executable, "-m", "git_filter_repo", "--force",
             "--mailmap", str(mailmap), "--replace-message", str(replacements),
+            "--replace-text", str(source_replacements),
         ]
         for suffix in sorted(PROHIBITED_SUFFIXES):
             command.extend(["--path-glob", f"*{suffix}"])

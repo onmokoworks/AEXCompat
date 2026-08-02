@@ -8,7 +8,7 @@
 
 namespace {
 constexpr char kResultPath[] =
-    "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/pf-batch-sampling.result.json";
+    "target/ae-oracles/pf-batch-sampling.result.json";
 
 struct Snapshot {
   PF_SampPB value{};

@@ -379,6 +379,24 @@ def test_repository_metadata_is_scanned_for_personal_paths(tmp_path, metadata_na
     )
 
 
+@pytest.mark.parametrize("source_name", ["probe.cpp", "runner.jsx"])
+def test_path_bearing_source_is_scanned_for_personal_paths(tmp_path, source_name):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    private_path = "D:/" + "Projects/alice/private/AEXCompat"
+    (repository / source_name).write_text(private_path, encoding="utf-8")
+    git(repository, "add", source_name)
+    git(repository, "commit", "-m", "add path-bearing source")
+
+    assert any(
+        "Windows absolute path in reachable blob" in item
+        for item in public_export.scan_export(repository)
+    )
+
+
 def test_scan_discards_oversized_blob_in_bounded_chunks(tmp_path):
     repository = tmp_path / "repository"
     repository.mkdir()
