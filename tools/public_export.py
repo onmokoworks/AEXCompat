@@ -41,6 +41,9 @@ PERSONAL_PATH_PATTERNS = {
     "Windows absolute path": re.compile(
         rb"\b[A-Za-z]:\\+[^\s`\"']+", re.I
     ),
+    "Windows UNC path": re.compile(
+        rb"\\{2,}[^\\/\s`\"']+\\+[^\s`\"']+", re.I
+    ),
     "macOS user path": re.compile(b"/" + rb"Users/[^/\r\n]+"),
     "Tailscale hostname": re.compile(rb"\b[A-Za-z0-9._-]+\.tail[0-9a-z]+\.ts\.net\b", re.I),
 }
@@ -85,6 +88,38 @@ def reachable_objects(repository: Path) -> list[tuple[str, str]]:
     return [tuple(line.split(" ", 1)) for line in proc.stdout.splitlines()]
 
 
+def validate_selected_tags(repository: Path, tags: list[str]) -> None:
+    for tag in tags:
+        try:
+            run(
+                ["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"],
+                cwd=repository,
+            )
+        except subprocess.CalledProcessError as error:
+            raise ValueError(f"selected tag does not resolve to a commit: {tag}") from error
+
+
+def read_exact(stream, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = stream.read(min(64 * 1024, remaining))
+        if not chunk:
+            raise RuntimeError("truncated git cat-file payload")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def discard_exact(stream, size: int) -> None:
+    remaining = size
+    while remaining:
+        chunk = stream.read(min(64 * 1024, remaining))
+        if not chunk:
+            raise RuntimeError("truncated git cat-file payload")
+        remaining -= len(chunk)
+
+
 def scan_export(repository: Path) -> list[str]:
     findings: list[str] = []
     paths = run(
@@ -121,12 +156,15 @@ def scan_export(repository: Path) -> list[str]:
             ):
                 raise RuntimeError(f"unexpected git cat-file header: {header}")
             size = int(header[2])
-            payload = batch.stdout.read(size)
-            if batch.stdout.read(1) != b"\n":
-                raise RuntimeError("git cat-file batch framing error")
             if expected_kind == "blob" and size > 8 * 1024 * 1024:
+                discard_exact(batch.stdout, size)
+                if batch.stdout.read(1) != b"\n":
+                    raise RuntimeError("git cat-file batch framing error")
                 findings.append(f"oversized reachable blob: {expected_oid} ({size} bytes)")
                 continue
+            payload = read_exact(batch.stdout, size)
+            if batch.stdout.read(1) != b"\n":
+                raise RuntimeError("git cat-file batch framing error")
             for label, pattern in SECRET_PATTERNS.items():
                 if pattern.search(payload):
                     findings.append(
@@ -172,6 +210,7 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         replacements.write_text(
             "regex:(?i)[A-Za-z]:\\\\+Users\\\\+[^\\\\/\\r\\n]+==><redacted-home>\n"
             "regex:(?i)\\b[A-Za-z]:\\\\+[^\\s`\"']+==><redacted-windows-path>\n"
+            "regex:(?i)\\\\{2,}[^\\\\/\\s`\"']+\\\\+[^\\s`\"']+==><redacted-unc-path>\n"
             "regex:/Users/[^/\\r\\n]+==><redacted-home>\n"
             "regex:[A-Za-z0-9._-]+\\.tail[0-9a-z]+\\.ts\\.net==><redacted-tailscale-host>\n",
             encoding="utf-8",
@@ -206,6 +245,7 @@ def create_export(source: Path, output: Path, tags: list[str], public_email: str
             run([
                 "git", "fetch", "origin", f"refs/tags/{tag}:refs/tags/{tag}"
             ], cwd=output)
+        validate_selected_tags(output, tags)
         run(["git", "remote", "remove", "origin"], cwd=output)
         # Git for Windows can leave this symbolic ref pointing at a deleted
         # remote ref. for-each-ref silently omits the broken ref, but fsck does

@@ -74,6 +74,19 @@ def test_rejects_implicit_or_unsafe_tag_names():
             raise AssertionError(f"unsafe tag accepted: {tag!r}")
 
 
+def test_rejects_selected_tag_that_does_not_resolve_to_commit(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    payload = repository / "payload.bin"
+    payload.write_bytes(b"binary payload")
+    oid = git(repository, "hash-object", "-w", "payload.bin")
+    git(repository, "tag", "blob-tag", oid)
+
+    with pytest.raises(ValueError, match="does not resolve to a commit"):
+        public_export.validate_selected_tags(repository, ["blob-tag"])
+
+
 def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -83,7 +96,8 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     (repository / "README.md").write_text("public\n", encoding="utf-8")
     (repository / "diagnostic.json").write_text(
         r'{"home":"C:\\users\\alice\\checkout",'
-        r'"workspace":"D:\\Projects\\private-checkout"}',
+        r'"workspace":"D:\\Projects\\private-checkout",'
+        r'"share":"\\\\alice-pc\\private-share\\AEXCompat"}',
         encoding="utf-8",
     )
     secret_name = "gho_abcdefghijklmnopqrstuvwxyz123456"
@@ -97,8 +111,24 @@ def test_scan_includes_commit_and_annotated_tag_messages(tmp_path):
     assert any("Windows user path in reachable commit" in item for item in findings)
     assert any("Windows user path in reachable blob" in item for item in findings)
     assert any("Windows absolute path in reachable blob" in item for item in findings)
+    assert any("Windows UNC path in reachable blob" in item for item in findings)
     assert any("GitHub token candidate in reachable tag" in item for item in findings)
     assert any("GitHub token candidate in reachable tree" in item for item in findings)
+
+
+def test_scan_discards_oversized_blob_in_bounded_chunks(tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.invalid")
+    (repository / "large.bin").write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+    git(repository, "add", "large.bin")
+    git(repository, "commit", "-m", "large fixture")
+
+    findings = public_export.scan_export(repository)
+
+    assert any("oversized reachable blob" in item for item in findings)
 
 
 def test_script_has_no_push_implementation():
