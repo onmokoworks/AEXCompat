@@ -22,6 +22,7 @@ dependencies = [
 name = "aexcompat-broker"
 version = "0.1.0"
 dependencies = [
+ "aexcompat-host-core",
  "image",
  "object",
  "rand",
@@ -32,6 +33,13 @@ dependencies = [
  "tracing-subscriber",
  "windows 0.58.0",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "aexcompat-host-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -218,9 +226,9 @@ dependencies = [
 
 [[package]]
 name = "decimal-rs"
-version = "0.1.43"
+version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0ad9d041ab836f528b91b4f4039feda1091adbef4d85850eac6b3d2f9cd6f3"
+checksum = "541fdd8bfb5edf4eef5c49cca10ba01c3e91614e14203cf0febbc6157d97b36b"
 dependencies = [
  "stack-buf",
 ]
@@ -248,9 +256,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.16.0"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
+checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
 name = "env_filter"
