@@ -80,6 +80,35 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
 
 
+def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
+    pytest.importorskip("git_filter_repo")
+    source = tmp_path / "source"
+    source.mkdir()
+    git(source, "init", "-b", "main")
+    git(source, "config", "user.name", "Test")
+    git(source, "config", "user.email", "test@example.invalid")
+    fixture = source / "tests" / "test_public_export.py"
+    fixture.parent.mkdir()
+    old_contents = "token = 'ghp_" + "abcdefghijklmnopqrstuvwxyz123456'\n"
+    fixture.write_text(old_contents, encoding="utf-8")
+    git(source, "add", "tests/test_public_export.py")
+    git(source, "commit", "-m", "old synthetic scanner fixture")
+    old_oid = git(source, "hash-object", "tests/test_public_export.py")
+    tip_contents = b"safe current scanner fixture\n"
+    fixture.write_bytes(tip_contents)
+    git(source, "add", "tests/test_public_export.py")
+    git(source, "commit", "-m", "split synthetic scanner fixture")
+
+    output = tmp_path / "export"
+    public_export.create_export(
+        source, output, [], "public@users.noreply.github.com"
+    )
+
+    assert (output / "tests" / "test_public_export.py").read_bytes() == tip_contents
+    assert old_oid not in git(output, "rev-list", "--objects", "--all")
+    assert public_export.scan_export(output) == []
+
+
 def test_rejects_implicit_or_unsafe_tag_names():
     for tag in (
         "",

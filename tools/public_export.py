@@ -111,7 +111,11 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
         "e90a9771e41d705f0f24e7571a5d9480ba99b27d9d5b7ea5dc57c94a814eaeb1",
     }),
     "instruments/common/trace_writer_selftest/main.cpp": frozenset({
+        "04c2e02b6905edb3ec210148f64f1b00bfbf06659dbc24ba6a867550e14cb939",
+        "23e959658f5082a89c6db72c842271a117887b8658ab703f60eaba650b3d5f20",
         "a4fc1f4893afb162e8829785530ef8dc92e418b047b01e5b67ab67c4a08ce17b",
+        "a624dd1252b630f65e7d72b448c5cc93f4beb3afd7865767068f1d569470e484",
+        "c4338c5984465bb5c832e43f99618473074c7e1b3163522b75c00ab98b3710ff",
     }),
     "tools/public_export.py": frozenset({
         "09ecaeaa0830c5d76af26bc84dbe37be15fa5e7af890148ef14d666945664b3c",
@@ -138,6 +142,9 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
         "c52ddf65534b7b46035084358ab7902be4bfef220bdb503ac7039cc861905b05",
         "cd4db80677bd42c006117a8326ea55fcb03c39acc98087d16a2b2b8c5d103fc3",
         "d2f86015d0c19ab337eaa9ad0986f63b10000593d7b5fc812653036a0350c5de",
+        "548c24abf8eafcac5b60be737744e5e31d7373d11f1629392e0273f6f8ef5ef0",
+        "7a52c97c4277dbfa38c6ddf260e56b15b33e869c2892de05f895a462232c2979",
+        "88e53e1e1f77b2a7880982e5172fe79269619726b35f1a1fc1960e16e738eb84",
     }),
     "tools/aex_dependency_availability_preflight.py": frozenset({
         "4c754b6dc9cd24a7e1a0801560911fbf9a832bf0f5b3bcba0f3844a71356489c",
@@ -178,6 +185,8 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
         "e79c60e7d95fd88c1508f05bd1d846411c682d2ee393b8a79cd3218509ad37bb",
         "e922f64b0c068649adcefe4516ee40e86a4f41773fca9813e727bf5dbbfa36c6",
         "edfd8aa05aef948c7a2c18312d7d27a5f8405117d84a01420dd5703f00e4fa12",
+        "8d10eace3eede3521e71ac191db8a493c168e213dcadbfa834de34096a072034",
+        "ed70ff84cd0007fff92162c8ee27b1bfea04aded2546fe1b5dff5ce6250fd1f7",
     }),
 }
 INTENTIONAL_PRIVATE_EMAIL_DIGESTS = {
@@ -185,8 +194,21 @@ INTENTIONAL_PRIVATE_EMAIL_DIGESTS = {
         "7f7133531186b4111a5064669ffb421e2d454cd91126d30d872f6f04584520a3",
         "8127d9e7a091c9e9f50175214c5aaaec1ed598737170686ef3697455bd5404f1",
         "c01af6ee6d8fa95f05bd62d5e9ce9f5e64009b22132b239e3be6a6de099a7902",
+        "60a84811c364b26b46fea3b624091dee6b0bdf86f50a191c371a45de70bc45d2",
+        "6e1f34cab96ab431774dc6e2ff80d29063ea80d1f4702121180d3972adf4a4ad",
+        "81811e6237d4dbdf4c49b5050a466423c07c52c8bfe0d64ec3ef9f81e9e78958",
     }),
 }
+
+
+def audited_tip_restore_paths() -> tuple[str, ...]:
+    """Files whose current synthetic fixtures must survive broad history cleanup."""
+    return tuple(sorted(
+        INTENTIONAL_SCANNER_FIXTURES
+        | INTENTIONAL_SECRET_BLOB_OIDS.keys()
+        | INTENTIONAL_PERSONAL_PATH_DIGESTS.keys()
+        | INTENTIONAL_PRIVATE_EMAIL_DIGESTS.keys()
+    ))
 DIAGNOSTIC_SUFFIXES = {".json", ".jsonl", ".log"}
 DIAGNOSTIC_PARTS = {"analysis", "corpus", "diagnostics", "results"}
 PUBLIC_NOTE_SUFFIXES = {".md", ".rst"}
@@ -537,6 +559,13 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         if "\0" in line
         and PRIVATE_EMAIL.search(line.split("\0", 1)[1].strip("<>"))
     })
+    audited_tip_files: dict[str, bytes] = {}
+    for path in audited_tip_restore_paths():
+        result = subprocess.run(
+            ["git", "show", f"main:{path}"], cwd=repository, capture_output=True
+        )
+        if result.returncode == 0:
+            audited_tip_files[path] = result.stdout
     with tempfile.TemporaryDirectory(prefix="aexcompat-public-export-") as temporary:
         temporary = Path(temporary)
         mailmap = temporary / "mailmap"
@@ -564,7 +593,8 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         )
         source_replacements = temporary / "source-replacements.txt"
         source_replacements.write_text(
-            "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
+            replacements.read_text(encoding="utf-8")
+            + "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
             "pf-batch-sampling.result.json==>target/ae-oracles/"
             "pf-batch-sampling.result.json\n"
             "D:/Projects/01_Project/04_Tools/AEXCompat/target/ae-oracles/"
@@ -592,8 +622,26 @@ def rewrite_export(repository: Path, public_email: str, tags: list[str]) -> None
         for part in sorted(PROHIBITED_PARTS):
             command.extend(["--path-glob", f"{part}/*"])
             command.extend(["--path-glob", f"*/{part}/*"])
+        for path in sorted(INTENTIONAL_SCANNER_FIXTURES):
+            command.extend(["--path", path])
         command.extend(["--invert-paths", "--refs", *refs])
         subprocess.run(command, cwd=repository, check=True)
+    for path, contents in audited_tip_files.items():
+        destination = repository / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(contents)
+    if audited_tip_files:
+        run(["git", "add", "--", *audited_tip_files], cwd=repository)
+        changed = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"], cwd=repository
+        ).returncode
+        if changed:
+            run(["git", "config", "user.name", "AEXCompat public export"], cwd=repository)
+            run(["git", "config", "user.email", public_email], cwd=repository)
+            run(
+                ["git", "commit", "-m", "Restore audited public test fixtures"],
+                cwd=repository,
+            )
 
 
 def create_export(source: Path, output: Path, tags: list[str], public_email: str) -> None:
