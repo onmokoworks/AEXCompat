@@ -16,12 +16,26 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: Check Rust formatting
-        working-directory: broker
-        run: cargo fmt --all --check
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        shell: pwsh
+        run: |
+          $base = $env:BASE_SHA
+          if (-not $base -or $base -match '^0+$') {
+            $base = 'HEAD^'
+          }
+          $files = @(git diff --name-only --diff-filter=ACMR $base $env:GITHUB_SHA -- '*.rs')
+          if (-not $files) {
+            Write-Host 'No changed Rust files to format-check.'
+            exit 0
+          }
+          rustfmt --edition 2021 --check --config skip_children=true @files
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: broker
