@@ -38,6 +38,11 @@ repository has a short entry point and a durable place for longer plans.
 - `MASKOFFSET_SECOND_FIXTURE_2026-07-13.md`
   - Records the fixed identity, isolated L1/L2 evidence, descriptor promotion,
     and remaining render work for the second owner-authored AEX fixture.
+- `ISOLATION_INVENTORY_2026-08-04.md`
+  - Fixes the implemented worker-isolation inventory: the always-on
+    crash-containment floor, the opt-in evidence tier, what is documented plan
+    only (mitigations, UI limits, integrity levels, AppContainer), the
+    non-goals (confidentiality, network), and the per-route sealing status.
 - `EVIDENCE_POLICY_2026-07-18.md`
   - Shifts the regression axis from frozen-identity re-assertion to
     machine-portable behavioral self-tests, and separates runtime worker

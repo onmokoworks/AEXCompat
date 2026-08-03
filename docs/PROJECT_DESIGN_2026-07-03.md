@@ -1,4 +1,11 @@
 AEXCompat 詳細設計案(2026-07-03)
+
+> 注記 (2026-08-04): 本書は superseded な旧設計案。本文中の「sandbox broker」
+> 「ネットワーク遮断」等の語彙は現行の主張に引き継がれていない。worker isolation
+> は crash containment であって confidentiality sandbox ではなく、ネットワーク
+> 制限は実装されていない。現行の実装状態は `docs/ISOLATION_INVENTORY_2026-08-04.md`
+> と `CLAUDE.md` (Execution Tiers and Safety Rules) を正とすること。
+
 1. 現状理解
 1.1 リポジトリの構成
 注意: 現時点で git リポジトリは初期化済みだがコミットが1つもなく、全ファイルが untracked です。 これ自体が最初の作業項目になります(§10)。
