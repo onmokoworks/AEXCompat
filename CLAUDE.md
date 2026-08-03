@@ -65,7 +65,9 @@ and bounded image input/output are now the main implementation path.
   loads no plug-in, so it is a different category rather than a sealing gap. So
   neither claim holds globally: the crash-containment-only default
   tier is not yet the standard path, and not every dispatch is sealed either.
-  Restoring an explicit receipt-free default tier is tracked work (#36). Do not
+  Restoring an explicit receipt-free default tier was tracked as #36, which
+  was closed not-planned on 2026-07-24; as of 2026-08-04 no live issue tracks
+  it, so treat it as unscheduled. Do not
   assume every production route is already sealed, nor that the light path is
   already available in the shipped host.
 - Keep `imports/` as frozen provenance. Do not redistribute Adobe SDK headers
@@ -178,4 +180,9 @@ artifacts from a previous checkout.
 
 Current status is tracked in `docs/COMPATIBILITY_STATUS_2026-07-16.md`, current
 direction in `docs/PROJECT_DIRECTION.md`, and security limitations in
-`docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md`.
+`docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md`. Before describing the
+worker isolation in security terms, read
+`docs/ISOLATION_INVENTORY_2026-08-04.md`: it fixes what is actually
+implemented, what is documented plan only (mitigation policies, UI limits,
+integrity levels, AppContainer are NOT implemented), and which routes are
+sealed versus normal-token.

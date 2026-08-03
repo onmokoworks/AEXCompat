@@ -1,5 +1,18 @@
 # Windows Native Hardening Plan (2026-07-16)
 
+> Status note (2026-08-04): this is a hardening *plan* whose sections were
+> appended over time, so earlier paragraphs (e.g. "is not connected to
+> production dispatch") are superseded by later ones ("now
+> production-connected for L2" under "Loader hardening"). The sealed load
+> tree, restricted token, protected DACL, trusted-worker stage, and module
+> audit ARE implemented and production-wired. The following are **not
+> implemented anywhere in the codebase**: process mitigation policies,
+> `JOB_OBJECT_UILIMIT_*` and other Job limits beyond kill-on-close plus
+> process memory, low integrity levels, and AppContainer. The execution-mode
+> table below is therefore aspirational beyond `compat` plus the shipped
+> sealed/restricted launch. For the inventory of what actually exists, see
+> `docs/ISOLATION_INVENTORY_2026-08-04.md` (issue #641).
+
 ## Current boundary
 
 The native worker is a crash-containment boundary, not an untrusted-code security sandbox. It starts suspended, is assigned to a kill-on-close Job Object with a 512 MiB process-memory limit, inherits only explicit standard-output handles, and has bounded termination waits. It still runs with the broker user's token and can read or modify resources that user can access.
