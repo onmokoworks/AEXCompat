@@ -484,8 +484,71 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("aexcompat-mf-{}-scan", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
-        let complete = collect_aex(&[dir], &[]).complete;
-        assert!(complete);
+        let limits = collect_aex(&[dir], &[]).limits;
+        assert!(limits.authoritative(), "{limits:?}");
+    }
+
+    /// Nests `levels` folders under `root` and returns the deepest one.
+    ///
+    /// One character per level, so a cap-relative fixture stays clear of Windows
+    /// `MAX_PATH` (260): a `%TEMP%` root of ~60 characters leaves room for
+    /// roughly 95 levels before `create_dir_all` starts failing for a reason that
+    /// has nothing to do with the test.
+    fn nest(root: &Path, levels: usize) -> PathBuf {
+        let mut dir = root.to_path_buf();
+        for _ in 0..levels {
+            dir = dir.join("d");
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The cap has to clear a real install. After Effects 2026 nests Qt resources
+    /// at `Plug-ins\Effects\mochaAE\Resources\mochaui\qml\QtQuick\Dialogs\
+    /// quickimpl\qml\+Fusion` — depth 10. The old cap of 8 stopped there, so
+    /// every launch reported a non-authoritative scan and the prune never ran
+    /// (issue #660). Nothing below was an `.aex`, so nothing was lost; what broke
+    /// was the completeness judgement.
+    #[test]
+    fn a_tree_as_deep_as_a_real_install_scans_authoritatively() {
+        // The measured install depth is 10. Pinned as an absolute number, not as
+        // `MAX_SCAN_DEPTH - n`: the point is that the cap clears a real install
+        // with room to spare, which a cap-relative fixture cannot fail to satisfy.
+        const REAL_INSTALL_DEPTH: usize = 10;
+        const {
+            assert!(
+                MAX_SCAN_DEPTH >= REAL_INSTALL_DEPTH * 2,
+                "the cap wants margin over a real install, not to just clear it"
+            )
+        };
+
+        let root = TempRoot::new("depth-real");
+        let deep = nest(root.path(), REAL_INSTALL_DEPTH + 2);
+        std::fs::write(deep.join("Deep.aex"), b"MZ").unwrap();
+
+        let scan = collect_aex(&[root.path().to_path_buf()], &[]);
+
+        assert!(scan.limits.authoritative(), "{:?}", scan.limits);
+        assert_eq!(scan.seen.len(), 1, "the .aex that deep has to be found");
+    }
+
+    /// The cap still exists — it is the backstop against a pathological tree
+    /// eating the stack — and hitting it reports the depth, not a folder that
+    /// could not be read. Those need different fixes from the user.
+    #[test]
+    fn a_tree_past_the_cap_reports_the_depth_not_a_read_failure() {
+        let root = TempRoot::new("depth-cap");
+        nest(root.path(), MAX_SCAN_DEPTH + 2);
+
+        let scan = collect_aex(&[root.path().to_path_buf()], &[]);
+
+        assert!(scan.limits.too_deep, "{:?}", scan.limits);
+        assert!(
+            !scan.limits.unreadable,
+            "a deep tree is not an unreadable one: {:?}",
+            scan.limits
+        );
+        assert!(!scan.limits.authoritative());
     }
 
     #[test]
@@ -495,9 +558,14 @@ mod tests {
         let scan = collect_aex(&[missing], &[]);
         assert!(scan.plugins.is_empty());
         assert!(
-            !scan.complete,
+            !scan.limits.authoritative(),
             "a folder that could not be read is not a complete scan"
         );
+        // Which reason, not just that there is one: a mistyped `dir` reaches here,
+        // and reporting it as the depth cap sends the user after a limit they
+        // cannot change while withholding the path advice they need (issue #660).
+        assert!(scan.limits.unreadable, "{:?}", scan.limits);
+        assert!(!scan.limits.too_deep, "{:?}", scan.limits);
     }
 
     // --- default folder resolution ------------------------------------------
@@ -934,7 +1002,7 @@ mod tests {
         junction(&scanned.join("linked"), &real);
         let scan = collect_aex(std::slice::from_ref(&scanned), &[]);
         assert_eq!(scan.seen.len(), 1, "the AEX behind the junction was seen");
-        assert!(scan.complete);
+        assert!(scan.limits.authoritative());
     }
 
     /// Creates a directory junction, failing loudly rather than letting the test
@@ -970,9 +1038,14 @@ mod tests {
 
         let scan = collect_aex(std::slice::from_ref(&scanned), &[]);
         assert!(
-            !scan.complete,
+            !scan.limits.authoritative(),
             "an unresolvable link is 'not looked at', not 'nothing there'"
         );
+        // Which reason: a link whose target is unreachable is a path the user can
+        // act on, so it must not be reported as the depth cap — that withholds
+        // the path remedy and blames a limit they cannot change (issue #660).
+        assert!(scan.limits.unreadable, "{:?}", scan.limits);
+        assert!(!scan.limits.too_deep, "{:?}", scan.limits);
 
         let hidden = scanned
             .join("linked")
@@ -980,7 +1053,12 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let mut cache = cache_of(&[&hidden]);
-        prune_cache(&mut cache, &scan.seen, &[scanned], scan.complete);
+        prune_cache(
+            &mut cache,
+            &scan.seen,
+            &[scanned],
+            scan.limits.authoritative(),
+        );
         assert!(cache.contains_key(&hidden), "its entry survived");
     }
 
@@ -1028,7 +1106,10 @@ mod tests {
         junction(&other.join("link"), &shared);
         let scan = collect_aex(&[shared.clone(), other], &[]);
         assert_eq!(scan.seen.len(), 1, "one AEX, seen once: {:?}", scan.seen);
-        assert!(scan.complete, "reaching it twice is not an incomplete scan");
+        assert!(
+            scan.limits.authoritative(),
+            "reaching it twice is not an incomplete scan"
+        );
     }
 
     /// The scan lists one spelling per AEX, so an entry keyed by another path to
@@ -1054,7 +1135,7 @@ mod tests {
         };
         let key = other.to_string_lossy().into_owned();
         let mut cache = cache_of(&[&key]);
-        prune_cache(&mut cache, &scan.seen, &[root], scan.complete);
+        prune_cache(&mut cache, &scan.seen, &[root], scan.limits.authoritative());
         assert!(
             cache.contains_key(&key),
             "the file is still there, so is its entry"
@@ -3008,7 +3089,7 @@ mod tests {
     /// to name that state instead of reporting "0 of 576" as if it were routine.
     #[test]
     fn the_summary_calls_out_registering_nothing() {
-        let summary = registration_summary(576, 0, 0, true);
+        let summary = registration_summary(576, 0, 0, AUTHORITATIVE);
 
         assert!(summary.contains("576"), "{summary}");
         assert!(
@@ -3028,7 +3109,7 @@ mod tests {
     /// to ignore the one message that matters.
     #[test]
     fn a_first_launch_is_not_reported_as_a_worker_failure() {
-        let summary = registration_summary(576, 0, 576, true);
+        let summary = registration_summary(576, 0, 576, AUTHORITATIVE);
 
         assert!(
             !summary.contains("failing for every plug-in"),
@@ -3045,7 +3126,7 @@ mod tests {
     /// register and nothing to work on, so it must not read as a broken host.
     #[test]
     fn knowing_no_plugins_is_not_reported_as_a_failure() {
-        let summary = registration_summary(0, 0, 0, true);
+        let summary = registration_summary(0, 0, 0, AUTHORITATIVE);
 
         assert!(
             !summary.contains("failing for every plug-in"),
@@ -3061,7 +3142,7 @@ mod tests {
     /// (some registered, the rest queued) is visible without a debugger.
     #[test]
     fn the_summary_reports_registered_known_and_pending() {
-        let summary = registration_summary(576, 570, 6, true);
+        let summary = registration_summary(576, 570, 6, AUTHORITATIVE);
 
         assert!(summary.contains("570 of 576"), "{summary}");
         // Not a bare `contains("6")`: "576" satisfies that, so an implementation
@@ -3071,6 +3152,109 @@ mod tests {
         assert!(!registration_is_alarming(576, 570, 6));
     }
 
+    /// A scan whose folders could not be read.
+    const UNREADABLE: ScanLimits = ScanLimits {
+        unresolved_root: false,
+        unreadable: true,
+        too_deep: false,
+    };
+
+    /// A scan that stopped at the depth cap. Distinct from [`UNREADABLE`]: the
+    /// user can fix a path, they cannot fix a cap from config (issue #660).
+    const TOO_DEEP: ScanLimits = ScanLimits {
+        unresolved_root: false,
+        unreadable: false,
+        too_deep: true,
+    };
+
+    /// A launch where a *default* plug-in folder would not resolve — an AE
+    /// install mid-update, a drive not yet mounted.
+    const UNRESOLVED_ROOT: ScanLimits = ScanLimits {
+        unresolved_root: true,
+        unreadable: false,
+        too_deep: false,
+    };
+
+    const AUTHORITATIVE: ScanLimits = ScanLimits {
+        unresolved_root: false,
+        unreadable: false,
+        too_deep: false,
+    };
+
+    /// Every cause has to suppress the prune. Dropping any one of them from
+    /// `authoritative()` re-enables it while this launch cannot see where the
+    /// plug-ins are, which drops hundreds of cache entries, unregisters their
+    /// filters next launch, and deletes the objects that used them from saved
+    /// projects (issue #307).
+    #[test]
+    fn every_scan_limit_suppresses_the_prune() {
+        for limits in [UNREADABLE, TOO_DEEP, UNRESOLVED_ROOT] {
+            assert!(
+                !limits.authoritative(),
+                "{limits:?} must not let the prune run"
+            );
+        }
+        assert!(AUTHORITATIVE.authoritative());
+    }
+
+    /// A default folder that would not resolve is a path problem, so it gets the
+    /// path remedy — the same one an unreadable folder gets, and not the silence
+    /// the depth cap gets.
+    #[test]
+    fn an_unresolved_root_gets_the_path_remedy() {
+        let summary = empty_scan_summary(&[PathBuf::from("x")], 0, UNRESOLVED_ROOT);
+
+        assert!(summary.contains("could not be resolved"), "{summary}");
+        assert!(summary.contains("path exists"), "{summary}");
+        assert!(summary.contains(ENV_DIR), "{summary}");
+    }
+
+    /// With a path cause and the depth cap at once, the remedy has to stay
+    /// attached to the path cause. Appended once after the list it binds to
+    /// whichever cause is last, which is how a user gets told to check `dir` for
+    /// a depth limit.
+    #[test]
+    fn the_remedy_binds_to_the_cause_it_belongs_to() {
+        let both = ScanLimits {
+            unresolved_root: false,
+            unreadable: true,
+            too_deep: true,
+        };
+        let described = both.describe_with_remedy().expect("not authoritative");
+
+        let (before, after) = described
+            .split_once("a folder tree was deeper")
+            .expect("the depth cause is listed");
+        assert!(
+            before.contains("path exists"),
+            "the remedy belongs to the readable-path cause: {described}"
+        );
+        assert!(
+            !after.contains("path exists"),
+            "and must not trail the depth cause: {described}"
+        );
+    }
+
+    /// The counts line names the causes without the remedy: it is a status line,
+    /// and the advice belongs to the message about the folders themselves.
+    #[test]
+    fn the_counts_line_names_causes_without_the_remedy() {
+        let summary = registration_summary(500, 500, 0, UNREADABLE);
+
+        assert!(summary.contains("could not be read"), "{summary}");
+        assert!(!summary.contains("path exists"), "{summary}");
+    }
+
+    /// The one message naming the cap has to name the number, or it cannot be
+    /// compared against the tree that tripped it.
+    #[test]
+    fn the_depth_cap_warning_names_the_limit() {
+        let warning = depth_cap_warning();
+
+        assert!(warning.contains(&MAX_SCAN_DEPTH.to_string()), "{warning}");
+        assert!(!warning.contains("config.toml"), "{warning}");
+    }
+
     /// An untrustworthy scan pads the known set with cached plug-ins this launch
     /// never saw (#321), so the counts mean something different and the line has
     /// to say so — otherwise "registered 500 of 500" hides that 488 of them were
@@ -3078,36 +3262,78 @@ mod tests {
     #[test]
     fn an_incomplete_scan_is_named_in_the_summary() {
         assert!(
-            registration_summary(500, 500, 0, false).contains("could not be read"),
+            registration_summary(500, 500, 0, UNREADABLE).contains("could not be read"),
             "an incomplete scan has to be admitted"
         );
         assert!(
-            !registration_summary(500, 500, 0, true).contains("could not be read"),
+            !registration_summary(500, 500, 0, AUTHORITATIVE).contains("could not be read"),
             "a complete scan must not claim otherwise"
         );
+    }
+
+    /// The depth cap is not a folder that could not be read. Reporting it as one
+    /// sent the user to check paths and permissions for a limit they cannot reach
+    /// from config, and it happened on every launch of a real AE install
+    /// (issue #660).
+    #[test]
+    fn the_depth_cap_is_not_reported_as_an_unreadable_folder() {
+        let summary = registration_summary(500, 500, 0, TOO_DEEP);
+
+        assert!(
+            summary.contains("deeper than the scan limit"),
+            "the actual cause has to be named: {summary}"
+        );
+        assert!(
+            !summary.contains("could not be read"),
+            "and not the wrong one: {summary}"
+        );
+    }
+
+    /// All three can hold at once and each needs a different fix, so none may
+    /// hide the others.
+    #[test]
+    fn every_reason_a_scan_is_untrustworthy_is_listed() {
+        let both = ScanLimits {
+            unresolved_root: true,
+            unreadable: true,
+            too_deep: true,
+        };
+        let described = both.describe().expect("not authoritative");
+
+        assert!(described.contains("could not be resolved"), "{described}");
+        assert!(described.contains("could not be read"), "{described}");
+        assert!(described.contains("deeper than"), "{described}");
+        assert!(
+            AUTHORITATIVE.describe().is_none(),
+            "an authoritative scan has nothing to explain"
+        );
+        assert!(AUTHORITATIVE.authoritative());
+        for limits in [UNREADABLE, TOO_DEEP] {
+            assert!(!limits.authoritative(), "{limits:?}");
+        }
     }
 
     /// Finding no .aex at all is a third way to get an empty filter list, and it
     /// used to be the quietest: `RegisterPlugin` returned before any other
     /// reporting.
     ///
-    /// The line names the folders instead of guessing the cause. A mistyped
-    /// folder and one that exists but cannot be read both arrive here with
-    /// `scan_complete == false` — `collect_aex` only ever sees a failed
-    /// `read_dir` — so a message that branched on it would confidently tell a
-    /// user with a typo to wait for a transient problem to clear.
+    /// The line names the folders instead of guessing why they held nothing. A
+    /// mistyped folder and one that exists but cannot be read both arrive here
+    /// the same way — `collect_aex` only ever sees a failed `read_dir` — so a
+    /// message that branched on it would tell a user with a typo to wait for a
+    /// transient problem to clear.
     #[test]
     fn an_empty_scan_names_the_folders_it_searched() {
         let dirs = vec![PathBuf::from(r"C:\ProgramData\aviutl2\Plug-ins")];
 
-        for scan_complete in [true, false] {
-            let summary = empty_scan_summary(&dirs, 0, scan_complete);
+        for limits in [AUTHORITATIVE, UNREADABLE] {
+            let summary = empty_scan_summary(&dirs, 0, limits);
             assert!(
                 summary.contains(r"C:\ProgramData\aviutl2\Plug-ins"),
                 "the folder is the payload when diagnosing this: {summary}"
             );
         }
-        let unreadable = empty_scan_summary(&dirs, 0, false);
+        let unreadable = empty_scan_summary(&dirs, 0, UNREADABLE);
         assert!(
             unreadable.contains("path exists"),
             "an unreadable folder has to point at the path, not at a wait: {unreadable}"
@@ -3117,16 +3343,27 @@ mod tests {
             "the env override wins over config.toml, so it has to be named: {unreadable}"
         );
         assert!(
-            empty_scan_summary(&[], 0, true).contains("no folder"),
+            empty_scan_summary(&[], 0, AUTHORITATIVE).contains("no folder"),
             "resolving no folder at all still has to say something"
         );
+    }
+
+    /// The depth cap gets no path advice: there is no path to fix. Offering some
+    /// is the misdirection this issue is about.
+    #[test]
+    fn the_depth_cap_offers_no_path_advice() {
+        let summary = empty_scan_summary(&[PathBuf::from("x")], 0, TOO_DEEP);
+
+        assert!(summary.contains("deeper than the scan limit"), "{summary}");
+        assert!(!summary.contains("path exists"), "{summary}");
+        assert!(!summary.contains(ENV_DIR), "{summary}");
     }
 
     /// Ignoring every .aex found is a different cause with the same symptom, and
     /// blaming the folders for it would send the user looking in the wrong place.
     #[test]
     fn an_all_ignored_scan_blames_the_ignore_list() {
-        let summary = empty_scan_summary(&[PathBuf::from("x")], 42, true);
+        let summary = empty_scan_summary(&[PathBuf::from("x")], 42, AUTHORITATIVE);
 
         assert!(summary.contains("ignore"), "{summary}");
         assert!(summary.contains("42"), "{summary}");
@@ -3137,7 +3374,7 @@ mod tests {
     /// that failed may be where the user's plug-ins really are.
     #[test]
     fn an_all_ignored_scan_still_admits_an_unreadable_folder() {
-        let summary = empty_scan_summary(&[PathBuf::from("x")], 42, false);
+        let summary = empty_scan_summary(&[PathBuf::from("x")], 42, UNREADABLE);
 
         assert!(summary.contains("ignore"), "{summary}");
         assert!(
