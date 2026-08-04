@@ -203,6 +203,18 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // unregistered filter would let AviUtl2 discard objects from saved projects.
     // Unknown entries and old-host entries also go to the background pass; its
     // updated result is picked up on the next launch.
+    // Computed over the whole set before any registration: a name can only be
+    // known to collide once every plug-in is known (issue #661). `plugins` is
+    // sorted and deduped above, so the assignment does not depend on scan order.
+    // Everything the cache still remembers counts too, so a folder that could not
+    // be read this launch does not rename a filter that did register. This
+    // narrows the hazard rather than closing it: a peer the cache has never seen
+    // (a first launch that misses a folder) still cannot be counted.
+    let filter_names = unique_filter_names(
+        &plugins,
+        &cached_naming_peers(&cache, &dirs, scan_complete, !dirs_complete, &config.ignore),
+    );
+    report_qualified_names(&plugins, &filter_names);
     let mut pending: Vec<PathBuf> = Vec::new();
     let mut registered: usize = 0;
     let mut aliases: Option<HashMap<PathBuf, Vec<String>>> = None;
@@ -217,7 +229,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         .collect();
     let alias_possible = alias_possible(&cache, &walked, &dirs);
 
-    for plugin in &plugins {
+    for (plugin, filter_name) in plugins.iter().zip(&filter_names) {
         let key = plugin.to_string_lossy().into_owned();
         let meta = file_meta(plugin);
         let (cached, alias) = resolve_cached(
@@ -255,7 +267,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         if decision.register
             && let Some(entry) = cached
         {
-            register_discovered(host, &repository, plugin, &dependency, entry);
+            register_discovered(host, &repository, plugin, &dependency, entry, filter_name);
             registered += 1;
         }
         if decision.discover {
@@ -346,6 +358,108 @@ fn prune_cache(
         // case is held off by `scan_complete`, which is false for such a link.)
         !matches!(path.try_exists(), Ok(false))
     });
+}
+
+/// The AEX an *untrustworthy* scan did not list but the cache still remembers,
+/// under the scan roots, ignored ones excluded. Used only to count filter-name
+/// collisions (issue #661): a plug-in this launch could not see must still hold
+/// its claim on a name, or the one that did register gets renamed and saved
+/// projects lose its objects (issue #307).
+///
+/// Empty for a complete scan, the same authority rule [`cached_fallback_plugins`]
+/// follows. A complete scan already listed every plug-in that can register, so
+/// the cache could only contribute names for files that are gone — and
+/// `prune_cache` runs only when the background pass does, so a deleted plug-in's
+/// key survives every launch that has nothing to discover. Counting it would
+/// qualify a name with no rival left, renaming a filter saved projects refer to.
+///
+/// Unlike [`cached_fallback_plugins`] this does not filter on `entry.ok`. A
+/// plug-in that has never discovered successfully is not registered, but it is
+/// still on disk and takes the name as soon as it does discover, so its claim has
+/// to stand either way.
+///
+/// A re-keyed entry is deliberately kept under both spellings ([`apply_rekey`]),
+/// and counting one file twice would invent a collision just the same. The
+/// retained spelling marks itself, so drop it while its walked spelling is still
+/// cached. A *moved* plug-in leaves a second key that carries no such mark and no
+/// filesystem check may be spent finding out (this runs on the load thread, see
+/// [`alias_possible`]), so it can still over-count until a prune — bounded to
+/// launches whose scan was already untrustworthy.
+fn cached_naming_peers(
+    cache: &HashMap<String, CacheEntry>,
+    roots: &[PathBuf],
+    scan_complete: bool,
+    roots_incomplete: bool,
+    ignore: &[String],
+) -> Vec<PathBuf> {
+    if scan_complete {
+        return Vec::new();
+    }
+    cache
+        .iter()
+        .filter(|(_, entry)| {
+            !entry.alias_fallback
+                || !entry
+                    .alias_target
+                    .as_ref()
+                    .is_some_and(|target| cache.contains_key(target))
+        })
+        .map(|(key, _)| PathBuf::from(key))
+        .filter(|path| {
+            // When a *default* root could not be resolved this launch, the roots
+            // no longer describe where the plug-ins are; filtering on them would
+            // drop exactly the peers this function exists to keep. Same reasoning
+            // as `cached_fallback_plugins`.
+            roots_incomplete || roots.is_empty() || roots.iter().any(|root| path.starts_with(root))
+        })
+        .filter(|path| !is_ignored(path, ignore))
+        .collect()
+}
+
+/// Says which filters had to be renamed to avoid a collision. A qualified name is
+/// user-visible and, per issue #662, changes how saved projects resolve the
+/// filter, so it should not happen silently.
+fn report_qualified_names(plugins: &[PathBuf], names: &[String]) {
+    let line = qualified_names_summary(plugins, names);
+    if !line.is_empty() {
+        log_info(&line);
+    }
+}
+
+/// The renamed filters as one line, or empty when nothing was renamed. Split out
+/// so the wording is testable without a host log handle.
+fn qualified_names_summary(plugins: &[PathBuf], names: &[String]) -> String {
+    // Paired with the path, because the name alone cannot say which file took it:
+    // a numeric fallback yields `Threshold (Effects)` and `Threshold (Effects) [2]`
+    // for two files whose folders are spelled the same.
+    let qualified: Vec<String> = plugins
+        .iter()
+        .zip(names)
+        .filter(|(plugin, name)| name.as_str() != filter_stem(plugin))
+        .map(|(plugin, name)| format!("{name} <- {}", plugin.display()))
+        .collect();
+    if qualified.is_empty() {
+        return String::new();
+    }
+    // Bounded: the list identifies the collision, it does not enumerate a
+    // pathological install.
+    const LISTED: usize = 8;
+    let rest = qualified.len().saturating_sub(LISTED);
+    format!(
+        "{} filter name(s) qualified to avoid a duplicate: {}{}",
+        qualified.len(),
+        qualified
+            .iter()
+            .take(LISTED)
+            .map(String::as_str)
+            .collect::<Vec<&str>>()
+            .join("; "),
+        if rest > 0 {
+            format!("; and {rest} more")
+        } else {
+            String::new()
+        }
+    )
 }
 
 /// Returns usable cached AEX paths that a non-authoritative scan did not see.
