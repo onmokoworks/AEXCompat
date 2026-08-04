@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -119,12 +120,12 @@ class AexSyntheticPiplParserSelftestTests(unittest.TestCase):
     def test_paths_are_confined_and_report_is_create_new(self):
         verifier_root = LAB_ROOT / "target" / "redacted-schema-verifier"
         verifier_root.mkdir(parents=True, exist_ok=True)
-        source = verifier_root / f"{time.time_ns()}-verifier.local.json"
+        source = verifier_root / f"{time.time_ns()}-{os.getpid()}-verifier.local.json"
         source.write_text(json.dumps(make_redacted_schema_verifier()), encoding="utf-8")
         verifier, resolved = aex_synthetic_pipl_parser_selftest.load_redacted_schema_verifier(source)
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-synthetic-parser.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-synthetic-parser.json"
         outside.write_text(json.dumps(make_redacted_schema_verifier()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_synthetic_pipl_parser_selftest.load_redacted_schema_verifier(outside)
@@ -133,7 +134,7 @@ class AexSyntheticPiplParserSelftestTests(unittest.TestCase):
             redacted_schema_verifier=verifier,
             verifier_path=resolved,
         )
-        out = LAB_ROOT / "target" / "synthetic-pipl-parser-selftest" / f"{time.time_ns()}-selftest.local.json"
+        out = LAB_ROOT / "target" / "synthetic-pipl-parser-selftest" / f"{time.time_ns()}-{os.getpid()}-selftest.local.json"
         written = aex_synthetic_pipl_parser_selftest.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

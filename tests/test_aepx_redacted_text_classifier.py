@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -266,7 +267,7 @@ class AepxRedactedTextClassifierTests(unittest.TestCase):
         inventory_root = LAB_ROOT / "target" / "aepx-redacted-text-inventory"
         roundtrip_root.mkdir(parents=True, exist_ok=True)
         inventory_root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         roundtrip_path = roundtrip_root / f"{stamp}-roundtrip.local.json"
         inventory_path = inventory_root / f"{stamp}-inventory.local.json"
         roundtrip_path.write_text(json.dumps(make_roundtrip()), encoding="utf-8")
@@ -277,7 +278,7 @@ class AepxRedactedTextClassifierTests(unittest.TestCase):
         self.assertEqual(resolved_inventory, inventory_path.resolve())
         self.assertEqual(resolved_roundtrip, roundtrip_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-inventory.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-inventory.json"
         outside.write_text(json.dumps(make_inventory(roundtrip_path)), encoding="utf-8")
         with self.assertRaises(ValueError):
             aepx_redacted_text_classifier.load_inventory(outside)
@@ -288,7 +289,7 @@ class AepxRedactedTextClassifierTests(unittest.TestCase):
             roundtrip_validator=roundtrip,
             roundtrip_validator_path=resolved_roundtrip,
         )
-        out = LAB_ROOT / "target" / "aepx-redacted-text-classifier" / f"{time.time_ns()}-classifier.local.json"
+        out = LAB_ROOT / "target" / "aepx-redacted-text-classifier" / f"{time.time_ns()}-{os.getpid()}-classifier.local.json"
         written = aepx_redacted_text_classifier.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

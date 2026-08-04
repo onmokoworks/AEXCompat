@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -190,7 +191,7 @@ class AexParameterSchemaPlanTests(unittest.TestCase):
         }
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         paths = {
             "catalog": roots["catalog"] / f"{stamp}-schema-catalog.local.json",
             "matrix": roots["matrix"] / f"{stamp}-schema-matrix.local.json",
@@ -211,7 +212,7 @@ class AexParameterSchemaPlanTests(unittest.TestCase):
         self.assertEqual(matrix_path, paths["matrix"].resolve())
         self.assertEqual(render_path, paths["render"].resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-schema.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-schema.json"
         outside.write_text(json.dumps(make_pipl_catalog()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_parameter_schema_plan.load_pipl_catalog(outside)
@@ -224,7 +225,7 @@ class AexParameterSchemaPlanTests(unittest.TestCase):
             render_contract=render,
             render_contract_path=render_path,
         )
-        out = LAB_ROOT / "target" / "parameter-schema-plan" / f"{time.time_ns()}-schema-plan.local.json"
+        out = LAB_ROOT / "target" / "parameter-schema-plan" / f"{time.time_ns()}-{os.getpid()}-schema-plan.local.json"
         written = aex_parameter_schema_plan.write_json_create_new(out, plan)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

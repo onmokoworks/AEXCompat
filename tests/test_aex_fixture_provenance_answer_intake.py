@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -336,7 +337,7 @@ class AexFixtureProvenanceAnswerIntakeTests(unittest.TestCase):
         answers_root = LAB_ROOT / "target" / "fixture-provenance-user-answers"
         template_root.mkdir(parents=True, exist_ok=True)
         answers_root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
 
         template_payload = answer_template_payload()
         template_path = template_root / f"{stamp}-answer-template.local.json"

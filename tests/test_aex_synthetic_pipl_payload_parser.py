@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -101,7 +102,7 @@ def synthetic_selftest() -> dict:
 def write_json(root_name: str, name: str, payload: dict) -> Path:
     root = LAB_ROOT / "target" / root_name
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-{name}.local.json"
+    path = root / f"{time.time_ns()}-{os.getpid()}-{name}.local.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
@@ -192,7 +193,7 @@ class AexSyntheticPiplPayloadParserTests(unittest.TestCase):
         self.assertEqual(resolved_gate, gate_path.resolve())
         self.assertEqual(resolved_selftest, selftest_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-gate.local.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-gate.local.json"
         outside.write_text(json.dumps(pipl_parser_gate()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_synthetic_pipl_payload_parser.load_pipl_parser_gate(outside)
@@ -202,7 +203,7 @@ class AexSyntheticPiplPayloadParserTests(unittest.TestCase):
             "publication_status": "local-only",
             "report_kind": "aex_synthetic_pipl_payload_parser",
         }
-        out = LAB_ROOT / "target" / "synthetic-pipl-payload-parser" / f"{time.time_ns()}-parser.local.json"
+        out = LAB_ROOT / "target" / "synthetic-pipl-payload-parser" / f"{time.time_ns()}-{os.getpid()}-parser.local.json"
         written = aex_synthetic_pipl_payload_parser.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

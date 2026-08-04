@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -117,19 +118,19 @@ class AexSandboxPolicyPacketTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         dep_root = LAB_ROOT / "target" / "dependency-matrix"
         dep_root.mkdir(parents=True, exist_ok=True)
-        source = dep_root / f"{time.time_ns()}-policy-source.local.json"
+        source = dep_root / f"{time.time_ns()}-{os.getpid()}-policy-source.local.json"
         source.write_text(json.dumps(make_dependency_matrix()), encoding="utf-8")
         loaded, resolved = aex_sandbox_policy_packet.load_dependency_matrix(source)
         self.assertEqual(loaded["report_kind"], "aex_dependency_matrix")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-policy.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-policy.json"
         outside.write_text(json.dumps(make_dependency_matrix()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_sandbox_policy_packet.load_dependency_matrix(outside)
 
         payload = aex_sandbox_policy_packet.build_sandbox_policy_packet(loaded, resolved)
-        out = LAB_ROOT / "target" / "sandbox-policy" / f"{time.time_ns()}-policy.local.json"
+        out = LAB_ROOT / "target" / "sandbox-policy" / f"{time.time_ns()}-{os.getpid()}-policy.local.json"
         written = aex_sandbox_policy_packet.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

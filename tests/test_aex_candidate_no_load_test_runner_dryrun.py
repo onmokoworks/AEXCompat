@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -283,14 +284,14 @@ class AexCandidateNoLoadTestRunnerDryrunTests(unittest.TestCase):
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
         paths = {
-            "handoff": roots["handoff"] / f"{time.time_ns()}-handoff.local.json",
-            "suite": roots["suite"] / f"{time.time_ns()}-suite.local.json",
-            "validation": roots["validation"] / f"{time.time_ns()}-validation.local.json",
-            "worker": roots["worker"] / f"{time.time_ns()}-worker.local.json",
-            "ofx": roots["ofx"] / f"{time.time_ns()}-ofx.local.json",
-            "smoke": roots["smoke"] / f"{time.time_ns()}-smoke.local.json",
-            "render": roots["render"] / f"{time.time_ns()}-render.local.json",
-            "route": roots["route"] / f"{time.time_ns()}-route.local.json",
+            "handoff": roots["handoff"] / f"{time.time_ns()}-{os.getpid()}-handoff.local.json",
+            "suite": roots["suite"] / f"{time.time_ns()}-{os.getpid()}-suite.local.json",
+            "validation": roots["validation"] / f"{time.time_ns()}-{os.getpid()}-validation.local.json",
+            "worker": roots["worker"] / f"{time.time_ns()}-{os.getpid()}-worker.local.json",
+            "ofx": roots["ofx"] / f"{time.time_ns()}-{os.getpid()}-ofx.local.json",
+            "smoke": roots["smoke"] / f"{time.time_ns()}-{os.getpid()}-smoke.local.json",
+            "render": roots["render"] / f"{time.time_ns()}-{os.getpid()}-render.local.json",
+            "route": roots["route"] / f"{time.time_ns()}-{os.getpid()}-route.local.json",
         }
         payloads = {
             "handoff": candidate_handoff(),
@@ -314,7 +315,7 @@ class AexCandidateNoLoadTestRunnerDryrunTests(unittest.TestCase):
         render, render_path = aex_candidate_no_load_test_runner_dryrun.load_render_validation_contract(paths["render"])
         route, route_path = aex_candidate_no_load_test_runner_dryrun.load_ofx_route_contract(paths["route"])
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-runner.local.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-runner.local.json"
         outside.write_text(json.dumps(candidate_handoff()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_candidate_no_load_test_runner_dryrun.load_candidate_handoff(outside)
@@ -337,7 +338,7 @@ class AexCandidateNoLoadTestRunnerDryrunTests(unittest.TestCase):
             ofx_route_contract=route,
             ofx_route_contract_path=route_path,
         )
-        out = LAB_ROOT / "target" / "candidate-test-runner-dryrun" / f"{time.time_ns()}-runner.local.json"
+        out = LAB_ROOT / "target" / "candidate-test-runner-dryrun" / f"{time.time_ns()}-{os.getpid()}-runner.local.json"
         written = aex_candidate_no_load_test_runner_dryrun.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

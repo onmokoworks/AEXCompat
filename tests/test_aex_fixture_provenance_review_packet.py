@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -171,7 +172,7 @@ class AexFixtureProvenanceReviewPacketTests(unittest.TestCase):
         request_root = LAB_ROOT / "target" / "fixture-approval-request"
         manual_root.mkdir(parents=True, exist_ok=True)
         request_root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         manual_path = manual_root / f"{stamp}-provenance-manual.local.json"
         request_path = request_root / f"{stamp}-provenance-request.local.json"
         manual_path.write_text(json.dumps(manual_review_payload()), encoding="utf-8")

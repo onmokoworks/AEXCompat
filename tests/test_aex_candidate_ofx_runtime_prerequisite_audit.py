@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -247,7 +248,7 @@ class AexCandidateOfxRuntimePrerequisiteAuditTests(unittest.TestCase):
         }
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         paths = {
             "verifier": roots["verifier"] / f"ae-candidate-ofx-runtime-approval-verifier-{stamp}.local.json",
             "selftest": roots["selftest"] / f"ae-native-loader-runtime-selftest-{stamp}.local.json",

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -233,7 +234,7 @@ class AexCandidateDependencyScopePacketTests(unittest.TestCase):
         }
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         manual_path = roots["manual"] / f"{stamp}-manual.local.json"
         dependency_path = roots["dependency"] / f"{stamp}-dependency.local.json"
         preflight_path = roots["preflight"] / f"{stamp}-preflight.local.json"
@@ -252,7 +253,7 @@ class AexCandidateDependencyScopePacketTests(unittest.TestCase):
         self.assertEqual(resolved_preflight, preflight_path.resolve())
         self.assertEqual(resolved_gate, gate_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-manual.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-manual.json"
         outside.write_text(json.dumps(make_manual_review()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_candidate_dependency_scope_packet.load_fixture_manual_review(outside)
@@ -267,7 +268,7 @@ class AexCandidateDependencyScopePacketTests(unittest.TestCase):
             load_gate=gate,
             load_gate_path=resolved_gate,
         )
-        out = LAB_ROOT / "target" / "candidate-dependency-scope" / f"{time.time_ns()}-scope.local.json"
+        out = LAB_ROOT / "target" / "candidate-dependency-scope" / f"{time.time_ns()}-{os.getpid()}-scope.local.json"
         written = aex_candidate_dependency_scope_packet.write_json_create_new(out, packet)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

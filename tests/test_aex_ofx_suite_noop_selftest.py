@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -88,7 +89,7 @@ class AexOfxSuiteNoopSelftestTests(unittest.TestCase):
             packet_path=Path("packet.json"),
             suite=make_suite(),
             suite_path=Path("suite.json"),
-            output_prefix=f"{time.time_ns()}-ofx-suite",
+            output_prefix=f"{time.time_ns()}-{os.getpid()}-ofx-suite",
         )
         self.assertEqual(report["report_kind"], "aex_ofx_suite_noop_selftest")
         self.assertEqual(report["ofx_suite_selftest_state"], "ofx_suite_noop_identity_passed_route_closed")
@@ -112,7 +113,7 @@ class AexOfxSuiteNoopSelftestTests(unittest.TestCase):
                 packet_path=Path("packet.json"),
                 suite=make_suite(),
                 suite_path=Path("suite.json"),
-                output_prefix=f"{time.time_ns()}-bad",
+                output_prefix=f"{time.time_ns()}-{os.getpid()}-bad",
             )
 
         suite = make_suite()
@@ -123,7 +124,7 @@ class AexOfxSuiteNoopSelftestTests(unittest.TestCase):
                 packet_path=Path("packet.json"),
                 suite=suite,
                 suite_path=Path("suite.json"),
-                output_prefix=f"{time.time_ns()}-bad",
+                output_prefix=f"{time.time_ns()}-{os.getpid()}-bad",
             )
 
     def test_paths_are_confined_and_report_is_create_new(self):
@@ -131,8 +132,8 @@ class AexOfxSuiteNoopSelftestTests(unittest.TestCase):
         suite_root = LAB_ROOT / "target" / "image-fixture-suite"
         packet_root.mkdir(parents=True, exist_ok=True)
         suite_root.mkdir(parents=True, exist_ok=True)
-        packet_path = packet_root / f"{time.time_ns()}-ofx-suite-packet.local.json"
-        suite_path = suite_root / f"{time.time_ns()}-ofx-suite.local.json"
+        packet_path = packet_root / f"{time.time_ns()}-{os.getpid()}-ofx-suite-packet.local.json"
+        suite_path = suite_root / f"{time.time_ns()}-{os.getpid()}-ofx-suite.local.json"
         packet_path.write_text(json.dumps(make_packet()), encoding="utf-8")
         suite_path.write_text(json.dumps(make_suite()), encoding="utf-8")
         packet, resolved_packet = aex_ofx_suite_noop_selftest.load_packet(packet_path)
@@ -142,7 +143,7 @@ class AexOfxSuiteNoopSelftestTests(unittest.TestCase):
         self.assertEqual(resolved_packet, packet_path.resolve())
         self.assertEqual(resolved_suite, suite_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-ofx-suite.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-ofx-suite.json"
         outside.write_text(json.dumps(make_suite()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_ofx_suite_noop_selftest.load_image_suite(outside)
@@ -152,7 +153,7 @@ class AexOfxSuiteNoopSelftestTests(unittest.TestCase):
             "report_kind": "aex_ofx_suite_noop_selftest",
             "native_load_performed": False,
         }
-        out = LAB_ROOT / "target" / "ofx-suite-selftest" / f"{time.time_ns()}-ofx-suite.local.json"
+        out = LAB_ROOT / "target" / "ofx-suite-selftest" / f"{time.time_ns()}-{os.getpid()}-ofx-suite.local.json"
         written = aex_ofx_suite_noop_selftest.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

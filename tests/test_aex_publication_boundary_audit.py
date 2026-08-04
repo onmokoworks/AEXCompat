@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -67,19 +68,19 @@ class AexPublicationBoundaryAuditTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         audit_root = LAB_ROOT / "target" / "safety-audit"
         audit_root.mkdir(parents=True, exist_ok=True)
-        source = audit_root / f"{time.time_ns()}-publication-source.json"
+        source = audit_root / f"{time.time_ns()}-{os.getpid()}-publication-source.json"
         source.write_text(json.dumps(make_safety_audit()), encoding="utf-8")
         loaded, resolved = aex_publication_boundary_audit.load_safety_audit(source)
         self.assertEqual(loaded["report_kind"], "aex_no_load_safety_chain_audit")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-publication.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-publication.json"
         outside.write_text(json.dumps(make_safety_audit()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_publication_boundary_audit.load_safety_audit(outside)
 
         payload = aex_publication_boundary_audit.build_publication_report(loaded, resolved)
-        out = LAB_ROOT / "target" / "publication-boundary" / f"{time.time_ns()}-publication.local.json"
+        out = LAB_ROOT / "target" / "publication-boundary" / f"{time.time_ns()}-{os.getpid()}-publication.local.json"
         written = aex_publication_boundary_audit.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

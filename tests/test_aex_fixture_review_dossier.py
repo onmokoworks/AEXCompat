@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -140,8 +141,8 @@ class AexFixtureReviewDossierTests(unittest.TestCase):
         decision_root = LAB_ROOT / "target" / "fixture-approval"
         manifest_root.mkdir(parents=True, exist_ok=True)
         decision_root.mkdir(parents=True, exist_ok=True)
-        manifest_path = manifest_root / f"{time.time_ns()}-dossier-source.local.json"
-        decision_path = decision_root / f"{time.time_ns()}-dossier-decision.local.json"
+        manifest_path = manifest_root / f"{time.time_ns()}-{os.getpid()}-dossier-source.local.json"
+        decision_path = decision_root / f"{time.time_ns()}-{os.getpid()}-dossier-decision.local.json"
         manifest_path.write_text(json.dumps(make_manifest()), encoding="utf-8")
         decision_path.write_text(json.dumps(make_decision()), encoding="utf-8")
 
@@ -150,13 +151,13 @@ class AexFixtureReviewDossierTests(unittest.TestCase):
         self.assertEqual(resolved_manifest, manifest_path.resolve())
         self.assertEqual(resolved_decision, decision_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-dossier.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-dossier.json"
         outside.write_text(json.dumps(make_manifest()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_fixture_review_dossier.load_manifest(outside)
 
         payload = aex_fixture_review_dossier.build_dossier(manifest, resolved_manifest, decision, resolved_decision)
-        out = LAB_ROOT / "target" / "fixture-dossier" / f"{time.time_ns()}-dossier.local.json"
+        out = LAB_ROOT / "target" / "fixture-dossier" / f"{time.time_ns()}-{os.getpid()}-dossier.local.json"
         written = aex_fixture_review_dossier.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

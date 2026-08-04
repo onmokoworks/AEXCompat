@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import struct
 import sys
 import time
@@ -111,7 +112,7 @@ class AexStaticProbeTests(unittest.TestCase):
     def test_analyze_file_reports_markers_and_no_runtime_flags(self):
         target = LAB_ROOT / "target" / "test-inputs"
         target.mkdir(parents=True, exist_ok=True)
-        path = target / f"{time.time_ns()}-synthetic.aex"
+        path = target / f"{time.time_ns()}-{os.getpid()}-synthetic.aex"
         path.write_bytes(minimal_pe64())
         entry = aex_static_probe.analyze_aex_file(path, root=target)
         self.assertFalse(entry["native_load_performed"])
@@ -127,7 +128,7 @@ class AexStaticProbeTests(unittest.TestCase):
     def test_report_summarizes_fixture_candidates(self):
         target = LAB_ROOT / "target" / "test-inputs"
         target.mkdir(parents=True, exist_ok=True)
-        path = target / f"{time.time_ns()}-synthetic.aex"
+        path = target / f"{time.time_ns()}-{os.getpid()}-synthetic.aex"
         path.write_bytes(minimal_pe64())
         report = aex_static_probe.build_report(path)
         self.assertEqual(report["schema_version"], 3)
@@ -140,7 +141,7 @@ class AexStaticProbeTests(unittest.TestCase):
         self.assertIn("EffectMain-export", report["fixture_candidates"][0]["fixture_candidate_reasons"])
 
     def test_report_writer_is_create_new_under_target_root(self):
-        path = LAB_ROOT / "target" / "aex-static-probe" / f"{time.time_ns()}-probe.local.json"
+        path = LAB_ROOT / "target" / "aex-static-probe" / f"{time.time_ns()}-{os.getpid()}-probe.local.json"
         payload = {"schema_version": 1, "ok": True}
         aex_static_probe.write_json_create_new(path, payload)
         with self.assertRaises(FileExistsError):

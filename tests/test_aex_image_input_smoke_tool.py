@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -25,7 +26,7 @@ ppm_fixture_tool = load_tool("ppm_fixture_tool")
 def create_ppm(name: str, width: int = 6, height: int = 5, pattern: str = "gradient") -> Path:
     root = LAB_ROOT / "target" / "ppm-fixtures"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-{name}.ppm"
+    path = root / f"{time.time_ns()}-{os.getpid()}-{name}.ppm"
     ppm_fixture_tool.write_ppm_create_new(path, ppm_fixture_tool.generate_image(width, height, pattern))
     return path
 
@@ -97,7 +98,7 @@ class AexImageInputSmokeToolTests(unittest.TestCase):
             ofx_facade=make_ofx_facade(),
             ofx_facade_path=Path("facade.json"),
             worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
-            output_prefix=f"{time.time_ns()}-smoke",
+            output_prefix=f"{time.time_ns()}-{os.getpid()}-smoke",
         )
         self.assertEqual(report["report_kind"], "aex_image_input_smoke_tool")
         self.assertEqual(report["smoke_state"], "image_input_smoke_passed_route_closed")
@@ -131,7 +132,7 @@ class AexImageInputSmokeToolTests(unittest.TestCase):
                 ofx_facade=make_ofx_facade(),
                 ofx_facade_path=Path("facade.json"),
                 worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
-                output_prefix=f"{time.time_ns()}-bad",
+                output_prefix=f"{time.time_ns()}-{os.getpid()}-bad",
             )
 
         facade = make_ofx_facade()
@@ -144,7 +145,7 @@ class AexImageInputSmokeToolTests(unittest.TestCase):
                 ofx_facade=facade,
                 ofx_facade_path=Path("facade.json"),
                 worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
-                output_prefix=f"{time.time_ns()}-bad",
+                output_prefix=f"{time.time_ns()}-{os.getpid()}-bad",
             )
 
     def test_paths_are_confined_and_report_is_create_new(self):
@@ -152,8 +153,8 @@ class AexImageInputSmokeToolTests(unittest.TestCase):
         facade_root = LAB_ROOT / "target" / "ofx-facade"
         contract_root.mkdir(parents=True, exist_ok=True)
         facade_root.mkdir(parents=True, exist_ok=True)
-        contract_path = contract_root / f"{time.time_ns()}-smoke-contract.local.json"
-        facade_path = facade_root / f"{time.time_ns()}-smoke-facade.local.json"
+        contract_path = contract_root / f"{time.time_ns()}-{os.getpid()}-smoke-contract.local.json"
+        facade_path = facade_root / f"{time.time_ns()}-{os.getpid()}-smoke-facade.local.json"
         contract_path.write_text(json.dumps(make_route_contract()), encoding="utf-8")
         facade_path.write_text(json.dumps(make_ofx_facade()), encoding="utf-8")
 
@@ -164,7 +165,7 @@ class AexImageInputSmokeToolTests(unittest.TestCase):
         self.assertEqual(resolved_contract, contract_path.resolve())
         self.assertEqual(resolved_facade, facade_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-smoke.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-smoke.json"
         outside.write_text(json.dumps(make_route_contract()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_image_input_smoke_tool.load_route_contract(outside)
@@ -174,7 +175,7 @@ class AexImageInputSmokeToolTests(unittest.TestCase):
             "report_kind": "aex_image_input_smoke_tool",
             "native_load_performed": False,
         }
-        out = LAB_ROOT / "target" / "image-input-smoke" / f"{time.time_ns()}-smoke.local.json"
+        out = LAB_ROOT / "target" / "image-input-smoke" / f"{time.time_ns()}-{os.getpid()}-smoke.local.json"
         written = aex_image_input_smoke_tool.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

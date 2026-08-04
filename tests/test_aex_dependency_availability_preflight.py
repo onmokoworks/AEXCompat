@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -75,7 +76,7 @@ def make_dependency_matrix() -> dict:
 
 class AexDependencyAvailabilityPreflightTests(unittest.TestCase):
     def test_preflight_checks_filesystem_existence_without_load(self):
-        search_dir = LAB_ROOT / "target" / "test-inputs" / f"{time.time_ns()}-dependency-search"
+        search_dir = LAB_ROOT / "target" / "test-inputs" / f"{time.time_ns()}-{os.getpid()}-dependency-search"
         search_dir.mkdir(parents=True, exist_ok=True)
         (search_dir / "kernel32.dll").write_bytes(b"MZ")
         (search_dir / "ucrtbased.dll").write_bytes(b"MZ")
@@ -129,19 +130,19 @@ class AexDependencyAvailabilityPreflightTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         matrix_root = LAB_ROOT / "target" / "dependency-matrix"
         matrix_root.mkdir(parents=True, exist_ok=True)
-        source = matrix_root / f"{time.time_ns()}-dependency-preflight-source.local.json"
+        source = matrix_root / f"{time.time_ns()}-{os.getpid()}-dependency-preflight-source.local.json"
         source.write_text(json.dumps(make_dependency_matrix()), encoding="utf-8")
         loaded, resolved = aex_dependency_availability_preflight.load_dependency_matrix(source)
         self.assertEqual(loaded["report_kind"], "aex_dependency_matrix")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-preflight.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-preflight.json"
         outside.write_text(json.dumps(make_dependency_matrix()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_dependency_availability_preflight.load_dependency_matrix(outside)
 
         payload = aex_dependency_availability_preflight.build_dependency_preflight(loaded, resolved, [])
-        out = LAB_ROOT / "target" / "dependency-preflight" / f"{time.time_ns()}-dependency-preflight.local.json"
+        out = LAB_ROOT / "target" / "dependency-preflight" / f"{time.time_ns()}-{os.getpid()}-dependency-preflight.local.json"
         written = aex_dependency_availability_preflight.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

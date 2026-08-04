@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -48,7 +49,7 @@ def make_packet() -> dict:
 def create_input_ppm() -> Path:
     root = LAB_ROOT / "target" / "ppm-fixtures"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-ofx-input.ppm"
+    path = root / f"{time.time_ns()}-{os.getpid()}-ofx-input.ppm"
     image = ppm_fixture_tool.generate_image(5, 4, "gradient")
     ppm_fixture_tool.write_ppm_create_new(path, image)
     return path
@@ -57,7 +58,7 @@ def create_input_ppm() -> Path:
 class AexOfxNoopMockTests(unittest.TestCase):
     def test_mock_identity_keeps_real_ofx_and_aex_routes_closed(self):
         input_ppm = create_input_ppm()
-        output_ppm = LAB_ROOT / "target" / "ofx-noop-mock" / f"{time.time_ns()}-identity.ppm"
+        output_ppm = LAB_ROOT / "target" / "ofx-noop-mock" / f"{time.time_ns()}-{os.getpid()}-identity.ppm"
         report = aex_ofx_noop_mock.build_mock_report(
             packet=make_packet(),
             packet_path=Path("ofx-packet.json"),
@@ -78,7 +79,7 @@ class AexOfxNoopMockTests(unittest.TestCase):
 
     def test_invalid_packet_refuses_without_writing_output_ppm(self):
         input_ppm = create_input_ppm()
-        output_ppm = LAB_ROOT / "target" / "ofx-noop-mock" / f"{time.time_ns()}-invalid.ppm"
+        output_ppm = LAB_ROOT / "target" / "ofx-noop-mock" / f"{time.time_ns()}-{os.getpid()}-invalid.ppm"
         packet = make_packet()
         packet["ofx_route_invoked"] = True
         report = aex_ofx_noop_mock.build_mock_report(
@@ -96,13 +97,13 @@ class AexOfxNoopMockTests(unittest.TestCase):
     def test_paths_are_confined_and_outputs_are_create_new(self):
         packet_root = LAB_ROOT / "target" / "ofx-facade"
         packet_root.mkdir(parents=True, exist_ok=True)
-        packet_path = packet_root / f"{time.time_ns()}-ofx-packet.json"
+        packet_path = packet_root / f"{time.time_ns()}-{os.getpid()}-ofx-packet.json"
         packet_path.write_text(json.dumps(make_packet()), encoding="utf-8")
         loaded, resolved = aex_ofx_noop_mock.load_packet(packet_path)
         self.assertEqual(loaded["packet_kind"], "aex_ofx_facade_deferred_packet")
         self.assertEqual(resolved, packet_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-ofx-packet.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-ofx-packet.json"
         outside.write_text(json.dumps(make_packet()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_ofx_noop_mock.load_packet(outside)
@@ -112,7 +113,7 @@ class AexOfxNoopMockTests(unittest.TestCase):
             "report_kind": "aex_ofx_noop_mock_selftest",
             "native_load_performed": False,
         }
-        out = LAB_ROOT / "target" / "ofx-noop-mock" / f"{time.time_ns()}-report.local.json"
+        out = LAB_ROOT / "target" / "ofx-noop-mock" / f"{time.time_ns()}-{os.getpid()}-report.local.json"
         written = aex_ofx_noop_mock.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -228,7 +229,7 @@ class AexOfxRouteContractProbeTests(unittest.TestCase):
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
 
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         paths = {
             "facade": roots["facade"] / f"{stamp}-contract-facade.local.json",
             "suite": roots["suite"] / f"{stamp}-contract-suite.local.json",
@@ -257,7 +258,7 @@ class AexOfxRouteContractProbeTests(unittest.TestCase):
         self.assertEqual(gate_path, paths["gate"].resolve())
         self.assertEqual(review_path, paths["review"].resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-contract.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-contract.json"
         outside.write_text(json.dumps(make_facade()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_ofx_route_contract_probe.load_facade(outside)
@@ -274,7 +275,7 @@ class AexOfxRouteContractProbeTests(unittest.TestCase):
             dependency_review=review,
             dependency_review_path=review_path,
         )
-        out = LAB_ROOT / "target" / "ofx-route-contract" / f"{time.time_ns()}-contract.local.json"
+        out = LAB_ROOT / "target" / "ofx-route-contract" / f"{time.time_ns()}-{os.getpid()}-contract.local.json"
         written = aex_ofx_route_contract_probe.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

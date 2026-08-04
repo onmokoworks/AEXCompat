@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -195,7 +196,7 @@ class AexRenderValidationContractTests(unittest.TestCase):
         }
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         paths = {
             "validation": roots["validation"] / f"{stamp}-render-validation.local.json",
             "smoke": roots["smoke"] / f"{stamp}-render-smoke.local.json",
@@ -220,7 +221,7 @@ class AexRenderValidationContractTests(unittest.TestCase):
         self.assertEqual(gate_path, paths["gate"].resolve())
         self.assertEqual(ofx_path, paths["ofx"].resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-render.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-render.json"
         outside.write_text(json.dumps(make_image_validation()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_render_validation_contract.load_image_validation(outside)
@@ -235,7 +236,7 @@ class AexRenderValidationContractTests(unittest.TestCase):
             ofx_route_contract=ofx,
             ofx_route_contract_path=ofx_path,
         )
-        out = LAB_ROOT / "target" / "render-validation-contract" / f"{time.time_ns()}-render-contract.local.json"
+        out = LAB_ROOT / "target" / "render-validation-contract" / f"{time.time_ns()}-{os.getpid()}-render-contract.local.json"
         written = aex_render_validation_contract.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -115,7 +116,7 @@ def write_bridge(name: str, payload: dict | None = None) -> Path:
 
 class AexCandidateOfxHostHarnessDryrunTests(unittest.TestCase):
     def test_builds_no_execution_harness_dryrun(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         bridge_path = LAB_ROOT / "target" / "candidate-ofx-bridge" / f"ae-candidate-ofx-bridge-{stamp}.local.json"
         bridge_path.parent.mkdir(parents=True, exist_ok=True)
         packet = aex_candidate_ofx_host_harness_dryrun.build_harness_dryrun(
@@ -161,7 +162,7 @@ class AexCandidateOfxHostHarnessDryrunTests(unittest.TestCase):
             )
 
     def test_loads_bridge_and_writes_create_new_under_root(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         bridge_path = write_bridge(f"ae-candidate-ofx-bridge-{stamp}.local.json")
         bridge, resolved_bridge = aex_candidate_ofx_host_harness_dryrun.load_bridge(
             Path("target") / "candidate-ofx-bridge" / bridge_path.name

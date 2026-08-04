@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -54,7 +55,7 @@ def make_design_contract() -> dict:
 def write_design_contract(payload: dict | None = None) -> Path:
     root = LAB_ROOT / "target" / "native-loader-design"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-broker-design.local.json"
+    path = root / f"{time.time_ns()}-{os.getpid()}-broker-design.local.json"
     path.write_text(json.dumps(payload or make_design_contract()), encoding="utf-8")
     return path
 
@@ -116,7 +117,7 @@ class AexNativeLoaderBrokerSelftestTests(unittest.TestCase):
             broker_path=LAB_ROOT / "tools" / "aex_native_loader_broker.py",
             design_contract_path=write_design_contract(),
         )
-        out = LAB_ROOT / "target" / "native-loader-broker-selftest" / f"{time.time_ns()}-broker-selftest.local.json"
+        out = LAB_ROOT / "target" / "native-loader-broker-selftest" / f"{time.time_ns()}-{os.getpid()}-broker-selftest.local.json"
         written = aex_native_loader_broker_selftest.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):
@@ -133,7 +134,7 @@ class AexNativeLoaderBrokerSelftestTests(unittest.TestCase):
         self.assertEqual(loaded["report_kind"], "aex_native_loader_design_contract")
         self.assertEqual(resolved, design_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-design.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-design.json"
         outside.write_text(json.dumps(make_design_contract()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_native_loader_broker_selftest.load_design_contract(outside)

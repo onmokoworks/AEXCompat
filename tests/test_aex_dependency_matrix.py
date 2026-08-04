@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -104,19 +105,19 @@ class AexDependencyMatrixTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         matrix_root = LAB_ROOT / "target" / "candidate-matrix"
         matrix_root.mkdir(parents=True, exist_ok=True)
-        source = matrix_root / f"{time.time_ns()}-dependency-source.local.json"
+        source = matrix_root / f"{time.time_ns()}-{os.getpid()}-dependency-source.local.json"
         source.write_text(json.dumps(make_candidate_matrix()), encoding="utf-8")
         loaded, resolved = aex_dependency_matrix.load_candidate_matrix(source)
         self.assertEqual(loaded["report_kind"], "aex_candidate_matrix")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-dependency.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-dependency.json"
         outside.write_text(json.dumps(make_candidate_matrix()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_dependency_matrix.load_candidate_matrix(outside)
 
         payload = aex_dependency_matrix.build_dependency_matrix(loaded, resolved)
-        out = LAB_ROOT / "target" / "dependency-matrix" / f"{time.time_ns()}-dependency.local.json"
+        out = LAB_ROOT / "target" / "dependency-matrix" / f"{time.time_ns()}-{os.getpid()}-dependency.local.json"
         written = aex_dependency_matrix.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

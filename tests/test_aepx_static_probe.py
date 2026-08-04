@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import time
@@ -25,7 +26,7 @@ aepx_static_probe = load_tool("aepx_static_probe")
 def write_synthetic_aepx() -> Path:
     root = LAB_ROOT / "target" / "test-inputs"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-synthetic.aepx"
+    path = root / f"{time.time_ns()}-{os.getpid()}-synthetic.aepx"
     path.write_text(
         """<?xml version="1.0" encoding="UTF-8"?>
 <AfterEffectsProject xmlns="http://www.adobe.com/products/aftereffects" majorVersion="1" minorVersion="0">
@@ -59,13 +60,13 @@ class AepxStaticProbeTests(unittest.TestCase):
         self.assertNotIn("Do not export this literal text", serialized)
 
     def test_invalid_suffix_or_xml_is_rejected(self):
-        bad_suffix = LAB_ROOT / "target" / "test-inputs" / f"{time.time_ns()}-bad.txt"
+        bad_suffix = LAB_ROOT / "target" / "test-inputs" / f"{time.time_ns()}-{os.getpid()}-bad.txt"
         bad_suffix.parent.mkdir(parents=True, exist_ok=True)
         bad_suffix.write_text("<x/>", encoding="utf-8")
         with self.assertRaises(ValueError):
             aepx_static_probe.build_aepx_probe(bad_suffix)
 
-        bad_xml = LAB_ROOT / "target" / "test-inputs" / f"{time.time_ns()}-bad.aepx"
+        bad_xml = LAB_ROOT / "target" / "test-inputs" / f"{time.time_ns()}-{os.getpid()}-bad.aepx"
         bad_xml.write_text("<AfterEffectsProject>", encoding="utf-8")
         with self.assertRaises(ValueError):
             aepx_static_probe.build_aepx_probe(bad_xml)
@@ -82,13 +83,13 @@ class AepxStaticProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(
             prefix="aexcompat-outside-", dir=outside_root
         ) as directory:
-            outside = Path(directory) / f"{time.time_ns()}-outside.aepx"
+            outside = Path(directory) / f"{time.time_ns()}-{os.getpid()}-outside.aepx"
             outside.write_text("<x/>", encoding="utf-8")
             with self.assertRaises(ValueError):
                 aepx_static_probe.validate_aepx_input_path(outside)
 
         payload = aepx_static_probe.build_aepx_probe(source)
-        out = LAB_ROOT / "target" / "aepx-static-probe" / f"{time.time_ns()}-aepx.local.json"
+        out = LAB_ROOT / "target" / "aepx-static-probe" / f"{time.time_ns()}-{os.getpid()}-aepx.local.json"
         written = aepx_static_probe.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

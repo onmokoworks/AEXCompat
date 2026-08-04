@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -157,12 +158,12 @@ class AexRedactedSchemaVerifierTests(unittest.TestCase):
     def test_paths_are_confined_and_report_is_create_new(self):
         review_root = LAB_ROOT / "target" / "parameter-schema-review"
         review_root.mkdir(parents=True, exist_ok=True)
-        source = review_root / f"{time.time_ns()}-review.local.json"
+        source = review_root / f"{time.time_ns()}-{os.getpid()}-review.local.json"
         source.write_text(json.dumps(make_review_packet()), encoding="utf-8")
         packet, resolved = aex_redacted_schema_verifier.load_review_packet(source)
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-verifier.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-verifier.json"
         outside.write_text(json.dumps(make_review_packet()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_redacted_schema_verifier.load_review_packet(outside)
@@ -171,7 +172,7 @@ class AexRedactedSchemaVerifierTests(unittest.TestCase):
             review_packet=packet,
             review_packet_path=resolved,
         )
-        out = LAB_ROOT / "target" / "redacted-schema-verifier" / f"{time.time_ns()}-verifier.local.json"
+        out = LAB_ROOT / "target" / "redacted-schema-verifier" / f"{time.time_ns()}-{os.getpid()}-verifier.local.json"
         written = aex_redacted_schema_verifier.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -338,16 +339,16 @@ class AexCandidateTestHandoffPacketTests(unittest.TestCase):
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
         paths = {
-            "approval": roots["approval"] / f"{time.time_ns()}-request.local.json",
-            "gate": roots["gate"] / f"{time.time_ns()}-gate.local.json",
-            "design": roots["design"] / f"{time.time_ns()}-design.local.json",
-            "runtime": roots["runtime"] / f"{time.time_ns()}-runtime.local.json",
-            "runtime_selftest": roots["runtime_selftest"] / f"{time.time_ns()}-runtime-selftest.local.json",
-            "path": roots["path"] / f"{time.time_ns()}-path.local.json",
-            "validation": roots["validation"] / f"{time.time_ns()}-validation.local.json",
-            "smoke": roots["smoke"] / f"{time.time_ns()}-smoke.local.json",
-            "render": roots["render"] / f"{time.time_ns()}-render.local.json",
-            "ofx": roots["ofx"] / f"{time.time_ns()}-ofx.local.json",
+            "approval": roots["approval"] / f"{time.time_ns()}-{os.getpid()}-request.local.json",
+            "gate": roots["gate"] / f"{time.time_ns()}-{os.getpid()}-gate.local.json",
+            "design": roots["design"] / f"{time.time_ns()}-{os.getpid()}-design.local.json",
+            "runtime": roots["runtime"] / f"{time.time_ns()}-{os.getpid()}-runtime.local.json",
+            "runtime_selftest": roots["runtime_selftest"] / f"{time.time_ns()}-{os.getpid()}-runtime-selftest.local.json",
+            "path": roots["path"] / f"{time.time_ns()}-{os.getpid()}-path.local.json",
+            "validation": roots["validation"] / f"{time.time_ns()}-{os.getpid()}-validation.local.json",
+            "smoke": roots["smoke"] / f"{time.time_ns()}-{os.getpid()}-smoke.local.json",
+            "render": roots["render"] / f"{time.time_ns()}-{os.getpid()}-render.local.json",
+            "ofx": roots["ofx"] / f"{time.time_ns()}-{os.getpid()}-ofx.local.json",
         }
         payloads = {
             "approval": approval_request(),
@@ -379,7 +380,7 @@ class AexCandidateTestHandoffPacketTests(unittest.TestCase):
         render, render_path = aex_candidate_test_handoff_packet.load_render_validation_contract(paths["render"])
         ofx, ofx_path = aex_candidate_test_handoff_packet.load_ofx_route_contract(paths["ofx"])
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-handoff-request.local.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-handoff-request.local.json"
         outside.write_text(json.dumps(approval_request()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_candidate_test_handoff_packet.load_approval_request(outside)
@@ -406,7 +407,7 @@ class AexCandidateTestHandoffPacketTests(unittest.TestCase):
             ofx_route_contract=ofx,
             ofx_route_contract_path=ofx_path,
         )
-        out = LAB_ROOT / "target" / "candidate-test-handoff" / f"{time.time_ns()}-handoff.local.json"
+        out = LAB_ROOT / "target" / "candidate-test-handoff" / f"{time.time_ns()}-{os.getpid()}-handoff.local.json"
         written = aex_candidate_test_handoff_packet.write_json_create_new(out, packet)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

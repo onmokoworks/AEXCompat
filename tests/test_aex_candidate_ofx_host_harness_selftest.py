@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -158,7 +159,7 @@ def write_dryrun(name: str, payload: dict | None = None) -> Path:
 
 class AexCandidateOfxHostHarnessSelftestTests(unittest.TestCase):
     def test_builds_synthetic_no_load_selftest(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         dryrun_path = LAB_ROOT / "target" / "candidate-ofx-host-harness-dryrun" / f"ae-candidate-ofx-host-harness-dryrun-{stamp}.local.json"
         dryrun_path.parent.mkdir(parents=True, exist_ok=True)
         report = aex_candidate_ofx_host_harness_selftest.build_harness_selftest(
@@ -233,7 +234,7 @@ class AexCandidateOfxHostHarnessSelftestTests(unittest.TestCase):
             )
 
     def test_loads_dryrun_and_writes_create_new_under_root(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         dryrun_path = write_dryrun(f"ae-candidate-ofx-host-harness-dryrun-{stamp}.local.json")
         dryrun, resolved_dryrun = aex_candidate_ofx_host_harness_selftest.load_harness_dryrun(
             Path("target") / "candidate-ofx-host-harness-dryrun" / dryrun_path.name

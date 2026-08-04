@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -175,7 +176,7 @@ def write_json(root_name: str, name: str, payload: dict) -> Path:
 
 class AexCandidateOfxBridgePacketTests(unittest.TestCase):
     def test_builds_bridge_packet_from_closed_no_load_evidence(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         card_path = LAB_ROOT / "target" / "candidate-compat-card" / f"ae-candidate-compat-card-{stamp}.local.json"
         image_path = LAB_ROOT / "target" / "candidate-image-compat-mock" / f"ae-candidate-image-compat-mock-{stamp}.local.json"
         facade_path = LAB_ROOT / "target" / "ofx-facade" / f"ae-ofx-facade-{stamp}.local.json"
@@ -252,7 +253,7 @@ class AexCandidateOfxBridgePacketTests(unittest.TestCase):
             )
 
     def test_loads_sources_and_writes_json_create_new_under_bridge_root(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         card_path = write_json("candidate-compat-card", f"ae-candidate-compat-card-{stamp}.local.json", compat_card_payload())
         image_path = write_json(
             "candidate-image-compat-mock",

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -204,10 +205,10 @@ class AexNativeLoaderRuntimeContractTests(unittest.TestCase):
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
         paths = {
-            "design": roots["design"] / f"{time.time_ns()}-design.local.json",
-            "broker": roots["broker"] / f"{time.time_ns()}-broker.local.json",
-            "gate": roots["gate"] / f"{time.time_ns()}-gate.local.json",
-            "policy": roots["policy"] / f"{time.time_ns()}-policy.local.json",
+            "design": roots["design"] / f"{time.time_ns()}-{os.getpid()}-design.local.json",
+            "broker": roots["broker"] / f"{time.time_ns()}-{os.getpid()}-broker.local.json",
+            "gate": roots["gate"] / f"{time.time_ns()}-{os.getpid()}-gate.local.json",
+            "policy": roots["policy"] / f"{time.time_ns()}-{os.getpid()}-policy.local.json",
         }
         paths["design"].write_text(json.dumps(design_contract()), encoding="utf-8")
         paths["broker"].write_text(json.dumps(broker_selftest()), encoding="utf-8")
@@ -221,7 +222,7 @@ class AexNativeLoaderRuntimeContractTests(unittest.TestCase):
         self.assertEqual(loaded_design["report_kind"], "aex_native_loader_design_contract")
         self.assertEqual(loaded_broker["report_kind"], "aex_native_loader_broker_selftest")
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-runtime-design.local.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-runtime-design.local.json"
         outside.write_text(json.dumps(design_contract()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_native_loader_runtime_contract.load_native_loader_design(outside)
@@ -236,7 +237,7 @@ class AexNativeLoaderRuntimeContractTests(unittest.TestCase):
             sandbox_policy=loaded_policy,
             sandbox_policy_path=resolved_policy,
         )
-        out = LAB_ROOT / "target" / "native-loader-runtime-contract" / f"{time.time_ns()}-runtime.local.json"
+        out = LAB_ROOT / "target" / "native-loader-runtime-contract" / f"{time.time_ns()}-{os.getpid()}-runtime.local.json"
         written = aex_native_loader_runtime_contract.write_json_create_new(out, contract)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -157,7 +158,7 @@ class AexPiplParserGateTests(unittest.TestCase):
         }
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         paths = {
             "catalog": roots["catalog"] / f"{stamp}-catalog.local.json",
             "selftest": roots["selftest"] / f"{stamp}-selftest.local.json",
@@ -170,7 +171,7 @@ class AexPiplParserGateTests(unittest.TestCase):
         self.assertEqual(catalog_path, paths["catalog"].resolve())
         self.assertEqual(selftest_path, paths["selftest"].resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-gate.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-gate.json"
         outside.write_text(json.dumps(make_pipl_catalog()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_pipl_parser_gate.load_pipl_catalog(outside)
@@ -181,7 +182,7 @@ class AexPiplParserGateTests(unittest.TestCase):
             synthetic_selftest=selftest,
             synthetic_selftest_path=selftest_path,
         )
-        out = LAB_ROOT / "target" / "pipl-parser-gate" / f"{time.time_ns()}-gate.local.json"
+        out = LAB_ROOT / "target" / "pipl-parser-gate" / f"{time.time_ns()}-{os.getpid()}-gate.local.json"
         written = aex_pipl_parser_gate.write_json_create_new(out, gate)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

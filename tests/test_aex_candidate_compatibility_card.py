@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -296,7 +297,7 @@ class AexCandidateCompatibilityCardTests(unittest.TestCase):
             "candidate-test-runner": candidate_runner_payload(),
             "fixture-provenance-answer-validator-selftest": answer_validator_payload(),
         }
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         paths = {}
         for root_name, payload in roots.items():
             root = LAB_ROOT / "target" / root_name

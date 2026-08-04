@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -44,7 +45,7 @@ def make_policy() -> dict:
 
 class AexImageFixtureSuiteTests(unittest.TestCase):
     def test_suite_generates_ppm_fixtures_and_manifest(self):
-        suite_id = f"{time.time_ns()}-suite"
+        suite_id = f"{time.time_ns()}-{os.getpid()}-suite"
         suite = aex_image_fixture_suite.build_suite(make_policy(), Path("policy.json"), suite_id=suite_id)
         self.assertEqual(suite["report_kind"], "aex_image_fixture_suite")
         self.assertEqual(suite["suite_state"], "image_fixture_suite_ready")
@@ -63,30 +64,30 @@ class AexImageFixtureSuiteTests(unittest.TestCase):
         policy = make_policy()
         policy["sandbox_policy_state"] = "incomplete"
         with self.assertRaises(ValueError):
-            aex_image_fixture_suite.build_suite(policy, Path("policy.json"), suite_id=f"{time.time_ns()}-bad")
+            aex_image_fixture_suite.build_suite(policy, Path("policy.json"), suite_id=f"{time.time_ns()}-{os.getpid()}-bad")
 
         policy = make_policy()
         policy["native_load_performed"] = True
         with self.assertRaises(ValueError):
-            aex_image_fixture_suite.build_suite(policy, Path("policy.json"), suite_id=f"{time.time_ns()}-bad")
+            aex_image_fixture_suite.build_suite(policy, Path("policy.json"), suite_id=f"{time.time_ns()}-{os.getpid()}-bad")
 
     def test_paths_are_confined_and_outputs_are_create_new(self):
         policy_root = LAB_ROOT / "target" / "sandbox-policy"
         policy_root.mkdir(parents=True, exist_ok=True)
-        source = policy_root / f"{time.time_ns()}-image-policy.local.json"
+        source = policy_root / f"{time.time_ns()}-{os.getpid()}-image-policy.local.json"
         source.write_text(json.dumps(make_policy()), encoding="utf-8")
         loaded, resolved = aex_image_fixture_suite.load_sandbox_policy(source)
         self.assertEqual(loaded["packet_kind"], "aex_sandbox_policy_packet")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-image-policy.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-image-policy.json"
         outside.write_text(json.dumps(make_policy()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_image_fixture_suite.load_sandbox_policy(outside)
 
-        suite_id = f"{time.time_ns()}-write"
+        suite_id = f"{time.time_ns()}-{os.getpid()}-write"
         payload = aex_image_fixture_suite.build_suite(loaded, resolved, suite_id=suite_id)
-        out = LAB_ROOT / "target" / "image-fixture-suite" / f"{time.time_ns()}-image-suite.local.json"
+        out = LAB_ROOT / "target" / "image-fixture-suite" / f"{time.time_ns()}-{os.getpid()}-image-suite.local.json"
         written = aex_image_fixture_suite.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

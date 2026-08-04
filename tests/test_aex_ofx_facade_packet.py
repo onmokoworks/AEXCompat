@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -73,19 +74,19 @@ class AexOfxFacadePacketTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         stub_root = LAB_ROOT / "target" / "native-loader-stub"
         stub_root.mkdir(parents=True, exist_ok=True)
-        source = stub_root / f"{time.time_ns()}-ofx-stub.json"
+        source = stub_root / f"{time.time_ns()}-{os.getpid()}-ofx-stub.json"
         source.write_text(json.dumps(make_stub()), encoding="utf-8")
         loaded, resolved = aex_ofx_facade_packet.load_loader_stub(source)
         self.assertEqual(loaded["report_kind"], "aex_native_loader_stub_report")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-stub.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-stub.json"
         outside.write_text(json.dumps(make_stub()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_ofx_facade_packet.load_loader_stub(outside)
 
         packet = aex_ofx_facade_packet.build_packet(loaded, resolved)
-        out = LAB_ROOT / "target" / "ofx-facade" / f"{time.time_ns()}-ofx.local.json"
+        out = LAB_ROOT / "target" / "ofx-facade" / f"{time.time_ns()}-{os.getpid()}-ofx.local.json"
         written = aex_ofx_facade_packet.write_json_create_new(out, packet)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

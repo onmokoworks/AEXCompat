@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -214,7 +215,7 @@ def write_payload(root_name: str, name: str, payload: dict) -> Path:
 
 
 def build_report() -> dict:
-    stamp = time.time_ns()
+    stamp = f"{time.time_ns()}-{os.getpid()}"
     return aex_candidate_ofx_runtime_boundary_contract.build_boundary_contract(
         candidate_ofx_bridge=bridge_payload(),
         candidate_ofx_bridge_path=Path(f"target/candidate-ofx-bridge/bridge-{stamp}.json"),
@@ -322,7 +323,7 @@ class AexCandidateOfxRuntimeBoundaryContractTests(unittest.TestCase):
             )
 
     def test_loads_sources_and_writes_create_new_under_root(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         bridge_path = write_payload(
             "candidate-ofx-bridge",
             f"ae-candidate-ofx-bridge-{stamp}.local.json",

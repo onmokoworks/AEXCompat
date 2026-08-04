@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -136,9 +137,9 @@ def make_synthetic_selftest() -> dict:
 
 
 def build_sources() -> tuple[dict, Path, dict, Path, dict, Path]:
-    static_path = LAB_ROOT / "target" / "aex-static-probe" / f"{time.time_ns()}-audit-static.local.json"
-    catalog_path = LAB_ROOT / "target" / "pipl-resource-catalog" / f"{time.time_ns()}-audit-catalog.local.json"
-    gate_path = LAB_ROOT / "target" / "pipl-parser-gate" / f"{time.time_ns()}-audit-gate.local.json"
+    static_path = LAB_ROOT / "target" / "aex-static-probe" / f"{time.time_ns()}-{os.getpid()}-audit-static.local.json"
+    catalog_path = LAB_ROOT / "target" / "pipl-resource-catalog" / f"{time.time_ns()}-{os.getpid()}-audit-catalog.local.json"
+    gate_path = LAB_ROOT / "target" / "pipl-parser-gate" / f"{time.time_ns()}-{os.getpid()}-audit-gate.local.json"
     for path in (static_path, catalog_path, gate_path):
         path.parent.mkdir(parents=True, exist_ok=True)
     static_report = make_static_report()
@@ -258,7 +259,7 @@ class AexPiplResourceConsistencyAuditTests(unittest.TestCase):
         self.assertEqual(resolved_catalog, catalog_path.resolve())
         self.assertEqual(resolved_gate, gate_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-static.local.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-static.local.json"
         write_json(outside, static_report)
         with self.assertRaises(ValueError):
             aex_pipl_resource_consistency_audit.load_static_report(outside)
@@ -271,7 +272,7 @@ class AexPiplResourceConsistencyAuditTests(unittest.TestCase):
             pipl_parser_gate=loaded_gate,
             pipl_parser_gate_path=resolved_gate,
         )
-        out = LAB_ROOT / "target" / "pipl-resource-consistency-audit" / f"{time.time_ns()}-audit.local.json"
+        out = LAB_ROOT / "target" / "pipl-resource-consistency-audit" / f"{time.time_ns()}-{os.getpid()}-audit.local.json"
         written = aex_pipl_resource_consistency_audit.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

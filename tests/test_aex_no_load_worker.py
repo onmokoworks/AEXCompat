@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import os
 import time
 import unittest
 from pathlib import Path
@@ -24,7 +25,7 @@ ppm_fixture_tool = load_tool("ppm_fixture_tool")
 def create_ppm_fixture() -> Path:
     root = LAB_ROOT / "target" / "ppm-fixtures"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-worker-input.ppm"
+    path = root / f"{time.time_ns()}-{os.getpid()}-worker-input.ppm"
     image = ppm_fixture_tool.generate_image(4, 3, "gradient")
     ppm_fixture_tool.write_ppm_create_new(path, image)
     return path
@@ -51,7 +52,7 @@ class AexNoLoadWorkerTests(unittest.TestCase):
         self.assertEqual(inspect["height"], 3)
         self.assertEqual(inspect["bytes"], 36)
 
-        output = LAB_ROOT / "target" / "worker-selftest" / f"{time.time_ns()}-identity.ppm"
+        output = LAB_ROOT / "target" / "worker-selftest" / f"{time.time_ns()}-{os.getpid()}-identity.ppm"
         transformed = aex_no_load_worker.handle_message(
             {"type": "transform_ppm_identity", "input": str(ppm), "out": str(output)}
         )
