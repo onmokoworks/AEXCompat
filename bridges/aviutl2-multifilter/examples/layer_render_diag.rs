@@ -189,8 +189,17 @@ fn main() {
             FrameStatus::FrameError {
                 render_error,
                 missing_dependency,
+                return_message,
             } => {
-                println!("frame error {render_error} (missing dependency: {missing_dependency:?})")
+                println!("frame error {render_error} (missing dependency: {missing_dependency:?})");
+                // What the plug-in itself said about the failure, when it said
+                // anything (issue #707): often the whole diagnosis.
+                if let Some(message) = return_message {
+                    println!(
+                        "frame return_message [{}] {:?} (error {}, display {})",
+                        message.selector, message.text, message.error, message.display_requested
+                    );
+                }
             }
         },
         Err(error) => println!("render_frame failed: {error}"),
