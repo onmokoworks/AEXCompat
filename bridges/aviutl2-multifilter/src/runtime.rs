@@ -537,6 +537,9 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
         .and_then(|&slot| read_virtual_buffer_rgba8(video).map(|(_, _, rgba)| (slot, rgba)));
     match render_on(&tx, plugin_index, current_time, rgba, parameters, layer) {
         FrameReply::Rendered(frame) => {
+            // Says so once when a filter that had been failing renders again;
+            // silent for one that never stopped.
+            report_frame_recovered(&ctx.plugin);
             // A filter object cannot change the image size; reject a resized frame.
             if frame.width != width || frame.height != height {
                 return true;
@@ -547,9 +550,15 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
             }
             true
         }
-        // Keep the session; leave this frame's pixels.
-        FrameReply::FrameLocal(_) => true,
-        FrameReply::SessionLost(_) => {
+        // Keep the session; leave this frame's pixels. Saying so matters: with
+        // the frame's pixels left alone, an effect erroring on every frame and
+        // an effect doing nothing look identical on screen (issue #697).
+        FrameReply::FrameLocal(code) => {
+            report_frame_trouble(&ctx.plugin, FrameTrouble::Error(code));
+            true
+        }
+        FrameReply::SessionLost(reason) => {
+            report_frame_trouble(&ctx.plugin, FrameTrouble::SessionLost(&reason));
             // Drop this exact instance so the next frame reopens, without
             // disturbing a healthy session a concurrent reopen may have installed.
             match route {
@@ -560,6 +569,128 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
             }
             true
         }
+    }
+}
+
+/// What went wrong with one frame, for [`report_frame_trouble`].
+enum FrameTrouble<'a> {
+    /// The plug-in (or the host on its behalf) returned an error for this
+    /// frame. The session stays usable.
+    Error(i64),
+    /// The session is gone; the next frame opens a fresh one.
+    SessionLost(&'a str),
+}
+
+/// The `PF_Err` name for a code AE defines, so a reader does not have to look
+/// up a bare number. Codes outside the enum - a plug-in's own, or one of the
+/// host's negative internal ones - keep just their number.
+fn pf_error_name(code: i64) -> Option<&'static str> {
+    Some(match code {
+        4 => "PF_Err_OUT_OF_MEMORY",
+        512 => "PF_Err_INTERNAL_STRUCT_DAMAGED",
+        513 => "PF_Err_INVALID_INDEX",
+        514 => "PF_Err_UNRECOGNIZED_PARAM_TYPE",
+        515 => "PF_Err_INVALID_CALLBACK",
+        516 => "PF_Err_BAD_CALLBACK_PARAM",
+        517 => "PF_Interrupt_CANCEL",
+        518 => "PF_Err_CANNOT_PARSE_KEYFRAME_TEXT",
+        _ => return None,
+    })
+}
+
+/// How many identical troubles pass silently between reports. A frame that
+/// keeps failing does so at the preview's frame rate, and one line per frame
+/// would bury the log it is supposed to make readable.
+const FRAME_TROUBLE_REPORT_INTERVAL: u32 = 60;
+
+/// What was last reported for one filter, so a run of identical troubles
+/// becomes one line plus a periodic count, and a recovery is reported once.
+struct FrameTroubleState {
+    summary: String,
+    count: u32,
+}
+
+type FrameTroubleStates = HashMap<PathBuf, FrameTroubleState>;
+
+static FRAME_TROUBLE: Mutex<Option<FrameTroubleStates>> = Mutex::new(None);
+
+/// What to say about a frame that did not render, or nothing when this filter
+/// is already known to be failing this way and the interval has not come round.
+///
+/// Kept apart from the logging so the rule - one line when it starts, one every
+/// `FRAME_TROUBLE_REPORT_INTERVAL` after that - is testable without a host
+/// logger or a global.
+fn frame_trouble_report(
+    states: &mut FrameTroubleStates,
+    plugin: &Path,
+    trouble: FrameTrouble<'_>,
+) -> Option<String> {
+    let summary = match trouble {
+        FrameTrouble::Error(code) => match pf_error_name(code) {
+            Some(name) => format!("frame error {code} ({name})"),
+            None => format!("frame error {code}"),
+        },
+        FrameTrouble::SessionLost(reason) => format!("session lost: {reason}"),
+    };
+    match states.get_mut(plugin) {
+        Some(state) if state.summary == summary => {
+            state.count += 1;
+            (state.count % FRAME_TROUBLE_REPORT_INTERVAL == 0)
+                .then(|| format!("{}: {summary} (x{})", filter_stem(plugin), state.count))
+        }
+        _ => {
+            let line = format!("{}: {summary}", filter_stem(plugin));
+            states.insert(
+                plugin.to_path_buf(),
+                FrameTroubleState { summary, count: 1 },
+            );
+            Some(line)
+        }
+    }
+}
+
+/// What to say when a filter renders again, or nothing when it was never
+/// reported as failing - a healthy filter stays silent.
+fn frame_recovered_report(states: &mut FrameTroubleStates, plugin: &Path) -> Option<String> {
+    states.remove(plugin).map(|state| {
+        format!(
+            "{}: rendering again after {} frame(s) of {}",
+            filter_stem(plugin),
+            state.count,
+            state.summary
+        )
+    })
+}
+
+/// Reports a frame that did not render.
+///
+/// Without this an effect erroring on every frame is indistinguishable from an
+/// effect that does nothing: the pixels are left as they are either way, and
+/// AviUtl2 shows the frame it already had. `Displacement` returning
+/// `PF_Err_OUT_OF_MEMORY` on every frame (#695) was found only after a
+/// throwaway build was made to print exactly this (issue #697).
+fn report_frame_trouble(plugin: &Path, trouble: FrameTrouble<'_>) {
+    let Ok(mut states) = FRAME_TROUBLE.lock() else {
+        return;
+    };
+    if let Some(line) =
+        frame_trouble_report(states.get_or_insert_with(HashMap::new), plugin, trouble)
+    {
+        log_warn(&line);
+    }
+}
+
+/// Reports that a filter is rendering again after [`report_frame_trouble`] said
+/// it was not.
+fn report_frame_recovered(plugin: &Path) {
+    let Ok(mut states) = FRAME_TROUBLE.lock() else {
+        return;
+    };
+    let Some(states) = states.as_mut() else {
+        return;
+    };
+    if let Some(line) = frame_recovered_report(states, plugin) {
+        log_info(&line);
     }
 }
 
