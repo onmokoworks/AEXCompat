@@ -1,3 +1,130 @@
+/// The AEX layer-parameter slots (`PF_Param_LAYER`, reported by discovery as
+/// `kind == "layer"`) in declaration order. Taken from the raw discovery
+/// parameters: `build_item` never maps a layer into a config item, so the
+/// registered `defaults` cannot contain one.
+fn layer_slots_of(parameters: &[InteractiveParameter]) -> Vec<u32> {
+    parameters
+        .iter()
+        .filter(|parameter| parameter.kind == "layer")
+        .map(|parameter| parameter.slot)
+        .collect()
+}
+
+/// AviUtl2's single global virtual buffer, written by the "仮想バッファ出力"
+/// (virtual buffer output / output switch) filter and read here as an AEX layer
+/// input (issue #645). Named `tempbuffer` in the image-resource namespace.
+const VIRTUAL_BUFFER_NAME: &str = "tempbuffer";
+
+/// Reads the virtual buffer back to the CPU as RGBA8, or `None` if nothing is
+/// written to it this frame (no "仮想バッファ出力" upstream) or it cannot be read.
+///
+/// The virtual buffer is a GPU-only `DXGI_FORMAT_R16G16B16A16_FLOAT` texture;
+/// `get_image_resource_data` fails on it for every format (verified — it works
+/// only for the ordinary `object` resource). So take its `ID3D11Texture2D`, copy
+/// it into a CPU-readable STAGING texture, `Map` it, and convert the half-float
+/// RGBA to RGBA8, honoring the mapped row pitch (which is padded).
+fn read_virtual_buffer_rgba8(video: *mut FILTER_PROC_VIDEO) -> Option<(u32, u32, Vec<u8>)> {
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
+    use windows::core::Interface;
+
+    let name: Vec<u16> = VIRTUAL_BUFFER_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `video` is the non-null FILTER_PROC_VIDEO the host passed to
+    // proc_video; the returned texture pointer is host-owned and valid until the
+    // proc returns, so it is only borrowed (never released) below.
+    let tex_ptr = unsafe { ((*video).get_image_resource_texture2d)(name.as_ptr()) };
+    if tex_ptr.is_null() {
+        return None;
+    }
+    let src: &ID3D11Texture2D = unsafe { ID3D11Texture2D::from_raw_borrowed(&tex_ptr) }?;
+
+    unsafe {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        src.GetDesc(&mut desc);
+        // Only the format the virtual buffer is known to use; a different format
+        // would need a different unpack, so skip rather than misread it.
+        if desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT || desc.Width == 0 || desc.Height == 0 {
+            return None;
+        }
+        let (width, height) = (desc.Width, desc.Height);
+
+        let device: ID3D11Device = src.GetDevice().ok()?;
+        let ctx: ID3D11DeviceContext = device.GetImmediateContext().ok()?;
+
+        let mut staging_desc = desc;
+        staging_desc.Usage = D3D11_USAGE_STAGING;
+        staging_desc.BindFlags = 0;
+        staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        staging_desc.MiscFlags = 0;
+        let mut staging: Option<ID3D11Texture2D> = None;
+        device
+            .CreateTexture2D(&staging_desc, None, Some(&mut staging))
+            .ok()?;
+        let staging = staging?;
+
+        ctx.CopyResource(&staging, src);
+
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).ok()?;
+        let row_pitch = mapped.RowPitch as usize;
+        if row_pitch < width as usize * 8 {
+            ctx.Unmap(&staging, 0);
+            return None;
+        }
+        // Claim only up to the last row's pixel data: D3D11 specifies RowPitch
+        // as the row stride, not that the final row's padding is readable.
+        let mapped_len = row_pitch * (height as usize - 1) + width as usize * 8;
+        let mapped_bytes = std::slice::from_raw_parts(mapped.pData as *const u8, mapped_len);
+        let rgba = unpack_rgba16f_to_rgba8(mapped_bytes, width, height, row_pitch);
+        ctx.Unmap(&staging, 0);
+
+        rgba.map(|rgba| (width, height, rgba))
+    }
+}
+
+/// Unpacks a mapped `R16G16B16A16_FLOAT` image (RGBA order, little-endian half
+/// floats, `row_pitch`-padded rows) into packed RGBA8, clamping each channel to
+/// [0, 1] (a displacement map's values are normalized; NaN clamps to 0). Returns
+/// `None` if `bytes` is too short for the claimed geometry.
+fn unpack_rgba16f_to_rgba8(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    row_pitch: usize,
+) -> Option<Vec<u8>> {
+    let (width, height) = (width as usize, height as usize);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    // The last row only needs its pixel data, not its padding (matching what
+    // the D3D11 mapping is claimed to expose).
+    if row_pitch < width * 8 || bytes.len() < row_pitch * (height - 1) + width * 8 {
+        return None;
+    }
+    let half_to_u8 = |lo: u8, hi: u8| -> u8 {
+        let v = half::f16::from_le_bytes([lo, hi]).to_f32();
+        (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+    };
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for y in 0..height {
+        let row = y * row_pitch;
+        for x in 0..width {
+            let px = row + x * 8;
+            rgba.push(half_to_u8(bytes[px], bytes[px + 1]));
+            rgba.push(half_to_u8(bytes[px + 2], bytes[px + 3]));
+            rgba.push(half_to_u8(bytes[px + 4], bytes[px + 5]));
+            rgba.push(half_to_u8(bytes[px + 6], bytes[px + 7]));
+        }
+    }
+    Some(rgba)
+}
+
 /// Build one leaked FILTER_ITEM for an exposed parameter, plus a reader and the
 /// (range-normalized) parameter to send. Mirrors the aviutl2 bridge's mapping.
 fn build_item(
@@ -284,7 +411,25 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
     // serialize on the map. An AEX sharing its dependency closure with other
     // registered AEXes routes through the pooled cluster session (issue
     // #405); everything else keeps the per-effect session.
-    let route = match route_session(ctx, effect_id, &identity) {
+    // Read once, only if this session actually opens: map AviUtl2's virtual
+    // buffer onto the AEX's first layer parameter (issue #645). Empty when the
+    // AEX has no layer input or nothing is written to the virtual buffer.
+    let read_layers = || -> Vec<SessionLayer> {
+        let Some(&slot) = ctx.layer_slots.first() else {
+            return Vec::new();
+        };
+        match read_virtual_buffer_rgba8(video) {
+            Some((layer_width, layer_height, rgba)) => vec![SessionLayer {
+                slot,
+                width: layer_width,
+                height: layer_height,
+                rgba,
+                timed: None,
+            }],
+            None => Vec::new(),
+        }
+    };
+    let route = match route_session(ctx, effect_id, &identity, &read_layers) {
         Ok(route) => route,
         Err(()) => return false,
     };
@@ -338,8 +483,17 @@ fn route_session(
     ctx: &FilterCtx,
     effect_id: i64,
     identity: &GeomIdentity,
+    // Called only when a session is actually opened, so an existing session's
+    // reuse never pays for reading the host virtual buffer (issue #645).
+    open_layers: &dyn Fn() -> Vec<SessionLayer>,
 ) -> Result<SessionRoute, ()> {
-    if let Some(closure_identity) = &ctx.closure_identity {
+    // An AEX with a layer parameter stays on its per-effect session: only there
+    // can the virtual buffer be supplied (a pooled session is shared by members
+    // whose parameter layouts differ, so a layer slot valid for one member may
+    // be a non-layer parameter in another, which the worker fails closed).
+    if ctx.layer_slots.is_empty()
+        && let Some(closure_identity) = &ctx.closure_identity
+    {
         let key = PoolKey {
             closure_identity: closure_identity.clone(),
             geom: identity.clone(),
@@ -355,7 +509,7 @@ fn route_session(
     }
     let (tx, serial) = match existing_sender(&ctx.sessions, effect_id, identity) {
         Some(pair) => pair,
-        None => open_and_get_sender(ctx, effect_id, identity).map_err(|_| ())?,
+        None => open_and_get_sender(ctx, effect_id, identity, open_layers).map_err(|_| ())?,
     };
     Ok(SessionRoute::PerEffect(tx, serial))
 }
@@ -400,6 +554,12 @@ fn pool_open_route(
         smart: ctx.smart,
         defaults: ctx.defaults.clone(),
         identity: key.geom.clone(),
+        // No virtual-buffer layer on a pooled cluster session: the members share
+        // one dependency closure but not a parameter layout, so the opener's
+        // layer slot may be a non-layer parameter in another member, which the
+        // worker fails closed (-3) — a regression for members that rendered
+        // fine before. A layer-fed AEX keeps its per-effect session (issue #645).
+        layers: Vec::new(),
         cluster: Some(ClusterLaunch {
             plugins: plugins.clone(),
             swap_payloads,
@@ -458,6 +618,10 @@ struct MfSessionConfig {
     smart: bool,
     defaults: Vec<InteractiveParameter>,
     identity: GeomIdentity,
+    /// Secondary layers read once at open (issue #645): AviUtl2's virtual buffer
+    /// feeding an AEX layer parameter. Read on the AviUtl2 callback thread (only
+    /// there can the host texture be read) and moved here for the session thread.
+    layers: Vec<SessionLayer>,
     /// Cluster launch (issue #405): when set, the session opens over the
     /// whole same-closure cluster and swaps plugins per request instead of
     /// serving a single AEX.
@@ -516,7 +680,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 audio_trailer: None,
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
-                layers: &[],
+                layers: &config.layers,
                 dependencies,
                 width: config.identity.width,
                 height: config.identity.height,
@@ -777,6 +941,7 @@ fn open_and_get_sender(
     ctx: &FilterCtx,
     effect_id: i64,
     identity: &GeomIdentity,
+    open_layers: &dyn Fn() -> Vec<SessionLayer>,
 ) -> Result<(Sender<RenderReq>, u64), String> {
     let opened = open_mf_session(MfSessionConfig {
         repository: ctx.repository.clone(),
@@ -786,6 +951,7 @@ fn open_and_get_sender(
         smart: ctx.smart,
         defaults: ctx.defaults.clone(),
         identity: identity.clone(),
+        layers: open_layers(),
         cluster: None,
     })?;
     let serial = opened.serial;

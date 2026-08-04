@@ -35,7 +35,7 @@ use aexcompat_broker::plugin_dependency_closure::{
 };
 use aexcompat_broker::render_session::{
     ClusterRenderPlugins, DiscoverySession, DiscoverySessionOpenRequest, FrameStatus,
-    InspectOutcome, RenderSession, SessionOpenRequest, SwapOutcome,
+    InspectOutcome, RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome,
 };
 use aexcompat_broker::sealed_load_tree::SealedResourceEntry;
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;

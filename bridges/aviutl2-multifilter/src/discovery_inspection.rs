@@ -978,6 +978,10 @@ fn register_discovered(
         sha: entry.sha.clone(),
         smart: entry.smart,
         closure_identity: entry.closure_identity.clone(),
+        // From the raw discovery parameters, NOT from `defaults`: `build_item`
+        // maps only value-carrying kinds (float/integer/color) into config
+        // items, so a layer parameter never reaches `defaults`.
+        layer_slots: layer_slots_of(&entry.params),
         defaults: defaults.clone(),
         readers,
         sessions: Mutex::new(HashMap::new()),
