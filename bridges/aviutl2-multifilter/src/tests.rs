@@ -3654,4 +3654,79 @@ mod tests {
         unsafe { unpack_row_f16c(&source, &mut actual) };
         assert_eq!(actual, expected);
     }
+
+    /// A bare number in the log makes a reader look the code up; the ones AE
+    /// defines carry their name (issue #697). Codes outside the enum - a
+    /// plug-in's own, the host's negative internal ones - keep just the number
+    /// rather than being given a name they do not have.
+    #[test]
+    fn known_pf_errors_are_named_and_unknown_ones_are_not() {
+        assert_eq!(pf_error_name(4), Some("PF_Err_OUT_OF_MEMORY"));
+        assert_eq!(pf_error_name(512), Some("PF_Err_INTERNAL_STRUCT_DAMAGED"));
+        assert_eq!(
+            pf_error_name(518),
+            Some("PF_Err_CANNOT_PARSE_KEYFRAME_TEXT")
+        );
+        assert_eq!(pf_error_name(0), None);
+        assert_eq!(pf_error_name(-3), None);
+        assert_eq!(pf_error_name(519), None);
+    }
+
+    /// One line when the trouble starts, then one every
+    /// `FRAME_TROUBLE_REPORT_INTERVAL` frames: an effect failing at the
+    /// preview's frame rate must not bury the log it exists to make readable.
+    #[test]
+    fn a_run_of_identical_frame_errors_reports_once_then_periodically() {
+        let plugin = PathBuf::from(r"C:\plugins\Displacement.aex");
+        let mut states = FrameTroubleStates::new();
+        let lines: Vec<String> = (0..FRAME_TROUBLE_REPORT_INTERVAL)
+            .filter_map(|_| frame_trouble_report(&mut states, &plugin, FrameTrouble::Error(4)))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "the first frame and the interval mark, not one per frame: {lines:?}"
+        );
+        assert!(lines[0].contains("Displacement"), "{lines:?}");
+        assert!(lines[0].contains("PF_Err_OUT_OF_MEMORY"), "{lines:?}");
+        assert!(
+            lines[1].contains(&format!("x{FRAME_TROUBLE_REPORT_INTERVAL}")),
+            "the repeat says how many frames it covers: {lines:?}"
+        );
+    }
+
+    /// The recovery is reported once, and only for a filter that was reported
+    /// as failing: a healthy one stays silent.
+    #[test]
+    fn a_recovery_is_reported_once_and_only_after_trouble() {
+        let plugin = PathBuf::from(r"C:\plugins\Displacement.aex");
+        let mut states = FrameTroubleStates::new();
+        assert!(frame_recovered_report(&mut states, &plugin).is_none());
+        frame_trouble_report(&mut states, &plugin, FrameTrouble::Error(4));
+        frame_trouble_report(&mut states, &plugin, FrameTrouble::Error(4));
+        let recovered = frame_recovered_report(&mut states, &plugin)
+            .expect("a filter that was failing says when it stops");
+        assert!(recovered.contains("rendering again"), "{recovered}");
+        assert!(recovered.contains("2 frame(s)"), "{recovered}");
+        assert!(frame_recovered_report(&mut states, &plugin).is_none());
+    }
+
+    /// A different reason for the same filter is its own line: collapsing an
+    /// out-of-memory run and a lost session into one count would hide the
+    /// change of failure.
+    #[test]
+    fn a_changed_reason_starts_its_own_report() {
+        let plugin = PathBuf::from(r"C:\plugins\Blend.aex");
+        let mut states = FrameTroubleStates::new();
+        let lines: Vec<String> = [
+            FrameTrouble::Error(4),
+            FrameTrouble::Error(4),
+            FrameTrouble::SessionLost("worker exited"),
+        ]
+        .into_iter()
+        .filter_map(|trouble| frame_trouble_report(&mut states, &plugin, trouble))
+        .collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[1].contains("worker exited"), "{lines:?}");
+    }
 }
