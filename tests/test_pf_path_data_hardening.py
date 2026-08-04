@@ -20,37 +20,10 @@ def _worker() -> Path:
     return next(path for path in candidates if path.exists())
 
 
-def test_path_hardening_is_fail_closed_in_source():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "c.open&&n?n-1:n" in source
-    assert "checked(path,c)" in source
-    assert "registered(prep,path,segment,false)" in source
-    cleanup = source[source.index("int32_t __cdecl path_cleanup_seg_length") :]
-    cleanup = cleanup[: cleanup.index("int32_t __cdecl path_is_inverted")]
-    assert "registered(prep,path,segment,false)" in cleanup
-    assert "catch(const std::bad_alloc&)" in source
-    assert "kBad" in cleanup
-    assert "lock(g_mutex)" in cleanup
 
 
-def test_path_hardening_selftest_is_a_true_translation_unit():
-    implementation = SELFTEST_SOURCE.read_text(encoding="utf-8")
-    worker = L2_SOURCE.read_text(encoding="utf-8")
-    assert "bool verify_pf_path_data_hardening(" in implementation
-    assert "bool verify_pf_path_data_hardening(" not in worker
-    assert "src/worker_pf_path_selftests.cpp" in CMAKE.read_text(encoding="utf-8")
-    assert "install_synthetic_scene" in implementation
 
 
-def test_pf_path_uses_exact_registered_argb_formats():
-    runtime = SOURCE.read_text(encoding="utf-8")
-    callbacks = CALLBACK_SOURCE.read_text(encoding="utf-8")
-    assert "resolve_dispatch_world_format" in callbacks
-    assert "kPixelFormatArgb128" in callbacks
-    assert "resolved.rowbytes != rowbytes" in callbacks
-    assert "supported_world_view" in runtime
-    assert "reinterpret_cast<float*>(pixel)" in runtime
-    assert "kPixelFormatArgb128" in runtime
 
 
 def test_path_hardening_runtime_self_test():

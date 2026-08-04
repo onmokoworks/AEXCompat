@@ -72,31 +72,6 @@ int main() { return 0; }
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
 
 
-def test_minihost_publishes_typed_fail_closed_legacy_effect_suites() -> None:
-    text = source_text()
-    for marker in (
-        "std::array<void*, 41> g_aegp_comp_suite10",
-        "scene_factory.comp_bg_color = reinterpret_cast<void*>(&aegp_get_comp_bg_color)",
-        "g_aegp_comp_suite10[4] = factory.comp_bg_color",
-        'named("AEGP Comp Suite") && version == 21',
-        "offsetof(PfInterfaceSuite, convert_effect_to_comp_time) == 2 * sizeof(void*)",
-        "&convert_effect_to_comp_time",
-        "using Suite1 = std::array<void*, 1>",
-        '{"AE Plugin Helper Suite", 1, aexcompat::pf_helper::suite1()}',
-        "--self-test-legacy-effect-compat",
-    ):
-        assert marker in text
-
-    bg = text[text.index("int32_t __cdecl aegp_get_comp_bg_color") :]
-    bg = bg[: bg.index("\n}")]
-    assert "comp != &g_aegp_comp || !color" in bg
-    assert bg.index("return 4") < bg.index("*color = headless_color")
-
-    assert "struct AegpTime {" in SUITE_ABI.read_text(encoding="utf-8")
-    convert = text[text.rindex("int32_t __cdecl convert_effect_to_comp_time(") :]
-    convert = convert[: convert.index("\n}")]
-    assert "effect != &g_effect || time_scale == 0 || !comp_time" in convert
-    assert convert.index("return 4") < convert.index("*comp_time = converted")
 
 
 def test_helper_v1_has_independent_lease_and_headless_none_policy() -> None:

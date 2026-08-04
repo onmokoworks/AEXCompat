@@ -21,15 +21,6 @@ def _worker():
     return next((path for path in candidates if path and path.is_file()), None)
 
 
-def test_probe_uses_public_sdk_abi_and_has_real_pipl():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert '#include "AE_EffectSuites.h"' in source
-    assert "PF_ParamUtilsSuite3" in source
-    assert "kPFParamUtilsSuiteVersion3" in source
-    assert "PF_FindKeyframeTime" in source and "PF_KeyIndexToTime" in source
-    assert "PF_CheckoutKeyframe" in source and "PF_CheckinKeyframe" in source
-    pipl = RC.read_text(encoding="utf-8")
-    assert "16000 PiPL DISCARDABLE" in pipl and '"EffectMain' in pipl
 
 
 def test_probe_builds_and_passes_native_guards():

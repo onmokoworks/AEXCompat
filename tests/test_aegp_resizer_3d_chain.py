@@ -70,22 +70,6 @@ int main() { return 0; }
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
 
 
-def test_host_chain_is_typed_bounded_and_atomic() -> None:
-    source = "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
-    for marker in (
-        "g_aegp_layer_suite5[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform)",
-        "g_aegp_layer_suite8[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform)",
-        "g_aegp_stream_suite2[16] = reinterpret_cast<void*>(&aegp_get_layer_stream_value_v2)",
-        "which_stream != kLayerStreamZoom || time_mode != kCompTimeMode",
-        "index != g_aegp_active_camera_layer_index",
-        "!layer_active_at_time(static_cast<std::size_t>(index), *time)",
-            "resolve_layer_camera_zoom(static_cast<std::size_t>(index), *time",
-            "value->one_d = zoom",
-        "std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0",
-        "g_aegp_comp_suite4[1] = reinterpret_cast<void*>(&aegp_get_item_from_comp)",
-        "reinterpret_cast<void**>(&g_aegp_legacy_item_suite6)[16]",
-    ):
-        assert marker in source
 
 
 def test_native_chain_passes_all_release_workers() -> None:

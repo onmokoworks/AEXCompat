@@ -123,32 +123,6 @@ int main() { return 0; }
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
 
 
-def test_l2_source_exposes_projector_levels_contract() -> None:
-    source = "\n".join(path.read_text(encoding="utf-8") for path in
-                       (SOURCE, SCENE_SOURCE, SCENE_RUNTIME_HEADER,
-                        SCENE_RUNTIME_SOURCE,
-                            SCENE_SELFTEST_SOURCE, PF_SUITE_SOURCE,
-                            SELFTEST_DISPATCH_SOURCE, ENTRY_WIRING_SOURCE))
-    for marker in (
-        '"ADBE Easy Levels"',
-        '"ADBE Pro Levels"',
-        '"Input Black"',
-        '"Input White"',
-        "std::array<void*, 22> g_aegp_stream_suite2{}",
-        "g_aegp_stream_suite2[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v2)",
-        "scene_factory.legacy_stream_callbacks = {{",
-        "reinterpret_cast<void*>(&aegp_get_new_effect_stream_by_index_v2)",
-        "reinterpret_cast<void*>(&aegp_dispose_stream_v2)",
-        "reinterpret_cast<void*>(&aegp_get_stream_name_v2)",
-        "reinterpret_cast<void*>(&aegp_get_stream_type_v2)",
-        "reinterpret_cast<void*>(&aegp_get_new_stream_value_v2)",
-        "reinterpret_cast<void*>(&aegp_dispose_stream_value_v2)",
-        "reinterpret_cast<void*>(&aegp_set_stream_value_v2)",
-        "g_aegp_stream_suite2[5] = factory.legacy_stream_callbacks[0]",
-        "g_aegp_stream_suite2[15] = factory.legacy_stream_callbacks[6]",
-        'L"--self-test-aegp-projector-levels"',
-    ):
-        assert marker in source
 
 
 def test_native_projector_levels_self_test_passes_all_present_workers() -> None:

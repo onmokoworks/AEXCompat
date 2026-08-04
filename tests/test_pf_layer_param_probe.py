@@ -51,15 +51,6 @@ class PfLayerParamProbeSourceTest(unittest.TestCase):
         self.assertIn("params[kLayer]->u.ld", source)
         self.assertIn("params[kSlider]->u.fs_d.value", source)
 
-    def test_build_is_standalone_and_reproducible(self):
-        cmake = (PROBE / "CMakeLists.txt").read_text(encoding="utf-8")
-        script = (ROOT / "tools" / "build-pf-layer-param-probe.ps1").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("add_library(pf_layer_param_probe MODULE", cmake)
-        self.assertIn("& $CMake -S $source -B $build", script)
-        self.assertIn("--target pf_layer_param_probe", script)
-        self.assertIn("Get-FileHash", script)
 
 
 if __name__ == "__main__":

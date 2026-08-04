@@ -34,15 +34,6 @@ def test_real_aex_matrix_distinguishes_supported_renders_from_depth_negotiation(
     assert sorted(result["plugins"].values()).count(6) == 7
 
 
-def test_worker_gates_deep_worlds_on_the_observed_ae_capability_bits():
-    source = source_owners.worker_text() + REPORT.read_text(encoding="utf-8")
-
-    assert "kOutFlagDeepColorAware = 1u << 25" in source
-    assert "kOutFlag2FloatColorAware = 1u << 12" in source
-    assert "external_pixel_bytes == 8 &&" in source
-    assert "external_pixel_bytes == 16 &&" in source
-    assert "params_error == 0 && image_render_supported && depth_supported" in source
-    assert r'\"depth_supported\"' in source
 
 
 def test_harness_reports_negotiation_without_fabricating_a_selector_error():

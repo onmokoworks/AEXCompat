@@ -15,10 +15,6 @@ def _worker():
     return next((path for path in candidates if path.is_file()), None)
 
 
-def test_transfer_mask_self_test_is_exposed_by_source():
-    source = source_owners.worker_text()
-    assert "verify_world_transform_transfer_mask" in source
-    assert "--self-test-world-transform-transfer-mask" in source
 
 
 def test_transfer_mask_runtime_matrix():

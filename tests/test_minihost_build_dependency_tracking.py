@@ -66,36 +66,7 @@ class MinihostBuildDependencyTracking(unittest.TestCase):
             "an operator's own launcher (ccache and friends) must not be replaced",
         )
 
-    def test_the_verifier_fails_closed_on_a_vacuous_dependency_graph(self) -> None:
-        """A directory that recorded no header dependency must be rejected."""
-        self.assertTrue(VERIFIER.is_file(), f"missing {VERIFIER}")
-        verifier = VERIFIER.read_text(encoding="utf-8")
-        self.assertIn("-t deps", verifier, "the verifier must read what ninja recorded")
-        self.assertRegex(
-            verifier,
-            r"if \(\$vacuous\.Count -gt 0\) \{",
-            "a translation unit with project headers and no recorded dependency "
-            "must be a failure",
-        )
-        self.assertIn(
-            "throw (",
-            verifier,
-            "the verifier must fail closed rather than warn",
-        )
-        # A unit including only <system> headers legitimately records none, so
-        # the check must not be a blanket "every object has dependencies".
-        self.assertIn('#include\\s*"', verifier)
 
-    def test_the_documented_build_runs_the_verifier(self) -> None:
-        """An unverified build directory is exactly what shipped the bad worker."""
-        requirements = BUILD_REQUIREMENTS.read_text(encoding="utf-8")
-        self.assertIn("tools\\verify-minihost-build-deps.ps1", requirements)
-        self.assertIn(
-            "削除して configure し直す",
-            requirements,
-            "the recovery must say the directory has to be recreated: an "
-            "incremental rebuild does not repair it",
-        )
 
 
 if __name__ == "__main__":

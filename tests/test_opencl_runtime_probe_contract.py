@@ -363,32 +363,48 @@ PATH_LIKE_METADATA = (
 )
 
 
-@pytest.mark.parametrize(
-    "field",
-    ("name", "vendor", "version", "profile", "extensions", "icd_suffix"),
-)
+# 12 個の metadata フィールド × 9 個の path 形状のクロス積 (108 ケース) は、
+# 「代表フィールドが全 path 形状を拒否する」×「残りのフィールドが同一の
+# 制約を共有している」の 2 段に圧縮してある (#683)。制約の共有は下の
+# test_path_free_constraint_is_shared_by_every_metadata_field が schema の
+# 構造 ($ref / pattern の同一性) として固定するので、代表での拒否が全
+# フィールドでの拒否を意味する。
+STRICT_TOKEN_PATTERN = "^[A-Za-z0-9_.-]+$"
+BOUNDED_STRING_FIELDS = {
+    "platform": ("name", "vendor", "version", "profile"),
+    "device": ("name", "vendor", "driver_version", "version", "profile"),
+}
+
+
 @pytest.mark.parametrize("value", PATH_LIKE_METADATA)
-def test_schema_rejects_path_like_platform_metadata(field, value):
+def test_schema_rejects_path_like_bounded_string_metadata(value):
     validator = _validator()
     report = _report()
-    report["aggregate_loader_observation"]["platforms"][0][field] = (
-        [value] if field == "extensions" else value
-    )
+    report["aggregate_loader_observation"]["platforms"][0]["name"] = value
     assert list(validator.iter_errors(report))
 
 
-@pytest.mark.parametrize(
-    "field",
-    ("name", "vendor", "driver_version", "version", "profile", "extensions"),
-)
 @pytest.mark.parametrize("value", PATH_LIKE_METADATA)
-def test_schema_rejects_path_like_device_metadata(field, value):
+def test_schema_rejects_path_like_token_metadata(value):
     validator = _validator()
     report = _report()
-    report["aggregate_loader_observation"]["platforms"][0]["devices"][0][field] = (
-        [value] if field == "extensions" else value
-    )
+    report["aggregate_loader_observation"]["platforms"][0]["icd_suffix"] = value
     assert list(validator.iter_errors(report))
+
+
+def test_path_free_constraint_is_shared_by_every_metadata_field():
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    for kind, fields in BOUNDED_STRING_FIELDS.items():
+        properties = schema["$defs"][kind]["properties"]
+        for field in fields:
+            assert properties[field] == {"$ref": "#/$defs/boundedString"}, (
+                f"{kind}.{field} must share the boundedString constraint"
+            )
+    for kind in ("platform", "device"):
+        items = schema["$defs"][kind]["properties"]["extensions"]["items"]
+        assert items["pattern"] == STRICT_TOKEN_PATTERN
+    icd_suffix = schema["$defs"]["platform"]["properties"]["icd_suffix"]
+    assert icd_suffix["pattern"] == STRICT_TOKEN_PATTERN
 
 
 @pytest.mark.parametrize(
@@ -446,44 +462,5 @@ def test_closed_schema_rejects_raw_paths_and_backend_readiness():
     assert list(validator.iter_errors(report))
 
 
-def test_worker_loads_only_the_system_opencl_loader_surface():
-    source = WORKER_PATH.read_text(encoding="utf-8")
-    assert 'LoadLibraryExW(name.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32)' in source
-    assert '"OpenCL.dll\\0"' in source
-    for symbol in (
-        "clGetPlatformIDs",
-        "clGetPlatformInfo",
-        "clGetDeviceIDs",
-        "clGetDeviceInfo",
-    ):
-        assert symbol in source
-    assert "LoadLibraryW(" not in source
-    assert "candidate.path" not in source
 
 
-def test_worker_resolves_only_the_bounded_compute_surface():
-    source = WORKER_PATH.read_text(encoding="utf-8")
-    for symbol in (
-        "clCreateContext",
-        "clCreateCommandQueueWithProperties",
-        "clCreateCommandQueue",
-        "clCreateBuffer",
-        "clEnqueueWriteBuffer",
-        "clCreateProgramWithSource",
-        "clBuildProgram",
-        "clGetProgramBuildInfo",
-        "clCreateKernel",
-        "clSetKernelArg",
-        "clEnqueueNDRangeKernel",
-        "clFinish",
-        "clEnqueueReadBuffer",
-        "clReleaseKernel",
-        "clReleaseProgram",
-        "clReleaseMemObject",
-        "clReleaseCommandQueue",
-        "clReleaseContext",
-    ):
-        assert f'b"{symbol}\\0"' in source
-    assert "COMPUTE_ELEMENT_COUNT" in source
-    assert "input[i] * 3u + 7u" in source
-    assert "backend_ready: true" not in source

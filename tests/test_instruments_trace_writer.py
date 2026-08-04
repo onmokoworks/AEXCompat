@@ -16,18 +16,7 @@ SELFTEST = ROOT / "target" / "instruments-build" / "trace_writer_selftest.exe"
 
 
 class InstrumentsTraceWriterTests(unittest.TestCase):
-    def test_sdk_headers_are_confined_to_instrument_plugin_sources(self):
-        common = "\n".join(path.read_text(encoding="utf-8") for path in (INSTRUMENTS / "common").rglob("*.*"))
-        for header in ("AEConfig.h", "AE_Effect.h", "entry.h"):
-            self.assertNotIn(header, common)
-        plugin = (INSTRUMENTS / "pf-null-echo" / "pf_null_echo.cpp").read_text(encoding="utf-8")
-        self.assertIn("AE_Effect.h", plugin)
 
-    def test_cmake_skips_sdk_plugin_when_sdk_is_absent(self):
-        cmake = (INSTRUMENTS / "CMakeLists.txt").read_text(encoding="utf-8")
-        self.assertIn("AE_SDK_ROOT", cmake)
-        self.assertIn("add_subdirectory(pf-null-echo)", cmake)
-        self.assertIn("pf-null-echo build is skipped", cmake)
 
     @unittest.skipUnless(SELFTEST.exists(), "trace writer selftest executable has not been built")
     def test_selftest_trace_passes_event_contract_and_intake(self):

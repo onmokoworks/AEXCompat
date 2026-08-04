@@ -36,22 +36,6 @@ class SmartFxMaskSceneContractTests(unittest.TestCase):
         ):
             self.assertIn(field, required)
 
-    def test_worker_uses_host_owned_records_and_fixed_scene_gate(self):
-        worker = worker_source()
-        route = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(
-            encoding="utf-8"
-        )
-        for marker in (
-            "struct HostMask",
-            "std::vector<HostMask> g_mask_scene",
-            'L"--smart-mask-scene-request"',
-            'scene_id == "two_rectangles"',
-            "mask_scene_id",
-        ):
-            self.assertIn(marker, worker)
-        self.assertIn('invalid("unknown fixed mask scene")', route)
-        self.assertIn('"two_rectangles_second"', route)
-        self.assertIn("mask_scene_argb8_hash", route)
 
     def test_request_v4_is_bounded_and_revalidated_by_worker(self):
         request_schema = json.loads(

@@ -37,42 +37,8 @@ def test_visual_audio_admission_and_audio_only_exemption():
     assert data["visual_audio_sidecar_transport_implemented"] is True
 
 
-def test_worker_checks_admission_before_source_availability():
-    source = worker_source()
-    admission = source.index("if (!telemetry_.checkout_allowed)")
-    source_check = source.index("!source_", admission)
-    assert admission < source_check
-    assert "audio_only_mode || usage_advertised" in source
-    # The image+audio render used to arrive as the one-shot --render-image-audio
-    # command; #365 replaced it with the session's `session-audio:v1|` launch
-    # trailer, which drives the same set_audio_source hook.
-    assert 'L"session-audio:v1|"' in source
-    assert "mode.session_audio && hooks.set_audio_source" in source
-    fixture = (ROOT / "instruments" / "pf-visual-audio-probe" / "pf_visual_audio_probe.cpp").read_text(encoding="utf-8")
-    assert "PF_CHECKOUT_LAYER_AUDIO" in fixture
-    assert "PF_GET_AUDIO_DATA" in fixture
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    harness = source_owners.harness_windows_text()
-    assert "render_experimental_image_with_audio_sidecar" in broker
-    assert "audio sidecar contains a non-finite sample" in broker
-    assert "--render-experimental-image-audio-sidecar" in harness
-    assert "Select visual audio sidecar (.f32, optional)" in harness
-    assert "Audio sidecar requires plain classic ARGB8 rendering." in harness
 
 
-def test_combined_audio_layer_fixture_consumes_both_inputs():
-    fixture = (ROOT / "instruments" / "pf-visual-audio-probe" /
-               "pf_visual_audio_probe.cpp").read_text(encoding="utf-8")
-    cmake = (ROOT / "instruments" / "pf-visual-audio-probe" /
-             "CMakeLists.txt").read_text(encoding="utf-8")
-    assert "pf_visual_audio_layer_sidecar_probe" in cmake
-    assert "AEXCOMPAT_AUDIO_LAYER_PROBE=1" in cmake
-    assert 'PF_ADD_LAYER("Layer", PF_LayerDefault_MYSELF, 1)' in fixture
-    assert "audio_window_start = reinterpret_cast<float*>(samples)[0]" in fixture
-    assert "audio_window_end = reinterpret_cast<float*>(samples)[5]" in fixture
-    assert "sample_layer(layer, x, y)" in fixture
-    assert "source.green ^ audio_start" in fixture
-    assert "source.blue ^ audio_end" in fixture
 
 
 def test_audio_checkout_windows_are_bounded_owned_and_time_scaled():

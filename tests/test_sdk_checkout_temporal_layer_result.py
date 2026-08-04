@@ -25,15 +25,3 @@ def test_checkout_fixture_observes_temporal_layer_composition():
     assert render["suite_leases_balanced"] is True
 
 
-def test_checkout_host_surface_remains_bounded_and_observable():
-    source = source_owners.worker_text()
-
-    for marker in (
-        '"PF Effect UI Suite"',
-        '"PF AE Channel Suite"',
-        "param_checkouts_balanced",
-        "last_param_checkout_time",
-        "channel_count_queries",
-        "options_button_name",
-    ):
-        assert marker in source

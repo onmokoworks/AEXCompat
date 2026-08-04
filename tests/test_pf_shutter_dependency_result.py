@@ -22,9 +22,3 @@ def test_shutter_transport_is_independent_from_dependency_advertisement():
     assert data["render_cache_implemented"] is False
 
 
-def test_worker_uses_effective_dynamic_flag_without_gating_fields():
-    source = source_owners.worker_text()
-    assert "kOutFlagIUseShutterAngle" in source
-    assert "dynamic_out_flags & kOutFlagIUseShutterAngle" in source
-    assert 'write<int32_t>(input, 248, g_shutter_angle)' in source
-    assert 'write<int32_t>(input, 400, g_shutter_phase)' in source

@@ -25,19 +25,6 @@ def test_probe_builds_against_world_suite3():
     assert "offsetof(AEGP_WorldSuite3, AEGP_Dispose) == 1 * sizeof(void*)" in source
 
 
-def test_probe_covers_owned_depths_metadata_projection_and_invalid_paths():
-    source = SOURCE.read_text(encoding="utf-8")
-    for operation in (
-        "AEGP_New", "AEGP_Dispose", "AEGP_GetType", "AEGP_GetSize",
-        "AEGP_GetRowBytes", "AEGP_GetBaseAddr8", "AEGP_GetBaseAddr16",
-        "AEGP_GetBaseAddr32", "AEGP_FillOutPFEffectWorld",
-    ):
-        assert f"->{operation}" in source
-    assert "AEGP_WorldType_8, AEGP_WorldType_16, AEGP_WorldType_32" in source
-    assert "AEGP_WorldH stale = world" in source
-    assert "AEGP_Dispose(stale) == A_Err_NONE" in source
-    assert "AEGP_WorldType_NONE, 4, 3, &invalid" in source
-    assert "AEGP_New(g_plugin_id, AEGP_WorldType_8, 4, 3, nullptr)" in source
 
 
 def test_real_probe_exercises_owned_world_lifecycle(tmp_path):

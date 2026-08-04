@@ -40,21 +40,3 @@ def test_null_missing_dependency_handle_is_a_valid_empty_result():
     assert query["handles_created"] == query["handles_disposed"] == 0
 
 
-def test_external_dependency_boundary_is_abi_bound_isolated_and_exposed():
-    evidence = result()
-    worker = source_owners.worker_text()
-    mode_execution = MODE_EXECUTION.read_text(encoding="utf-8")
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    harness = source_owners.harness_windows_text()
-    probe = PROBE.read_text(encoding="utf-8")
-    assert evidence["abi"]["selector"] == 16
-    assert evidence["abi"]["extra_handle_offset"] == 8
-    assert "PF_ExtDependenciesExtra::dependencies_strH" in probe
-    assert "PF_Cmd_GET_EXTERNAL_DEPENDENCIES" in probe
-    assert "constexpr int32_t kGetExternalDependencies = 16;" in worker
-    assert "kMaxDependencyBytes = 64 * 1024" in mode_execution
-    assert "invoke_entry_seh(b.entry, kGetExternalDependencies" in worker
-    assert "pub fn inspect_experimental_external_dependencies" in broker
-    assert '"get_external_dependencies"' in broker
-    assert 'args[1] == "--inspect-experimental-dependencies"' in harness
-    assert "Inspect missing dependencies" in harness

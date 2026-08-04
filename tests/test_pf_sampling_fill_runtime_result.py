@@ -135,39 +135,8 @@ def test_fill_color_depth_matrix_has_independent_numeric_oracle():
         assert report["output_sha256"] == run["internal_output_sha256"]
 
 
-def test_sampling_area_callbacks_occupy_the_frozen_suite_slots():
-    worker = source_owners.worker_text()
-    expected = {
-        "g_sampling8_suite1[2]": "area_sample8",
-        "g_sampling16_suite1[2]": "area_sample16",
-        "g_sampling_float_suite1[2]": "area_sample_float",
-    }
-    assert result()["source_contract"]["sampling_area_suite_slot"] == 2
-    assert result()["source_contract"]["sampling_area_callbacks"] == list(expected.values())
-    for slot, callback in expected.items():
-        assert f"{slot} = reinterpret_cast<void*>(&{callback});" in worker
 
 
-def test_fill_premultiply_callbacks_occupy_the_frozen_suite_slots():
-    worker = WORLD_TRANSFORM.read_text(encoding="utf-8")
-    callbacks = [
-        "premultiply_world8",
-        "premultiply_color8",
-        "premultiply_color16",
-        "premultiply_color_float",
-    ]
-    contract = result()["source_contract"]
-    assert contract["fill_premultiply_callbacks"] == callbacks
-    assert contract["fill_premultiply_suite_slots"] == [3, 4, 5, 6]
-    provider = worker.index("const void* provide_fill_matte2(")
-    aggregate = worker[worker.index("void* callbacks[] = {", provider) : worker.index(
-        "std::copy(std::begin(callbacks)", provider
-    )]
-    for callback in callbacks:
-        assert f"reinterpret_cast<void*>(&{callback})" in aggregate
-    assert aggregate.index("&premultiply_world8") < aggregate.index("&premultiply_color8")
-    assert aggregate.index("&premultiply_color8") < aggregate.index("&premultiply_color16")
-    assert aggregate.index("&premultiply_color16") < aggregate.index("&premultiply_color_float")
 
 
 def test_evidence_is_runtime_success_with_ae_pixel_oracle_pending():

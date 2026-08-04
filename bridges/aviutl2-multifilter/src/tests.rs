@@ -3609,4 +3609,49 @@ mod tests {
             "the plugin has to be identifiable in a shared log: {lines:?}"
         );
     }
+    /// The F16C row must produce exactly what the reference row does, or the
+    /// map silently changes with the CPU it runs on (issue #674).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn the_f16c_row_matches_the_scalar_row_byte_for_byte() {
+        if !f16c_row_available() {
+            return;
+        }
+        // Values spanning the interesting cases: below 0, 0, the rounding
+        // boundaries, 1, above 1, infinities and NaN, plus a spread in between.
+        let mut source = Vec::new();
+        let mut push = |value: f32| {
+            source.extend_from_slice(&half::f16::from_f32(value).to_le_bytes());
+        };
+        for value in [
+            -1.0f32,
+            -0.0,
+            0.0,
+            0.5 / 255.0,
+            1.5 / 255.0,
+            0.25,
+            0.5,
+            0.75,
+            1.0,
+            2.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            0.333,
+            0.666,
+            0.999,
+        ] {
+            push(value);
+        }
+        // 16 values = 4 pixels; add one more pixel so the scalar tail runs too.
+        for value in [0.1f32, 0.2, 0.3, 0.4] {
+            push(value);
+        }
+        let pixels = source.len() / 8;
+        let mut expected = vec![0u8; pixels * 4];
+        unpack_row_scalar(&source, &mut expected);
+        let mut actual = vec![0u8; pixels * 4];
+        unsafe { unpack_row_f16c(&source, &mut actual) };
+        assert_eq!(actual, expected);
+    }
 }

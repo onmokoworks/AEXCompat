@@ -115,8 +115,34 @@ jobs:
       # worksteal: ビルドでブロックした worker の積み残しを他の worker が
       # 引き取る。time_ns ファイル名の worker 間衝突は stamp への pid 付与で
       # 解消済みなので、モジュール直列化 (loadscope) はもう要らない (#668)。
+      # dev_infra (レビュー運用スキルのテスト) は下の dev-infra job が担当 (#684)。
       - name: Run source-reproducible Python tests
-        run: uv run python -m pytest -q -n auto --dist worksteal --durations=25
+        run: uv run python -m pytest -q -n auto --dist worksteal --durations=25 -m "not dev_infra"
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats
+
+  # 開発インフラ (codex-review-loop の bash/jq 関数) のテスト。中身は
+  # プラットフォーム非依存の bash+jq で、プロセス起動が速い ubuntu で回す
+  # 方が Windows 本体 job より数倍速い (#684)。
+  dev-infra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+      - name: Install Python test dependencies
+        run: uv sync --locked
+      # skip はゲートする: bash/jq が見つからない環境ではこれらのテストは
+      # pytest.skip になるが、それを緑として扱うと job の存在意義が消える。
+      - name: Run dev-infra tests
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run python -m pytest -q -m dev_infra | tee pytest-infra.txt
+          if grep -qE "[0-9]+ skipped" pytest-infra.txt; then
+            echo "::error::dev-infra tests were skipped instead of running"
+            exit 1
+          fi

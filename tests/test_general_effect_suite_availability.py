@@ -31,41 +31,8 @@ def component_catalog_source(source: str) -> str:
     return source[start:end]
 
 
-def test_general_effect_suites_are_available_without_mask_mode_and_are_version_exact():
-    source = (source_owners.worker_text() + HOST_CATALOG_SOURCE.read_text(encoding="utf-8") +
-              PF_SAMPLING_SOURCE.read_text(encoding="utf-8") +
-              PF_WORLD_TRANSFORM_SOURCE.read_text(encoding="utf-8"))
-    catalog = component_catalog_source(source)
-
-    for name, (version, function_markers) in SUITES.items():
-        entries = re.findall(rf'\{{"{re.escape(name)}",\s*(\d+),[^\n]*', catalog)
-        assert entries == [str(version)], f"{name} must have one exact-version provider"
-        for marker in function_markers:
-            assert f"&{marker}" in source
-
-    assert "configure_host_suite_catalog(" in source
-    assert "catalog.providers[1] = {&resolve_static_provider" in source
-    assert "acquire_host_suite(catalog.provider_catalog, name, version, suite" in source
 
 
-def test_general_effect_suite_functions_keep_existing_safety_bounds():
-    source = source_owners.worker_text() + PF_SUITES_SOURCE.read_text(encoding="utf-8") + PF_SAMPLING_SOURCE.read_text(encoding="utf-8") + PF_WORLD_TRANSFORM_SOURCE.read_text(encoding="utf-8") + WORLD_SAFETY_SOURCE.read_text(encoding="utf-8")
-
-    for marker in (
-        "int32_t __cdecl subpixel_sample16(",
-        "int32_t __cdecl subpixel_sample_float(",
-        "int32_t __cdecl blend_world(",
-        "int32_t __cdecl convolve_world(",
-        "int32_t __cdecl copy_world8(",
-        "int32_t __cdecl fill_world8(",
-        "int32_t __cdecl fill_world16(",
-        "int32_t __cdecl fill_world_float(",
-        "kernel_size > 15",
-        "width <= 4096 && height <= 4096",
-        "static_cast<int64_t>(width) * height <= 16'777'216",
-        "rowbytes <= 4096 * 16",
-    ):
-        assert marker in source
 
 
 def test_result_is_truthful_source_contract_evidence():

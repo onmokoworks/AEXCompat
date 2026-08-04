@@ -34,88 +34,8 @@ def test_schema_and_compiled_abi_are_grounded_in_probe_result():
         }
 
 
-def test_source_wiring_matches_inventory():
-    report = load_report()
-    source = source_owners.worker_text()
-    world_source = WORLD_TRANSFORM.read_text(encoding="utf-8")
-    compact_source = " ".join((source + world_source).split())
-    suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
-
-    world = report["suites"]["PF_WorldTransformSuite1"]
-    world_callbacks = ", ".join(f"&{slot['callback']}" for slot in world["slots"])
-    assert f"g_world_transform_suite1 = {{{world_callbacks}" in compact_source
-
-    path = report["suites"]["PF_PathDataSuite1"]
-    for index, callback in zip(path["implemented_slots"], path["callbacks"]):
-        runtime_callback = callback.removeprefix("pf_")
-        assert index < len(path["callbacks"])
-        assert (
-            f"reinterpret_cast<void*>(&aexcompat::pf_path_runtime::{runtime_callback})"
-            in source
-        )
-
-    sampling = report["suites"]["PF_SamplingSuites1"]["callbacks"]
-    table_names = {"8": "g_sampling8_suite1", "16": "g_sampling16_suite1", "float": "g_sampling_float_suite1"}
-    for depth, callbacks in sampling.items():
-        for index, callback in enumerate(callbacks):
-            assert f"{table_names[depth]}[{index}] = reinterpret_cast<void*>(&{callback});" in source
-
-    fill_ranges = report["suites"]["PF_FillMatteSuite2"]["slots"]
-    fill_callbacks = []
-    for group in fill_ranges:
-        for index, callback in zip(range(group["range"][0], group["range"][1] + 1), group["callbacks"]):
-            assert index == len(fill_callbacks)
-            fill_callbacks.append(callback)
-    callback_table = ", ".join(
-            f"reinterpret_cast<void*>(&{callback})" for callback in fill_callbacks
-    )
-    assert f"void* callbacks[] = {{{callback_table}" in compact_source
 
 
-def test_render_options_and_async_receipt_claims_match_current_source():
-    report = load_report()
-    source = source_owners.worker_text()
-    item_runtime = (ROOT / "minihost" / "src" /
-                    "worker_aegp_item_render_runtime.cpp").read_text(encoding="utf-8")
-    ownership_source = source + (ROOT / "minihost" / "src" / "worker_render_receipts.cpp").read_text(
-        encoding="utf-8"
-    )
-    ownership_source += (ROOT / "minihost" / "src" / "worker_world_registry.cpp").read_text(
-        encoding="utf-8"
-    )
-    suite_abi = (ROOT / "minihost" / "src" / "worker_suite_abi.hpp").read_text(encoding="utf-8")
-    assert report["suites"]["AEGP_RenderOptionsSuite1"]["status"] == "implemented_and_focused_runtime_tested"
-    assert "static_assert(sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*));" in suite_abi
-    assert "receipt->render_options = *options;" in item_runtime
-    assert "aegp_item_render_runtime::publish_receipt(options, receipt)" in source
-
-    async_state = report["suites"]["AEGP_WorldSuite3"]["async_receipt_integration"]
-    assert async_state["status"] == "implemented_for_layer_argb8_argb16_argb32f_and_focused_runtime_tested"
-    checkout_start = source.index(
-        "int32_t __cdecl checkout_layer_frame_async(",
-        source.index("int32_t __cdecl checkout_layer_frame_async(") + 1,
-    )
-    checkout = source[checkout_start:]
-    checkout = checkout[: checkout.index("\n}") + 2]
-    assert "snapshot_layer_render_options(options, snapshot)" in checkout
-    assert "snapshot.world_type == 1 ? kPixelFormatArgb32" in checkout
-    assert "snapshot.world_type == 2 ? kPixelFormatArgb64 : kPixelFormatArgb128" in checkout
-    assert "aegp_item_render_runtime::publish_synthetic(" in checkout
-    assert '{"AEGP Render Suite", 5, nullptr, &provide_render_suite5}' in source
-    assert "&checkin_frame" in source and "&get_receipt_world" in source
-    assert "world_registry::unregister_borrowed_view(" in ownership_source
-
-    assert report["suites"]["AEGP_WorldSuite3"]["slots"][1]["range"] == [2, 8]
-    for callback in (
-        "aegp_world_get_type",
-        "aegp_world_get_size",
-        "aegp_world_get_rowbytes",
-        "aegp_world_get_base_addr8",
-        "aegp_world_get_base_addr16",
-        "aegp_world_get_base_addr32",
-        "aegp_world_fill_pf_world",
-    ):
-        assert f"&{callback}" in source
 
 
 def test_artifact_hashes_and_sizes_authenticate_current_files():

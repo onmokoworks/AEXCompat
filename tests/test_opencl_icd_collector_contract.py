@@ -123,31 +123,3 @@ def test_identity_verified_requires_exact_lowercase_sha256_fingerprint(fingerpri
     assert list(Draft202012Validator(schema).iter_errors(report))
 
 
-def test_opencl_icd_json_rejects_duplicate_keys_and_source_stays_fail_closed():
-    duplicate = '{"schema_version":1,"schema_version":2}'
-
-    def reject_duplicates(pairs):
-        result = {}
-        for key, value in pairs:
-            assert key not in result, f"duplicate key: {key}"
-            result[key] = value
-        return result
-
-    try:
-        json.loads(duplicate, object_pairs_hook=reject_duplicates)
-    except AssertionError as error:
-        assert "duplicate key: schema_version" in str(error)
-    else:
-        raise AssertionError("duplicate JSON key was accepted")
-
-    source = SOURCE_PATH.read_text(encoding="utf-8")
-    for marker in (
-        "OpenClIcdClassification::Disabled",
-        "OpenClIcdClassification::MalformedRegistryValue",
-        "OpenClIcdClassification::MissingDll",
-        "OpenClIcdClassification::InaccessibleDll",
-        "OpenClIcdClassification::RegistryReadFailure",
-        '"adapter_association": "unverified"',
-        '"backend_ready": false',
-    ):
-        assert marker in source

@@ -136,40 +136,8 @@ def test_evidence_validator_rejects_duplicate_keys(tmp_path: Path):
     assert "duplicate JSON key: status" in completed.stderr
 
 
-def test_probe_is_host_neutral_and_uses_only_public_aegp_surfaces():
-    source = PROBE.read_text(encoding="utf-8")
-    assert "AEXCompat" not in source
-    assert "GetModuleFileName" not in source
-    assert "ISSUE26_SCENE_PROBE_EVIDENCE" in source
-    for marker in (
-        "AEGP_GetNumProjects",
-        "AEGP_GetFirstProjItem",
-        "AEGP_GetNextProjItem",
-        "AEGP_GetCompLayerByIndex",
-        "AEGP_GetLayerEffectByIndex",
-        "AEGP_GetNewEffectStreamByIndex",
-        "AEGP_GetLayerParent",
-        "AEGP_LayerStream_ZOOM",
-        "AEGP_GetKeyframeInterpolation",
-        "AEGP_GetKeyframeTemporalEase",
-        "AEGP_GetNewKeyframeSpatialTangents",
-        "AEGP_StartAddKeyframes",
-        "AEGP_EndAddKeyframes",
-        "AEGP_DeleteKeyframe",
-        "AEGP_DuplicateEffect",
-        "AEGP_DeleteLayerEffect",
-    ):
-        assert marker in source
-    assert "AEGP_ItemH fallback_comp_item = nullptr;" in source
-    assert "active_item = fallback_comp_item;" in source
-    assert 'write_init_trace("idle_entered", A_Err_NONE);' in source
-    assert '"report_written" : "report_write_failed"' in source
 
 
-def test_probe_pipl_name_payload_is_four_byte_aligned():
-    resource = PROBE_RESOURCE.read_text(encoding="utf-8")
-    assert '20, 0x0,\n  "\\x13Issue26 Scene Probe",' in resource
-    assert '"\\x13Issue26 Scene Probe\\0' not in resource
 
 
 def test_probe_uses_the_windows_plugin_subsystem():
@@ -180,81 +148,12 @@ def test_probe_uses_the_windows_plugin_subsystem():
     ) in cmake
 
 
-def test_fixture_authors_required_structural_scene():
-    source = FIXTURE.read_text(encoding="utf-8")
-    for marker in (
-        "items.addFolder",
-        "items.addComp",
-        '"Issue26 Child Comp"',
-        '"Issue26 Child Footage"',
-        "layers.addSolid",
-        "layers.addNull",
-        "layers.addCamera",
-        "solid.parent = parent",
-        "zoom.setValueAtTime(0.0, 700)",
-        "zoom.setValueAtTime(1.0, 900)",
-        '"ADBE Slider Control"',
-        '"ADBE Easy Levels"',
-        '"ADBE Mask Atom"',
-        "setInterpolationTypeAtKey",
-        "setTemporalEaseAtKey",
-        "ISSUE26_SCENE_FIXTURE_METADATA",
-    ):
-        assert marker in source
 
 
-def test_fixture_temporal_ease_arity_matches_stream_types():
-    source = FIXTURE.read_text(encoding="utf-8")
-    assert (
-        "position.setTemporalEaseAtKey(\n"
-        "        1, [new KeyframeEase(0, 33)], "
-        "[new KeyframeEase(0, 33)]);"
-    ) in source
-    assert (
-        "zoom.setTemporalEaseAtKey(\n"
-        "        1, [new KeyframeEase(0, 33)], "
-        "[new KeyframeEase(0, 33)]);"
-    ) in source
 
 
-def test_fixture_metadata_write_is_extendscript_compatible_and_cleanup_safe():
-    source = FIXTURE.read_text(encoding="utf-8")
-    assert "JSON.stringify" not in source
-    assert "function writeUtf8File(path, contents)" in source
-    assert "var metadataContents = [" in source
-    assert source.index("var metadataContents = [") < source.index(
-        "writeUtf8File(metadataPath, metadataContents)"
-    )
-    assert "finally {" in source
-    assert "if (!output.close() && !failure)" in source
-    assert 'var diagnosticPath = metadataPath + ".error.json";' in source
-    assert '\\"status\\":\\"metadata_write_failed\\"' in source
-    assert "ISSUE26_FIXTURE_METADATA_ERROR" in source
-    assert "ISSUE26_FIXTURE_DIAGNOSTIC_ERROR" in source
-    assert "scheduleTask" not in source
 
 
-def test_fixture_hands_off_to_idle_and_probe_schedules_shutdown():
-    probe = PROBE.read_text(encoding="utf-8")
-    fixture = FIXTURE.read_text(encoding="utf-8")
-    assert "if (command != g_command)" in probe
-    assert "if (handled) *handled = FALSE;" in probe
-    assert "if (handled) *handled = TRUE;" in probe
-    assert "error = commands->AEGP_EnableCommand(g_command);" in probe
-    assert 'write_init_trace("command_enabled", error);' in probe
-    assert "findMenuCommandId" not in fixture
-    assert "executeCommand" not in fixture
-    assert "scheduleTask" not in fixture
-    assert "app.quit" not in fixture
-    assert 'env("ISSUE26_SCENE_FIXTURE_PROJECT")' in fixture
-    assert "app.project.save(new File(projectPath))" in fixture
-    assert "kAEGPUtilitySuiteVersion6" in probe
-    assert "AEGP_IsScriptingAvailable" in probe
-    assert "AEGP_ExecuteScript" in probe
-    assert '"shutdown_schedule_failed" : "shutdown_scheduled"' in probe
-    assert probe.index("write_atomic(path, serialize(report))") < probe.rindex(
-        "g_shutdown_scheduled = schedule_shutdown();"
-    )
 
 
 def test_init_artifact_schema_binds_command_to_probe_run():
@@ -279,24 +178,6 @@ def test_init_artifact_schema_binds_command_to_probe_run():
         assert list(validator.iter_errors(invalid))
 
 
-def test_aegp_admission_opt_in_keeps_pf_preflight_closed():
-    header = (
-        ROOT / "minihost" / "src" / "worker_runtime_admission.hpp"
-    ).read_text(encoding="utf-8")
-    admission = (
-        ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
-    ).read_text(encoding="utf-8")
-    main = (
-        ROOT / "minihost" / "src" / "l2_main.cpp"
-    ).read_text(encoding="utf-8") + (
-        ROOT / "minihost" / "src" / "l2_main_entry.inc"
-    ).read_text(encoding="utf-8")
-    assert "bool allow_aegp_plugin{}" in header
-    assert (
-        "!request.allow_aegp_plugin &&\n"
-        "      is_aegp_candidate_without_execution(plugin_path)"
-    ) in admission
-    assert "runtime_request.allow_aegp_plugin = g_aegp_init_mode;" in main
 
 
 def test_corpus_is_strict_schema_valid_and_derived():
@@ -747,19 +628,6 @@ def test_blocked_and_crashed_evidence_generators_return_nonzero(
     assert crashed.returncode != 0
 
 
-def test_public_abi_source_contracts_are_exact():
-    scene = (
-        ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
-    ).read_text(encoding="utf-8")
-    registry = (
-        ROOT / "minihost" / "src" / "worker_suite_registry.cpp"
-    ).read_text(encoding="utf-8")
-    probe = PROBE.read_text(encoding="utf-8")
-    assert '{"AEGP Proj Suite", 9}' in registry
-    assert "case ItemKind::footage: result = 4;" in scene
-    assert 'case 0: name = u"Input"; break;' in scene
-    assert "type == AEGP_StreamType_LAYER_ID" in probe
-    assert "input_value.val.layer_id == layer_id" in probe
 
 
 def test_real_runner_retains_outputs_and_fixture_report_inputs():

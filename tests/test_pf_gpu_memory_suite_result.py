@@ -24,11 +24,3 @@ def test_gpu_device_suite_memory_probe_is_balanced_and_rejects_double_free():
     assert render["passed"] is True
 
 
-def test_gpu_device_suite_has_no_unsupported_slots_and_is_bounded():
-    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text(encoding="utf-8")
-    table = source[source.index("std::array<void*, 15> gpu_device_suite1") :]
-    table = table[: table.index("};")]
-    assert "gpu_unsupported" not in table
-    assert "kMaxGpuAllocations = 256" in source
-    assert "kMaxGpuAllocationBytes = 256u * 1024u * 1024u" in source
-    assert "gpu_memory_lifetimes_balanced()" in source

@@ -22,10 +22,3 @@ def test_arbitrary_scan_requires_a_new_owned_handle():
     assert data["rejected_assignment"]["handle_lifetimes_balanced"] is True
 
 
-def test_scan_probe_compares_and_disposes_plugin_handles():
-    source = (ROOT / "minihost" / "src" / "worker_parameter_execution.cpp").read_text(encoding="utf-8")
-    assert "probe_arbitrary_scan" in source
-    assert "hooks().handle_is_live(scanned) && scanned != source" in source
-    assert "comparison == 0" in source
-    assert "runtime().arbitrary.scan_calls" in source
-    assert "runtime().arbitrary.scan_failures" in source

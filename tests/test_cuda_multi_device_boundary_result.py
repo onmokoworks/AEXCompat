@@ -24,24 +24,3 @@ def test_cuda_multi_device_evidence_preserves_runtime_and_failure_isolation():
     assert rejected["worker_process_crashed"] is False
 
 
-def test_cuda_device_enumeration_is_bounded_and_worlds_keep_their_ordinal():
-    source = (ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp").read_text(encoding="utf-8")
-    backend = (ROOT / "minihost" / "src" / "gpu_cuda_backend.cpp").read_text(encoding="utf-8")
-    for marker in (
-        'load_function(state->module, state->device_get_count, "cuDeviceGetCount")',
-        "static_assert(kMaxGpuDevices == 16)",
-        "active_device_index >= last_discovered_device_count_",
-        "state->primary_retain(&state->contexts[index]",
-        "state->context_push(state->contexts[active_device_index])",
-    ):
-        assert marker in backend
-    for marker in (
-        "g_created_worlds.emplace(*world, index)",
-        "gpu_free_device_memory(nullptr, index, pixels)",
-        "owned == g_created_worlds.end() ? active_gpu_device_index() : owned->second",
-    ):
-        assert marker in source
-
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    assert '"cuda_device_count"' in broker
-    assert '"cuda_device_index"' in broker

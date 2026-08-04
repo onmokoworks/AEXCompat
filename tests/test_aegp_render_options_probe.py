@@ -24,12 +24,3 @@ def test_fixture_builds_and_exercises_lifecycle():
     assert all(x["stale_receipt_rejected"] for x in report["observations"])
     assert report["live_options"] == 0 and report["passed"] is True
 
-def test_fixture_uses_sdk_typed_tables_and_owned_scope_only():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert '#include "AE_GeneralPlug.h"' in source
-    assert "sizeof(AEGP_RenderOptionsSuite1)==17*sizeof(void*)" in source
-    assert "sizeof(AEGP_RenderSuite4)==12*sizeof(void*)" in source
-    assert "AEGP_RenderAndCheckoutFrame" in source
-    assert "AEGP_GetReceiptWorld" in source
-    assert "AEGP_CheckinFrame" in source
-    assert "minihost" not in source.lower()

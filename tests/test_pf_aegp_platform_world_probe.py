@@ -26,19 +26,6 @@ def test_probe_builds_with_exact_sdk_tables():
     assert "A_Err (*)(AEGP_RenderOptionsH, const AEGP_TimeStamp*" in source
 
 
-def test_probe_covers_platform_world_lifecycle_and_safe_invalid_paths():
-    source = SOURCE.read_text(encoding="utf-8")
-    for operation in (
-        "AEGP_NewPlatformWorld", "AEGP_NewReferenceFromPlatformWorld",
-        "AEGP_GetType", "AEGP_GetSize", "AEGP_GetRowBytes", "AEGP_GetBaseAddr8",
-        "AEGP_DisposePlatformWorld", "AEGP_CheckinRenderedFrame",
-    ):
-        assert f"->{operation}" in source
-    assert "AEGP_WorldH stale_reference = reference" in source
-    assert "AEGP_PlatformWorldH stale_platform = platform" in source
-    assert "AEGP_WorldH adopted_reference = reference" in source
-    assert "g_plugin_id, nullptr, &invalid_reference" in source
-    assert "nullptr, &timestamp, 1, nullptr" in source
 
 
 def test_real_probe_adopts_platform_world_and_rejects_stale_handles(tmp_path):

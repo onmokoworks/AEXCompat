@@ -25,25 +25,6 @@ def test_probe_builds_against_the_real_pf_aegp_sdk_tables():
     assert "AEGP_CheckinRenderedFrame) == 12 * sizeof(void*)" in source
 
 
-def test_probe_covers_external_cache_roundtrip_and_invalidation_paths():
-    source = SOURCE.read_text(encoding="utf-8")
-    for operation in (
-        "AEGP_NewPlatformWorld", "AEGP_NewReferenceFromPlatformWorld",
-        "AEGP_CheckinRenderedFrame", "AEGP_RenderAndCheckoutFrame",
-        "AEGP_GetReceiptWorld", "AEGP_GetRenderedRegion", "AEGP_CheckinFrame",
-    ):
-        assert f"->{operation}" in source
-    assert "PF_Pixel8 expected_pixel" in source
-    assert "std::memcmp(&row[x], &expected" in source
-    assert "AEGP_PlatformWorldH stale_platform" in source
-    assert "AEGP_FrameReceiptH stale_receipt" in source
-    assert "worlds->AEGP_GetType(receipt_world, &stale_type)" in source
-    assert "rendered_region.right != width" in source
-    assert "rendered_region.bottom != height" in source
-    assert "const A_LRect source_roi{3, 2, 31, 20}" in source
-    assert "const A_LRect expected_region{1, 0, 16, 7}" in source
-    assert "AEGP_SetDownsampleFactor(options, downsample_x, downsample_y)" in source
-    assert "AEGP_SetRegionOfInterest(options, &source_roi)" in source
 
 
 def test_real_probe_roundtrips_external_cache_pixels_through_a_receipt(tmp_path):

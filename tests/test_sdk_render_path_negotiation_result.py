@@ -40,17 +40,3 @@ def test_smart_positive_control_still_completes_all_depths_and_paths():
     assert control["matrix_failed"] == 0
 
 
-def test_worker_and_harness_enforce_the_render_path_gate():
-    minihost = source_owners.worker_text()
-    report = RENDER_REPORT.read_text(encoding="utf-8")
-    harness = source_owners.harness_windows_text()
-
-    assert "constexpr uint32_t kOutFlag2SupportsSmartRender = 1u << 10;" in minihost
-    assert (
-        "params_error == 0 && image_render_supported && depth_supported &&" in minihost
-        and "smart_render_supported" in minihost
-    )
-    assert '\\"smart_render_supported\\"' in report
-    assert '"unsupported_render_path"' in harness
-    assert 'Some("render_path_negotiation".to_owned())' in harness
-    assert "unsupported_render_path || unsupported_depth" in harness

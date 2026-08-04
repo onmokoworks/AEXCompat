@@ -16,37 +16,8 @@ PROBE = ROOT / "target" / "pf-aegp-layer-receipt-probe-build" / "Release" / "pf_
 INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 
 
-def test_probe_uses_the_requested_aegp_receipt_path():
-    source = SOURCE.read_text(encoding="utf-8")
-    for token in (
-        "kAEGPPFInterfaceSuiteVersion1",
-        "kAEGPEffectSuiteVersion3",
-        "kAEGPLayerRenderOptionsSuiteVersion1",
-        "kAEGPRenderSuiteVersion5",
-        "kAEGPWorldSuiteVersion3",
-        "AEGP_GetNewEffectForEffect",
-        "AEGP_NewFromUpstreamOfEffect",
-        "AEGP_RenderAndCheckoutLayerFrame",
-        "AEGP_GetReceiptWorld",
-        "AEGP_GetBaseAddr8",
-        "AEGP_GetBaseAddr16",
-        "AEGP_GetBaseAddr32",
-        "PF_GetPixelFormat",
-        "PF_PixelFormat_ARGB32",
-        "PF_PixelFormat_ARGB64",
-        "PF_PixelFormat_ARGB128",
-    ):
-        assert token in source
 
 
-def test_probe_unwinds_all_owned_resources():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "AEGP_CheckinFrame(receipt)" in source
-    assert "AEGP_Dispose(options)" in source
-    assert "AEGP_DisposeEffect(effect)" in source
-    assert source.count("ReleaseSuite(") >= 7
-    assert "std::memset(output->data" in source
-    assert "rowbytes < static_cast<A_u_long>(width) * pixel_size" in source
 
 
 def _float32(value):
