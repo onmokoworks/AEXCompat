@@ -436,12 +436,17 @@ sizing の追随変更 (result_rect 基準 + origin 設定) は issue #102 の
 - SMART_RENDER 中の `PF_GetPixelFormat`
 - レイヤー外へ広げた入力要求とそのクリップ
 
+`AEXCOMPAT_PROBE_OUT_FLAGS2` で probe の `out_flags2` を Displacement と同じ
+134222848 (`SUPPORTS_SMART_RENDER` | `FLOAT_COLOR_AWARE` |
+`SUPPORTS_THREADED_RENDERING`) に差し替えても stage 1 / stage 5 とも描画できた。
+広告するフラグの差も否定。
+
 未確定 (次の候補):
 
-- Displacement が `out_flags2` に立てている bit 27
-  (`PF_OutFlag2_SUPPORTS_THREADED_RENDERING` と思われる) の扱い。probe は立てていない。
 - `PF_Cmd_QUERY_DYNAMIC_FLAGS` をセッション経路で配送していないこと。
 - パラメータ構成の差 (Displacement は 8 パラメータ、probe は 2)。
+- Displacement 側の内部判断を逆アセンブルで直接見る。ホストが呼ばれずに 4 を返す
+  以上、ホスト側の観測だけでは詰め切れない可能性がある。
 
 関連: ホストは `out_data->global_data` を `in_data->global_data` に書き戻していない
 (#705)。classic / smart のどちらでも NULL なので Displacement の症状の直接原因では

@@ -21,6 +21,11 @@
 // The probe never invents an error: every failure returns the host's own error
 // code, and the stage it failed in is reported through out_data->return_msg so a
 // diagnostic run can read it back.
+//
+// Out flags are fixed before any parameter exists, so the stage popup cannot
+// reach them. AEXCOMPAT_PROBE_OUT_FLAGS2 replaces out_flags2 outright, which is
+// how the flags Displacement advertises (134222848: SUPPORTS_SMART_RENDER,
+// FLOAT_COLOR_AWARE, SUPPORTS_THREADED_RENDERING) get asked about.
 
 #include "AEConfig.h"
 #include "entry.h"
@@ -31,7 +36,10 @@
 #include "AE_Macros.h"
 #include "Param_Utils.h"
 
+#include <windows.h>
+
 #include <array>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 
@@ -224,12 +232,24 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
                                        PF_OutData* out_data, PF_ParamDef* params[],
                                        PF_LayerDef*, void* extra) {
   switch (cmd) {
-    case PF_Cmd_GLOBAL_SETUP:
+    case PF_Cmd_GLOBAL_SETUP: {
       out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
       out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_DEEP_COLOR_AWARE;
       out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER |
                              PF_OutFlag2_FLOAT_COLOR_AWARE;
+      // Out flags are fixed before any parameter exists, so the Stage popup
+      // cannot reach them. AEXCOMPAT_PROBE_OUT_FLAGS2 replaces out_flags2
+      // outright, which is how "does advertising what Displacement advertises
+      // change anything" gets asked (issue #695).
+      char override_flags[32]{};
+      if (GetEnvironmentVariableA("AEXCOMPAT_PROBE_OUT_FLAGS2", override_flags,
+                                  sizeof(override_flags))) {
+        char* tail = nullptr;
+        const unsigned long value = std::strtoul(override_flags, &tail, 10);
+        if (tail && *tail == 0) out_data->out_flags2 = static_cast<A_long>(value);
+      }
       return PF_Err_NONE;
+    }
     case PF_Cmd_PARAMS_SETUP:
       return ParamsSetup(in_data, out_data);
     case PF_Cmd_SMART_PRE_RENDER:
