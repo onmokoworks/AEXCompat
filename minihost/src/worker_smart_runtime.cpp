@@ -75,6 +75,26 @@ bool checkout_id_registered(const State& runtime, int32_t checkout_id) {
       });
 }
 
+// Drops any registration this checkout id already has, so re-checking it out
+// answers the new geometry instead of being refused.
+//
+// PreRender is a negotiation: a plug-in may check the same layer out several
+// times with different request rects to learn what it would be given, and the
+// SDK gives it no other way to ask. Treating the second call as a duplicate
+// registration made the plug-in abandon the frame (issue #675). Only the last
+// answer can be checked out for pixels, which is what replacing preserves.
+//
+// Called at each success site, never up front: a re-checkout that goes on to be
+// refused (a slot that is neither hosted nor secondary, a timed slot asked at
+// the wrong time) must leave the earlier registration standing, or one
+// mis-probed layer would take the good answer with it.
+void forget_checkout(State& runtime, int32_t checkout_id) {
+  runtime.pixel_checkouts.erase(
+      std::remove_if(runtime.pixel_checkouts.begin(), runtime.pixel_checkouts.end(),
+          [checkout_id](const auto& checkout) { return checkout.id == checkout_id; }),
+      runtime.pixel_checkouts.end());
+}
+
 }  // namespace
 
 void State::clear_transient() {
@@ -170,7 +190,11 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
         ? intersect_checkout_rect(request_rect, width, height)
         : std::array<int32_t, 4>{0, 0, width, height};
   };
-  if (checkout_id_registered(runtime, checkout_id) ||
+  // The cap bounds how many *distinct* checkouts one PreRender may hold. It is
+  // read here but only enforced against a growing set: a re-checkout replaces
+  // its own registration below, so re-asking about the same layer cannot grow
+  // into it.
+  if (!checkout_id_registered(runtime, checkout_id) &&
       runtime.pixel_checkouts.size() >= kMaxPixelCheckouts) return 4;
   if (hosted != runtime.hosted_layers.end()) {
     if (!result || !hosted->world) return 4;
@@ -183,6 +207,7 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
                           {0, 0, hosted->width, hosted->height},
                           hosted->width, hosted->height);
     hosted->checkout_id = checkout_id;
+    forget_checkout(runtime, checkout_id);
     runtime.pixel_checkouts.push_back({checkout_id, hosted->world,
         hosted->view_world, hosted->checkout_rect, false});
     return 0;
@@ -202,7 +227,12 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   }
   if (!result) return 4;
   if (index == 0 && checkout_id == 0) {
-    if (!runtime.input_world) return 4;
+    // No `input_world` check: PreRender answers geometry, and a plug-in is
+    // entitled to ask before any world exists to hand it. `checkout_pixels`
+    // fails closed on a registration with no world, which is where a missing
+    // one actually matters. Requiring it here refused the negotiation itself
+    // (issue #675) and left `--self-test-pf-pre-checkout-result` and
+    // `--self-test-smart-runtime-concurrency` failing, since neither sets one.
     const int32_t reference_width = runtime.full_resolution_width > 0
         ? runtime.full_resolution_width : runtime.width;
     const int32_t reference_height = runtime.full_resolution_height > 0
@@ -213,6 +243,7 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
     write_checkout_result(result, runtime.input_checkout_result_rect,
                           {0, 0, runtime.width, runtime.height},
                           reference_width, reference_height);
+    forget_checkout(runtime, checkout_id);
     runtime.pixel_checkouts.push_back({checkout_id, runtime.input_world,
         runtime.input_checkout_view_world,
         runtime.input_checkout_result_rect, false});
@@ -226,6 +257,7 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
                           {0, 0, runtime.map_width, runtime.map_height},
                           runtime.map_width, runtime.map_height);
     runtime.secondary_checkout_id = checkout_id;
+    forget_checkout(runtime, checkout_id);
     runtime.pixel_checkouts.push_back({checkout_id, runtime.map_world,
         runtime.map_checkout_view_world, runtime.map_checkout_result_rect,
         false});
@@ -348,8 +380,11 @@ bool checkout_intersection_self_test() {
   const auto verify = [&](const std::array<int32_t, 4>* requested,
                           int32_t expected_status,
                           const std::array<int32_t, 4>& expected) {
-    // Each geometry case represents a fresh PreRender callback scope.
-    runtime.pixel_checkouts.clear();
+    // Every case runs in ONE PreRender scope, re-checking out the same id.
+    // That is how a plug-in negotiates: the SDK gives it no other way to ask
+    // what a given request rect would be answered with. Clearing between cases
+    // here is what let a "already registered, refuse it" rule look correct
+    // while it made real plug-ins abandon the frame (issue #675).
     std::array<std::byte, 44> request{};
     if (requested) std::memcpy(request.data(), requested->data(), sizeof(*requested));
     std::array<std::byte, kCheckoutResultBytes> result{};
@@ -393,8 +428,30 @@ bool checkout_intersection_self_test() {
       hosted_maximum == std::array<int32_t, 4>{0, 0, 50, 40} &&
       runtime.hosted_layers.front().checkout_rect == hosted_answer && passed;
   void* checked_out{};
-  passed = pre_checkout_layer(nullptr, 3, 7, hosted_request.data(), 7, 1, 30,
+  // Re-checking out an id answers the NEW geometry, leaves exactly one
+  // registration, and that registration carries the new answer. Refusing the
+  // second call is what issue #675 was: a plug-in re-asking for geometry got
+  // PF_Err_OUT_OF_MEMORY and gave up on the frame. Asking with a different rect
+  // is what separates "replaced" from "erased and re-pushed unchanged".
+  const std::size_t registrations_before = runtime.pixel_checkouts.size();
+  const std::array<int32_t, 4> narrower_rect{20, 15, 40, 30};
+  std::array<std::byte, 44> narrower_request{};
+  std::memcpy(narrower_request.data(), narrower_rect.data(), sizeof(narrower_rect));
+  const auto registration_for = [&](int32_t id) {
+    return std::find_if(runtime.pixel_checkouts.begin(),
+        runtime.pixel_checkouts.end(),
+        [id](const auto& checkout) { return checkout.id == id; });
+  };
+  // A slot that is neither hosted nor secondary is refused, and that refusal
+  // must not take the registration standing above it.
+  passed = pre_checkout_layer(nullptr, 9, 7, hosted_request.data(), 7, 1, 30,
                               hosted_result.data()) == 4 &&
+      registration_for(7) != runtime.pixel_checkouts.end() && passed;
+  passed = pre_checkout_layer(nullptr, 3, 7, narrower_request.data(), 7, 1, 30,
+                              hosted_result.data()) == 0 &&
+      runtime.pixel_checkouts.size() == registrations_before &&
+      registration_for(7) != runtime.pixel_checkouts.end() &&
+      registration_for(7)->rect == narrower_rect &&
       pre_checkout_layer(nullptr, 3, 8, hosted_request.data(), 7, 1, 30,
                          hosted_result.data()) == 0 &&
       checkout_pixels(nullptr, 999, &checked_out) == 4 &&

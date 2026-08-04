@@ -101,6 +101,17 @@ bool dispatch(const Request& request, const Hooks& hooks,
   runtime.height = plan.height;
   runtime.rowbytes = plan.rowbytes;
   runtime.pixel_format = plan.float32 ? "argb32f" : (plan.deep16 ? "argb16" : "argb8");
+  // Before the selector, not after it: PreRender is where a SmartFX plug-in
+  // checks its input out, and the registration that checkout leaves behind is
+  // what SmartRender later hands pixels from. Assigning this only in the render
+  // preamble below registered a null world for the whole negotiation (issue
+  // #675). The secondary and hosted-layer worlds are already set up before
+  // dispatch, so this brings the primary input in line with them.
+  //
+  // `output_world` deliberately stays below: nothing in PreRender reads it, and
+  // publishing it early would also widen the GPU world registry's view of it
+  // before the transport that backs it is prepared.
+  runtime.input_world = plan.missing_input ? nullptr : request.input_world->data();
   std::cerr << "stage:smart_pre_render_begin\n" << std::flush;
   result.pre_error = (!plan.gpu_negotiation || result.gpu_setup_error == 0)
       ? hooks.guarded_call(request.entry, kSmartPreRender, request.input->data(),
@@ -179,7 +190,6 @@ bool dispatch(const Request& request, const Hooks& hooks,
   write<void*>(callbacks, 16, reinterpret_cast<void*>(&smart::checkout_output));
   write<void*>(smart_extra, 0, smart_input.data());
   write<void*>(smart_extra, 8, callbacks.data());
-  runtime.input_world = plan.missing_input ? nullptr : request.input_world->data();
   runtime.output_world = request.output_world->data();
   if (plan.gpu_negotiation &&
       ((!plan.missing_input && !request.formats->register_world(
