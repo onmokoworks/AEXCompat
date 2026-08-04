@@ -27,10 +27,11 @@ constexpr std::size_t kRenderRequestChannelMask = 20;
 constexpr std::size_t kInputBitdepth = 44;
 constexpr std::size_t kSmartInputPreRenderData = 48;
 constexpr int32_t kFieldFrame = 0;
-// 仮説: AE がフレーム描画で渡すのは PF_ChannelMask_ARGB とみて 0xF を書いている。
-// 実機 AE から観測した値ではない (probe が output_request.rect しか記録していない)。
-// 確かなのは「0 は『どのチャンネルも要求しない』と読める」ことと、PreRender と
-// SmartRender が同じ値を見るべきことの 2 点。
+// Hypothesis, not an observation: AE is assumed to pass PF_ChannelMask_ARGB
+// for an ordinary frame render, so 0xF is written. No probe has recorded what
+// AE actually passes (the selector-timeline probe captures output_request.rect
+// only). What is certain is that 0 reads as "no channel requested", and that
+// PreRender and SmartRender must see the same value.
 constexpr int32_t kChannelMaskArgb = 0xF;
 
 template <typename T, std::size_t N>
