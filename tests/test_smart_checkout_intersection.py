@@ -64,13 +64,48 @@ def test_native_smart_pixel_checkout_owns_opaque_tokens() -> None:
         "struct PixelCheckout",
         "std::vector<PixelCheckout> pixel_checkouts;",
         "constexpr std::size_t kMaxPixelCheckouts = 64;",
+        # Re-checking out an id replaces its answer instead of being refused:
+        # PreRender is a negotiation and a plug-in re-asks the same layer with
+        # different request rects (issue #675). The cap still bounds how many
+        # distinct checkouts one PreRender may hold, so it is only enforced
+        # against a growing set.
         "bool checkout_id_registered(const State& runtime, int32_t checkout_id)",
-        "if (checkout_id_registered(runtime, checkout_id) ||",
+        "void forget_checkout(State& runtime, int32_t checkout_id)",
+        "if (!checkout_id_registered(runtime, checkout_id) &&\n"
+        "      runtime.pixel_checkouts.size() >= kMaxPixelCheckouts) return 4;",
         "checkout->checked_out = true;",
         "checkout->checked_out = false;",
         "bool pixel_checkouts_balanced()",
     ):
         assert marker in runtime + header
+    # The primary input world is published BEFORE the PreRender selector runs.
+    # PreRender is where a plug-in checks its input out, and the registration
+    # that checkout leaves behind is what SmartRender hands pixels from; setting
+    # it afterwards registered a null world for the whole negotiation and the
+    # plug-in abandoned the frame (issue #675). Nothing else pins this ordering
+    # — the native selftest assigns `input_world` itself, and the broker E2E
+    # tests that catch it need the SDK and a built fixture.
+    assign = dispatch.index(
+        "runtime.input_world = plan.missing_input ? nullptr : request.input_world->data();")
+    # The call, not the constant's declaration at the top of the file.
+    pre_render = dispatch.index("kSmartPreRender, request.input->data()")
+    assert assign < pre_render, "input_world must be published before PreRender"
+    assert dispatch.count("runtime.input_world =") == 1
+    # Erased at each success site, never up front: a re-checkout that goes on to
+    # be refused must leave the earlier registration standing (issue #675).
+    assert runtime.count("forget_checkout(runtime, checkout_id);") == 3
+    for site in (
+        "    forget_checkout(runtime, checkout_id);\n"
+        "    runtime.pixel_checkouts.push_back({checkout_id, hosted->world,",
+        "    forget_checkout(runtime, checkout_id);\n"
+        "    runtime.pixel_checkouts.push_back({checkout_id, runtime.input_world,",
+        "    forget_checkout(runtime, checkout_id);\n"
+        "    runtime.pixel_checkouts.push_back({checkout_id, runtime.map_world,",
+    ):
+        assert site in runtime
+    # PreRender answers geometry; requiring a world here refused the negotiation
+    # itself. `checkout_pixels` is where a missing world fails closed.
+    assert "if (!runtime.input_world) return 4;" not in runtime
     assert "if (!smart::pixel_checkouts_balanced() && result.render_error == 0)" not in dispatch
     assert "smart.runtime->pixel_checkouts_balanced" not in report
     assert "snapshot_->pixel_checkouts_balanced = pixel_checkouts_balanced();" in runtime
