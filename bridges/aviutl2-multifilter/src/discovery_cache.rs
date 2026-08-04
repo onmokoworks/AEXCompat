@@ -168,11 +168,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     limits.unresolved_root |= !dirs_complete;
     let scan_complete = limits.authoritative();
     if limits.too_deep {
-        log_warn(&format!(
-            "a folder tree under the scan roots is deeper than {MAX_SCAN_DEPTH} \
-             levels and was not fully walked; any .aex below that depth is \
-             invisible and nothing can be pruned"
-        ));
+        log_warn(&depth_cap_warning());
     }
 
     // Discovery (an L2 worker per AEX) is slow — hundreds of AE effects take
@@ -331,7 +327,9 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
 /// "deleted", and dropping a live entry leaves that effect unregistered on the
 /// next launch, deleting objects from saved projects that use it (issue #307):
 ///
-/// - `scan_complete` is false when a folder went missing or could not be read.
+/// - `scan_complete` is false for any of [`ScanLimits`]: a default folder that
+///   would not resolve, a folder that could not be read, a tree past the depth
+///   cap. The causes differ for the user; for the prune they are one answer.
 /// - `roots` bounds the prune to the folders scanned. The cache file is shared
 ///   across configurations, so pointing `AEXCOMPAT_MULTIFILTER_DIR` at one folder
 ///   for a launch would otherwise delete every entry from the default AE and
@@ -1207,15 +1205,39 @@ impl ScanLimits {
     /// What to tell the user, or `None` when the scan was authoritative. Every
     /// applicable cause is listed: they are independent and fixed differently.
     fn describe(self) -> Option<String> {
-        let mut causes: Vec<&str> = Vec::new();
+        self.causes(false)
+    }
+
+    /// The same, with the remedy attached to the cause it belongs to. Written per
+    /// cause rather than appended once, because a trailing "check the path"
+    /// after a list binds to whichever cause happens to be last — and the depth
+    /// cap is not a path the user can check (issue #660).
+    fn describe_with_remedy(self) -> Option<String> {
+        self.causes(true)
+    }
+
+    fn causes(self, remedy: bool) -> Option<String> {
+        let path_remedy = if remedy {
+            format!(
+                " (check the path exists and is reachable — `dir`/`dirs` in \
+                 config.toml, or {ENV_DIR} if that is set)"
+            )
+        } else {
+            String::new()
+        };
+        let mut causes: Vec<String> = Vec::new();
         if self.unresolved_root {
-            causes.push("a default plug-in folder could not be resolved");
+            causes.push(format!(
+                "a default plug-in folder could not be resolved{path_remedy}"
+            ));
         }
         if self.unreadable {
-            causes.push("a folder could not be read");
+            causes.push(format!("a folder could not be read{path_remedy}"));
         }
         if self.too_deep {
-            causes.push("a folder tree was deeper than the scan limit");
+            // No remedy: the cap is not reachable from config, and offering one
+            // is the misdirection this issue is about.
+            causes.push("a folder tree was deeper than the scan limit".to_owned());
         }
         (!causes.is_empty()).then(|| causes.join("; "))
     }
@@ -1230,7 +1252,9 @@ struct Scan {
     /// dropping its cache entry would leave it unregistered on the launch after
     /// it is taken back out of `ignore` (issue #307).
     seen: Vec<PathBuf>,
-    /// Why the scan cannot be trusted to be exhaustive, if it cannot.
+    /// Why the walk itself could not be exhaustive, if it could not. Never
+    /// carries `unresolved_root`: that is about which folders were handed to the
+    /// scan, which only the caller knows. Fold it in before judging authority.
     limits: ScanLimits,
 }
 
@@ -1284,8 +1308,10 @@ fn collect_aex_into(
         return ScanLimits::default();
     }
     let Ok(read) = std::fs::read_dir(dir) else {
+        // The path every mistyped `dir`, unmounted drive and denied folder takes:
+        // `collect_aex` learns of a missing folder only as a failed `read_dir`.
         return ScanLimits {
-            too_deep: true,
+            unreadable: true,
             ..ScanLimits::default()
         };
     };
@@ -1307,7 +1333,7 @@ fn collect_aex_into(
         // only `is_dir()` would silently skip a junctioned subfolder while still
         // calling the scan complete — and the prune would then delete the cache
         // entries of every AEX under it, unregistering them (issue #307).
-        // `MAX_SCAN_DEPTH` bounds any link cycle.
+        // A link cycle is broken by `visited` above, not by the depth cap.
         let resolved = file_type.is_symlink().then(|| std::fs::metadata(&path));
         if matches!(resolved, Some(Err(_))) {
             // A link whose target cannot be resolved (its drive is not mounted
@@ -2028,25 +2054,28 @@ fn empty_scan_summary(dirs: &[PathBuf], seen: usize, limits: ScanLimits) -> Stri
     )
 }
 
-/// The tail naming why the scan was not authoritative, empty when it was.
+/// The line for a launch that stopped at the depth cap.
 ///
-/// Only the unreadable-folder case gets remediation advice, and it names the env
-/// override as well as the config keys since it wins over both. The depth cap is
-/// not something the user can fix from config, so pointing them at `dir` for it
-/// would be the misdirection issue #660 is about.
+/// Warned on its own, and only here: the summaries name the cause but not what
+/// it means, and unlike the other two causes this one is not the user's to fix.
+/// The cap is sized well past a real install, so reaching it means either a
+/// pathological tree or a cap that needs raising again (issue #660). It names the
+/// number so whoever reads it knows what to compare against.
+fn depth_cap_warning() -> String {
+    format!(
+        "a folder tree under the scan roots goes deeper than {MAX_SCAN_DEPTH} \
+         levels and was not walked to the bottom; any .aex below that is invisible \
+         and nothing can be pruned this launch"
+    )
+}
+
+/// The tail naming why the scan was not authoritative, empty when it was. Each
+/// cause carries its own remedy, so nothing binds to the wrong one.
 fn scan_limit_note(limits: ScanLimits) -> String {
-    let Some(causes) = limits.describe() else {
-        return String::new();
-    };
-    let advice = if limits.unreadable || limits.unresolved_root {
-        format!(
-            ": check the path exists and is reachable — `dir`/`dirs` in \
-             config.toml, or {ENV_DIR} if that is set"
-        )
-    } else {
-        String::new()
-    };
-    format!(" ({causes}{advice})")
+    match limits.describe_with_remedy() {
+        Some(causes) => format!(" ({causes})"),
+        None => String::new(),
+    }
 }
 
 /// The scan folders as one log fragment. Diagnosing a misconfiguration needs the

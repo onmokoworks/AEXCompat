@@ -489,6 +489,11 @@ mod tests {
     }
 
     /// Nests `levels` folders under `root` and returns the deepest one.
+    ///
+    /// One character per level, so a cap-relative fixture stays clear of Windows
+    /// `MAX_PATH` (260): a `%TEMP%` root of ~60 characters leaves room for
+    /// roughly 95 levels before `create_dir_all` starts failing for a reason that
+    /// has nothing to do with the test.
     fn nest(root: &Path, levels: usize) -> PathBuf {
         let mut dir = root.to_path_buf();
         for _ in 0..levels {
@@ -506,8 +511,19 @@ mod tests {
     /// was the completeness judgement.
     #[test]
     fn a_tree_as_deep_as_a_real_install_scans_authoritatively() {
+        // The measured install depth is 10. Pinned as an absolute number, not as
+        // `MAX_SCAN_DEPTH - n`: the point is that the cap clears a real install
+        // with room to spare, which a cap-relative fixture cannot fail to satisfy.
+        const REAL_INSTALL_DEPTH: usize = 10;
+        const {
+            assert!(
+                MAX_SCAN_DEPTH >= REAL_INSTALL_DEPTH * 2,
+                "the cap wants margin over a real install, not to just clear it"
+            )
+        };
+
         let root = TempRoot::new("depth-real");
-        let deep = nest(root.path(), 12);
+        let deep = nest(root.path(), REAL_INSTALL_DEPTH + 2);
         std::fs::write(deep.join("Deep.aex"), b"MZ").unwrap();
 
         let scan = collect_aex(&[root.path().to_path_buf()], &[]);
@@ -545,6 +561,11 @@ mod tests {
             !scan.limits.authoritative(),
             "a folder that could not be read is not a complete scan"
         );
+        // Which reason, not just that there is one: a mistyped `dir` reaches here,
+        // and reporting it as the depth cap sends the user after a limit they
+        // cannot change while withholding the path advice they need (issue #660).
+        assert!(scan.limits.unreadable, "{:?}", scan.limits);
+        assert!(!scan.limits.too_deep, "{:?}", scan.limits);
     }
 
     // --- default folder resolution ------------------------------------------
@@ -1020,6 +1041,11 @@ mod tests {
             !scan.limits.authoritative(),
             "an unresolvable link is 'not looked at', not 'nothing there'"
         );
+        // Which reason: a link whose target is unreachable is a path the user can
+        // act on, so it must not be reported as the depth cap — that withholds
+        // the path remedy and blames a limit they cannot change (issue #660).
+        assert!(scan.limits.unreadable, "{:?}", scan.limits);
+        assert!(!scan.limits.too_deep, "{:?}", scan.limits);
 
         let hidden = scanned
             .join("linked")
@@ -3141,11 +3167,93 @@ mod tests {
         too_deep: true,
     };
 
+    /// A launch where a *default* plug-in folder would not resolve — an AE
+    /// install mid-update, a drive not yet mounted.
+    const UNRESOLVED_ROOT: ScanLimits = ScanLimits {
+        unresolved_root: true,
+        unreadable: false,
+        too_deep: false,
+    };
+
     const AUTHORITATIVE: ScanLimits = ScanLimits {
         unresolved_root: false,
         unreadable: false,
         too_deep: false,
     };
+
+    /// Every cause has to suppress the prune. Dropping any one of them from
+    /// `authoritative()` re-enables it while this launch cannot see where the
+    /// plug-ins are, which drops hundreds of cache entries, unregisters their
+    /// filters next launch, and deletes the objects that used them from saved
+    /// projects (issue #307).
+    #[test]
+    fn every_scan_limit_suppresses_the_prune() {
+        for limits in [UNREADABLE, TOO_DEEP, UNRESOLVED_ROOT] {
+            assert!(
+                !limits.authoritative(),
+                "{limits:?} must not let the prune run"
+            );
+        }
+        assert!(AUTHORITATIVE.authoritative());
+    }
+
+    /// A default folder that would not resolve is a path problem, so it gets the
+    /// path remedy — the same one an unreadable folder gets, and not the silence
+    /// the depth cap gets.
+    #[test]
+    fn an_unresolved_root_gets_the_path_remedy() {
+        let summary = empty_scan_summary(&[PathBuf::from("x")], 0, UNRESOLVED_ROOT);
+
+        assert!(summary.contains("could not be resolved"), "{summary}");
+        assert!(summary.contains("path exists"), "{summary}");
+        assert!(summary.contains(ENV_DIR), "{summary}");
+    }
+
+    /// With a path cause and the depth cap at once, the remedy has to stay
+    /// attached to the path cause. Appended once after the list it binds to
+    /// whichever cause is last, which is how a user gets told to check `dir` for
+    /// a depth limit.
+    #[test]
+    fn the_remedy_binds_to_the_cause_it_belongs_to() {
+        let both = ScanLimits {
+            unresolved_root: false,
+            unreadable: true,
+            too_deep: true,
+        };
+        let described = both.describe_with_remedy().expect("not authoritative");
+
+        let (before, after) = described
+            .split_once("a folder tree was deeper")
+            .expect("the depth cause is listed");
+        assert!(
+            before.contains("path exists"),
+            "the remedy belongs to the readable-path cause: {described}"
+        );
+        assert!(
+            !after.contains("path exists"),
+            "and must not trail the depth cause: {described}"
+        );
+    }
+
+    /// The counts line names the causes without the remedy: it is a status line,
+    /// and the advice belongs to the message about the folders themselves.
+    #[test]
+    fn the_counts_line_names_causes_without_the_remedy() {
+        let summary = registration_summary(500, 500, 0, UNREADABLE);
+
+        assert!(summary.contains("could not be read"), "{summary}");
+        assert!(!summary.contains("path exists"), "{summary}");
+    }
+
+    /// The one message naming the cap has to name the number, or it cannot be
+    /// compared against the tree that tripped it.
+    #[test]
+    fn the_depth_cap_warning_names_the_limit() {
+        let warning = depth_cap_warning();
+
+        assert!(warning.contains(&MAX_SCAN_DEPTH.to_string()), "{warning}");
+        assert!(!warning.contains("config.toml"), "{warning}");
+    }
 
     /// An untrustworthy scan pads the known set with cached plug-ins this launch
     /// never saw (#321), so the counts mean something different and the line has
@@ -3181,7 +3289,8 @@ mod tests {
         );
     }
 
-    /// Both at once is possible and both matter, so neither may hide the other.
+    /// All three can hold at once and each needs a different fix, so none may
+    /// hide the others.
     #[test]
     fn every_reason_a_scan_is_untrustworthy_is_listed() {
         let both = ScanLimits {
