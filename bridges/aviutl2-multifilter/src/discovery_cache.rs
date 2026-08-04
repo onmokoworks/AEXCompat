@@ -112,10 +112,11 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         return;
     }
     let config = load_config();
-    let repository = std::env::var_os(ENV_REPOSITORY)
-        .map(PathBuf::from)
-        .or_else(|| config.repository.clone());
-    let Some(repository) = repository else {
+    let Some(repository) = resolve_worker_root(
+        std::env::var_os(ENV_REPOSITORY).map(PathBuf::from),
+        config.repository.as_deref(),
+        self_module_path(),
+    ) else {
         return;
     };
     let (dirs, dirs_complete) = resolve_scan_dirs(&config);
@@ -1577,10 +1578,7 @@ fn cache_path() -> Option<PathBuf> {
 /// while the in-DLL broker does the sealed-load-tree staging that decides whether
 /// the load succeeds (issue #304's dep-sealing lives broker-side, in this DLL).
 fn build_fingerprint(repository: &Path, dependency: &DependencyConfig) -> BuildFingerprint {
-    let worker = repository
-        .join("target")
-        .join("minihost-build")
-        .join("aex_l2_worker.exe");
+    let worker = repository.join(L2_WORKER_RELATIVE_PATH);
     let flatten = |m: ((u64, u32), u64)| (m.0.0, m.0.1, m.1);
     BuildFingerprint {
         worker: file_meta(&worker).map(flatten),
@@ -1612,6 +1610,57 @@ fn dependency_inputs_fingerprint(dependency: &DependencyConfig) -> u64 {
     let digest = hasher.finalize();
     u64::from_le_bytes(digest[..8].try_into().unwrap_or_default())
 }
+
+/// Where the compat-host workers live, as the root the broker joins
+/// `target/minihost-build/aex_*_worker.exe` onto.
+///
+/// Preference order:
+///
+/// 1. `AEXCOMPAT_MULTIFILTER_REPOSITORY`, then the TOML `repository` — a
+///    developer naming their checkout. Taken even when no worker is built there
+///    yet, since that is the tree they are about to build in.
+/// 2. Beside the plugin: this DLL's own folder, then `<dll folder>/aexcompat`,
+///    each accepted only when the L2 worker is actually present.
+///
+/// (2) is what lets a deployed plugin carry its own workers. Pointing the plugin
+/// at a source tree makes its runtime depend on a directory the user is free to
+/// delete, move, or `cargo clean` — which is how a removed worktree turned into
+/// "every AEX fails discovery, zero filters registered" with nothing reported
+/// (issue #650).
+///
+/// A named checkout that no longer holds a worker falls through to (2) rather
+/// than being handed to the broker regardless. Preferring the setting is right
+/// while it points at something usable; keeping that preference after the tree
+/// is gone only reproduces the incident, and the plugin currently has no way to
+/// report the mistake (`InitializeLogger` is a stub, issue #649).
+fn resolve_worker_root(
+    env_override: Option<PathBuf>,
+    configured: Option<&Path>,
+    module_path: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let named: Vec<PathBuf> = env_override
+        .into_iter()
+        .chain(configured.map(Path::to_path_buf))
+        .collect();
+    let beside: Vec<PathBuf> = module_path
+        .as_deref()
+        .and_then(Path::parent)
+        .map(|dir| vec![dir.to_path_buf(), dir.join("aexcompat")])
+        .unwrap_or_default();
+
+    named
+        .iter()
+        .chain(beside.iter())
+        .find(|root| root.join(L2_WORKER_RELATIVE_PATH).is_file())
+        .cloned()
+        // Nothing holds a worker: keep a named checkout (it may be about to be
+        // built), but never invent one from the plugin's folder.
+        .or_else(|| named.into_iter().next())
+}
+
+/// The L2 (discovery) worker, relative to the root handed to the broker. Kept in
+/// step with the broker's own `WorkerKind::repository_relative_program`.
+const L2_WORKER_RELATIVE_PATH: &str = "target/minihost-build/aex_l2_worker.exe";
 
 /// The path of this running DLL, resolved from an address inside it. Used to
 /// fingerprint the in-process broker (its bytes ship in this module, not the

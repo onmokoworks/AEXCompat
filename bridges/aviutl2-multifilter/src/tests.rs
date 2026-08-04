@@ -2460,4 +2460,163 @@ mod tests {
         assert!(survivors.iter().all(|parameter| parameter.kind != "layer"));
         assert!(layer_slots_of(&survivors).is_empty());
     }
+
+    // --- worker root resolution (issue #650) ---------------------------------
+
+    /// Lays out `<root>/target/minihost-build/aex_l2_worker.exe`.
+    fn place_worker(root: &Path) {
+        let dir = root.join("target/minihost-build");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("aex_l2_worker.exe"), b"MZ").unwrap();
+    }
+
+    /// A temp directory removed when the guard drops, so the suite does not
+    /// leave `%TEMP%` littered.
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("aexcompat-mf-root-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A deployed plugin finds its workers next to itself, with no setting at
+    /// all. This is what keeps a deployment from depending on a developer's
+    /// checkout, which can be deleted or moved out from under it (issue #650).
+    #[test]
+    fn worker_root_falls_back_to_the_plugin_directory() {
+        let plugin = TempRoot::new("beside");
+        place_worker(plugin.path());
+
+        assert_eq!(
+            resolve_worker_root(None, None, Some(plugin.path().join("x.aux2"))),
+            Some(plugin.path().to_path_buf())
+        );
+    }
+
+    /// The same, one level down, so a deployment can keep the workers out of the
+    /// host's plugin folder proper.
+    #[test]
+    fn worker_root_falls_back_to_an_aexcompat_subfolder() {
+        let plugin = TempRoot::new("subfolder");
+        let bundle = plugin.path().join("aexcompat");
+        place_worker(&bundle);
+
+        assert_eq!(
+            resolve_worker_root(None, None, Some(plugin.path().join("x.aux2"))),
+            Some(bundle)
+        );
+    }
+
+    /// Nothing configured and nothing beside the plugin: report that instead of
+    /// inventing a root the broker cannot run from.
+    #[test]
+    fn worker_root_is_none_when_nothing_holds_a_worker() {
+        let plugin = TempRoot::new("empty");
+
+        assert_eq!(
+            resolve_worker_root(None, None, Some(plugin.path().join("x.aux2"))),
+            None
+        );
+        assert_eq!(resolve_worker_root(None, None, None), None);
+    }
+
+    /// A named checkout that holds a worker wins over the plugin's own copy: a
+    /// developer who names a tree means that tree.
+    #[test]
+    fn a_named_checkout_with_a_worker_wins_over_the_plugin_directory() {
+        let plugin = TempRoot::new("named-plugin");
+        place_worker(plugin.path());
+        let checkout = TempRoot::new("named-checkout");
+        place_worker(checkout.path());
+
+        assert_eq!(
+            resolve_worker_root(None, Some(checkout.path()), Some(plugin.path().join("x.aux2"))),
+            Some(checkout.path().to_path_buf())
+        );
+        assert_eq!(
+            resolve_worker_root(
+                Some(checkout.path().to_path_buf()),
+                None,
+                Some(plugin.path().join("x.aux2"))
+            ),
+            Some(checkout.path().to_path_buf()),
+            "the environment override behaves the same way"
+        );
+    }
+
+    /// The incident this issue is about: the named checkout is gone (a deleted
+    /// worktree), so keeping it would fail every discovery again. Fall through to
+    /// the workers shipped beside the plugin instead.
+    #[test]
+    fn a_named_checkout_without_a_worker_falls_through_to_the_plugin_directory() {
+        let plugin = TempRoot::new("stale-named-plugin");
+        place_worker(plugin.path());
+        let gone = plugin.path().join("deleted-worktree");
+
+        assert_eq!(
+            resolve_worker_root(None, Some(&gone), Some(plugin.path().join("x.aux2"))),
+            Some(plugin.path().to_path_buf())
+        );
+    }
+
+    /// ...but with nothing beside the plugin either, the named checkout is still
+    /// the answer: a developer is about to build a worker there.
+    #[test]
+    fn a_named_checkout_survives_when_no_worker_exists_anywhere() {
+        let plugin = TempRoot::new("fresh-checkout-plugin");
+        let fresh = plugin.path().join("fresh-checkout");
+
+        assert_eq!(
+            resolve_worker_root(None, Some(&fresh), Some(plugin.path().join("x.aux2"))),
+            Some(fresh)
+        );
+    }
+
+    /// With workers in both plugin-local candidates, the DLL's own folder wins.
+    /// Pinned so the order stays a decision rather than an accident.
+    #[test]
+    fn the_plugin_directory_outranks_its_aexcompat_subfolder() {
+        let plugin = TempRoot::new("beside-order");
+        place_worker(plugin.path());
+        place_worker(&plugin.path().join("aexcompat"));
+
+        assert_eq!(
+            resolve_worker_root(None, None, Some(plugin.path().join("x.aux2"))),
+            Some(plugin.path().to_path_buf())
+        );
+    }
+
+    /// The environment override outranks the config file.
+    #[test]
+    fn the_environment_override_outranks_the_configured_repository() {
+        let plugin = TempRoot::new("precedence");
+        let from_env = plugin.path().join("from-env");
+        let from_config = plugin.path().join("from-config");
+        place_worker(&from_env);
+        place_worker(&from_config);
+
+        assert_eq!(
+            resolve_worker_root(
+                Some(from_env.clone()),
+                Some(&from_config),
+                Some(plugin.path().join("x.aux2"))
+            ),
+            Some(from_env)
+        );
+    }
 }
