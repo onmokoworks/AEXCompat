@@ -18,23 +18,8 @@ def _sdk_header() -> Path:
     return SDK_HEADER
 
 
-def test_cache_on_load_v1_exact_name_version_and_one_slot_abi():
-    text = source_owners.worker_text()
-    component = COMPONENT.read_text(encoding="utf-8")
-    header = _sdk_header().read_text(encoding="utf-8")
-    assert '#define kPFCacheOnLoadSuite\t\t\t"PF Cache On Load Suite"' in header
-    assert "kPFCacheOnLoadSuiteVersion1\t1" in header
-    assert '{"PF Cache On Load Suite", 1, &cache_on_load_suite()}' in text
-    assert "sizeof(PfCacheOnLoadSuite1) == sizeof(void*)" in component
-    assert "offsetof(PfCacheOnLoadSuite1, set_no_cache_on_load) == 0" in component
 
 
-def test_cache_on_load_policy_is_bounded_and_effect_owned():
-    component = COMPONENT.read_text(encoding="utf-8")
-    assert "effect_ref != owned_effect_ref" in component
-    assert "effect_available != 0 && effect_available != 1" in component
-    assert "g_no_cache_on_load.store(effect_available != 0" in component
-    assert "no persistent startup plug-in cache" in component
 
 
 def test_cache_on_load_sdk_function_shape_is_frozen():

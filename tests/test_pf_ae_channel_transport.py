@@ -108,14 +108,6 @@ def test_aux_manifest_rejects_nonfinite_and_sidecar_outside_manifest_folder(tmp_
     assert run_transport(manifest).returncode != 0
 
 
-def test_source_declares_transport_contract_and_handle_ownership():
-    source = source_owners.contract_text("pf_ae_channel_transport")
-    assert '"expected_byte_length","sha256"' in source
-    assert 'sampling!="exact"&&sampling!="hold"' in source
-    assert "canon.parent_path()!=canonical.parent_path()" in source
-    assert "effect_ref != host_effect_ref()" in source
-    assert "chunk->data_handle != live.handle" in source
-    assert "unlock_handle(live.handle); dispose_handle(live.handle);" in source
 
 
 def test_rich_manifest_accepts_padded_negative_stride_and_preserves_logical_rows(tmp_path):

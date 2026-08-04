@@ -30,14 +30,6 @@ def source_text():
                      (SOURCE, source_owners.SRC / "worker_host_suite_wiring.cpp", COLOR_HEADER, COLOR_SOURCE, COLOR_SELFTEST_SOURCE))
 
 
-def test_color_settings_selftest_is_a_true_translation_unit():
-    worker_source = SOURCE.read_text(encoding="utf-8") + (source_owners.SRC / "worker_host_suite_wiring.cpp").read_text(encoding="utf-8")
-    selftest_source = COLOR_SELFTEST_SOURCE.read_text(encoding="utf-8")
-    marker = "bool verify_pf_color_settings_suite6()"
-    assert marker in selftest_source
-    assert marker not in worker_source
-    assert "struct Hooks" in (ROOT / "minihost" / "src" /
-                              "worker_color_settings_selftests.hpp").read_text(encoding="utf-8")
 
 
 def worker(name):
@@ -51,32 +43,8 @@ def worker(name):
     return next((path for path in candidates if path and path.is_file()), None)
 
 
-def test_color_settings_suite6_has_exact_typed_20_slot_abi():
-    text = source_text()
-    assert "struct AegpColorSettingsSuite6" in text
-    assert "sizeof(AegpColorSettingsSuite6) == 20 * sizeof(void*)" in text
-    for slot, member in enumerate(MEMBERS):
-        assert f"offsetof(AegpColorSettingsSuite6, {member}) == {slot} * sizeof(void*)" in text
-    assert '{"PF Color Settings Suite", 7, nullptr, &provide_color_settings7}' in text
-    assert "return &g_color_settings_suite6" in text
-    assert "color_settings_validate_icc" in text
-    assert "color_settings_builtin_srgb_icc" in text
-    assert "color_settings_builtin_linear_icc" in text
-    assert "g_working_color_space_kind" in text
-    assert "color_settings_init_empty_utf16_handle" in text
 
 
-def test_color_settings_headless_policy_is_fail_closed_and_alpha_preserving():
-    text = source_text()
-    assert "ColorProfileKind::ImportedRgb" in text
-    assert "color_settings_linear_to_srgb" in text
-    assert "in_place = src == dst" in text
-    assert "AEGP_WorldH is an opaque handle token" in text
-    assert "std::memcpy(dst_pixel, pixel.data(), sizeof(pixel))" in text
-    assert "++g_invalid_color_profile_operations" in text
-    assert "kMaxIccProfileBytes" in text
-    assert "kWorkingLinearSrgbGuid" in text
-    assert "kWorkingSrgbGuid" in text
 
 
 def test_color_settings_runtime_matrix():
@@ -168,17 +136,6 @@ def test_generated_linear_icc_with_independent_binary_parser():
         assert struct.unpack_from(">H", profile, offset + 12)[0] / 256.0 == 1.0
 
 
-def test_icc_source_has_no_unaligned_or_double_swap_paths():
-    text = source_text()
-    section = text[
-        text.index("uint32_t color_settings_read_be32"):
-        text.index("ColorProfileKind color_settings_classify_icc")
-    ]
-    assert "reinterpret_cast<const uint32_t*>" not in section
-    assert "reinterpret_cast<const float*>" not in section
-    assert "color_settings_be16" not in section
-    assert "color_settings_be32" not in section
-    assert "constexpr std::size_t kTagCount = 9" in section
 
 
 def test_generated_linear_icc_is_accepted_by_windows_wcs(tmp_path):

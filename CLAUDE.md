@@ -93,13 +93,14 @@ and bounded image input/output are now the main implementation path.
 - Prefer machine-portable behavioral self-tests for new compatibility work, and
   update frozen evidence values in `analysis/` only through the
   `tools/refresh-*-evidence.ps1` scripts (`docs/EVIDENCE_POLICY_2026-07-18.md`).
-- Source-text tests resolve which files they read through
-  `tests/source_owners.py` (issue #127). When a TU extraction moves an
-  implementation out of `l2_main.cpp`, append the new owner file to
-  `WORKER_RUNTIME_OWNERS` or the relevant `CONTRACTS` entry there instead of
-  editing individual tests; never weaken assert markers to make a move pass.
-  Negative assertions ("no longer in l2_main") must keep reading the exact
-  file (`L2_MAIN`), not a growable contract.
+- Pure source-text grep tests (ソースを read_text して文字列 assert するだけの
+  テスト) は #691 で全廃した。新規追加も禁止のまま
+  (`docs/EVIDENCE_POLICY_2026-07-18.md` §5.3)。`tests/source_owners.py`
+  (issue #127) は、凍結 evidence とソースを突き合わせる残存テストのために
+  残っている。TU 抽出で実装が移動したら owner を `source_owners.py` に追記
+  する運用は変わらない。例外として残したのは `.rc`↔`.cpp` の意味的整合
+  (`test_probe_pipl_contract.py`) と CI workflow 契約
+  (`test_windows_clean_clone_workflow.py`) の 2 ファイル。
 - Image dispatch admits the locally built worker at dispatch time (no frozen
   trust constants; see the section 3 amendment in
   `docs/EVIDENCE_POLICY_2026-07-18.md`). In the evidence tier, receipt-pinned

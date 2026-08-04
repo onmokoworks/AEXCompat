@@ -23,81 +23,14 @@ def worker():
     return next((candidate for candidate in candidates if candidate and candidate.is_file()), None)
 
 
-def test_iterate_suite2_structs_match_sdk_abi_without_null_slots():
-    text = source_text()
-    assert "sizeof(Iterate8Suite2) == 5 * sizeof(void*)" in text
-    assert "sizeof(Iterate16Suite2) == 3 * sizeof(void*)" in text
-    assert "sizeof(IterateFloatSuite2) == 3 * sizeof(void*)" in text
-    assert re.search(
-        r"Iterate8Suite2 g_iterate8_suite2\{reinterpret_cast<void\*>\(&iterate_world8\), "
-        r"&iterate_origin8, &iterate_lut8,\s*"
-        r"&iterate_origin_non_clip8, &iterate_generic\}",
-        text,
-    )
-    assert re.search(
-        r"Iterate16Suite2 g_iterate16_suite2\{&iterate_world16, &iterate_origin16,\s*"
-        r"&iterate_origin_non_clip16\}",
-        text,
-    )
-    assert re.search(
-        r"IterateFloatSuite2 g_iterate_float_suite2\{&iterate_world_float, &iterate_origin_float,\s*"
-        r"&iterate_origin_non_clip_float\}",
-        text,
-    )
 
 
-def test_iterate_callbacks_are_bounded_and_propagate_errors():
-    text = source_text()
-    assert "normalize_legacy_rect(area, bound_width, bound_height, bounds)" in text
-    assert "constexpr int32_t kMaxIterations = 16'777'216;" in text
-    assert "iterations <= 0 || iterations > kMaxIterations" in text
-    assert "if (error != 0) return error;" in text
-    assert "tables[channel] ? tables[channel][value] : value" in text
-    assert "std::array<unsigned char, 16> zero{};" in text
 
 
-def test_world_iterate_supports_null_source_destination_only_walk():
-    # issue #219: a null source world is the documented destination-only mode.
-    # The host must skip source resolution, bound the walk to the destination,
-    # and pass a null source pixel to the callback instead of returning A_Err_ALLOC.
-    text = source_text()
-    assert "const bool has_source = source_world != nullptr;" in text
-    assert "has_source && !resolve_world(source_world" in text
-    assert "? std::min(source_width, destination_width) : destination_width;" in text
-    assert "? std::min(source_height, destination_height) : destination_height;" in text
-    assert "void* source_pixel = has_source" in text
-    assert "iterate_test_null_source_pixel" in text
-    assert "iterate_world_typed(input.data(), 10, 14, 4, nullptr, &all_rows," in text
-    # The origin variants share the same null-source rule.
-    assert text.count("const bool has_source = source_world != nullptr;") >= 2
-    assert "iterate_origin_non_clip8(nullptr, 0, 1, nullptr, nullptr, origin.data()," in text
 
 
-def test_world_iterate_reports_rows_and_checks_abort_without_masking_pixel_errors():
-    text = source_text()
-    assert "progress_span * completed_rows / rows" in text
-    assert "progress_callback(effect_ref, current, callback_total)" in text
-    assert "const bool reverse_progress = progress_final < progress_base" in text
-    assert "const int32_t callback_total = reverse_progress" in text
-    assert "? static_cast<int32_t>(progress_span)" in text
-    assert "completed_rows < rows && abort_callback" in text
-    assert "if (error != 0) return error;" in text
-    assert "interaction.progress != std::vector<int32_t>({11, 12, 13, 14})" in text
-    assert "interaction.pixel_calls != 2 || interaction.abort_calls != 2" in text
-    assert "interaction.pixel_calls != 2 || interaction.abort_calls != 1" in text
-    assert "pixel_bytes : {4, 8, 16}" in text
 
 
-def test_iterate_suite_names_and_versions_are_acquirable():
-    text = source_text()
-    for name, global_name in (
-        ("PF Iterate8 Suite", "g_iterate8_suite2"),
-        ("PF iterate16 Suite", "g_iterate16_suite2"),
-        ("PF iterateFloat Suite", "g_iterate_float_suite2"),
-    ):
-        for version in (1, 2):
-            assert f'{{"{name}", {version},' in text
-        assert global_name in text
 
 
 def test_iterate_native_lut_non_clip_generic_and_error_paths():

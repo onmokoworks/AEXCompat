@@ -22,13 +22,3 @@ def test_path_parameter_assignment_resolves_only_connected_masks():
     assert data["assignment_precedence"]["explicit_assignment_wins"] is True
 
 
-def test_path_assignment_is_slot_bound_across_ui_broker_and_worker():
-    worker = source_owners.contract_text("path_parameter_assignment")
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    harness = source_owners.harness_windows_text()
-    assert "descriptor.type == 7 || descriptor.type == 12" in worker
-    assert "hooks().active_mask_count()" in worker
-    assert "runtime().records[i].default_value" in worker
-    assert '"integer" | "path" if item.value.fract() == 0.0' in broker
-    assert '"integer" | "float" | "path"' in harness
-    assert 'parameter.kind == "path"' in harness

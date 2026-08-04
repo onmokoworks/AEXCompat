@@ -67,6 +67,18 @@ CI wall-clock への効果はほぼ無い (削除分は直列合計 ~27 秒で�
 - #683 GPU contract のクロス積圧縮 + producer↔schema 接続
 - #684 codex monitor のバッチ実行化
 
+## 追記 (2026-08-04, #691)
+
+上記「source-text (grep) 系」の判定を owner 判断で前倒しし、純 grep テスト
+578 個を全廃した (suite 1966 → 1388)。本文の「否定 assert は正当」という
+評価は owner 判断で覆された (訂正として残す)。削除には「secure launch に
+fallback が無いこと」「session が唯一の image transport であること」等の
+negative guard も含まれる。例外として残したのは test_probe_pipl_contract
+(.rc↔.cpp の意味的整合) と test_windows_clean_clone_workflow (CI workflow
+契約) の 2 ファイル。凍結 evidence とソースを突き合わせる混在テスト
+(~50 call site) は evidence 側の検証なので残置し、source_owners.py も
+それらのために残る。
+
 ## 仮説 (未検証)
 
 - CI pytest の下限は canonical worker ビルド (~225 秒) で決まっており、#681-684

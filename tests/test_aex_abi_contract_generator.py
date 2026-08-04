@@ -29,29 +29,6 @@ def test_committed_outputs_are_deterministic():
     )
 
 
-def test_cpp_and_rust_share_observed_constants():
-    cpp = (ROOT / "minihost" / "src" / "generated" / "aex_abi_contract.hpp").read_text()
-    rust = (ROOT / "guest" / "crates" / "aex-abi" / "src" / "generated.rs").read_text()
-    for name, value in (
-        ("SCHEMA_VERSION", 1),
-        ("PF_IN_DATA_SIZE", 408),
-        ("PF_OUT_DATA_SIZE", 408),
-        ("PF_UTIL_CALLBACKS_SIZE", 552),
-        ("INTER_ADD_PARAM_OFFSET", 16),
-    ):
-        assert f"{name} = {value}" in cpp
-        assert f"{name}: usize = {value}" in rust
-    input_offsets = (
-        "INTER_CHECKOUT_PARAM_OFFSET, INTER_CHECKIN_PARAM_OFFSET, "
-        "INTER_ADD_PARAM_OFFSET"
-    )
-    utility_offsets = (
-        "UTILS_BEGIN_SAMPLING_OFFSET, UTILS_SUBPIXEL_SAMPLE_OFFSET, "
-        "UTILS_AREA_SAMPLE_OFFSET"
-    )
-    for output in (cpp, rust):
-        assert input_offsets in output
-        assert utility_offsets in output
 
 
 def test_duplicate_keys_are_rejected(tmp_path):
@@ -147,30 +124,3 @@ def test_invalid_contracts_fail_closed(tmp_path, mutation, message):
         load_generator().load_contract(path)
 
 
-def test_probe_covers_every_current_bootstrap_callback():
-    probe = (ROOT / "instruments" / "abi-layout-probe" / "main.cpp").read_text()
-    names = (
-        "inter.checkout_param", "inter.checkin_param", "inter.add_param",
-        "inter.abort", "inter.progress", "inter.register_ui",
-        "inter.checkout_layer_audio", "inter.checkin_layer_audio",
-        "inter.get_audio_data", "utils.begin_sampling",
-        "utils.subpixel_sample", "utils.area_sample", "utils.end_sampling",
-        "utils.blend", "utils.convolve", "utils.copy", "utils.fill",
-        "utils.premultiply", "utils.premultiply_color", "utils.fill16",
-        "utils.premultiply_color16", "utils.iterate", "utils.iterate16",
-        "utils.iterate_origin",
-        "utils.get_callback_addr",
-        "utils.new_world",
-        "utils.dispose_world", "utils.transform_world", "utils.ansi_ceil",
-        "utils.ansi_cos",
-        "utils.ansi_fabs", "utils.ansi_hypot", "utils.ansi_pow",
-        "utils.ansi_sin", "utils.ansi_sqrt",
-        "utils.ansi_sprintf", "utils.ansi_strcpy", "utils.ansi_asin",
-        "utils.ansi_acos", "utils.get_platform_data",
-        "utils.get_pixel_data8", "utils.get_pixel_data16",
-        "utils.host_new_handle", "utils.host_lock_handle",
-        "utils.host_unlock_handle", "utils.host_dispose_handle",
-        "utils.host_get_handle_size", "utils.host_resize_handle",
-    )
-    for name in names:
-        assert f'"{name}"' in probe

@@ -39,22 +39,5 @@ def test_smartypants_rgb_invert_is_exact_at_all_supported_cpu_depths():
         assert render[invariant] is True
 
 
-def test_conditional_selectors_run_after_render_time_is_initialized():
-    source = source_owners.worker_text()
-
-    assert "constexpr std::size_t kInCurrentTime = 224" in source
-    assert "constexpr std::size_t kInTimeStep = 228" in source
-    assert "constexpr std::size_t kInTimeScale = 240" in source
-    classic_time = source.index("write<int32_t>(input, 224, external_current_time);")
-    classic_dispatch = source.index(
-        "dispatch_conditional_ui_selectors(entry, input, command_output, params.data())",
-        classic_time,
-    )
-    assert classic_time < classic_dispatch
 
 
-def test_l2_current_parameters_are_available_to_checkout_callbacks():
-    source = source_owners.worker_text()
-
-    assert "LifecycleCheckoutDefinitionsScope" in source
-    assert "g_checkout_layer_definitions[static_cast<int32_t>(i)] = lifecycle_definitions[i]" in source

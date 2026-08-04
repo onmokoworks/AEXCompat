@@ -5,24 +5,6 @@ import source_owners
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_production_worker_reports_bounded_missing_suites():
-    source = source_owners.L2_SOURCE.read_text(encoding="utf-8")
-    report = (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text(
-        encoding="utf-8"
-    )
-    registry = (ROOT / "minihost" / "src" / "worker_suite_registry.cpp").read_text(
-        encoding="utf-8"
-    )
-    assert "constexpr std::size_t kMaxMissingSuites = 16" in registry
-    assert "constexpr std::size_t kMaxTelemetrySuiteNameBytes = 64" in registry
-    assert "constexpr int32_t kMaxSuiteVersion = 65535" in registry
-    assert "record_missing_suite(safe_name, version)" in registry
-    assert "!valid_schema_text(name, kMaxTelemetrySuiteNameBytes, true)" in registry
-    assert "missing_suites_truncated_ = true" in registry
-    assert '\\"missing_suites_truncated\\":' in registry
-    assert source.count("missing_suites_report_json()") >= 2
-    assert "value.missing_suites_json" in report
-    assert "v.missing_suites_json" in report
 
 
 def test_broker_uses_structured_report_not_stderr_for_missing_suites():
@@ -47,53 +29,3 @@ def test_broker_uses_structured_report_not_stderr_for_missing_suites():
     )
 
 
-def test_unsupported_suite_slots_flow_from_worker_report_to_broker_diagnostics():
-    header = (ROOT / "minihost" / "src" / "worker_suite_registry.hpp").read_text(
-        encoding="utf-8"
-    )
-    registry = (ROOT / "minihost" / "src" / "worker_suite_registry.cpp").read_text(
-        encoding="utf-8"
-    )
-    source = source_owners.L2_SOURCE.read_text(encoding="utf-8")
-    l2_report_header = (ROOT / "minihost" / "src" / "worker_report.hpp").read_text(
-        encoding="utf-8"
-    )
-    l2_report = (ROOT / "minihost" / "src" / "worker_report.cpp").read_text(
-        encoding="utf-8"
-    )
-    report = (ROOT / "minihost" / "src" / "worker_render_report.cpp").read_text(
-        encoding="utf-8"
-    )
-    smart = (ROOT / "minihost" / "src" / "worker_smart_report.cpp").read_text(
-        encoding="utf-8"
-    )
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-
-    assert "unsupported_suite_slot()" in header
-    assert "constexpr std::size_t kMaxUnsupportedSuiteCalls = 32" in registry
-    assert '"stage:suite_slot_unsupported suite="' in registry
-    assert "unsupported_suite_calls" in registry
-    assert '\\"unsupported_suite_calls_truncated\\":' in registry
-    assert "unsupported_suite_calls_report_json()" in source
-    assert "unsupported_suite_calls_json" in l2_report_header
-    assert "c.unsupported_suite_calls_json" in l2_report
-    assert "unsupported_suite_calls_report_json()" in report
-    assert "unsupported_suite_calls_report_json()" in smart
-    assert "fn propagate_unsupported_suite_calls(" in broker
-    assert 'worker_report.get("unsupported_suite_calls")' in broker
-    # Every broker path that turns a worker report into public diagnostics must
-    # lift the structured suite records, or a compatibility gap stops being a
-    # reproducible diagnostic. The count used to be `>= 3` because the one-shot
-    # dispatch propagated twice (initial launch and CPU retry); #365 deleted it,
-    # so assert the two surviving paths by name instead of by a floor that a
-    # future deletion could satisfy while dropping the render path.
-    for owner, marker in (
-        ("inspection", "fn inspect_experimental_with_diagnostics_and_runtime_policy("),
-        ("session render", "fn render_classic_via_length_one_session("),
-    ):
-        start = broker.index(marker)
-        end = broker.index("\n}\n", start)
-        body = broker[start:end]
-        assert "propagate_missing_suites(&mut diagnostics" in body, owner
-        assert "propagate_unsupported_suite_calls(&mut diagnostics" in body, owner
-        assert "propagate_suite_timeline(&mut diagnostics" in body, owner

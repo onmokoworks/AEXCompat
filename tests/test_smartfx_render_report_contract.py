@@ -59,27 +59,6 @@ class SmartfxRenderReportContractTests(unittest.TestCase):
         errors = sorted(Draft202012Validator(self.schema).iter_errors(report), key=str)
         self.assertEqual([], errors, errors)
 
-    def test_schema_is_strict_and_matches_smart_rs_emission(self):
-        self.assertFalse(self.schema["additionalProperties"])
-        self.assertEqual(self.schema["properties"]["stage"], {"const": "smartfx_render"})
-
-        source = SMART_SOURCE.read_text(encoding="utf-8")
-        start = source.index("let summary = json!({")
-        end = source.index("let mut file = OpenOptions", start)
-        summary = source[start:end]
-        emitted = set(re.findall(r'"([a-z0-9_]+)"\s*:', summary))
-        # The summary contains two deliberately nested run objects. Remove their
-        # six keys before comparing the top-level report contract.
-        emitted -= set(self.schema["$defs"]["run"]["properties"])
-        declared = set(self.schema["properties"])
-        self.assertLessEqual(emitted, declared)
-        self.assertEqual(
-            emitted,
-            declared,
-            f"schema/report drift: missing={sorted(declared - emitted)} extra={sorted(emitted - declared)}",
-        )
-        for key in self.schema["required"]:
-            self.assertIn(f'"{key}"', summary)
 
     def test_success_report_validates(self):
         report = _report(

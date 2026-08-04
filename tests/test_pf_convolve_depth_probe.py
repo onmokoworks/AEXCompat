@@ -23,17 +23,6 @@ def test_probe_builds_against_world_transform_suite1():
     assert "kPFWorldTransformSuiteVersion1" in source
 
 
-def test_probe_has_exact_identity_border_and_alias_vectors():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "identity[4] = 2295" in source
-    assert "identity, unnormalized" in source
-    assert "normalized = unnormalized | PF_KernelFlag_NORMALIZED" in source
-    assert "0,-255,0,-255,1275,-255,0,-255,0" in source
-    assert "kBlur{{13,23,18,30,50,37,27,43,31}}" in source
-    assert "kSharpen{{0,10,70,70,50,130,230,190,255}}" in source
-    assert "PF_KernelFlag_TRANSPARENT_BORDERS" in source
-    assert "&source, blur, normalized" in source
-    assert "format != PF_PixelFormat_ARGB32" in source
 
 
 def test_real_probe_validates_argb8_convolution_and_aliasing(tmp_path):

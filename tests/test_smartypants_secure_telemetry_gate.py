@@ -48,10 +48,3 @@ def test_artifact_identities_are_path_free_and_event_is_not_misattributed():
     assert result["event_boundary"]["telemetry_origin"] == "PF_Cmd_SMART_PRE_RENDER only"
 
 
-def test_runner_uses_only_release_harness_and_fixed_identity_checks():
-    text = RUNNER.read_text(encoding="utf-8")
-    assert "broker\\target\\release\\aexcompat-harness.exe" in text
-    assert "Assert-Identity harness" in text and "Assert-Identity worker" in text
-    assert "--render-experimental-smart" in text
-    assert "aex_smart_worker.exe'" in text
-    assert "& $worker" not in text

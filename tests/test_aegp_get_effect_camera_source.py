@@ -26,17 +26,6 @@ def scene_source() -> str:
 BUILD = ROOT / "target" / "minihost-build"
 
 
-def test_scene_host_boundary_is_compiled_for_each_worker_target():
-    cmake = CMAKE_SOURCE.read_text(encoding="utf-8")
-    l2_source = SOURCE.read_text(encoding="utf-8")
-    scene_source = (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
-        encoding="utf-8")
-    selftest_source = SCENE_SELFTEST_SOURCE.read_text(encoding="utf-8")
-    assert "src/worker_aegp_scene.cpp" in cmake
-    assert "src/worker_aegp_scene_selftests.cpp" in cmake
-    assert '#include "worker_aegp_scene.cpp"' not in l2_source
-    assert "configure_scene_context" in scene_source
-    assert "scene_selftests_translation_unit_linked" in selftest_source
 
 
 def test_pf_interface_slot_3_uses_exact_sdk_shape_and_offset():
@@ -77,14 +66,6 @@ def test_camera_matrix_distance_uses_active_camera_zoom_snapshot():
     assert "*distance_to_image_plane = resolved_distance;" in source
 
 
-def test_active_camera_matrix_uses_scene_world_transform_and_fail_closed():
-    source = (ROOT / "minihost" / "src" / "worker_aegp_pf_interface_suite.cpp").read_text(
-        encoding="utf-8")
-    assert "bool invert_affine_matrix(const AegpMatrix4& input, AegpMatrix4& output)" in source
-    assert "aegp_get_layer_to_world_xform(camera_layer, comp_time, &world)" in source
-    assert "std::abs(determinant) <= kDeterminantEpsilon" in source
-    assert "!invert_affine_matrix(world, result)" in source
-    assert "*camera_matrix = result" in source
 
 
 def test_camera_lookup_is_fail_closed_and_preserves_output_on_error():
@@ -100,58 +81,12 @@ def test_camera_lookup_is_fail_closed_and_preserves_output_on_error():
     assert "get_effect_camera(&g_effect, &before_in, &camera) == 0 && camera == nullptr" in source
 
 
-def test_single_layer_authored_transform_is_bounded_and_fail_closed():
-    source = scene_source() + (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
-        encoding="utf-8")
-    assert "struct AegpLayerTransform" in source
-    assert "std::array<AegpLayerTransform, 3> layer_transforms{}" in source
-    assert "T(position) * Rz * Ry * Rx" in source
-    assert "authored.scale[index] == 0.0" in source
-    assert "finite_bounded(authored.rotation_degrees[index], kRotationLimit)" in source
-    assert "std::isfinite(result.mat[row][column])" in source
-    assert "*transform = result" in source
-    assert "std::memcmp(&matrix, &matrix_sentinel, sizeof(matrix)) == 0" in source
 
 
-def test_parent_layer_transform_chain_is_bounded_and_fail_closed():
-    source = scene_source() + (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
-        encoding="utf-8")
-    assert "std::array<int32_t, 3> layer_parent_indices{{-1, -1, -1}}" in source
-    assert "constexpr std::size_t kMaxParentDepth = 8" in source
-    assert "visited[current]" in source
-    assert "world = multiply(local, world)" in source
-    assert "g_aegp_layer_parent_indices" in source
-    assert "parent_index < 0" in source
-    assert "parent_index >= 0" not in source
 
 
-def test_animated_layer_transform_snapshot_is_rational_and_fail_closed():
-    source = (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
-        encoding="utf-8")
-    runtime = (ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp").read_text(
-        encoding="utf-8")
-    assert "struct AegpLayerTransformKeyframe" in runtime
-    assert "layer_transform_keyframes" in runtime
-    assert "resolve_layer_transform" in source
-    assert "first_time < second_time" in source
-    assert "current_time <= first_time" in source
-    assert "current_time >= second_time" in source
-    assert "blend(output.position" in source
-    assert "!keyframes[0].valid || !keyframes[1].valid" in source
 
 
-def test_camera_zoom_snapshot_is_rational_and_fail_closed():
-    source = (ROOT / "minihost" / "src" / "worker_aegp_scene.cpp").read_text(
-        encoding="utf-8")
-    runtime = (ROOT / "minihost" / "src" / "worker_aegp_scene_runtime.hpp").read_text(
-        encoding="utf-8")
-    assert "struct AegpCameraZoomKeyframe" in runtime
-    assert "layer_camera_zoom_keyframes" in runtime
-    assert "resolve_layer_camera_zoom" in source
-    assert "kZoomLimit" in source
-    assert "fallback <= 0.0" in source
-    assert "!(first_time < second_time)" in source
-    assert "value->one_d = zoom" in source
 
 
 def test_native_self_test_covers_all_three_release_workers():

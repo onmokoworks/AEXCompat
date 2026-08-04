@@ -1102,13 +1102,3 @@ def test_harness_exposes_depth_variants_of_typed_request_cli():
     assert "AEXCOMPAT_REPOSITORY_ROOT" in source
 
 
-def test_native_render_settings_uses_checked_ascii_narrowing():
-    source = (
-        ROOT / "minihost" / "src" / "worker_render_report.cpp"
-    ).read_text(encoding="utf-8")
-    assert "bool narrow_ascii_checked(const std::wstring& text, std::string& output)" in source
-    assert "output.push_back(static_cast<char>(character));" in source
-    assert "narrow_ascii_checked(fields[1], premultiplication)" in source
-    assert "narrow_ascii_checked(fields[5], renderer)" in source
-    assert "std::string(fields[1].begin(), fields[1].end())" not in source
-    assert "std::string(fields[5].begin(), fields[5].end())" not in source

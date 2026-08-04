@@ -14,28 +14,8 @@ PROBE = ROOT / "target" / "pf-aegp-render-suite5-probe-build" / "Release" / "pf_
 INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 
 
-def test_probe_uses_exact_typed_suite5_metadata_and_lifecycle_slots():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "const AEGP_RenderSuite5* suite" in source
-    assert "sizeof(AEGP_RenderSuite5) == 14 * sizeof(void*)" in source
-    assert "kAEGPRenderSuiteVersion5" in source
-    for slot in (
-        "AEGP_CheckinFrame", "AEGP_GetRenderedRegion",
-        "AEGP_IsRenderedFrameSufficient", "AEGP_GetCurrentTimestamp",
-        "AEGP_HasItemChangedSinceTimestamp", "AEGP_IsItemWorthwhileToRender",
-        "AEGP_GetReceiptGuid",
-    ):
-        assert f"suite->{slot}" in source
 
 
-def test_probe_covers_stale_handles_and_error_paths():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "AEGP_FrameReceiptH stale_receipt = receipt" in source
-    assert "AEGP_IsRenderedFrameSufficient(nullptr, nullptr, &answer)" in source
-    assert "AEGP_IsItemWorthwhileToRender(nullptr, &timestamp, &answer)" in source
-    assert "AEGP_FreeMemHandle(stale_guid) == A_Err_NONE" in source
-    assert "AEGP_GetCurrentTimestamp(nullptr) == A_Err_NONE" in source
-    assert "nullptr, &start, &duration" in source
 
 
 def test_real_probe_exercises_render_suite5_metadata_and_lifecycle(tmp_path):

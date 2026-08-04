@@ -29,27 +29,6 @@ STATUS_DLL_INIT_FAILED = 0xC0000142
 GENERATOR = ROOT / "tools" / "generate-oracle-rgba-input.py"
 
 
-def test_render_session_broker_wiring_is_fail_closed():
-    source = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
-    # Transport handles are inherited and advertised by number; the worker
-    # never receives a session path (issue #18 lesson).
-    assert "SessionChildHandles" in source
-    # Per-frame safety boundaries from the protocol: watchdog, generation,
-    # static header, checksum, guard verification, all session-invalidating.
-    for marker in (
-        '"frame_deadline"',
-        '"worker_exited"',
-        '"frame_invariant_failure"',
-        '"output_checksum_mismatch"',
-        "terminate_job",
-        "guards_intact",
-    ):
-        assert marker in source, marker
-    # Frame-local errors continue the session; the batch aborts by default.
-    assert "FrameError" in source
-    assert "continue_on_frame_error" in source
-    main = BROKER_MAIN.read_text(encoding="utf-8")
-    assert '"render-video-batch"' in main
 
 
 def _require_artifacts():

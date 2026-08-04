@@ -161,41 +161,7 @@ def test_wgpu_dx12_report_schema_is_closed_and_fail_closed():
             jsonschema.validate(mutation, SCHEMA)
 
 
-def test_probe_source_pins_wgpu_dx12_and_inline_wgsl_lifecycle():
-    assert 'wgpu = { version = "=0.19.4"' in RUNTIME_CARGO
-    assert 'default-features = false' in RUNTIME_CARGO
-    assert 'features = ["dx12", "hal", "wgsl"]' in RUNTIME_CARGO
-    assert "Backends::DX12" in RUNTIME
-    assert "Backend::Dx12" in RUNTIME
-    assert "ShaderSource::Wgsl(WGSL.into())" in RUNTIME
-    assert "@compute @workgroup_size(64)" in RUNTIME
-    assert "output_values[id.x] = input_values[id.x] * 3u + 7u" in RUNTIME
-    assert "aexcompat_wgpu_dx12_global_setup" in AEX
-    assert "aexcompat_wgpu_dx12_global_setdown" in AEX
-    assert AEX.index("PF_Cmd_GLOBAL_SETUP") < AEX.index("PF_Cmd_GLOBAL_SETDOWN")
-    assert "PF_OutFlag_NOP_RENDER" in AEX
-    assert "PF_Cmd_RENDER" in AEX and "PF_Err_INTERNAL_STRUCT_DAMAGED" in AEX
-    assert "vulkan" not in RUNTIME.lower()
-    assert "metal" not in RUNTIME.lower()
 
 
-def test_broker_reuses_sealed_audit_and_never_promotes_backend_ready():
-    assert "dispatch_secure_image_with_process_memory_limit" in BROKER
-    assert "WorkerKind::L2" in BROKER
-    assert "PROBE_PROCESS_MEMORY_LIMIT: usize = 1024 * 1024 * 1024" in BROKER
-    assert "collect_gpu_platform_identity" in BROKER
-    assert "candidate.adapter_luid == selected_luid" in BROKER
-    assert "module_audit_evidence" in BROKER
-    assert "backend_ready: false" in BROKER
-    assert "backend_ready: true" not in BROKER
-    assert "probe artifact identity changed after Release build" in BROKER
-    assert "probe artifact is missing or unreadable" in BROKER
 
 
-def test_release_build_records_locked_sources_versions_and_hashes():
-    assert "--release --locked" in BUILD
-    assert '"runtime\\Cargo.toml"' in BUILD
-    assert '"runtime\\Cargo.lock"' in BUILD
-    assert "Get-FileHash" in BUILD
-    assert "configuration = \"Release\"" in BUILD
-    assert "wgpu_version = \"0.19.4\"" in BUILD

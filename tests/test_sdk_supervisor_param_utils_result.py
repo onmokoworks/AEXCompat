@@ -59,12 +59,3 @@ def test_supervisor_e2e_completes_lifecycle_state_ui_and_render_contracts():
     assert safety["guard_bytes_intact"] is True
 
 
-def test_supervisor_lifecycle_precedes_conditional_ui_in_l2_and_render_paths():
-    source = source_owners.worker_text()
-    l2_sequence = source.index('std::cerr << "stage:sequence_setup_begin', source.index("lifecycle_errors"))
-    l2_ui = source.index("dispatch_conditional_ui_selectors", l2_sequence)
-    assert l2_sequence < l2_ui
-    classic = source.index("int32_t render_once(")
-    classic_sequence = source.index("begin_render_lifecycle", classic)
-    classic_ui = source.index("dispatch_conditional_ui_selectors", classic)
-    assert classic_sequence < classic_ui

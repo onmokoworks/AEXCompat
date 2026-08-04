@@ -5,16 +5,6 @@ import source_owners
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_minihost_dispatches_a_bounded_custom_ui_lifecycle() -> None:
-    source = source_owners.contract_text("custom_ui_lifecycle")
-
-    assert 'L"--l2-ui-lifecycle"' in source
-    assert "std::array<int32_t, 5>{0, 1, 7, 5, 6}" in source
-    assert '\\"lifecycle_context_stable\\"' in source
-    assert '\\"plugin_state_before_close\\"' in source
-    assert '\\"lifecycle_host_state_cleared\\"' in source
-    assert "event_assignments_applied" in source
-    assert "requested_parameters_json(invocation.ui_event_assignments)" in source
 
 
 def test_broker_validates_the_complete_lifecycle_contract() -> None:

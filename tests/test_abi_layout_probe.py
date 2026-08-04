@@ -7,146 +7,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AbiLayoutProbeTests(unittest.TestCase):
-    def test_probe_is_confined_to_instruments(self):
-        source = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
-        text = source.read_text(encoding="utf-8")
-        self.assertIn('#include "AE_Effect.h"', text)
-        self.assertIn("offsetof(PF_InData", text)
-        self.assertIn("offsetof(PF_OutData", text)
-        for path in (ROOT / "minihost").rglob("*"):
-            if path.suffix in {".cpp", ".h", ".hpp"}:
-                self.assertNotIn("AE_Effect.h", path.read_text(encoding="utf-8"))
 
-    def test_probe_covers_l2_layout_and_selector_inputs(self):
-        text = (ROOT / "instruments" / "abi-layout-probe" / "main.cpp").read_text(encoding="utf-8")
-        for marker in (
-            "pf_in_data_size", "pf_out_data_size", "pf_param_def_size",
-            "in.pica_basicP", "out.my_version", "out.num_params",
-            "inter.add_param", "param.param_type", "param.name",
-            "PF_Cmd_GLOBAL_SETUP", "PF_Cmd_PARAMS_SETUP",
-            "PF_Cmd_RENDER", "layer.rowbytes", "layer.data", "in.time_scale", "in.extent_hint",
-            "in.output_origin_x", "in.output_origin_y",
-            "in.downsample_x", "in.downsample_y", "in.pixel_aspect_ratio",
-            "out.width", "out.height", "out.origin",
-            "utils.blend", "utils.convolve", "utils.copy", "utils.fill",
-            "utils.new_world", "utils.dispose_world", "utils.get_platform_data",
-            "utils.get_pixel_data8", "utils.get_pixel_data16",
-            "pf_pixel16_size", "pf_pixel_float_size", "layer.world_flags",
-            "PF_Cmd_SMART_RENDER_GPU", "PF_Cmd_GPU_DEVICE_SETUP",
-            "pf_gpu_device_setup_extra_size", "gpu_setup_input.what_gpu",
-            "gpu_setdown_input.gpu_data", "smart_input.device_index",
-            "in.sequence_data", "out.frame_data", "PF_Cmd_SEQUENCE_SETUP",
-            "PF_Cmd_FRAME_SETDOWN",
-            "PF_Cmd_USER_CHANGED_PARAM", "PF_UserChangedParamExtra",
-            "PF_ArbitraryDef", "PF_ArbParamsExtra", "PF_Cmd_ARBITRARY_CALLBACK",
-            "PF_CustomUIInfo", "custom_ui.events",
-            "PF_DoClickEventInfo", "do_click.continue_refcon",
-            "PF_KeyDownEvent", "key_down.keycode",
-            "PF_Context", "context.plugin_state",
-            "AEGP_StreamSuite6::AEGP_SetStreamValue", "aegp_stream.set_value",
-            "DRAWBOT_DrawbotSuite1", "DRAWBOT_SupplierSuite1", "DRAWBOT_SurfaceSuite2",
-            "DRAWBOT_PathSuite1", "PF_EffectCustomUISuite1", "PFAppSuite4",
-            "PF_EffectCustomUIOverlayThemeSuite1", "overlay_theme.stroke_path",
-            "AEGP_CommandSuite1", "AEGP_RegisterSuite5", "AEGP_ItemSuite9",
-            "AEGP_CompSuite11", "AEGP_LayerSuite5", "AEGP_LayerSuite9",
-            "AEGP_CompSuite12", "AEGP_LayerSuite8", "AEGP_EffectSuite4",
-            "AEGP_StreamSuite6",
-            "AEGP_KeyframeSuite5", "AEGP_StreamValue2",
-            "PF_BatchSamplingSuite1", "batch_sampling.get_func16",
-        ):
-            self.assertIn(marker, text)
 
-    def test_utils_handle_callback_offsets_are_pinned_to_the_sdk(self):
-        # The handle callbacks wired into in_data->utils (issue #220) must have
-        # their exact numeric offsets pinned to PF_UtilCallbacks so a host or SDK
-        # header drift fails the build instead of handing a plug-in a null slot.
-        text = (ROOT / "instruments" / "abi-layout-probe" / "main.cpp").read_text(
-            encoding="utf-8")
-        for member, offset in (
-            ("host_new_handle", 160),
-            ("host_lock_handle", 168),
-            ("host_unlock_handle", 176),
-            ("host_dispose_handle", 184),
-            ("host_get_handle_size", 440),
-            ("host_resize_handle", 464),
-        ):
-            assert (f"static_assert(offsetof(PF_UtilCallbacks, {member}) == {offset});"
-                    in text)
-        assert '"utils.host_get_handle_size"' in text
-        assert '"utils.host_resize_handle"' in text
 
-    def test_batch_sampling_suite1_has_official_four_slot_abi(self):
-        text = (ROOT / "instruments" / "abi-layout-probe" / "main.cpp").read_text(encoding="utf-8")
-        self.assertIn("sizeof(PF_BatchSamplingSuite1) == 4 * sizeof(void*)", text)
-        for name, slot in (("begin_sampling", 0), ("end_sampling", 1),
-                           ("get_batch_func", 2), ("get_batch_func16", 3)):
-            self.assertIn(f"offsetof(PF_BatchSamplingSuite1, {name})", text)
-            self.assertIn(f"{slot} * sizeof(void*)", text)
 
-    def test_effect_param_union_is_observed_at_x64_slot_3(self):
-        text = (ROOT / "instruments" / "abi-layout-probe" / "main.cpp").read_text(encoding="utf-8")
-        self.assertIn('"aegp_effect.get_param_union_by_index"', text)
-        self.assertIn("offsetof(AEGP_EffectSuite4, AEGP_GetEffectParamUnionByIndex)", text)
-        self.assertIn("3 * sizeof(void*)", text)
-        self.assertIn("slot 3 (offset 24)", text)
 
-    def test_layer_source_item_is_observed_at_x64_slot_4(self):
-        text = (ROOT / "instruments" / "abi-layout-probe" / "main.cpp").read_text(encoding="utf-8")
-        self.assertIn('"aegp_layer5.get_source_item"', text)
-        self.assertIn("offsetof(AEGP_LayerSuite5, AEGP_GetLayerSourceItem)", text)
-        self.assertIn("4 * sizeof(void*)", text)
-        self.assertIn("slot 4 (offset 32)", text)
 
-    def test_item_suite9_get_item_type_is_observed_at_x64_slot_5(self):
-        text = (ROOT / "instruments" / "abi-layout-probe" / "main.cpp").read_text(encoding="utf-8")
-        self.assertIn('"aegp_item.get_type"', text)
-        self.assertIn("offsetof(AEGP_ItemSuite9, AEGP_GetItemType)", text)
-        self.assertIn("5 * sizeof(void*)", text)
-        self.assertIn("slot 5 (offset 40)", text)
 
-    def test_effect_suite4_installed_catalog_abi_is_observed(self):
-        text = (ROOT / "instruments" / "abi-layout-probe" / "main.cpp").read_text(encoding="utf-8")
-        self.assertIn("AEGP_InstalledEffectKey_NONE == 0", text)
-        self.assertIn("sizeof(AEGP_EffectSuite4) == 22 * sizeof(void*)", text)
-        for name, slot in (
-            ("AEGP_GetNumInstalledEffects", 11),
-            ("AEGP_GetNextInstalledEffect", 12),
-            ("AEGP_GetEffectCategory", 15),
-        ):
-            self.assertIn(f"offsetof(AEGP_EffectSuite4, {name})", text)
-            self.assertIn(f"{slot} * sizeof(void*)", text)
-        for marker in (
-            '"aegp_effect.get_installed_count"',
-            '"aegp_effect.get_next_installed"',
-            '"aegp_effect.get_category"',
-        ):
-            self.assertIn(marker, text)
 
-    def test_keyframe_suite5_records_all_mutation_boundaries(self):
-        text = (ROOT / "instruments" / "abi-layout-probe" / "main.cpp").read_text(encoding="utf-8")
-        self.assertIn("sizeof(AEGP_KeyframeSuite5) == 22 * sizeof(void*)", text)
-        for name, slot in (
-            ("AEGP_InsertKeyframe", 2), ("AEGP_SetKeyframeValue", 5),
-            ("AEGP_GetNewKeyframeSpatialTangents", 8),
-            ("AEGP_SetKeyframeSpatialTangents", 9),
-            ("AEGP_GetKeyframeTemporalEase", 10),
-            ("AEGP_SetKeyframeTemporalEase", 11),
-            ("AEGP_SetKeyframeFlag", 13), ("AEGP_SetKeyframeInterpolation", 15),
-            ("AEGP_StartAddKeyframes", 16), ("AEGP_SetKeyframeLabelColorIndex", 21),
-        ):
-            self.assertIn(f"offsetof(AEGP_KeyframeSuite5, {name})", text)
-            self.assertIn(f"{slot} * sizeof(void*)", text)
-        for marker in (
-            '"aegp_keyframe.insert"', '"aegp_keyframe.delete"',
-            '"aegp_keyframe.set_value"', '"aegp_keyframe.set_flag"',
-            '"aegp_keyframe.get_spatial_tangents"',
-            '"aegp_keyframe.set_spatial_tangents"',
-            '"aegp_keyframe.get_temporal_ease"',
-            '"aegp_keyframe.set_temporal_ease"',
-            '"aegp_keyframe.set_interpolation"', '"aegp_keyframe.start_add"',
-            '"aegp_keyframe.end_add"', '"aegp_keyframe.set_label"',
-        ):
-            self.assertIn(marker, text)
 
     def test_recorded_observation_is_no_load_and_x64(self):
         data = json.loads((ROOT / "analysis" / "AE_ABI_LAYOUT_OBSERVATION_2026-07-13.json").read_text(encoding="utf-8"))

@@ -64,20 +64,3 @@ def test_smartfx_unadvertised_write_is_isolated_after_pre_render():
     assert denied["broker_failed_safely"] is True
 
 
-def test_input_write_boundary_is_cleanroom_abi_bound_and_exposed():
-    evidence = result()
-    worker = source_owners.worker_text()
-    pixel_buffer = PIXEL_BUFFER.read_text(encoding="utf-8")
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    harness = source_owners.harness_windows_text()
-    fixture = FIXTURE.read_text(encoding="utf-8")
-    assert evidence["abi"]["i_write_input_buffer_flag"] == 2048
-    assert "PF_OutFlag_I_WRITE_INPUT_BUFFER" in fixture
-    assert "InputPixelBuffer::set_plugin_writable" in pixel_buffer
-    assert "PAGE_READONLY" in pixel_buffer and "PAGE_READWRITE" in pixel_buffer
-    assert "kOutFlagIWriteInputBuffer = 1u << 11" in worker
-    assert "pub fn probe_experimental_input_buffer_write" in broker
-    assert "pub fn probe_experimental_smart_input_buffer_write" in broker
-    assert 'args[1] == "--probe-experimental-input-buffer-write"' in harness
-    assert "Probe input-buffer write access" in harness
-    assert "Probe SmartFX input-buffer write access" in harness

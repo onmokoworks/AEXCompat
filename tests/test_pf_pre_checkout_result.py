@@ -65,37 +65,6 @@ int main() { return 0; }
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
 
 
-def test_l2_source_writes_full_checkout_result() -> None:
-    source = SOURCE.read_text(encoding="utf-8")
-    runtime_source = "\n".join(path.read_text(encoding="utf-8") for path in (
-        SMART_RUNTIME_SOURCE, SMART_RUNTIME_HEADER, SMART_EXECUTION_HEADER,
-        FIXED_SELFTEST_ROUTING_SOURCE
-    ))
-    for marker in (
-        "constexpr std::size_t kCheckoutResultBytes = 76;",
-        "void write_checkout_result(void* destination",
-        "std::memset(bytes, 0, kCheckoutResultBytes);",
-        "const int32_t par[2] = {runtime.pixel_aspect_numerator,",
-        "std::memcpy(bytes + 32, par, sizeof(par));",
-        "std::memcpy(bytes + 44, reference_size, sizeof(reference_size));",
-        'L"--self-test-pf-pre-checkout-result"',
-        'L"--self-test-smart-runtime-concurrency"',
-        'L"--self-test-smart-result-skipped"',
-        "std::make_shared<smart::Snapshot>()",
-    ):
-        assert marker in source + runtime_source
-    for marker in (
-        "runtime.full_resolution_width > 0",
-        "write_checkout_result(result, runtime.input_checkout_result_rect,",
-        "thread_local State g_default_state;",
-        "thread_local State* g_active_state{};",
-        "if (!g_active_state || time_step <= 0 || time_scale == 0) return 4;",
-        "int32_t __cdecl width() { return g_active_state ? g_active_state->width : 0; }",
-    ):
-        assert marker in runtime_source
-    # No success path may write only the rects and leave par, ref_width, and
-    # ref_height uninitialized for the caller.
-    assert "write_rect(static_cast<std::byte*>(result) + 16" not in source + runtime_source
 
 
 def test_native_self_test_passes_all_three_workers() -> None:

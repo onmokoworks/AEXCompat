@@ -79,18 +79,6 @@ int main() { return 0; }
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
 
 
-def test_l2_source_exposes_apply_effect_contract() -> None:
-    source = "\n".join(path.read_text(encoding="utf-8") for path in
-                       (SOURCE, SCENE_SOURCE, SCENE_SELFTEST_SOURCE,
-                           PF_SUITE_SOURCE, SELFTEST_DISPATCH_SOURCE))
-    for marker in (
-        "int32_t __cdecl aegp_apply_effect(",
-        "(version == 2 || version == 3)",
-        "effect_suite[9] = reinterpret_cast<void*>(&aegp_apply_effect)",
-        "g_aegp_effect_suite4[9] = reinterpret_cast<void*>(&aegp_apply_effect)",
-        'L"--self-test-aegp-apply-effect"',
-    ):
-        assert marker in source
 
 
 def test_native_self_test_passes_all_three_workers() -> None:

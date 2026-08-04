@@ -30,14 +30,3 @@ def test_transformer_observes_multi_input_difference_render():
     assert external["checkout_time"] == external["current_time"]
 
 
-def test_transformer_callbacks_match_the_frozen_effect_abi():
-    source = "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
-
-    assert "write(input, 24, &abort_render);" in source
-    assert "write(input, 32, &report_progress);" in source
-    assert '{"PF World Suite", 1, g_world_suite1.data()}' in source
-    assert "g_params[slot - 1].layer_default == -1" in source
-    assert "transfer_mode < 0 || transfer_mode > 38" in source
-    assert "rgb_only > 1" in source
-    assert "mask_world" in source
-    assert "ansi_fabs" in source

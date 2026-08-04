@@ -116,31 +116,6 @@ int main() { return 0; }
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
 
 
-def test_l2_source_exposes_effect_stack_contract() -> None:
-    source = "\n".join(path.read_text(encoding="utf-8") for path in
-                       (SOURCE, SCENE_SOURCE, SCENE_SELFTEST_SOURCE,
-                           PF_SUITE_SOURCE, SELFTEST_DISPATCH_SOURCE,
-                           ENTRY_WIRING_SOURCE))
-    for marker in (
-        "int32_t __cdecl aegp_set_effect_flags(",
-        "int32_t __cdecl aegp_reorder_effect(",
-        "int32_t __cdecl aegp_delete_layer_effect(",
-        "int32_t __cdecl aegp_duplicate_effect(",
-        "effect_suite[5] = reinterpret_cast<void*>(&aegp_set_effect_flags)",
-        "effect_suite[6] = reinterpret_cast<void*>(&aegp_reorder_effect)",
-        "effect_suite[10] = reinterpret_cast<void*>(&aegp_delete_layer_effect)",
-        "effect_suite[16] = reinterpret_cast<void*>(&aegp_duplicate_effect)",
-        "g_aegp_effect_suite4[5] = reinterpret_cast<void*>(&aegp_set_effect_flags)",
-        "g_aegp_effect_suite4[6] = reinterpret_cast<void*>(&aegp_reorder_effect)",
-        "g_aegp_effect_suite4[10] = reinterpret_cast<void*>(&aegp_delete_layer_effect)",
-        "g_aegp_effect_suite4[16] = reinterpret_cast<void*>(&aegp_duplicate_effect)",
-        "std::array<void*, 22> g_aegp_stream_suite2{}",
-        "scene_factory.legacy_stream_callbacks = {{",
-        "reinterpret_cast<void*>(&aegp_set_stream_value_v2)",
-        "g_aegp_stream_suite2[15] = factory.legacy_stream_callbacks[6]",
-        'L"--self-test-aegp-effect-stack"',
-    ):
-        assert marker in source
 
 
 def test_native_self_test_passes_all_three_workers() -> None:

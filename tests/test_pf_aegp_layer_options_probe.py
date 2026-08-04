@@ -12,38 +12,8 @@ PROBE = ROOT / "target" / "pf-aegp-layer-options-probe-build" / "Release" / "pf_
 INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 
 
-def test_probe_acquires_suite1_and_exercises_all_14_slots():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "kAEGPLayerRenderOptionsSuiteVersion1" in source
-    for slot in (
-        "AEGP_NewFromLayer",
-        "AEGP_NewFromUpstreamOfEffect",
-        "AEGP_Duplicate",
-        "AEGP_Dispose",
-        "AEGP_SetTime",
-        "AEGP_GetTime",
-        "AEGP_SetTimeStep",
-        "AEGP_GetTimeStep",
-        "AEGP_SetWorldType",
-        "AEGP_GetWorldType",
-        "AEGP_SetDownsampleFactor",
-        "AEGP_GetDownsampleFactor",
-        "AEGP_SetMatteMode",
-        "AEGP_GetMatteMode",
-    ):
-        assert f"suite->{slot}" in source
 
 
-def test_probe_checks_duplicate_independence_and_rejects_stale_handles():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "copy == original" in source
-    assert "AEGP_SetTime(copy, copy_time)" in source
-    assert "AEGP_GetTime(original, &got_time)" in source
-    assert "AEGP_WorldType_32" in source
-    assert "AEGP_WorldType_16" in source
-    assert "AEGP_LayerRenderOptionsH stale = original" in source
-    assert "AEGP_GetTime(stale, &got_time) == A_Err_NONE" in source
-    assert "AEGP_Dispose(stale) == A_Err_NONE" in source
 
 
 def test_real_probe_validates_layer_options_suite_during_render(tmp_path):

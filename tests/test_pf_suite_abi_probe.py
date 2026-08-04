@@ -52,19 +52,6 @@ def test_pf_suite_abi_probe_builds_and_records_sdk_layouts():
         assert all(entry["size"] == report["scalars"]["pointer"] for entry in members)
 
 
-def test_pf_suite_abi_probe_is_sdk_header_backed_and_scoped():
-    source = (ROOT / "instruments" / "pf-suite-abi-probe" / "main.cpp").read_text(
-        encoding="utf-8"
-    )
-    assert '#include "AE_EffectCBSuites.h"' in source
-    assert '#include "AE_EffectSuites.h"' in source
-    assert '#include "AE_GeneralPlug.h"' in source
-    assert "ABI_MEMBER(PF_WorldTransformSuite1" in source
-    assert "ABI_MEMBER(PF_PathDataSuite1" in source
-    assert "ABI_MEMBER(AEGP_RenderOptionsSuite1" in source
-    assert "ABI_MEMBER(AEGP_WorldSuite3" in source
-    assert "ABI_MEMBER(AEGP_RenderSuite4" in source
-    assert "ABI_MEMBER(AEGP_RenderAsyncManagerSuite1" in source
 
 
 def test_pf_suite_abi_probe_records_receipt_suite_member_names():
@@ -90,10 +77,3 @@ def test_pf_suite_abi_probe_records_receipt_suite_member_names():
     ]
 
 
-def test_minihost_publishes_the_compiled_sdk_slot_counts():
-    source = source_owners.worker_text()
-    suite_abi = SUITE_ABI.read_text(encoding="utf-8")
-    assert "static_assert(sizeof(AegpRenderOptionsSuite1) == 17 * sizeof(void*));" in suite_abi
-    assert "AEXCOMPAT_ASSERT_RENDER1_SLOT(get_matte, 16)" in suite_abi
-    assert "static_assert(sizeof(AegpWorldSuite3) == 13 * sizeof(void*));" in suite_abi
-    assert "offsetof(AegpWorldSuite3, reference_platform_world) == 12 * sizeof(void*)" in suite_abi

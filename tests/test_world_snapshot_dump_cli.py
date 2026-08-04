@@ -18,27 +18,6 @@ FIXTURE = ROOT / "target" / "sdk-fixtures" / "shifter" / "Shifter.aex"
 INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"
 
 
-def test_world_dump_and_checksum_detail_are_opt_in_and_fail_closed():
-    worker = (source_owners.worker_text() + "\n" +
-              DISPATCH_SOURCE.read_text(encoding="utf-8") + "\n" +
-              RENDER_SOURCE.read_text(encoding="utf-8"))
-    # Opt-in trailers, default off, with hard caps on count and total bytes.
-    assert 'equals(flag, L"--dump-worlds-v1")' in worker
-    assert 'equals(flag, L"--output-checksum-detail-v1")' in worker
-    assert "constexpr uint32_t kMaxWorldDumps = 32;" in worker
-    assert "constexpr uint64_t kMaxWorldDumpBytes = 1ull << 30;" in worker
-    # Dump names carry stage and dimensions in the raw formats the comparison
-    # tool consumes directly.
-    assert '"%03u-%s-%dx%d.%s"' in worker
-    for extension in ('"rgba32f-le"', '"rgba16le"', '"rgba8"'):
-        assert extension in worker
-
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    assert '"AEXCOMPAT_DUMP_WORLDS_DIR"' in broker
-    assert '"AEXCOMPAT_CHECKSUM_DETAIL"' in broker
-    assert "world dump directory must stay under the repository target tree" in broker
-    assert "world dump directory must start empty" in broker
-    assert "world dump directory must not contain traversal components" in broker
 
 
 def test_world_dumps_and_row_channel_checksums_match_the_raw_output(

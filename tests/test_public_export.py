@@ -781,6 +781,3 @@ def test_tag_identity_collection_discards_oversized_messages(tmp_path):
     ]
 
 
-def test_script_has_no_push_implementation():
-    source = (ROOT / "tools/public_export.py").read_text(encoding="utf-8")
-    assert '["git", "push"' not in source
