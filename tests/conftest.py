@@ -37,10 +37,39 @@ TEST_CLASSES = (
 
 
 @pytest.fixture(scope="session")
-def canonical_release_worker(tmp_path_factory):
+def canonical_release_worker(tmp_path_factory, request):
     if os.name != "nt":
         pytest.skip("native worker self-tests require Windows")
 
+    # workerinput は xdist の worker プロセスにだけ存在する。worker_id fixture
+    # と違い、xdist plugin を無効にした実行 (-p no:xdist) でも壊れない。
+    if getattr(request.config, "workerinput", None) is None:
+        return _build_canonical_release_worker(
+            tmp_path_factory.mktemp("canonical-release-worker"))
+
+    # xdist では session fixture が worker プロセスごとに実行される。minihost の
+    # MSVC ビルド (~2分) を worker の数だけ走らせないため、全 worker 共有の
+    # basetemp 親ディレクトリでロックを取り、最初の worker だけがビルドして
+    # 結果のパスをマーカーに書く。後続はマーカーを読んで同じバイナリを使う。
+    from filelock import FileLock
+
+    shared_root = tmp_path_factory.getbasetemp().parent
+    marker = shared_root / "canonical-release-worker.json"
+    with FileLock(str(marker) + ".lock"):
+        if marker.is_file():
+            worker = Path(json.loads(marker.read_text(encoding="utf-8"))["worker"])
+            assert worker.is_file(), f"canonical worker marker is stale: {worker}"
+            return worker
+        build = shared_root / "canonical-release-worker"
+        build.mkdir(parents=True, exist_ok=True)
+        worker = _build_canonical_release_worker(build)
+        # マーカーはビルド成功後にのみ書く。途中で死んだ worker が残した
+        # 半端なビルドを後続が拾わないようにするため。
+        marker.write_text(json.dumps({"worker": str(worker)}), encoding="utf-8")
+        return worker
+
+
+def _build_canonical_release_worker(build: Path) -> Path:
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
     vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     if not vswhere.is_file():
@@ -105,7 +134,6 @@ def canonical_release_worker(tmp_path_factory):
     vcvars = vs_root / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
     if not vcvars.is_file():
         pytest.fail("vcvars64.bat is unavailable; install Visual Studio C++ tools")
-    build = tmp_path_factory.mktemp("canonical-release-worker")
     source = ROOT / "minihost"
     command = (
         f'@call "{vcvars}" >nul && '
