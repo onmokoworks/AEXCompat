@@ -107,22 +107,102 @@ fn unpack_rgba16f_to_rgba8(
     if row_pitch < width * 8 || bytes.len() < row_pitch * (height - 1) + width * 8 {
         return None;
     }
-    let half_to_u8 = |lo: u8, hi: u8| -> u8 {
-        let v = half::f16::from_le_bytes([lo, hi]).to_f32();
-        (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
-    };
-    let mut rgba = Vec::with_capacity(width * height * 4);
+    // Written row by row into a pre-sized buffer: the previous per-channel
+    // `Vec::push` with bounds-checked indexing measured 21 ms for one 1080p
+    // frame (issue #674), which is ~17x the memory bandwidth floor for the
+    // 24 MB it moves. The scalar row below is the behavioural reference; the
+    // F16C path must agree with it byte for byte (pinned by a test).
+    let mut rgba = vec![0u8; width * height * 4];
+    let simd = f16c_row_available();
     for y in 0..height {
-        let row = y * row_pitch;
-        for x in 0..width {
-            let px = row + x * 8;
-            rgba.push(half_to_u8(bytes[px], bytes[px + 1]));
-            rgba.push(half_to_u8(bytes[px + 2], bytes[px + 3]));
-            rgba.push(half_to_u8(bytes[px + 4], bytes[px + 5]));
-            rgba.push(half_to_u8(bytes[px + 6], bytes[px + 7]));
+        let source = &bytes[y * row_pitch..y * row_pitch + width * 8];
+        let target = &mut rgba[y * width * 4..(y + 1) * width * 4];
+        if simd {
+            // SAFETY: guarded by the runtime feature detection above, and the
+            // slices are exactly `width` pixels wide by construction.
+            unsafe { unpack_row_f16c(source, target) };
+        } else {
+            unpack_row_scalar(source, target);
         }
     }
     Some(rgba)
+}
+
+/// One pixel row, `width` RGBA half-float pixels to RGBA8. The reference
+/// conversion: clamp to [0, 1] (NaN clamps to 0), scale by 255, round half up.
+fn unpack_row_scalar(source: &[u8], target: &mut [u8]) {
+    for (pixel, out) in source.chunks_exact(8).zip(target.chunks_exact_mut(4)) {
+        for channel in 0..4 {
+            let value =
+                half::f16::from_le_bytes([pixel[channel * 2], pixel[channel * 2 + 1]]).to_f32();
+            out[channel] = (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        }
+    }
+}
+
+/// Whether this CPU can run [`unpack_row_f16c`]. `half`'s own conversion only
+/// uses the F16C instruction when the *compile-time* target has it, and the
+/// x86-64 baseline does not, so the released plug-in converts in software.
+/// Detecting at runtime keeps the baseline where it is while letting every
+/// machine since Ivy Bridge take the hardware path.
+fn f16c_row_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *AVAILABLE.get_or_init(|| {
+            std::arch::is_x86_feature_detected!("f16c") && std::arch::is_x86_feature_detected!("avx")
+        })
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Eight half floats per iteration through `vcvtph2ps`, then the same clamp,
+/// scale and round-half-up the scalar row applies, packed back to bytes.
+///
+/// # Safety
+/// The caller must have confirmed F16C and AVX support ([`f16c_row_available`]).
+/// `source` must hold `target.len() / 4` pixels of 8 bytes each.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "f16c,avx")]
+unsafe fn unpack_row_f16c(source: &[u8], target: &mut [u8]) {
+    use std::arch::x86_64::{
+        __m128i, _mm_cvttps_epi32, _mm_loadu_si128, _mm_packs_epi32, _mm_packus_epi16,
+        _mm_storel_epi64, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtph_ps,
+        _mm256_extractf128_ps, _mm256_max_ps, _mm256_min_ps, _mm256_mul_ps, _mm256_set1_ps,
+        _mm256_setzero_ps,
+    };
+
+    // Two pixels (8 channels) per iteration; the remainder falls back to the
+    // reference row so odd widths stay byte-identical.
+    let vectorized = target.len() / 8 * 8;
+    let zero = _mm256_setzero_ps();
+    let one = _mm256_set1_ps(1.0);
+    let scale = _mm256_set1_ps(255.0);
+    let half_step = _mm256_set1_ps(0.5);
+    let mut offset = 0;
+    while offset < vectorized {
+        let packed = _mm_loadu_si128(source.as_ptr().add(offset * 2) as *const __m128i);
+        let values = _mm256_cvtph_ps(packed);
+        // max-then-min with the constant second: `_mm256_max_ps` returns its
+        // second operand for a NaN input, so NaN lands on 0 exactly as
+        // `f32::clamp` followed by a saturating `as u8` does in the reference.
+        let clamped = _mm256_min_ps(_mm256_max_ps(values, zero), one);
+        let scaled = _mm256_add_ps(_mm256_mul_ps(clamped, scale), half_step);
+        // Truncation after +0.5 is round-half-up, matching `as u8` above;
+        // the default rounding mode would round half to even instead.
+        let low = _mm_cvttps_epi32(_mm256_castps256_ps128(scaled));
+        let high = _mm_cvttps_epi32(_mm256_extractf128_ps(scaled, 1));
+        let words = _mm_packs_epi32(low, high);
+        let bytes = _mm_packus_epi16(words, words);
+        _mm_storel_epi64(target.as_mut_ptr().add(offset) as *mut __m128i, bytes);
+        offset += 8;
+    }
+    if offset < target.len() {
+        unpack_row_scalar(&source[offset * 2..], &mut target[offset..]);
+    }
 }
 
 /// Build one leaked FILTER_ITEM for an exposed parameter, plus a reader and the
