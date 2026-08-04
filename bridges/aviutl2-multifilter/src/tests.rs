@@ -2309,6 +2309,7 @@ mod tests {
                     total_time: 300,
                     time_scale: 30,
                 },
+                layers: Vec::new(),
                 cluster: Some(ClusterLaunch {
                     plugins: vec![(one.clone(), sha_of(&one)), (two.clone(), sha_of(&two))],
                     swap_payloads: vec![None, None],
@@ -2363,5 +2364,100 @@ mod tests {
             );
             std::fs::remove_dir_all(&root).unwrap();
         }
+    }
+
+    // --- virtual buffer unpack (issue #645) ----------------------------------
+
+    /// Little-endian bytes of one RGBA16F pixel.
+    fn px16f(r: f32, g: f32, b: f32, a: f32) -> [u8; 8] {
+        let mut out = [0u8; 8];
+        for (i, v) in [r, g, b, a].into_iter().enumerate() {
+            let h = half::f16::from_f32(v).to_le_bytes();
+            out[i * 2] = h[0];
+            out[i * 2 + 1] = h[1];
+        }
+        out
+    }
+
+    #[test]
+    fn unpack_converts_rgba_order_with_row_padding() {
+        // 2x2, rows padded to 32 bytes (2 * 8 = 16 data + 16 pad), like the
+        // D3D11 row pitch is.
+        let row_pitch = 32;
+        let mut bytes = vec![0u8; row_pitch * 2];
+        bytes[0..8].copy_from_slice(&px16f(1.0, 0.0, 0.0, 1.0)); // red
+        bytes[8..16].copy_from_slice(&px16f(0.0, 1.0, 0.0, 1.0)); // green
+        bytes[row_pitch..row_pitch + 8].copy_from_slice(&px16f(0.0, 0.0, 1.0, 1.0)); // blue
+        bytes[row_pitch + 8..row_pitch + 16].copy_from_slice(&px16f(0.5, 0.5, 0.5, 0.0)); // gray
+
+        let rgba = unpack_rgba16f_to_rgba8(&bytes, 2, 2, row_pitch).unwrap();
+        assert_eq!(&rgba[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&rgba[4..8], &[0, 255, 0, 255]);
+        assert_eq!(&rgba[8..12], &[0, 0, 255, 255]);
+        // 0.5 in half is exactly representable; 0.5 * 255 + 0.5 rounds to 128.
+        assert_eq!(&rgba[12..16], &[128, 128, 128, 0]);
+    }
+
+    /// Out-of-range and non-finite values clamp instead of wrapping: an HDR
+    /// virtual buffer must not alias into wrong displacement values.
+    #[test]
+    fn unpack_clamps_hdr_and_nan() {
+        let row_pitch = 8;
+        let mut bytes = vec![0u8; row_pitch];
+        bytes[0..8].copy_from_slice(&px16f(2.0, -1.0, f32::NAN, 1.0));
+        let rgba = unpack_rgba16f_to_rgba8(&bytes, 1, 1, row_pitch).unwrap();
+        assert_eq!(&rgba[0..4], &[255, 0, 0, 255]);
+    }
+
+    /// A buffer shorter than the claimed geometry is refused, not misread.
+    #[test]
+    fn unpack_refuses_short_input() {
+        assert!(unpack_rgba16f_to_rgba8(&[0u8; 15], 2, 1, 16).is_none());
+        assert!(unpack_rgba16f_to_rgba8(&[0u8; 16], 2, 1, 8).is_none(), "pitch below width*8");
+    }
+
+    /// The virtual-buffer wiring reads layer slots from the RAW discovery
+    /// parameters. Extracting from the registered config defaults instead is
+    /// the bug this pins: `build_item` maps only float/integer/color, so a
+    /// layer parameter never reaches `defaults` and the wiring would be dead.
+    #[test]
+    fn layer_slots_come_from_raw_parameters_not_config_defaults() {
+        let float = InteractiveParameter {
+            slot: 1,
+            name: "Amount".into(),
+            kind: "float".into(),
+            minimum: 0.0,
+            maximum: 1.0,
+            value: 0.5,
+            choices: Vec::new(),
+            color: [0, 0, 0, 0],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        };
+        let layer = InteractiveParameter {
+            slot: 2,
+            name: "Displacement Map".into(),
+            kind: "layer".into(),
+            ..float.clone()
+        };
+        let raw = vec![float.clone(), layer];
+
+        assert_eq!(layer_slots_of(&raw), vec![2], "the layer slot is found");
+
+        // And the same parameters run through build_item (what `defaults` is
+        // made of) lose the layer, proving `defaults` is the wrong source.
+        let survivors: Vec<InteractiveParameter> = raw
+            .iter()
+            .filter_map(|parameter| build_item(parameter, "x").map(|(_, _, sent)| sent))
+            .collect();
+        assert!(survivors.iter().all(|parameter| parameter.kind != "layer"));
+        assert!(layer_slots_of(&survivors).is_empty());
     }
 }

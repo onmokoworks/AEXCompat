@@ -1265,6 +1265,10 @@ struct FilterCtx {
     defaults: Vec<InteractiveParameter>,
     /// Readers pulling each frame's current config value into the parameters.
     readers: Vec<ItemReader>,
+    /// AEX layer-parameter slots (`kind == "layer"`) from discovery. When this is
+    /// non-empty and AviUtl2's virtual buffer is written upstream, the first slot
+    /// is fed the virtual buffer as a `SessionLayer` at session open (issue #645).
+    layer_slots: Vec<u32>,
     /// Live sessions keyed by AviUtl2 `effect_id`, so two objects of the same
     /// AEX filter each get their own session/worker (no cross-object thrash).
     sessions: Mutex<HashMap<i64, MfSession>>,
