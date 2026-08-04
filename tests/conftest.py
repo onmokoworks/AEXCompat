@@ -41,6 +41,18 @@ def canonical_release_worker(tmp_path_factory, request):
     if os.name != "nt":
         pytest.skip("native worker self-tests require Windows")
 
+    # ae-sdk-tests.yml は前段の Build minihost workers ステップで同一 checkout
+    # から aex_render_worker.exe をビルド済みなので、ここで再ビルドせず
+    # そのバイナリを指せる (#681 の二重ビルド解消)。指定が壊れている場合は
+    # fail-closed (黙ってビルドに fallback すると workflow 側の期待とずれる)。
+    override = os.environ.get("AEXCOMPAT_CANONICAL_WORKER")
+    if override:
+        worker = Path(override)
+        if not worker.is_file():
+            pytest.fail(
+                f"AEXCOMPAT_CANONICAL_WORKER points to a missing file: {worker}")
+        return worker
+
     # workerinput は xdist の worker プロセスにだけ存在する。worker_id fixture
     # と違い、xdist plugin を無効にした実行 (-p no:xdist) でも壊れない。
     if getattr(request.config, "workerinput", None) is None:
