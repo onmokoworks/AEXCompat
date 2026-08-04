@@ -45,6 +45,102 @@ if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja" AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
       "${CMAKE_COMMAND}" -E env "VSLANG=${AEXCOMPAT_VSLANG}")
 endif()
 
+# Build provenance embedded in every worker (issue #649).
+#
+# The broker admits a locally built worker by comparing `minihost/src` mtimes
+# against the worker's own. That comparison needs the sources to be present, so
+# a worker shipped beside the plugin - with no repository around it - can only
+# ever come back "indeterminate" and is refused. Recording what the worker was
+# built from, in the worker, gives the broker something to judge that survives
+# leaving the build tree behind.
+#
+# Resolved at configure time, so `CMAKE_CONFIGURE_DEPENDS` below re-runs it when
+# HEAD moves - the same contract `guest/crates/aex-guest-worker/build.rs` gets
+# from `cargo:rerun-if-changed`.
+set(AEXCOMPAT_REPOSITORY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
+# `-DAEXCOMPAT_BUILD_REVISION=` as well as the environment variable, so pinning
+# a release build does not depend on which one the operator reaches for.
+if(NOT DEFINED AEXCOMPAT_BUILD_REVISION)
+  set(AEXCOMPAT_BUILD_REVISION "$ENV{AEXCOMPAT_BUILD_REVISION}")
+endif()
+string(STRIP "${AEXCOMPAT_BUILD_REVISION}" AEXCOMPAT_BUILD_REVISION)
+set(AEXCOMPAT_BUILD_DIRTY "0")
+
+find_package(Git QUIET)
+if(GIT_FOUND)
+  if(AEXCOMPAT_BUILD_REVISION STREQUAL "")
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+      WORKING_DIRECTORY "${AEXCOMPAT_REPOSITORY_ROOT}"
+      OUTPUT_VARIABLE AEXCOMPAT_BUILD_REVISION
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+  endif()
+  # Asked unconditionally, including when the revision was pinned: a pinned
+  # revision does not make the tree clean, and the broker's own build script
+  # asks unconditionally too. Recording "clean" on either side while the other
+  # records "dirty" is the two halves disagreeing about the same tree.
+  # Fails closed: a `git status` that could not run records dirty. Reading a
+  # failed query as "clean" would let a modified tree assert an identity it has
+  # not earned, and the broker's build script fails closed the same way.
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
+    WORKING_DIRECTORY "${AEXCOMPAT_REPOSITORY_ROOT}"
+    OUTPUT_VARIABLE AEXCOMPAT_GIT_STATUS
+    RESULT_VARIABLE AEXCOMPAT_GIT_STATUS_RESULT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(NOT AEXCOMPAT_GIT_STATUS_RESULT EQUAL 0 OR NOT AEXCOMPAT_GIT_STATUS STREQUAL "")
+    set(AEXCOMPAT_BUILD_DIRTY "1")
+  endif()
+  # Re-configure when HEAD moves, so the worker's revision does not silently
+  # fall behind the broker's. The branch ref matters most: committing on the
+  # current branch rewrites `refs/heads/<branch>` and leaves `.git/HEAD`
+  # untouched, so watching HEAD alone would miss every ordinary commit.
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" symbolic-ref -q HEAD
+    WORKING_DIRECTORY "${AEXCOMPAT_REPOSITORY_ROOT}"
+    OUTPUT_VARIABLE AEXCOMPAT_GIT_BRANCH_REF
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  foreach(AEXCOMPAT_GIT_REF HEAD packed-refs "${AEXCOMPAT_GIT_BRANCH_REF}")
+    if(AEXCOMPAT_GIT_REF STREQUAL "")
+      continue()
+    endif()
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" rev-parse --git-path "${AEXCOMPAT_GIT_REF}"
+      WORKING_DIRECTORY "${AEXCOMPAT_REPOSITORY_ROOT}"
+      OUTPUT_VARIABLE AEXCOMPAT_GIT_REF_PATH
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if(AEXCOMPAT_GIT_REF_PATH STREQUAL "")
+      continue()
+    endif()
+    # `--git-path` answers relative to the repository root, while `if(EXISTS)`
+    # resolves against the cmake process's own directory. Anchor it, or a
+    # configure run started from anywhere else registers no dependency at all
+    # and the revision then never refreshes.
+    if(NOT IS_ABSOLUTE "${AEXCOMPAT_GIT_REF_PATH}")
+      set(AEXCOMPAT_GIT_REF_PATH
+          "${AEXCOMPAT_REPOSITORY_ROOT}/${AEXCOMPAT_GIT_REF_PATH}")
+    endif()
+    if(EXISTS "${AEXCOMPAT_GIT_REF_PATH}")
+      set_property(DIRECTORY APPEND PROPERTY
+        CMAKE_CONFIGURE_DEPENDS "${AEXCOMPAT_GIT_REF_PATH}")
+    endif()
+  endforeach()
+endif()
+# An unknown revision is not a failure: a source archive with no git around it
+# still builds, and the broker treats "unknown" as "cannot identify" rather than
+# as a match.
+if(AEXCOMPAT_BUILD_REVISION STREQUAL "")
+  set(AEXCOMPAT_BUILD_REVISION "unknown")
+endif()
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/worker_build_provenance.hpp.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/worker_build_provenance.hpp"
+  @ONLY)
+
 add_library(aexcompat_trace_writer STATIC
   ../instruments/common/trace_writer.cpp
 )
@@ -192,8 +288,29 @@ set_source_files_properties(
   ../tests/native/worker_aegp_compute_cache_selftest.cpp
   PROPERTIES COMPILE_OPTIONS "/EHsc")
 
-add_library(aex_worker_runtime_core OBJECT ${AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES})
+# Keep a recorded "clean" honest. A configure run only re-runs when something in
+# `CMAKE_CONFIGURE_DEPENDS` changes, so without this an edit after a clean
+# configure leaves the worker asserting the commit it no longer matches - and
+# that assertion is what admits it where no sources are present to check.
+#
+# Registered only when the tree was clean: a dirty build already records `1`, and
+# a stale `1` can only over-restrict. So the reconfigure cost falls on clean
+# builds - the release case, where being right is the point - and not on the
+# edit-build loop, which is dirty by definition.
+if(AEXCOMPAT_BUILD_DIRTY STREQUAL "0")
+  foreach(AEXCOMPAT_PROVENANCE_SOURCE ${AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES})
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/${AEXCOMPAT_PROVENANCE_SOURCE}")
+  endforeach()
+endif()
+
+add_library(aex_worker_runtime_core OBJECT
+  ${AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES}
+  src/worker_build_provenance.cpp)
 target_compile_features(aex_worker_runtime_core PRIVATE cxx_std_17)
+# Where the configured provenance header lands. Object-library sources are all
+# linked into every worker, so each one carries the marker.
+target_include_directories(aex_worker_runtime_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_definitions(aex_worker_runtime_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX AEXCOMPAT_COMPILE_AEGP_SCENE_CALLBACKS=1)
 target_link_libraries(aex_worker_runtime_core PRIVATE aexcompat_trace_writer)
 
