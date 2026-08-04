@@ -225,3 +225,12 @@ def pytest_collection_modifyitems(config, items):
                 "local-artifact manifest contains uncollected node ids: "
                 + ", ".join(missing)
             )
+
+    # canonical_release_worker (minihost の MSVC ビルド、数分) を含む
+    # モジュールを collection の先頭へ寄せる。xdist は collection 順に配る
+    # ので、後半に残るとビルドがそのまま実行時間の tail になる。モジュール
+    # 単位の安定ソートなので loadscope のスコープ連続性は崩れない。
+    canonical_first = ("tests/test_pf_adv_time_suite1.py",
+                      "tests/test_suite_entry_utility13.py")
+    items.sort(key=lambda item: 0 if item.nodeid.replace(
+        "\\", "/").startswith(canonical_first) else 1)
