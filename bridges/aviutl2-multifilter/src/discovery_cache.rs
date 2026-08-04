@@ -116,9 +116,17 @@ fn is_ignored(path: &Path, ignore: &[String]) -> bool {
 /// cached as a non-effect. Discovery runs on a background thread, so a low cap is
 /// cheap. (Measured: 8-way ≈ 68% false timeouts, serial ≈ 3%.)
 const MAX_DISCOVERY_PARALLELISM: usize = 3;
-/// Recursion depth cap for the folder scan (guards symlink loops / pathological
-/// trees); the AE plug-in tree is only a few levels deep.
-const MAX_SCAN_DEPTH: usize = 8;
+/// Recursion depth cap for the folder scan. A backstop against a pathological
+/// tree eating the stack, not the cycle guard — `visited` holds canonical paths
+/// and already breaks link loops.
+///
+/// It was 8 on the assumption that "the AE plug-in tree is only a few levels
+/// deep". A real After Effects 2026 install goes to 10:
+/// `Plug-ins\Effects\mochaAE\Resources\mochaui\qml\QtQuick\Dialogs\quickimpl\qml\+Fusion`
+/// (Qt resources, no `.aex` below). Nothing was lost, but every launch hit the
+/// cap and so reported a non-authoritative scan forever, which permanently
+/// suppressed the prune (issue #660). Sized well clear of any real install.
+const MAX_SCAN_DEPTH: usize = 32;
 
 /// The background discovery saves the cache after each chunk of this many AEX, so
 /// progress survives a restart/shutdown mid-scan (rather than only at the end of a
@@ -152,11 +160,20 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     report_worker_root(&repository, root_source, &dirs);
 
     // Recursively collect the *.aex to expose (minus ignored), deduped + sorted.
-    // `scan_complete` is false when a default folder went missing or one could not
-    // be read, which makes the background pass keep (rather than prune) the
-    // entries it did not see this launch.
+    // A non-authoritative scan makes the background pass keep (rather than prune)
+    // the entries it did not see this launch. Each cause is carried separately
+    // because they need different fixes from the user (issue #660).
     let scan = collect_aex(&dirs, &config.ignore);
-    let scan_complete = dirs_complete && scan.complete;
+    let mut limits = scan.limits;
+    limits.unresolved_root |= !dirs_complete;
+    let scan_complete = limits.authoritative();
+    if limits.too_deep {
+        log_warn(&format!(
+            "a folder tree under the scan roots is deeper than {MAX_SCAN_DEPTH} \
+             levels and was not fully walked; any .aex below that depth is \
+             invisible and nothing can be pruned"
+        ));
+    }
 
     // Discovery (an L2 worker per AEX) is slow — hundreds of AE effects take
     // minutes — and can only ever populate the cache, since AviUtl2 freezes a
@@ -193,7 +210,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         // Also an empty filter list, and also worth saying out loud: a mistyped
         // `dir`, an AE install that moved, or an over-broad `ignore` reaches here
         // rather than any of the failure paths below (issue #655).
-        log_warn(&empty_scan_summary(&dirs, scan.seen.len(), scan_complete));
+        log_warn(&empty_scan_summary(&dirs, scan.seen.len(), limits));
         return;
     }
 
@@ -278,7 +295,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // Counted over `plugins` — the set actually iterated above — not over
     // `scan.seen`: an untrustworthy scan adds cached entries that were not walked
     // this launch (#321), which would otherwise read as "registered 500 of 12".
-    report_registration(plugins.len(), registered, pending.len(), scan_complete);
+    report_registration(plugins.len(), registered, pending.len(), limits);
 
     let rekeyed = !rekey.is_empty();
     apply_rekey(&mut cache, rekey);
@@ -1161,6 +1178,49 @@ fn newest_versioned(root: &Path, prefix: &str, leaf: &[&str]) -> (Option<PathBuf
     (best.map(|(_, path)| path), complete)
 }
 
+/// Why a launch's picture of what is on disk is not authoritative. Each cause
+/// suppresses the prune the same way, but they need different fixes from the
+/// user, so they are reported apart rather than as one "incomplete" (issue #660:
+/// the depth cap was being reported as a folder that could not be read).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct ScanLimits {
+    /// A *default* scan folder could not be resolved (an AE install mid-update).
+    unresolved_root: bool,
+    /// A folder or one of its entries could not be read this launch.
+    unreadable: bool,
+    /// A subtree went past [`MAX_SCAN_DEPTH`] and was not descended.
+    too_deep: bool,
+}
+
+impl ScanLimits {
+    /// Whether this launch may conclude that an AEX it did not see is gone.
+    fn authoritative(self) -> bool {
+        !self.unresolved_root && !self.unreadable && !self.too_deep
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.unresolved_root |= other.unresolved_root;
+        self.unreadable |= other.unreadable;
+        self.too_deep |= other.too_deep;
+    }
+
+    /// What to tell the user, or `None` when the scan was authoritative. Every
+    /// applicable cause is listed: they are independent and fixed differently.
+    fn describe(self) -> Option<String> {
+        let mut causes: Vec<&str> = Vec::new();
+        if self.unresolved_root {
+            causes.push("a default plug-in folder could not be resolved");
+        }
+        if self.unreadable {
+            causes.push("a folder could not be read");
+        }
+        if self.too_deep {
+            causes.push("a folder tree was deeper than the scan limit");
+        }
+        (!causes.is_empty()).then(|| causes.join("; "))
+    }
+}
+
 /// What one launch's folder scan saw.
 struct Scan {
     /// The AEX to expose as filters (ignored ones removed).
@@ -1170,9 +1230,8 @@ struct Scan {
     /// dropping its cache entry would leave it unregistered on the launch after
     /// it is taken back out of `ignore` (issue #307).
     seen: Vec<PathBuf>,
-    /// False if any folder could not be fully enumerated, in which case nothing
-    /// may be concluded to be gone at all.
-    complete: bool,
+    /// Why the scan cannot be trusted to be exhaustive, if it cannot.
+    limits: ScanLimits,
 }
 
 /// Recursively scans `dirs`. An incomplete scan (a folder that could not be read,
@@ -1181,12 +1240,12 @@ struct Scan {
 /// launch, which deletes objects from saved projects that use it (issue #307).
 fn collect_aex(dirs: &[PathBuf], ignore: &[String]) -> Scan {
     let mut seen = Vec::new();
-    let mut complete = true;
+    let mut limits = ScanLimits::default();
     // Shared across roots: junctions can make one folder reachable from several
     // of them, and descending twice would expose the same AEX as several filters.
     let mut visited = std::collections::HashSet::new();
     for dir in dirs {
-        complete &= collect_aex_into(dir, 0, &mut seen, &mut visited);
+        limits.merge(collect_aex_into(dir, 0, &mut seen, &mut visited));
     }
     seen.sort();
     seen.dedup();
@@ -1198,19 +1257,22 @@ fn collect_aex(dirs: &[PathBuf], ignore: &[String]) -> Scan {
     Scan {
         plugins,
         seen,
-        complete,
+        limits,
     }
 }
 
-/// Returns false if any part of this subtree could not be enumerated.
+/// Reports which parts of this subtree could not be enumerated, if any.
 fn collect_aex_into(
     dir: &Path,
     depth: usize,
     out: &mut Vec<PathBuf>,
     visited: &mut std::collections::HashSet<PathBuf>,
-) -> bool {
+) -> ScanLimits {
     if depth > MAX_SCAN_DEPTH {
-        return false;
+        return ScanLimits {
+            too_deep: true,
+            ..ScanLimits::default()
+        };
     }
     // A junction can point back up the tree or make one folder reachable twice.
     // Visiting the real folder once keeps an AEX from being registered as several
@@ -1219,23 +1281,26 @@ fn collect_aex_into(
     if let Ok(real) = dir.canonicalize()
         && !visited.insert(real)
     {
-        return true;
+        return ScanLimits::default();
     }
     let Ok(read) = std::fs::read_dir(dir) else {
-        return false;
+        return ScanLimits {
+            too_deep: true,
+            ..ScanLimits::default()
+        };
     };
-    let mut complete = true;
+    let mut limits = ScanLimits::default();
     for entry in read {
         // An entry the iterator itself could not yield is a partially enumerated
         // folder; flattening it away would report the scan as complete and let
         // the prune drop that AEX's entry (issue #307).
         let Ok(entry) = entry else {
-            complete = false;
+            limits.unreadable = true;
             continue;
         };
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
-            complete = false;
+            limits.unreadable = true;
             continue;
         };
         // A directory junction reports as a symlink, not a directory, so testing
@@ -1248,11 +1313,11 @@ fn collect_aex_into(
             // A link whose target cannot be resolved (its drive is not mounted
             // this launch) says nothing about what is behind it. Treating that as
             // "no AEX here" would prune everything under it.
-            complete = false;
+            limits.unreadable = true;
             continue;
         }
         if file_type.is_dir() || matches!(&resolved, Some(Ok(meta)) if meta.is_dir()) {
-            complete &= collect_aex_into(&path, depth + 1, out, visited);
+            limits.merge(collect_aex_into(&path, depth + 1, out, visited));
         } else if path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -1261,7 +1326,7 @@ fn collect_aex_into(
             out.push(path);
         }
     }
-    complete
+    limits
 }
 
 // --- Per-AEX discovery + registration ------------------------------------
@@ -1937,43 +2002,51 @@ fn report_worker_root(repository: &Path, source: WorkerRootSource, dirs: &[PathB
 /// The line for a launch that registered nothing because the scan produced no
 /// plug-in.
 ///
-/// Where it can, it names the folders rather than guessing the cause. A mistyped
-/// folder and a folder that exists but cannot be read are indistinguishable here
-/// — both leave `scan_complete` false, since `collect_aex` learns of a missing
-/// folder only as a failed `read_dir` — so guessing would have sent a user with a
-/// typo away to wait for a transient problem to clear.
-fn empty_scan_summary(dirs: &[PathBuf], seen: usize, scan_complete: bool) -> String {
+/// It names the folders rather than guessing why they held nothing. A mistyped
+/// folder and one that exists but cannot be read are indistinguishable here —
+/// `collect_aex` learns of a missing folder only as a failed `read_dir` — so
+/// guessing would have sent a user with a typo away to wait for a transient
+/// problem to clear.
+fn empty_scan_summary(dirs: &[PathBuf], seen: usize, limits: ScanLimits) -> String {
     // Everything the scan walked matched `ignore`. That is the whole cause of
-    // what it *did* see, but a folder it could not read at all hid its contents
-    // from the ignore list too, so the tail still admits that.
+    // what it *did* see, but a folder it could not walk hid its contents from the
+    // ignore list too, so the tail still admits that.
     if seen > 0 {
         return format!(
             "all {seen} .aex found are excluded by `ignore` in config.toml; no AEX \
              filter is registered{}",
-            unreadable_folder_note(scan_complete)
+            scan_limit_note(limits)
         );
     }
     format!(
         "no .aex found in {}; no AEX filter is registered{}",
         describe_dirs(dirs),
-        if scan_complete {
-            " (they were read and hold no .aex)".to_owned()
-        } else {
-            unreadable_folder_note(scan_complete)
+        match scan_limit_note(limits).as_str() {
+            "" => " (they were read and hold no .aex)".to_owned(),
+            note => note.to_owned(),
         }
     )
 }
 
-/// The tail added when a scan folder could not be read. Names the env override as
-/// well as the config keys, since it wins over both when set.
-fn unreadable_folder_note(scan_complete: bool) -> String {
-    if scan_complete {
+/// The tail naming why the scan was not authoritative, empty when it was.
+///
+/// Only the unreadable-folder case gets remediation advice, and it names the env
+/// override as well as the config keys since it wins over both. The depth cap is
+/// not something the user can fix from config, so pointing them at `dir` for it
+/// would be the misdirection issue #660 is about.
+fn scan_limit_note(limits: ScanLimits) -> String {
+    let Some(causes) = limits.describe() else {
         return String::new();
-    }
-    format!(
-        " (at least one folder could not be read: check the path exists and is \
-         reachable — `dir`/`dirs` in config.toml, or {ENV_DIR} if that is set)"
-    )
+    };
+    let advice = if limits.unreadable || limits.unresolved_root {
+        format!(
+            ": check the path exists and is reachable — `dir`/`dirs` in \
+             config.toml, or {ENV_DIR} if that is set"
+        )
+    } else {
+        String::new()
+    };
+    format!(" ({causes}{advice})")
 }
 
 /// The scan folders as one log fragment. Diagnosing a misconfiguration needs the
@@ -1995,8 +2068,8 @@ fn describe_dirs(dirs: &[PathBuf]) -> String {
 /// no longer exists, an unbuilt worker, a worker regression failing every
 /// plug-in) and used to be silent, so the only symptom was an empty filter list
 /// (issues #650, #651).
-fn report_registration(known: usize, registered: usize, pending: usize, scan_complete: bool) {
-    let summary = registration_summary(known, registered, pending, scan_complete);
+fn report_registration(known: usize, registered: usize, pending: usize, limits: ScanLimits) {
+    let summary = registration_summary(known, registered, pending, limits);
     if registration_is_alarming(known, registered, pending) {
         log_warn(&summary);
     } else {
@@ -2021,14 +2094,15 @@ fn registration_summary(
     known: usize,
     registered: usize,
     pending: usize,
-    scan_complete: bool,
+    limits: ScanLimits,
 ) -> String {
     // Named whenever it holds, because it changes what the counts mean: `known`
-    // then includes cached plug-ins this launch never saw on disk (#321).
-    let scan = if scan_complete {
-        ""
-    } else {
-        " (a folder could not be read, so cached plug-ins are included)"
+    // then includes cached plug-ins this launch never saw on disk (#321). The
+    // cause is named rather than assumed — a tree past the depth cap is not a
+    // folder that could not be read, and sends the user somewhere else (#660).
+    let scan = match limits.describe() {
+        Some(causes) => format!(" ({causes}, so cached plug-ins are included)"),
+        None => String::new(),
     };
     if registration_is_alarming(known, registered, pending) {
         return format!(
