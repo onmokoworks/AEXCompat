@@ -3,7 +3,6 @@ use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
 use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult, secure_launch};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -424,32 +423,160 @@ fn dispatch_secure_image_impl(
 /// it. Receipt-driven flows keep supplying an externally pinned identity
 /// through `secure_launch` and do not pass through this admission.
 fn admit_local_worker(repository: &Path, path: &Path) -> io::Result<([u8; 32], u64)> {
-    let mut file = File::open(path).map_err(|error| {
+    let bytes = std::fs::read(path).map_err(|error| {
         io::Error::new(error.kind(), "local worker binary is missing or unreadable")
     })?;
-    ensure_local_worker_freshness(repository, path)?;
-    let mut hasher = Sha256::new();
-    let size = io::copy(&mut file, &mut hasher)?;
-    if size == 0 {
+    if bytes.is_empty() {
         return Err(invalid("local worker binary is empty"));
     }
-    Ok((hasher.finalize().into(), size))
+    // Read once: the provenance the freshness decision needs is in the same
+    // bytes the identity is taken from, so recognizing it costs no extra I/O and
+    // cannot describe a different file than the one admitted.
+    ensure_local_worker_freshness(repository, path, WorkerProvenance::find(&bytes))?;
+    let size = bytes.len() as u64;
+    Ok((Sha256::digest(&bytes).into(), size))
+}
+
+/// What a worker records about the tree it was built from (issue #649).
+/// `minihost/src/worker_build_provenance.cpp` writes the marker this parses.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct WorkerProvenance {
+    revision: String,
+    /// Tracked files differed from that commit when the worker was configured.
+    dirty: bool,
+}
+
+impl WorkerProvenance {
+    const MARKER: &'static str = "AEXCOMPAT-WORKER-PROVENANCE-V1";
+
+    /// How far past the marker the record may run. A 12-character revision and a
+    /// one-character flag need well under this; the bound is what keeps a stray
+    /// byte pattern from pulling the binary into a scan.
+    const MAX_RECORD_BYTES: usize = 256;
+
+    /// Finds the marker in a worker's bytes, or `None` for a worker built before
+    /// this existed. Scans the raw bytes rather than parsing the executable: the
+    /// marker is a plain literal, and a parser would be a second thing to keep in
+    /// step with the linker.
+    fn find(bytes: &[u8]) -> Option<Self> {
+        let marker = Self::MARKER.as_bytes();
+        let start = bytes
+            .windows(marker.len())
+            .position(|window| window == marker)?;
+        // Bounded so a byte pattern that merely happens to start like the marker
+        // scans a fixed amount rather than the rest of the executable.
+        let window = &bytes[start..(start + Self::MAX_RECORD_BYTES).min(bytes.len())];
+        // Cut on the bytes, then decode only the record. Decoding the whole
+        // window first would throw the record away whenever the linker happened
+        // to place non-UTF-8 data after it — which is decided by layout, so the
+        // worker would identify itself or not depending on unrelated code.
+        let terminator = b" END";
+        let end = window
+            .windows(terminator.len())
+            .position(|candidate| candidate == terminator)?;
+        let record = std::str::from_utf8(&window[..end]).ok()?;
+        Some(Self {
+            revision: field(record, " rev=")?.to_owned(),
+            dirty: field(record, " dirty=")? != "0",
+        })
+    }
+
+    /// Whether this identifies a specific tree. A worker built without git, or
+    /// from modified sources, records what it can but cannot be matched by it.
+    fn identifies_a_tree(&self) -> bool {
+        !self.dirty && self.revision != "unknown" && !self.revision.is_empty()
+    }
+}
+
+/// The value after `key` in a provenance record, up to the next space.
+fn field<'a>(record: &'a str, key: &str) -> Option<&'a str> {
+    record
+        .split_once(key)
+        .map(|(_, rest)| rest.split(' ').next().unwrap_or(rest))
+}
+
+/// This broker's own build revision, and whether it was built from modified
+/// sources. See `build.rs`.
+fn broker_provenance() -> WorkerProvenance {
+    WorkerProvenance {
+        revision: env!("AEXCOMPAT_BUILD_REVISION").to_owned(),
+        dirty: env!("AEXCOMPAT_BUILD_DIRTY") != "0",
+    }
 }
 
 /// A local minihost worker carries source-side logic (notably module-audit
-/// classification).  Do not let a stale build produce a convincing-looking
-/// compatibility receipt for current broker sources.  This intentionally uses
-/// only repository-local source mtimes: commit/build-id integration belongs to
-/// a later build-system scope.
-fn ensure_local_worker_freshness(repository: &Path, worker: &Path) -> io::Result<()> {
+/// classification). Do not let a stale build produce a convincing-looking
+/// compatibility receipt for current broker sources.
+///
+/// The source mtimes decide this whenever they are readable, exactly as before.
+/// They are the only signal that sees a developer's uncommitted edit: a revision
+/// describes the tree the same way before and after one, so accepting a matching
+/// revision *instead* would admit precisely the stale build this exists to stop.
+///
+/// The recorded revisions answer the one question mtimes cannot: a worker with no
+/// repository around it. Shipped beside the plugin there is no `minihost/src` to
+/// be newer than anything, and the old rule could only call that "indeterminate"
+/// and refuse — which is what kept the worker-beside-the-plugin layout from
+/// working at all (issue #649). Both sides decide their revision at build time,
+/// so a bundle built from one tree recognizes itself with nothing else present.
+///
+/// A dirty or unknown revision names no tree and is never treated as a match.
+fn ensure_local_worker_freshness(
+    repository: &Path,
+    worker: &Path,
+    provenance: Option<WorkerProvenance>,
+) -> io::Result<()> {
+    ensure_local_worker_freshness_against(repository, worker, provenance, broker_provenance())
+}
+
+/// The decision, with the broker's own side passed in so it can be exercised
+/// from a tree that does not identify itself — which is every working tree with
+/// an uncommitted change, i.e. the normal one.
+fn ensure_local_worker_freshness_against(
+    repository: &Path,
+    worker: &Path,
+    provenance: Option<WorkerProvenance>,
+    broker: WorkerProvenance,
+) -> io::Result<()> {
+    let source_root = repository.join("minihost").join("src");
+    let source_modified = match newest_source_modified(&source_root) {
+        Ok(modified) => modified,
+        // Only "there is no source tree here" hands the decision to the recorded
+        // revisions. Every other failure — the planted-symlink refusal, a file
+        // locked mid-walk — happens *inside* a checkout whose sources exist, and
+        // treating those as "no sources" would route a stale local build around
+        // the very comparison that catches it.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return admit_without_sources(provenance, broker);
+        }
+        Err(_) => return Err(worker_freshness_error("metadata_unavailable")),
+    };
     let worker_modified = std::fs::metadata(worker)
         .and_then(|metadata| metadata.modified())
         .map_err(|_| worker_freshness_error("metadata_unavailable"))?;
-    let source_root = repository.join("minihost").join("src");
-    let source_modified = newest_source_modified(&source_root)
-        .map_err(|_| worker_freshness_error("metadata_unavailable"))?;
     if source_modified > worker_modified {
         return Err(worker_freshness_error("source_newer_than_worker"));
+    }
+    Ok(())
+}
+
+/// The worker's sources are not here to be compared against, so the recorded
+/// revisions are all there is. Every outcome below was a flat rejection before.
+fn admit_without_sources(
+    provenance: Option<WorkerProvenance>,
+    broker: WorkerProvenance,
+) -> io::Result<()> {
+    let Some(provenance) = provenance else {
+        return Err(worker_freshness_error("worker_provenance_unavailable"));
+    };
+    if !provenance.identifies_a_tree() || !broker.identifies_a_tree() {
+        // Built from modified or unidentifiable sources. Nothing here can tell
+        // whether the two halves belong together, and there are no mtimes to
+        // fall back on.
+        return Err(worker_freshness_error("worker_provenance_indeterminate"));
+    }
+    if provenance.revision != broker.revision {
+        return Err(worker_freshness_error("worker_revision_mismatch"));
     }
     Ok(())
 }
@@ -671,8 +798,12 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A worker with neither sources to compare against nor a recorded build is
+    /// unidentifiable, and unidentifiable is not admissible. The reason names
+    /// which of the two is missing, because they are fixed differently: build the
+    /// worker from a tree that records its revision, or dispatch from a checkout.
     #[test]
-    fn indeterminate_worker_freshness_is_rejected_before_launch() {
+    fn an_unidentifiable_worker_is_rejected_before_launch() {
         let root = std::env::temp_dir().join(format!(
             "aexcompat-worker-freshness-{:032x}",
             rand::random::<u128>()
@@ -689,10 +820,255 @@ mod tests {
             json!({
                 "classification": "stale_worker",
                 "stage": "worker_freshness",
-                "reason": "metadata_unavailable",
+                "reason": "worker_provenance_unavailable",
             })
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    // --- build provenance (issue #649) ---------------------------------------
+
+    /// The marker `minihost/src/worker_build_provenance.cpp` emits, as it appears
+    /// in a built worker.
+    fn provenance_bytes(revision: &str, dirty: bool) -> Vec<u8> {
+        let dirty = u8::from(dirty);
+        format!(
+            "...binary noise...AEXCOMPAT-WORKER-PROVENANCE-V1 rev={revision} \
+             dirty={dirty} END...more noise..."
+        )
+        .into_bytes()
+    }
+
+    fn identified(revision: &str) -> WorkerProvenance {
+        WorkerProvenance {
+            revision: revision.to_owned(),
+            dirty: false,
+        }
+    }
+
+    fn freshness_reason(error: &io::Error) -> String {
+        serde_json::from_str::<serde_json::Value>(&error.to_string()).unwrap()["reason"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// A worker with no repository around it is exactly what issue #649 is
+    /// about: shipped beside the plugin, it has no `minihost/src` to be judged
+    /// against, and the old rule could only call that indeterminate and refuse.
+    /// Matching build revisions answer it without any of that.
+    ///
+    /// The broker's side is injected rather than read from `env!`, so this runs
+    /// in a working tree with uncommitted changes — the normal one, where the
+    /// real broker identifies no tree and the test would otherwise assert
+    /// nothing while reporting `ok`.
+    #[test]
+    fn a_worker_built_from_this_revision_is_admitted_without_any_sources() {
+        ensure_local_worker_freshness_against(
+            Path::new(r"C:\no\such\repository"),
+            Path::new(r"C:\no\such\worker.exe"),
+            Some(identified("0123456789ab")),
+            identified("0123456789ab"),
+        )
+        .expect("a worker built from this revision needs no sources");
+    }
+
+    /// A bundle whose halves came from different commits is refused. There is no
+    /// mtime relationship that would reveal it, so this is the only thing that
+    /// can.
+    #[test]
+    fn a_worker_built_from_another_revision_is_refused_without_sources() {
+        let error = ensure_local_worker_freshness_against(
+            Path::new(r"C:\no\such\repository"),
+            Path::new(r"C:\no\such\worker.exe"),
+            Some(identified("0000deadbeef")),
+            identified("0123456789ab"),
+        )
+        .expect_err("a worker from another commit must not launch");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(freshness_reason(&error), "worker_revision_mismatch");
+    }
+
+    /// Either half built from modified or unidentifiable sources says nothing
+    /// about whether they belong together, and without sources there is nothing
+    /// to fall back on.
+    #[test]
+    fn an_unidentifiable_half_is_refused_without_sources() {
+        let dirty = WorkerProvenance {
+            revision: "0123456789ab".to_owned(),
+            dirty: true,
+        };
+        for (worker, broker) in [
+            (dirty.clone(), identified("0123456789ab")),
+            (identified("0123456789ab"), dirty.clone()),
+            (identified("unknown"), identified("unknown")),
+        ] {
+            let error = ensure_local_worker_freshness_against(
+                Path::new(r"C:\no\such\repository"),
+                Path::new(r"C:\no\such\worker.exe"),
+                Some(worker.clone()),
+                broker.clone(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                freshness_reason(&error),
+                "worker_provenance_indeterminate",
+                "{worker:?} vs {broker:?}"
+            );
+        }
+    }
+
+    /// With the sources present the mtimes decide, whatever the revisions say.
+    /// They are the only signal that sees an uncommitted edit — a revision reads
+    /// the same before and after one — so letting a matching revision stand in
+    /// for them would admit exactly the stale build this gate exists to stop.
+    #[test]
+    fn matching_revisions_do_not_excuse_a_worker_older_than_its_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-worker-freshness-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let worker = freshness_fixture(&root, false);
+
+        let error = ensure_local_worker_freshness_against(
+            &root,
+            &worker,
+            Some(identified("0123456789ab")),
+            identified("0123456789ab"),
+        )
+        .expect_err("a worker older than its sources is stale however it identifies");
+        assert_eq!(freshness_reason(&error), "source_newer_than_worker");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// ...and a revision that disagrees does not condemn a worker the sources
+    /// vouch for either. A developer who commits without reconfiguring cmake has
+    /// a current worker with a stale recorded revision; refusing it would stop
+    /// every dispatch until someone re-ran configure.
+    #[test]
+    fn a_mismatched_revision_does_not_condemn_a_worker_newer_than_its_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-worker-freshness-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let worker = freshness_fixture(&root, true);
+
+        ensure_local_worker_freshness_against(
+            &root,
+            &worker,
+            Some(identified("0000deadbeef")),
+            identified("0123456789ab"),
+        )
+        .expect("the sources are here and they say the worker is current");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A worker built with no git around it records `unknown`, which names no
+    /// tree. Treating that as a match would admit anything.
+    #[test]
+    fn an_unknown_revision_identifies_nothing() {
+        for revision in ["unknown", ""] {
+            let provenance = WorkerProvenance {
+                revision: revision.to_owned(),
+                dirty: false,
+            };
+            assert!(!provenance.identifies_a_tree(), "{provenance:?}");
+        }
+        assert!(
+            !WorkerProvenance {
+                revision: "0123456789ab".to_owned(),
+                dirty: true,
+            }
+            .identifies_a_tree(),
+            "a dirty build identifies no tree either"
+        );
+        assert!(
+            WorkerProvenance {
+                revision: "0123456789ab".to_owned(),
+                dirty: false,
+            }
+            .identifies_a_tree()
+        );
+    }
+
+    /// Parsed out of the surrounding binary, not out of a tidy line.
+    #[test]
+    fn provenance_is_recovered_from_the_bytes_around_it() {
+        assert_eq!(
+            WorkerProvenance::find(&provenance_bytes("0123456789ab", false)),
+            Some(identified("0123456789ab"))
+        );
+        assert_eq!(
+            WorkerProvenance::find(&provenance_bytes("0123456789ab", true)),
+            Some(WorkerProvenance {
+                revision: "0123456789ab".to_owned(),
+                dirty: true,
+            })
+        );
+        assert_eq!(
+            WorkerProvenance::find(b"a worker built before this existed"),
+            None
+        );
+    }
+
+    /// What follows the record in `.rdata` is whatever the linker put there:
+    /// UTF-16 literals, doubles, pointers. Decoding the whole window before
+    /// cutting at ` END` therefore discards a perfectly good record depending on
+    /// unrelated code layout, and the worker stops identifying itself for reasons
+    /// nobody can see.
+    #[test]
+    fn binary_noise_after_the_record_does_not_discard_it() {
+        let mut bytes = b"AEXCOMPAT-WORKER-PROVENANCE-V1 rev=0123456789ab dirty=0 END".to_vec();
+        bytes.extend_from_slice(&[0xFF, 0xFE, 0x00, 0x80, 0xC0]);
+        bytes.extend_from_slice(&[0x41; 200]);
+
+        assert_eq!(
+            WorkerProvenance::find(&bytes),
+            Some(identified("0123456789ab"))
+        );
+    }
+
+    /// A record that never terminates inside the window is not a record. The
+    /// bound is what stops a stray byte pattern from pulling the binary in.
+    #[test]
+    fn an_unterminated_record_is_not_accepted() {
+        let mut bytes = b"AEXCOMPAT-WORKER-PROVENANCE-V1 rev=0123456789ab dirty=0 ".to_vec();
+        bytes.extend_from_slice(&[0x41; WorkerProvenance::MAX_RECORD_BYTES]);
+        bytes.extend_from_slice(b" END");
+
+        assert_eq!(WorkerProvenance::find(&bytes), None);
+        // ...and neither is a marker with nothing after it at all.
+        assert_eq!(
+            WorkerProvenance::find(WorkerProvenance::MARKER.as_bytes()),
+            None
+        );
+        assert_eq!(
+            WorkerProvenance::find(b"AEXCOMPAT-WORKER-PROVENANCE-V1 dirty=0 END"),
+            None,
+            "a record with no revision names no tree"
+        );
+    }
+
+    /// The producer is C++ and the parser is Rust, with nothing but agreement
+    /// between them. Renaming a token would leave every distributed bundle
+    /// reporting `worker_provenance_unavailable` while both test suites stay
+    /// green, so pin the tokens against the file that emits them.
+    #[test]
+    fn the_worker_side_emits_the_record_this_parses() {
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../minihost/src/worker_build_provenance.cpp"),
+        )
+        .expect("the worker-side producer is part of this contract");
+
+        for token in [WorkerProvenance::MARKER, " rev=", " dirty=", " END"] {
+            assert!(
+                source.contains(&format!("\"{token}")) || source.contains(&format!("{token}\"")),
+                "{token:?} is not emitted by worker_build_provenance.cpp"
+            );
+        }
     }
 
     #[test]

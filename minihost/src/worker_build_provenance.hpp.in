@@ -1,0 +1,14 @@
+// Configured by minihost/CMakeLists.txt; do not edit the generated copy.
+//
+// What the worker was built from, so the broker can identify a worker that no
+// longer has its repository around it (issue #649).
+#pragma once
+
+// Abbreviated commit of the tree this worker was configured from, or "unknown"
+// when it was built without git (a source archive).
+#define AEXCOMPAT_WORKER_BUILD_REVISION "@AEXCOMPAT_BUILD_REVISION@"
+
+// "1" when tracked files differed from that commit at configure time. A commit
+// match proves nothing about such a build, so the broker must not accept it as
+// one.
+#define AEXCOMPAT_WORKER_BUILD_DIRTY "@AEXCOMPAT_BUILD_DIRTY@"
