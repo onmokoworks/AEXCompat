@@ -28,7 +28,7 @@ use crate::secure_image_dispatch::{
 use crate::secure_launch::{SecureLaunchResult, SecureSessionProcess};
 use crate::windows_process::{SessionChildHandles, WorkerDesktopPolicy};
 use crate::worker_module_audit::ClusterAuditDeclaration;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
@@ -89,6 +89,33 @@ pub const EXIT_INVARIANT_FAILURE: u32 = 24;
 /// stay frame-local by the worker's contract.
 fn is_fatal_session_error(render_error: i64) -> bool {
     matches!(render_error, -47 | -45..=-41)
+}
+
+/// The worker already filters `PF_OutData::return_msg`, but the worker is the
+/// side the plug-in runs in, so the text is re-validated where it crosses into
+/// the broker (issue #707): bounded by the SDK buffer, printable ASCII, no path
+/// separator, and a selector name that looks like one the host emits. A
+/// plug-in must not be able to put a private path into a report through a field
+/// that exists only to be read by a human.
+///
+/// A message that fails this is dropped, not escalated. Unlike
+/// `missing_dependency`, nothing decides anything on this text - discarding it
+/// costs a sentence of diagnosis, while invalidating the session over it would
+/// turn a plug-in's stray backslash into a render failure.
+fn admissible_return_message(message: &FrameReturnMessage) -> bool {
+    // PF_MAX_EFFECT_MSG_LEN + 1 is 256, so the text cannot exceed 255 bytes.
+    !message.text.is_empty()
+        && message.text.len() <= 255
+        && message
+            .text
+            .bytes()
+            .all(|byte| (0x20..0x7F).contains(&byte) && byte != b'\\' && byte != b'/')
+        && !message.selector.is_empty()
+        && message.selector.len() <= 64
+        && message
+            .selector
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn valid_dependency_basename(name: &str) -> bool {
@@ -590,6 +617,11 @@ pub enum FrameStatus {
     FrameError {
         render_error: i64,
         missing_dependency: Option<String>,
+        /// What the plug-in itself wrote into `PF_OutData::return_msg` while
+        /// failing. The SDK's own suite helper writes "Couldn't load suite."
+        /// there, and plug-ins write their own reason, so this is often the
+        /// whole diagnosis (issue #707). Absent when the plug-in said nothing.
+        return_message: Option<FrameReturnMessage>,
     },
     // An expand-output effect that overruns the launch slot no longer surfaces to
     // the caller: `render_frame` grows the shared section in place and waits for
@@ -630,6 +662,21 @@ struct FrameDoneOutput {
     empty_result: bool,
 }
 
+/// A selector's own account of why it failed, as left in
+/// `PF_OutData::return_msg` (issue #707). The worker only reports it for a
+/// selector that also returned an error, and only when it is printable ASCII.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FrameReturnMessage {
+    /// The selector that wrote it; the buffer is reused across selectors.
+    pub selector: String,
+    pub text: String,
+    pub error: i64,
+    /// The plug-in raised `PF_OutFlag_DISPLAY_ERROR_MESSAGE` alongside it, i.e.
+    /// it meant this for the user rather than for a log.
+    pub display_requested: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FrameDone {
@@ -643,6 +690,8 @@ struct FrameDone {
     render_error: i64,
     #[serde(default)]
     missing_dependency: Option<String>,
+    #[serde(default)]
+    return_message: Option<FrameReturnMessage>,
     #[serde(default)]
     generation: Option<u32>,
     /// Present only on a "resize_needed" status (#262): the dimensions the
@@ -1964,7 +2013,7 @@ impl RenderSession {
                     ));
                 }
             };
-            let done: FrameDone = match serde_json::from_slice(&body) {
+            let mut done: FrameDone = match serde_json::from_slice(&body) {
                 Ok(done) => done,
                 Err(error) => {
                     return Err(self.invalidate(
@@ -2004,6 +2053,14 @@ impl RenderSession {
                     true,
                     POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
+            }
+            // Dropped rather than escalated: see `admissible_return_message`.
+            if done
+                .return_message
+                .as_ref()
+                .is_some_and(|message| !admissible_return_message(message))
+            {
+                done.return_message = None;
             }
             match done.status.as_str() {
                 "error" => {
@@ -2075,6 +2132,7 @@ impl RenderSession {
                         status: FrameStatus::FrameError {
                             render_error: done.render_error,
                             missing_dependency: done.missing_dependency,
+                            return_message: done.return_message,
                         },
                     });
                 }
@@ -3265,11 +3323,13 @@ pub fn run_video_batch(
                 FrameStatus::FrameError {
                     render_error,
                     missing_dependency,
+                    return_message,
                 } => Ok(json!({
                     "frame_index": frame_index,
                     "status": "error",
                     "render_error": render_error,
                     "missing_dependency": missing_dependency,
+                    "return_message": return_message,
                 })),
             }
         })();

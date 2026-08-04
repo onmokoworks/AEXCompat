@@ -301,6 +301,9 @@ bool SessionPipes::write_message(const std::string& payload) {
 // every definition stays in l2_main.
 namespace aexcompat::l2_detail {
 
+// Owned by worker_l2_shared_helpers.cpp.
+std::string escape(const std::string& input);
+
 using EffectEntry = aexcompat::worker_runtime::parameter_execution::EffectEntry;
 using RequestedAssignments = aexcompat::worker_runtime::parameters::RequestedAssignments;
 using ExternalLayerInput = aexcompat::worker_runtime::request_parser::LayerInput;
@@ -747,6 +750,9 @@ RenderSessionOutcome run_session_frame_loop(
         outcome.protocol_violation = true;
         break;
       }
+      // The outgoing plug-in's words do not belong to the incoming one
+      // (issue #707).
+      aexcompat::worker_runtime::reset_selector_return_message();
       // 1. SEQUENCE_SETDOWN when a sequence is up (design §4.1 step 1).
       if (sequence_started) {
         const int32_t sequence_setdown_error = invoke_sequence_selector(
@@ -830,6 +836,9 @@ RenderSessionOutcome run_session_frame_loop(
       outcome.protocol_violation = true;
       break;
     }
+    // Each frame starts with no message: what the plug-in said about a previous
+    // frame is not this frame's diagnosis (issue #707).
+    aexcompat::worker_runtime::reset_selector_return_message();
     const auto& time_object = std::get<JsonValue::Object>(time_value->value);
     int32_t current_time{};
     int32_t current_scale{};
@@ -890,9 +899,21 @@ RenderSessionOutcome run_session_frame_loop(
       std::string reply = "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":" +
           std::to_string(frame_index) + ",\"status\":\"error\",\"render_error\":" +
           std::to_string(frame_error);
-      const auto& missing =
-          aexcompat::worker_runtime::selector_dispatch_telemetry().missing_dependency;
+      const auto& telemetry =
+          aexcompat::worker_runtime::selector_dispatch_telemetry();
+      const auto& missing = telemetry.missing_dependency;
       if (!missing.empty()) reply += ",\"missing_dependency\":\"" + missing + "\"";
+      // What the plug-in itself said about the failure. The SDK writes
+      // "Couldn't load suite." here when a suite is missing, and plug-ins write
+      // their own reason, so this is often the whole diagnosis (issue #707).
+      if (!telemetry.return_message.empty()) {
+        reply += ",\"return_message\":{\"selector\":\"" +
+            escape(telemetry.return_message.selector) + "\",\"text\":\"" +
+            escape(telemetry.return_message.text) + "\",\"error\":" +
+            std::to_string(telemetry.return_message.error) +
+            ",\"display_requested\":" +
+            (telemetry.return_message.display_requested ? "true" : "false") + "}";
+      }
       reply += "}";
       return channels.write_message(reply);
     };

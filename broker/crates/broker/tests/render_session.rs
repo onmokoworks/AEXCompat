@@ -2040,6 +2040,7 @@ mod windows_e2e {
             FrameStatus::FrameError {
                 render_error: -40,
                 missing_dependency: None,
+                return_message: None,
             }
         ));
         let outcome = session

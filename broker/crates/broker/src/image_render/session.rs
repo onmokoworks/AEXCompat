@@ -1166,6 +1166,7 @@ impl InteractiveRenderSession {
             FrameStatus::FrameError {
                 render_error,
                 missing_dependency,
+                return_message,
             } => {
                 self.frames_errored += 1;
                 let mut report = json!({
@@ -1182,6 +1183,8 @@ impl InteractiveRenderSession {
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
                     "render_error": render_error,
                     "missing_dependency": missing_dependency,
+                    // The plug-in's own account of the failure (issue #707).
+                    "return_message": return_message,
                     "passed": false,
                 });
                 annotate_interactive_selection(&mut report, self.selection);
