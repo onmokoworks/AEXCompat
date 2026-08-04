@@ -1,4 +1,6 @@
 #include "worker_fixed_selftest_routing.hpp"
+
+#include "worker_smart_dispatch.hpp"
 #include "worker_aegp_scene_runtime.hpp"
 
 #include "worker_aegp_compat_selftests.hpp"
@@ -109,6 +111,24 @@ int selftest_effect_param_union(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+// Reports the offsets the SmartFX dispatch actually uses inside
+// PF_PreRenderInput / PF_SmartRenderInput alongside the verdict, so the frozen
+// SDK ABI evidence can be compared against them rather than the numbers only
+// agreeing with themselves (issue #699).
+int selftest_smart_selector_inputs(int, wchar_t**) {
+  namespace smart_dispatch = aexcompat::worker_runtime::smart_dispatch;
+  const bool passed = smart_dispatch::verify_selector_inputs();
+  const auto layout = smart_dispatch::selector_input_layout();
+  std::cout << "{\"smart_selector_inputs\":\"" << (passed ? "passed" : "failed")
+            << "\",\"render_request_bytes\":" << layout.render_request_bytes
+            << ",\"field_offset\":" << layout.field_offset
+            << ",\"channel_mask_offset\":" << layout.channel_mask_offset
+            << ",\"bitdepth_offset\":" << layout.bitdepth_offset
+            << ",\"pre_render_data_offset\":" << layout.pre_render_data_offset
+            << "}\n";
+  return passed ? 0 : 1;
+}
+
 int selftest_compute_cache(int, wchar_t**) {
   const bool passed = aexcompat::compute_cache::selftest();
   std::cout << "{\"aegp_compute_cache_suite1\":\"" << (passed ? "passed" : "failed")
@@ -122,7 +142,7 @@ int selftest_compute_cache(int, wchar_t**) {
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 8> host_commands{{
+  const std::array<selftest::HostCommand, 9> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
       {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
       {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
@@ -132,6 +152,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-aegp-effect-param-union-suite4", 2,
        &selftest_effect_param_union},
       {L"--self-test-compute-cache", 2, &selftest_compute_cache},
+      {L"--self-test-smart-selector-inputs", 2, &selftest_smart_selector_inputs},
   }};
   if (const auto exit = selftest::dispatch_host(
           request.argc, request.argv, host_commands.data(), host_commands.size()))

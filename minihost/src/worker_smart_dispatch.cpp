@@ -5,6 +5,7 @@
 #include "worker_smart_runtime.hpp"
 #include "worker_world_registry.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <iostream>
 
@@ -16,6 +17,21 @@ constexpr int32_t kSmartRender = 24;
 constexpr int32_t kSmartRenderGpu = 31;
 constexpr int32_t kGpuDeviceSetup = 32;
 constexpr int32_t kGpuDeviceSetdown = 33;
+// `PF_RenderRequest` (AE_Effect.h) leads both selector inputs and is 44 bytes:
+// rect at 0, `PF_Field` at 16, `PF_ChannelMask` at 20, then
+// `preserve_rgb_of_zero_alpha`, padding, and reserved words. `bitdepth`
+// follows it, and `PF_SmartRenderInput` continues with `pre_render_data`.
+constexpr std::size_t kRenderRequestBytes = 44;
+constexpr std::size_t kRenderRequestField = 16;
+constexpr std::size_t kRenderRequestChannelMask = 20;
+constexpr std::size_t kInputBitdepth = 44;
+constexpr std::size_t kSmartInputPreRenderData = 48;
+constexpr int32_t kFieldFrame = 0;
+// 仮説: AE がフレーム描画で渡すのは PF_ChannelMask_ARGB とみて 0xF を書いている。
+// 実機 AE から観測した値ではない (probe が output_request.rect しか記録していない)。
+// 確かなのは「0 は『どのチャンネルも要求しない』と読める」ことと、PreRender と
+// SmartRender が同じ値を見るべきことの 2 点。
+constexpr int32_t kChannelMaskArgb = 0xF;
 
 template <typename T, std::size_t N>
 void write(std::array<std::byte, N>& buffer, std::size_t offset, T value) {
@@ -29,7 +45,75 @@ T read(const std::array<std::byte, N>& buffer, std::size_t offset) {
   return value;
 }
 
+void write_render_request(std::byte* destination,
+                          const std::array<int32_t, 4>& rect) {
+  std::memset(destination, 0, kRenderRequestBytes);
+  std::memcpy(destination, rect.data(), sizeof(rect));
+  const int32_t field = kFieldFrame;
+  const int32_t channel_mask = kChannelMaskArgb;
+  std::memcpy(destination + kRenderRequestField, &field, sizeof(field));
+  std::memcpy(destination + kRenderRequestChannelMask, &channel_mask,
+              sizeof(channel_mask));
+}
+
 }  // namespace
+
+SelectorInputs build_selector_inputs(const std::array<int32_t, 4>& request_rect,
+                                     int16_t bitdepth, void* pre_render_data) {
+  SelectorInputs inputs{};
+  write_render_request(inputs.pre_render.data(), request_rect);
+  write<int16_t>(inputs.pre_render, kInputBitdepth, bitdepth);
+  write_render_request(inputs.smart_render.data(), request_rect);
+  write<int16_t>(inputs.smart_render, kInputBitdepth, bitdepth);
+  write<void*>(inputs.smart_render, kSmartInputPreRenderData, pre_render_data);
+  return inputs;
+}
+
+SelectorInputLayout selector_input_layout() {
+  return {static_cast<int32_t>(kRenderRequestBytes),
+          static_cast<int32_t>(kRenderRequestField),
+          static_cast<int32_t>(kRenderRequestChannelMask),
+          static_cast<int32_t>(kInputBitdepth),
+          static_cast<int32_t>(kSmartInputPreRenderData)};
+}
+
+bool verify_selector_inputs() {
+  const std::array<int32_t, 4> rect{3, 2, 11, 8};
+  int32_t pre_render_marker = 0;
+  for (const int16_t bitdepth : {int16_t{8}, int16_t{16}, int16_t{32}}) {
+    const SelectorInputs inputs =
+        build_selector_inputs(rect, bitdepth, &pre_render_marker);
+    // The regression this guards is asymmetry: SmartRender used to get a zeroed
+    // prefix while PreRender got the real one. Compare the two byte for byte
+    // over the shared prefix rather than re-reading each field with the same
+    // constants that wrote it.
+    if (!std::equal(inputs.pre_render.begin(),
+                    inputs.pre_render.begin() + kInputBitdepth + sizeof(bitdepth),
+                    inputs.smart_render.begin()))
+      return false;
+    std::array<int32_t, 4> observed{};
+    std::memcpy(observed.data(), inputs.smart_render.data(), sizeof(observed));
+    if (observed != rect) return false;
+    if (read<int32_t>(inputs.smart_render, kRenderRequestField) != kFieldFrame)
+      return false;
+    if (read<int32_t>(inputs.smart_render, kRenderRequestChannelMask) !=
+        kChannelMaskArgb)
+      return false;
+    if (read<int16_t>(inputs.smart_render, kInputBitdepth) != bitdepth) return false;
+    // The request prefix must stop before `pre_render_data`: PreRender's pointer
+    // has to reach SmartRender intact.
+    if (read<void*>(inputs.smart_render, kSmartInputPreRenderData) !=
+        static_cast<void*>(&pre_render_marker))
+      return false;
+    // Nothing past the pointer belongs to this builder.
+    if (!std::all_of(inputs.smart_render.begin() + kSmartInputPreRenderData +
+                         sizeof(void*),
+                     inputs.smart_render.end(),
+                     [](std::byte value) { return value == std::byte{}; }))
+      return false;
+  }
+  return true;
+}
 
 bool dispatch(const Request& request, const Hooks& hooks,
               smart_execution::Result& result, State& dispatch_state) {
@@ -76,14 +160,19 @@ bool dispatch(const Request& request, const Hooks& hooks,
               << "\n" << std::flush;
   }
 
-  std::array<std::byte, 64> pre_input{};
   std::array<std::byte, 16> pre_callbacks{};
   std::array<std::byte, 24> pre_extra{};
   const std::array<int32_t, 4> expected_request = plan.partial_output_request
       ? std::array<int32_t, 4>{3, 2, 11, 8}
       : std::array<int32_t, 4>{0, 0, plan.width, plan.height};
-  std::memcpy(pre_input.data(), expected_request.data(), sizeof(expected_request));
-  write<int16_t>(pre_input, 44, plan.float32 ? 32 : (plan.deep16 ? 16 : 8));
+  const int16_t render_bitdepth = plan.float32 ? 32 : (plan.deep16 ? 16 : 8);
+  // Both selector inputs come from one builder, so SmartRender cannot be handed
+  // a different request or bitdepth than PreRender was (issue #699).
+  // `pre_render_data` is only known after PreRender ran; it is written into the
+  // SmartRender copy below.
+  SelectorInputs selector_inputs =
+      build_selector_inputs(expected_request, render_bitdepth, nullptr);
+  std::array<std::byte, 64>& pre_input = selector_inputs.pre_render;
   if (plan.gpu_negotiation) {
     write<void*>(pre_input, 48, read<void*>(gpu_setup_output, 0));
     write<int32_t>(pre_input, 56, gpu_framework);
@@ -176,10 +265,11 @@ bool dispatch(const Request& request, const Hooks& hooks,
   result.checkout_time_step = runtime.checkout_time_step;
   result.checkout_time_scale = runtime.checkout_time_scale;
 
-  std::array<std::byte, 72> smart_input{};
   std::array<std::byte, 24> callbacks{};
   std::array<std::byte, 16> smart_extra{};
-  write<void*>(smart_input, 48, read<void*>(dispatch_state.pre_output, 40));
+  std::array<std::byte, 72>& smart_input = selector_inputs.smart_render;
+  write<void*>(smart_input, kSmartInputPreRenderData,
+               read<void*>(dispatch_state.pre_output, 40));
   if (plan.gpu_negotiation) {
     write<void*>(smart_input, 56, read<void*>(gpu_setup_output, 0));
     write<int32_t>(smart_input, 64, gpu_framework);

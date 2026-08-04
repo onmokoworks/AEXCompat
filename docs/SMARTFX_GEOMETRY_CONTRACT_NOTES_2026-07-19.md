@@ -363,3 +363,41 @@ sizing の追随変更 (result_rect 基準 + origin 設定) は issue #102 の
   行わず、evidence 生成マシン側で
   `tools/refresh-smartfx-geometry-evidence.ps1` /
   `tools/refresh-runtime-evidence.ps1` を再実行する別作業とする。
+
+## 2026-08-05 issue #699 (SmartRender に渡す PF_RenderRequest と bitdepth)
+
+観察 (事実):
+
+- `worker_smart_dispatch.cpp` は `PF_PreRenderInput` の先頭 `PF_RenderRequest`
+  の rect (offset 0..15) と `bitdepth` (offset 44) は書いていたが、
+  `PF_SmartRenderInput` の側は `pre_render_data` (offset 48) と GPU 尾部しか
+  書いておらず、先頭 44 バイトと `bitdepth` はゼロのまま
+  `PF_Cmd_SMART_RENDER` に渡っていた。
+- プラグインからは `output_request.rect = {0,0,0,0}`、`channel_mask = 0`、
+  `bitdepth = 0` に見える。bitdepth からピクセルループを選ぶ SmartFX は
+  該当分岐を持たない。
+- `channel_mask` は PreRender 側でも 0 のままだった。
+
+実装:
+
+- 両セレクタ入力を `smart_dispatch::build_selector_inputs` 1 箇所で組み立てる
+  ようにし、共有プレフィックス (rect / field / channel_mask / bitdepth) が
+  片側だけ欠けることを構造的に防いだ。
+- `--self-test-smart-selector-inputs` が両者の共有プレフィックスをバイト比較し、
+  使用オフセットを JSON で報告する。`tests/test_smart_selector_inputs.py` が
+  そのオフセットを実 SDK ヘッダ由来の
+  `analysis/AE_ABI_LAYOUT_OBSERVATION_2026-07-13.json` と突き合わせる。
+
+仮説 (未検証、実機 AE の観測ではない):
+
+- `PF_RenderRequest.channel_mask` に `PF_ChannelMask_ARGB` (0xF) を書いている。
+  AE がフレーム描画で実際に何を渡すかは未観測 (`instruments/pf-selector-timeline-probe`
+  は `output_request.rect` しか記録していない)。確かなのは「0 はどのチャンネルも
+  要求しないと読める」ことと「PreRender と SmartRender が同じ値を見るべき」ことの
+  2 点で、後者がこの issue の本体。0xF の妥当性は AE 実機観測で確認する余地が残る。
+- `field` は `PF_Field_FRAME` (0) 固定。フィールドレンダリングは未対応。
+
+否定 (事実):
+
+- この修正では issue #695 の Displacement (`PF_Err_OUT_OF_MEMORY`) は直らない。
+  埋めた前後どちらでも SMART_RENDER は 4 を返す。#699 は独立した ABI の欠落。
