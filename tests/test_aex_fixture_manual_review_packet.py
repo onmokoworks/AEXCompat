@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import time
@@ -114,7 +115,7 @@ def make_load_gate() -> dict:
 
 def write_wiztree_csv(root: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-aex-fixtures.csv"
+    path = root / f"{time.time_ns()}-{os.getpid()}-aex-fixtures.csv"
     path.write_text(
         "\n".join(
             [
@@ -196,7 +197,7 @@ class AexFixtureManualReviewPacketTests(unittest.TestCase):
         }
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         dossier_path = roots["dossier"] / f"{stamp}-dossier.local.json"
         dependency_path = roots["dependency"] / f"{stamp}-dependency.local.json"
         gate_path = roots["gate"] / f"{stamp}-gate.local.json"
@@ -211,7 +212,7 @@ class AexFixtureManualReviewPacketTests(unittest.TestCase):
         self.assertEqual(resolved_dependency, dependency_path.resolve())
         self.assertEqual(resolved_gate, gate_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-dossier.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-dossier.json"
         outside.write_text(json.dumps(make_dossier()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_fixture_manual_review_packet.load_fixture_dossier(outside)
@@ -224,7 +225,7 @@ class AexFixtureManualReviewPacketTests(unittest.TestCase):
             load_gate=gate,
             load_gate_path=resolved_gate,
         )
-        out = LAB_ROOT / "target" / "fixture-manual-review" / f"{time.time_ns()}-manual-review.local.json"
+        out = LAB_ROOT / "target" / "fixture-manual-review" / f"{time.time_ns()}-{os.getpid()}-manual-review.local.json"
         written = aex_fixture_manual_review_packet.write_json_create_new(out, packet)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

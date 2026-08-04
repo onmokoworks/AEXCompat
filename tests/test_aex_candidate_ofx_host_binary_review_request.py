@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -203,7 +204,7 @@ def write_source(root_name: str, name: str, payload: dict) -> Path:
 
 class AexCandidateOfxHostBinaryReviewRequestTests(unittest.TestCase):
     def test_builds_pending_host_binary_review_request_without_paths_or_runtime(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         audit_path = (
             LAB_ROOT
             / "target"
@@ -344,7 +345,7 @@ class AexCandidateOfxHostBinaryReviewRequestTests(unittest.TestCase):
             )
 
     def test_loads_sources_and_writes_create_new_under_root(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         audit_path = write_source(
             "candidate-ofx-runtime-prerequisite-audit",
             f"ae-candidate-ofx-runtime-prerequisite-audit-{stamp}.local.json",

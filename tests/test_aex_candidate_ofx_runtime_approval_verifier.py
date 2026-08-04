@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -295,7 +296,7 @@ class AexCandidateOfxRuntimeApprovalVerifierTests(unittest.TestCase):
         boundary_root = LAB_ROOT / "target" / "candidate-ofx-runtime-boundary-contract"
         root.mkdir(parents=True, exist_ok=True)
         boundary_root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         source = root / f"ae-candidate-ofx-runtime-approval-request-{stamp}.local.json"
         boundary_source = boundary_root / f"ae-candidate-ofx-runtime-boundary-contract-{stamp}.local.json"
         source.write_text(json.dumps(approval_request_payload()), encoding="utf-8")

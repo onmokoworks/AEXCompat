@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -191,9 +192,9 @@ class AexLoadGateCheckTests(unittest.TestCase):
         design_root.mkdir(parents=True, exist_ok=True)
         selftest_root.mkdir(parents=True, exist_ok=True)
         dependency_root.mkdir(parents=True, exist_ok=True)
-        design = design_root / f"{time.time_ns()}-gate-design.json"
-        selftest = selftest_root / f"{time.time_ns()}-gate-selftest.json"
-        dependency = dependency_root / f"{time.time_ns()}-gate-dependency-review.json"
+        design = design_root / f"{time.time_ns()}-{os.getpid()}-gate-design.json"
+        selftest = selftest_root / f"{time.time_ns()}-{os.getpid()}-gate-selftest.json"
+        dependency = dependency_root / f"{time.time_ns()}-{os.getpid()}-gate-dependency-review.json"
         design.write_text(json.dumps(make_design_packet()), encoding="utf-8")
         selftest.write_text(json.dumps(make_selftest()), encoding="utf-8")
         dependency.write_text(json.dumps(make_dependency_review()), encoding="utf-8")
@@ -223,7 +224,7 @@ class AexLoadGateCheckTests(unittest.TestCase):
         self.assertIsNone(approval)
         self.assertIsNone(approval_path)
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside.json"
         outside.write_text(json.dumps(make_design_packet()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_load_gate_check.load_evidence(
@@ -241,7 +242,7 @@ class AexLoadGateCheckTests(unittest.TestCase):
             dependency_review=make_dependency_review(),
             dependency_review_path=dependency,
         )
-        out = LAB_ROOT / "target" / "load-gate" / f"{time.time_ns()}-gate.local.json"
+        out = LAB_ROOT / "target" / "load-gate" / f"{time.time_ns()}-{os.getpid()}-gate.local.json"
         written = aex_load_gate_check.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

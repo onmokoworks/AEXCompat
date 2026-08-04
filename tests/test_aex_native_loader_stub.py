@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -84,19 +85,19 @@ class AexNativeLoaderStubTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         gate_root = LAB_ROOT / "target" / "load-gate"
         gate_root.mkdir(parents=True, exist_ok=True)
-        gate = gate_root / f"{time.time_ns()}-loader-stub-gate.json"
+        gate = gate_root / f"{time.time_ns()}-{os.getpid()}-loader-stub-gate.json"
         gate.write_text(json.dumps(make_gate_report()), encoding="utf-8")
         loaded, resolved = aex_native_loader_stub.load_gate_report(gate)
         self.assertEqual(loaded["report_kind"], "aex_load_gate_check")
         self.assertEqual(resolved, gate.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-gate.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-gate.json"
         outside.write_text(json.dumps(make_gate_report()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_native_loader_stub.load_gate_report(outside)
 
         payload = aex_native_loader_stub.build_stub_report(loaded, resolved)
-        out = LAB_ROOT / "target" / "native-loader-stub" / f"{time.time_ns()}-stub.local.json"
+        out = LAB_ROOT / "target" / "native-loader-stub" / f"{time.time_ns()}-{os.getpid()}-stub.local.json"
         written = aex_native_loader_stub.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

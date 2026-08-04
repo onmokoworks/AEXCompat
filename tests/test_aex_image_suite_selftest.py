@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -66,7 +67,7 @@ class AexImageSuiteSelftestTests(unittest.TestCase):
             suite=suite,
             suite_path=Path("suite.json"),
             worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
-            output_prefix=f"{time.time_ns()}-suite-selftest",
+            output_prefix=f"{time.time_ns()}-{os.getpid()}-suite-selftest",
         )
         self.assertEqual(report["report_kind"], "aex_image_suite_worker_selftest")
         self.assertEqual(report["suite_selftest_state"], "image_suite_worker_selftest_passed")
@@ -93,7 +94,7 @@ class AexImageSuiteSelftestTests(unittest.TestCase):
                 suite=suite,
                 suite_path=Path("suite.json"),
                 worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
-                output_prefix=f"{time.time_ns()}-bad",
+                output_prefix=f"{time.time_ns()}-{os.getpid()}-bad",
             )
 
         suite = make_suite()
@@ -103,19 +104,19 @@ class AexImageSuiteSelftestTests(unittest.TestCase):
                 suite=suite,
                 suite_path=Path("suite.json"),
                 worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
-                output_prefix=f"{time.time_ns()}-bad",
+                output_prefix=f"{time.time_ns()}-{os.getpid()}-bad",
             )
 
     def test_paths_are_confined_and_report_is_create_new(self):
         suite_root = LAB_ROOT / "target" / "image-fixture-suite"
         suite_root.mkdir(parents=True, exist_ok=True)
-        source = suite_root / f"{time.time_ns()}-suite-source.local.json"
+        source = suite_root / f"{time.time_ns()}-{os.getpid()}-suite-source.local.json"
         source.write_text(json.dumps(make_suite()), encoding="utf-8")
         loaded, resolved = aex_image_suite_selftest.load_image_suite(source)
         self.assertEqual(loaded["report_kind"], "aex_image_fixture_suite")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-suite.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-suite.json"
         outside.write_text(json.dumps(make_suite()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_image_suite_selftest.load_image_suite(outside)
@@ -125,7 +126,7 @@ class AexImageSuiteSelftestTests(unittest.TestCase):
             "report_kind": "aex_image_suite_worker_selftest",
             "native_load_performed": False,
         }
-        out = LAB_ROOT / "target" / "image-suite-selftest" / f"{time.time_ns()}-suite-selftest.local.json"
+        out = LAB_ROOT / "target" / "image-suite-selftest" / f"{time.time_ns()}-{os.getpid()}-suite-selftest.local.json"
         written = aex_image_suite_selftest.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

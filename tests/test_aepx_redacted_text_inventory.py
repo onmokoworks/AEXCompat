@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -24,7 +25,7 @@ aepx_redacted_text_inventory = load_tool("aepx_redacted_text_inventory")
 def write_synthetic_aepx() -> Path:
     root = LAB_ROOT / "target" / "test-inputs"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-redacted-inventory.aepx"
+    path = root / f"{time.time_ns()}-{os.getpid()}-redacted-inventory.aepx"
     path.write_text(
         """<?xml version="1.0" encoding="UTF-8"?>
 <AfterEffectsProject xmlns="http://www.adobe.com/products/aftereffects" majorVersion="1" minorVersion="0">
@@ -129,13 +130,13 @@ class AepxRedactedTextInventoryTests(unittest.TestCase):
         source = write_synthetic_aepx()
         roundtrip_root = LAB_ROOT / "target" / "aepx-roundtrip-validator"
         roundtrip_root.mkdir(parents=True, exist_ok=True)
-        roundtrip_path = roundtrip_root / f"{time.time_ns()}-roundtrip.local.json"
+        roundtrip_path = roundtrip_root / f"{time.time_ns()}-{os.getpid()}-roundtrip.local.json"
         roundtrip_path.write_text(json.dumps(make_roundtrip(source)), encoding="utf-8")
 
         roundtrip, resolved_roundtrip = aepx_redacted_text_inventory.load_roundtrip_validator(roundtrip_path)
         self.assertEqual(resolved_roundtrip, roundtrip_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-roundtrip.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-roundtrip.json"
         outside.write_text(json.dumps(make_roundtrip(source)), encoding="utf-8")
         with self.assertRaises(ValueError):
             aepx_redacted_text_inventory.load_roundtrip_validator(outside)
@@ -144,7 +145,7 @@ class AepxRedactedTextInventoryTests(unittest.TestCase):
             roundtrip_validator=roundtrip,
             roundtrip_validator_path=resolved_roundtrip,
         )
-        out = LAB_ROOT / "target" / "aepx-redacted-text-inventory" / f"{time.time_ns()}-inventory.local.json"
+        out = LAB_ROOT / "target" / "aepx-redacted-text-inventory" / f"{time.time_ns()}-{os.getpid()}-inventory.local.json"
         written = aepx_redacted_text_inventory.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

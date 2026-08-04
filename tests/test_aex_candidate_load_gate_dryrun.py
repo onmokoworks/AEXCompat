@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -280,7 +281,7 @@ class AexCandidateLoadGateDryrunTests(unittest.TestCase):
         }
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         paths = {
             "design": roots["design"] / f"{stamp}-design.local.json",
             "selftest": roots["selftest"] / f"{stamp}-selftest.local.json",
@@ -313,7 +314,7 @@ class AexCandidateLoadGateDryrunTests(unittest.TestCase):
         self.assertEqual(scope_path, paths["scope"].resolve())
         self.assertEqual(gate_path, paths["load_gate"].resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-decision.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-decision.json"
         outside.write_text(json.dumps(make_fixture_decision()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_candidate_load_gate_dryrun.load_fixture_decision(outside)
@@ -332,7 +333,7 @@ class AexCandidateLoadGateDryrunTests(unittest.TestCase):
             source_load_gate=gate,
             source_load_gate_path=gate_path,
         )
-        out = LAB_ROOT / "target" / "candidate-load-gate" / f"{time.time_ns()}-candidate-load-gate.local.json"
+        out = LAB_ROOT / "target" / "candidate-load-gate" / f"{time.time_ns()}-{os.getpid()}-candidate-load-gate.local.json"
         written = aex_candidate_load_gate_dryrun.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

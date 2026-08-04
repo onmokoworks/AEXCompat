@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -133,7 +134,7 @@ def write_boundary(name: str, payload: dict | None = None) -> Path:
 
 class AexCandidateOfxRuntimeApprovalRequestPacketTests(unittest.TestCase):
     def test_builds_pending_runtime_approval_request_without_approval(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         boundary_path = (
             LAB_ROOT
             / "target"
@@ -190,7 +191,7 @@ class AexCandidateOfxRuntimeApprovalRequestPacketTests(unittest.TestCase):
             )
 
     def test_loads_boundary_and_writes_create_new_under_root(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         boundary_path = write_boundary(f"ae-candidate-ofx-runtime-boundary-contract-{stamp}.local.json")
         boundary, resolved_boundary = aex_candidate_ofx_runtime_approval_request_packet.load_runtime_boundary_contract(
             Path("target") / "candidate-ofx-runtime-boundary-contract" / boundary_path.name

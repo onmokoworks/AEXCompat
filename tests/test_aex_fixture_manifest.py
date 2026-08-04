@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -106,20 +107,20 @@ class AexFixtureManifestTests(unittest.TestCase):
     def test_source_report_must_be_under_static_probe_root(self):
         source_root = LAB_ROOT / "target" / "aex-static-probe"
         source_root.mkdir(parents=True, exist_ok=True)
-        source = source_root / f"{time.time_ns()}-fixture-source.json"
+        source = source_root / f"{time.time_ns()}-{os.getpid()}-fixture-source.json"
         source.write_text(json.dumps(make_report()), encoding="utf-8")
         loaded, resolved = aex_fixture_manifest.load_source_report(source)
         self.assertEqual(loaded["report_kind"], "aex_static_probe")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-report.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-report.json"
         outside.write_text(json.dumps(make_report()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_fixture_manifest.load_source_report(outside)
 
     def test_manifest_writer_is_create_new_under_manifest_root(self):
         manifest = aex_fixture_manifest.build_manifest_payload(make_report(), Path("source.json"))
-        path = LAB_ROOT / "target" / "fixture-review" / f"{time.time_ns()}-manifest.local.json"
+        path = LAB_ROOT / "target" / "fixture-review" / f"{time.time_ns()}-{os.getpid()}-manifest.local.json"
         written = aex_fixture_manifest.write_json_create_new(path, manifest)
         self.assertEqual(written, path.resolve())
         with self.assertRaises(FileExistsError):

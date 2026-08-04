@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -24,7 +25,7 @@ aex_worker_selftest = load_tool("aex_worker_selftest")
 def make_design_packet() -> Path:
     root = LAB_ROOT / "target" / "worker-design"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-selftest-design.local.json"
+    path = root / f"{time.time_ns()}-{os.getpid()}-selftest-design.local.json"
     payload = {
         "schema_version": 1,
         "publication_status": "local-only",
@@ -41,7 +42,7 @@ def make_design_packet() -> Path:
 
 class AexWorkerSelftestTests(unittest.TestCase):
     def test_run_selftest_spawns_worker_and_reports_no_load(self):
-        output_ppm = LAB_ROOT / "target" / "worker-selftest" / f"{time.time_ns()}-identity.ppm"
+        output_ppm = LAB_ROOT / "target" / "worker-selftest" / f"{time.time_ns()}-{os.getpid()}-identity.ppm"
         report = aex_worker_selftest.run_selftest(
             worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
             input_ppm=None,
@@ -71,7 +72,7 @@ class AexWorkerSelftestTests(unittest.TestCase):
         unsafe = make_design_packet()
         payload = json.loads(unsafe.read_text(encoding="utf-8"))
         payload["native_load_performed"] = True
-        bad = LAB_ROOT / "target" / "worker-design" / f"{time.time_ns()}-unsafe.local.json"
+        bad = LAB_ROOT / "target" / "worker-design" / f"{time.time_ns()}-{os.getpid()}-unsafe.local.json"
         bad.write_text(json.dumps(payload), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_worker_selftest.load_design_packet(bad)
@@ -81,7 +82,7 @@ class AexWorkerSelftestTests(unittest.TestCase):
             "report_kind": "aex_no_load_worker_selftest",
             "native_load_performed": False,
         }
-        out = LAB_ROOT / "target" / "worker-selftest" / f"{time.time_ns()}-report.local.json"
+        out = LAB_ROOT / "target" / "worker-selftest" / f"{time.time_ns()}-{os.getpid()}-report.local.json"
         written = aex_worker_selftest.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -104,13 +105,13 @@ class AexNativeLoaderRuntimeSelftestTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         root = LAB_ROOT / "target" / "native-loader-runtime-contract"
         root.mkdir(parents=True, exist_ok=True)
-        source = root / f"{time.time_ns()}-runtime-contract.local.json"
+        source = root / f"{time.time_ns()}-{os.getpid()}-runtime-contract.local.json"
         source.write_text(json.dumps(runtime_contract()), encoding="utf-8")
         loaded, resolved = aex_native_loader_runtime_selftest.load_runtime_contract(source)
         self.assertEqual(loaded["report_kind"], "aex_native_loader_runtime_contract")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-runtime-contract.local.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-runtime-contract.local.json"
         outside.write_text(json.dumps(runtime_contract()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_native_loader_runtime_selftest.load_runtime_contract(outside)
@@ -121,7 +122,7 @@ class AexNativeLoaderRuntimeSelftestTests(unittest.TestCase):
             timeout_ms=1000,
             cleanup_timeout_ms=2000,
         )
-        out = LAB_ROOT / "target" / "native-loader-runtime-selftest" / f"{time.time_ns()}-runtime-selftest.local.json"
+        out = LAB_ROOT / "target" / "native-loader-runtime-selftest" / f"{time.time_ns()}-{os.getpid()}-runtime-selftest.local.json"
         written = aex_native_loader_runtime_selftest.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

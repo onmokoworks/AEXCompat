@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -252,7 +253,7 @@ class AexFixtureProvenanceAnswerValidatorSelftestTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         root = LAB_ROOT / "target" / "fixture-provenance-answer-template"
         root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         source = root / f"{stamp}-answer-template.local.json"
         source.write_text(json.dumps(answer_template_payload()), encoding="utf-8")
 

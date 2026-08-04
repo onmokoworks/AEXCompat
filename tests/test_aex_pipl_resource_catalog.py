@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -127,19 +128,19 @@ class AexPiplResourceCatalogTests(unittest.TestCase):
     def test_paths_are_confined_and_report_is_create_new(self):
         static_root = LAB_ROOT / "target" / "aex-static-probe"
         static_root.mkdir(parents=True, exist_ok=True)
-        static_path = static_root / f"{time.time_ns()}-static.local.json"
+        static_path = static_root / f"{time.time_ns()}-{os.getpid()}-static.local.json"
         static_path.write_text(json.dumps(make_static_report()), encoding="utf-8")
         report, resolved = aex_pipl_resource_catalog.load_static_report(static_path)
         self.assertEqual(report["report_kind"], "aex_static_probe")
         self.assertEqual(resolved, static_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-static.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-static.json"
         outside.write_text(json.dumps(make_static_report()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_pipl_resource_catalog.load_static_report(outside)
 
         catalog = aex_pipl_resource_catalog.build_catalog(report, resolved)
-        out = LAB_ROOT / "target" / "pipl-resource-catalog" / f"{time.time_ns()}-catalog.local.json"
+        out = LAB_ROOT / "target" / "pipl-resource-catalog" / f"{time.time_ns()}-{os.getpid()}-catalog.local.json"
         written = aex_pipl_resource_catalog.write_json_create_new(out, catalog)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -24,7 +25,7 @@ aepx_roundtrip_validator = load_tool("aepx_roundtrip_validator")
 def write_synthetic_aepx() -> Path:
     root = LAB_ROOT / "target" / "test-inputs"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-roundtrip.aepx"
+    path = root / f"{time.time_ns()}-{os.getpid()}-roundtrip.aepx"
     path.write_text(
         """<?xml version="1.0" encoding="UTF-8"?>
 <AfterEffectsProject xmlns="http://www.adobe.com/products/aftereffects" majorVersion="1" minorVersion="0">
@@ -166,7 +167,7 @@ class AepxRoundtripValidatorTests(unittest.TestCase):
         plan_root = LAB_ROOT / "target" / "aepx-edit-plan"
         probe_root.mkdir(parents=True, exist_ok=True)
         plan_root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         probe_path = probe_root / f"{stamp}-probe.local.json"
         plan_path = plan_root / f"{stamp}-plan.local.json"
         probe_path.write_text(json.dumps(make_probe(source)), encoding="utf-8")
@@ -177,7 +178,7 @@ class AepxRoundtripValidatorTests(unittest.TestCase):
         self.assertEqual(resolved_probe, probe_path.resolve())
         self.assertEqual(resolved_plan, plan_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-roundtrip.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-roundtrip.json"
         outside.write_text(json.dumps(make_probe(source)), encoding="utf-8")
         with self.assertRaises(ValueError):
             aepx_roundtrip_validator.load_aepx_probe(outside)
@@ -188,7 +189,7 @@ class AepxRoundtripValidatorTests(unittest.TestCase):
             aepx_edit_plan=plan,
             aepx_edit_plan_path=resolved_plan,
         )
-        out = LAB_ROOT / "target" / "aepx-roundtrip-validator" / f"{time.time_ns()}-roundtrip.local.json"
+        out = LAB_ROOT / "target" / "aepx-roundtrip-validator" / f"{time.time_ns()}-{os.getpid()}-roundtrip.local.json"
         written = aepx_roundtrip_validator.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

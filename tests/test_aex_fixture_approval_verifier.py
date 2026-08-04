@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -225,11 +226,11 @@ class AexFixtureApprovalVerifierTests(unittest.TestCase):
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
         paths = {
-            "decision": roots["decision"] / f"{time.time_ns()}-decision.local.json",
-            "manual": roots["manual"] / f"{time.time_ns()}-manual.local.json",
-            "scope": roots["scope"] / f"{time.time_ns()}-scope.local.json",
-            "path": roots["path"] / f"{time.time_ns()}-path.local.json",
-            "gate": roots["gate"] / f"{time.time_ns()}-gate.local.json",
+            "decision": roots["decision"] / f"{time.time_ns()}-{os.getpid()}-decision.local.json",
+            "manual": roots["manual"] / f"{time.time_ns()}-{os.getpid()}-manual.local.json",
+            "scope": roots["scope"] / f"{time.time_ns()}-{os.getpid()}-scope.local.json",
+            "path": roots["path"] / f"{time.time_ns()}-{os.getpid()}-path.local.json",
+            "gate": roots["gate"] / f"{time.time_ns()}-{os.getpid()}-gate.local.json",
         }
         paths["decision"].write_text(json.dumps(fixture_decision_hold()), encoding="utf-8")
         paths["manual"].write_text(json.dumps(manual_review()), encoding="utf-8")
@@ -243,7 +244,7 @@ class AexFixtureApprovalVerifierTests(unittest.TestCase):
         path_policy, path_policy_path = aex_fixture_approval_verifier.load_path_policy_selftest(paths["path"])
         gate, gate_path = aex_fixture_approval_verifier.load_candidate_load_gate(paths["gate"])
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-decision.local.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-decision.local.json"
         outside.write_text(json.dumps(fixture_decision_hold()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_fixture_approval_verifier.load_fixture_decision(outside)
@@ -260,7 +261,7 @@ class AexFixtureApprovalVerifierTests(unittest.TestCase):
             candidate_load_gate=gate,
             candidate_load_gate_path=gate_path,
         )
-        out = LAB_ROOT / "target" / "fixture-approval-verifier" / f"{time.time_ns()}-approval-verifier.local.json"
+        out = LAB_ROOT / "target" / "fixture-approval-verifier" / f"{time.time_ns()}-{os.getpid()}-approval-verifier.local.json"
         written = aex_fixture_approval_verifier.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

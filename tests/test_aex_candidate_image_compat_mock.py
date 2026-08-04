@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -100,7 +101,7 @@ def write_input_ppm(name: str) -> Path:
 
 class AexCandidateImageCompatMockTests(unittest.TestCase):
     def test_builds_no_load_invert_mock_without_absolute_path_exports(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         card_path = write_card(f"ae-candidate-compat-card-{stamp}.local.json")
         input_ppm = write_input_ppm(f"candidate-image-compat-mock-{stamp}.ppm")
         output_ppm = LAB_ROOT / "target" / "candidate-image-compat-mock" / f"mock-{stamp}.ppm"
@@ -134,7 +135,7 @@ class AexCandidateImageCompatMockTests(unittest.TestCase):
         self.assertEqual(output_image.pixels, expected.pixels)
 
     def test_rejects_unsafe_or_open_compatibility_card(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         card = compat_card_payload()
         card["real_route_open"] = True
         input_ppm = write_input_ppm(f"candidate-image-compat-mock-unsafe-{stamp}.ppm")
@@ -150,7 +151,7 @@ class AexCandidateImageCompatMockTests(unittest.TestCase):
         self.assertFalse(output_ppm.exists())
 
     def test_confines_paths_and_writes_json_create_new(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         card_path = write_card(f"ae-candidate-compat-card-{stamp}.local.json")
         loaded, resolved = aex_candidate_image_compat_mock.load_compat_card(
             Path("target") / "candidate-compat-card" / card_path.name
@@ -183,7 +184,7 @@ class AexCandidateImageCompatMockTests(unittest.TestCase):
             )
 
     def test_rejects_unsupported_operation(self):
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         input_ppm = write_input_ppm(f"candidate-image-compat-mock-operation-{stamp}.ppm")
         output_ppm = LAB_ROOT / "target" / "candidate-image-compat-mock" / f"operation-{stamp}.ppm"
         with self.assertRaises(ValueError):

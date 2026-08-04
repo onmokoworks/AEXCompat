@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -114,19 +115,19 @@ class AexDependencyReviewPacketTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         preflight_root = LAB_ROOT / "target" / "dependency-preflight"
         preflight_root.mkdir(parents=True, exist_ok=True)
-        source = preflight_root / f"{time.time_ns()}-review-source.local.json"
+        source = preflight_root / f"{time.time_ns()}-{os.getpid()}-review-source.local.json"
         source.write_text(json.dumps(make_preflight()), encoding="utf-8")
         loaded, resolved = aex_dependency_review_packet.load_preflight(source)
         self.assertEqual(loaded["report_kind"], "aex_dependency_availability_preflight")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-review.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-review.json"
         outside.write_text(json.dumps(make_preflight()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_dependency_review_packet.load_preflight(outside)
 
         payload = aex_dependency_review_packet.build_dependency_review_packet(loaded, resolved)
-        out = LAB_ROOT / "target" / "dependency-review" / f"{time.time_ns()}-dependency-review.local.json"
+        out = LAB_ROOT / "target" / "dependency-review" / f"{time.time_ns()}-{os.getpid()}-dependency-review.local.json"
         written = aex_dependency_review_packet.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

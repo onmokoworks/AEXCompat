@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -123,13 +124,13 @@ class AexNativeLoaderPathPolicySelftestTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         root = LAB_ROOT / "target" / "native-loader-runtime-selftest"
         root.mkdir(parents=True, exist_ok=True)
-        source = root / f"{time.time_ns()}-runtime-selftest.local.json"
+        source = root / f"{time.time_ns()}-{os.getpid()}-runtime-selftest.local.json"
         source.write_text(json.dumps(runtime_selftest()), encoding="utf-8")
         loaded, resolved = aex_native_loader_path_policy_selftest.load_runtime_selftest(source)
         self.assertEqual(loaded["report_kind"], "aex_native_loader_runtime_selftest")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-runtime-selftest.local.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-runtime-selftest.local.json"
         outside.write_text(json.dumps(runtime_selftest()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_native_loader_path_policy_selftest.load_runtime_selftest(outside)
@@ -142,7 +143,7 @@ class AexNativeLoaderPathPolicySelftestTests(unittest.TestCase):
             LAB_ROOT
             / "target"
             / "native-loader-path-policy-selftest"
-            / f"{time.time_ns()}-path-policy.local.json"
+            / f"{time.time_ns()}-{os.getpid()}-path-policy.local.json"
         )
         written = aex_native_loader_path_policy_selftest.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())

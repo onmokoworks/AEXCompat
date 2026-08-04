@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -179,19 +180,19 @@ class AexFixtureDecisionTests(unittest.TestCase):
     def test_paths_are_confined_and_create_new(self):
         review_root = LAB_ROOT / "target" / "fixture-review"
         review_root.mkdir(parents=True, exist_ok=True)
-        source = review_root / f"{time.time_ns()}-decision-source.json"
+        source = review_root / f"{time.time_ns()}-{os.getpid()}-decision-source.json"
         source.write_text(json.dumps(make_review_manifest()), encoding="utf-8")
         loaded, resolved = aex_fixture_decision.load_review_manifest(source)
         self.assertEqual(loaded["manifest_kind"], "aex_fixture_review_manifest")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-review.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-review.json"
         outside.write_text(json.dumps(make_review_manifest()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_fixture_decision.load_review_manifest(outside)
 
         payload = aex_fixture_decision.build_decision_manifest(loaded, resolved, decision="reject")
-        out = LAB_ROOT / "target" / "fixture-approval" / f"{time.time_ns()}-reject.local.json"
+        out = LAB_ROOT / "target" / "fixture-approval" / f"{time.time_ns()}-{os.getpid()}-reject.local.json"
         written = aex_fixture_decision.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -2168,19 +2169,19 @@ class AexReadinessMatrixTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         index_root = LAB_ROOT / "target" / "artifact-index"
         index_root.mkdir(parents=True, exist_ok=True)
-        source = index_root / f"{time.time_ns()}-readiness-index.local.json"
+        source = index_root / f"{time.time_ns()}-{os.getpid()}-readiness-index.local.json"
         source.write_text(json.dumps(make_index()), encoding="utf-8")
         loaded, resolved = aex_readiness_matrix.load_artifact_index(source)
         self.assertEqual(loaded["report_kind"], "aex_artifact_index")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-readiness-index.local.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-readiness-index.local.json"
         outside.write_text(json.dumps(make_index()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_readiness_matrix.load_artifact_index(outside)
 
         payload = aex_readiness_matrix.build_readiness_matrix(loaded, resolved)
-        out = LAB_ROOT / "target" / "readiness-matrix" / f"{time.time_ns()}-readiness.local.json"
+        out = LAB_ROOT / "target" / "readiness-matrix" / f"{time.time_ns()}-{os.getpid()}-readiness.local.json"
         written = aex_readiness_matrix.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

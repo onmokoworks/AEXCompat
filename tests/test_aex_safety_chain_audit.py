@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -161,7 +162,7 @@ def write_payloads(payloads: dict[str, dict]) -> dict[str, Path]:
     for label, payload in payloads.items():
         root = aex_safety_chain_audit.ROOTS[label]
         root.mkdir(parents=True, exist_ok=True)
-        path = root / f"{time.time_ns()}-{label}.json"
+        path = root / f"{time.time_ns()}-{os.getpid()}-{label}.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         paths[label] = path
     return paths
@@ -198,13 +199,13 @@ class AexSafetyChainAuditTests(unittest.TestCase):
         self.assertEqual(loaded["report_kind"], "aex_load_gate_check")
         self.assertEqual(resolved, paths["load_gate"].resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-audit.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-audit.json"
         outside.write_text(json.dumps(payloads["load_gate"]), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_safety_chain_audit.load_artifact("load_gate", outside)
 
         report = aex_safety_chain_audit.build_audit(paths)
-        out = LAB_ROOT / "target" / "safety-audit" / f"{time.time_ns()}-audit.local.json"
+        out = LAB_ROOT / "target" / "safety-audit" / f"{time.time_ns()}-{os.getpid()}-audit.local.json"
         written = aex_safety_chain_audit.write_json_create_new(out, report)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

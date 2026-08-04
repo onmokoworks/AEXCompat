@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -2078,7 +2079,7 @@ class AexArtifactIndexTests(unittest.TestCase):
             "report_kind": "aex_artifact_index",
             "native_load_performed": False,
         }
-        out = LAB_ROOT / "target" / "artifact-index" / f"{time.time_ns()}-index.local.json"
+        out = LAB_ROOT / "target" / "artifact-index" / f"{time.time_ns()}-{os.getpid()}-index.local.json"
         written = aex_artifact_index.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

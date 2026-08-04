@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -96,19 +97,19 @@ class AepxEditPlanPacketTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         probe_root = LAB_ROOT / "target" / "aepx-static-probe"
         probe_root.mkdir(parents=True, exist_ok=True)
-        source = probe_root / f"{time.time_ns()}-aepx-probe.local.json"
+        source = probe_root / f"{time.time_ns()}-{os.getpid()}-aepx-probe.local.json"
         source.write_text(json.dumps(make_probe()), encoding="utf-8")
         loaded, resolved = aepx_edit_plan_packet.load_probe(source)
         self.assertEqual(loaded["report_kind"], "aepx_static_probe")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-aepx-probe.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-aepx-probe.json"
         outside.write_text(json.dumps(make_probe()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aepx_edit_plan_packet.load_probe(outside)
 
         payload = aepx_edit_plan_packet.build_edit_plan_packet(loaded, resolved)
-        out = LAB_ROOT / "target" / "aepx-edit-plan" / f"{time.time_ns()}-edit-plan.local.json"
+        out = LAB_ROOT / "target" / "aepx-edit-plan" / f"{time.time_ns()}-{os.getpid()}-edit-plan.local.json"
         written = aepx_edit_plan_packet.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

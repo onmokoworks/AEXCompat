@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -164,8 +165,8 @@ class AexFixtureApprovalRequestPacketTests(unittest.TestCase):
         manual_root = LAB_ROOT / "target" / "fixture-manual-review"
         verifier_root.mkdir(parents=True, exist_ok=True)
         manual_root.mkdir(parents=True, exist_ok=True)
-        verifier_path = verifier_root / f"{time.time_ns()}-approval-verifier.local.json"
-        manual_path = manual_root / f"{time.time_ns()}-manual.local.json"
+        verifier_path = verifier_root / f"{time.time_ns()}-{os.getpid()}-approval-verifier.local.json"
+        manual_path = manual_root / f"{time.time_ns()}-{os.getpid()}-manual.local.json"
         verifier_path.write_text(json.dumps(approval_verifier()), encoding="utf-8")
         manual_path.write_text(json.dumps(manual_review()), encoding="utf-8")
 
@@ -174,7 +175,7 @@ class AexFixtureApprovalRequestPacketTests(unittest.TestCase):
         self.assertEqual(resolved_verifier, verifier_path.resolve())
         self.assertEqual(resolved_review, manual_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-approval-verifier.local.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-approval-verifier.local.json"
         outside.write_text(json.dumps(approval_verifier()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_fixture_approval_request_packet.load_approval_verifier(outside)
@@ -185,7 +186,7 @@ class AexFixtureApprovalRequestPacketTests(unittest.TestCase):
             fixture_manual_review=review,
             fixture_manual_review_path=resolved_review,
         )
-        out = LAB_ROOT / "target" / "fixture-approval-request" / f"{time.time_ns()}-request.local.json"
+        out = LAB_ROOT / "target" / "fixture-approval-request" / f"{time.time_ns()}-{os.getpid()}-request.local.json"
         written = aex_fixture_approval_request_packet.write_json_create_new(out, packet)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

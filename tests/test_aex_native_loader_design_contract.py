@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -249,7 +250,7 @@ class AexNativeLoaderDesignContractTests(unittest.TestCase):
         }
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         paths = {
             "worker": roots["worker"] / f"{stamp}-worker-design.local.json",
             "sandbox": roots["sandbox"] / f"{stamp}-sandbox-policy.local.json",
@@ -284,7 +285,7 @@ class AexNativeLoaderDesignContractTests(unittest.TestCase):
         self.assertEqual(render_path, paths["render"].resolve())
         self.assertEqual(ofx_path, paths["ofx"].resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-loader-stub.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-loader-stub.json"
         outside.write_text(json.dumps(make_loader_stub()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_native_loader_design_contract.load_native_loader_stub(outside)
@@ -303,7 +304,7 @@ class AexNativeLoaderDesignContractTests(unittest.TestCase):
             ofx_route_contract=ofx,
             ofx_route_contract_path=ofx_path,
         )
-        out = LAB_ROOT / "target" / "native-loader-design" / f"{time.time_ns()}-loader-design.local.json"
+        out = LAB_ROOT / "target" / "native-loader-design" / f"{time.time_ns()}-{os.getpid()}-loader-design.local.json"
         written = aex_native_loader_design_contract.write_json_create_new(out, contract)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

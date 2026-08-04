@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -139,19 +140,19 @@ class AexCandidateMatrixTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         report_root = LAB_ROOT / "target" / "aex-static-probe"
         report_root.mkdir(parents=True, exist_ok=True)
-        source = report_root / f"{time.time_ns()}-candidate-source.local.json"
+        source = report_root / f"{time.time_ns()}-{os.getpid()}-candidate-source.local.json"
         source.write_text(json.dumps(make_report()), encoding="utf-8")
         loaded, resolved = aex_candidate_matrix.load_static_report(source)
         self.assertEqual(loaded["report_kind"], "aex_static_probe")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-candidate.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-candidate.json"
         outside.write_text(json.dumps(make_report()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_candidate_matrix.load_static_report(outside)
 
         payload = aex_candidate_matrix.build_candidate_matrix(loaded, resolved)
-        out = LAB_ROOT / "target" / "candidate-matrix" / f"{time.time_ns()}-candidate-matrix.local.json"
+        out = LAB_ROOT / "target" / "candidate-matrix" / f"{time.time_ns()}-{os.getpid()}-candidate-matrix.local.json"
         written = aex_candidate_matrix.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

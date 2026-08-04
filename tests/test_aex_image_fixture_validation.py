@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -114,19 +115,19 @@ class AexImageFixtureValidationTests(unittest.TestCase):
     def test_paths_are_confined_and_output_is_create_new(self):
         suite_root = LAB_ROOT / "target" / "image-fixture-suite"
         suite_root.mkdir(parents=True, exist_ok=True)
-        source = suite_root / f"{time.time_ns()}-validation-suite.local.json"
+        source = suite_root / f"{time.time_ns()}-{os.getpid()}-validation-suite.local.json"
         source.write_text(json.dumps(make_suite()), encoding="utf-8")
         loaded, resolved = aex_image_fixture_validation.load_image_suite(source)
         self.assertEqual(loaded["report_kind"], "aex_image_fixture_suite")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-validation-suite.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-validation-suite.json"
         outside.write_text(json.dumps(make_suite()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_image_fixture_validation.load_image_suite(outside)
 
         payload = aex_image_fixture_validation.build_validation_report(loaded, resolved)
-        out = LAB_ROOT / "target" / "image-fixture-validation" / f"{time.time_ns()}-validation.local.json"
+        out = LAB_ROOT / "target" / "image-fixture-validation" / f"{time.time_ns()}-{os.getpid()}-validation.local.json"
         written = aex_image_fixture_validation.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

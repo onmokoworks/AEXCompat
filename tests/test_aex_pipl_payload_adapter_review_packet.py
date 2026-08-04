@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -295,7 +296,7 @@ class AexPiplPayloadAdapterReviewPacketTests(unittest.TestCase):
         parser_root.mkdir(parents=True, exist_ok=True)
         audit_root.mkdir(parents=True, exist_ok=True)
         schema_root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         gate_path = gate_root / f"{stamp}-gate.local.json"
         parser_path = parser_root / f"{stamp}-parser.local.json"
         audit_path = audit_root / f"{stamp}-audit.local.json"
@@ -314,7 +315,7 @@ class AexPiplPayloadAdapterReviewPacketTests(unittest.TestCase):
         self.assertEqual(resolved_audit, audit_path.resolve())
         self.assertEqual(resolved_schema, schema_path.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-gate.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-gate.json"
         outside.write_text(json.dumps(gate()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_pipl_payload_adapter_review_packet.load_pipl_parser_gate(outside)
@@ -329,7 +330,7 @@ class AexPiplPayloadAdapterReviewPacketTests(unittest.TestCase):
             parameter_schema_review=loaded_schema,
             parameter_schema_review_path=resolved_schema,
         )
-        out = LAB_ROOT / "target" / "pipl-payload-adapter-review" / f"{time.time_ns()}-review.local.json"
+        out = LAB_ROOT / "target" / "pipl-payload-adapter-review" / f"{time.time_ns()}-{os.getpid()}-review.local.json"
         written = aex_pipl_payload_adapter_review_packet.write_json_create_new(out, packet)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

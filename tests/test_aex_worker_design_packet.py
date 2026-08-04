@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -100,20 +101,20 @@ class AexWorkerDesignPacketTests(unittest.TestCase):
     def test_manifest_must_be_under_fixture_review_root(self):
         manifest_root = LAB_ROOT / "target" / "fixture-review"
         manifest_root.mkdir(parents=True, exist_ok=True)
-        source = manifest_root / f"{time.time_ns()}-worker-source.json"
+        source = manifest_root / f"{time.time_ns()}-{os.getpid()}-worker-source.json"
         source.write_text(json.dumps(make_manifest()), encoding="utf-8")
         loaded, resolved = aex_worker_design_packet.load_manifest(source)
         self.assertEqual(loaded["manifest_kind"], "aex_fixture_review_manifest")
         self.assertEqual(resolved, source.resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-manifest.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-manifest.json"
         outside.write_text(json.dumps(make_manifest()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_worker_design_packet.load_manifest(outside)
 
     def test_packet_writer_is_create_new_under_packet_root(self):
         packet = aex_worker_design_packet.build_packet_payload(make_manifest(), Path("manifest.json"))
-        path = LAB_ROOT / "target" / "worker-design" / f"{time.time_ns()}-packet.local.json"
+        path = LAB_ROOT / "target" / "worker-design" / f"{time.time_ns()}-{os.getpid()}-packet.local.json"
         written = aex_worker_design_packet.write_json_create_new(path, packet)
         self.assertEqual(written, path.resolve())
         with self.assertRaises(FileExistsError):

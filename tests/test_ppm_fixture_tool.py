@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import os
 import time
 import unittest
 from pathlib import Path
@@ -31,7 +32,7 @@ class PpmFixtureToolTests(unittest.TestCase):
         self.assertEqual(inverted.pixels[0], 255 - image.pixels[0])
 
     def test_write_create_new_and_read(self):
-        path = LAB_ROOT / "target" / "ppm-fixtures" / f"{time.time_ns()}-fixture.ppm"
+        path = LAB_ROOT / "target" / "ppm-fixtures" / f"{time.time_ns()}-{os.getpid()}-fixture.ppm"
         image = ppm_fixture_tool.generate_image(8, 8, "checker")
         ppm_fixture_tool.write_ppm_create_new(path, image)
         loaded = ppm_fixture_tool.read_ppm(path)

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -38,7 +39,7 @@ SAFETY_FALSE = {
 def create_ppm(name: str, width: int, height: int, pattern: str) -> Path:
     root = LAB_ROOT / "target" / "ppm-fixtures"
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-{name}.ppm"
+    path = root / f"{time.time_ns()}-{os.getpid()}-{name}.ppm"
     ppm_fixture_tool.write_ppm_create_new(path, ppm_fixture_tool.generate_image(width, height, pattern))
     return path
 
@@ -218,7 +219,7 @@ def ofx_packet() -> dict:
 def write_json(root_name: str, name: str, payload: dict) -> Path:
     root = LAB_ROOT / "target" / root_name
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{time.time_ns()}-{name}.local.json"
+    path = root / f"{time.time_ns()}-{os.getpid()}-{name}.local.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
@@ -281,7 +282,7 @@ class AexCandidateNoLoadTestRunnerTests(unittest.TestCase):
             ofx_packet=ofx_packet_payload,
             ofx_packet_path=bundle["paths"]["ofx_packet"],
             worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
-            output_prefix=f"{time.time_ns()}-candidate-runner",
+            output_prefix=f"{time.time_ns()}-{os.getpid()}-candidate-runner",
         )
 
         self.assertEqual(report["report_kind"], "aex_candidate_no_load_test_runner")
@@ -328,7 +329,7 @@ class AexCandidateNoLoadTestRunnerTests(unittest.TestCase):
                 ofx_packet=ofx_packet(),
                 ofx_packet_path=bundle["paths"]["ofx_packet"],
                 worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
-                output_prefix=f"{time.time_ns()}-bad-runner",
+                output_prefix=f"{time.time_ns()}-{os.getpid()}-bad-runner",
             )
         self.assertIn("execution_performed must be false", str(ctx.exception))
 
@@ -345,7 +346,7 @@ class AexCandidateNoLoadTestRunnerTests(unittest.TestCase):
                 ofx_packet=ofx_packet(),
                 ofx_packet_path=bundle["paths"]["ofx_packet"],
                 worker_path=LAB_ROOT / "tools" / "aex_no_load_worker.py",
-                output_prefix=f"{time.time_ns()}-bad-runner",
+                output_prefix=f"{time.time_ns()}-{os.getpid()}-bad-runner",
             )
         self.assertIn("native_test_plan_ready must be false", str(ctx.exception))
 
@@ -361,7 +362,7 @@ class AexCandidateNoLoadTestRunnerTests(unittest.TestCase):
         self.assertEqual(loaded["report_kind"], "aex_candidate_no_load_test_runner_dryrun")
         self.assertEqual(resolved, bundle["runner_dryrun_path"].resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-runner-dryrun.local.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-runner-dryrun.local.json"
         outside.write_text(json.dumps(bundle["expected"]), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_candidate_no_load_test_runner.load_runner_dryrun(outside)
@@ -371,7 +372,7 @@ class AexCandidateNoLoadTestRunnerTests(unittest.TestCase):
             "publication_status": "local-only",
             "report_kind": "aex_candidate_no_load_test_runner",
         }
-        out = LAB_ROOT / "target" / "candidate-test-runner" / f"{time.time_ns()}-runner.local.json"
+        out = LAB_ROOT / "target" / "candidate-test-runner" / f"{time.time_ns()}-{os.getpid()}-runner.local.json"
         written = aex_candidate_no_load_test_runner.write_json_create_new(out, payload)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):

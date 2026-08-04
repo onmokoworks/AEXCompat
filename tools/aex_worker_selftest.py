@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -105,7 +106,7 @@ def load_design_packet(path: Path | None) -> tuple[dict[str, Any] | None, Path |
 
 def create_default_input_ppm() -> Path:
     PPM_FIXTURE_ROOT.mkdir(parents=True, exist_ok=True)
-    output = PPM_FIXTURE_ROOT / f"worker-selftest-input-{time.time_ns()}.ppm"
+    output = PPM_FIXTURE_ROOT / f"worker-selftest-input-{time.time_ns()}-{os.getpid()}.ppm"
     image = ppm_fixture_tool.generate_image(8, 8, "checker")
     ppm_fixture_tool.write_ppm_create_new(output, image)
     return output

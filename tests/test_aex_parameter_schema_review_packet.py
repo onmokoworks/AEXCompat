@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 import unittest
@@ -187,7 +188,7 @@ class AexParameterSchemaReviewPacketTests(unittest.TestCase):
         }
         for root in roots.values():
             root.mkdir(parents=True, exist_ok=True)
-        stamp = time.time_ns()
+        stamp = f"{time.time_ns()}-{os.getpid()}"
         paths = {
             "plan": roots["plan"] / f"{stamp}-schema-plan.local.json",
             "publication": roots["publication"] / f"{stamp}-publication.local.json",
@@ -208,7 +209,7 @@ class AexParameterSchemaReviewPacketTests(unittest.TestCase):
         self.assertEqual(publication_path, paths["publication"].resolve())
         self.assertEqual(ofx_path, paths["ofx"].resolve())
 
-        outside = LAB_ROOT / "target" / f"{time.time_ns()}-outside-review.json"
+        outside = LAB_ROOT / "target" / f"{time.time_ns()}-{os.getpid()}-outside-review.json"
         outside.write_text(json.dumps(make_schema_plan()), encoding="utf-8")
         with self.assertRaises(ValueError):
             aex_parameter_schema_review_packet.load_schema_plan(outside)
@@ -221,7 +222,7 @@ class AexParameterSchemaReviewPacketTests(unittest.TestCase):
             ofx_route_contract=ofx,
             ofx_route_contract_path=ofx_path,
         )
-        out = LAB_ROOT / "target" / "parameter-schema-review" / f"{time.time_ns()}-schema-review.local.json"
+        out = LAB_ROOT / "target" / "parameter-schema-review" / f"{time.time_ns()}-{os.getpid()}-schema-review.local.json"
         written = aex_parameter_schema_review_packet.write_json_create_new(out, packet)
         self.assertEqual(written, out.resolve())
         with self.assertRaises(FileExistsError):
