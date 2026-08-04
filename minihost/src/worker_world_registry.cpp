@@ -58,6 +58,12 @@ struct PlatformWorldEntry {
 };
 
 std::mutex g_mutex;
+// Keyed by the pixel buffer, not by the `PF_EffectWorld` the caller happened to
+// pass. `PF_NewWorld` fills a caller-owned value struct and AE never treats that
+// struct's address as the world's identity, so a plug-in may allocate twice
+// through one local and may dispose through a copy of the struct. Keying on the
+// struct rejected both (issue #700). The pixel pointer is unique while the
+// allocation is live, which is what ownership actually means here.
 std::unordered_map<void*, OwnedWorld> g_worlds;
 uint64_t g_created{};
 uint64_t g_disposed{};
@@ -84,6 +90,15 @@ constexpr std::size_t kMaxPlatformReferences = 64;
 constexpr std::size_t kMaxOwnedAegpWorlds = 64;
 constexpr uint64_t kMaxPlatformWorldBytes = 64ULL * 1024 * 1024;
 
+// The pixel pointer a `PF_EffectWorld` carries (offset 24), or null when the
+// struct is absent or already cleared by `dispose_world`.
+void* world_pixels(const void* world) {
+  if (!world) return nullptr;
+  void* pixels{};
+  std::memcpy(&pixels, static_cast<const std::byte*>(world) + 24, sizeof(pixels));
+  return pixels;
+}
+
 int32_t bytes_per_pixel(int32_t pixel_format) {
   if (pixel_format == kPixelFormatArgb32) return 4;
   if (pixel_format == kPixelFormatArgb64) return 8;
@@ -99,34 +114,17 @@ world_safety::OwnedWorldResolution resolve_owned_world(
     int32_t height, world_safety::DispatchWorldFormat& result) {
   using world_safety::OwnedWorldResolution;
   std::lock_guard<std::mutex> lock(g_mutex);
-  const auto exact = g_worlds.find(const_cast<void*>(world));
-  if (exact != g_worlds.end()) {
-    if (exact->second.pixels != data) return OwnedWorldResolution::rejected;
-    result = {world, data, width, height, rowbytes, exact->second.pixel_format, 0};
-    return OwnedWorldResolution::resolved;
-  }
-
-  const OwnedWorld* unique_owned = nullptr;
-  const void* unique_world = nullptr;
-  for (const auto& candidate : g_worlds) {
-    if (candidate.second.pixels != data) continue;
-    const auto* candidate_bytes = static_cast<const std::byte*>(candidate.first);
-    int32_t candidate_rowbytes{}, candidate_width{}, candidate_height{};
-    std::memcpy(&candidate_rowbytes, candidate_bytes + 32,
-                sizeof(candidate_rowbytes));
-    std::memcpy(&candidate_width, candidate_bytes + 36,
-                sizeof(candidate_width));
-    std::memcpy(&candidate_height, candidate_bytes + 40,
-                sizeof(candidate_height));
-    if (candidate_rowbytes != rowbytes || candidate_width != width ||
-        candidate_height != height) continue;
-    if (unique_owned) return OwnedWorldResolution::rejected;
-    unique_owned = &candidate.second;
-    unique_world = candidate.first;
-  }
-  if (!unique_owned) return OwnedWorldResolution::not_owned;
-  result = {unique_world, data, width, height, rowbytes,
-            unique_owned->pixel_format, 0};
+  // The pixel buffer is the identity, so a struct copy resolves exactly like the
+  // struct `PF_NewWorld` filled; the geometry the caller read out of that struct
+  // still has to describe the allocation.
+  const auto owned = g_worlds.find(data);
+  if (owned == g_worlds.end()) return OwnedWorldResolution::not_owned;
+  const int32_t pixel_bytes = bytes_per_pixel(owned->second.pixel_format);
+  const int64_t tight_rowbytes = static_cast<int64_t>(width) * pixel_bytes;
+  if (width <= 0 || height <= 0 || rowbytes < tight_rowbytes ||
+      static_cast<uint64_t>(rowbytes) * height > owned->second.size)
+    return OwnedWorldResolution::rejected;
+  result = {world, data, width, height, rowbytes, owned->second.pixel_format, 0};
   return OwnedWorldResolution::resolved;
 }
 
@@ -141,8 +139,13 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
                           void* world) {
   std::lock_guard<std::mutex> lock(g_mutex);
   const int32_t pixel_bytes = bytes_per_pixel(pixel_format);
+  // No check on the destination struct: reusing one local for a second
+  // allocation is legal, and rejecting it made a plug-in that builds a pyramid
+  // report PF_Err_OUT_OF_MEMORY (issue #700). Whatever the struct held before is
+  // the plug-in's to dispose through whichever copy it kept; the lifetime
+  // accounting reports it if nobody does.
   if (!world || width <= 0 || height <= 0 || pixel_bytes == 0 ||
-      g_worlds.count(world) || g_worlds.size() >= kMaxWorldCount) {
+      g_worlds.size() >= kMaxWorldCount) {
     ++g_invalid_operations;
     return 4;
   }
@@ -171,7 +174,7 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   std::memcpy(bytes + 44, extent.data(), sizeof(extent));
   std::memcpy(bytes + 88, &aspect_num, sizeof(aspect_num));
   std::memcpy(bytes + 92, &aspect_den, sizeof(aspect_den));
-  g_worlds.emplace(world, OwnedWorld{pixels, size, pixel_format});
+  g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format});
   ++g_created;
   g_live_bytes += size;
   if (aexcompat::l2_detail::g_trace_writer &&
@@ -192,8 +195,16 @@ int32_t __cdecl legacy_new_world(void* effect_ref, int32_t width,
 
 int32_t __cdecl dispose_world(void*, void* world) {
   std::lock_guard<std::mutex> lock(g_mutex);
-  const auto found = g_worlds.find(world);
-  if (!world || found == g_worlds.end()) {
+  // Resolved through the pixel pointer the struct carries, so a copy of the
+  // struct disposes the same allocation. Fail-closed is unchanged: a cleared
+  // struct carries a null pointer, a second dispose finds nothing, and a world
+  // this registry never allocated is not in the map.
+  if (!world) {
+    ++g_invalid_operations;
+    return 4;
+  }
+  const auto found = g_worlds.find(world_pixels(world));
+  if (found == g_worlds.end()) {
     ++g_invalid_operations;
     return 4;
   }
@@ -209,7 +220,7 @@ int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
   if (!world || !pixel_format) return 4;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
-    const auto found = g_worlds.find(const_cast<void*>(world));
+    const auto found = g_worlds.find(world_pixels(world));
     if (found != g_worlds.end()) {
       *pixel_format = found->second.pixel_format;
       return 0;
@@ -223,12 +234,12 @@ int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
 
 bool owns_world(void* world) {
   std::lock_guard<std::mutex> lock(g_mutex);
-  return world && g_worlds.count(world) != 0;
+  return world && g_worlds.count(world_pixels(world)) != 0;
 }
 
 bool owned_world_matches(void* world, int32_t pixel_format) {
   std::lock_guard<std::mutex> lock(g_mutex);
-  const auto found = g_worlds.find(world);
+  const auto found = g_worlds.find(world_pixels(world));
   return found != g_worlds.end() && found->second.pixel_format == pixel_format;
 }
 
@@ -288,12 +299,20 @@ bool snapshot_aegp_view(void** handle, AegpWorldView& view,
   if (found == g_aegp_views.end() || !found->second.pf_world) return false;
   if (!found->second.borrowed &&
       (!*handle || *handle != found->second.pf_world)) return false;
+  uint64_t owned_bytes = 0;
   if (!found->second.borrowed) {
-    const auto owned = g_worlds.find(found->second.pf_world);
+    const auto owned = g_worlds.find(world_pixels(found->second.pf_world));
     if (owned == g_worlds.end() ||
         owned->second.pixel_format != found->second.pixel_format) return false;
     std::memcpy(&world, found->second.pf_world, sizeof(world));
-    if (world.data != owned->second.pixels) return false;
+    // With the pixel buffer as the identity, `world.data == owned->second.pixels`
+    // is how the entry was found and can no longer fail. What used to be pinned
+    // by that comparison - that the geometry in the struct describes the
+    // allocation this view was registered against - is pinned by the size bound
+    // below instead (issue #700): a struct retargeted at a smaller owned buffer
+    // while keeping a larger width/height would otherwise hand
+    // `AEGP_GetBaseAddr8` and the blur an out-of-bounds span.
+    owned_bytes = owned->second.size;
   } else {
     std::memcpy(&world, found->second.pf_world, sizeof(world));
   }
@@ -307,6 +326,8 @@ bool snapshot_aegp_view(void** handle, AegpWorldView& view,
   if (!pixel_bytes || minimum_rowbytes >
           (std::numeric_limits<int32_t>::max)() ||
       world.rowbytes < minimum_rowbytes) return false;
+  if (owned_bytes && static_cast<uint64_t>(world.rowbytes) *
+          static_cast<uint64_t>(world.height) > owned_bytes) return false;
   view = found->second;
   return true;
 }
@@ -315,11 +336,21 @@ bool snapshot_owned_world(void* world, OwnedWorldSnapshot& snapshot) {
   snapshot = {};
   if (!world) return false;
   std::lock_guard<std::mutex> lock(g_mutex);
-  const auto found = g_worlds.find(world);
+  const auto found = g_worlds.find(world_pixels(world));
   if (found == g_worlds.end() || !found->second.pixels) return false;
   world_safety::LocalEffectWorld descriptor{};
   std::memcpy(&descriptor, world, sizeof(descriptor));
-  if (descriptor.data != found->second.pixels) return false;
+  // The pixel pointer is what resolved the entry, so it no longer needs
+  // comparing; the geometry the struct claims still has to fit the allocation
+  // (issue #700).
+  const int32_t pixel_bytes = bytes_per_pixel(found->second.pixel_format);
+  if (descriptor.width <= 0 || descriptor.height <= 0 || !pixel_bytes ||
+      descriptor.rowbytes <
+          static_cast<int64_t>(descriptor.width) * pixel_bytes ||
+      static_cast<uint64_t>(descriptor.rowbytes) *
+              static_cast<uint64_t>(descriptor.height) >
+          found->second.size)
+    return false;
   snapshot.world = descriptor;
   snapshot.pixel_format = found->second.pixel_format;
   return true;

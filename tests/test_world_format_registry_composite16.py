@@ -58,6 +58,13 @@ def test_composite16_runtime_provenance_and_concurrency_matrix():
 
 
 def test_pf_world_registry_rejects_double_dispose_and_oversized_allocations():
+    """Also covers PF_EffectWorld value semantics (issue #700).
+
+    `PF_NewWorld` fills a caller-owned struct; that struct's address is not the
+    world's identity. Reusing one local for a second allocation, and disposing
+    through a copy of the struct, are both legal and used by real plug-ins. The
+    self-test checks those alongside the rejections that must stay fail-closed.
+    """
     worker = _worker()
     assert worker is not None, "build aex_render_worker before running the runtime test"
     completed = subprocess.run(
@@ -72,6 +79,7 @@ def test_pf_world_registry_rejects_double_dispose_and_oversized_allocations():
     assert json.loads(completed.stdout) == {
         "pf_world_registry": "passed",
         "double_dispose_rejected": True,
+        "world_value_semantics": True,
         "allocation_limit_rejected": True,
         "owned_snapshot_atomic": True,
         "concurrent_snapshot_dispose": True,
