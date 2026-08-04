@@ -97,6 +97,38 @@ def _build_canonical_release_worker(build: Path) -> Path:
     if cmake is None:
         pytest.fail("cmake is unavailable on PATH")
 
+    def installation_version(entry):
+        return tuple(int(part) for part in entry["installationVersion"].split("."))
+
+    # Ninja first (#671): builds translation units in parallel, so the worker
+    # build is minutes faster than the MSBuild solution path on a hosted
+    # runner, and cmake does not need to know the newest VS's solution
+    # generator (the #89 failure class). vcvars64 supplies cl and, on a dev
+    # box without a PATH ninja, the VS-bundled ninja. A failed attempt falls
+    # through to the VS-generator path below.
+    newest = sorted(installations, key=installation_version, reverse=True)[0]
+    vcvars = (Path(newest["installationPath"]) / "VC" / "Auxiliary" / "Build"
+              / "vcvars64.bat")
+    source = ROOT / "minihost"
+    if vcvars.is_file():
+        ninja_build = build / "ninja"
+        ninja_build.mkdir(parents=True, exist_ok=True)
+        command = (
+            f'@call "{vcvars}" >nul && '
+            f'"{cmake}" -S "{source}" -B "{ninja_build}" -G Ninja '
+            f"-DCMAKE_BUILD_TYPE=Release && "
+            f'"{cmake}" --build "{ninja_build}" --target aex_render_worker'
+        )
+        batch = ninja_build / "build-worker.bat"
+        batch.write_text(command + "\n", encoding="ascii")
+        completed = subprocess.run(
+            ["cmd", "/d", "/c", str(batch)], check=False, timeout=420)
+        worker = ninja_build / "aex_render_worker.exe"
+        if completed.returncode == 0 and worker.is_file():
+            return worker
+        print("canonical worker: Ninja build failed "
+              f"(exit {completed.returncode}); falling back to a VS generator")
+
     # Generator names are ASCII, but pin the decode so a Japanese console code
     # page cannot break the substring match (cf. #58).
     cmake_help = subprocess.run(
@@ -108,9 +140,6 @@ def _build_canonical_release_worker(build: Path) -> Path:
         errors="replace",
     ).stdout
     known_generator_years = {17: "2022", 18: "2026"}
-
-    def installation_version(entry):
-        return tuple(int(part) for part in entry["installationVersion"].split("."))
 
     # Prefer the newest install whose generator the resolved cmake actually
     # advertises, falling back to older toolsets (e.g. VS 2022 under cmake 3.24).
@@ -134,7 +163,6 @@ def _build_canonical_release_worker(build: Path) -> Path:
     vcvars = vs_root / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
     if not vcvars.is_file():
         pytest.fail("vcvars64.bat is unavailable; install Visual Studio C++ tools")
-    source = ROOT / "minihost"
     command = (
         f'@call "{vcvars}" >nul && '
         f'"{cmake}" -S "{source}" -B "{build}" -G "{generator}" -A x64 && '
