@@ -86,6 +86,39 @@ New-Item -ItemType Directory -Force "$plugin\aexcompat\target\minihost-build" | 
 Copy-Item target\minihost-build\aex_*_worker.exe "$plugin\aexcompat\target\minihost-build\"
 ```
 
+### ログ (issue #655)
+
+フィルタが1件も出ないとき、原因は AviUtl2 の**ログ**に出る。この DLL は
+`InitializeLogger` で受け取ったハンドルへ `[AEXCompat] ` 始まりの行を書く。
+
+通常の起動で出る行 (下の warn で早期 return した場合は途中までになる):
+
+- `worker root: <path> (<経路>)` — 採用した worker root と、それが config.toml /
+  環境変数 / プラグインの隣のどれで決まったか。スキャン対象フォルダの実パスも出す
+- `registered N of M known plug-in(s); K queued for discovery` — 登録件数
+- `discovering K plug-in(s) in the background` — バックグラウンド discovery の開始
+- 完了時に `background discovery: N effect(s), R rejected`
+
+以下は warn で出る。どれも「フィルタが空」という同じ症状になる別々の原因で、
+ログが無かった頃は外から区別が付かなかった:
+
+| 状況 | 出る内容 |
+| --- | --- |
+| worker がどこにも無い | 探索する実パス (`target\minihost-build\aex_l2_worker.exe`) と設定先 |
+| 指定した root に worker が無い | root を出したうえで「そこには worker が無い」と明示 |
+| config.toml が読めない / パースできない | パスとエラー。設定が全部無視されることを明示 |
+| .aex が1件も見つからない | 実際に見たフォルダのパス。読めなかったフォルダがあればそれも |
+| 全部 `ignore` に一致した | 件数と、`ignore` が原因であること |
+| M件知っているのに0件登録・0件キュー | worker が全滅している可能性 (issue #651 の形) |
+| discovery が全件 reject | 同上 |
+| キャッシュを書けなかった | 再起動しても結果が残らないこと |
+
+初回起動の「0件登録・全件キュー」は正常な状態なので warn ではなく info にし、
+「次回起動で出る」と明示する。ここを warn にすると本物の異常と区別が付かなくなる。
+
+`InitializeLogger` が `RegisterPlugin` より後に呼ばれても行は落ちない (ハンドルを
+受け取るまでバッファに溜め、受け取った時点で順序を保ったまま吐く)。
+
 ## 設定 (issue #299)
 
 対象 AEX フォルダ・worker repository・除外エフェクトを TOML で設定する。既定の設定パスは

@@ -2504,7 +2504,7 @@ mod tests {
 
         assert_eq!(
             resolve_worker_root(None, None, Some(plugin.path().join("x.aux2"))),
-            Some(plugin.path().to_path_buf())
+            Some((plugin.path().to_path_buf(), WorkerRootSource::BesidePlugin))
         );
     }
 
@@ -2518,7 +2518,7 @@ mod tests {
 
         assert_eq!(
             resolve_worker_root(None, None, Some(plugin.path().join("x.aux2"))),
-            Some(bundle)
+            Some((bundle, WorkerRootSource::BesidePlugin))
         );
     }
 
@@ -2546,7 +2546,7 @@ mod tests {
 
         assert_eq!(
             resolve_worker_root(None, Some(checkout.path()), Some(plugin.path().join("x.aux2"))),
-            Some(checkout.path().to_path_buf())
+            Some((checkout.path().to_path_buf(), WorkerRootSource::Named))
         );
         assert_eq!(
             resolve_worker_root(
@@ -2554,7 +2554,7 @@ mod tests {
                 None,
                 Some(plugin.path().join("x.aux2"))
             ),
-            Some(checkout.path().to_path_buf()),
+            Some((checkout.path().to_path_buf(), WorkerRootSource::Named)),
             "the environment override behaves the same way"
         );
     }
@@ -2570,12 +2570,14 @@ mod tests {
 
         assert_eq!(
             resolve_worker_root(None, Some(&gone), Some(plugin.path().join("x.aux2"))),
-            Some(plugin.path().to_path_buf())
+            Some((plugin.path().to_path_buf(), WorkerRootSource::BesidePlugin))
         );
     }
 
     /// ...but with nothing beside the plugin either, the named checkout is still
-    /// the answer: a developer is about to build a worker there.
+    /// the answer: a developer is about to build a worker there. The reported
+    /// source says the worker is missing, so the log can name that as the likely
+    /// cause when nothing registers (issue #655).
     #[test]
     fn a_named_checkout_survives_when_no_worker_exists_anywhere() {
         let plugin = TempRoot::new("fresh-checkout-plugin");
@@ -2583,7 +2585,7 @@ mod tests {
 
         assert_eq!(
             resolve_worker_root(None, Some(&fresh), Some(plugin.path().join("x.aux2"))),
-            Some(fresh)
+            Some((fresh, WorkerRootSource::NamedWithoutWorker))
         );
     }
 
@@ -2597,7 +2599,7 @@ mod tests {
 
         assert_eq!(
             resolve_worker_root(None, None, Some(plugin.path().join("x.aux2"))),
-            Some(plugin.path().to_path_buf())
+            Some((plugin.path().to_path_buf(), WorkerRootSource::BesidePlugin))
         );
     }
 
@@ -2616,7 +2618,375 @@ mod tests {
                 Some(&from_config),
                 Some(plugin.path().join("x.aux2"))
             ),
-            Some(from_env)
+            Some((from_env, WorkerRootSource::Named))
+        );
+    }
+
+    // --- load-time logging (issue #655) --------------------------------------
+
+    /// Knowing about plug-ins, registering none, and queueing none is the shape
+    /// of the two incidents behind this work (a worker root pointing at a deleted
+    /// worktree, then a worker regression failing every plug-in). The summary has
+    /// to name that state instead of reporting "0 of 576" as if it were routine.
+    #[test]
+    fn the_summary_calls_out_registering_nothing() {
+        let summary = registration_summary(576, 0, 0, true);
+
+        assert!(summary.contains("576"), "{summary}");
+        assert!(
+            summary.contains("0 of 576"),
+            "the count has to be unambiguous: {summary}"
+        );
+        assert!(
+            summary.contains("worker is failing for every plug-in"),
+            "the likely cause has to be named: {summary}"
+        );
+        assert!(registration_is_alarming(576, 0, 0));
+    }
+
+    /// A first launch registers nothing and queues everything, which is the
+    /// design working (results appear next launch), not a broken host. Reporting
+    /// it in the same alarming words as the incident above would train the user
+    /// to ignore the one message that matters.
+    #[test]
+    fn a_first_launch_is_not_reported_as_a_worker_failure() {
+        let summary = registration_summary(576, 0, 576, true);
+
+        assert!(
+            !summary.contains("failing for every plug-in"),
+            "everything queued is the expected first launch: {summary}"
+        );
+        assert!(summary.contains("576"), "{summary}");
+        assert!(
+            !registration_is_alarming(576, 0, 576),
+            "a first launch must not warn"
+        );
+    }
+
+    /// A launch on an empty folder is not the failure either: there is nothing to
+    /// register and nothing to work on, so it must not read as a broken host.
+    #[test]
+    fn knowing_no_plugins_is_not_reported_as_a_failure() {
+        let summary = registration_summary(0, 0, 0, true);
+
+        assert!(
+            !summary.contains("failing for every plug-in"),
+            "no plug-ins is not a worker failure: {summary}"
+        );
+        // Positive too, so an implementation that returned "" for this input —
+        // logging a bare "[AEXCompat] " line — does not pass on the negative.
+        assert!(summary.contains("registered 0 of 0"), "{summary}");
+        assert!(!registration_is_alarming(0, 0, 0));
+    }
+
+    /// The ordinary case still reports all three counts, so a partial failure
+    /// (some registered, the rest queued) is visible without a debugger.
+    #[test]
+    fn the_summary_reports_registered_known_and_pending() {
+        let summary = registration_summary(576, 570, 6, true);
+
+        assert!(summary.contains("570 of 576"), "{summary}");
+        // Not a bare `contains("6")`: "576" satisfies that, so an implementation
+        // that dropped the pending count would pass.
+        assert!(summary.contains("6 queued"), "{summary}");
+        assert!(!summary.contains("failing for every plug-in"), "{summary}");
+        assert!(!registration_is_alarming(576, 570, 6));
+    }
+
+    /// An untrustworthy scan pads the known set with cached plug-ins this launch
+    /// never saw (#321), so the counts mean something different and the line has
+    /// to say so — otherwise "registered 500 of 500" hides that 488 of them were
+    /// never found on disk.
+    #[test]
+    fn an_incomplete_scan_is_named_in_the_summary() {
+        assert!(
+            registration_summary(500, 500, 0, false).contains("could not be read"),
+            "an incomplete scan has to be admitted"
+        );
+        assert!(
+            !registration_summary(500, 500, 0, true).contains("could not be read"),
+            "a complete scan must not claim otherwise"
+        );
+    }
+
+    /// Finding no .aex at all is a third way to get an empty filter list, and it
+    /// used to be the quietest: `RegisterPlugin` returned before any other
+    /// reporting.
+    ///
+    /// The line names the folders instead of guessing the cause. A mistyped
+    /// folder and one that exists but cannot be read both arrive here with
+    /// `scan_complete == false` — `collect_aex` only ever sees a failed
+    /// `read_dir` — so a message that branched on it would confidently tell a
+    /// user with a typo to wait for a transient problem to clear.
+    #[test]
+    fn an_empty_scan_names_the_folders_it_searched() {
+        let dirs = vec![PathBuf::from(r"C:\ProgramData\aviutl2\Plug-ins")];
+
+        for scan_complete in [true, false] {
+            let summary = empty_scan_summary(&dirs, 0, scan_complete);
+            assert!(
+                summary.contains(r"C:\ProgramData\aviutl2\Plug-ins"),
+                "the folder is the payload when diagnosing this: {summary}"
+            );
+        }
+        let unreadable = empty_scan_summary(&dirs, 0, false);
+        assert!(
+            unreadable.contains("path exists"),
+            "an unreadable folder has to point at the path, not at a wait: {unreadable}"
+        );
+        assert!(
+            unreadable.contains(ENV_DIR),
+            "the env override wins over config.toml, so it has to be named: {unreadable}"
+        );
+        assert!(
+            empty_scan_summary(&[], 0, true).contains("no folder"),
+            "resolving no folder at all still has to say something"
+        );
+    }
+
+    /// Ignoring every .aex found is a different cause with the same symptom, and
+    /// blaming the folders for it would send the user looking in the wrong place.
+    #[test]
+    fn an_all_ignored_scan_blames_the_ignore_list() {
+        let summary = empty_scan_summary(&[PathBuf::from("x")], 42, true);
+
+        assert!(summary.contains("ignore"), "{summary}");
+        assert!(summary.contains("42"), "{summary}");
+    }
+
+    /// ...but an unreadable folder alongside the ignored ones still gets named:
+    /// the ignore list explains only what was actually walked, and the folder
+    /// that failed may be where the user's plug-ins really are.
+    #[test]
+    fn an_all_ignored_scan_still_admits_an_unreadable_folder() {
+        let summary = empty_scan_summary(&[PathBuf::from("x")], 42, false);
+
+        assert!(summary.contains("ignore"), "{summary}");
+        assert!(
+            summary.contains("could not be read"),
+            "the incomplete scan must not be swallowed by the ignore branch: {summary}"
+        );
+    }
+
+    /// The remediation has to name the path the search actually probes, and both
+    /// ways a root can be named. Pointing the user at the plugin folder alone
+    /// would have them drop the exe where nothing looks for it; pointing an
+    /// env-var user at config.toml sends them to a file that is not in play.
+    #[test]
+    fn the_worker_root_wording_covers_every_source() {
+        assert!(
+            WorkerRootSource::BesidePlugin
+                .describe()
+                .contains("beside the plugin"),
+            "{}",
+            WorkerRootSource::BesidePlugin.describe()
+        );
+        for named in [WorkerRootSource::Named, WorkerRootSource::NamedWithoutWorker] {
+            let described = named.describe();
+            assert!(described.contains("config.toml"), "{named:?}: {described}");
+            assert!(
+                described.contains(ENV_REPOSITORY),
+                "{named:?} must name the env override too: {described}"
+            );
+        }
+        assert!(
+            WorkerRootSource::NamedWithoutWorker
+                .describe()
+                .contains("no worker"),
+            "a named root with no worker has to say so: {}",
+            WorkerRootSource::NamedWithoutWorker.describe()
+        );
+    }
+
+    /// The one message whose whole job is to be actionable. It has to name the
+    /// path the search actually probes — a user who drops the exe straight into
+    /// the plugin folder, as "beside the plugin" alone implies, gets the same
+    /// silent empty list — and both ways to name a root.
+    #[test]
+    fn the_missing_worker_advice_names_the_probed_path_and_both_settings() {
+        let advice = missing_worker_advice();
+
+        assert!(
+            advice.contains(L2_WORKER_RELATIVE_PATH.replace('/', "\\").as_str()),
+            "the advice has to carry the probed subpath in Windows spelling, not \
+             just the folder: {advice}"
+        );
+        assert!(advice.contains("config.toml"), "{advice}");
+        assert!(advice.contains(ENV_REPOSITORY), "{advice}");
+    }
+
+    /// Rejecting every plug-in is the worker-failure signature (issue #651), not
+    /// hundreds of plug-ins that all happen to be codecs.
+    #[test]
+    fn discovery_calls_out_rejecting_everything() {
+        let summary = discovery_summary(0, 576, false);
+
+        assert!(summary.contains("576"), "{summary}");
+        assert!(
+            summary.contains("worker is likely failing"),
+            "the likely cause has to be named: {summary}"
+        );
+    }
+
+    /// A few codec `.aex` among working effects is routine, so it must not be
+    /// dressed up as a worker failure.
+    #[test]
+    fn some_rejections_alongside_effects_are_routine() {
+        let summary = discovery_summary(570, 6, false);
+
+        assert!(summary.contains("570"), "{summary}");
+        assert!(summary.contains("6"), "{summary}");
+        assert!(!summary.contains("worker is likely failing"), "{summary}");
+    }
+
+    /// A pass cut short by shutdown says so, so a partial count is not read as
+    /// the final tally of what the machine supports.
+    #[test]
+    fn an_interrupted_pass_says_it_stopped_early() {
+        assert!(
+            discovery_summary(12, 3, true).contains("stopped early"),
+            "an interrupted pass has to admit it"
+        );
+        assert!(
+            !discovery_summary(12, 3, false).contains("stopped early"),
+            "a complete pass must not claim it"
+        );
+        assert!(
+            discovery_summary(0, 576, true).contains("stopped early"),
+            "the all-rejected wording carries it too"
+        );
+    }
+
+    /// Discovering nothing at all is not a failure to report: with an empty
+    /// queue the pass has nothing to say about the worker — and nothing to
+    /// restart AviUtl2 for either.
+    #[test]
+    fn an_empty_discovery_pass_is_not_reported_as_a_failure() {
+        let summary = discovery_summary(0, 0, false);
+
+        assert!(
+            !summary.contains("worker is likely failing"),
+            "nothing attempted is not a worker failure: {summary}"
+        );
+        assert!(
+            !summary.contains("Restart"),
+            "there is nothing to restart for: {summary}"
+        );
+        // Positive too: an empty string satisfies both negatives above and would
+        // log a bare "[AEXCompat] " line.
+        assert!(summary.contains("nothing was discovered"), "{summary}");
+        assert!(!discovery_is_alarming(0, 0));
+    }
+
+    /// The level and the wording read the same condition, so an edit cannot leave
+    /// an alarming sentence logged at info (or a routine one at warn).
+    #[test]
+    fn the_discovery_level_and_wording_agree() {
+        for (effects, rejected) in [(0usize, 576usize), (570, 6), (0, 0), (12, 0)] {
+            assert_eq!(
+                discovery_is_alarming(effects, rejected),
+                discovery_summary(effects, rejected, false).contains("worker is likely failing"),
+                "({effects}, {rejected})"
+            );
+        }
+    }
+
+    /// Lines captured by the fake sink below, newest last.
+    static CAPTURED_LOG: Mutex<Vec<(&'static str, String)>> = Mutex::new(Vec::new());
+
+    unsafe fn capture(level: &'static str, message: aviutl2_sys::common::LPCWSTR) {
+        let mut len = 0usize;
+        // SAFETY: the caller is our own `log_line`, which passes a
+        // null-terminated UTF-16 buffer alive for the duration of the call.
+        unsafe {
+            while *message.add(len) != 0 {
+                len += 1;
+            }
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(message, len));
+            if let Ok(mut captured) = CAPTURED_LOG.lock() {
+                captured.push((level, text));
+            }
+        }
+    }
+
+    unsafe extern "C" fn capture_info(
+        _handle: *mut aviutl2_sys::logger2::LOG_HANDLE,
+        message: aviutl2_sys::common::LPCWSTR,
+    ) {
+        unsafe { capture("info", message) }
+    }
+
+    unsafe extern "C" fn capture_warn(
+        _handle: *mut aviutl2_sys::logger2::LOG_HANDLE,
+        message: aviutl2_sys::common::LPCWSTR,
+    ) {
+        unsafe { capture("warn", message) }
+    }
+
+    /// The lines that matter most are written during registration, and the SDK
+    /// does not promise `InitializeLogger` runs first. Holding them until the
+    /// sink arrives is what keeps this issue's whole point from depending on that
+    /// ordering (issue #655).
+    ///
+    /// One test rather than several: it installs the process-wide sink, and no
+    /// other test in this binary touches `LOGGER`, `PENDING_LOG`, `log_info`,
+    /// `log_warn`, or the reporting wrappers — so splitting it would make the
+    /// pieces order-dependent under the test harness's threads.
+    #[test]
+    fn the_host_log_receives_every_line_in_order_and_at_its_level() {
+        log_warn("held first");
+        log_info("held second");
+
+        let handle: &'static mut aviutl2_sys::logger2::LOG_HANDLE =
+            Box::leak(Box::new(aviutl2_sys::logger2::LOG_HANDLE {
+                log: capture_info,
+                info: capture_info,
+                warn: capture_warn,
+                error: capture_warn,
+                verbose: capture_info,
+            }));
+        set_logger(handle as *mut _);
+
+        // Lines written once the sink exists must still arrive: an implementation
+        // that only ever flushed the buffer would pass without this.
+        log_info("after the sink");
+
+        // A null handle is nothing to publish. Storing it would un-publish the
+        // working sink and strand every later line in the buffer, and flushing
+        // through it would call a null function pointer.
+        set_logger(std::ptr::null_mut());
+        log_info("after a null handle");
+
+        let captured = CAPTURED_LOG.lock().unwrap();
+        let lines: Vec<(&str, &str)> = captured
+            .iter()
+            .map(|(level, text)| (*level, text.as_str()))
+            .collect();
+
+        for expected in [
+            "held first",
+            "held second",
+            "after the sink",
+            "after a null handle",
+        ] {
+            assert_eq!(
+                lines.iter().filter(|(_, text)| text.contains(expected)).count(),
+                1,
+                "{expected:?} must appear exactly once, not dropped and not \
+                 double-emitted: {lines:?}"
+            );
+        }
+        assert_eq!(
+            lines
+                .iter()
+                .map(|(level, _)| *level)
+                .collect::<Vec<&str>>(),
+            vec!["warn", "info", "info", "info"],
+            "each line has to reach the sink at its own level, in order: {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|(_, text)| text.starts_with("[AEXCompat] ")),
+            "the plugin has to be identifiable in a shared log: {lines:?}"
         );
     }
 }
