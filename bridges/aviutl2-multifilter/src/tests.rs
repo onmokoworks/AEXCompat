@@ -1906,6 +1906,377 @@ mod tests {
         );
     }
 
+    // --- filter name collisions (issue #661) --------------------------------
+
+    /// The shipped case: After Effects installs `Threshold.aex` twice, in
+    /// `Effects` and in `Effects\CycoreFXHD`. Registering both as `Threshold`
+    /// makes AviUtl2 refuse the second with a modal dialog that blocks startup,
+    /// and loses that effect. Only the colliding pair is qualified — every other
+    /// filter has to keep the name the user already knows.
+    #[test]
+    fn a_colliding_stem_is_qualified_by_its_folder_and_others_are_left_alone() {
+        let plugins = vec![
+            PathBuf::from(r"C:\AE\Plug-ins\Effects\CycoreFXHD\Threshold.aex"),
+            PathBuf::from(r"C:\AE\Plug-ins\Effects\Levels.aex"),
+            PathBuf::from(r"C:\AE\Plug-ins\Effects\Threshold.aex"),
+        ];
+
+        assert_eq!(
+            unique_filter_names(&plugins, &[]),
+            vec![
+                "Threshold (CycoreFXHD)".to_owned(),
+                "Levels".to_owned(),
+                "Threshold (Effects)".to_owned(),
+            ]
+        );
+    }
+
+    /// The plug-in that this launch could not see still holds its claim on the
+    /// name. Without that, a folder that momentarily could not be read renames a
+    /// filter that *did* register — and AviUtl2 drops saved objects whose filter
+    /// name no longer exists, which is the #307 data loss all over again.
+    #[test]
+    fn a_plugin_the_scan_missed_still_counts_toward_collisions() {
+        let registered = vec![PathBuf::from(r"C:\AE\Plug-ins\Effects\Threshold.aex")];
+        let unseen = vec![PathBuf::from(
+            r"C:\AE\Plug-ins\Effects\CycoreFXHD\Threshold.aex",
+        )];
+
+        assert_eq!(
+            unique_filter_names(&registered, &unseen),
+            vec!["Threshold (Effects)".to_owned()],
+            "the surviving filter keeps the qualified name it registered under"
+        );
+    }
+
+    /// ...but a plug-in listed in both sets is one plug-in, not a collision with
+    /// itself. Counting it twice would qualify a name that is actually unique.
+    #[test]
+    fn a_plugin_in_both_sets_is_not_a_collision_with_itself() {
+        let registered = vec![PathBuf::from(r"C:\AE\Plug-ins\Effects\Threshold.aex")];
+        // Same file, as the cache spells it (Windows paths are case-insensitive).
+        let known = vec![PathBuf::from(r"c:\ae\plug-ins\effects\threshold.aex")];
+
+        assert_eq!(
+            unique_filter_names(&registered, &known),
+            vec!["Threshold".to_owned()]
+        );
+    }
+
+    /// Stems are matched case-insensitively, because Windows filenames are:
+    /// `Threshold.aex` and `threshold.aex` in *different* folders are two files
+    /// competing for one name, and calling them distinct hands the host a pair it
+    /// may still reject — the failure this exists to prevent.
+    #[test]
+    fn stems_are_matched_case_insensitively() {
+        let plugins = vec![
+            PathBuf::from(r"C:\AE\Plug-ins\A\Threshold.aex"),
+            PathBuf::from(r"C:\AE\Plug-ins\B\threshold.aex"),
+        ];
+        let names = unique_filter_names(&plugins, &[]);
+
+        assert_eq!(
+            names,
+            vec!["Threshold (A)".to_owned(), "threshold (B)".to_owned()]
+        );
+    }
+
+    /// The *generated* names must be compared case-insensitively too, not just
+    /// the stems. Two plug-ins in different trees whose folders differ only in
+    /// case yield `Threshold (Fx)` and `Threshold (fx)` — distinct as bytes, the
+    /// same name to the host, so the modal dialog comes back unless the final
+    /// uniqueness pass folds case as well.
+    #[test]
+    fn qualified_names_differing_only_in_case_are_separated() {
+        let plugins = vec![
+            PathBuf::from(r"C:\X\Fx\Threshold.aex"),
+            PathBuf::from(r"C:\Y\fx\Threshold.aex"),
+        ];
+        let names = unique_filter_names(&plugins, &[]);
+
+        assert_eq!(
+            names,
+            vec!["Threshold (Fx)".to_owned(), "Threshold (fx) [2]".to_owned()],
+            "the second has to be pushed off the name the first took"
+        );
+    }
+
+    /// Same stem *and* same folder name, in different trees: qualifying by folder
+    /// is not enough, so the numeric pass has to finish the job. Without it the
+    /// host is handed a duplicate again and startup blocks exactly as before.
+    #[test]
+    fn a_collision_the_folder_cannot_separate_falls_back_to_a_number() {
+        let plugins = vec![
+            PathBuf::from(r"C:\AE\2025\Effects\Threshold.aex"),
+            PathBuf::from(r"C:\AE\2026\Effects\Threshold.aex"),
+        ];
+        let names = unique_filter_names(&plugins, &[]);
+
+        assert_eq!(
+            names,
+            vec![
+                "Threshold (Effects)".to_owned(),
+                "Threshold (Effects) [2]".to_owned(),
+            ]
+        );
+    }
+
+    /// Whatever the input, the host must never see one name twice — that is the
+    /// entire contract.
+    #[test]
+    fn no_two_filters_ever_share_a_name() {
+        let plugins = vec![
+            PathBuf::from(r"C:\AE\Effects\Threshold.aex"),
+            PathBuf::from(r"C:\AE\CycoreFXHD\Threshold.aex"),
+            PathBuf::from(r"C:\AE\Other\threshold.aex"),
+            // Already spelled like a generated name: must not be able to steal one.
+            PathBuf::from(r"C:\AE\More\Threshold (Effects).aex"),
+            PathBuf::from(r"C:\AE\Effects\Levels.aex"),
+        ];
+        let names = unique_filter_names(&plugins, &[]);
+
+        let lowered: HashSet<String> = names.iter().map(|name| name.to_lowercase()).collect();
+        assert_eq!(lowered.len(), plugins.len(), "{names:?}");
+    }
+
+    /// The cache `cached_naming_peers` reads: AEX path -> its entry.
+    fn peer_cache(entries: &[(&str, CacheEntry)]) -> HashMap<String, CacheEntry> {
+        entries
+            .iter()
+            .map(|(key, entry)| ((*key).to_owned(), entry.clone()))
+            .collect()
+    }
+
+    /// `cached_naming_peers` returns `HashMap` iteration order, which is not
+    /// stable; the caller only counts, so order is irrelevant there. Sort before
+    /// comparing so a test cannot pass or fail by luck.
+    fn sorted(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        paths.sort();
+        paths
+    }
+
+    /// A plug-in that has never discovered successfully is not registered, but it
+    /// is on disk and takes the name the moment it does discover. Filtering these
+    /// out — the obvious thing to copy from `cached_fallback_plugins` — would let
+    /// the registered twin claim the unqualified name and then lose it later,
+    /// which is the rename this whole peer set exists to prevent.
+    #[test]
+    fn naming_peers_keep_plugins_that_never_discovered() {
+        let cache = peer_cache(&[
+            (r"C:\AE\Effects\Threshold.aex", discovered(5, 64, build(1))),
+            (
+                r"C:\AE\Effects\CycoreFXHD\Threshold.aex",
+                failed(5, 64, build(1)),
+            ),
+        ]);
+        let roots = vec![PathBuf::from(r"C:\AE\Effects")];
+
+        assert_eq!(
+            sorted(cached_naming_peers(&cache, &roots, false, false, &[])),
+            sorted(vec![
+                PathBuf::from(r"C:\AE\Effects\Threshold.aex"),
+                PathBuf::from(r"C:\AE\Effects\CycoreFXHD\Threshold.aex"),
+            ])
+        );
+    }
+
+    /// A complete scan already listed every plug-in that can register, so the
+    /// cache can only speak for files that are gone. The prune that would remove
+    /// them runs only when the background pass does, so an uninstalled plug-in's
+    /// key outlives it — and counting it qualifies a name whose rival no longer
+    /// exists, renaming a filter that saved projects refer to.
+    #[test]
+    fn a_complete_scan_takes_no_peers_from_the_cache() {
+        let cache = peer_cache(&[(
+            // Uninstalled, not yet pruned.
+            r"C:\AE\Effects\CycoreFXHD\Threshold.aex",
+            discovered(5, 64, build(1)),
+        )]);
+
+        assert_eq!(
+            cached_naming_peers(&cache, &[PathBuf::from(r"C:\AE")], true, false, &[]),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    /// A re-keyed entry is kept under both spellings on purpose, so counting both
+    /// would invent a collision for a plug-in that has none — qualifying a name
+    /// that was unique and dropping the saved objects that used it.
+    #[test]
+    fn naming_peers_drop_a_retained_alias_spelling() {
+        let mut alias = discovered(5, 64, build(1));
+        alias.alias_fallback = true;
+        alias.alias_target = Some(r"C:\AE\Effects\Threshold.aex".to_owned());
+        let cache = peer_cache(&[
+            (r"C:\AE\Effects\Threshold.aex", discovered(5, 64, build(1))),
+            (r"C:\AE\Legacy\Threshold.aex", alias),
+        ]);
+        let roots = vec![PathBuf::from(r"C:\AE")];
+
+        assert_eq!(
+            sorted(cached_naming_peers(&cache, &roots, false, false, &[])),
+            sorted(vec![PathBuf::from(r"C:\AE\Effects\Threshold.aex")]),
+            "one file must count once"
+        );
+    }
+
+    /// ...but once the walked spelling is gone, the retained one is the only
+    /// record that the plug-in exists, so it counts again.
+    #[test]
+    fn naming_peers_keep_an_alias_whose_target_is_gone() {
+        let mut alias = discovered(5, 64, build(1));
+        alias.alias_fallback = true;
+        alias.alias_target = Some(r"C:\AE\Effects\Threshold.aex".to_owned());
+        let cache = peer_cache(&[(r"C:\AE\Legacy\Threshold.aex", alias)]);
+
+        assert_eq!(
+            sorted(cached_naming_peers(
+                &cache,
+                &[PathBuf::from(r"C:\AE")],
+                false,
+                false,
+                &[]
+            )),
+            sorted(vec![PathBuf::from(r"C:\AE\Legacy\Threshold.aex")])
+        );
+    }
+
+    /// Ignored plug-ins are never registered, so they cannot collide with
+    /// anything and must not qualify anyone else's name.
+    #[test]
+    fn naming_peers_drop_ignored_plugins() {
+        let cache = peer_cache(&[
+            (r"C:\AE\Effects\Threshold.aex", discovered(5, 64, build(1))),
+            (
+                r"C:\AE\Effects\CycoreFXHD\Threshold.aex",
+                discovered(5, 64, build(1)),
+            ),
+        ]);
+        let roots = vec![PathBuf::from(r"C:\AE")];
+
+        assert_eq!(
+            sorted(cached_naming_peers(
+                &cache,
+                &roots,
+                false,
+                false,
+                &["Threshold".to_owned()]
+            )),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    /// Entries outside the scanned roots belong to a folder this launch is not
+    /// registering from, so they cannot collide either.
+    #[test]
+    fn naming_peers_drop_entries_outside_the_roots() {
+        let cache = peer_cache(&[
+            (r"C:\AE\Effects\Threshold.aex", discovered(5, 64, build(1))),
+            (r"D:\Elsewhere\Threshold.aex", discovered(5, 64, build(1))),
+        ]);
+
+        assert_eq!(
+            sorted(cached_naming_peers(
+                &cache,
+                &[PathBuf::from(r"C:\AE")],
+                false,
+                false,
+                &[]
+            )),
+            sorted(vec![PathBuf::from(r"C:\AE\Effects\Threshold.aex")])
+        );
+    }
+
+    /// ...unless the roots themselves could not be resolved. Then they do not
+    /// describe where the plug-ins are, and filtering on them would drop exactly
+    /// the peers this set exists to keep — the same reasoning
+    /// `cached_fallback_plugins` applies.
+    #[test]
+    fn unresolved_roots_do_not_filter_the_naming_peers() {
+        let cache = peer_cache(&[(r"D:\Elsewhere\Threshold.aex", discovered(5, 64, build(1)))]);
+
+        assert_eq!(
+            sorted(cached_naming_peers(
+                &cache,
+                &[PathBuf::from(r"C:\AE")],
+                false,
+                true,
+                &[]
+            )),
+            sorted(vec![PathBuf::from(r"D:\Elsewhere\Threshold.aex")])
+        );
+    }
+
+    /// A rename is user-visible and changes how saved projects resolve the filter
+    /// (issue #662), so it has to be traceable — and the name alone cannot say
+    /// which file took it once a numeric fallback is involved.
+    #[test]
+    fn the_rename_report_pairs_each_name_with_its_plugin() {
+        let plugins = vec![
+            PathBuf::from(r"C:\AE\Effects\Threshold.aex"),
+            PathBuf::from(r"C:\AE\Effects\Levels.aex"),
+        ];
+        let names = vec!["Threshold (Effects)".to_owned(), "Levels".to_owned()];
+        let summary = qualified_names_summary(&plugins, &names);
+
+        assert!(summary.contains("Threshold (Effects)"), "{summary}");
+        assert!(
+            summary.contains(r"C:\AE\Effects\Threshold.aex"),
+            "the path is what identifies the file: {summary}"
+        );
+        assert!(
+            !summary.contains("Levels"),
+            "a filter that kept its name is not a rename: {summary}"
+        );
+    }
+
+    /// Nothing renamed is nothing to say. An empty line would still reach the log
+    /// as a bare `[AEXCompat] ` prefix.
+    #[test]
+    fn the_rename_report_is_silent_when_nothing_was_renamed() {
+        let plugins = vec![PathBuf::from(r"C:\AE\Effects\Levels.aex")];
+
+        assert!(
+            qualified_names_summary(&plugins, &["Levels".to_owned()]).is_empty(),
+            "no rename, no line"
+        );
+    }
+
+    /// The list is bounded, and says so rather than silently truncating — a
+    /// truncated list reads as the complete set.
+    #[test]
+    fn the_rename_report_admits_what_it_left_out() {
+        let plugins: Vec<PathBuf> = (0..12)
+            .map(|index| PathBuf::from(format!(r"C:\AE\F{index}\Threshold.aex")))
+            .collect();
+        let names: Vec<String> = (0..12)
+            .map(|index| format!("Threshold (F{index})"))
+            .collect();
+        let summary = qualified_names_summary(&plugins, &names);
+
+        assert!(summary.starts_with("12 filter name(s)"), "{summary}");
+        assert!(summary.contains("and 4 more"), "{summary}");
+    }
+
+    /// A path with no file name at all falls back to a placeholder rather than an
+    /// empty name, and two of them still get separated. Reaching the fallback
+    /// needs a path `file_stem` cannot answer for — a bare root, not a dotfile
+    /// (`.aex` has `.aex` as its stem).
+    #[test]
+    fn a_path_without_a_stem_falls_back_to_a_placeholder() {
+        let plugins = vec![PathBuf::from(r"C:\"), PathBuf::from(r"D:\")];
+
+        assert!(
+            plugins.iter().all(|path| path.file_stem().is_none()),
+            "the fixture has to actually reach the fallback"
+        );
+        assert_eq!(
+            unique_filter_names(&plugins, &[]),
+            vec!["AEX".to_owned(), "AEX [2]".to_owned()],
+            "no parent folder to qualify with, so only the numeric pass separates them"
+        );
+    }
+
     // --- cluster sessions (issue #405) ---
 
     fn artifact(name: &str, sha_byte: u8) -> ApprovedImageArtifact {

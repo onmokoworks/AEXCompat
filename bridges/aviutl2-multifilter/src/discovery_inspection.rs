@@ -944,14 +944,98 @@ fn version_key(version: &str) -> Vec<u64> {
         .collect()
 }
 
+/// The AviUtl2 filter name for each plug-in, in the same order.
+///
+/// AviUtl2 refuses a filter registered under a name it already holds, and says so
+/// with a modal dialog that blocks startup until someone dismisses it. Two
+/// same-named `.aex` in different folders is not hypothetical — After Effects
+/// ships both `Effects\Threshold.aex` and `Effects\CycoreFXHD\Threshold.aex` — so
+/// deriving the name from the file stem alone hangs an unattended launch and
+/// leaves one of the two effects unavailable (issue #661).
+///
+/// A stem is qualified only when it collides, and with the folder that
+/// distinguishes it, so every other filter keeps the name the user already knows.
+/// Comparison is case-insensitive because Windows filenames are: treating
+/// `Threshold` and `threshold` as distinct would hand the host a pair it may
+/// still reject.
+///
+/// `also_known` holds plug-ins that are not being registered but must still count
+/// toward collisions — what the cache remembers under the scan roots. Counting
+/// only the registered set would let a folder that could not be read this launch
+/// change a *surviving* filter's name, and AviUtl2 resolves saved objects by
+/// filter name, so that renaming drops them from saved projects for good
+/// (issues #307, #321).
+///
+/// A name still depends on which same-stem plug-ins exist, so installing or
+/// uninstalling one renames the others — the trade-off recorded in issue #662.
+/// The final numeric pass is global, so a plug-in whose own stem already reads
+/// like a generated name (`Threshold (Effects).aex`) can be renamed by an
+/// unrelated collision too.
+fn unique_filter_names(plugins: &[PathBuf], also_known: &[PathBuf]) -> Vec<String> {
+    let mut counted = HashSet::<String>::new();
+    let mut counts = HashMap::<String, usize>::new();
+    for plugin in plugins.iter().chain(also_known) {
+        // A path present in both sets is one plug-in, not a collision with
+        // itself. Lowercased because Windows paths are case-insensitive; the
+        // other way one file reaches here under two spellings — a re-keyed alias
+        // — is dropped by `cached_naming_peers` before it gets this far.
+        if !counted.insert(plugin.to_string_lossy().to_lowercase()) {
+            continue;
+        }
+        *counts
+            .entry(filter_stem(plugin).to_lowercase())
+            .or_default() += 1;
+    }
+
+    let mut used = HashSet::<String>::new();
+    plugins
+        .iter()
+        .map(|plugin| {
+            let stem = filter_stem(plugin);
+            let collides = counts
+                .get(&stem.to_lowercase())
+                .copied()
+                .unwrap_or_default()
+                > 1;
+            let folder = plugin
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|folder| folder.to_str());
+            let base = match (collides, folder) {
+                (true, Some(folder)) => format!("{stem} ({folder})"),
+                // Nothing to qualify with (a root-level plug-in, or a folder name
+                // that is not UTF-8); the numeric pass below still separates them.
+                _ => stem.to_owned(),
+            };
+            let mut candidate = base.clone();
+            let mut disambiguator = 2u32;
+            while !used.insert(candidate.to_lowercase()) {
+                candidate = format!("{base} [{disambiguator}]");
+                disambiguator = disambiguator.saturating_add(1);
+            }
+            candidate
+        })
+        .collect()
+}
+
+/// The plug-in's file stem, or `AEX` when it has none or is not UTF-8.
+fn filter_stem(plugin: &Path) -> &str {
+    plugin
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("AEX")
+}
+
 /// Registers one discovered AEX as an AviUtl2 filter. Runs on the RegisterPlugin
-/// (host callback) thread only.
+/// (host callback) thread only. `name` comes from [`unique_filter_names`], which
+/// is what keeps the host from being handed two filters under one name.
 fn register_discovered(
     host: *mut HOST_APP_TABLE,
     repository: &Path,
     plugin: &Path,
     dependency: &DependencyConfig,
     entry: &CacheEntry,
+    name: &str,
 ) {
     // Build config items + readers + normalized defaults from the exposed params.
     let mut items: Vec<*const c_void> = Vec::new();
@@ -1014,10 +1098,6 @@ fn register_discovered(
     let func_proc_video: extern "C" fn(*mut FILTER_PROC_VIDEO) -> bool =
         unsafe { std::mem::transmute(code) };
 
-    let name = plugin
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("AEX");
     let table = Box::leak(Box::new(FILTER_PLUGIN_TABLE {
         flag: 1 | 8, // FLAG_VIDEO | FLAG_FILTER
         name: wide_leak(&format!("AEX: {name}")),
