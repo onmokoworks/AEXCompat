@@ -3680,7 +3680,9 @@ mod tests {
         let plugin = PathBuf::from(r"C:\plugins\Displacement.aex");
         let mut states = FrameTroubleStates::new();
         let lines: Vec<String> = (0..FRAME_TROUBLE_REPORT_INTERVAL)
-            .filter_map(|_| frame_trouble_report(&mut states, &plugin, FrameTrouble::Error(4)))
+            .filter_map(|_| {
+                frame_trouble_report(&mut states, &plugin, FrameTrouble::Error(4, None))
+            })
             .collect();
         assert_eq!(
             lines.len(),
@@ -3702,13 +3704,62 @@ mod tests {
         let plugin = PathBuf::from(r"C:\plugins\Displacement.aex");
         let mut states = FrameTroubleStates::new();
         assert!(frame_recovered_report(&mut states, &plugin).is_none());
-        frame_trouble_report(&mut states, &plugin, FrameTrouble::Error(4));
-        frame_trouble_report(&mut states, &plugin, FrameTrouble::Error(4));
+        frame_trouble_report(&mut states, &plugin, FrameTrouble::Error(4, None));
+        frame_trouble_report(&mut states, &plugin, FrameTrouble::Error(4, None));
         let recovered = frame_recovered_report(&mut states, &plugin)
             .expect("a filter that was failing says when it stops");
         assert!(recovered.contains("rendering again"), "{recovered}");
         assert!(recovered.contains("2 frame(s)"), "{recovered}");
         assert!(frame_recovered_report(&mut states, &plugin).is_none());
+    }
+
+    /// The plug-in's own words reach the log - "PF_Err_INTERNAL_STRUCT_DAMAGED"
+    /// alone does not tell a user that a suite could not be acquired - but they
+    /// stay out of the identity the run is collapsed on, so a plug-in that
+    /// varies its message per frame cannot defeat the interval (issue #707).
+    #[test]
+    fn a_plug_ins_own_reason_reaches_the_log_without_defeating_the_interval() {
+        let plugin = PathBuf::from(r"C:\plugins\Invert.aex");
+        let mut states = FrameTroubleStates::new();
+        let first = frame_trouble_report(
+            &mut states,
+            &plugin,
+            FrameTrouble::Error(512, Some("Couldn't load suite.")),
+        )
+        .expect("the first trouble is reported");
+        assert!(first.contains("Invert"), "{first}");
+        assert!(first.contains("PF_Err_INTERNAL_STRUCT_DAMAGED"), "{first}");
+        assert!(first.contains("Couldn't load suite."), "{first}");
+
+        // A plug-in numbering its message per frame must not get a line per
+        // frame: the identity is the code, so the run still collapses.
+        let noisy: Vec<String> = (1..FRAME_TROUBLE_REPORT_INTERVAL)
+            .filter_map(|frame| {
+                let text = format!("bad sample at t={frame}");
+                frame_trouble_report(&mut states, &plugin, FrameTrouble::Error(512, Some(&text)))
+            })
+            .collect();
+        assert_eq!(
+            noisy.len(),
+            1,
+            "only the interval mark, not one line per frame: {noisy:?}"
+        );
+        // The line that is emitted still carries the words from that frame.
+        assert!(noisy[0].contains("bad sample at t="), "{}", noisy[0]);
+        assert!(
+            noisy[0].contains(&format!("x{FRAME_TROUBLE_REPORT_INTERVAL}")),
+            "{}",
+            noisy[0]
+        );
+
+        // Saying nothing is the ordinary case and reads exactly as before.
+        let mut quiet = FrameTroubleStates::new();
+        let silent = frame_trouble_report(&mut quiet, &plugin, FrameTrouble::Error(512, None))
+            .expect("the first trouble is reported");
+        assert_eq!(
+            silent,
+            "Invert: frame error 512 (PF_Err_INTERNAL_STRUCT_DAMAGED)"
+        );
     }
 
     /// A different reason for the same filter is its own line: collapsing an
@@ -3719,8 +3770,8 @@ mod tests {
         let plugin = PathBuf::from(r"C:\plugins\Blend.aex");
         let mut states = FrameTroubleStates::new();
         let lines: Vec<String> = [
-            FrameTrouble::Error(4),
-            FrameTrouble::Error(4),
+            FrameTrouble::Error(4, None),
+            FrameTrouble::Error(4, None),
             FrameTrouble::SessionLost("worker exited"),
         ]
         .into_iter()

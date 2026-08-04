@@ -168,12 +168,27 @@ struct SelectorInvocationDiagnostic {
   SpecVersionEntryDiagnostic version_at_entry;
 };
 
+/// What a selector left in `PF_OutData::return_msg`. The SDK's own
+/// `AEFX_AcquireSuite` writes there when a suite cannot be acquired, and
+/// plug-ins write there to say why they failed, so the text is often the whole
+/// diagnosis (issue #707). The buffer is reused across selectors, so the
+/// selector that wrote it has to be recorded with it.
+struct SelectorReturnMessage {
+  std::string selector;
+  std::string text;
+  int32_t error{};
+  bool display_requested{};
+
+  bool empty() const noexcept { return text.empty(); }
+};
+
 struct SelectorDispatchTelemetry {
   uint32_t seh_code{};
   uint64_t seh_address{};
   std::string seh_module;
   std::string selector;
   std::string missing_dependency;
+  SelectorReturnMessage return_message;
   int32_t error{};
   std::vector<SelectorInvocationDiagnostic> invocations;
   bool invocations_truncated{};
@@ -183,6 +198,10 @@ void configure_selector_dispatch_audit(AuditCapture capture,
                                        AuditPassed passed) noexcept;
 void configure_selector_dispatch_trace(SelectorDispatchTrace trace) noexcept;
 SelectorDispatchTelemetry& selector_dispatch_telemetry() noexcept;
+/// Forgets the last `PF_OutData::return_msg` a selector wrote. Called once per
+/// frame and on a cluster plug-in swap, so a frame never reports what a
+/// previous frame - or a previous plug-in - said (issue #707).
+void reset_selector_return_message() noexcept;
 void* active_selector_module() noexcept;
 HostCallbackTimelineTelemetry& host_callback_timeline_telemetry() noexcept;
 void reset_host_callback_timeline() noexcept;

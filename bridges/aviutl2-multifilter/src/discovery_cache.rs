@@ -1402,8 +1402,11 @@ struct RenderedFrame {
 /// one so the caller reopens only when necessary.
 enum FrameReply {
     Rendered(RenderedFrame),
-    /// A frame-local diagnostic; the session stays usable, leave pixels.
-    FrameLocal(i64),
+    /// A frame-local diagnostic; the session stays usable, leave pixels. The
+    /// second field is what the plug-in wrote into `PF_OutData::return_msg`
+    /// while failing, when it wrote anything (issue #707) - often the whole
+    /// reason, e.g. "Couldn't load suite.".
+    FrameLocal(i64, Option<String>),
     /// The session/worker is gone; the caller drops it so the next frame reopens.
     SessionLost(String),
 }

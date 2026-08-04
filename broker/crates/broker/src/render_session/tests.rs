@@ -92,6 +92,85 @@ fn frame_done_parsing_is_strict_about_unknown_fields() {
 }
 
 #[test]
+fn frame_done_carries_the_selector_return_message() {
+    // The plug-in's own account of the failure travels with the frame error, so
+    // "Couldn't load suite." reaches the caller instead of only the number
+    // (issue #707).
+    let reported: FrameDone = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":2,"status":"error",
+                "render_error":512,
+                "return_message":{"selector":"SMART_RENDER","text":"Couldn't load suite.",
+                                  "error":512,"display_requested":true}}"#,
+    )
+    .unwrap();
+    let message = reported.return_message.expect("the message is parsed");
+    assert_eq!(message.selector, "SMART_RENDER");
+    assert_eq!(message.text, "Couldn't load suite.");
+    assert_eq!(message.error, 512);
+    assert!(message.display_requested);
+
+    // Absent is the ordinary case and must stay absent rather than become empty.
+    let silent: FrameDone = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":3,"status":"error","render_error":4}"#,
+    )
+    .unwrap();
+    assert!(silent.return_message.is_none());
+
+    // The message object is as strict as the frame response around it.
+    let unknown_field: Result<FrameDone, _> = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":4,"status":"error","render_error":512,
+                "return_message":{"selector":"RENDER","text":"x","error":512,
+                                  "display_requested":false,"surprise":true}}"#,
+    );
+    assert!(unknown_field.is_err());
+}
+
+#[test]
+fn a_return_message_is_re_validated_where_it_crosses_into_the_broker() {
+    let message = |selector: &str, text: &str| FrameReturnMessage {
+        selector: selector.to_string(),
+        text: text.to_string(),
+        error: 512,
+        display_requested: true,
+    };
+    // What the SDK's own suite helper writes.
+    assert!(admissible_return_message(&message(
+        "SMART_RENDER",
+        "Couldn't load suite."
+    )));
+    // A path is what this rule exists to keep out of a report, in either slash.
+    assert!(!admissible_return_message(&message(
+        "RENDER",
+        r"could not read C:\Users\someone\secret.aep"
+    )));
+    assert!(!admissible_return_message(&message(
+        "RENDER",
+        "could not read /home/someone/secret.aep"
+    )));
+    // Control bytes and newlines would break the line the log prints.
+    assert!(!admissible_return_message(&message("RENDER", "one\ntwo")));
+    assert!(!admissible_return_message(&message("RENDER", "bell\u{7}")));
+    // Bounded by the SDK buffer, and never empty.
+    assert!(admissible_return_message(&message(
+        "RENDER",
+        &"x".repeat(255)
+    )));
+    assert!(!admissible_return_message(&message(
+        "RENDER",
+        &"x".repeat(256)
+    )));
+    assert!(!admissible_return_message(&message("RENDER", "")));
+    // The selector is a host literal, so anything that does not look like one
+    // came from somewhere else.
+    assert!(!admissible_return_message(&message("render", "fine")));
+    assert!(!admissible_return_message(&message("", "fine")));
+    assert!(admissible_return_message(&message(
+        "GPU_DEVICE_SETUP",
+        "fine"
+    )));
+}
+
+#[test]
 fn final_report_clean_fails_closed_on_missing_or_dirty_fields() {
     let clean = serde_json::json!({
         "status": "render_completed",

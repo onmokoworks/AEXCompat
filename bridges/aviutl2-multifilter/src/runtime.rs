@@ -553,8 +553,8 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
         // Keep the session; leave this frame's pixels. Saying so matters: with
         // the frame's pixels left alone, an effect erroring on every frame and
         // an effect doing nothing look identical on screen (issue #697).
-        FrameReply::FrameLocal(code) => {
-            report_frame_trouble(&ctx.plugin, FrameTrouble::Error(code));
+        FrameReply::FrameLocal(code, said) => {
+            report_frame_trouble(&ctx.plugin, FrameTrouble::Error(code, said.as_deref()));
             true
         }
         FrameReply::SessionLost(reason) => {
@@ -575,8 +575,9 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
 /// What went wrong with one frame, for [`report_frame_trouble`].
 enum FrameTrouble<'a> {
     /// The plug-in (or the host on its behalf) returned an error for this
-    /// frame. The session stays usable.
-    Error(i64),
+    /// frame. The session stays usable. The second field is the plug-in's own
+    /// account of it, when it left one (issue #707).
+    Error(i64, Option<&'a str>),
     /// The session is gone; the next frame opens a fresh one.
     SessionLost(&'a str),
 }
@@ -625,8 +626,18 @@ fn frame_trouble_report(
     plugin: &Path,
     trouble: FrameTrouble<'_>,
 ) -> Option<String> {
+    // The plug-in's own words ride on the lines that get emitted but stay out
+    // of the identity the run is collapsed on. A plug-in is free to vary its
+    // message per frame ("bad sample at t=..."), and folding that into the
+    // identity would make every frame its own line at preview frame rate -
+    // exactly the burial FRAME_TROUBLE_REPORT_INTERVAL exists to prevent.
+    let said = match trouble {
+        FrameTrouble::Error(_, said) => said,
+        FrameTrouble::SessionLost(_) => None,
+    };
+    let detail = said.map(|text| format!(": {text}")).unwrap_or_default();
     let summary = match trouble {
-        FrameTrouble::Error(code) => match pf_error_name(code) {
+        FrameTrouble::Error(code, _) => match pf_error_name(code) {
             Some(name) => format!("frame error {code} ({name})"),
             None => format!("frame error {code}"),
         },
@@ -635,11 +646,16 @@ fn frame_trouble_report(
     match states.get_mut(plugin) {
         Some(state) if state.summary == summary => {
             state.count += 1;
-            (state.count % FRAME_TROUBLE_REPORT_INTERVAL == 0)
-                .then(|| format!("{}: {summary} (x{})", filter_stem(plugin), state.count))
+            (state.count % FRAME_TROUBLE_REPORT_INTERVAL == 0).then(|| {
+                format!(
+                    "{}: {summary}{detail} (x{})",
+                    filter_stem(plugin),
+                    state.count
+                )
+            })
         }
         _ => {
-            let line = format!("{}: {summary}", filter_stem(plugin));
+            let line = format!("{}: {summary}{detail}", filter_stem(plugin));
             states.insert(
                 plugin.to_path_buf(),
                 FrameTroubleState { summary, count: 1 },
@@ -1024,7 +1040,9 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         Ok(SwapOutcome::Swapped) => current_plugin = req.plugin_index,
                         Ok(SwapOutcome::PluginError { global_setup_error }) => {
                             current_plugin = req.plugin_index;
-                            let _ = req.reply.send(FrameReply::FrameLocal(global_setup_error));
+                            let _ = req
+                                .reply
+                                .send(FrameReply::FrameLocal(global_setup_error, None));
                             continue;
                         }
                         Err(error) => {
@@ -1078,9 +1096,14 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                             width,
                             height,
                         }),
-                        FrameStatus::FrameError { render_error, .. } => {
-                            FrameReply::FrameLocal(render_error)
-                        }
+                        FrameStatus::FrameError {
+                            render_error,
+                            return_message,
+                            ..
+                        } => FrameReply::FrameLocal(
+                            render_error,
+                            return_message.map(|message| message.text),
+                        ),
                     },
                     Err(error) => FrameReply::SessionLost(format!("render_frame failed: {error}")),
                 };
@@ -1089,9 +1112,14 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 let reply = if session.invalidation().is_some() {
                     FrameReply::SessionLost(match reply {
                         FrameReply::SessionLost(message) => message,
-                        FrameReply::FrameLocal(code) => {
-                            format!("session invalidated (render_error {code})")
-                        }
+                        // The plug-in's own words survive the escalation: an
+                        // invalidated session is where the reason matters most.
+                        FrameReply::FrameLocal(code, said) => match said {
+                            Some(text) => {
+                                format!("session invalidated (render_error {code}: {text})")
+                            }
+                            None => format!("session invalidated (render_error {code})"),
+                        },
                         FrameReply::Rendered(_) => "session invalidated".to_string(),
                     })
                 } else {

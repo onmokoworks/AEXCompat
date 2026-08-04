@@ -85,6 +85,11 @@ constexpr std::size_t kInSpecVersionOffset = 196;
 constexpr std::size_t kInApplicationIdOffset = 204;
 constexpr std::size_t kInGlobalDataOffset = 312;
 constexpr std::size_t kOutGlobalDataOffset = 40;
+// PF_OutData::return_msg and the out flag a plug-in raises alongside it.
+constexpr std::size_t kOutFlagsOffset = 96;
+constexpr std::size_t kOutReturnMsgOffset = 100;
+constexpr std::size_t kOutReturnMsgSize = 256;
+constexpr uint32_t kOutFlagDisplayErrorMessage = 1u << 8;
 constexpr std::array<const char*, 5> kRegisterNames{
     "rcx", "rdx", "r8", "r9", "rsp"};
 
@@ -415,6 +420,23 @@ int32_t audited_effect_call(EffectEntry entry, int32_t command, void* input,
   return g_audit_passed() ? error : kAuditFailure;
 }
 
+// The buffer is a fixed-size C string the plug-in owns; it is read as bytes,
+// bounded by its declared size, and kept only when every byte is printable
+// ASCII. That rejects the shapes that would break the hand-built JSON around
+// it (newlines, control bytes, a non-terminated blob) - it does not make the
+// text trustworthy, and the broker re-validates it at the transport boundary.
+std::string captured_return_message(void* output) {
+  if (!output) return {};
+  const auto* bytes = static_cast<const unsigned char*>(output) + kOutReturnMsgOffset;
+  std::size_t length = 0;
+  while (length < kOutReturnMsgSize - 1 && bytes[length] != 0) ++length;
+  std::string text(reinterpret_cast<const char*>(bytes), length);
+  const bool printable = std::all_of(text.begin(), text.end(), [](unsigned char value) {
+    return value >= 0x20 && value < 0x7F;
+  });
+  return printable ? text : std::string{};
+}
+
 void record_selector_invocation(const char* selector,
                                 bool invocation_completed_normally,
                                 int32_t raw_return_code,
@@ -656,6 +678,8 @@ void configure_selector_dispatch_audit(AuditCapture capture,
 void configure_selector_dispatch_trace(SelectorDispatchTrace trace) noexcept {
   g_selector_trace = trace;
 }
+
+void reset_selector_return_message() noexcept { g_telemetry.return_message = {}; }
 
 SelectorDispatchTelemetry& selector_dispatch_telemetry() noexcept {
   return g_telemetry;
@@ -1191,6 +1215,16 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
   if (!out_exception_code) return kAuditFailure;
   *out_exception_code = 0;
   g_telemetry.missing_dependency.clear();
+  // The buffer is cleared before the selector runs. The `PF_OutData` lives for
+  // the whole session and is reused across frames and, through the cluster
+  // swap, across plug-ins, so text left by an earlier selector would otherwise
+  // be re-read and attributed to this one (issue #707). The telemetry is not
+  // cleared here - a plug-in often writes its reason from an earlier selector
+  // than the one that finally fails - it is cleared per frame by
+  // `reset_selector_return_message`.
+  if (output)
+    std::memset(static_cast<unsigned char*>(output) + kOutReturnMsgOffset, 0,
+                kOutReturnMsgSize);
   const char* selector = effect_selector_name(command);
   const char* previous_suite_selector = set_suite_timeline_selector(selector);
   if (command == 1) {
@@ -1285,6 +1319,20 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
       &invocation_completed_normally, &raw_return_code, out_exception_code,
       selector);
   record_extended_allocation_selector_exit(selector);
+  // The buffer was cleared before the call, so whatever is in it now was
+  // written by this selector. It is recorded whatever this selector returned:
+  // the plug-in that says "Couldn't load suite." often says it from an earlier
+  // selector than the one that finally reports the frame error, and the pair
+  // (selector, its own error) is what makes the message readable rather than
+  // misattributed. The latest one wins, so it stays the most recent thing the
+  // plug-in said.
+  if (std::string message = captured_return_message(output); !message.empty()) {
+    uint32_t out_flags = 0;
+    std::memcpy(&out_flags, static_cast<const unsigned char*>(output) + kOutFlagsOffset,
+                sizeof(out_flags));
+    g_telemetry.return_message = {selector ? selector : "", std::move(message), result,
+                                  (out_flags & kOutFlagDisplayErrorMessage) != 0};
+  }
   const CapturedGlobalDataState output_global_data =
       capture_global_data_state(output, kOutGlobalDataOffset);
   handoff.output_after_return = output_global_data.diagnostic;

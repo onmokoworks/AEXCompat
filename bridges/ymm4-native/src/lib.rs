@@ -208,11 +208,16 @@ fn open_session(
                 FrameStatus::FrameError {
                     render_error,
                     missing_dependency,
+                    return_message,
                 } => RenderReply::Error(format!(
-                    "AEX frame error {render_error}{}",
+                    "AEX frame error {render_error}{}{}",
                     missing_dependency
                         .as_deref()
                         .map(|value| format!("; missing dependency: {value}"))
+                        .unwrap_or_default(),
+                    // The plug-in's own account of the failure, when it left one.
+                    return_message
+                        .map(|value| format!("; {}: {}", value.selector, value.text))
                         .unwrap_or_default()
                 )),
             },
