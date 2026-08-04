@@ -264,12 +264,6 @@ INTENTIONAL_PERSONAL_PATH_DIGESTS = {
         "7a52c97c4277dbfa38c6ddf260e56b15b33e869c2892de05f895a462232c2979",
         "88e53e1e1f77b2a7880982e5172fe79269619726b35f1a1fc1960e16e738eb84",
     }),
-    "tools/aex_dependency_availability_preflight.py": frozenset({
-        "4c754b6dc9cd24a7e1a0801560911fbf9a832bf0f5b3bcba0f3844a71356489c",
-    }),
-    "tools/aex_native_loader_path_policy_selftest.py": frozenset({
-        "0ebc17c6b46a7acf5f8c721666191d070e117c112c21dc5768e8cd4ee290b47e",
-    }),
     "tools/conformance_bundle_validator.py": frozenset({
         "2da0adb572c983c5e4451038ea6267e88305bc4875f73684e8372673ab9e8f59",
         "4078491cd748c7038a076acbd60a86e980f15bafb1b8e9b15278db28abbe4996",
