@@ -607,6 +607,7 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
           {&run_pf_path_data_hardening_selftest,
            &run_pf_mask_composition_selftest,
            &verify_world_double_dispose_rejected,
+           &verify_world_value_semantics,
            &verify_world_allocation_limit_rejected,
            &verify_owned_world_snapshot_is_atomic,
            &verify_owned_world_snapshot_concurrent_dispose,

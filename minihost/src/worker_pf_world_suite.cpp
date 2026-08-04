@@ -56,6 +56,64 @@ bool verify_world_double_dispose_rejected() {
           invalid_before + 1 && world_lifetimes_balanced();
 }
 
+// PF_EffectWorld is a value type, so the struct a plug-in passed to
+// PF_NewWorld is not the world's identity (issue #700): one local may back
+// several allocations in turn, and a copy of the struct must dispose the same
+// allocation. What still has to fail closed is a second dispose, a struct this
+// registry never filled, and a struct already cleared by a dispose.
+bool verify_world_value_semantics() {
+  alignas(8) std::array<std::byte, kEffectWorldSize> first{};
+  alignas(8) std::array<std::byte, kEffectWorldSize> second{};
+  const uint64_t invalid_before =
+      aexcompat::world_registry::statistics().invalid_operations;
+  // Two allocations through one struct: the first is kept alive through a copy.
+  if (new_world(&g_effect, 4, 3, 1, kPixelFormatArgb32, first.data()) != 0)
+    return false;
+  std::array<std::byte, kEffectWorldSize> copy_of_first = first;
+  if (new_world(&g_effect, 2, 2, 1, kPixelFormatArgb32, first.data()) != 0)
+    return false;
+  void* first_pixels{};
+  void* second_pixels{};
+  std::memcpy(&first_pixels, copy_of_first.data() + 24, sizeof(first_pixels));
+  std::memcpy(&second_pixels, first.data() + 24, sizeof(second_pixels));
+  if (!first_pixels || !second_pixels || first_pixels == second_pixels)
+    return false;
+  // The copy still resolves, and disposing through it frees the first
+  // allocation, not the one the reused struct now holds.
+  int32_t format{};
+  if (get_pixel_format(copy_of_first.data(), &format) != 0 ||
+      format != kPixelFormatArgb32) return false;
+  if (dispose_world(&g_effect, copy_of_first.data()) != 0) return false;
+  if (get_pixel_format(first.data(), &format) != 0 ||
+      format != kPixelFormatArgb32) return false;
+  // Disposing through the now-cleared copy a second time is still rejected.
+  if (dispose_world(&g_effect, copy_of_first.data()) == 0) return false;
+  // A struct this registry never filled is still rejected.
+  alignas(8) std::array<std::byte, kEffectWorldSize> foreign{};
+  int32_t foreign_layout[3] = {8, 2, 2};
+  void* foreign_pixels = foreign.data();
+  std::memcpy(foreign.data() + 24, &foreign_pixels, sizeof(foreign_pixels));
+  std::memcpy(foreign.data() + 32, foreign_layout, sizeof(foreign_layout));
+  if (dispose_world(&g_effect, foreign.data()) == 0) return false;
+  if (dispose_world(&g_effect, second.data()) == 0) return false;
+  // Identity by pixel buffer must not become "any geometry the struct claims":
+  // a copy that keeps the pixel pointer but inflates the extent describes more
+  // memory than was allocated and has to be refused.
+  std::array<std::byte, kEffectWorldSize> inflated = first;
+  const int32_t inflated_extent[2] = {4096, 4096};
+  std::memcpy(inflated.data() + 36, inflated_extent, sizeof(inflated_extent));
+  aexcompat::world_registry::OwnedWorldSnapshot rejected{};
+  if (aexcompat::world_registry::snapshot_owned_world(inflated.data(), rejected))
+    return false;
+  world_safety::DispatchWorldFormat resolved{};
+  if (aexcompat::world_registry::resolve_dispatch_world_format(inflated.data(),
+                                                               resolved))
+    return false;
+  if (dispose_world(&g_effect, first.data()) != 0) return false;
+  return aexcompat::world_registry::statistics().invalid_operations ==
+      invalid_before + 3 && world_lifetimes_balanced();
+}
+
 bool verify_world_allocation_limit_rejected() {
   alignas(8) std::array<std::byte, kEffectWorldSize> world{};
   world.fill(std::byte{0x5a});

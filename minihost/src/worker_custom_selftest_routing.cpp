@@ -210,12 +210,14 @@ Result dispatch(const Request& request, const Hooks& hooks) {
   }
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pf-world-registry") {
     const bool double_dispose = hooks.verify_world_double_dispose_rejected();
+    const bool value_semantics = hooks.verify_world_value_semantics();
     const bool allocation_limit = hooks.verify_world_allocation_limit_rejected();
     const bool snapshot_atomic = hooks.verify_owned_world_snapshot_is_atomic();
     const bool concurrent_snapshot =
         hooks.verify_owned_world_snapshot_concurrent_dispose();
     const auto world_stats = aexcompat::world_registry::statistics();
-    const bool passed = double_dispose && allocation_limit && snapshot_atomic &&
+    const bool passed = double_dispose && value_semantics &&
+        allocation_limit && snapshot_atomic &&
         concurrent_snapshot &&
         aexcompat::world_registry::lifetimes_balanced() &&
         world_stats.live_count == 0 && world_stats.live_bytes == 0;
@@ -224,6 +226,8 @@ Result dispatch(const Request& request, const Hooks& hooks) {
         << passed_or_failed(passed)
         << "\",\"double_dispose_rejected\":"
         << json_bool(double_dispose)
+        << ",\"world_value_semantics\":"
+        << json_bool(value_semantics)
         << ",\"allocation_limit_rejected\":"
         << json_bool(allocation_limit)
         << ",\"owned_snapshot_atomic\":"

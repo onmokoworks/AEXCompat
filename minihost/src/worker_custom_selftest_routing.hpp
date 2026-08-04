@@ -15,6 +15,7 @@ struct Hooks {
   bool (*run_pf_path_data_hardening)(){};
   bool (*run_pf_mask_composition)(){};
   bool (*verify_world_double_dispose_rejected)(){};
+  bool (*verify_world_value_semantics)(){};
   bool (*verify_world_allocation_limit_rejected)(){};
   bool (*verify_owned_world_snapshot_is_atomic)(){};
   bool (*verify_owned_world_snapshot_concurrent_dispose)(){};
