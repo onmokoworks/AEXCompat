@@ -14,6 +14,10 @@ jobs:
     timeout-minutes: 45
     env:
       PYTHONUTF8: "1"
+      # clean clone は mtime が毎回新しく、rust-cache だけでは workspace
+      # クレートが常に再コンパイルされる。sccache が内容ハッシュで吸収する (#664)。
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,6 +25,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: mozilla/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
       - name: Check Rust formatting
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -38,7 +45,10 @@ jobs:
           rustfmt --edition 2024 --check --config skip_children=true @files
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: broker
+          workspaces: |
+            broker
+            bridges/aviutl2
+            bridges/aviutl2-multifilter
       # Python 版は .python-version (3.12) に従う。
       # setup-uv は v8 から floating major tag (@v8) を出していないので full tag で pin する。
       - uses: astral-sh/setup-uv@v8.3.2
@@ -102,5 +112,12 @@ jobs:
           }
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
+      # loadscope: 同一モジュールのテストを同一 worker に直列化する。テストは
+      # 共有ディレクトリに time.time_ns() 名でファイルを書く箇所が多数あり、
+      # Windows の time_ns は ~1ms 粒度なので module を跨いで並走させると
+      # 同名衝突で flake する (#664 で実測)。
       - name: Run source-reproducible Python tests
-        run: uv run python -m pytest -q
+        run: uv run python -m pytest -q -n auto --dist loadscope
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
