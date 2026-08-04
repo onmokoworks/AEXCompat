@@ -19,6 +19,11 @@ def git(repository: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+# create_export の E2E は 1 回に統合してある (#682): 遅さは履歴サイズではなく
+# export 1 回あたりの git プロセス起動の固定費なので、branch/tag の ref 絞り
+# 込み・identity 書き換え・履歴からの物理削除・tip 復元を同じ export で検証
+# する。commit1 がタグ対象 (analysis 系を含めない)、commit2 が削除されるべき
+# 汚染履歴、commit3 が復元されるべき tip。
 def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path):
     pytest.importorskip("git_filter_repo")
     source = tmp_path / "source"
@@ -73,7 +78,61 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     git(source, "tag", "-a", "v1", "-m", "public release", inner_oid)
     git(source, "config", "user.email", "alice@workstation")
     git(source, "tag", "internal-wip")
-    scanner_fixture.write_text("main fixture\n", encoding="utf-8")
+
+    # commit2: 履歴から物理削除されるべき汚染コンテンツ (タグより後なので
+    # タグ tip の snapshot/restore とは独立)。
+    diagnostic = source / "analysis" / "result.json"
+    diagnostic.parent.mkdir()
+    diagnostic_toml = source / "analysis" / "result.toml"
+    diagnostic_env = source / "analysis" / "result.env"
+    root_dotenv = source / ".env"
+    local_dotenv = source / "analysis" / ".env.local"
+    old_contents = "token = 'ghp_" + "abcdefghijklmnopqrstuvwxyz123456'\n"
+    scanner_fixture.write_text(old_contents, encoding="utf-8")
+    diagnostic.write_text('{"path":"C:/' + 'Users/alice/private"}\n', encoding="utf-8")
+    diagnostic_toml.write_text(
+        "owner='alice!tag@workstation'\n"
+        "equals='alice=tag@workstation'\n"
+        "query='alice?tag@workstation'\n",
+        encoding="utf-8",
+    )
+    diagnostic_env.write_text(
+        "OWNER=alice@workstation\n"
+        "TAGGED=alice=tag@workstation\n",
+        encoding="utf-8",
+    )
+    root_dotenv.write_text("OWNER=alice@workstation\n", encoding="utf-8")
+    local_dotenv.write_text(
+        "# Contact alice=tag@workstation.\n"
+        "# Alternate alice@workstation!\n"
+        "OWNER=alice@workstation\n",
+        encoding="utf-8",
+    )
+    git(source, "add", ".")
+    git(source, "commit", "-m", "old synthetic scanner fixture")
+    old_oid = git(source, "hash-object", "tests/test_public_export.py")
+    old_diagnostic_oid = git(source, "hash-object", "analysis/result.json")
+    old_toml_oid = git(source, "hash-object", "analysis/result.toml")
+    old_env_oid = git(source, "hash-object", "analysis/result.env")
+    old_root_dotenv_oid = git(source, "hash-object", ".env")
+    old_local_dotenv_oid = git(source, "hash-object", "analysis/.env.local")
+
+    # commit3 (tip): fixture はバイト一致で復元され、diagnostic は redaction
+    # 済みで書き戻される側。
+    tip_contents = b"safe current scanner fixture\n"
+    scanner_fixture.write_bytes(tip_contents)
+    diagnostic.write_text(
+        '{"path":"D:/'
+        + 'Projects/current/result","workspace":"/'
+        + 'workspaces/alice/build",'
+        '"owner":"alice@workstation",'
+        '"tailscale_owner":"alice@host.'
+        + 'tail123.ts.net",'
+        '"digit_owner":"alice@3dworkstation",'
+        '"tagged_owner":"alice!tag@workstation","suite":"Suite@2",'
+        '"protocol":"v2|brightness@1"}\n',
+        encoding="utf-8",
+    )
     (source / "private.dll").unlink()
     git(source, "add", "-u")
     git(source, "commit", "-m", "remove private payload")
@@ -105,119 +164,10 @@ def test_export_keeps_only_main_and_explicit_tags_and_sanitizes_history(tmp_path
     assert git(output, "show", "refs/tags/v1^{commit}:tests/test_public_export.py") == (
         "tagged fixture"
     )
-    assert (output / "tests" / "test_public_export.py").read_text(encoding="utf-8") == (
-        "main fixture\n"
-    )
+    assert (output / "tests" / "test_public_export.py").read_bytes() == tip_contents
     assert (output / "schemas" / "probe.schema.json").read_text(
         encoding="utf-8"
     ) == schema_contents
-    exported_messages = git(output, "log", "--all", "--format=%B")
-    assert "tailbe216f.ts.net" not in exported_messages
-    assert "workstation.local" not in exported_messages
-    assert "bob@" + "workstation" not in exported_messages
-    assert "<redacted-home>" in exported_messages
-    assert "<redacted-private-email>" in exported_messages
-    assert "alice.local@example.com" in exported_messages
-    assert "naari.named@gmail.com" in exported_messages
-    assert "alice@build-host.example.com" in exported_messages
-    assert "alice@bücher.example" in exported_messages
-    assert "álîce@example.com" in exported_messages
-    assert "alice!tag@example.com" in exported_messages
-    assert "alice@foo.local.example.com" in exported_messages
-    assert "actions/checkout@v4" in exported_messages
-    assert "react@latest" in exported_messages
-    assert "react@canary" in exported_messages
-    assert "react@experimental" in exported_messages
-    assert "Suite@2" in exported_messages
-    assert public_export.scan_export(output) == []
-    git(output, "fsck", "--full", "--no-reflogs", "--no-dangling")
-
-
-def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
-    pytest.importorskip("git_filter_repo")
-    source = tmp_path / "source"
-    source.mkdir()
-    git(source, "init", "-b", "main")
-    git(source, "config", "user.name", "Test")
-    git(source, "config", "user.email", "test@example.invalid")
-    fixture = source / "tests" / "test_public_export.py"
-    fixture.parent.mkdir()
-    diagnostic = source / "analysis" / "result.json"
-    diagnostic.parent.mkdir()
-    diagnostic_toml = source / "analysis" / "result.toml"
-    diagnostic_env = source / "analysis" / "result.env"
-    root_dotenv = source / ".env"
-    local_dotenv = source / "analysis" / ".env.local"
-    old_contents = "token = 'ghp_" + "abcdefghijklmnopqrstuvwxyz123456'\n"
-    fixture.write_text(old_contents, encoding="utf-8")
-    diagnostic.write_text('{"path":"C:/' + 'Users/alice/private"}\n', encoding="utf-8")
-    diagnostic_toml.write_text(
-        "owner='alice!tag@workstation'\n"
-        "equals='alice=tag@workstation'\n"
-        "query='alice?tag@workstation'\n",
-        encoding="utf-8",
-    )
-    diagnostic_env.write_text(
-        "OWNER=alice@workstation\n"
-        "TAGGED=alice=tag@workstation\n",
-        encoding="utf-8",
-    )
-    root_dotenv.write_text("OWNER=alice@workstation\n", encoding="utf-8")
-    local_dotenv.write_text(
-        "# Contact alice=tag@workstation.\n"
-        "# Alternate alice@workstation!\n"
-        "OWNER=alice@workstation\n",
-        encoding="utf-8",
-    )
-    git(
-        source,
-        "add",
-        "tests/test_public_export.py",
-        "analysis/result.json",
-        "analysis/result.toml",
-        "analysis/result.env",
-        ".env",
-        "analysis/.env.local",
-    )
-    git(source, "commit", "-m", "old synthetic scanner fixture")
-    old_oid = git(source, "hash-object", "tests/test_public_export.py")
-    old_diagnostic_oid = git(source, "hash-object", "analysis/result.json")
-    old_toml_oid = git(source, "hash-object", "analysis/result.toml")
-    old_env_oid = git(source, "hash-object", "analysis/result.env")
-    old_root_dotenv_oid = git(source, "hash-object", ".env")
-    old_local_dotenv_oid = git(source, "hash-object", "analysis/.env.local")
-    tip_contents = b"safe current scanner fixture\n"
-    fixture.write_bytes(tip_contents)
-    diagnostic.write_text(
-        '{"path":"D:/'
-        + 'Projects/current/result","workspace":"/'
-        + 'workspaces/alice/build",'
-        '"owner":"alice@workstation",'
-        '"tailscale_owner":"alice@host.'
-        + 'tail123.ts.net",'
-        '"digit_owner":"alice@3dworkstation",'
-        '"tagged_owner":"alice!tag@workstation","suite":"Suite@2",'
-        '"protocol":"v2|brightness@1"}\n',
-        encoding="utf-8",
-    )
-    git(
-        source,
-        "add",
-        "tests/test_public_export.py",
-        "analysis/result.json",
-        "analysis/result.toml",
-        "analysis/result.env",
-        ".env",
-        "analysis/.env.local",
-    )
-    git(source, "commit", "-m", "split synthetic scanner fixture")
-
-    output = tmp_path / "export"
-    public_export.create_export(
-        source, output, [], "public@users.noreply.github.com"
-    )
-
-    assert (output / "tests" / "test_public_export.py").read_bytes() == tip_contents
     assert (output / "analysis" / "result.json").read_text(encoding="utf-8") == (
         '{"path":"<redacted-windows-path>","workspace":"<redacted-workspace>",'
         '"owner":"<redacted-private-email>",'
@@ -243,12 +193,31 @@ def test_export_drops_scanner_fixture_history_and_restores_tip_bytes(tmp_path):
         "# Alternate <redacted-private-email>!\n"
         "OWNER=<redacted-private-email>\n"
     )
-    assert old_oid not in git(output, "rev-list", "--objects", "--all")
-    assert old_diagnostic_oid not in git(output, "rev-list", "--objects", "--all")
-    assert old_toml_oid not in git(output, "rev-list", "--objects", "--all")
-    assert old_env_oid not in git(output, "rev-list", "--objects", "--all")
-    assert old_root_dotenv_oid not in git(output, "rev-list", "--objects", "--all")
-    assert old_local_dotenv_oid not in git(output, "rev-list", "--objects", "--all")
+    exported_objects = git(output, "rev-list", "--objects", "--all")
+    assert old_oid not in exported_objects
+    assert old_diagnostic_oid not in exported_objects
+    assert old_toml_oid not in exported_objects
+    assert old_env_oid not in exported_objects
+    assert old_root_dotenv_oid not in exported_objects
+    assert old_local_dotenv_oid not in exported_objects
+    exported_messages = git(output, "log", "--all", "--format=%B")
+    assert "tailbe216f.ts.net" not in exported_messages
+    assert "workstation.local" not in exported_messages
+    assert "bob@" + "workstation" not in exported_messages
+    assert "<redacted-home>" in exported_messages
+    assert "<redacted-private-email>" in exported_messages
+    assert "alice.local@example.com" in exported_messages
+    assert "naari.named@gmail.com" in exported_messages
+    assert "alice@build-host.example.com" in exported_messages
+    assert "alice@bücher.example" in exported_messages
+    assert "álîce@example.com" in exported_messages
+    assert "alice!tag@example.com" in exported_messages
+    assert "alice@foo.local.example.com" in exported_messages
+    assert "actions/checkout@v4" in exported_messages
+    assert "react@latest" in exported_messages
+    assert "react@canary" in exported_messages
+    assert "react@experimental" in exported_messages
+    assert "Suite@2" in exported_messages
     assert public_export.scan_export(output) == []
 
 

@@ -233,6 +233,10 @@ jobs:
         # cannot hide as an environment limitation off CI (issue #335).
         env:
           AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"
+          # 前段の Build minihost workers が同一 checkout からビルド済みの
+          # worker を canonical_release_worker fixture に渡し、fixture 内での
+          # 二重ビルドを避ける (#681)。
+          AEXCOMPAT_CANONICAL_WORKER: ${{ github.workspace }}\target\minihost-build\aex_render_worker.exe
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           uv run python -m pytest -q -rs --run-sdk-tests --run-built-artifact-tests --validate-local-artifact-manifest > pytest-output.txt 2>&1

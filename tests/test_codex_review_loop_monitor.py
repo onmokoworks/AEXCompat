@@ -16,6 +16,10 @@ from pathlib import Path
 
 import pytest
 
+# 開発インフラ (レビュー運用スキル) のテスト。プロダクト CI からは分離し、
+# 専用の infra job (bash/jq がネイティブに速い ubuntu) で実行する (#684)。
+pytestmark = pytest.mark.dev_infra
+
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / ".claude" / "skills" / "codex-review-loop" / "codex-review-lib.sh"
 
