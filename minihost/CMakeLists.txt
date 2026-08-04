@@ -1,5 +1,49 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Pin the MSVC diagnostic language before the compiler is probed (issue #657).
+#
+# With the Ninja generator, header dependencies are recovered by matching cl's
+# `/showIncludes` lines against the `msvc_deps_prefix` CMake captured while
+# probing the compiler. That prefix is localized: a configure run whose cl
+# speaks Japanese records those bytes, and a later build whose cl speaks
+# English (or the same words under a different console codepage) matches
+# nothing. Ninja then records ZERO header dependencies per object and reports
+# "no work to do" forever, so a header edit never rebuilds its dependents.
+# The build directory keeps accumulating objects compiled against older
+# headers while looking up to date, and the linked worker mixes them.
+#
+# That is not hypothetical: it produced a worker whose GLOBAL_SETUP dispatch
+# access-violated for every AEX, and AviUtl2 registered zero filters (#651).
+# `ninja -t deps` on that directory reported `#deps 0` for every object,
+# including the ones rebuilt the same day.
+#
+# Setting VSLANG here fixes the language CMake probes; the launcher below fixes
+# the language the build itself emits. Both are needed - they are separate
+# processes with separate environments, and the failure is exactly the two
+# disagreeing. An operator who has already chosen a language is left alone.
+set(AEXCOMPAT_VSLANG "$ENV{VSLANG}")
+string(STRIP "${AEXCOMPAT_VSLANG}" AEXCOMPAT_VSLANG)
+# An operator's own value is honored, but only when it is a bare LCID: it is
+# forwarded into every compile below, so anything else is replaced rather than
+# passed through.
+if(NOT AEXCOMPAT_VSLANG MATCHES "^[0-9]+$")
+  set(AEXCOMPAT_VSLANG 1033)
+endif()
+set(ENV{VSLANG} "${AEXCOMPAT_VSLANG}")
+
 project(AEXCompatMinihost LANGUAGES CXX)
+
+# The build-time half of the pin: every compile runs through `cmake -E env`, so
+# cl emits the same language whatever shell drives ninja. Without this, the
+# prefix agrees only as long as configure and build happen to share a console.
+#
+# A launcher the operator already chose (ccache and friends) wins: replacing it
+# would silently disable their tooling, and only this generator+compiler pair
+# has the localization hazard to begin with.
+if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja" AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+  set(CMAKE_CXX_COMPILER_LAUNCHER
+      "${CMAKE_COMMAND}" -E env "VSLANG=${AEXCOMPAT_VSLANG}")
+endif()
 
 add_library(aexcompat_trace_writer STATIC
   ../instruments/common/trace_writer.cpp

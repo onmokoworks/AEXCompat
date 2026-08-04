@@ -104,6 +104,28 @@ Get-ChildItem target\minihost-build\aex_*.exe
 # aex_l1_worker.exe / aex_l2_worker.exe / aex_render_worker.exe / aex_smart_worker.exe
 ```
 
+### ヘッダ依存追跡の検証 (issue #657)
+
+ビルド後にこれを実行する:
+
+```powershell
+pwsh -File tools\verify-minihost-build-deps.ps1
+```
+
+Ninja + MSVC では、ヘッダ依存は cl の `/showIncludes` 出力を configure 時に
+記録した `msvc_deps_prefix` と突き合わせて復元している。このプレフィックスは
+**ローカライズされる**ため、configure 時と build 時で cl の言語 (あるいは
+コンソールのコードページ) が食い違うと一行も一致せず、ninja はオブジェクトごとに
+**ヘッダ依存を 0 件**として記録する。以後そのビルドディレクトリはヘッダを
+書き換えても `no work to do` と答え続け、古いヘッダでコンパイルされた
+オブジェクトを抱えたまま「最新」に見える。
+
+実際にこれが起き、全 AEX が GLOBAL_SETUP で access violation を起こす worker が
+できて AviUtl2 のフィルタ登録が 0 件になった (#651)。`minihost/CMakeLists.txt` は
+configure と build の双方に `VSLANG` を固定してこの食い違いを防ぐが、
+**それ以前に作られたビルドディレクトリは壊れたまま**なので、上の検証で落ちたら
+ディレクトリごと削除して configure し直すこと。増分ビルドは復旧しない。
+
 broker / harness と gate スクリプト (`tools/refresh-sdk-grabba-evidence.ps1` 等)
 はこのパス直下の exe を前提にしているため、multi-config generator
 (Visual Studio) で `Release\` 配下に出すと参照されない点に注意。
