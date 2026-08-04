@@ -71,7 +71,8 @@ fn read_virtual_buffer_rgba8(video: *mut FILTER_PROC_VIDEO) -> Option<(u32, u32,
         ctx.CopyResource(&staging, src);
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).ok()?;
+        ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            .ok()?;
         let row_pitch = mapped.RowPitch as usize;
         if row_pitch < width as usize * 8 {
             ctx.Unmap(&staging, 0);
@@ -150,7 +151,8 @@ fn f16c_row_available() -> bool {
     {
         static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *AVAILABLE.get_or_init(|| {
-            std::arch::is_x86_feature_detected!("f16c") && std::arch::is_x86_feature_detected!("avx")
+            std::arch::is_x86_feature_detected!("f16c")
+                && std::arch::is_x86_feature_detected!("avx")
         })
     }
     #[cfg(not(target_arch = "x86_64"))]
