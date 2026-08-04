@@ -48,6 +48,44 @@ Copy-Item bridges\aviutl2-multifilter\target\release\aexcompat_aviutl2_multifilt
 `.aux2` で置くこと (`.auf2` は不可)。AviUtl2 起動中はロック。設計経緯は
 `docs/AVIUTL2_BRIDGE_2026-07-21.md` の段階5。
 
+### worker の置き場所 (issue #650)
+
+AEX は別プロセスの worker (`aex_l2_worker.exe` 等) で実行するので、DLL だけでは
+動かない。worker の探索順は:
+
+1. 環境変数 `AEXCOMPAT_MULTIFILTER_REPOSITORY`
+2. `config.toml` の `repository`
+3. **プラグインの隣**: DLL と同じフォルダ、次に `<DLLのフォルダ>\aexcompat`。
+   それぞれ `target\minihost-build\aex_l2_worker.exe` がある場合にのみ採用
+
+1 と 2 は開発者が自前ビルドの worker を使うための明示指定で、そこに worker がある
+限り優先される。**worker が無い場合は 3 に降格する** (指した先が消えていても
+プラグインが動き続けるように)。3 にも worker が無ければ 1・2 をそのまま採用する
+(これから建てる場所を指しているとみなす)。
+
+つまり明示指定していても、そこに worker が無くプラグインの隣にあれば、隣の worker が
+使われる。意図しない worker で観測しないよう、開発中は指定先を建ててから使うこと。
+ルートが切り替わった起動では worker fingerprint が変わるため、登録は維持したまま
+全エントリがバックグラウンド再 discovery に回る (issue #307 の再検証機構)。
+
+> **現状 3 だけでは動かない**: broker の worker freshness gate (#613) が
+> `<root>\minihost\src` のソース mtime を読むため、ソースを含まない配布形態は
+> `metadata_unavailable` で discovery も render も失敗する。3 は配布形態への
+> 準備であって、まだ end-to-end では通らない。配布物向けのゲート置き換えは
+> #649 の残りスコープ。それまでは開発チェックアウトを `repository` に
+> 指定する運用が確実。
+
+ゲート置き換え後は、プラグインと worker を一緒に置くだけでユーザーのチェックアウトに
+実行時依存しなくなる:
+
+```powershell
+$plugin = 'C:\ProgramData\aviutl2\Plugin'
+Copy-Item bridges\aviutl2-multifilter\target\release\aexcompat_aviutl2_multifilter.dll `
+          "$plugin\aexcompat_multifilter.aux2"
+New-Item -ItemType Directory -Force "$plugin\aexcompat\target\minihost-build" | Out-Null
+Copy-Item target\minihost-build\aex_*_worker.exe "$plugin\aexcompat\target\minihost-build\"
+```
+
 ## 設定 (issue #299)
 
 対象 AEX フォルダ・worker repository・除外エフェクトを TOML で設定する。既定の設定パスは
