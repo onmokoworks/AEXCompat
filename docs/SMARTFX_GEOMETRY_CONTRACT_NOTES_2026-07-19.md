@@ -448,6 +448,9 @@ sizing の追随変更 (result_rect 基準 + origin 設定) は issue #102 の
 - Displacement 側の内部判断を逆アセンブルで直接見る。ホストが呼ばれずに 4 を返す
   以上、ホスト側の観測だけでは詰め切れない可能性がある。
 
-関連: ホストは `out_data->global_data` を `in_data->global_data` に書き戻していない
-(#705)。classic / smart のどちらでも NULL なので Displacement の症状の直接原因では
-ないが、ABI の欠落として別に記録した。
+調査中の誤り (記録として残す): 「ホストは `out_data->global_data` を
+`in_data->global_data` に書き戻していない」として #705 を起票したが、これは誤り。
+`worker_effect_bootstrap.cpp:102-103` が GLOBAL_SETUP の直後に
+`contract::IN_GLOBAL_DATA_OFFSET` (312) へ `contract::OUT_GLOBAL_DATA_OFFSET` (40) を
+書いている。`l2_main_support.inc` 側の未使用な重複定数 `kInGlobalData` だけを grep して
+実装を見落としていた。#705 は not planned でクローズ済み。
