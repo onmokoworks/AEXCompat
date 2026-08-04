@@ -117,7 +117,7 @@ jobs:
       # Windows の time_ns は ~1ms 粒度なので module を跨いで並走させると
       # 同名衝突で flake する (#664 で実測)。
       - name: Run source-reproducible Python tests
-        run: uv run python -m pytest -q -n auto --dist loadscope
+        run: uv run python -m pytest -q -n auto --dist loadscope --durations=25
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats
