@@ -83,6 +83,16 @@ jobs:
           cmake --build target\minihost-build || exit /b 1
           dir /b target\minihost-build\aex_*.exe
 
+      # ヘッダ依存が実際に記録されているかを確認する (#657)。cl の /showIncludes は
+      # ローカライズされるため、configure 時と build 時で言語が食い違うと ninja は
+      # 依存を 0 件記録し、以後ヘッダを変えても再ビルドされない。それに気づかず
+      # 古いヘッダでコンパイルされたオブジェクトが混ざった worker が全 AEX で
+      # access violation を起こした (#651)。runner は毎回クリーンなので普段は
+      # 通るが、ビルド設定の変更でこの追跡が壊れたらここで落ちる。
+      - name: Verify minihost header dependency tracking
+        shell: pwsh
+        run: pwsh -File tools\verify-minihost-build-deps.ps1
+
       # trace writer の動的テスト (test_production_worker_trace.py /
       # test_instruments_trace_writer.py の handle ベース検証) を CI で実走させる
       # ため instruments の trace_writer_selftest をビルドする (#250)。この target は
