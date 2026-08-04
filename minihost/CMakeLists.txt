@@ -45,6 +45,26 @@ if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja" AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
       "${CMAKE_COMMAND}" -E env "VSLANG=${AEXCOMPAT_VSLANG}")
 endif()
 
+# Read every source as UTF-8 instead of as the operator's code page (issue
+# #713).
+#
+# Without this, cl reads a source with no BOM as the current code page. On a
+# Japanese-locale Windows that is cp932, where 0x81-0x9F and 0xE0-0xFC are lead
+# bytes: a UTF-8 character whose last byte is one of those, sitting immediately
+# before a bare LF, pairs with the newline. The line comment then runs into the
+# next line and the declaration there disappears. That removed a `constexpr`
+# from worker_smart_dispatch.cpp and broke this build on a clean checkout
+# (#708) - invisibly, because a CRLF working copy absorbs the lead byte and
+# still ends the line, and because no CI job builds minihost.
+#
+# `/utf-8` also sets the execution charset. Nothing in `minihost/src` has a
+# non-ASCII string or character literal - every non-ASCII byte is inside a
+# comment - so no emitted bytes change; only how the compiler reads the file
+# does. It also retires the C4819 warnings those comments produce.
+if(MSVC)
+  add_compile_options(/utf-8)
+endif()
+
 # Build provenance embedded in every worker (issue #649).
 #
 # The broker admits a locally built worker by comparing `minihost/src` mtimes
