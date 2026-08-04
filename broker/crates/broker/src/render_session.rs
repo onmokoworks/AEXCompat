@@ -21,9 +21,9 @@ use crate::image_render::{
 };
 use crate::runtime_module_policy::{WorkerModuleValidation, authenticate_gpu_worker_report};
 use crate::secure_image_dispatch::{
-    ApprovedImageArtifact, GpuRuntimeAuthorization, SecureClusterImageDispatch, SecureImageDispatch,
-    WorkerKind, dispatch_secure_cluster_image_session, dispatch_secure_gpu_image_session,
-    dispatch_secure_image_session,
+    ApprovedImageArtifact, GpuRuntimeAuthorization, SecureClusterImageDispatch,
+    SecureImageDispatch, WorkerKind, dispatch_secure_cluster_image_session,
+    dispatch_secure_gpu_image_session, dispatch_secure_image_session,
 };
 use crate::secure_launch::{SecureLaunchResult, SecureSessionProcess};
 use crate::windows_process::{SessionChildHandles, WorkerDesktopPolicy};
@@ -32,7 +32,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::mem::size_of;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
@@ -561,6 +561,14 @@ pub struct SessionLayer {
     /// `Some((time, time_scale))` marks this a timed layer; `None` is a static
     /// secondary that renders on every frame.
     pub timed: Option<(i32, u32)>,
+    /// The caller intends to replace these pixels between frames through
+    /// [`RenderSession::update_dynamic_layer`] (issue #674: AviUtl2's virtual
+    /// buffer driving an animated displacement map). The worker then keeps the
+    /// layer's file handle open and re-reads it before every frame instead of
+    /// consuming it at open. Geometry stays fixed at open either way, so only
+    /// the bytes may change. Not combinable with `timed`, which already means
+    /// "this layer belongs to one point in time".
+    pub dynamic: bool,
 }
 
 #[derive(Debug)]
@@ -706,6 +714,11 @@ pub struct RenderSession {
     /// and removes them on drop; the worker reads each layer once at open via
     /// its inherited handle.
     _layer_sidecars: LayerSidecars,
+    /// Writable handles for the layers the caller declared `dynamic` (issue
+    /// #674), keyed by slot with the byte length fixed at open. The worker
+    /// holds its own read handle to the same file and re-reads it before each
+    /// frame, so replacing the bytes here is what animates the map.
+    dynamic_layers: Vec<DynamicLayer>,
 }
 
 /// The launch plugin set of a cluster render session (issue #405, design
@@ -775,6 +788,16 @@ impl Drop for AnimationSidecar {
 /// early return from `open` still cleans up the files it already wrote.
 struct LayerSidecars(Vec<PathBuf>);
 
+/// One layer the caller may rewrite between frames (issue #674).
+struct DynamicLayer {
+    slot: u32,
+    /// Byte length fixed at open: the worker reads exactly this much, and its
+    /// PF world was built for these dimensions, so a differently sized update
+    /// is rejected rather than resized.
+    bytes: usize,
+    file: std::fs::File,
+}
+
 impl Drop for LayerSidecars {
     fn drop(&mut self) {
         for path in &self.0 {
@@ -830,13 +853,13 @@ impl RenderSession {
         // bounds are enforced by the dispatch when it builds the document.
         if let Some(cluster) = &cluster {
             let launch_sha256 = decode_sha256_hex(request.plugin_sha256)?;
-            if cluster.plugins.first().map(|plugin| plugin.expected_sha256)
-                != Some(launch_sha256)
-            {
+            if cluster.plugins.first().map(|plugin| plugin.expected_sha256) != Some(launch_sha256) {
                 return Err(invalid("cluster plugins[0] must match the launch plugin"));
             }
             if cluster.swap_payloads.len() != cluster.plugins.len() {
-                return Err(invalid("cluster swap payloads must parallel the plugin list"));
+                return Err(invalid(
+                    "cluster swap payloads must parallel the plugin list",
+                ));
             }
         }
         crate::render_request::validate_image_buffer_layout(
@@ -1051,6 +1074,7 @@ impl RenderSession {
         let mut layer_sidecars = LayerSidecars(Vec::with_capacity(request.layers.len()));
         let mut layer_files: Vec<std::fs::File> = Vec::with_capacity(request.layers.len());
         let mut layer_handles: Vec<HANDLE> = Vec::with_capacity(request.layers.len());
+        let mut dynamic_layers: Vec<DynamicLayer> = Vec::new();
         if !request.layers.is_empty() {
             let root = request.repository.join("target/image-transport");
             fs::create_dir_all(&root)?;
@@ -1079,6 +1103,17 @@ impl RenderSession {
                 }
                 layer_handles.push(handle);
                 layer_files.push(file);
+                if layer.dynamic {
+                    // A second, writable handle to the same file. The worker's
+                    // inherited handle is read-only, and this one is not
+                    // inheritable, so the plug-in's process can never write the
+                    // map it is being shown.
+                    dynamic_layers.push(DynamicLayer {
+                        slot: layer.slot,
+                        bytes: layer.rgba.len(),
+                        file: OpenOptions::new().write(true).open(&path)?,
+                    });
+                }
             }
         }
 
@@ -1111,12 +1146,18 @@ impl RenderSession {
                     encoded.push(';');
                 }
                 let handle = layer_handles[index] as usize;
-                match layer.timed {
-                    Some((time, time_scale)) => encoded.push_str(&format!(
+                match (layer.timed, layer.dynamic) {
+                    (Some((time, time_scale)), _) => encoded.push_str(&format!(
                         "{},{},{},{},{},{}",
                         layer.slot, layer.width, layer.height, time, time_scale, handle
                     )),
-                    None => encoded.push_str(&format!(
+                    // Five fields, the trailing 1 marking a layer the broker
+                    // rewrites between frames (issue #674).
+                    (None, true) => encoded.push_str(&format!(
+                        "{},{},{},{},1",
+                        layer.slot, layer.width, layer.height, handle
+                    )),
+                    (None, false) => encoded.push_str(&format!(
                         "{},{},{},{}",
                         layer.slot, layer.width, layer.height, handle
                     )),
@@ -1438,6 +1479,7 @@ impl RenderSession {
             cluster: cluster_state,
             _animation_sidecar: animation_sidecar,
             _layer_sidecars: layer_sidecars,
+            dynamic_layers,
         })
     }
 
@@ -1525,9 +1567,7 @@ impl RenderSession {
             .map(|cluster| (cluster.plugin_count, cluster.current_plugin_index))
             .ok_or_else(|| invalid("render session was not opened as a cluster session"))?;
         if plugin_index >= plugin_count {
-            return Err(invalid(
-                "swap plugin index is outside the cluster manifest",
-            ));
+            return Err(invalid("swap plugin index is outside the cluster manifest"));
         }
         if plugin_index == current_index {
             return Err(invalid("swap plugin index is the current plugin"));
@@ -1565,7 +1605,8 @@ impl RenderSession {
                 POST_TERMINATION_COLLECT_TIMEOUT,
             ));
         }
-        let message = format!("{{\"v\":1,\"type\":\"swap_plugin\",\"plugin_index\":{plugin_index}}}");
+        let message =
+            format!("{{\"v\":1,\"type\":\"swap_plugin\",\"plugin_index\":{plugin_index}}}");
         if !self.transport.send_message(&message) {
             return Err(self.invalidate(
                 "request_pipe_closed",
@@ -1590,7 +1631,9 @@ impl RenderSession {
             FrameWait::WorkerGone => {
                 return Err(self.invalidate(
                     "worker_exited",
-                    format!("the worker was gone before the swap to plugin {plugin_index} completed"),
+                    format!(
+                        "the worker was gone before the swap to plugin {plugin_index} completed"
+                    ),
                     true,
                     POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
@@ -1615,7 +1658,9 @@ impl RenderSession {
                 ));
             }
         };
-        if done.v != PROTOCOL_VERSION || done.kind != "swap_done" || done.plugin_index != plugin_index
+        if done.v != PROTOCOL_VERSION
+            || done.kind != "swap_done"
+            || done.plugin_index != plugin_index
         {
             return Err(self.invalidate(
                 "swap_done_mismatch",
@@ -1670,6 +1715,47 @@ impl RenderSession {
             .expect("cluster state checked above")
             .current_plugin_index = plugin_index;
         Ok(outcome)
+    }
+
+    /// Replaces the pixels of a layer opened as `dynamic` (issue #674), for
+    /// every frame from the next one on.
+    ///
+    /// The worker re-reads the layer before each frame it renders, and this
+    /// session is the only writer, so the ordering that keeps a frame from
+    /// seeing half an update is the request/response cycle itself: write here,
+    /// then send the frame and wait for its reply. Calling this while a frame
+    /// is in flight is not possible through `&mut self`.
+    ///
+    /// Geometry is fixed at open, so an update of a different length is
+    /// rejected: the worker's PF world was built for the opening dimensions and
+    /// would otherwise read past what it was handed.
+    pub fn update_dynamic_layer(&mut self, slot: u32, rgba: &[u8]) -> io::Result<()> {
+        if let Some(invalidation) = &self.invalidation {
+            return Err(invalid(format!(
+                "render session is invalidated ({}): {}",
+                invalidation.reason, invalidation.detail
+            )));
+        }
+        let Some(layer) = self
+            .dynamic_layers
+            .iter_mut()
+            .find(|layer| layer.slot == slot)
+        else {
+            return Err(invalid(format!(
+                "layer slot {slot} was not opened as a dynamic layer"
+            )));
+        };
+        if rgba.len() != layer.bytes {
+            return Err(invalid(format!(
+                "dynamic layer {slot} was opened for {} bytes but the update carries {}",
+                layer.bytes,
+                rgba.len()
+            )));
+        }
+        layer.file.seek(SeekFrom::Start(0))?;
+        layer.file.write_all(rgba)?;
+        layer.file.flush()?;
+        Ok(())
     }
 
     pub fn render_frame(
@@ -2593,7 +2679,9 @@ impl RenderSession {
                         {
                             self.invalidation = Some(SessionInvalidation {
                                 reason: "module_audit_mismatch",
-                                detail: format!("the cluster module audit failed at close: {error}"),
+                                detail: format!(
+                                    "the cluster module audit failed at close: {error}"
+                                ),
                             });
                         }
                     }
@@ -3237,7 +3325,6 @@ pub fn run_video_batch(
     output.write_all(serde_json::to_string_pretty(&report)?.as_bytes())?;
     Ok(passed)
 }
-
 
 mod audio;
 mod discovery;

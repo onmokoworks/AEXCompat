@@ -122,16 +122,30 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
           const std::wstring field = body.substr(offset, end - offset);
           LayerInput layer;
           int consumed = 0;
-          // `slot,w,h,time,scale,handle` (6 fields) is a timed layer (issue #98
-          // W1-4b); the shorter `slot,w,h,handle` stays a static secondary
-          // (W1-4). The handle value is always the final field (#268).
-          if (std::count(field.begin(), field.end(), L',') == 5) {
+          // Field count selects the form. `slot,w,h,time,scale,handle` (6) is a
+          // timed layer (issue #98 W1-4b), `slot,w,h,handle,1` (5) a dynamic
+          // secondary whose bytes the broker rewrites between frames (#674),
+          // and `slot,w,h,handle` (4) the static secondary (W1-4). The handle
+          // is the last field of the static forms and of the timed one (#268).
+          const auto commas = std::count(field.begin(), field.end(), L',');
+          if (commas == 5) {
             if (swscanf_s(field.c_str(), L"%d,%d,%d,%d,%u,%llu%n", &layer.slot,
                     &layer.width, &layer.height, &layer.time, &layer.time_scale,
                     &layer.rgba_handle, &consumed) != 6 ||
                 layer.time_scale == 0)
               throw 1;
             layer.timed = true;
+          } else if (commas == 4) {
+            int32_t dynamic_flag = 0;
+            // Only the literal 1 marks a dynamic layer: anything else would be
+            // a sender the worker does not understand, and admitting it would
+            // silently pick the static reading of a field that means otherwise.
+            if (swscanf_s(field.c_str(), L"%d,%d,%d,%llu,%d%n", &layer.slot,
+                    &layer.width, &layer.height, &layer.rgba_handle,
+                    &dynamic_flag, &consumed) != 5 ||
+                dynamic_flag != 1)
+              throw 1;
+            layer.dynamic = true;
           } else if (swscanf_s(field.c_str(), L"%d,%d,%d,%llu%n", &layer.slot,
                          &layer.width, &layer.height, &layer.rgba_handle,
                          &consumed) != 4) {

@@ -2772,7 +2772,7 @@ mod tests {
             // The frame renders; the close-time cluster module audit fails
             // only afterwards (the fixture injects an undeclared module into
             // the final report's observed union).
-            let reply = render_on(&tx, 0, 0, vec![7u8; 8 * 4 * 4], None);
+            let reply = render_on(&tx, 0, 0, vec![7u8; 8 * 4 * 4], None, None);
             assert!(
                 matches!(reply, FrameReply::Rendered(_)),
                 "the frame renders"

@@ -316,6 +316,7 @@ fn render_with_artifact(
                     height,
                     rgba,
                     timed: None,
+                    dynamic: false,
                 },
             )
             .chain(
@@ -328,6 +329,7 @@ fn render_with_artifact(
                             height,
                             rgba,
                             timed: Some((time.value, time.scale)),
+                            dynamic: false,
                         },
                     ),
             )
