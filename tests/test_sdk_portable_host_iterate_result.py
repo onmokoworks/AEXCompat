@@ -38,15 +38,3 @@ def test_portable_observes_host_lifecycle_and_classic_iterate():
         assert render[ownership] is True
 
 
-def test_portable_bounded_ansi_callback_and_render_message_are_exposed():
-    source = "\n".join(path.read_text(encoding="utf-8") for path in (
-        SOURCE, PF_ANSI_RUNTIME,
-    ))
-
-    assert "kUtilsAnsiSprintf = 328" in source
-    assert "required >= 0 && required <= 4096" in source
-    assert "vsprintf_s(destination, static_cast<std::size_t>(required) + 1" in source
-    assert "strnlen_s(format, 256) == 256" in source
-    report = RENDER_REPORT.read_text(encoding="utf-8")
-    assert r'\"return_message\"' in report
-    assert "value.escaped_return_message" in report

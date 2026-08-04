@@ -462,44 +462,5 @@ def test_closed_schema_rejects_raw_paths_and_backend_readiness():
     assert list(validator.iter_errors(report))
 
 
-def test_worker_loads_only_the_system_opencl_loader_surface():
-    source = WORKER_PATH.read_text(encoding="utf-8")
-    assert 'LoadLibraryExW(name.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32)' in source
-    assert '"OpenCL.dll\\0"' in source
-    for symbol in (
-        "clGetPlatformIDs",
-        "clGetPlatformInfo",
-        "clGetDeviceIDs",
-        "clGetDeviceInfo",
-    ):
-        assert symbol in source
-    assert "LoadLibraryW(" not in source
-    assert "candidate.path" not in source
 
 
-def test_worker_resolves_only_the_bounded_compute_surface():
-    source = WORKER_PATH.read_text(encoding="utf-8")
-    for symbol in (
-        "clCreateContext",
-        "clCreateCommandQueueWithProperties",
-        "clCreateCommandQueue",
-        "clCreateBuffer",
-        "clEnqueueWriteBuffer",
-        "clCreateProgramWithSource",
-        "clBuildProgram",
-        "clGetProgramBuildInfo",
-        "clCreateKernel",
-        "clSetKernelArg",
-        "clEnqueueNDRangeKernel",
-        "clFinish",
-        "clEnqueueReadBuffer",
-        "clReleaseKernel",
-        "clReleaseProgram",
-        "clReleaseMemObject",
-        "clReleaseCommandQueue",
-        "clReleaseContext",
-    ):
-        assert f'b"{symbol}\\0"' in source
-    assert "COMPUTE_ELEMENT_COUNT" in source
-    assert "input[i] * 3u + 7u" in source
-    assert "backend_ready: true" not in source

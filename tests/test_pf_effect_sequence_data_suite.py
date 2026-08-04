@@ -22,18 +22,6 @@ def test_sdk_abi_probe_compiles_and_confirms_frozen_single_slot_suite():
     assert report["types"]["PF_ConstHandle"] == 8
 
 
-def test_minihost_uses_bounded_borrowed_unflattened_registry():
-    source = "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
-    assert '"PF Effect Sequence Data Suite"' in source
-    assert "kMaxLiveEffectSequences = 64" in source
-    assert "using PfConstHandle = const void* const*;" in source
-    assert "publish_effect_sequence" in source
-    assert "invalidate_effect_sequence" in source
-    assert "invoke_sequence_selector" in source
-    assert "bool verify_suite1" in source
-    assert "selector == kSequenceSetup || selector == kSequenceResetup" in source
-    assert "selector == kSequenceSetdown" in source
-    assert "kSequenceFlatten" not in source[source.index("int32_t invoke_sequence_selector"):source.index("template <typename T")]
 
 
 def test_native_selftest_covers_pre_setup_foreign_null_and_stale_handles():

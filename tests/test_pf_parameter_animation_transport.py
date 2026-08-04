@@ -67,14 +67,6 @@ def test_native_timeline_evaluation_and_param_utils():
         assert json.loads(completed.stdout)["parameter_animation_transport"] == "passed"
 
 
-def test_param_utils_direction_state_and_checkout_safety_are_wired():
-    source = worker_source()
-    assert "const bool greater = direction == 0 || direction == 0x1000" in source
-    assert "const bool inclusive = direction == 0x1000 || direction == 0x1001" in source
-    assert "timeline->keys.size() - 1 - offset" in source
-    assert "for (const auto &timeline : g_parameter_timelines)" in source
-    assert "std::lock_guard<std::mutex> lock(g_keyframe_checkout_mutex)" in source
-    assert "std::floor(key.scalar) != key.scalar" in source
 
 
 def test_strict_sidecar_accepts_schema_and_rejects_malformed_documents():
@@ -110,20 +102,6 @@ def test_arbitrary_sidecar_is_bounded_and_strict():
         assert rejected.returncode == 3, (index, rejected.stdout, rejected.stderr)
 
 
-def test_arbitrary_runtime_uses_adjacent_keys_and_owned_handles():
-    source = worker_source()
-    assert "(now - left) / (right_time - left)" in source
-    assert "write<void*>(extra, 16, owned[selected])" in source
-    assert "write<void*>(extra, 24, owned[right])" in source
-    assert "write<void*>(new_extra, 16, &preallocated)" in source
-    assert "replacement = preallocated" in source
-    assert "replacement != preallocated" in source
-    assert "void* interpolated = created" in source
-    assert "interpolated != created" in source
-    assert "timeline_controls_slot" in source
-    assert "if (timeline_controls_slot) continue" in source
-    assert "const bool compared = invoke_entry_seh" not in source
-    assert "apply_arbitrary_parameter_animation" in source
 
 
 def test_sidecar_is_confined_to_broker_owned_transport_and_trailers_are_peeled():

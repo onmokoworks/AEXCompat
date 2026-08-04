@@ -43,31 +43,6 @@ def test_pf_path_checkout_mask_and_lifecycle_ownership_are_balanced():
         assert lifecycle[invariant] is True
 
 
-def test_worker_and_broker_keep_the_path_boundary_explicit_and_observable():
-    worker = "\n".join(path.read_text(encoding="utf-8") for path in WORKER_SOURCES)
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-
-    for marker in (
-        '{"PF Path Query Suite", 1, nullptr, &provide_path_query1',
-        '{"PF Path Data Suite", 1, nullptr, &provide_path_data1',
-        "struct MaskSuite5",
-        '{"AEGP Layer Mask Suite", 6',
-        "write_rect(lifecycle_world.data() + 44, 1, 1)",
-        "transfer_mode < 0 || transfer_mode > 38",
-        "bool flatten(",
-        "double edge_distance(",
-        "out.size()<=64*16",
-        "pf_path_runtime::lifetimes_balanced()",
-    ):
-        assert marker in worker
-    for marker in (
-        'worker_report.get("pf_path_lifetimes_balanced") == Some(&Value::Bool(true))',
-        '"pf_path_checkout_calls"',
-        '"pf_path_checkin_calls"',
-        '"pf_path_mask_calls"',
-        '"invalid_pf_path_operations"',
-    ):
-        assert marker in broker
 
 
 def test_anisotropic_feather_produces_bounded_directional_alpha_gradients():

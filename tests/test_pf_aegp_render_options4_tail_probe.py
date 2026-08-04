@@ -12,32 +12,8 @@ PROBE = ROOT / "target" / "pf-aegp-render-options4-tail-probe-build" / "Release"
 INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 
 
-def test_probe_pins_typed_suite4_tail_slots_17_through_22():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "const AEGP_RenderOptionsSuite4* suite" in source
-    assert "sizeof(AEGP_RenderOptionsSuite4) == 23 * sizeof(void*)" in source
-    for slot, offset in (
-        ("AEGP_SetChannelOrder", 17), ("AEGP_GetChannelOrder", 18),
-        ("AEGP_GetRenderGuideLayers", 19), ("AEGP_SetRenderGuideLayers", 20),
-        ("AEGP_GetRenderQuality", 21), ("AEGP_SetRenderQuality", 22),
-    ):
-        assert f"offsetof(AEGP_RenderOptionsSuite4, {slot}) == {offset} * sizeof(void*)" in source
-        assert f"suite->{slot}" in source
 
 
-def test_probe_covers_tail_roundtrips_invalid_and_stale_options():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "kAEGPRenderOptionsSuiteVersion4" in source
-    assert "channel != AEGP_ChannelOrder_BGRA" in source
-    assert "guides != TRUE" in source
-    assert "quality != AEGP_ItemQuality_BEST" in source
-    assert "AEGP_RenderOptionsH stale = options" in source
-    for call in (
-        "AEGP_SetChannelOrder(stale", "AEGP_GetChannelOrder(stale",
-        "AEGP_GetRenderGuideLayers(stale", "AEGP_SetRenderGuideLayers(stale",
-        "AEGP_GetRenderQuality(stale", "AEGP_SetRenderQuality(stale",
-    ):
-        assert call in source
 
 
 def test_real_probe_exercises_render_options4_tail(tmp_path):

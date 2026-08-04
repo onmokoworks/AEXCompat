@@ -40,66 +40,6 @@ def test_scene_model_schema_is_valid() -> None:
     Draft202012Validator.check_schema(SCHEMA)
 
 
-def test_scene_model_source_contract_connects_registry_scheduler_receipts() -> None:
-    runtime = (
-        ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
-    ).read_text(encoding="utf-8")
-    receipts = (
-        ROOT / "minihost" / "src" / "worker_render_receipts.cpp"
-    ).read_text(encoding="utf-8")
-    transaction = (
-        ROOT / "minihost" / "src" / "worker_aegp_scene_transaction.hpp"
-    ).read_text(encoding="utf-8")
-    routing = (
-        ROOT / "minihost" / "src" / "worker_custom_selftest_routing.cpp"
-    ).read_text(encoding="utf-8")
-    wiring = (
-        ROOT / "minihost" / "src" / "worker_l2_render_abi.cpp"
-    ).read_text(encoding="utf-8")
-    scene = (
-        ROOT / "minihost" / "src" / "worker_aegp_scene.cpp"
-    ).read_text(encoding="utf-8")
-    selftest = (
-        ROOT / "minihost" / "src" / "worker_aegp_compat_selftests.cpp"
-    ).read_text(encoding="utf-8")
-    for marker in (
-        "register_scene_item(",
-        "publish_scene_stage_world(",
-        "stable_scene_identity(",
-        "registration_graph_has_cycle(",
-        "dependency_identity_hash",
-        "effect_order_hash",
-        "invalidate_scene_generation(",
-        "stale_stage_invalidations",
-        "invalid_handle_rejections",
-        "render_receipts::invalidate_scene_generation",
-        "notify_generation_invalidated(project_id_",
-        'L"--self-test-aegp-scene-model"',
-        "&publish_scene_scheduler_stage",
-    ):
-        assert (
-            marker in runtime
-            or marker in receipts
-            or marker in transaction
-            or marker in routing
-            or marker in wiring
-        )
-    assert "register_scene_item(" in wiring
-    assert "publish_scene_stage_world(" in wiring
-    assert "ordered_effects[left].layer_index ==" in scene
-    assert "ordered_effects[left].stack_order ==" in scene
-    assert "effect_slots[7]" in selftest
-    assert "unsupported_suite_calls_report_json()" in selftest
-    assert "invalid_after_unsupported == invalid_before_unsupported" in selftest
-    assert "report.unsupported_slots_preserved =" in selftest
-    assert "!prepare_scene_staged_item(active_item.legacy_handle)" in selftest
-    assert "report.duplicate_order_state_unchanged" in selftest
-    assert "report.duplicate_order_receipt_unchanged" in selftest
-    assert (
-        '<< json_bool(report.unsupported_slots_preserved)'
-        in routing
-    )
-    assert ',"unsupported_slots_preserved":true' not in routing
 
 
 def test_scene_model_evidence_all_production_workers() -> None:

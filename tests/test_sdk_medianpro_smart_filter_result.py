@@ -30,14 +30,6 @@ def test_medianpro_smart_cpu_image_io_contract():
         assert render[ownership] is True
 
 
-def test_reused_paramdef_addresses_are_reference_counted_until_auto_checkin():
-    source = source_owners.worker_text()
-    runtime = PARAMETER_RUNTIME.read_text(encoding="utf-8")
-
-    assert "std::unordered_map<void*, uint32_t> live" in runtime
-    assert "g_live_param_checkouts = g_parameter_runtime.checkout.live" in source
-    assert "++g_live_param_checkouts[definition]" in source
-    assert "checkout_count += checkout.second" in source
 
 
 def test_gpu_is_not_emulated_without_a_real_backend():

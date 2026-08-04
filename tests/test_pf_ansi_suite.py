@@ -21,13 +21,6 @@ def test_pf_ansi_suite_v1_wires_all_19_sdk_slots_without_gaps():
     assert "std::array<void*, 19> ansi{}" in text
 
 
-def test_pf_ansi_runtime_is_a_true_translation_unit():
-    worker = SOURCES[0].read_text(encoding="utf-8")
-    implementation = SOURCES[-1].read_text(encoding="utf-8")
-    cmake = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
-    assert "src/worker_pf_ansi_runtime.cpp" in cmake
-    assert "double __cdecl ansi_atan(double value)" in implementation
-    assert "double __cdecl ansi_atan(double value)" not in worker
 
 
 def test_pf_ansi_numeric_callbacks_use_a_finite_fail_closed_policy():

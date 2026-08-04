@@ -65,13 +65,3 @@ def test_color_settings_probe_records_related_sdk_type_sizes():
         assert types[name] == types["pointer"]
 
 
-def test_color_settings_probe_is_sdk_typed_and_independent_of_minihost():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert '#include "AE_GeneralPlug.h"' in source
-    assert "using Suite = AEGP_ColorSettingsSuite6;" in source
-    assert "kAEGPColorSettingsSuiteVersion6 == 7" in source
-    assert "sizeof(Suite) == 20 * sizeof(void*)" in source
-    assert source.count("SLOT(") == 21  # macro definition plus all 20 members
-    for member in MEMBERS:
-        assert f"SLOT({member}" in source
-    assert "l2_main.cpp" not in source

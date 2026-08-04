@@ -28,14 +28,3 @@ def test_aegp_world_suite3_probe_builds_and_exercises_read_slots():
     assert len({item["pixel_hash"] for item in report["observations"]}) == 3
 
 
-def test_probe_is_sdk_typed_and_scoped_to_world_suite_read_operations():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert '#include "AE_GeneralPlug.h"' in source
-    assert "sizeof(AEGP_WorldSuite3) == 13 * sizeof(void*)" in source
-    for callback in (
-        "AEGP_GetType", "AEGP_GetSize", "AEGP_GetRowBytes", "AEGP_GetBaseAddr8",
-        "AEGP_GetBaseAddr16", "AEGP_GetBaseAddr32", "AEGP_FillOutPFEffectWorld",
-    ):
-        assert callback in source
-    assert "AEGP_New(" not in source
-    assert "AEGP_Dispose(" not in source

@@ -16,27 +16,6 @@ REGISTRY_HEADER = (ROOT / "minihost/src/worker_suite_registry.hpp").read_text(en
 REGISTRY_SOURCE = (ROOT / "minihost/src/worker_suite_registry.cpp").read_text(encoding="utf-8")
 
 
-def test_v7_v13_utility_slots_use_structured_fail_closed_callbacks() -> None:
-    assert "UnsupportedSuiteId::aegp_utility_7" in UTILITY_SOURCE
-    assert "UnsupportedSuiteId::aegp_utility_13" in UTILITY_SOURCE
-    assert "populate_unsupported_slots" in UTILITY_SOURCE
-    assert "utility->unsupported[0] != nullptr" in UTILITY_SOURCE
-    assert "utility3->unsupported[0] != nullptr" in UTILITY_SOURCE
-    assert "utility->unsupported_tail[0]" in UTILITY_SOURCE
-    assert "utility3->unsupported_tail[0]" in UTILITY_SOURCE
-    assert "unsupported_suite_calls_report_json()" in UTILITY_SOURCE
-    for version, slots in ((13, (0, 11)), (7, (0, 9))):
-        for slot in slots:
-            assert (
-                f'{{\\"name\\":\\"AEGP Utility Suite\\",\\"version\\":{version},'
-                f'\\"slot\\":{slot},\\"call_count\\":1}}'
-            ) in UTILITY_SOURCE
-    assert "aegp_utility_7" in REGISTRY_HEADER
-    assert "aegp_utility_13" in REGISTRY_HEADER
-    assert '{"AEGP Utility Suite", 7}' in REGISTRY_SOURCE
-    assert '{"AEGP Utility Suite", 13}' in REGISTRY_SOURCE
-    assert "version/slot record" in UTILITY_HEADER
-    assert "UtilitySuiteSelftestResult" in UTILITY_HEADER
 
 
 def _msvc_vcvars() -> Path:

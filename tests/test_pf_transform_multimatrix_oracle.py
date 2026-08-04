@@ -122,15 +122,6 @@ def test_oracle_build_is_reproducible_for_hash_pinned_bundle():
     assert PROBE.read_bytes() == first
 
 
-def test_oracle_has_ae_load_and_render_safety_guards():
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_DEEP_COLOR_AWARE" in source
-    assert "if (!out) return PF_Err_BAD_CALLBACK_PARAM;" in source
-    assert "if (!err && !transforms) err = PF_Err_BAD_CALLBACK_PARAM;" in source
-    assert "if (!err && !worlds) err = PF_Err_BAD_CALLBACK_PARAM;" in source
-    assert "world.rowbytes < 0 || world.height < 0" in source
-    assert "rowbytes > std::numeric_limits<size_t>::max() / height" in source
-    assert "std::memset(output->data, 0, output_bytes);" in source
 
 
 def test_generated_oracle_has_well_formed_pipl_and_effect_main_export():

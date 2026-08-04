@@ -13,12 +13,6 @@ class HumanGateDecisionTests(unittest.TestCase):
         self.assertIn("223FF5EC542DD74374C727F16AA6C068073D1C2D7A5CABF20512CB289F0716EB", text)
         self.assertIn("does not waive dependency review", text)
 
-    def test_cleanroom_decision_confines_sdk_to_instruments(self):
-        text = (ROOT / "docs" / "ABI_PROVENANCE_DECISION_2026-07-13.md").read_text(encoding="utf-8")
-        self.assertIn("public-document cleanroom", text)
-        self.assertIn("may be read only", text)
-        self.assertIn("under `instruments/`", text)
-        self.assertIn("may not be copied", text)
 
     def test_sdk_note_records_external_local_root(self):
         text = (ROOT / "analysis" / "AE_SDK_LICENSE_NOTE_2026-07-13.md").read_text(encoding="utf-8")

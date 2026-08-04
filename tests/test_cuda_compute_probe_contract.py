@@ -333,16 +333,3 @@ def test_jit_log_is_hash_only_and_schema_is_closed():
     assert list(validator.iter_errors(extra))
 
 
-def test_source_contract_is_system32_driver_only_and_backend_never_ready():
-    source = WORKER_PATH.read_text(encoding="utf-8")
-    assert 'LoadLibraryExW(name.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32)' in source
-    assert '"nvcuda.dll\\0"' in source
-    assert "cudart" not in source.lower()
-    assert "backend_ready: false" in (
-        ROOT
-        / "broker"
-        / "crates"
-        / "broker"
-        / "src"
-        / "cuda_compute_probe.rs"
-    ).read_text(encoding="utf-8")

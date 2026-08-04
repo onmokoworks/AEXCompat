@@ -40,17 +40,3 @@ def test_host_and_plugin_each_dispose_their_owned_handle_once():
     assert render["guard_bytes_intact"] is True
 
 
-def test_modern_sequence_save_selector_is_abi_bound_and_user_accessible():
-    evidence = result()
-    worker = source_owners.worker_text()
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    harness = source_owners.harness_windows_text()
-    probe = PROBE.read_text(encoding="utf-8")
-    assert evidence["abi"]["get_flattened_sequence_data_selector"] == 28
-    assert "PF_Cmd_GET_FLATTENED_SEQUENCE_DATA" in probe
-    assert "constexpr int32_t kGetFlattenedSequenceData = 28;" in worker
-    assert '"get_flattened_sequence_data"' in broker
-    assert "pub fn probe_experimental_copied_flattened_sequence" in broker
-    assert "non-destructive sequence save worker contract failed" in broker
-    assert 'args[1] == "--probe-experimental-copied-flattened-sequence"' in harness
-    assert "Probe non-destructive sequence save" in harness

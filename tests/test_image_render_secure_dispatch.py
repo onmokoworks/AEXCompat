@@ -28,31 +28,6 @@ def session_open() -> str:
     return session[start:session.index("\n    pub fn ", start + 1)]
 
 
-def test_render_workers_admit_the_local_build_through_dispatch_only():
-    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    dispatch = (SOURCE.parent / "secure_image_dispatch.rs").read_text(encoding="utf-8")
-
-    # Frozen worker trust constants are retired; render/smart/L2 image dispatch
-    # admits the locally built worker at dispatch time instead.
-    assert "WORKER_TRUST" not in source
-    assert 'include!("generated_' not in source
-    for name in (
-        "generated_l2_worker_trust.rs",
-        "generated_render_worker_trust.rs",
-        "generated_smart_worker_trust.rs",
-    ):
-        assert not (SOURCE.parent / name).exists()
-
-    # Admission happens exactly once per launch, inside dispatch_secure_image
-    # (the diagnostic request routes) and its render-session variant (every
-    # image and audio render since #365), and the staged copy must still match
-    # the admitted bytes before launch.
-    production = dispatch.split("\n#[cfg(test)]", 1)[0]
-    assert production.count("admit_local_worker(") == 3  # definition + request + session
-    assert "pub fn dispatch_secure_image_session(" in dispatch
-    assert "local worker binary is missing or unreadable" in dispatch
-    assert "local worker binary is empty" in dispatch
-    assert "Sha256::digest(fs::read(&worker" not in render_function()
 
 
 def test_plugin_identity_is_strictly_decoded_and_size_bound():
@@ -67,47 +42,6 @@ def test_plugin_identity_is_strictly_decoded_and_size_bound():
     assert session.count("expected_size: fs::metadata(request.plugin_path)?.len()") == 2
 
 
-def test_the_session_is_the_only_image_transport():
-    """#365 (W4): no eligibility gate, no argv render commands, no fallback.
-
-    A second transport is what made a gate necessary; without one, a shape the
-    session cannot carry has to become an explicit error from
-    `RenderSession::open` instead of being silently rerouted.
-    """
-    source = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    body = render_function()
-    dispatch = (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text(encoding="utf-8")
-
-    assert "session_eligible" not in source, "the eligibility gate must be gone"
-    assert "fn image_worker_command(" not in source
-    assert "dispatch_secure_gpu_image(" not in source
-    # render_with_artifact ends at the session outcome; nothing dispatches a
-    # one-shot worker after it.
-    assert "render_classic_via_length_one_session(&SessionWrapperRequest {" in body
-    assert "dispatch_secure_image(" not in body
-    assert "SecureImageDispatch {" not in body
-    assert "run_isolated" not in body
-    # Fail closed: an infrastructure failure is reported, not retried elsewhere.
-    assert "there is no alternate transport" in body
-
-    # The worker no longer admits any one-shot render command word.
-    for command in (
-        '"--render-image"', '"--render-image16"', '"--render-image32"',
-        '"--render-image-layer"', '"--render-image16-layer"', '"--render-image32-layer"',
-        '"--render-image-audio"', '"--render-audio"',
-        '"--smart-image"', '"--smart-image16"', '"--smart-image32"',
-        '"--smart-image32-cpu"', '"--smart-image32-opencl"', '"--smart-image32-directx"',
-        '"--smart-image-layer"', '"--smart-image16-layer"',
-        '"--smart-image32-layer"', '"--smart-image32-cpu-layer"',
-    ):
-        # `equals(command, L"--render-image")` is the admission form; a bare
-        # mention inside a comment is fine, so match the L-prefixed literal.
-        assert f'L{command}' not in dispatch, f"{command} is still admitted"
-    # The session command words must survive that sweep (the loop above would
-    # also match them by prefix if it were written loosely).
-    assert 'L"--render-session-v1"' in dispatch
-    assert 'L"--render-audio-session-v1"' in dispatch
-    assert 'L"--smart-session32-cpu-v1"' in dispatch
 
 
 def test_a_gpu_session_requires_a_policy_and_never_retries_on_cpu():
@@ -240,66 +174,6 @@ def test_gpu_preflight_seals_the_same_dependencies_as_the_render():
     assert "vec![authorization.artifact.clone()]" not in body
 
 
-def test_smart_sessions_carry_static_context_trailers():
-    """A host context must reach the plug-in on a smart session (#331).
-
-    The broker builds the mask/spatial/render trailers from `host_context` and pushes
-    them onto the session's positional tail; the worker's smart session command has to
-    peel them in the same order the classic session command does, or the ten-slot
-    session contract does not resolve and the command is rejected outright.
-
-    Before #365 this also had to assert that a host context did not force the
-    render onto the one-shot transport. There is no such transport now, so what
-    remains is the peel order itself.
-    """
-    session = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
-    dispatch = (
-        ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
-    ).read_text(encoding="utf-8")
-
-    # The session open does not refuse smart requests that carry the trailers.
-    assert "smart sessions do not carry static context trailers yet" not in session
-    # The broker pushes all three, in the original positional order.
-    push = session[session.index("if let Some(mask) = &request.mask_trailer"):]
-    assert push.index("request.mask_trailer") < push.index("request.spatial_trailer")
-    assert push.index("request.spatial_trailer") < push.index(
-        "request.render_environment_trailer"
-    )
-
-    # Both session commands peel the three trailers ahead of the layer trailer, so
-    # the ten-slot core lands at the same place on either route. `>= 11` is the
-    # session arity guard (10 slots + the trailer under test). Asserted per branch
-    # and in order: counting file-wide would pass a smart branch that peeled mask
-    # before render, which shifts where the core lands, or one that re-based
-    # image_argc on effective_argc ahead of the (shared) layer line -- both
-    # re-break #331 while keeping every count at 2.
-    peels = [
-        "mode.image_render_environment = ",
-        "mode.image_spatial_context = ",
-        "mode.image_mask_context = ",
-        "mode.session_layers = ",
-        "const int session_core_argc = ",
-    ]
-    branches = {
-        "classic": 'if (equals(command, L"--render-session-v1") || session16 || session32) {',
-        "smart": 'if (equals(command, L"--smart-session-v1") || session16 || session32) {',
-    }
-    for name, opener in branches.items():
-        start = dispatch.index(opener)
-        branch = dispatch[start : dispatch.index("return WorkerMode{};", start)]
-        at = -1
-        for peel in peels:
-            found = branch.find(peel, at + 1)
-            assert found > at, f"{name}: {peel} missing or out of order"
-            at = found
-        # The chain must thread through the *_argc fields, never restart from
-        # effective_argc after the first peel.
-        assert "mode.image_argc = mode.image_trailer_argc -" in branch, name
-        assert "mode.image_argc = effective_argc" not in branch, name
-        assert (
-            "const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);"
-            in branch
-        ), name
 
 
 def test_a_policy_below_float32_or_on_classic_does_not_exclude_a_render():

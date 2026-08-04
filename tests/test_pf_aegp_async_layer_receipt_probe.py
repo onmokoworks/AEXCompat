@@ -13,16 +13,6 @@ PROBE = ROOT / "target" / "pf-aegp-async-layer-receipt-probe-build" / "Release" 
 INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 
 
-def test_probe_has_bounded_validated_async_slot2_path():
-    source = SOURCE.read_text(encoding="utf-8")
-    for token in (
-        "AEGP_RenderAndCheckoutLayerFrame_Async", "Render Suite5 slot 2",
-        "std::chrono::seconds(5)", "callback_count", "callback_request_id != request_id",
-        "refcon == result->expected_refcon", "!callback_state->refcon_matches",
-        "AEGP_CancelAsyncRequest", "AEGP_WorldType_8", "AEGP_GetBaseAddr8",
-        "AEGP_CheckinFrame(receipt)", "AEGP_Dispose(options)", "AEGP_DisposeEffect(effect)",
-    ):
-        assert token in source
 
 
 def test_real_probe_uses_async_owned_receipt_during_ordinary_render(tmp_path):

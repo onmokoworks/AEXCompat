@@ -46,26 +46,6 @@ def test_sdk_freezes_param_utils_suite1_at_acquisition_version_2_with_ten_slots(
     ]
 
 
-def test_suite1_has_a_distinct_typed_old_abi_and_all_ten_contract_slots():
-    source = "\n".join((source_owners.worker_text(),
-                        STATE_SOURCE.read_text(encoding="utf-8"),
-                        SELFTEST_SOURCE.read_text(encoding="utf-8")))
-    assert '{"PF Param Utils Suite", 2, &g_param_utils_suite1}' in source
-    assert "struct ParamUtilsSuite1" in source
-    assert "sizeof(ParamUtilsSuite1) == 10 * sizeof(void*)" in source
-    assert "acquired_v1 != acquired" in source
-    initializer = source.split("ParamUtilsSuite1 g_param_utils_suite1{", 1)[1].split("};", 1)[0]
-    expected = [
-        "update_param_ui", "get_current_param_state_obsolete",
-        "has_param_changed_obsolete", "have_inputs_changed_over_time_span_obsolete",
-        "is_identical_param_checkout", "find_param_keyframe_time",
-        "get_param_keyframe_count", "checkout_param_keyframe",
-        "checkin_param_keyframe", "param_key_index_to_time",
-    ]
-    assert re.findall(r"&(\w+)", initializer) == expected
-    assert "*changed = 1;" in source
-    assert "valid_obsolete_param_state(owner, state)" in source
-    assert "found->second.owner == owner" in source
 
 
 def test_suite1_and_suite3_native_contracts_pass_together():

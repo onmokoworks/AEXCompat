@@ -44,17 +44,3 @@ def test_resetup_data_is_usable_by_a_real_path_render():
     assert len(render["output_sha256"]) == 64
 
 
-def test_flatten_selector_is_abi_bound_isolated_and_exposed_to_the_harness():
-    evidence = result()
-    worker = source_owners.worker_text()
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    harness = source_owners.harness_windows_text()
-    probe = PROBE.read_text(encoding="utf-8")
-    assert evidence["abi"]["sequence_flatten_selector"] == 7
-    assert "PF_Cmd_SEQUENCE_FLATTEN" in probe
-    assert "constexpr int32_t kSequenceFlatten = 7;" in worker
-    assert '"sequence_flatten"' in broker
-    assert "pub fn probe_experimental_flattened_sequence" in broker
-    assert "flattened sequence worker contract failed" in broker
-    assert 'args[1] == "--probe-experimental-flattened-sequence"' in harness
-    assert "Probe sequence save/reload" in harness

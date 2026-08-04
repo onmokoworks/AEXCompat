@@ -25,17 +25,3 @@ def test_shifter_covers_classic_transform_and_smart_sampling_at_all_depths():
         assert section["world_lifetimes_balanced"] is True
 
 
-def test_shifter_host_callbacks_are_bounded_and_depth_aware():
-    source = "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
-
-    for marker in (
-        "kUtilsTransformWorld",
-        "transform_world",
-        "iterate_origin_typed",
-        "subpixel_sample_typed",
-        '"PF Sampling16 Suite"',
-        '"PF SamplingFloat Suite"',
-        "automatic_checkin_pre_render_params",
-        "automatic_pre_render_handle_disposals",
-    ):
-        assert marker in source

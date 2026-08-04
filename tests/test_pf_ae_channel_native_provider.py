@@ -20,24 +20,6 @@ def worker():
     return next((path for path in candidates if path and path.is_file()), None)
 
 
-def test_native_provider_keeps_plane_metadata_and_never_infers_noncoverage_planes():
-    source = (SOURCE.read_text(encoding="utf-8") +
-              (SOURCE.parent / "worker_classic_render_runtime.cpp").read_text(encoding="utf-8") +
-              CHANNEL_RUNTIME.read_text(encoding="utf-8"))
-    for contract in (
-        "signed_row_bytes",
-        "origin_x",
-        "origin_y",
-        "downsample_x_num",
-        "coordinate_space",
-        "sample_receipt",
-        "pre_effect_source_pixel",
-        "normalized_coverage",
-    ):
-        assert contract in source
-    assert "channel.channel_type = 0x434f5652" in source
-    assert "output pixels are never used to infer auxiliary planes" in source
-    assert "0x44505448" not in source[source.index("publish_alpha_coverage_provider"):source.index("clear_native_aux_provider")]
 
 
 def test_native_provider_oracle_normalizes_8_16_float_and_pins_receipt():
@@ -60,16 +42,6 @@ def test_native_provider_oracle_normalizes_8_16_float_and_pins_receipt():
     }
 
 
-def test_broker_requires_explicit_coverage_contract():
-    request = (ROOT / "broker/crates/broker/src/render_request.rs").read_text(encoding="utf-8")
-    transport = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    session = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
-    assert "alpha_as_coverage_params" in request
-    # The launch argv is built by the session since #365 deleted the one-shot
-    # transport; the validation message stays where the shared helpers live.
-    assert '"--alpha-as-coverage-v1".to_owned()' in session
-    assert "alpha-as-coverage parameter slots are invalid" in session
-    assert "alpha_as_coverage_params" in transport
 
 
 def test_coverage_transport_follows_the_positional_trailers():

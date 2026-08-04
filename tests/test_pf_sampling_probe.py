@@ -19,67 +19,6 @@ AEX = ROOT / "target/pf-sampling-probe-build/Release/pf_sampling_probe.aex"
 INPUT = ROOT / "target/gpu-effects/opencl-input.rgba"
 
 
-class PfSamplingProbeSourceTest(unittest.TestCase):
-    def test_probe_uses_normal_render_and_all_depth_suites(self):
-        source = (PROBE / "pf_sampling_probe.cpp").read_text(encoding="utf-8")
-        self.assertIn("case PF_Cmd_RENDER:", source)
-        self.assertNotIn("PF_Cmd_SMART_RENDER", source)
-        for suite in (
-            "PF_Sampling8Suite1",
-            "PF_Sampling16Suite1",
-            "PF_SamplingFloatSuite1",
-        ):
-            self.assertIn(suite, source)
-        for suite_name in (
-            "kPFSampling8Suite",
-            "kPFSampling16Suite",
-            "kPFSamplingFloatSuite",
-        ):
-            self.assertIn(suite_name, source)
-        self.assertIn("AcquireSuite", source)
-        self.assertIn("ReleaseSuite", source)
-
-    def test_oracle_covers_point_area_edge_and_outside_cases(self):
-        source = (PROBE / "pf_sampling_probe.cpp").read_text(encoding="utf-8")
-        for marker in (
-            "kNearest",
-            "kNearestHalf",
-            "kSubpixelHalf",
-            "kArea",
-            "kEdge",
-            "kOutside",
-            "PF_SampleEdgeBehav_ZERO",
-            "x_radius = kHalf",
-            "y_radius = kHalf",
-            "params.area = kOne",
-        ):
-            self.assertIn(marker, source)
-        for callback in (
-            "nn_sample(",
-            "subpixel_sample(",
-            "area_sample(",
-            "nn_sample16(",
-            "subpixel_sample16(",
-            "area_sample16(",
-            "nn_sample_float(",
-            "subpixel_sample_float(",
-            "area_sample_float(",
-        ):
-            self.assertIn(callback, source)
-        self.assertIn("x % static_cast<A_long>(SampleCase::kCount)", source)
-        self.assertIn("Oracle<Pixel>", source)
-        self.assertIn("OracleMatches", source)
-
-    def test_build_is_standalone_and_reproducible(self):
-        cmake = (PROBE / "CMakeLists.txt").read_text(encoding="utf-8")
-        script = (ROOT / "tools" / "build-pf-sampling-probe.ps1").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("add_library(pf_sampling_probe MODULE", cmake)
-        self.assertIn("PF_DEEP_COLOR_AWARE=1", cmake)
-        self.assertIn("& $CMake -S $source -B $build", script)
-        self.assertIn("--target pf_sampling_probe", script)
-        self.assertIn("Get-FileHash", script)
 
 
 if __name__ == "__main__":

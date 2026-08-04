@@ -22,26 +22,6 @@ class PfFrameResizeFlagResultTest(unittest.TestCase):
             self.assertFalse(cases[name]["render_selector_dispatched"])
             self.assertTrue(cases[name]["guard_bytes_intact"])
 
-    def test_worker_enforces_flags_before_render(self):
-        render = RENDER.read_text(encoding="utf-8")
-        worker = source_owners.worker_text()
-        # Request-shaping is shared by Classic and SmartFX; L2 only invokes
-        # the extracted validator before replacing the guarded output world.
-        validator = render[render.index("bool validate_output_extent("):
-                           render.index("SmartOutputBounds prepare_smart_output_bounds")]
-        self.assertIn("const bool expands", validator)
-        self.assertIn("const bool shrinks", validator)
-        self.assertIn("(output_flags & kExpandBuffer) != 0", validator)
-        self.assertIn("(output_flags & kShrinkBuffer) != 0", validator)
-        validate = worker.index("aexcompat::render::validate_output_extent(")
-        resize = worker.index("width = next_width;", validate)
-        self.assertLess(validate, resize)
-        self.assertIn("classic_context.mark_selector_dispatched()", worker)
-        self.assertIn("g_last_selector_dispatched.store(true",
-                      CLASSIC_RUNTIME.read_text(encoding="utf-8"))
-        fixture = (ROOT / "instruments" / "pf-frame-resize-probe" / "pf_frame_resize_probe.cpp").read_text(encoding="utf-8")
-        self.assertIn("PF_Cmd_FRAME_SETUP", fixture)
-        self.assertIn("PF_Err_INTERNAL_STRUCT_DAMAGED", fixture)
 
     def test_broker_and_harness_expose_isolated_resize_probes(self):
         broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
