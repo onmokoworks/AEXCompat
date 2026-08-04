@@ -401,3 +401,56 @@ sizing の追随変更 (result_rect 基準 + origin 設定) は issue #102 の
 
 - この修正では issue #695 の Displacement (`PF_Err_OUT_OF_MEMORY`) は直らない。
   埋めた前後どちらでも SMART_RENDER は 4 を返す。#699 は独立した ABI の欠落。
+
+## 2026-08-05 issue #695 調査ツール (pf-smart-map-layer-probe)
+
+観察 (事実):
+
+- `Displacement.aex` (SmartFX / 副レイヤー 1 枚) は SMART_RENDER から
+  `PF_Err_OUT_OF_MEMORY` を返すが、同じ AEX を `PF_Cmd_RENDER` に流すと描画できる。
+- SMART_RENDER 中にプラグインが呼ぶホスト callback は全部成功している
+  (checkout_layer_pixels ×2、checkout_output、`PF World Suite` v2 の
+  `PF_GetPixelFormat`、`PF_CHECKOUT_PARAM` ×6)。以降ホストを一度も呼ばずに 4 を返す。
+- 既存の `instruments/pf-smart-timed-multilayer-probe` (SDK 流儀の SmartFX +
+  副レイヤー) は同じセッション経路で描画できる。「SmartFX × 副レイヤー」自体は動く。
+
+そこで `instruments/pf-smart-map-layer-probe` を追加した。Displacement が
+既存 probe より余分にやっていることを "Stage" popup で 1 段ずつ足していく:
+
+1. baseline: 副レイヤーを実矩形で checkout → pixels → output
+2. + 空矩形 `[0,0,0,0]` と別 checkout id での副レイヤーのジオメトリ照会
+3. + PreRender と SmartRender の両方での `PF_CHECKOUT_PARAM`
+4. + `PF World Suite` v2 を PICA で acquire し出力ワールドの pixel format を照会
+5. + 入力をレイヤー外へ 5px 広げて要求し、クリップされた結果を使う
+
+結果 (2026-08-05、`layer_render_diag` 経由):
+
+- **stage 1..5 すべて `rendered 256x144`**。この 4 点はいずれも Displacement の
+  失敗を再現しない。
+
+否定 (この時点で消えた仮説):
+
+- SmartFX × 副レイヤーそのもの
+- 空矩形ジオメトリ照会 + 未回収 checkout id の併存
+- PreRender/SmartRender 両方でのパラメータ checkout
+- SMART_RENDER 中の `PF_GetPixelFormat`
+- レイヤー外へ広げた入力要求とそのクリップ
+
+`AEXCOMPAT_PROBE_OUT_FLAGS2` で probe の `out_flags2` を Displacement と同じ
+134222848 (`SUPPORTS_SMART_RENDER` | `FLOAT_COLOR_AWARE` |
+`SUPPORTS_THREADED_RENDERING`) に差し替えても stage 1 / stage 5 とも描画できた。
+広告するフラグの差も否定。
+
+未確定 (次の候補):
+
+- `PF_Cmd_QUERY_DYNAMIC_FLAGS` をセッション経路で配送していないこと。
+- パラメータ構成の差 (Displacement は 8 パラメータ、probe は 2)。
+- Displacement 側の内部判断を逆アセンブルで直接見る。ホストが呼ばれずに 4 を返す
+  以上、ホスト側の観測だけでは詰め切れない可能性がある。
+
+調査中の誤り (記録として残す): 「ホストは `out_data->global_data` を
+`in_data->global_data` に書き戻していない」として #705 を起票したが、これは誤り。
+`worker_effect_bootstrap.cpp:102-103` が GLOBAL_SETUP の直後に
+`contract::IN_GLOBAL_DATA_OFFSET` (312) へ `contract::OUT_GLOBAL_DATA_OFFSET` (40) を
+書いている。`l2_main_support.inc` 側の未使用な重複定数 `kInGlobalData` だけを grep して
+実装を見落としていた。#705 は not planned でクローズ済み。
