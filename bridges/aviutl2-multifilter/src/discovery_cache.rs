@@ -53,10 +53,35 @@ fn load_config() -> Config {
     let Some(path) = config_path() else {
         return Config::default();
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Config::default();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        // Having no config file is the normal case and says nothing. Having one
+        // that cannot be read drops every setting in it just like a parse error
+        // does, and misdirects the same way (issue #655).
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Config::default();
+        }
+        Err(error) => {
+            log_warn(&format!(
+                "{} could not be read, so every setting in it is ignored: {error}",
+                path.display()
+            ));
+            return Config::default();
+        }
     };
-    toml::from_str(&text).unwrap_or_default()
+    match toml::from_str(&text) {
+        Ok(config) => config,
+        Err(error) => {
+            // Silently defaulting drops `repository` along with everything else,
+            // and the "no worker found" warning then tells a user who *did* set
+            // `repository` to go set it. Name the parse error instead (issue #655).
+            log_warn(&format!(
+                "{} could not be parsed, so every setting in it is ignored: {error}",
+                path.display()
+            ));
+            Config::default()
+        }
+    }
 }
 
 /// Drops a trailing `.aex` extension (any case) from an ignore entry so it may
@@ -109,17 +134,22 @@ static DISCOVERY_THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 #[unsafe(no_mangle)]
 pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     if host.is_null() {
+        log_warn("the host passed no registration table; no AEX filter is registered");
         return;
     }
     let config = load_config();
-    let Some(repository) = resolve_worker_root(
+    let Some((repository, root_source)) = resolve_worker_root(
         std::env::var_os(ENV_REPOSITORY).map(PathBuf::from),
         config.repository.as_deref(),
         self_module_path(),
     ) else {
+        log_warn(&missing_worker_advice());
         return;
     };
     let (dirs, dirs_complete) = resolve_scan_dirs(&config);
+    // Said before the scan, so every early return below still leaves the log
+    // showing which worker root and which folders this launch used.
+    report_worker_root(&repository, root_source, &dirs);
 
     // Recursively collect the *.aex to expose (minus ignored), deduped + sorted.
     // `scan_complete` is false when a default folder went missing or one could not
@@ -160,6 +190,10 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     plugins.sort();
     plugins.dedup();
     if plugins.is_empty() {
+        // Also an empty filter list, and also worth saying out loud: a mistyped
+        // `dir`, an AE install that moved, or an over-broad `ignore` reaches here
+        // rather than any of the failure paths below (issue #655).
+        log_warn(&empty_scan_summary(&dirs, scan.seen.len(), scan_complete));
         return;
     }
 
@@ -170,6 +204,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // Unknown entries and old-host entries also go to the background pass; its
     // updated result is picked up on the next launch.
     let mut pending: Vec<PathBuf> = Vec::new();
+    let mut registered: usize = 0;
     let mut aliases: Option<HashMap<PathBuf, Vec<String>>> = None;
     let mut rekey: Vec<(String, String)> = Vec::new();
     // Whether any cached key under the scan roots is a spelling this scan did not
@@ -221,11 +256,17 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
             && let Some(entry) = cached
         {
             register_discovered(host, &repository, plugin, &dependency, entry);
+            registered += 1;
         }
         if decision.discover {
             pending.push(plugin.clone());
         }
     }
+
+    // Counted over `plugins` — the set actually iterated above — not over
+    // `scan.seen`: an untrustworthy scan adds cached entries that were not walked
+    // this launch (#321), which would otherwise read as "registered 500 of 12".
+    report_registration(plugins.len(), registered, pending.len(), scan_complete);
 
     let rekeyed = !rekey.is_empty();
     apply_rekey(&mut cache, rekey);
@@ -233,8 +274,11 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     if pending.is_empty() {
         // Nothing to discover, so the background pass (the only other writer)
         // will not run. Persist the re-key here or it is recomputed every launch.
-        if rekeyed {
-            save_cache(&cache);
+        if rekeyed && !save_cache(&cache) {
+            log_warn(
+                "the discovery cache could not be written; the plug-in paths it \
+                 re-keyed this launch are resolved again on the next one",
+            );
         }
         return;
     }
@@ -613,51 +657,119 @@ fn spawn_background_discovery(
     build: BuildFingerprint,
     scan_complete: bool,
 ) {
+    // Said before the spawn, so it is never a promise a failed spawn leaves
+    // unkept: `report_registration` has already told the user these are queued.
+    log_info(&format!(
+        "discovering {} plug-in(s) in the background; results appear on the next \
+         launch",
+        pending.len()
+    ));
     let handle = std::thread::Builder::new()
         .name("aex-multifilter-discovery".into())
         .spawn(move || {
-            // Prune stale entries (removed/renamed AEX) up front so an early
-            // shutdown still leaves a pruned cache.
-            prune_cache(&mut cache, &seen, &roots, scan_complete);
-
-            // Discover in chunks and save the cache after each, so a restart or
-            // shutdown mid-scan keeps the progress so far (effects appear across
-            // successive launches) instead of discarding a multi-minute scan. The
-            // full scan of hundreds of AE effects can only ever populate the cache
-            // — AviUtl2 freezes a filter's config at load — so the results show on
-            // the next launch.
-            // Each entry carries the build that produced it, so an interrupted pass
-            // leaves the not-yet-redone entries on the old build and they are
-            // queued again next launch (issue #307).
-            for chunk in pending.chunks(DISCOVERY_SAVE_CHUNK) {
-                if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
-                    break;
-                }
-                let results = discover_all(&repository, chunk, &dependency, build);
-                let discovered = results.len();
-                for (plugin, entry) in results {
-                    let key = plugin.to_string_lossy().into_owned();
-                    // `None` means there was nothing trustworthy to write; the
-                    // existing entry keeps registering and is retried next launch.
-                    if let Some(merged) = keep_best(cache.get(&key), entry, file_meta(&plugin)) {
-                        cache.insert(key, merged);
-                    }
-                }
-                // discover_all returns fewer than the chunk only if it was cut
-                // short by the shutdown flag; save what we have and stop.
-                save_cache(&cache);
-                if discovered < chunk.len() {
-                    break;
-                }
+            // The pass runs arbitrary third-party AEX through the broker. A panic
+            // here would end the thread silently, leaving the "results appear on
+            // the next launch" line above as a promise nothing retracts — the
+            // silence this issue exists to remove. `discover_all` already catches
+            // per-plug-in panics; this covers the rest of the pass.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                run_discovery_pass(
+                    &repository,
+                    &dependency,
+                    &seen,
+                    &roots,
+                    &mut cache,
+                    &pending,
+                    build,
+                    scan_complete,
+                )
+            }));
+            if outcome.is_err() {
+                log_warn(
+                    "background discovery stopped on an internal error; the \
+                     plug-ins it had not reached stay undiscovered until the next \
+                     launch",
+                );
             }
         });
-    if let Ok(handle) = handle
-        && let Ok(mut slot) = DISCOVERY_THREAD.lock()
-    {
-        // A previous launch's thread cannot exist (RegisterPlugin runs once), so
-        // just store this one for UninitializePlugin to join.
-        *slot = Some(handle);
+    match handle {
+        Ok(handle) => {
+            if let Ok(mut slot) = DISCOVERY_THREAD.lock() {
+                // A previous launch's thread cannot exist (RegisterPlugin runs
+                // once), so just store this one for UninitializePlugin to join.
+                *slot = Some(handle);
+            }
+        }
+        // Nothing will ever discover them, so the line above is now a promise
+        // that cannot be kept; retract it rather than leave the user waiting for
+        // filters that appear on no later launch either.
+        Err(error) => log_warn(&format!(
+            "could not start the background discovery thread ({error}); no new \
+             plug-in will be discovered this launch"
+        )),
     }
+}
+
+/// The background pass itself: prune, then discover in chunks, then report.
+#[allow(clippy::too_many_arguments)]
+fn run_discovery_pass(
+    repository: &Path,
+    dependency: &DependencyConfig,
+    seen: &[PathBuf],
+    roots: &[PathBuf],
+    cache: &mut HashMap<String, CacheEntry>,
+    pending: &[PathBuf],
+    build: BuildFingerprint,
+    scan_complete: bool,
+) {
+    // Prune stale entries (removed/renamed AEX) up front so an early shutdown
+    // still leaves a pruned cache.
+    prune_cache(cache, seen, roots, scan_complete);
+
+    // Discover in chunks and save the cache after each, so a restart or shutdown
+    // mid-scan keeps the progress so far (effects appear across successive
+    // launches) instead of discarding a multi-minute scan. The full scan of
+    // hundreds of AE effects can only ever populate the cache — AviUtl2 freezes a
+    // filter's config at load — so the results show on the next launch.
+    // Each entry carries the build that produced it, so an interrupted pass
+    // leaves the not-yet-redone entries on the old build and they are queued
+    // again next launch (issue #307).
+    let (mut effects, mut rejected) = (0usize, 0usize);
+    let mut interrupted = false;
+    let mut persisted = true;
+    for chunk in pending.chunks(DISCOVERY_SAVE_CHUNK) {
+        if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
+            interrupted = true;
+            break;
+        }
+        let results = discover_all(repository, chunk, dependency, build);
+        let discovered = results.len();
+        for (plugin, entry) in results {
+            if entry.ok {
+                effects += 1;
+            } else {
+                rejected += 1;
+            }
+            let key = plugin.to_string_lossy().into_owned();
+            // `None` means there was nothing trustworthy to write; the existing
+            // entry keeps registering and is retried next launch.
+            if let Some(merged) = keep_best(cache.get(&key), entry, file_meta(&plugin)) {
+                cache.insert(key, merged);
+            }
+        }
+        // discover_all returns fewer than the chunk only if it was cut short by
+        // the shutdown flag; save what we have and stop.
+        // Assigned, not accumulated: every save writes the whole map, so a chunk
+        // that lost the cache lock is fully made up for by the next successful
+        // write. Sticking on the earlier failure would warn that a pass "will not
+        // survive the restart" when all of it did.
+        persisted = save_cache(cache);
+        if discovered < chunk.len() {
+            interrupted = true;
+            break;
+        }
+    }
+    report_discovery(effects, rejected, interrupted, persisted);
 }
 
 /// The folders to scan: the env override wins, else `dir` + `dirs` from the
@@ -1631,13 +1743,13 @@ fn dependency_inputs_fingerprint(dependency: &DependencyConfig) -> u64 {
 /// A named checkout that no longer holds a worker falls through to (2) rather
 /// than being handed to the broker regardless. Preferring the setting is right
 /// while it points at something usable; keeping that preference after the tree
-/// is gone only reproduces the incident, and the plugin currently has no way to
-/// report the mistake (`InitializeLogger` is a stub, issue #649).
+/// is gone only reproduces the incident. The returned [`WorkerRootSource`] is
+/// what lets the caller say which of the two happened (issue #655).
 fn resolve_worker_root(
     env_override: Option<PathBuf>,
     configured: Option<&Path>,
     module_path: Option<PathBuf>,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, WorkerRootSource)> {
     let named: Vec<PathBuf> = env_override
         .into_iter()
         .chain(configured.map(Path::to_path_buf))
@@ -1648,14 +1760,275 @@ fn resolve_worker_root(
         .map(|dir| vec![dir.to_path_buf(), dir.join("aexcompat")])
         .unwrap_or_default();
 
-    named
+    if let Some(root) = named
         .iter()
         .chain(beside.iter())
         .find(|root| root.join(L2_WORKER_RELATIVE_PATH).is_file())
-        .cloned()
-        // Nothing holds a worker: keep a named checkout (it may be about to be
-        // built), but never invent one from the plugin's folder.
-        .or_else(|| named.into_iter().next())
+    {
+        let source = if named.iter().any(|named| named == root) {
+            WorkerRootSource::Named
+        } else {
+            WorkerRootSource::BesidePlugin
+        };
+        return Some((root.clone(), source));
+    }
+    // Nothing holds a worker: keep a named checkout (it may be about to be
+    // built), but never invent one from the plugin's folder.
+    named
+        .into_iter()
+        .next()
+        .map(|root| (root, WorkerRootSource::NamedWithoutWorker))
+}
+
+/// The line for a launch that found no worker anywhere.
+///
+/// Built from the same constants the search uses, so the remediation cannot drift
+/// from what is actually probed. The workers sit under a `target/minihost-build/`
+/// subtree, so "put the exe beside the plugin" would send the user to a folder
+/// the search never looks in.
+fn missing_worker_advice() -> String {
+    format!(
+        "no compat host worker found: set `repository` in config.toml (or \
+         {ENV_REPOSITORY}), or place the workers at <plugin folder>\\{} — an \
+         `aexcompat` subfolder there works too. No AEX filter is registered.",
+        // Windows separators throughout: the constant is `/`-separated for
+        // `Path::join`, and a half-converted path reads like a typo.
+        L2_WORKER_RELATIVE_PATH.replace('/', "\\")
+    )
+}
+
+/// Says which worker root this launch resolved and how, and which folders it
+/// will scan. Emitted before the scan so an early return still leaves the log
+/// showing what the plugin decided.
+fn report_worker_root(repository: &Path, source: WorkerRootSource, dirs: &[PathBuf]) {
+    let line = format!(
+        "worker root: {} ({}); scanning {}",
+        repository.display(),
+        source.describe(),
+        describe_dirs(dirs)
+    );
+    // A named root with no worker in it cannot register anything, and that is the
+    // shape of the incident behind issue #650 (a `repository` left pointing at a
+    // deleted worktree). Say so at load rather than leaving it to be inferred.
+    if source == WorkerRootSource::NamedWithoutWorker {
+        log_warn(&format!(
+            "{line}. No worker is built there, so discovery will fail for every \
+             plug-in until one is."
+        ));
+    } else {
+        log_info(&line);
+    }
+}
+
+/// The line for a launch that registered nothing because the scan produced no
+/// plug-in.
+///
+/// Where it can, it names the folders rather than guessing the cause. A mistyped
+/// folder and a folder that exists but cannot be read are indistinguishable here
+/// — both leave `scan_complete` false, since `collect_aex` learns of a missing
+/// folder only as a failed `read_dir` — so guessing would have sent a user with a
+/// typo away to wait for a transient problem to clear.
+fn empty_scan_summary(dirs: &[PathBuf], seen: usize, scan_complete: bool) -> String {
+    // Everything the scan walked matched `ignore`. That is the whole cause of
+    // what it *did* see, but a folder it could not read at all hid its contents
+    // from the ignore list too, so the tail still admits that.
+    if seen > 0 {
+        return format!(
+            "all {seen} .aex found are excluded by `ignore` in config.toml; no AEX \
+             filter is registered{}",
+            unreadable_folder_note(scan_complete)
+        );
+    }
+    format!(
+        "no .aex found in {}; no AEX filter is registered{}",
+        describe_dirs(dirs),
+        if scan_complete {
+            " (they were read and hold no .aex)".to_owned()
+        } else {
+            unreadable_folder_note(scan_complete)
+        }
+    )
+}
+
+/// The tail added when a scan folder could not be read. Names the env override as
+/// well as the config keys, since it wins over both when set.
+fn unreadable_folder_note(scan_complete: bool) -> String {
+    if scan_complete {
+        return String::new();
+    }
+    format!(
+        " (at least one folder could not be read: check the path exists and is \
+         reachable — `dir`/`dirs` in config.toml, or {ENV_DIR} if that is set)"
+    )
+}
+
+/// The scan folders as one log fragment. Diagnosing a misconfiguration needs the
+/// paths themselves, not a count.
+fn describe_dirs(dirs: &[PathBuf]) -> String {
+    if dirs.is_empty() {
+        return "no folder (none configured and no default resolved)".to_owned();
+    }
+    dirs.iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<String>>()
+        .join("; ")
+}
+
+/// Sends the load-time counts to the host log.
+///
+/// Registering nothing while plug-ins *are* known is reported as a warning. That
+/// state has several causes that look identical from outside (a worker root that
+/// no longer exists, an unbuilt worker, a worker regression failing every
+/// plug-in) and used to be silent, so the only symptom was an empty filter list
+/// (issues #650, #651).
+fn report_registration(known: usize, registered: usize, pending: usize, scan_complete: bool) {
+    let summary = registration_summary(known, registered, pending, scan_complete);
+    if registration_is_alarming(known, registered, pending) {
+        log_warn(&summary);
+    } else {
+        log_info(&summary);
+    }
+}
+
+/// Whether registering nothing is a symptom rather than the expected state.
+///
+/// A first launch (or one after the cache is deleted) legitimately registers
+/// nothing: every plug-in is unknown, so all of them queue for discovery and
+/// appear next launch. What is not legitimate is knowing about plug-ins,
+/// registering none, and having none queued either — nothing is being shown and
+/// nothing is being worked on.
+fn registration_is_alarming(known: usize, registered: usize, pending: usize) -> bool {
+    known > 0 && registered == 0 && pending == 0
+}
+
+/// The load-time counts as one line. Split out so the wording, including the
+/// "nothing registered" case, is testable without a host log handle.
+fn registration_summary(
+    known: usize,
+    registered: usize,
+    pending: usize,
+    scan_complete: bool,
+) -> String {
+    // Named whenever it holds, because it changes what the counts mean: `known`
+    // then includes cached plug-ins this launch never saw on disk (#321).
+    let scan = if scan_complete {
+        ""
+    } else {
+        " (a folder could not be read, so cached plug-ins are included)"
+    };
+    if registration_is_alarming(known, registered, pending) {
+        return format!(
+            "0 of {known} known plug-in(s) registered and none queued for \
+             discovery{scan}. Nothing will appear in the filter list: either the \
+             compat host worker is failing for every plug-in, or none of them is \
+             an effect."
+        );
+    }
+    if registered == 0 && pending > 0 {
+        return format!(
+            "registered 0 of {known} known plug-in(s); {pending} queued for \
+             discovery{scan}. Expected on a first launch or after a host rebuild: \
+             they appear once discovery finishes and AviUtl2 is restarted."
+        );
+    }
+    format!(
+        "registered {registered} of {known} known plug-in(s); {pending} queued for \
+         discovery{scan}"
+    )
+}
+
+/// Sends the background pass's outcome to the host log.
+fn report_discovery(effects: usize, rejected: usize, interrupted: bool, persisted: bool) {
+    let summary = discovery_summary(effects, rejected, interrupted);
+    if discovery_is_alarming(effects, rejected) {
+        log_warn(&summary);
+    } else {
+        log_info(&summary);
+    }
+    // The whole point of the pass is what the *next* launch reads back. Without
+    // this, a pass that discovered hundreds of effects and could not write any of
+    // them still ends on "Restart AviUtl2 to pick them up".
+    if !persisted {
+        log_warn(
+            "the discovery cache could not be written, so this pass will not \
+             survive the restart and runs again next launch",
+        );
+    }
+}
+
+/// Whether a discovery pass's outcome is a symptom rather than a normal result.
+/// Shared by the wording and the level, so the two cannot drift into an alarming
+/// sentence logged at info (or the reverse).
+fn discovery_is_alarming(effects: usize, rejected: usize) -> bool {
+    effects == 0 && rejected > 0
+}
+
+/// The background pass's counts as one line. Split out so the wording is
+/// testable without running a discovery.
+///
+/// Every plug-in being rejected is called out separately. A rejection is normal
+/// on its own — a format or codec `.aex` is not an effect — but *nothing*
+/// succeeding out of hundreds means the worker itself is failing, which is what
+/// issue #651 looked like from the user's side: an empty filter list and no
+/// explanation.
+///
+/// The counts are of discovery *results*, not of cache writes. They differ in two
+/// places, both deliberately: a result whose file vanished between discovery and
+/// the stat is counted but not written (`keep_best` returns `None`), and a failed
+/// re-check of a working entry is counted as rejected while the entry keeps
+/// registering (`keep_best` refuses to demote). The question this line answers is
+/// "is the worker producing results at all", so the attempt is the right unit.
+fn discovery_summary(effects: usize, rejected: usize, interrupted: bool) -> String {
+    let tail = if interrupted {
+        " (stopped early; the rest is retried next launch)"
+    } else {
+        ""
+    };
+    if discovery_is_alarming(effects, rejected) {
+        return format!(
+            "background discovery: 0 of {rejected} plug-in(s) yielded an \
+             effect{tail}. Every one was rejected, so the compat host worker is \
+             likely failing rather than the plug-ins being unsupported."
+        );
+    }
+    if effects == 0 {
+        return format!("background discovery: nothing was discovered{tail}");
+    }
+    // "rejected", not "rejected as non-effect": a load failure or a per-plug-in
+    // worker fault lands in the same bucket as a format/codec .aex, and this line
+    // cannot tell them apart.
+    format!(
+        "background discovery: {effects} effect(s), {rejected} rejected{tail}. \
+         Restart AviUtl2 to pick them up."
+    )
+}
+
+/// How [`resolve_worker_root`] arrived at its answer, so the plugin can say so
+/// rather than leaving a misconfiguration indistinguishable from a healthy
+/// launch (issue #655).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WorkerRootSource {
+    /// The environment override or the configured `repository`, holding a worker.
+    Named,
+    /// Shipped beside the plugin.
+    BesidePlugin,
+    /// A named root with no worker built there, and none beside the plugin.
+    NamedWithoutWorker,
+}
+
+impl WorkerRootSource {
+    /// Names both ways a root can be "named", because the plugin does not record
+    /// which one won and sending an env-var user to config.toml wastes their time.
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Named => "from config.toml or AEXCOMPAT_MULTIFILTER_REPOSITORY",
+            Self::BesidePlugin => "beside the plugin",
+            Self::NamedWithoutWorker => {
+                "from config.toml or AEXCOMPAT_MULTIFILTER_REPOSITORY, but no worker \
+                 is built there"
+            }
+        }
+    }
 }
 
 /// The L2 (discovery) worker, relative to the root handed to the broker. Kept in
@@ -1723,9 +2096,12 @@ fn accept_cache_file(file: CacheFile) -> HashMap<String, CacheEntry> {
         .collect()
 }
 
-fn save_cache(entries: &HashMap<String, CacheEntry>) {
+/// Persists the cache. Returns whether it reached disk: a discovery pass that
+/// cannot write has nothing to show on the next launch, and telling the user to
+/// restart for it would be a lie (issue #655).
+fn save_cache(entries: &HashMap<String, CacheEntry>) -> bool {
     let Some(path) = cache_path() else {
-        return;
+        return false;
     };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -1734,7 +2110,7 @@ fn save_cache(entries: &HashMap<String, CacheEntry>) {
     // lock around only the final rename would still allow two launches to read
     // the same old cache and lose one another's newly discovered entries.
     let Some(_lock) = acquire_cache_lock(&path) else {
-        return;
+        return false;
     };
     let mut merged_entries = load_cache_at(&path);
     merge_cache_entries(&mut merged_entries, entries);
@@ -1751,12 +2127,18 @@ fn save_cache(entries: &HashMap<String, CacheEntry>) {
     // background thread can still be writing when AviUtl2 quits) never leaves a
     // truncated, unparseable cache file behind. The temp name carries the PID so
     // two AviUtl2 instances do not clobber each other's temp before the rename.
-    if let Ok(text) = serde_json::to_string(&file) {
-        let temp = path.with_file_name(format!("discovery-cache.{}.tmp", std::process::id()));
-        if std::fs::write(&temp, text).is_ok() && std::fs::rename(&temp, &path).is_err() {
-            let _ = std::fs::remove_file(&temp);
-        }
+    let Ok(text) = serde_json::to_string(&file) else {
+        return false;
+    };
+    let temp = path.with_file_name(format!("discovery-cache.{}.tmp", std::process::id()));
+    if std::fs::write(&temp, text).is_err() {
+        return false;
     }
+    if std::fs::rename(&temp, &path).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return false;
+    }
+    true
 }
 
 /// `(mtime, len)` for cache invalidation; `mtime` degrades to `(0, 0)` if the

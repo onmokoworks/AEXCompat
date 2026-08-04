@@ -232,7 +232,9 @@ pub extern "C" fn RequiredVersion() -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn InitializeLogger(_logger: *mut aviutl2_sys::logger2::LOG_HANDLE) {}
+pub extern "C" fn InitializeLogger(logger: *mut aviutl2_sys::logger2::LOG_HANDLE) {
+    set_logger(logger);
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn InitializeConfig(_config: *mut aviutl2_sys::config2::CONFIG_HANDLE) {}
@@ -296,6 +298,146 @@ pub extern "C" fn GetCommonPluginTable() -> *mut COMMON_PLUGIN_TABLE {
             "Registers each AEX in the configured folder as its own keyframeable filter (issue #295)",
         ),
     }))
+}
+
+// --- Host logging --------------------------------------------------------
+
+/// AviUtl2's log sink, handed to the plugin at load. Held so the plugin can say
+/// what it resolved and what discovery produced: without it every failure mode
+/// (a worker root that no longer exists, an unbuilt worker, a worker regression
+/// that fails every plug-in) looks identical from the outside — AviUtl2 starts
+/// and the filter list is simply empty (issue #655).
+///
+/// `AtomicPtr` because the background discovery thread logs too, while the host
+/// hands the handle over on the load thread.
+static LOGGER: std::sync::atomic::AtomicPtr<aviutl2_sys::logger2::LOG_HANDLE> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// Severity of a line sent to the host log.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LogLevel {
+    Info,
+    Warn,
+}
+
+/// Lines produced before the host handed over its log sink. The SDK does not fix
+/// the order of `InitializeLogger` against `RegisterPlugin`, and registration is
+/// where the lines that matter most are written ("no worker", "0 registered"), so
+/// they are held rather than dropped on the guess that the sink arrives first.
+static PENDING_LOG: Mutex<Vec<(LogLevel, String)>> = Mutex::new(Vec::new());
+
+/// Cap on the buffer above. The load thread and the background discovery thread
+/// together emit a handful of lines, so the bound is a backstop against retaining
+/// unboundedly if a host never calls `InitializeLogger` at all.
+const PENDING_LOG_LIMIT: usize = 64;
+
+/// Serializes this plugin's own calls into the host sink. The SDK states no
+/// thread affinity for `LOG_HANDLE`, and this plugin has two callers (the load
+/// thread and the background discovery thread), so at minimum do not hand the
+/// host two concurrent calls of our own making. This does not make the host's
+/// implementation re-entrant; it only removes the concurrency we introduce.
+///
+/// Also held across [`set_logger`]'s flush, so a line produced on another thread
+/// during the flush queues behind the held ones instead of overtaking them.
+static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A poisoned log lock means an earlier logger call panicked; the guarded state
+/// is the host call itself, so keep logging rather than lose the diagnostic.
+fn lock_log() -> std::sync::MutexGuard<'static, ()> {
+    LOG_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn set_logger(handle: *mut aviutl2_sys::logger2::LOG_HANDLE) {
+    // Held for the whole publish-and-flush so a concurrent `log_line` that sees
+    // the new handle blocks here rather than emitting ahead of the held lines.
+    let guard = lock_log();
+    // A null sink is nothing to publish and nothing to flush through: `write_line`
+    // would dereference it. Leave `LOGGER` alone rather than store the null, so a
+    // host that calls this twice (valid, then null) does not un-publish a working
+    // sink and strand every later line in the buffer.
+    //
+    // This does assume a null is a non-answer rather than a revocation. The SDK
+    // documents no teardown convention for `LOG_HANDLE` and offers no
+    // `UninitializeLogger`, so there is nothing to honour; if a host ever meant it
+    // as "stop using the sink", this keeps writing through the old pointer.
+    if handle.is_null() {
+        return;
+    }
+    let held: Vec<(LogLevel, String)> = match PENDING_LOG.lock() {
+        // The store happens under `PENDING_LOG` because `log_line` reads the
+        // handle under it too: without that, a thread can read "null", lose the
+        // race to the drain below, and then push into a buffer nothing will ever
+        // flush again (`InitializeLogger` runs once).
+        Ok(mut pending) => {
+            LOGGER.store(handle, Ordering::Release);
+            std::mem::take(&mut pending)
+        }
+        // The buffer is unusable, but publishing the sink still gets every later
+        // line through, which beats logging nothing at all.
+        Err(_) => {
+            LOGGER.store(handle, Ordering::Release);
+            Vec::new()
+        }
+    };
+    for (level, message) in held {
+        write_line(handle, level, &message);
+    }
+    drop(guard);
+}
+
+/// Writes one line to AviUtl2's log, or holds it until the host hands over a
+/// sink (see [`PENDING_LOG`]). On a host that never calls `InitializeLogger` the
+/// held lines are simply never emitted.
+fn log_line(level: LogLevel, message: &str) {
+    // Decide under the buffer lock, so this cannot interleave with the drain in
+    // `set_logger` (see there).
+    let handle = match PENDING_LOG.lock() {
+        Ok(mut pending) => {
+            let handle = LOGGER.load(Ordering::Acquire);
+            if handle.is_null() {
+                if pending.len() < PENDING_LOG_LIMIT {
+                    pending.push((level, message.to_owned()));
+                }
+                return;
+            }
+            handle
+        }
+        // Without the buffer there is nowhere to hold a pre-sink line; emit if a
+        // sink exists, otherwise drop.
+        Err(_) => LOGGER.load(Ordering::Acquire),
+    };
+    if handle.is_null() {
+        return;
+    }
+    let _guard = lock_log();
+    write_line(handle, level, message);
+}
+
+/// Hands one line to the host sink. Callers hold [`LOG_LOCK`]; `handle` is
+/// non-null.
+fn write_line(handle: *mut aviutl2_sys::logger2::LOG_HANDLE, level: LogLevel, message: &str) {
+    let mut wide: Vec<u16> = format!("[AEXCompat] {message}").encode_utf16().collect();
+    wide.push(0);
+    // SAFETY: `handle` is the host's own log handle. The SDK documents no
+    // lifetime for it and offers no teardown callback, so this assumes it stays
+    // valid until the plugin is unloaded — including during `UninitializePlugin`,
+    // where the joined discovery thread writes its last line. `wide` is a
+    // null-terminated UTF-16 buffer alive for the call.
+    unsafe {
+        let sink = match level {
+            LogLevel::Info => (*handle).info,
+            LogLevel::Warn => (*handle).warn,
+        };
+        sink(handle, wide.as_ptr());
+    }
+}
+
+fn log_info(message: &str) {
+    log_line(LogLevel::Info, message);
+}
+
+fn log_warn(message: &str) {
+    log_line(LogLevel::Warn, message);
 }
 
 include!("discovery_cache.rs");
