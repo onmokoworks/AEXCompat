@@ -2413,7 +2413,10 @@ mod tests {
     #[test]
     fn unpack_refuses_short_input() {
         assert!(unpack_rgba16f_to_rgba8(&[0u8; 15], 2, 1, 16).is_none());
-        assert!(unpack_rgba16f_to_rgba8(&[0u8; 16], 2, 1, 8).is_none(), "pitch below width*8");
+        assert!(
+            unpack_rgba16f_to_rgba8(&[0u8; 16], 2, 1, 8).is_none(),
+            "pitch below width*8"
+        );
     }
 
     /// The virtual-buffer wiring reads layer slots from the RAW discovery
@@ -2545,7 +2548,11 @@ mod tests {
         place_worker(checkout.path());
 
         assert_eq!(
-            resolve_worker_root(None, Some(checkout.path()), Some(plugin.path().join("x.aux2"))),
+            resolve_worker_root(
+                None,
+                Some(checkout.path()),
+                Some(plugin.path().join("x.aux2"))
+            ),
             Some((checkout.path().to_path_buf(), WorkerRootSource::Named))
         );
         assert_eq!(
@@ -2781,7 +2788,10 @@ mod tests {
             "{}",
             WorkerRootSource::BesidePlugin.describe()
         );
-        for named in [WorkerRootSource::Named, WorkerRootSource::NamedWithoutWorker] {
+        for named in [
+            WorkerRootSource::Named,
+            WorkerRootSource::NamedWithoutWorker,
+        ] {
             let described = named.describe();
             assert!(described.contains("config.toml"), "{named:?}: {described}");
             assert!(
@@ -2970,22 +2980,24 @@ mod tests {
             "after a null handle",
         ] {
             assert_eq!(
-                lines.iter().filter(|(_, text)| text.contains(expected)).count(),
+                lines
+                    .iter()
+                    .filter(|(_, text)| text.contains(expected))
+                    .count(),
                 1,
                 "{expected:?} must appear exactly once, not dropped and not \
                  double-emitted: {lines:?}"
             );
         }
         assert_eq!(
-            lines
-                .iter()
-                .map(|(level, _)| *level)
-                .collect::<Vec<&str>>(),
+            lines.iter().map(|(level, _)| *level).collect::<Vec<&str>>(),
             vec!["warn", "info", "info", "info"],
             "each line has to reach the sink at its own level, in order: {lines:?}"
         );
         assert!(
-            lines.iter().all(|(_, text)| text.starts_with("[AEXCompat] ")),
+            lines
+                .iter()
+                .all(|(_, text)| text.starts_with("[AEXCompat] ")),
             "the plugin has to be identifiable in a shared log: {lines:?}"
         );
     }
