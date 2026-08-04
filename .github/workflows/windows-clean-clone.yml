@@ -26,6 +26,8 @@ jobs:
         with:
           components: rustfmt
       - uses: mozilla/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
       - name: Check Rust formatting
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -110,8 +112,12 @@ jobs:
           }
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
+      # loadscope: 同一モジュールのテストを同一 worker に直列化する。テストは
+      # 共有ディレクトリに time.time_ns() 名でファイルを書く箇所が多数あり、
+      # Windows の time_ns は ~1ms 粒度なので module を跨いで並走させると
+      # 同名衝突で flake する (#664 で実測)。
       - name: Run source-reproducible Python tests
-        run: uv run python -m pytest -q -n auto
+        run: uv run python -m pytest -q -n auto --dist loadscope
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats

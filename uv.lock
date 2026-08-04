@@ -26,7 +26,7 @@ dev = [
     { name = "openexr", specifier = ">=3.3,<4" },
     { name = "pillow", specifier = ">=10.0,<13" },
     { name = "pytest", specifier = ">=8.0,<10" },
-    { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "pytest-xdist", specifier = ">=3.8,<4" },
 ]
 
 [[package]]
