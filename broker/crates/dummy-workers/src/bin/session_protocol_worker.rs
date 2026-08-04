@@ -47,7 +47,9 @@ mod worker {
     use sha2::{Digest, Sha256};
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_BEGIN, ReadFile, SetFilePointer, WriteFile,
+    };
     use windows_sys::Win32::System::Memory::{FILE_MAP_ALL_ACCESS, MapViewOfFile};
     use windows_sys::Win32::System::StationsAndDesktops::{
         GetThreadDesktop, GetUserObjectInformationW, UOI_NAME,
@@ -659,10 +661,20 @@ mod worker {
         // fields) or timed `slot,w,h,time,scale,handle` (6); the handle value is
         // always last. The handle is inherited, so its numeric value matches the
         // broker's.
+        // Layers the broker rewrites between frames (issue #674) keep their
+        // handle open here, exactly as the real worker does, so the frame loop
+        // below can re-read them.
+        let mut dynamic_layers: Vec<(u32, HANDLE, usize)> = Vec::new();
         if let Some(trailer) = &layer_trailer {
             for entry in trailer[LAYER_TRAILER_PREFIX.len()..].split(';') {
                 let fields: Vec<&str> = entry.split(',').collect();
-                if fields.len() != 4 && fields.len() != 6 {
+                if fields.len() != 4 && fields.len() != 5 && fields.len() != 6 {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                // `slot,w,h,handle,1`: the trailing 1 is the dynamic marker, so
+                // the handle is the second-to-last field rather than the last.
+                let dynamic = fields.len() == 5;
+                if dynamic && fields.last() != Some(&"1") {
                     return EXIT_PROTOCOL_VIOLATION;
                 }
                 let (
@@ -674,7 +686,9 @@ mod worker {
                     fields.first().map(|s| s.parse::<u32>()),
                     fields.get(1).map(|s| s.parse::<usize>()),
                     fields.get(2).map(|s| s.parse::<usize>()),
-                    fields.last().map(|s| s.parse::<usize>()),
+                    fields
+                        .get(if dynamic { 3 } else { fields.len() - 1 })
+                        .map(|s| s.parse::<usize>()),
                 )
                 else {
                     return EXIT_PROTOCOL_VIOLATION;
@@ -687,6 +701,10 @@ mod worker {
                 let mut buffer = vec![0u8; layer_bytes];
                 if !read_exact(handle, &mut buffer) || buffer[0] != slot as u8 {
                     return EXIT_PROTOCOL_VIOLATION;
+                }
+                if dynamic {
+                    dynamic_layers.push((slot, handle, layer_bytes));
+                    continue;
                 }
                 unsafe {
                     CloseHandle(handle);
@@ -816,6 +834,23 @@ mod worker {
             };
             let scale = message["current_time"]["scale"].as_u64().unwrap_or(0) as u32;
             let expected_generation = frame_index as u32 + 1;
+
+            // A dynamic layer must show this frame's bytes, not the ones the
+            // session opened with (issue #674). The broker writes
+            // `slot + frame_index` into the first byte before sending the
+            // frame, so a worker that never re-read, or an update that did not
+            // land, fails here instead of rendering a stale map.
+            for (slot, handle, bytes) in &dynamic_layers {
+                unsafe {
+                    SetFilePointer(*handle, 0, null_mut(), FILE_BEGIN);
+                }
+                let mut buffer = vec![0u8; *bytes];
+                if !read_exact(*handle, &mut buffer)
+                    || buffer[0] != (*slot as u8).wrapping_add(frame_index as u8)
+                {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+            }
 
             match behavior.as_str() {
                 "hang_frame" => loop {

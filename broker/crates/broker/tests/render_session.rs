@@ -559,6 +559,7 @@ mod windows_e2e {
                 height: HEIGHT,
                 rgba: vec![3u8; (WIDTH * HEIGHT * 4) as usize],
                 timed: None,
+                dynamic: false,
             },
             SessionLayer {
                 slot: 7,
@@ -566,6 +567,7 @@ mod windows_e2e {
                 height: HEIGHT,
                 rgba: vec![7u8; (WIDTH * HEIGHT * 4) as usize],
                 timed: None,
+                dynamic: false,
             },
         ];
         let mut session = RenderSession::open(SessionOpenRequest {
@@ -606,6 +608,161 @@ mod windows_e2e {
         assert_eq!(close["session_clean"], true, "close: {close}");
     }
 
+    /// A layer opened `dynamic` must show each frame the bytes written for that
+    /// frame, not the ones the session opened with (issue #674): AviUtl2's
+    /// virtual buffer drives a displacement map that has to follow a moving
+    /// scene. The fixture worker re-reads the layer per frame and requires its
+    /// first byte to be `slot + frame_index`, so a worker that consumed the
+    /// layer at open, or an update that never reached the file, fails the frame.
+    #[test]
+    fn a_dynamic_layer_shows_each_frame_its_own_pixels() {
+        if crate::common::skip_without_restricted_token_launch(
+            "a_dynamic_layer_shows_each_frame_its_own_pixels",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        const SLOT: u32 = 3;
+        let bytes = (WIDTH * HEIGHT * 4) as usize;
+        let layers = vec![SessionLayer {
+            slot: SLOT,
+            width: WIDTH,
+            height: HEIGHT,
+            rgba: vec![SLOT as u8; bytes],
+            timed: None,
+            dynamic: true,
+        }];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            payload_override: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            audio_trailer: None,
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("open render session with a dynamic layer");
+        // Frame 0 renders on the bytes the session opened with.
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(5))
+            .expect("frame 0 renders on the opening layer");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        // Every later frame gets its own map.
+        for frame in 1u32..4 {
+            session
+                .update_dynamic_layer(SLOT, &vec![(SLOT as u8).wrapping_add(frame as u8); bytes])
+                .expect("the layer accepts this frame's pixels");
+            let outcome = session
+                .render_frame(frame, 0, &input_pattern(5))
+                .unwrap_or_else(|error| panic!("frame {frame} renders on its own map: {error}"));
+            assert!(
+                matches!(outcome.status, FrameStatus::Rendered { .. }),
+                "frame {frame} status"
+            );
+        }
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    /// Geometry is fixed at open, and a slot that was not opened dynamic has no
+    /// file to rewrite; both are caller errors rather than something to resize
+    /// or invent, and neither may take the session down with it.
+    #[test]
+    fn a_dynamic_layer_update_is_bounded_by_what_it_opened_with() {
+        if crate::common::skip_without_restricted_token_launch(
+            "a_dynamic_layer_update_is_bounded_by_what_it_opened_with",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        const SLOT: u32 = 3;
+        let bytes = (WIDTH * HEIGHT * 4) as usize;
+        let layers = vec![SessionLayer {
+            slot: SLOT,
+            width: WIDTH,
+            height: HEIGHT,
+            rgba: vec![SLOT as u8; bytes],
+            timed: None,
+            dynamic: true,
+        }];
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            payload_override: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            audio_trailer: None,
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            layers: &layers,
+            dependencies: Vec::new(),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("open render session with a dynamic layer");
+        // Frame 0 first: the session numbers frames from zero, so starting at
+        // one would fail for a reason that has nothing to do with layers.
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(5))
+            .expect("frame 0 renders on the opening layer");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let short = session.update_dynamic_layer(SLOT, &vec![0u8; bytes - 4]);
+        assert!(short.is_err(), "a differently sized update is refused");
+        let unknown = session.update_dynamic_layer(SLOT + 1, &vec![0u8; bytes]);
+        assert!(
+            unknown.is_err(),
+            "a slot opened static has nothing to write"
+        );
+        // Refusing an update leaves the session usable: frame 1 still renders,
+        // on the map this frame actually wrote.
+        session
+            .update_dynamic_layer(SLOT, &vec![(SLOT as u8).wrapping_add(1); bytes])
+            .expect("a correctly sized update still lands");
+        let outcome = session
+            .render_frame(1, 0, &input_pattern(5))
+            .expect("the session survives refused updates");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
     #[test]
     fn timed_layers_travel_the_session_trailer_into_their_slots() {
         if crate::common::skip_without_restricted_token_launch(
@@ -627,6 +784,7 @@ mod windows_e2e {
                 height: HEIGHT,
                 rgba: vec![5u8; (WIDTH * HEIGHT * 4) as usize],
                 timed: Some((0, 30)),
+                dynamic: false,
             },
             SessionLayer {
                 slot: 5,
@@ -634,6 +792,7 @@ mod windows_e2e {
                 height: HEIGHT,
                 rgba: vec![5u8; (WIDTH * HEIGHT * 4) as usize],
                 timed: Some((7, 30)),
+                dynamic: false,
             },
             SessionLayer {
                 slot: 9,
@@ -641,6 +800,7 @@ mod windows_e2e {
                 height: HEIGHT,
                 rgba: vec![9u8; (WIDTH * HEIGHT * 4) as usize],
                 timed: None,
+                dynamic: false,
             },
         ];
         let mut session = RenderSession::open(SessionOpenRequest {
@@ -694,6 +854,7 @@ mod windows_e2e {
                 height: HEIGHT,
                 rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
                 timed: Some((1, 30)),
+                dynamic: false,
             },
             SessionLayer {
                 slot: 4,
@@ -701,6 +862,7 @@ mod windows_e2e {
                 height: HEIGHT,
                 rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
                 timed: Some((2, 60)),
+                dynamic: false,
             },
         ];
         let error = RenderSession::open(SessionOpenRequest {
@@ -761,6 +923,7 @@ mod windows_e2e {
                 height: HEIGHT,
                 rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
                 timed: None,
+                dynamic: false,
             },
             SessionLayer {
                 slot: 4,
@@ -768,6 +931,7 @@ mod windows_e2e {
                 height: HEIGHT,
                 rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
                 timed: Some((7, 30)),
+                dynamic: false,
             },
         ];
         let mut session = RenderSession::open(SessionOpenRequest {
@@ -821,6 +985,7 @@ mod windows_e2e {
                 height: HEIGHT,
                 rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
                 timed: None,
+                dynamic: false,
             },
             SessionLayer {
                 slot: 4,
@@ -828,6 +993,7 @@ mod windows_e2e {
                 height: HEIGHT,
                 rgba: vec![4u8; (WIDTH * HEIGHT * 4) as usize],
                 timed: None,
+                dynamic: false,
             },
         ];
         let error = RenderSession::open(SessionOpenRequest {
@@ -972,6 +1138,7 @@ mod windows_e2e {
             // One byte short of the declared geometry.
             rgba: vec![3u8; (WIDTH * HEIGHT * 4 - 1) as usize],
             timed: None,
+            dynamic: false,
         }];
         let error = RenderSession::open(SessionOpenRequest {
             repository: &repository.0,
@@ -1020,6 +1187,7 @@ mod windows_e2e {
             height: HEIGHT,
             rgba: vec![0u8; (WIDTH * HEIGHT * 4) as usize],
             timed: None,
+            dynamic: false,
         }];
         let error = RenderSession::open(SessionOpenRequest {
             repository: &repository.0,
@@ -2718,7 +2886,9 @@ mod windows_e2e {
             .expect_err("a mismatched swap_done is a protocol violation");
         assert!(error.to_string().contains("swap_done_mismatch"), "{error}");
         assert_eq!(
-            session.invalidation().map(|invalidation| invalidation.reason),
+            session
+                .invalidation()
+                .map(|invalidation| invalidation.reason),
             Some("swap_done_mismatch")
         );
         let close = session.close();
@@ -2787,8 +2957,7 @@ mod windows_e2e {
         assert_eq!(close["invalidated"], true, "close: {close}");
         assert_eq!(close["session_clean"], false, "close: {close}");
         assert_eq!(
-            close["invalidated_reason"]["reason"],
-            "module_audit_mismatch",
+            close["invalidated_reason"]["reason"], "module_audit_mismatch",
             "close: {close}"
         );
     }
@@ -2865,7 +3034,9 @@ mod windows_e2e {
         let mut session = open_discovery_session(&cluster);
         let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
         assert!(matches!(first, InspectOutcome::Inspected { .. }));
-        let second = session.inspect_plugin(1, 1).expect("the exchange completes");
+        let second = session
+            .inspect_plugin(1, 1)
+            .expect("the exchange completes");
         let InspectOutcome::InspectError { error_kind, report } = second else {
             panic!("expected a parameter-local inspect error, got {second:?}");
         };

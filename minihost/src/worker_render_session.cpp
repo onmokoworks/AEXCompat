@@ -532,6 +532,30 @@ RenderSessionOutcome run_session_frame_loop(
     outcome.protocol_violation = true;
     return outcome;
   }
+  // Refills every dynamic layer's private vector from its retained handle
+  // (issue #674). Returns false on a short read or an unreadable handle, which
+  // the caller turns into the same fail-closed protocol violation a bad layer
+  // is at open: rendering a frame against half-updated pixels would be a
+  // silently wrong image rather than a diagnostic.
+  const auto refresh_dynamic_layers = [](std::vector<ExternalLayerInput>& layers) {
+    for (auto& layer : layers) {
+      if (!layer.dynamic || layer.rgba_handle == 0) continue;
+      const HANDLE handle =
+          reinterpret_cast<HANDLE>(static_cast<uintptr_t>(layer.rgba_handle));
+      if (SetFilePointer(handle, 0, nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
+        return false;
+      std::size_t collected = 0;
+      while (collected < layer.rgba.size()) {
+        DWORD read = 0;
+        const DWORD request = static_cast<DWORD>(layer.rgba.size() - collected);
+        if (!ReadFile(handle, layer.rgba.data() + collected, request, &read, nullptr) ||
+            read == 0)
+          return false;
+        collected += read;
+      }
+    }
+    return true;
+  };
   // Layers are static for the whole session and travel as inherited per-layer
   // read HANDLEs (#268), not section slots: read each layer's RGBA8 once from
   // its handle into a worker-private vector the render loop reuses (the plug-in
@@ -568,8 +592,16 @@ RenderSessionOutcome run_session_frame_loop(
         }
         collected += read;
       }
-      CloseHandle(handle);
-      layer.rgba_handle = 0;  // consumed; never reused
+      if (layer.dynamic) {
+        // Kept open on purpose (issue #674): the broker rewrites this file
+        // between frames, and the frame loop below re-reads it. Everything
+        // else about the layer - slot, geometry, the private vector the
+        // plug-in sees - is unchanged.
+        SetFilePointer(handle, 0, nullptr, FILE_BEGIN);
+      } else {
+        CloseHandle(handle);
+        layer.rgba_handle = 0;  // consumed; never reused
+      }
       if (!read_ok || collected != bytes) {
         outcome.protocol_violation = true;
         return outcome;
@@ -976,6 +1008,15 @@ RenderSessionOutcome run_session_frame_loop(
       write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
     }
     captured.clear();
+    // Re-read every dynamic layer for this frame (issue #674). The broker
+    // rewrites the file before it sends the frame message and waits for the
+    // reply, so a write is never in flight while this reads. Geometry was fixed
+    // at open, so only the bytes may differ; a short read is the same
+    // fail-closed protocol violation it is at open.
+    if (!refresh_dynamic_layers(session_layers)) {
+      outcome.protocol_violation = true;
+      break;
+    }
     const SessionFrameOutput frame =
         render_frame(current_time, frame_rgba, captured, frame_layers, frame_override,
                      frame_ui);

@@ -1413,6 +1413,11 @@ struct RenderReq {
     current_time: i32,
     rgba: Vec<u8>,
     parameters: Option<Vec<InteractiveParameter>>,
+    /// This frame's virtual-buffer pixels for the AEX's layer slot, when the
+    /// session opened one as dynamic (issue #674). `None` leaves the layer
+    /// showing whatever it last held, which is what a session without a layer
+    /// input, or a frame whose buffer could not be read, wants.
+    layer: Option<(u32, Vec<u8>)>,
     /// The manifest index this frame's plugin holds inside a pooled cluster
     /// session (issue #405); always 0 for a single-plugin session, which
     /// never swaps.

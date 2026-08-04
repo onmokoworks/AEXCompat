@@ -507,6 +507,11 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
                 height: layer_height,
                 rgba,
                 timed: None,
+                // Opened dynamic so the map can follow a moving scene (issue
+                // #674). The geometry a session opens with is the geometry it
+                // keeps: a virtual buffer that changes size needs a new
+                // session, which a changed object geometry already forces.
+                dynamic: true,
             }],
             None => Vec::new(),
         }
@@ -520,7 +525,17 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
         SessionRoute::Pooled(tx, _, plugin_index, _) => (tx.clone(), *plugin_index),
     };
 
-    match render_on(&tx, plugin_index, current_time, rgba, parameters) {
+    // Re-read the virtual buffer for this frame, so a moving scene moves the map
+    // (issue #674). Only when this AEX has a layer slot: without one the
+    // readback is pure cost. A buffer that cannot be read this frame leaves the
+    // layer as it was rather than blanking it, and one whose size no longer
+    // matches the session is refused by the update below, which drops the
+    // session so the next frame reopens at the new geometry.
+    let layer = ctx
+        .layer_slots
+        .first()
+        .and_then(|&slot| read_virtual_buffer_rgba8(video).map(|(_, _, rgba)| (slot, rgba)));
+    match render_on(&tx, plugin_index, current_time, rgba, parameters, layer) {
         FrameReply::Rendered(frame) => {
             // A filter object cannot change the image size; reject a resized frame.
             if frame.width != width || frame.height != height {
@@ -729,6 +744,11 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
         .name("aex-multifilter-session".into())
         .spawn(move || {
             let baseline = (!config.defaults.is_empty()).then_some(&config.defaults[..]);
+            // Whether this session actually opened a layer the frames may
+            // rewrite (issue #674). Read here, before `config` is borrowed into
+            // the open request, and used by the frame loop below to tell "there
+            // is no map to update" from "the map no longer fits".
+            let dynamic_layer_open = config.layers.iter().any(|layer| layer.dynamic);
             // Re-resolve the closure the discovery pass sealed, so the render
             // session's sealed root carries the same dependency DLLs the
             // parameter inspection loaded with (issue #304). Resolving here (on
@@ -884,6 +904,30 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         }
                     }
                 }
+                // The map for this frame goes in before the frame does: the
+                // worker re-reads the layer file when it renders, and this
+                // thread is the only writer, so the request/response cycle is
+                // what keeps a frame from seeing half an update (issue #674).
+                // A rejected update fails the frame rather than rendering the
+                // previous map under a new frame's parameters.
+                //
+                // A session that opened without a dynamic layer - the virtual
+                // buffer had nothing in it when the session opened - has
+                // nothing to update. Dropping it once per frame would reopen it
+                // once per frame forever, so it simply renders without the map
+                // until something else reopens it. A session that HAS the layer
+                // and still rejects the update is the other case: the pixels no
+                // longer fit what the worker was handed, so the session goes
+                // and the next frame opens one at the new geometry.
+                if let Some((slot, pixels)) = &req.layer
+                    && dynamic_layer_open
+                    && let Err(error) = session.update_dynamic_layer(*slot, pixels)
+                {
+                    let _ = req.reply.send(FrameReply::SessionLost(format!(
+                        "dynamic layer update failed: {error}"
+                    )));
+                    break;
+                }
                 let outcome = session.render_frame_with_parameters(
                     frame_index,
                     req.current_time,
@@ -964,6 +1008,7 @@ fn render_on(
     current_time: i32,
     rgba: Vec<u8>,
     parameters: Option<Vec<InteractiveParameter>>,
+    layer: Option<(u32, Vec<u8>)>,
 ) -> FrameReply {
     let (reply_tx, reply_rx) = channel();
     if tx
@@ -971,6 +1016,7 @@ fn render_on(
             current_time,
             rgba,
             parameters,
+            layer,
             plugin_index,
             reply: reply_tx,
         })
