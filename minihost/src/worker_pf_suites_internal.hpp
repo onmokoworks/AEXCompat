@@ -95,6 +95,7 @@ int32_t __cdecl nearest_sample_float(void*, int32_t, int32_t, const void*, void*
 int32_t __cdecl area_sample8(void*, int32_t, int32_t, const void*, void*);
 int32_t __cdecl area_sample16(void*, int32_t, int32_t, const void*, void*);
 int32_t __cdecl area_sample_float(void*, int32_t, int32_t, const void*, void*);
+int32_t __cdecl get_callback_addr(void*, int32_t, uint32_t, int32_t, void**);
 int32_t __cdecl begin_sampling8(void*, int32_t, uint32_t, void*);
 int32_t __cdecl end_sampling8(void*, int32_t, uint32_t, void*);
 int32_t __cdecl unsupported_batch_sample_func(void*, int32_t, uint32_t,
@@ -206,4 +207,3 @@ struct PfBatchSamplingSuite1 {
   BatchSamplingGetter get_batch_func16;
 };
 extern PfBatchSamplingSuite1 g_batch_sampling_suite1;
-
