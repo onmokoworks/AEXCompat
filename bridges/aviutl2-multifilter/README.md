@@ -94,6 +94,10 @@ Copy-Item target\minihost-build\aex_*_worker.exe "$plugin\aexcompat\target\minih
 
 - `worker root: <path> (<経路>)` — 採用した worker root と、それが config.toml /
   環境変数 / プラグインの隣のどれで決まったか。スキャン対象フォルダの実パスも出す
+- 初回起動 (キャッシュファイルが無い) のみ:
+  `no discovery cache yet: discovering N plug-in(s) before registration` —
+  同期 discovery の開始 (issue #838、後述)。完了時に
+  `first-launch discovery: N effect(s), R rejected`
 - `registered N of M known plug-in(s); K queued for discovery` — 登録件数
 - `discovering K plug-in(s) in the background` — バックグラウンド discovery の開始
 - 完了時に `background discovery: N effect(s), R rejected`
@@ -112,8 +116,9 @@ Copy-Item target\minihost-build\aex_*_worker.exe "$plugin\aexcompat\target\minih
 | discovery が全件 reject | 同上 |
 | キャッシュを書けなかった | 再起動しても結果が残らないこと |
 
-初回起動の「0件登録・全件キュー」は正常な状態なので warn ではなく info にし、
-「次回起動で出る」と明示する。ここを warn にすると本物の異常と区別が付かなくなる。
+「0件登録・全件キュー」は (キャッシュファイルはあるが中身が読めない起動などで)
+正常に起こり得る状態なので warn ではなく info にし、「次回起動で出る」と明示する。
+ここを warn にすると本物の異常と区別が付かなくなる。
 
 `InitializeLogger` が `RegisterPlugin` より後に呼ばれても行は落ちない (ハンドルを
 受け取るまでバッファに溜め、受け取った時点で順序を保ったまま吐く)。
@@ -194,21 +199,28 @@ worker は AEX を隔離した sealed load tree からロードし、探索先�
 AE の全エフェクトをそのまま AviUtl2 のキーフレーム可能フィルタとして使える。effect でない
 `.aex` (Format/codec 等) は discovery に失敗して自動的にスキップされる。
 
-### discovery キャッシュ / バックグラウンド discovery
+### discovery キャッシュ / 初回同期 discovery / バックグラウンド discovery
 
-各 AEX の discovery (パラメーター取得) はロード時に worker を起動して行うため、AE の全
-エフェクト (数百) を毎回起動時に discovery すると数分かかる。**起動をブロックしないため、
-discovery はバックグラウンドスレッドで行う:**
+各 AEX の discovery (パラメーター取得) はロード時に worker を起動して行う。2 回目以降の
+起動をブロックしないため、キャッシュとバックグラウンドスレッドを使う:
 
-- `RegisterPlugin` は**キャッシュ済み (discovery 成功済み) の効果を即座に登録して即リターン**
-  する。起動はブロックされない。
+- **初回起動 (キャッシュファイルが無い) だけは同期 discovery** (issue #838): 何も登録せず
+  次回を待つ代わりに、`RegisterPlugin` がその場で全 AEX を discovery してから登録する。
+  in-place ロード (issue #751) 後の AE 全エフェクト (224 本) で実測 40 秒前後。この間
+  AviUtl2 はロード画面のまま止まって見える。discovery には deadline が無いので、inspect が
+  返らない AEX がいると起動が終わらないことがあるが、discovery 開始前にキャッシュファイルを
+  作成 (スタンプ) してあるため、**強制終了しても次の起動からは従来のバックグラウンドフローに
+  落ちて二度とブロックしない** (原因の AEX は `ignore` で外せる)。
+- 2 回目以降の `RegisterPlugin` は**キャッシュ済み (discovery 成功済み) の効果を即座に登録して
+  即リターン**する。起動はブロックされない。
 - 未 discovery / 変更された AEX は**別スレッドで低並列に全部 discovery** し、結果を
   `%APPDATA%\aexcompat-multifilter\discovery-cache.json` に (mtime+len キーで) 書く。
-- **新しく discovery された効果は次回の AviUtl2 起動時にキャッシュから登録されて出る。**
-  初回 (や AEX 追加後) は該当フィルタがその起動では出ず、次の起動で出る。
+  **新しく discovery された効果は次回の AviUtl2 起動時にキャッシュから登録されて出る。**
 
-つまり: 初回起動 → 即座に使える (バックグラウンドで数分かけて discovery) → 2 回目起動 → 全効果が
-出て高速。AEX を差し替え・追加すると mtime/len 変化で再 discovery され、次回起動で反映される。
+つまり: 初回起動 → 数十秒待つと全効果が出る → 2 回目以降 → 即座に出て高速。AEX を
+差し替え・追加すると mtime/len 変化で再 discovery され、次回起動で反映される (このとき
+起動はブロックされない)。キャッシュファイルがあるのに中身が読めない起動 (スキーマ更新等) も
+ブロックせず、従来どおり「その起動は 0 件登録 → バックグラウンド → 次回反映」になる。
 
 - **依存解決の入力** (探索フォルダの並び + 上限) は worker exe / この DLL と並んで
   エントリの「どのホストで作られたか」に含まれる。変われば各エントリはバックグラウンドで
