@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 
 from tools.trace_contract_validator import EVENT_KINDS, validate_event
-import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]

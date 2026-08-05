@@ -1,6 +1,5 @@
 import subprocess
 from pathlib import Path
-import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
