@@ -88,7 +88,7 @@ pub fn secure_launch(
 ) -> io::Result<SecureLaunchResult> {
     let args = build_launch_args(&tree, &request)?;
     secure_launch_impl(
-        tree,
+        Some(tree),
         request.worker_program,
         request.worker_expected_sha256,
         request.worker_expected_size,
@@ -108,7 +108,7 @@ pub(crate) fn secure_launch_with_process_memory_limit(
 ) -> io::Result<SecureLaunchResult> {
     let args = build_launch_args(&tree, &request)?;
     secure_launch_impl(
-        tree,
+        Some(tree),
         request.worker_program,
         request.worker_expected_sha256,
         request.worker_expected_size,
@@ -120,12 +120,63 @@ pub(crate) fn secure_launch_with_process_memory_limit(
     )
 }
 
+/// In-place variant of `secure_launch` (issue #751): the plug-in loads from
+/// the path it actually lives at and its dependency closure resolves through
+/// the worker's admitted search directories, so nothing is staged and no
+/// sealed tree exists. `request.plugin_basename` must be `None`; the
+/// positional argv slot carries `plugin_path` verbatim.
+pub(crate) fn secure_launch_in_place(
+    plugin_path: &std::path::Path,
+    request: SecureLaunchRequest<'_>,
+    timeout: Option<Duration>,
+    process_memory_limit: Option<usize>,
+) -> io::Result<SecureLaunchResult> {
+    let args = build_in_place_launch_args(plugin_path, &request)?;
+    secure_launch_impl(
+        None,
+        request.worker_program,
+        request.worker_expected_sha256,
+        request.worker_expected_size,
+        &args,
+        request.require_module_audit,
+        request.repository,
+        timeout,
+        process_memory_limit,
+    )
+}
+
+fn build_in_place_launch_args(
+    plugin_path: &std::path::Path,
+    request: &SecureLaunchRequest<'_>,
+) -> io::Result<Vec<String>> {
+    if request.plugin_basename.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an in-place launch carries the plugin path itself, not a staged basename",
+        ));
+    }
+    if !plugin_path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "in-place plugin path must be absolute",
+        ));
+    }
+    let mut args =
+        Vec::with_capacity(request.args_before_plugin.len() + 1 + request.args_after_plugin.len());
+    args.extend_from_slice(request.args_before_plugin);
+    args.push(plugin_path.to_string_lossy().into_owned());
+    args.extend_from_slice(request.args_after_plugin);
+    Ok(args)
+}
+
 #[cfg(windows)]
 fn secure_launch_impl(
     // Taken by value and dropped when this returns: the tree's retained
     // handles are what keep the staged plug-in bytes in place for the whole
     // launch, so its lifetime is the point even though nothing reads it here.
-    _tree: SealedLoadTree,
+    // `None` on the in-place route (issue #751): nothing is staged, and the
+    // worker's own pre-load hash is the identity record.
+    _tree: Option<SealedLoadTree>,
     worker_program: &Path,
     worker_expected_sha256: [u8; 32],
     worker_expected_size: u64,
@@ -208,7 +259,8 @@ pub struct SecureSessionProcess {
     /// See `SecureLaunchResult::worker_freshness_warning`; recorded by the
     /// dispatch that admitted the worker and carried into `finish`'s result.
     worker_freshness_warning: Option<&'static str>,
-    _tree: SealedLoadTree,
+    /// `None` on the in-place session route (issue #751).
+    _tree: Option<SealedLoadTree>,
     _stage: crate::trusted_worker_stage::TrustedWorkerStage,
 }
 
@@ -318,6 +370,20 @@ pub(crate) fn secure_launch_session_on_current_desktop(
     )
 }
 
+/// In-place session variant (issue #751): mirrors `secure_launch_in_place`
+/// for resident sessions. No sealed tree exists; the positional argv slot
+/// carries the real plugin path.
+#[cfg(windows)]
+pub(crate) fn secure_launch_session_in_place(
+    plugin_path: &std::path::Path,
+    request: SecureLaunchRequest<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+    desktop_policy: crate::windows_process::WorkerDesktopPolicy,
+) -> io::Result<SecureSessionProcess> {
+    let args = build_in_place_launch_args(plugin_path, &request)?;
+    secure_launch_session_impl(None, args, request, session, desktop_policy)
+}
+
 #[cfg(windows)]
 fn secure_launch_session_with_desktop_policy(
     tree: SealedLoadTree,
@@ -325,9 +391,20 @@ fn secure_launch_session_with_desktop_policy(
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
 ) -> io::Result<SecureSessionProcess> {
+    let args = build_launch_args(&tree, &request)?;
+    secure_launch_session_impl(Some(tree), args, request, session, desktop_policy)
+}
+
+#[cfg(windows)]
+fn secure_launch_session_impl(
+    tree: Option<SealedLoadTree>,
+    args: Vec<String>,
+    request: SecureLaunchRequest<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+    desktop_policy: crate::windows_process::WorkerDesktopPolicy,
+) -> io::Result<SecureSessionProcess> {
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
-    let args = build_launch_args(&tree, &request)?;
     let worker_stage = TrustedWorkerStage::create(
         request.worker_program,
         request.worker_expected_sha256,
@@ -377,7 +454,7 @@ fn stage_error(stage: &'static str, error: io::Error) -> io::Error {
 
 #[cfg(not(windows))]
 fn secure_launch_impl(
-    _tree: SealedLoadTree,
+    _tree: Option<SealedLoadTree>,
     _worker_program: &Path,
     _worker_expected_sha256: [u8; 32],
     _worker_expected_size: u64,
@@ -440,6 +517,49 @@ mod tests {
             assert_eq!(error.kind(), kind);
             fs::remove_dir_all(source).unwrap();
         }
+    }
+
+    #[test]
+    fn in_place_args_reject_a_staged_basename_and_relative_paths() {
+        let request = |basename: Option<&'static str>| SecureLaunchRequest {
+            worker_program: Path::new("trusted-worker.exe"),
+            worker_expected_sha256: [0; 32],
+            worker_expected_size: 0,
+            plugin_basename: basename,
+            args_before_plugin: &[],
+            args_after_plugin: &[],
+            repository: Path::new("."),
+            require_module_audit: false,
+        };
+        // A staged basename names a sealed-tree entry; carrying one on the
+        // in-place route would silently launch a different path than the
+        // caller validated.
+        let error =
+            build_in_place_launch_args(Path::new("C:\\plugins\\a.aex"), &request(Some("a.aex")))
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let error =
+            build_in_place_launch_args(Path::new("relative.aex"), &request(None)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn in_place_args_carry_the_real_plugin_path_positionally() {
+        let before = vec!["--l2-params-only".to_owned()];
+        let after = vec!["abc123".to_owned()];
+        let request = SecureLaunchRequest {
+            worker_program: Path::new("trusted-worker.exe"),
+            worker_expected_sha256: [0; 32],
+            worker_expected_size: 0,
+            plugin_basename: None,
+            args_before_plugin: &before,
+            args_after_plugin: &after,
+            repository: Path::new("."),
+            require_module_audit: false,
+        };
+        let args = build_in_place_launch_args(Path::new("C:\\plugins\\a.aex"), &request).unwrap();
+        assert_eq!(args, ["--l2-params-only", "C:\\plugins\\a.aex", "abc123"]);
     }
 
     #[cfg(not(windows))]

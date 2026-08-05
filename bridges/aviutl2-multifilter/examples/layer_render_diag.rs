@@ -19,6 +19,11 @@
 //! * `AEXCOMPAT_DIAG_NO_LAYER=1` - open the session with no secondary layer.
 //! * `AEXCOMPAT_DIAG_SET=slot=value,slot=value` - override discovered parameter
 //!   defaults, so a value-dependent refusal can be ruled in or out.
+//! * `AEXCOMPAT_DIAG_IN_PLACE=1` - load the AEX from its real path with the
+//!   plug-in directory and every `[deps-dir]` argument admitted as DLL search
+//!   directories (issue #751), instead of resolving the dependency closure
+//!   and staging a sealed tree. The A/B against the default staged mode is
+//!   the acceptance measurement for #751/#753.
 //!
 //! `AEXCOMPAT_EXTENDED_DIAG=1` additionally turns on the worker's host-callback
 //! trace; it reaches stderr, which the session collects but does not report.
@@ -26,7 +31,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_resources;
+use aexcompat_broker::image_render::{
+    inspect_experimental_in_place, inspect_experimental_with_approved_dependencies_and_resources,
+};
 use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::plugin_dependency_closure::{
     DependencyClosureRequest, resolve_dependency_closure,
@@ -63,21 +70,33 @@ fn main() {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
 
-    let closure = resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots))
-        .expect("resolve the plug-in's dependency closure");
-    let dependencies = closure.into_dependencies();
-    eprintln!("closure: {} dependencies", dependencies.len());
+    let in_place = std::env::var("AEXCOMPAT_DIAG_IN_PLACE").is_ok_and(|value| value == "1");
+    let (dependencies, dependency_search_dirs) = if in_place {
+        eprintln!("in-place: {} search dir(s)", roots.len());
+        (Vec::new(), roots.clone())
+    } else {
+        let closure = resolve_dependency_closure(DependencyClosureRequest::new(&plugin, &roots))
+            .expect("resolve the plug-in's dependency closure");
+        let dependencies = closure.into_dependencies();
+        eprintln!("closure: {} dependencies", dependencies.len());
+        (dependencies, Vec::new())
+    };
 
     // Discovery's own inspect, so the session opens on the parameters the
     // plug-in actually declares - the layer slot among them.
-    let (parameters, diagnostics) = inspect_experimental_with_approved_dependencies_and_resources(
-        &repository,
-        &plugin,
-        &sha,
-        dependencies.clone(),
-        Vec::new(),
-    )
-    .expect("inspect the plug-in");
+    let (parameters, diagnostics) = if in_place {
+        inspect_experimental_in_place(&repository, &plugin, &sha, dependency_search_dirs.clone())
+            .expect("inspect the plug-in in place")
+    } else {
+        inspect_experimental_with_approved_dependencies_and_resources(
+            &repository,
+            &plugin,
+            &sha,
+            dependencies.clone(),
+            Vec::new(),
+        )
+        .expect("inspect the plug-in")
+    };
     // `AEXCOMPAT_DIAG_SET=slot=value,slot=value` overrides discovered defaults,
     // so a value-dependent refusal can be bisected without AviUtl2.
     let mut parameters = parameters;
@@ -164,6 +183,7 @@ fn main() {
         conformance_render_settings: None,
         layers: &layers,
         dependencies,
+        dependency_search_dirs,
         width: WIDTH,
         height: HEIGHT,
         pixel_format: RenderPixelFormat::Argb8,

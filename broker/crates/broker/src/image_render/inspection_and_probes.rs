@@ -2,10 +2,42 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     repository: &Path,
     plugin_path: &Path,
     approved_sha256: &str,
-    mut dependencies: Vec<ApprovedImageArtifact>,
+    dependencies: Vec<ApprovedImageArtifact>,
     resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    inspect_experimental_impl(
+        repository,
+        plugin_path,
+        approved_sha256,
+        dependencies,
+        Vec::new(),
+        resources,
+        runtime_policy,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inspect_experimental_impl(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    mut dependencies: Vec<ApprovedImageArtifact>,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+    resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
+    runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    // In-place inspection (issue #751): the loader resolves the closure, so
+    // staged dependencies and resources cannot ride the same launch, and the
+    // GPU authorization manifest (staged beside the plug-in) has no staged
+    // directory to live in.
+    if !dependency_search_dirs.is_empty()
+        && (!dependencies.is_empty() || !resources.is_empty() || runtime_policy.is_some())
+    {
+        return Err(invalid(
+            "in-place inspection cannot combine staged dependencies, resources, or a runtime policy",
+        ));
+    }
     let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--l2-params-only".into()];
     let mut args_after_plugin = vec![actual.to_ascii_lowercase()];
@@ -28,7 +60,10 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     // closure was reported as "timed out", and that verdict was then cached.
     // Containment stays — the job object kills the tree when the launch handle
     // drops, and the sealed root is still torn down.
-    let isolated = if !dependencies.is_empty() || !resources.is_empty() {
+    let isolated = if !dependencies.is_empty()
+        || !resources.is_empty()
+        || !dependency_search_dirs.is_empty()
+    {
         crate::secure_image_dispatch::dispatch_secure_image_with_resources(
             SecureImageDispatch {
                 repository,
@@ -39,6 +74,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
                     expected_size: fs::metadata(plugin_path)?.len(),
                 },
                 dependencies,
+                dependency_search_dirs,
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
                 timeout: None,

@@ -159,6 +159,13 @@ const void* provide_bib_suite_locked() {
                          LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
                              LOAD_LIBRARY_SEARCH_SYSTEM32);
   }
+  // In-place loads (issue #751) keep the host facility beside the real
+  // dependency closure, not beside the plug-in: resolve by name through the
+  // admitted USER_DIRS search set, which only admission populates.
+  if (!bib)
+    bib = LoadLibraryExW(L"BIB.dll", nullptr,
+                         LOAD_LIBRARY_SEARCH_USER_DIRS |
+                             LOAD_LIBRARY_SEARCH_SYSTEM32);
   if (aexcompat::l2_detail::extended_diag_enabled())
     std::cerr << "extended_diag:bib_provide module=" << (void*)bib << "\n" << std::flush;
   if (!bib) return nullptr;
@@ -341,6 +348,12 @@ void ensure_pica_components_initialized() {
                            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
                                LOAD_LIBRARY_SEARCH_SYSTEM32);
   }
+  // In-place loads (issue #751): same admitted USER_DIRS name resolution as
+  // the BIB fallback above.
+  if (!bravo)
+    bravo = LoadLibraryExW(L"dvabravoinitializer.dll", nullptr,
+                           LOAD_LIBRARY_SEARCH_USER_DIRS |
+                               LOAD_LIBRARY_SEARCH_SYSTEM32);
   if (!bravo) {
     if (aexcompat::l2_detail::extended_diag_enabled())
       std::cerr << "extended_diag:pica_component dll=dvabravoinitializer.dll status=absent"
@@ -372,6 +385,12 @@ void ensure_pica_components_initialized() {
                               LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
                                   LOAD_LIBRARY_SEARCH_SYSTEM32);
   }
+  // In-place loads (issue #751): same admitted USER_DIRS name resolution as
+  // the BIB fallback above.
+  if (!sweetpea)
+    sweetpea = LoadLibraryExW(L"ae_sweetpea.dll", nullptr,
+                              LOAD_LIBRARY_SEARCH_USER_DIRS |
+                                  LOAD_LIBRARY_SEARCH_SYSTEM32);
   if (sweetpea) {
     const auto sp_init = reinterpret_cast<SPInitFn>(GetProcAddress(
         sweetpea,

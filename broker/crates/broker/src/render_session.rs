@@ -549,6 +549,12 @@ pub struct SessionOpenRequest<'a> {
     /// `session-layers:v2|` launch trailer.
     pub layers: &'a [SessionLayer],
     pub dependencies: Vec<ApprovedImageArtifact>,
+    /// In-place load mode (issue #751): non-empty opens the session on the
+    /// plug-in's real path with these directories admitted into the worker's
+    /// DLL search set, instead of staging a sealed tree. Mutually exclusive
+    /// with `dependencies`, and unsupported (explicitly rejected) with GPU
+    /// runtime authorization and cluster sessions for now.
+    pub dependency_search_dirs: Vec<PathBuf>,
     pub width: u32,
     pub height: u32,
     pub pixel_format: RenderPixelFormat,
@@ -1021,6 +1027,29 @@ impl RenderSession {
                 "GPU render requires a session-bound authenticated runtime module policy report; supply gpu_runtime_policy or select the CPU backend",
             ));
         }
+        // In-place load mode (issue #751): the closure is the loader's job, so
+        // approved dependency artifacts cannot ride the same open. GPU runtime
+        // authorization stages its AEXRMA1 manifest beside the plug-in, which
+        // an in-place launch has no staged directory for, and cluster sessions
+        // still pin against a sealed root; both fail closed here until they
+        // are migrated.
+        if !request.dependency_search_dirs.is_empty() {
+            if !request.dependencies.is_empty() {
+                return Err(invalid(
+                    "an in-place session resolves dependencies by search directory, not by staged artifact",
+                ));
+            }
+            if gpu_attempt {
+                return Err(invalid(
+                    "an in-place session does not support GPU runtime authorization yet",
+                ));
+            }
+            if cluster.is_some() {
+                return Err(invalid(
+                    "an in-place session does not support plugin clusters yet",
+                ));
+            }
+        }
         // A GPU attempt authenticates a single-plugin runtime module policy;
         // combining it with a cluster manifest is out of scope for the
         // cluster session design, so it fails closed rather than widening the
@@ -1399,6 +1428,7 @@ impl RenderSession {
                 },
                 plugin,
                 dependencies,
+                dependency_search_dirs: request.dependency_search_dirs.clone(),
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
                 timeout: Some(request.frame_deadline),
@@ -3214,6 +3244,7 @@ pub fn run_video_batch(
         conformance_render_settings: None,
         layers: &[],
         dependencies: Vec::new(),
+        dependency_search_dirs: Vec::new(),
         width,
         height,
         pixel_format: request.pixel_format,

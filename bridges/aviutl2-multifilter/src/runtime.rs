@@ -931,6 +931,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 conformance_render_settings: None,
                 layers: &config.layers,
                 dependencies,
+                dependency_search_dirs: Vec::new(),
                 width: config.identity.width,
                 height: config.identity.height,
                 pixel_format: RenderPixelFormat::Argb8,

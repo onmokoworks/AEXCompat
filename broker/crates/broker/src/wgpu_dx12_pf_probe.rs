@@ -235,6 +235,7 @@ pub fn run_from_manifest(
             worker_kind: WorkerKind::L2,
             plugin: approved(aex, &manifest.artifacts.aex)?,
             dependencies: vec![approved(runtime, &manifest.artifacts.runtime)?],
+            dependency_search_dirs: Vec::new(),
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
             timeout: None,

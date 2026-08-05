@@ -618,6 +618,7 @@ fn open_rejects_timing_the_worker_could_never_render() {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: 8,
             height: 4,
             pixel_format: RenderPixelFormat::Argb8,

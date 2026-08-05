@@ -83,6 +83,19 @@ bool capture_l2_cluster_manifest(void*, const wchar_t* value) {
   return true;
 }
 
+// Captures the in-place dependency search directories carried by a
+// `--dependency-dirs-v1` auxiliary option (issue #751): absolute directories
+// joined by ';', validated by the broker and re-bounded by
+// apply_dependency_search_dirs before admission. Stored in a global because
+// the auxiliary-option hook runs during request parsing, before runtime
+// admission.
+std::wstring g_dependency_search_dirs;
+bool capture_l2_dependency_search_dirs(void*, const wchar_t* value) {
+  if (!value || !*value) return false;
+  g_dependency_search_dirs = value;
+  return true;
+}
+
 bool __cdecl scene_render_receipt_enabled() {
   return is_render_worker() && aexcompat::aegp_layer_render_runtime::active();
 }
@@ -990,7 +1003,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
         load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
         parse_l2_conformance_render_settings,
-        capture_l2_runtime_module_authorization, capture_l2_cluster_manifest},
+        capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
+        capture_l2_dependency_search_dirs},
        &parse_layer_transport_key, &parse_mask_context_payload,
        &parse_spatial_context_payload, &parse_render_environment_payload,
        &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -1003,7 +1017,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
           load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
           parse_l2_conformance_render_settings,
-        capture_l2_runtime_module_authorization, capture_l2_cluster_manifest},
+        capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
+        capture_l2_dependency_search_dirs},
          &parse_layer_transport_key, &parse_mask_context_payload,
          &parse_spatial_context_payload, &parse_render_environment_payload,
          &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -1011,8 +1026,18 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     aexcompat::worker_runtime::invocation::apply_smart(
         parsed.invocation, invocation, invocation_hooks);
   } else {
+    // The L2 modes keep their strict positional argc contracts; the in-place
+    // dependency-dirs pair (issue #751) is the one auxiliary option they
+    // accept, peeled from the tail before mode classification.
+    int l2_argc = argc;
+    if (l2_argc >= 3 &&
+        std::wstring(argv[l2_argc - 2]) == L"--dependency-dirs-v1") {
+      if (!capture_l2_dependency_search_dirs(nullptr, argv[l2_argc - 1]))
+        return 2;
+      l2_argc -= 2;
+    }
     const auto mode_error = aexcompat::worker_runtime::invocation::parse_l2_modes(
-        argc, argv, invocation,
+        l2_argc, argv, invocation,
         {parse_parameter_payload, kMaxParams});
     if (mode_error != 0) return mode_error;
     g_aegp_update_menu_mode = invocation.aegp_update_menu_mode;
@@ -1062,6 +1087,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   const int request_error = aexcompat::worker_runtime::prepare_runtime_request(
       argv[2], argv[3], authorize_runtime_modules, authorization_basename, runtime_request);
   if (request_error != 0) return request_error;
+  if (!g_dependency_search_dirs.empty()) {
+    const int dirs_error = aexcompat::worker_runtime::apply_dependency_search_dirs(
+        g_dependency_search_dirs.c_str(), runtime_request);
+    if (dirs_error != 0) return dirs_error;
+  }
   runtime_request.allow_aegp_plugin = g_aegp_init_mode;
   std::unique_ptr<aexcompat::TraceWriter> trace_writer;
   RuntimeContext runtime_context;

@@ -189,6 +189,7 @@ impl AudioRenderSession {
             worker_kind: WorkerKind::Render,
             plugin,
             dependencies: request.dependencies,
+            dependency_search_dirs: Vec::new(),
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
             timeout: Some(request.frame_deadline),
