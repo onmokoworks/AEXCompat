@@ -124,8 +124,11 @@ cannot themselves carry a stapled ticket, so the release must define a bundle,
 DMG, or package.
 
 `tools/package-macos-aex-carriers.sh` defines that minimum distribution as a DMG
-with separate arm64 Unicorn and x86_64 trusted-only native-carrier helpers plus
-a size/SHA-256 manifest. Its default `local-adhoc` distribution tier requires
+with an arm64 Unicorn helper and a size/SHA-256 manifest. The normal build and
+package path is arm64-only and does not require Rosetta. Setting
+`AEXCOMPAT_INCLUDE_NATIVE_CARRIER=1` explicitly adds the separate x86_64
+trusted-only helper; merely building or packaging AEXCompat never enables that
+backend at runtime. The default `local-adhoc` distribution tier requires
 ad-hoc Hardened Runtime signatures and records that tier in the manifest. This
 is the supported Mac-only development package: it is not notarized or approved
 by Gatekeeper for third-party distribution. Setting

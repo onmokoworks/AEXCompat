@@ -10,13 +10,26 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 identity=${AEXCOMPAT_CODESIGN_IDENTITY:--}
 arm64_worker=${1:-"$root/guest/target/release/aex-guest-worker"}
 native_worker=${2:-"$root/guest/target/x86_64-apple-darwin/release/aex-guest-worker"}
+include_native=${AEXCOMPAT_INCLUDE_NATIVE_CARRIER:-0}
 
-for worker in "$arm64_worker" "$native_worker"; do
+case "$include_native" in
+  0|1) ;;
+  *)
+    echo "AEXCOMPAT_INCLUDE_NATIVE_CARRIER must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
+for worker in "$arm64_worker"; do
   if [ ! -f "$worker" ]; then
     echo "missing worker: $worker" >&2
     exit 2
   fi
 done
+if [ "$include_native" = "1" ] && [ ! -f "$native_worker" ]; then
+  echo "missing worker: $native_worker" >&2
+  exit 2
+fi
 
 sign_one() {
   worker=$1
@@ -30,5 +43,7 @@ sign_one() {
 }
 
 sign_one "$arm64_worker" "$root/tools/macos/arm64-unicorn.entitlements"
-sign_one "$native_worker" "$root/tools/macos/x86_64-native-carrier.entitlements"
+if [ "$include_native" = "1" ]; then
+  sign_one "$native_worker" "$root/tools/macos/x86_64-native-carrier.entitlements"
+fi
 "$root/tools/verify-macos-aex-carriers.sh" "$arm64_worker" "$native_worker"

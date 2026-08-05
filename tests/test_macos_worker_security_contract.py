@@ -72,7 +72,8 @@ def test_hardened_runtime_entitlements_are_minimal_and_distinct():
     assert "disable-library-validation" in verifier
 
 
-def test_distribution_gate_is_developer_id_notarized_and_fail_closed():
+def test_distribution_tiers_keep_arm64_local_default_and_publication_fail_closed():
+    build = source("tools/build-macos-aex-carriers.sh")
     package = source("tools/package-macos-aex-carriers.sh")
     notarize = source("tools/notarize-macos-aex-carriers.sh")
 
@@ -83,7 +84,8 @@ def test_distribution_gate_is_developer_id_notarized_and_fail_closed():
         "local-adhoc",
         "developer-id",
         '"schema": "aexcompat-macos-carriers-v1"',
-        '"distribution_tier": "$distribution_tier"',
+        '"distribution_tier": "%s"',
+        '"$distribution_tier"',
         '"backend": "unicorn"',
         '"backend": "native-carrier-trusted-only"',
         "shasum -a 256",
@@ -105,6 +107,17 @@ def test_distribution_gate_is_developer_id_notarized_and_fail_closed():
 
     assert "AEXCOMPAT_ALLOW_ADHOC_PACKAGE" not in package
     assert "Local-only package" in package
+    assert "AEXCOMPAT_INCLUDE_NATIVE_CARRIER" in build
+    assert 'include_native=${AEXCOMPAT_INCLUDE_NATIVE_CARRIER:-0}' in build
+    assert 'if [ "$include_native" = "1" ]' in build
+    assert 'include_native=${AEXCOMPAT_INCLUDE_NATIVE_CARRIER:-0}' in package
+    assert 'if [ "$include_native" = "1" ]' in package
+    signer = source("tools/sign-macos-aex-carriers.sh")
+    verifier = source("tools/verify-macos-aex-carriers.sh")
+    assert 'include_native=${AEXCOMPAT_INCLUDE_NATIVE_CARRIER:-0}' in signer
+    assert 'if [ "$include_native" = "1" ]' in signer
+    assert 'include_native=${AEXCOMPAT_INCLUDE_NATIVE_CARRIER:-0}' in verifier
+    assert 'if [ "$include_native" = "1" ]' in verifier
 
 
 def test_guest_execution_admission_is_fail_closed():

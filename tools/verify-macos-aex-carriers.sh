@@ -9,8 +9,17 @@ fi
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 arm64_worker=${1:-"$root/guest/target/release/aex-guest-worker"}
 native_worker=${2:-"$root/guest/target/x86_64-apple-darwin/release/aex-guest-worker"}
+include_native=${AEXCOMPAT_INCLUDE_NATIVE_CARRIER:-0}
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/aexcompat-signing.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+
+case "$include_native" in
+  0|1) ;;
+  *)
+    echo "AEXCOMPAT_INCLUDE_NATIVE_CARRIER must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 
 verify_one() {
   worker=$1
@@ -40,10 +49,14 @@ verify_one() {
 }
 
 verify_one "$arm64_worker" arm64 com.apple.security.cs.allow-jit "$scratch/arm64.plist"
-verify_one "$native_worker" x86_64 com.apple.security.cs.allow-unsigned-executable-memory \
-  "$scratch/native.plist"
+if [ "$include_native" = "1" ]; then
+  verify_one "$native_worker" x86_64 com.apple.security.cs.allow-unsigned-executable-memory \
+    "$scratch/native.plist"
+fi
 
 "$arm64_worker" --help >/dev/null 2>&1 || [ "$?" -eq 2 ]
-arch -x86_64 "$native_worker" --help >/dev/null 2>&1 || [ "$?" -eq 2 ]
+if [ "$include_native" = "1" ]; then
+  arch -x86_64 "$native_worker" --help >/dev/null 2>&1 || [ "$?" -eq 2 ]
+fi
 
 echo "macOS carrier signatures, Hardened Runtime flags, architectures, and launch probes verified"
