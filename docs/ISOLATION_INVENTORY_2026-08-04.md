@@ -4,8 +4,15 @@ worker isolation の「実装されている機構」「対処している失敗
 1 枚に固定する参照文書。エージェントセッションが isolation を security sandbox と
 誤読する事故が繰り返されているため、その再発防止を目的とする (issue #641)。
 
-規範 (何をしてよいか) は `CLAUDE.md` の Execution Tiers and Safety Rules が正本。
+規範 (何をしてよいか) は `CLAUDE.md` の Execution Floor and Safety Rules が正本。
 本書は実装状態の記述であり、方針を追加しない。実装が変わったらこの文書を更新する。
+
+> 追記 (2026-08-05, issue #678): 方針が「単層の床 + record」に変更された。本書の
+> 「evidence tier (opt-in)」という枠組みは方針としては廃止され、§2 の機構
+> (sealed load tree / restricted token / module audit) と §7 の receipt 経路は
+> enforcement としては撤去予定 (#729-#733)。実装インベントリとしての本書の記述は
+> 撤去が済むまで正確なまま。決定の根拠は `docs/ENFORCEMENT_AUDIT_2026-08-05.md`。
+> §7 の「生きている追跡 issue はない」は #728-#733 の起票により古くなった。
 
 ## TL;DR
 

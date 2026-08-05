@@ -4,7 +4,10 @@
 
 ## 0. 作業開始時の必須確認
 
-1. この `AGENTS.md` を読む。
+1. この `AGENTS.md` を読む。実行時の安全規範は `CLAUDE.md` の
+   Execution Floor and Safety Rules が正本 (単層の床 + record 方針、
+   issue #678)。enforcement (receipt / 事前ハッシュ一致 / fail-closed
+   module audit) を新設・拡張しない。
 2. `git status --short --branch` と `git worktree list` を確認する。
 3. 主worktree (`git worktree list` の先頭に出る、自分がこの作業のために作成したのではない既存worktree) の既存変更は、閲覧以外の操作をしない。特定のbranch名で固定せず、その時点の `git worktree list` で判定する。revert、reset、checkout、clean、上書きを禁止する。
 4. 設定済みのremote (通常は `origin`) から最新を fetch し、GitHub の Issue/PR の現在状態を確認する。remoteが無い、または名前が異なる環境では fetch は best-effort とし (`git remote` で実際の名前を確認する)、GitHub側の現在状態の確認を優先する。過去の会話や古いcommitを正本にしない。

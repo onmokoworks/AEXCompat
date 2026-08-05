@@ -14,6 +14,21 @@ dispatch time instead of comparing it against committed constants. The
 amendment record in section 3 states what changed, what was deliberately given
 up, and what is untouched.
 
+Amendment (2026-08-05, issue #678): runtime identity **enforcement** is
+retired policy-wide, extending the section 3 amendment to its conclusion. The
+owner decision on #678 (audit: `docs/ENFORCEMENT_AUDIT_2026-08-05.md`)
+supersedes every statement in this document that keeps runtime pinning
+mandatory: "runtime identity pinning", receipt-pinned worker identity, the
+mandatory module audit, and the sealed/restricted launch machinery move from
+admission-time enforcement to per-run recording (#729-#733). A recorded
+identity that fails to match at comparison time disqualifies that evidence
+instead of blocking dispatch. Unchanged: recording the identity of what
+actually ran, refresh-runner ownership of `analysis/` documents, behavioral
+self-tests as the regression axis, claim stratification, and the AE oracle
+identity contract. Approval receipts remain as reviewed documents recording
+fixture provenance and native-execution escalation; they stop being a
+dispatch precondition (#732).
+
 This document is policy, not an immediate replacement of existing assets.
 Existing evidence tests and `analysis/` documents are not deleted or
 rewritten by this document; migration happens in staged follow-up changes

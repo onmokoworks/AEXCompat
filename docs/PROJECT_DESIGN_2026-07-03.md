@@ -4,7 +4,7 @@ AEXCompat 詳細設計案(2026-07-03)
 > 「ネットワーク遮断」等の語彙は現行の主張に引き継がれていない。worker isolation
 > は crash containment であって confidentiality sandbox ではなく、ネットワーク
 > 制限は実装されていない。現行の実装状態は `docs/ISOLATION_INVENTORY_2026-08-04.md`
-> と `CLAUDE.md` (Execution Tiers and Safety Rules) を正とすること。
+> と `CLAUDE.md` (Execution Floor and Safety Rules) を正とすること。
 
 1. 現状理解
 1.1 リポジトリの構成

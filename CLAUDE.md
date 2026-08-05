@@ -5,16 +5,18 @@ After Effects Effect AEX plug-ins. The original no-load phase is historical;
 reviewed native loading, `EffectMain` selector dispatch, parameter discovery,
 and bounded image input/output are now the main implementation path.
 
-## Execution Tiers and Safety Rules
+## Execution Floor and Safety Rules
 
-- Two execution tiers. The default tier is a crash-contained dev/observation
-  worker: separate process and kill-on-close Job Object. This is the
-  floor for running any AEX and needs no approval receipt, allowlist, or enforced
-  pre-selection hash match. It exists so an in-development or unknown AEX can be
-  loaded, dispatched, and observed (Project Direction 1/3) without the evidence
-  apparatus, and so a rebuilt plug-in re-runs without re-approval. Failure
-  isolation comes from process + Job Object, not from identity pinning; hashing
-  the plug-in buys nothing for crash containment.
+- One execution floor, no enforcement tier (decided 2026-08-05 on issue #678;
+  the audit behind the decision is `docs/ENFORCEMENT_AUDIT_2026-08-05.md`).
+  Every route that loads an AEX gets the same always-on crash containment:
+  separate worker process, kill-on-close Job Object with a process-memory
+  limit, and a private desktop with modal-dialog sweep (issue #351). No route
+  requires an approval receipt, allowlist, or enforced pre-selection hash
+  match, so an in-development or unknown AEX can be loaded, dispatched, and
+  observed, and a rebuilt plug-in re-runs without re-approval. Failure
+  isolation comes from process + Job Object, not from identity pinning;
+  hashing the plug-in buys nothing for crash containment.
 - A deadline is not part of that floor. Where a wrong answer is worse than a
   slow one, there is none: parameter inspection (discovery) waits indefinitely,
   because a watchdog there contains nothing the Job Object does not already
@@ -25,51 +27,45 @@ and bounded image input/output are now the main implementation path.
   the broker's own probe workers in `selftest`. A worker that blocks on a modal
   dialog is a UI-containment problem (issue #351), not a reason to reintroduce a
   discovery deadline.
-- The evidence tier adds the authenticated sealed load tree, receipt-pinned
-  identity, dependency manifest, and module audit. Treat these as provenance
-  for a trustworthy AE-equivalence/regression corpus (Project Direction 4), not
-  as a security boundary against untrusted binaries. Require this tier only when
-  producing evidence that will be compared, committed, or trusted later; do not
-  force it onto interactive observation or reverse-engineering.
+- Evidence is a recording depth, not an execution tier. Provenance for the
+  AE-equivalence/regression corpus (Project Direction 4) comes from recording
+  what actually ran — the hash of the actually-loaded plug-in bytes, the
+  loaded-module list, the environment — on every run. A recorded identity that
+  fails to match at comparison time disqualifies that evidence; it never gates
+  launch. The former evidence-tier enforcement (sealed-tree ACL machinery,
+  receipt-pinned identity, fail-closed module audit, restricted token) is
+  scheduled for removal (#729-#733) and must not be extended.
 - Do not bypass output bounds, pixel/output validation, or fail-closed
   suite/handle ownership (reject stale, foreign, exhausted, or double-disposed
   references) to make an AEX appear compatible. These are host-protection
   runtime invariants that keep a malformed plug-in producing diagnostics instead
-  of corrupting host state or crashing; they are part of the always-on
-  crash-containment floor, not an evidence-tier concern.
-- In the evidence tier, do not bypass identity checks, approval receipts, or
-  dependency manifests to make an AEX appear compatible.
-- Record versus enforce are separate decisions. Hashing the bytes that actually
-  loaded and recording that hash in the diagnostic is cheap provenance and stays
-  fine in the default tier; it binds observations to what ran. Enforcing a hash
-  as a load precondition (rejecting launch when the bytes differ from a
-  selected/approved identity, as the shipped `ApprovedImageArtifact.expected_sha256`
-  does) is the evidence-tier gate, and is what the default tier drops so a
-  post-selection rebuild is not treated as a mismatch.
-- Implementation gap: there is no single shipped tier today. The sealed/restricted
-  launch with no normal-token fallback is wired for two paths: the L2 launch
-  transaction (schema-v2 approval receipts) and interactive image dispatch
-  (`image_render.rs`, which uses per-session `ApprovedImageArtifact` from
-  `selection.sha256` enforcing a pre-selection hash match, not a schema-v2
-  receipt, and already admits the locally built worker at dispatch time per
-  `docs/EVIDENCE_POLICY_2026-07-18.md` §3). Since #365 deleted the one-shot argv
-  render transport, an image or audio render reaches that boundary only through
-  `RenderSession`/`AudioRenderSession` (`dispatch_secure_image_session`);
-  `dispatch_secure_image` still serves the non-rendering diagnostic request
-  routes (`dispatch_approved_image`). The `l1` route
-  (`l1.rs`) still dispatches a plug-in through normal-token `run_isolated`; the
-  `render_request.rs` routes (`render-parameter-request`, `smart-suite-fault`,
-  `smart-mask-scene`) moved onto the sealed load tree in #312, so `l1` is the
-  last plug-in-loading one. `selftest` (`selftest.rs`) also uses `run_isolated`,
-  but only to launch the broker's own probe workers (exit0/sleep/abort); it
-  loads no plug-in, so it is a different category rather than a sealing gap. So
-  neither claim holds globally: the crash-containment-only default
-  tier is not yet the standard path, and not every dispatch is sealed either.
-  Restoring an explicit receipt-free default tier was tracked as #36, which
-  was closed not-planned on 2026-07-24; as of 2026-08-04 no live issue tracks
-  it, so treat it as unscheduled. Do not
-  assume every production route is already sealed, nor that the light path is
-  already available in the shipped host.
+  of corrupting host state or crashing; they are part of the always-on floor.
+- Do not fabricate or hand-edit recorded provenance to make an AEX appear
+  compatible or an observation look reproducible; records are written by the
+  code path that executed, or not at all.
+- Record, never enforce. Hashing the bytes that actually loaded and recording
+  that hash in the diagnostic binds observations to what ran and stays
+  mandatory. Enforcing a hash as a launch precondition (rejecting dispatch when
+  bytes differ from a selected/approved identity) is removed policy-wide. A
+  hash mismatch is a state transition, not an error (the #309 pattern): it
+  triggers re-discovery, re-verification, or evidence rejection. Stale-reuse
+  protection belongs in cache keys (the multifilter `BuildFingerprint` pattern:
+  results are keyed by plug-in bytes + host build, so a rebuild invalidates its
+  own cache), not in dispatch gates.
+- Implementation gap: the code still contains the enforcement this policy
+  removes. Approval receipts still gate the `l1`/`l2`/`render*`/`smart*`/
+  `render_request` CLI routes (#732), interactive image dispatch still enforces
+  a per-session pre-selection hash match (`ApprovedImageArtifact`) and a worker
+  freshness gate (#729), the module audit still fails closed (#730), and the
+  sealed/restricted launch machinery is still wired (#731). Until those land,
+  do not treat the existing enforcement as policy, do not add new enforcement,
+  and when touching one of these routes migrate it toward the floor rather
+  than extending the gate. `l1` is the last plug-in-loading normal-token route
+  and is settled by #732. `selftest` launches only the broker's own probe
+  workers and loads no plug-in, so it is out of scope. The receipt-free routes
+  that already exist (`render-video-batch`, `InteractiveRenderSession`,
+  self-hash admission in `dispatch_secure_image`) are the floor's reference
+  implementations.
 - Keep `imports/` as frozen provenance. Do not redistribute Adobe SDK headers
   or source; the SDK selected by `AFTER_EFFECTS_SDK_ROOT` is an external ABI
   verification and fixture-build input only.
@@ -88,8 +84,8 @@ and bounded image input/output are now the main implementation path.
   broker-created inherited dump handle superseded #67's directory-pin plus
   worker-side re-open.
 - The worker is crash containment, not a confidentiality sandbox. Do not claim
-  that it prevents user-token filesystem or network access. The evidence-tier
-  integrity machinery guarantees which bytes ran, not that the plug-in is safe.
+  that it prevents user-token filesystem or network access. Recorded provenance
+  says which bytes ran, not that the plug-in is safe.
 - Prefer machine-portable behavioral self-tests for new compatibility work, and
   update frozen evidence values in `analysis/` only through the
   `tools/refresh-*-evidence.ps1` scripts (`docs/EVIDENCE_POLICY_2026-07-18.md`).
@@ -102,11 +98,9 @@ and bounded image input/output are now the main implementation path.
   (`test_probe_pipl_contract.py`) と CI workflow 契約
   (`test_windows_clean_clone_workflow.py`) の 2 ファイル。
 - Image dispatch admits the locally built worker at dispatch time (no frozen
-  trust constants; see the section 3 amendment in
-  `docs/EVIDENCE_POLICY_2026-07-18.md`). In the evidence tier, receipt-pinned
-  worker identity, the worker's own plug-in hash check, and plug-in/dependency
-  admission stay fail-closed; after any worker rebuild, run the broker
-  integration tests before relying on broker dispatch.
+  trust constants; see the section 3 amendment and the 2026-08-05 amendment in
+  `docs/EVIDENCE_POLICY_2026-07-18.md`). After any worker rebuild, run the
+  broker integration tests before relying on broker dispatch.
 
 ## Issue Claim and PR Linking
 
@@ -175,9 +169,9 @@ artifacts from a previous checkout.
    from Adobe-equivalence evidence.
 5. Keep crash containment (process isolation, Job Object), output bounds, and
    fail-closed suite/handle ownership (stale, foreign, exhausted, or
-   double-disposed references) always on as host-protection invariants; treat
-   module identity, receipt pinning, and load-tree ownership as the evidence tier
-   rather than a universal requirement.
+   double-disposed references) always on as host-protection invariants; record
+   module identity and loaded bytes as provenance on every run, and enforce
+   none of it as a launch precondition (issue #678).
 
 Current status is tracked in `docs/COMPATIBILITY_STATUS_2026-07-16.md`, current
 direction in `docs/PROJECT_DIRECTION.md`, and security limitations in
@@ -186,4 +180,5 @@ worker isolation in security terms, read
 `docs/ISOLATION_INVENTORY_2026-08-04.md`: it fixes what is actually
 implemented, what is documented plan only (mitigation policies, UI limits,
 integrity levels, AppContainer are NOT implemented), and which routes are
-sealed versus normal-token.
+sealed versus normal-token. The audit and decision record behind the
+single-floor policy is `docs/ENFORCEMENT_AUDIT_2026-08-05.md`.
