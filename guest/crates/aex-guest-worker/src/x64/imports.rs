@@ -60,6 +60,7 @@ enum LegacyWin64Import {
     CrtInitializeOnexitTable,
     CrtRegisterOnexitFunction,
     CrtExecuteOnexitTable,
+    CrtSetTerminate,
     CrtGetenv,
     InitializeCriticalSection,
     InitializeCriticalSectionAndSpinCount,
@@ -304,6 +305,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "_initialize_onexit_table" | "_register_onexit_function" | "_execute_onexit_table") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-runtime-l1-1-0.dll", "set_terminate") => {
+            LegacyWin64Import::CrtSetTerminate
+        }
+        (_, "set_terminate") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-environment-l1-1-0.dll", "getenv") => LegacyWin64Import::CrtGetenv,
         (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "cos") => LegacyWin64Import::Cos,
@@ -747,6 +752,15 @@ fn install_win64_import(
                     }),
                 )?;
             }
+            LegacyWin64Import::CrtSetTerminate => {
+                uc("write CRT set_terminate return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install CRT set_terminate import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_set_terminate(unicorn);
+                    }),
+                )?;
+            }
             LegacyWin64Import::InitializeCriticalSection
             | LegacyWin64Import::InitializeCriticalSectionAndSpinCount
             | LegacyWin64Import::EnterCriticalSection
@@ -1116,6 +1130,28 @@ fn emulate_crt_getenv(unicorn: &mut Unicorn<'_, GuestState>) {
         unicorn
             .reg_write(RegisterX86::RAX, 0)
             .map_err(|error| format!("CRT getenv return write failed: {error}"))
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
+    }
+}
+
+fn emulate_crt_set_terminate(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let handler = read_win64_import_argument(unicorn, 0)?;
+        if handler != 0 && !image_executable_address(unicorn.get_data(), handler) {
+            return Err(format!(
+                "CRT terminate handler {handler:#x} is outside the executable image"
+            ));
+        }
+        let previous = unicorn.get_data().crt_terminate_handler;
+        unicorn.get_data_mut().crt_terminate_handler = handler;
+        unicorn
+            .reg_write(RegisterX86::RAX, previous)
+            .map_err(|error| format!("CRT set_terminate result write failed: {error}"))
     })();
     if let Err(error) = result {
         if unicorn.get_data().callback_error.is_none() {

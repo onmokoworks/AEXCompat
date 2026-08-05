@@ -1954,6 +1954,55 @@
     }
 
     #[test]
+    fn crt_set_terminate_is_library_qualified_stateful_validated_and_session_local() {
+        const SET_TERMINATE: u64 = STUB_BASE + 0x430;
+        let runtime = "api-ms-win-crt-runtime-l1-1-0.dll";
+        assert_eq!(
+            dispatch_win64_import(runtime, "set_terminate"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CrtSetTerminate)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "set_terminate"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+
+        let mut first = test_engine(&[0xc3, 0xc3]);
+        first.unicorn.mem_write(SET_TERMINATE, &[0xc3]).unwrap();
+        install_win64_import(&mut first.unicorn, SET_TERMINATE, runtime, "set_terminate").unwrap();
+        let handler = TEST_CODE + 1;
+        assert_eq!(
+            first
+                .call_win64(SET_TERMINATE, [handler, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            first
+                .call_win64(SET_TERMINATE, [TEST_CODE, 0, 0, 0, 0, 0])
+                .unwrap(),
+            handler
+        );
+        assert_eq!(
+            first
+                .call_win64(SET_TERMINATE, [0, 0, 0, 0, 0, 0])
+                .unwrap(),
+            TEST_CODE
+        );
+
+        let error = first
+            .call_win64(SET_TERMINATE, [DATA_BASE, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("outside the executable image"),
+            "{error}"
+        );
+        assert_eq!(first.unicorn.get_data().crt_terminate_handler, 0);
+
+        let second = test_engine(&[0xc3]);
+        assert_eq!(second.unicorn.get_data().crt_terminate_handler, 0);
+    }
+
+    #[test]
     fn windows_critical_section_is_recursive_bounded_and_library_qualified() {
         let operations = [
             (STUB_BASE + 0x3b0, "InitializeCriticalSectionAndSpinCount"),
