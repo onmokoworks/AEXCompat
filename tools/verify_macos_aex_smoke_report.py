@@ -18,8 +18,21 @@ MAX_OUTPUT_BYTES = 512 * 1024 * 1024
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
+class DuplicateKeyError(ValueError):
+    pass
+
+
 def fail(message: str) -> "NoReturn":
     raise SystemExit(f"macos_aex_smoke_error: {message}")
+
+
+def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise DuplicateKeyError(key)
+        value[key] = item
+    return value
 
 
 def validate_png(payload: bytes) -> tuple[int, int]:
@@ -117,7 +130,12 @@ def validate(report_path: Path, output_path: Path) -> dict[str, object]:
     if report_size <= 0 or report_size > MAX_REPORT_BYTES:
         fail("diagnostic report size is outside the bounded contract")
     try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report = json.loads(
+            report_path.read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except DuplicateKeyError as error:
+        fail(f"diagnostic report contains duplicate JSON key: {error}")
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         fail(f"diagnostic report is not bounded UTF-8 JSON: {error}")
     if not isinstance(report, dict) or report.get("schema_version") != 1:

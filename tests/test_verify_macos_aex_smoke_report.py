@@ -132,6 +132,25 @@ def test_rejects_invalid_json_and_non_png_output(tmp_path):
         MODULE.validate(report_path, output_path)
 
 
+def test_rejects_duplicate_diagnostic_keys_at_any_depth(tmp_path):
+    report = json.dumps(valid_report())
+    report = report.replace(
+        '"unsupported_suite_calls": []',
+        '"unsupported_suite_calls": [{"slot": 7}], "unsupported_suite_calls": []',
+    )
+    report_path, output_path = write_fixture(tmp_path, report)
+    with pytest.raises(SystemExit, match="duplicate JSON key: unsupported_suite_calls"):
+        MODULE.validate(report_path, output_path)
+
+    nested = json.dumps(valid_report()).replace(
+        '"requested_backend": "cpu"',
+        '"requested_backend": "opencl", "requested_backend": "cpu"',
+    )
+    report_path.write_text(nested, encoding="utf-8")
+    with pytest.raises(SystemExit, match="duplicate JSON key: requested_backend"):
+        MODULE.validate(report_path, output_path)
+
+
 def test_rejects_png_with_bad_crc_or_truncated_idat(tmp_path):
     report_path, output_path = write_fixture(tmp_path, valid_report())
     payload = bytearray(output_path.read_bytes())
