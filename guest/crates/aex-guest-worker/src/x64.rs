@@ -11,7 +11,7 @@ use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::{RegisterX86, UcHookId, Unicorn};
 
 use crate::crt_heap::{CrtHeap, CrtHeapError, MAX_CRT_HEAP_BYTES};
-use crate::pe::PeImage;
+use crate::pe::{PeImage, StaticTlsImage};
 use crate::plugin_data::{
     CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
 };
@@ -285,6 +285,12 @@ pub enum GuestError {
     },
     #[error("DLL process attach returned FALSE")]
     DllProcessAttach,
+    #[error("TLS process attach callback {index} at {address:#x} failed: {detail}")]
+    TlsProcessAttach {
+        index: usize,
+        address: u64,
+        detail: String,
+    },
     #[error("guest execution failed: {reason}; crash_snapshot={snapshot_json}")]
     ExecutionCrash {
         reason: String,
@@ -304,7 +310,7 @@ impl GuestError {
             Self::DataCapacity => "memory",
             Self::Callback(_) => "callback",
             Self::SelectorAbort { .. } => "selector",
-            Self::DllProcessAttach => "dllmain",
+            Self::DllProcessAttach | Self::TlsProcessAttach { .. } => "dllmain",
             Self::ExecutionCrash { .. } => "crash",
         }
     }

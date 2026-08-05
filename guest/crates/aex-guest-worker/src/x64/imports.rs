@@ -1413,27 +1413,11 @@ fn emulate_windows_condition_variable(
                 Ok(())
             }
             1 => {
-                if !unicorn
-                    .get_data()
-                    .windows_condition_variables
-                    .contains(&address)
-                {
-                    return Err(format!(
-                        "Windows condition variable {address:#x} is not initialized"
-                    ));
-                }
+                ensure_windows_condition_variable(unicorn, address)?;
                 Err("blocking SleepConditionVariableCS is unsupported in the serial backend".into())
             }
             2 | 3 => {
-                if !unicorn
-                    .get_data()
-                    .windows_condition_variables
-                    .contains(&address)
-                {
-                    return Err(format!(
-                        "Windows condition variable {address:#x} is not initialized"
-                    ));
-                }
+                ensure_windows_condition_variable(unicorn, address)?;
                 let _ = unicorn.reg_write(RegisterX86::RAX, 0);
                 Ok(())
             }
@@ -1446,6 +1430,43 @@ fn emulate_windows_condition_variable(
         }
         let _ = unicorn.emu_stop();
     }
+}
+
+fn ensure_windows_condition_variable(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    address: u64,
+) -> Result<(), String> {
+    if unicorn
+        .get_data()
+        .windows_condition_variables
+        .contains(&address)
+    {
+        return Ok(());
+    }
+    if unicorn.get_data().windows_condition_variables.len() >= MAX_WINDOWS_CONDITION_VARIABLES {
+        return Err(format!(
+            "Windows condition-variable count exceeds {MAX_WINDOWS_CONDITION_VARIABLES}"
+        ));
+    }
+    let bytes = unicorn.mem_read_as_vec(address, 8).map_err(|error| {
+        format!("Windows condition variable {address:#x} is unreadable: {error}")
+    })?;
+    if bytes != [0; 8] {
+        return Err(format!(
+            "Windows condition variable {address:#x} is neither initialized nor zero-initialized"
+        ));
+    }
+    // CONDITION_VARIABLE_INIT is all-zero and is a complete supported
+    // initialization path on Windows.  Writing the same bytes validates that
+    // the guest object is writable before retaining it as live state.
+    unicorn.mem_write(address, &[0; 8]).map_err(|error| {
+        format!("Windows condition variable {address:#x} is not writable: {error}")
+    })?;
+    unicorn
+        .get_data_mut()
+        .windows_condition_variables
+        .insert(address);
+    Ok(())
 }
 
 fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
