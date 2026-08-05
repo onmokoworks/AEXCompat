@@ -474,6 +474,67 @@
     }
 
     #[test]
+    fn crt_strdup_copies_independently_uses_crt_ownership_and_fails_closed() {
+        const STRDUP: u64 = STUB_BASE + 0x530;
+        let mut engine = test_engine(&[0xc3]);
+        for library in ["api-ms-win-crt-string-l1-1-0.dll", "UCRTBASE.DLL"] {
+            assert_eq!(
+                dispatch_win64_import(library, "_strdup"),
+                Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CrtStrdup)
+            );
+        }
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "_strdup"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                STRDUP,
+                "api-ms-win-crt-string-l1-1-0.dll",
+                "_strdup",
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CrtStrdup)
+        );
+
+        assert_eq!(engine.call_win64(STRDUP, [0; 6]).unwrap(), 0);
+        assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+
+        let source = DATA_BASE + 0x800;
+        engine.write(source, b"OLM\0").unwrap();
+        let first = engine
+            .call_win64(STRDUP, [source, 0, 0, 0, 0, 0])
+            .unwrap();
+        let second = engine
+            .call_win64(STRDUP, [source, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_ne!(first, 0);
+        assert_ne!(first, second);
+        assert_eq!(engine.unicorn.mem_read_as_vec(first, 4).unwrap(), b"OLM\0");
+        assert_eq!(engine.unicorn.mem_read_as_vec(second, 4).unwrap(), b"OLM\0");
+        engine.write(source, b"AE!\0").unwrap();
+        assert_eq!(engine.unicorn.mem_read_as_vec(first, 4).unwrap(), b"OLM\0");
+        assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 8);
+
+        for pointer in [first, second] {
+            engine.unicorn.reg_write(RegisterX86::RCX, pointer).unwrap();
+            emulate_crt_free(&mut engine.unicorn);
+        }
+        assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+
+        engine.write(source, b"ABCDE").unwrap();
+        let error = duplicate_crt_string(&mut engine.unicorn, source, 4).unwrap_err();
+        assert!(error.contains("exceeds 4 bytes"), "{error}");
+        assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+
+        let error = engine
+            .call_win64(STRDUP, [0xdead_beef, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("_strdup source read"), "{error}");
+    }
+
+    #[test]
     fn extended_inter_allocation_is_zeroed_bounded_and_owned() {
         let mut engine = test_engine(&[0xc3]);
         let output = engine.allocate(8, 8).unwrap();

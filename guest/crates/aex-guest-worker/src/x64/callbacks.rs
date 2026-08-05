@@ -523,6 +523,73 @@ fn emulate_crt_malloc(unicorn: &mut Unicorn<'_, GuestState>, calloc: bool) {
     let _ = unicorn.reg_write(RegisterX86::RAX, pointer.unwrap_or(0));
 }
 
+fn read_bounded_crt_c_string(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    limit: u64,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    for offset in 0..=limit {
+        let current = address
+            .checked_add(offset)
+            .ok_or_else(|| format!("{label} source range overflow"))?;
+        let mut byte = [0u8; 1];
+        unicorn
+            .mem_read(current, &mut byte)
+            .map_err(|error| format!("{label} source read: {error}"))?;
+        bytes.push(byte[0]);
+        if byte[0] == 0 {
+            return Ok(bytes);
+        }
+        if offset == limit {
+            break;
+        }
+    }
+    Err(format!("{label} source exceeds {limit} bytes"))
+}
+
+fn duplicate_crt_string(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    source: u64,
+    limit: u64,
+) -> Result<u64, String> {
+    let bytes = read_bounded_crt_c_string(unicorn, source, limit, "_strdup")?;
+    let size = u64::try_from(bytes.len()).map_err(|_| "_strdup size overflow".to_string())?;
+    let pointer = match allocate_crt_region(unicorn, size) {
+        Ok(pointer) => pointer,
+        Err(_) => return Ok(0),
+    };
+    if let Err(error) = unicorn.mem_write(pointer, &bytes) {
+        let _ = free_crt_region(unicorn, pointer);
+        return Err(format!("_strdup destination write: {error}"));
+    }
+    Ok(pointer)
+}
+
+fn emulate_crt_strdup(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("read _strdup source pointer: {error}"))?;
+        if source == 0 {
+            return Ok(0);
+        }
+        duplicate_crt_string(unicorn, source, MAX_CRT_STRING_BYTES)
+    })();
+    match result {
+        Ok(pointer) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn allocate_crt_region(
     unicorn: &mut Unicorn<'_, GuestState>,
     size: u64,
