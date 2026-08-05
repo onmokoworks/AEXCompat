@@ -136,8 +136,10 @@ auxiliary option: broker が検証・canonical 化・de-verbatim した絶対デ
 `AddDllDirectory` してから positional slot の**実パス**の AEX を
 `LOAD_LIBRARY_SEARCH_USER_DIRS` 込みでロードする。このモードでは sealed staging
 は行われず、module audit は recorded (記録のみ、enforce しない)。staged
-dependencies / sealed resources / GPU runtime authorization / cluster との
-併用は broker が明示拒否する。
+dependencies / sealed resources / GPU runtime authorization (#815) との
+併用は broker が明示拒否する。cluster との併用は cluster-manifest-v2
+(クラスタセッション書 §2.4) で行い、こちらは step 3 (#812) 以降サポート
+される。
 
 `session-audio:v1|<samples>|<rate>|<path>` は classic session 専用 (broker が
 SmartFX + audio を拒否するため smart session 側は剥がさない)。one-shot の
@@ -736,6 +738,7 @@ one-shot audio (`--render-audio`、`worker_audio_execution.cpp` の
 aex_render_worker.exe --render-audio-session-v1 <plugin> <plugin_sha256>
     <payload> <max_samples> <channels> <time_scale>
     [--parameter-animation-v1 <path>] [--minidump-v1 <dir>]
+    [--dependency-dirs-v1 <dir;dir;...>]
 ```
 
 - 位置引数は 7 個 (command 含む `effective_argc == 8`)。`l2_cli_dispatch.cpp`
@@ -844,9 +847,15 @@ impl AudioRenderSession {
 }
 ```
 
-- launch / Job Object / restricted token / sealed staging は image セッションの
-  `run_isolated_impl` 分離 (§8) を流用。handle list に audio section + 制御パイプ
-  2 本。per-request deadline (§7) を audio_render ごとに張る。
+- launch / Job Object は image セッションの `run_isolated_impl` 分離 (§8) を
+  流用 (restricted token は #731 で撤去済み。sealed staging は staged open の
+  ときだけ)。handle list に audio section + 制御パイプ 2 本。per-request
+  deadline (§7) を audio_render ごとに張る。
+- in-place load mode (issue #751 step 4): `AudioSessionOpenRequest` も
+  `dependency_search_dirs` を持ち、image セッションと同じ `--dependency-dirs-v1`
+  auxiliary option で in-place launch できる (`dependencies` と相互排他)。
+  worker 側は共通の auxiliary peel + admission 経路がそのまま audio session
+  mode にも効く。
 - wrapper: `render_with_artifact` の audio 経路 (`audio.is_some()`) と
   `render_experimental_audio` を、単発 audio を「長さ1 audio セッション」として
   この経路に載せる (image の length-1 wrapper と同型、挙動不変)。適格条件から

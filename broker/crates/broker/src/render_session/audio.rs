@@ -41,6 +41,11 @@ pub struct AudioSessionOpenRequest<'a> {
     pub plugin_sha256: &'a str,
     pub parameters: Option<&'a [InteractiveParameter]>,
     pub dependencies: Vec<ApprovedImageArtifact>,
+    /// In-place load mode (issue #751): non-empty opens the session on the
+    /// plug-in's real path with these directories admitted into the worker's
+    /// DLL search set, exactly like the image session's field. Mutually
+    /// exclusive with `dependencies`.
+    pub dependency_search_dirs: Vec<PathBuf>,
     pub max_samples: u32,
     pub channels: u32,
     pub time_scale: u32,
@@ -189,7 +194,7 @@ impl AudioRenderSession {
             worker_kind: WorkerKind::Render,
             plugin,
             dependencies: request.dependencies,
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: request.dependency_search_dirs,
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
             timeout: Some(request.frame_deadline),

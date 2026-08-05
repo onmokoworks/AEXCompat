@@ -32,6 +32,25 @@ staging・ACL・LoadLibrary・Adobe ランタイムの DllMain 初期化がク�
 - 異なる session 構成 (深度・寸法・time 系) 間での render プラグイン
   差し替え (§6)。
 
+### 1.1 現況 (issue #751 以降)
+
+in-place ロード (cluster-manifest-v2、§2.4) が discovery / render の既定
+パイプラインになった。既定経路は closure を解決・staging せず、プラグイン
+実パスからのロード + `AddDllDirectory` による探索ディレクトリ admit で
+依存を Windows loader に解決させる。本書の sealed staging 経路
+(cluster-manifest-v1 と `plugin_dependency_closure` による closure 封入) は
+次の用途で残る:
+
+- escape hatch: `AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY=1` /
+  `AEXCOMPAT_MULTIFILTER_STAGED_RENDER=1` による旧経路の明示選択。
+- failure survey: in-place で失敗したプラグインの staged closure 解決
+  結果を記録するプローブ (cache 収束の証跡)。
+- GPU (AEXRMA1) render: in-place dispatch は GPU runtime authorization を
+  未サポート (明示 reject) のため、GPU 経路は staged のまま (#815)。
+
+sealed staging 機構そのものの撤去は、#732 (l1 経路の decommission、済) と
+上記 hatch / GPU 残件の解消後に #816 で扱う。
+
 ## 2. 信頼モデル: クラスタマニフェスト
 
 RS 書 §3 の原則「**セッションの信頼判断・構成は launch 時 argv で全て確定し、

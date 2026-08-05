@@ -553,7 +553,8 @@ pub struct SessionOpenRequest<'a> {
     /// plug-in's real path with these directories admitted into the worker's
     /// DLL search set, instead of staging a sealed tree. Mutually exclusive
     /// with `dependencies`, and unsupported (explicitly rejected) with GPU
-    /// runtime authorization and cluster sessions for now.
+    /// runtime authorization for now (#815). Cluster sessions combine with
+    /// it since step 3 (#812): they ride the cluster-manifest-v2 dispatch.
     pub dependency_search_dirs: Vec<PathBuf>,
     pub width: u32,
     pub height: u32,
