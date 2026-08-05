@@ -11,6 +11,13 @@ pub(crate) const MAX_CRT_ALLOCATIONS: usize = 4096;
 pub(crate) struct CrtAllocation {
     pub(crate) requested_size: u64,
     pub(crate) backing_size: u64,
+    kind: CrtAllocationKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CrtAllocationKind {
+    Regular,
+    Aligned,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,9 +27,11 @@ pub(crate) enum CrtHeapError {
     AllocationCountExceeded,
     AggregateBudgetExceeded,
     AddressSpaceExhausted,
+    InvalidAlignment,
     InvalidPointer,
     DuplicatePointer,
     ForeignOrFreedPointer,
+    AllocatorMismatch,
 }
 
 impl fmt::Display for CrtHeapError {
@@ -33,9 +42,13 @@ impl fmt::Display for CrtHeapError {
             Self::AllocationCountExceeded => "CRT heap allocation-count limit exceeded",
             Self::AggregateBudgetExceeded => "CRT heap aggregate budget exceeded",
             Self::AddressSpaceExhausted => "CRT heap guest address space exhausted",
+            Self::InvalidAlignment => {
+                "CRT aligned allocation requires a nonzero power-of-two alignment"
+            }
             Self::InvalidPointer => "CRT heap allocator returned an invalid pointer",
             Self::DuplicatePointer => "CRT heap allocator returned a duplicate pointer",
             Self::ForeignOrFreedPointer => "CRT free rejected a foreign or already-freed pointer",
+            Self::AllocatorMismatch => "CRT free API does not own this allocation",
         })
     }
 }
@@ -57,6 +70,21 @@ impl CrtHeap {
         &self,
         requested_size: u64,
     ) -> Result<CrtAllocation, CrtHeapError> {
+        self.prepare_allocation_kind(requested_size, CrtAllocationKind::Regular)
+    }
+
+    pub(crate) fn prepare_aligned_allocation(
+        &self,
+        requested_size: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        self.prepare_allocation_kind(requested_size, CrtAllocationKind::Aligned)
+    }
+
+    fn prepare_allocation_kind(
+        &self,
+        requested_size: u64,
+        kind: CrtAllocationKind,
+    ) -> Result<CrtAllocation, CrtHeapError> {
         let requested_size = requested_size.max(1);
         if requested_size > MAX_CRT_ALLOCATION_BYTES {
             return Err(CrtHeapError::AllocationTooLarge);
@@ -71,6 +99,7 @@ impl CrtHeap {
         Ok(CrtAllocation {
             requested_size,
             backing_size,
+            kind,
         })
     }
 
@@ -80,7 +109,21 @@ impl CrtHeap {
         range_end: u64,
         allocation: CrtAllocation,
     ) -> Result<u64, CrtHeapError> {
-        let mut candidate = align_up(range_start, CRT_HEAP_PAGE_SIZE)?;
+        self.first_fit_aligned(range_start, range_end, allocation, CRT_HEAP_PAGE_SIZE)
+    }
+
+    pub(crate) fn first_fit_aligned(
+        &self,
+        range_start: u64,
+        range_end: u64,
+        allocation: CrtAllocation,
+        alignment: u64,
+    ) -> Result<u64, CrtHeapError> {
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(CrtHeapError::InvalidAlignment);
+        }
+        let mapping_alignment = alignment.max(CRT_HEAP_PAGE_SIZE);
+        let mut candidate = align_up(range_start, mapping_alignment)?;
         for (&pointer, existing) in self.allocations.range(range_start..range_end) {
             let candidate_end = candidate
                 .checked_add(allocation.backing_size)
@@ -92,7 +135,7 @@ impl CrtHeap {
                 pointer
                     .checked_add(existing.backing_size)
                     .ok_or(CrtHeapError::AddressSpaceExhausted)?,
-                CRT_HEAP_PAGE_SIZE,
+                mapping_alignment,
             )?;
         }
         candidate
@@ -119,10 +162,26 @@ impl CrtHeap {
     }
 
     pub(crate) fn remove(&mut self, pointer: u64) -> Result<CrtAllocation, CrtHeapError> {
-        let allocation = self
+        self.remove_kind(pointer, CrtAllocationKind::Regular)
+    }
+
+    pub(crate) fn remove_aligned(&mut self, pointer: u64) -> Result<CrtAllocation, CrtHeapError> {
+        self.remove_kind(pointer, CrtAllocationKind::Aligned)
+    }
+
+    fn remove_kind(
+        &mut self,
+        pointer: u64,
+        expected: CrtAllocationKind,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let allocation = *self
             .allocations
-            .remove(&pointer)
+            .get(&pointer)
             .ok_or(CrtHeapError::ForeignOrFreedPointer)?;
+        if allocation.kind != expected {
+            return Err(CrtHeapError::AllocatorMismatch);
+        }
+        self.allocations.remove(&pointer);
         self.live_bytes -= allocation.requested_size;
         Ok(allocation)
     }
@@ -213,6 +272,39 @@ mod tests {
             heap.first_fit(0x10_0000, 0x20_0000, allocation).unwrap(),
             first
         );
+    }
+
+    #[test]
+    fn aligned_first_fit_honors_large_alignment_and_free_kind() {
+        let mut heap = CrtHeap::default();
+        let aligned = heap.prepare_aligned_allocation(17).unwrap();
+        let pointer = heap
+            .first_fit_aligned(0x10_1000, 0x40_0000, aligned, 0x20_000)
+            .unwrap();
+        assert_eq!(pointer % 0x20_000, 0);
+        heap.insert(pointer, aligned).unwrap();
+        assert_eq!(heap.remove(pointer), Err(CrtHeapError::AllocatorMismatch));
+        assert_eq!(heap.remove_aligned(pointer), Ok(aligned));
+
+        let regular = heap.prepare_allocation(17).unwrap();
+        heap.insert(0x10_0000, regular).unwrap();
+        assert_eq!(
+            heap.remove_aligned(0x10_0000),
+            Err(CrtHeapError::AllocatorMismatch)
+        );
+        assert_eq!(heap.remove(0x10_0000), Ok(regular));
+    }
+
+    #[test]
+    fn aligned_first_fit_rejects_invalid_alignment() {
+        let heap = CrtHeap::default();
+        let allocation = heap.prepare_aligned_allocation(1).unwrap();
+        for alignment in [0, 3] {
+            assert_eq!(
+                heap.first_fit_aligned(0x10_0000, 0x20_0000, allocation, alignment),
+                Err(CrtHeapError::InvalidAlignment)
+            );
+        }
     }
 
     #[test]

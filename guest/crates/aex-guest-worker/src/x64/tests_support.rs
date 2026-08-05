@@ -535,6 +535,118 @@
     }
 
     #[test]
+    fn crt_aligned_allocation_honors_alignment_reuses_and_owns_free() {
+        const ALLOC: u64 = STUB_BASE + 0x570;
+        const FREE: u64 = STUB_BASE + 0x580;
+        let mut engine = test_engine(&[0xc3]);
+        for (stub, symbol, implementation) in [
+            (ALLOC, "_aligned_malloc", LegacyWin64Import::AlignedMalloc),
+            (FREE, "_aligned_free", LegacyWin64Import::AlignedFree),
+        ] {
+            assert_eq!(
+                install_win64_import(
+                    &mut engine.unicorn,
+                    stub,
+                    "api-ms-win-crt-heap-l1-1-0.dll",
+                    symbol,
+                )
+                .unwrap(),
+                Win64ImportDispatch::LegacyImplemented(implementation)
+            );
+            assert_eq!(
+                dispatch_win64_import("UCRTBASE.DLL", symbol),
+                Win64ImportDispatch::LegacyImplemented(implementation)
+            );
+            assert_eq!(
+                dispatch_win64_import("fixture.dll", symbol),
+                Win64ImportDispatch::UnsupportedLegacyImport
+            );
+        }
+
+        let first = engine
+            .call_win64(ALLOC, [17, 0x20_000, 0, 0, 0, 0])
+            .unwrap();
+        assert_ne!(first, 0);
+        assert_eq!(first % 0x20_000, 0);
+        assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 17);
+        assert_eq!(
+            engine.call_win64(FREE, [first, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+        assert!(engine.unicorn.mem_read_as_vec(first, 1).is_err());
+
+        let reused = engine
+            .call_win64(ALLOC, [0, 0x20_000, 0, 0, 0, 0])
+            .unwrap();
+        assert_eq!(reused, first);
+        assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 1);
+        engine.call_win64(FREE, [reused, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(
+            engine.call_win64(FREE, [0, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn crt_aligned_allocation_rejects_invalid_budget_and_free_kind_mismatch() {
+        const ALLOC: u64 = STUB_BASE + 0x590;
+        const FREE: u64 = STUB_BASE + 0x5a0;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            ALLOC,
+            "api-ms-win-crt-heap-l1-1-0.dll",
+            "_aligned_malloc",
+        )
+        .unwrap();
+        install_win64_import(
+            &mut engine.unicorn,
+            FREE,
+            "api-ms-win-crt-heap-l1-1-0.dll",
+            "_aligned_free",
+        )
+        .unwrap();
+        for (size, alignment) in [
+            (1, 0),
+            (1, 3),
+            (crate::crt_heap::MAX_CRT_ALLOCATION_BYTES + 1, 16),
+            (1, 1u64 << 63),
+        ] {
+            assert_eq!(
+                engine
+                    .call_win64(ALLOC, [size, alignment, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+
+        engine.unicorn.reg_write(RegisterX86::RCX, 8).unwrap();
+        emulate_crt_malloc(&mut engine.unicorn, false);
+        let regular = engine.unicorn.reg_read(RegisterX86::RAX).unwrap();
+        let error = engine
+            .call_win64(FREE, [regular, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("does not own"), "{error}");
+        assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 8);
+
+        let mut engine = test_engine(&[0xc3]);
+        let aligned = allocate_aligned_crt_region(&mut engine.unicorn, 8, 64).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RCX, aligned).unwrap();
+        emulate_crt_free(&mut engine.unicorn);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains("does not own"))
+        );
+        assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 8);
+    }
+
+    #[test]
     fn extended_inter_allocation_is_zeroed_bounded_and_owned() {
         let mut engine = test_engine(&[0xc3]);
         let output = engine.allocate(8, 8).unwrap();
