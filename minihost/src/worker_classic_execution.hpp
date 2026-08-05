@@ -6,9 +6,13 @@
 namespace aexcompat::worker_runtime::classic_execution {
 struct LifecycleHooks {
   void* (*begin)(void* host);
-  // What the plug-in returned from its own SEQUENCE_SETUP / FRAME_SETUP. `begin`
-  // hands back an opaque lifecycle, so without this accessor begin_lifecycle
-  // cannot see a setup refusal and reports success (issue #725).
+  // How SEQUENCE_SETUP / FRAME_SETUP came out. Not necessarily the plug-in's
+  // own return value: the host also puts 512 here for an SEH fault or a module
+  // audit rejection (worker_selector_dispatch.cpp) and for a missing invoke
+  // hook (render_lifecycle.cpp), so read it as "setup did not succeed", not as
+  // "the plug-in refused". `begin` hands back an opaque lifecycle, so without
+  // this accessor begin_lifecycle cannot see any of that and reports success
+  // (issue #725).
   int32_t (*setup_error)(void* lifecycle);
   bool (*click)(void* host);
   bool (*interpolate)(void* host);
