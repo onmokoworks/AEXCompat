@@ -1440,12 +1440,18 @@ fn install_avx_state_sync_points(
 ) -> Result<(), GuestError> {
     let mut unique = HashMap::with_capacity(points.len().min(MAX_AVX_STATE_SYNC_POINTS));
     for (address, sync) in points {
-        unique.entry(address).or_insert(sync);
-        if unique.len() > MAX_AVX_STATE_SYNC_POINTS {
-            return Err(GuestError::AvxStateCapacity {
-                observed: unique.len(),
-                limit: MAX_AVX_STATE_SYNC_POINTS,
-            });
+        let observed = unique.len();
+        match unique.entry(address) {
+            std::collections::hash_map::Entry::Occupied(_) => {}
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                if observed >= MAX_AVX_STATE_SYNC_POINTS {
+                    return Err(GuestError::AvxStateCapacity {
+                        observed: observed + 1,
+                        limit: MAX_AVX_STATE_SYNC_POINTS,
+                    });
+                }
+                entry.insert(sync);
+            }
         }
     }
     if unique.len() <= MAX_SPARSE_AVX_STATE_SYNC_HOOKS {
