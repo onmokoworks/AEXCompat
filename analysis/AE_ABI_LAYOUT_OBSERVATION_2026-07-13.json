@@ -157,6 +157,8 @@
     "utils.dispose_world":{"offset":120,"size":8},
     "utils.transfer_rect":{"offset":144,"size":8},
     "utils.transform_world":{"offset":152,"size":8},
+    "utils.subpixel_sample16":{"offset":472,"size":8},
+    "utils.area_sample16":{"offset":480,"size":8},
     "utils.fill16":{"offset":488,"size":8},
     "utils.premultiply_color16":{"offset":496,"size":8},
     "utils.iterate16":{"offset":504,"size":8},

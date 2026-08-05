@@ -24,6 +24,9 @@
 //!   directories (issue #751), instead of resolving the dependency closure
 //!   and staging a sealed tree. The A/B against the default staged mode is
 //!   the acceptance measurement for #751/#753.
+//! * `AEXCOMPAT_DIAG_DEPTH=8|16|32` - open the session at that bit depth. A
+//!   plug-in that advertises `PF_OutFlag2_FLOAT_COLOR_AWARE` may behave
+//!   differently per depth, and the default 8 hides that.
 //!
 //! `AEXCOMPAT_EXTENDED_DIAG=1` additionally turns on the worker's host-callback
 //! trace; it reaches stderr, which the session collects but does not report.
@@ -166,6 +169,12 @@ fn main() {
         .into_iter()
         .collect();
 
+    let pixel_format = match std::env::var("AEXCOMPAT_DIAG_DEPTH").as_deref() {
+        Ok("16") => RenderPixelFormat::Argb16,
+        Ok("32") => RenderPixelFormat::Argb32f,
+        _ => RenderPixelFormat::Argb8,
+    };
+    eprintln!("depth: {pixel_format:?}");
     let mut session = RenderSession::open(SessionOpenRequest {
         repository: &repository,
         plugin_path: &plugin,
@@ -186,7 +195,7 @@ fn main() {
         dependency_search_dirs,
         width: WIDTH,
         height: HEIGHT,
-        pixel_format: RenderPixelFormat::Argb8,
+        pixel_format,
         time_step: 1,
         total_time: 300,
         time_scale: 30,

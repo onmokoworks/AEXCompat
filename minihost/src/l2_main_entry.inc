@@ -329,6 +329,10 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
     reinterpret_cast<void*>(&blend_world), reinterpret_cast<void*>(&convolve_world),
     reinterpret_cast<void*>(&copy_world8), reinterpret_cast<void*>(&fill_world8),
     reinterpret_cast<void*>(&premultiply_world8), reinterpret_cast<void*>(&premultiply_color8),
+    // The 16-bit sampling pair. Left unwired until issue #777: a deep-colour
+    // plug-in that sampled - AE's own Displacement does - called through a null
+    // slot and access-violated at address 0.
+    reinterpret_cast<void*>(&subpixel_sample16), reinterpret_cast<void*>(&area_sample16),
     reinterpret_cast<void*>(&fill_world16), reinterpret_cast<void*>(&premultiply_color16),
     reinterpret_cast<void*>(&iterate_world16), reinterpret_cast<void*>(&iterate_world8),
     reinterpret_cast<void*>(&iterate_origin8),

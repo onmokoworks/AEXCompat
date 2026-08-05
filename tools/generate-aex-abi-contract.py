@@ -137,6 +137,8 @@ CALLBACK_TABLES = {
         "utils.fill",
         "utils.premultiply",
         "utils.premultiply_color",
+        "utils.subpixel_sample16",
+        "utils.area_sample16",
         "utils.fill16",
         "utils.premultiply_color16",
         "utils.iterate16",
