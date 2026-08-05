@@ -63,7 +63,7 @@ fn frame_done_parsing_is_strict_about_unknown_fields() {
     let ok: Result<FrameDone, _> = serde_json::from_str(
         r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
                 "output":{"width":1,"height":1,"rowbytes":4,"pixel_format":"argb8",
-                          "checksum":"00","guards_intact":true},
+                          "packed_bytes":4,"guards_intact":true},
                 "render_error":0,"generation":1}"#,
     );
     assert!(ok.is_ok());

@@ -331,7 +331,7 @@ def render_frame_message(frame_index, time_value, scale=TIME_SCALE):
             "current_time": {"value": time_value, "scale": scale}}
 
 
-def test_session_renders_frames_with_persistent_sequence_and_slot_checksums():
+def test_session_renders_frames_with_persistent_sequence_and_packed_extents():
     _require_artifacts()
     transport = SessionTransport()
     process = _spawn(transport)
@@ -354,8 +354,10 @@ def test_session_renders_frames_with_persistent_sequence_and_slot_checksums():
             assert output["guards_intact"] is True
             assert transport.read_header(OUTPUT_GENERATION_OFFSET) == frame_index + 1
             slot = transport.output_bytes(WIDTH * HEIGHT * 4)
-            assert hashlib.sha256(slot).hexdigest() == output["checksum"]
-            checksums.append(output["checksum"])
+            # The worker reports how many bytes it packed; the reader derives
+            # the same extent from the reported dimensions (issue #690).
+            assert output["packed_bytes"] == len(slot)
+            checksums.append(hashlib.sha256(slot).hexdigest())
         # Different input patterns must produce different transferred outputs:
         # the slot transport is live, not an artifact of one frame.
         assert checksums[0] != checksums[1]
@@ -514,7 +516,7 @@ def test_v2_parameters_replace_the_launch_assignments_for_one_frame():
             assert done["status"] == "ok", done
             expected = _echo_frame_bytes(value)
             assert transport.output_bytes(len(expected)) == expected
-            assert done["output"]["checksum"] == hashlib.sha256(expected).hexdigest()
+            assert done["output"]["packed_bytes"] == len(expected)
         transport.send({"v": 1, "type": "close"})
         code, _, stderr = _finish(process)
         assert code == 0, (code, stderr[-500:])

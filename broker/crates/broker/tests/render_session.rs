@@ -1662,12 +1662,14 @@ mod windows_e2e {
                 .render_frame(frame_index, frame_index as i32, &input)
                 .expect("frame renders");
             match outcome.status {
-                FrameStatus::Rendered {
-                    pixels, checksum, ..
-                } => {
+                FrameStatus::Rendered { pixels, .. } => {
                     let expected: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
                     assert_eq!(pixels, expected, "slot transfer round-trips the render");
-                    checksums.push(checksum);
+                    // Hashed here rather than taken from the frame: the
+                    // transport stopped carrying a per-frame content hash in
+                    // issue #690, and what this asserts is that two inputs
+                    // produce two outputs.
+                    checksums.push(format!("{:x}", Sha256::digest(&pixels)));
                 }
                 FrameStatus::FrameError { render_error, .. } => {
                     panic!("frame {frame_index} unexpectedly errored: {render_error}")
@@ -2464,20 +2466,19 @@ mod windows_e2e {
     }
 
     #[test]
-    fn output_checksum_mismatch_is_fail_closed() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "output_checksum_mismatch_is_fail_closed",
-        ) {
+    fn output_extent_mismatch_is_fail_closed() {
+        if crate::common::skip_without_sealed_worker_launch("output_extent_mismatch_is_fail_closed")
+        {
             return;
         }
-        let _behavior = BehaviorGuard::set(Some("bad_checksum"));
+        let _behavior = BehaviorGuard::set(Some("bad_extent"));
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
         let error = session
             .render_frame(0, 0, &input_pattern(8))
-            .expect_err("a checksum mismatch must invalidate the session");
+            .expect_err("an extent disagreement must invalidate the session");
         assert!(
-            error.to_string().contains("output_checksum_mismatch"),
+            error.to_string().contains("output_extent_mismatch"),
             "{error}"
         );
         assert_eq!(session.close()["invalidated"], true);

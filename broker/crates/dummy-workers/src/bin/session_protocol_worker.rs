@@ -14,7 +14,8 @@
 //!   watcher can see the death (protocol §7 three-way wait).
 //! - `stale_generation`: answers with a stale generation and no header update.
 //! - `mutate_header`: rewrites a broker-owned static header field.
-//! - `bad_checksum`: reports a checksum that does not match the slot bytes.
+//! - `bad_extent`: reports a packed byte count that disagrees with the
+//!   dimensions it reports alongside it.
 //! - `error_frame_0`: answers frame 0 with a frame-local error response.
 //! - `modal_frame`: reports its desktop, opens a MessageBox, and waits for the
 //!   broker watchdog (issue #351).
@@ -930,16 +931,15 @@ mod worker {
             if behavior == "empty_result_frame_0" && frame_index == 0 {
                 // A legally empty SmartFX result (#278): no slot write, advance
                 // the output generation like a normal frame, and report a valid
-                // 0x0 ok frame with the explicit empty_result flag. The checksum
-                // is over zero bytes (what the broker reads for an empty frame).
+                // 0x0 ok frame with the explicit empty_result flag. Nothing was
+                // packed, which is what the broker reads for an empty frame.
                 view.write_u32(FRAME_WIDTH_OFFSET, 0);
                 view.write_u32(FRAME_HEIGHT_OFFSET, 0);
                 view.write_u32(OUTPUT_GENERATION_OFFSET, expected_generation);
-                let empty_checksum = format!("{:x}", Sha256::digest([]));
                 let reply = format!(
                     "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
                      \"status\":\"ok\",\"output\":{{\"width\":0,\"height\":0,\"rowbytes\":0,\
-                     \"pixel_format\":\"argb8\",\"checksum\":\"{empty_checksum}\",\
+                     \"pixel_format\":\"argb8\",\"packed_bytes\":0,\
                      \"guards_intact\":true,\"empty_result\":true}},\"render_error\":0,\
                      \"generation\":{expected_generation}}}"
                 );
@@ -997,7 +997,7 @@ mod worker {
             frames += 1;
 
             let mut reported_generation = expected_generation;
-            let mut checksum = format!("{:x}", Sha256::digest(&output));
+            let mut packed_bytes = output.len();
             match behavior.as_str() {
                 "stale_generation" => {
                     reported_generation = frame_index as u32;
@@ -1007,8 +1007,10 @@ mod worker {
                     view.write_u32(MAX_WIDTH_OFFSET, width as u32 + 1);
                     view.write_u32(OUTPUT_GENERATION_OFFSET, expected_generation);
                 }
-                "bad_checksum" => {
-                    checksum = "0".repeat(64);
+                "bad_extent" => {
+                    packed_bytes = output.len() + 4;
+                    view.write_u32(FRAME_WIDTH_OFFSET, width as u32);
+                    view.write_u32(FRAME_HEIGHT_OFFSET, height as u32);
                     view.write_u32(OUTPUT_GENERATION_OFFSET, expected_generation);
                 }
                 _ => {
@@ -1020,7 +1022,7 @@ mod worker {
             let reply = format!(
                 "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
                  \"status\":\"ok\",\"output\":{{\"width\":{width},\"height\":{height},\
-                 \"rowbytes\":{rowbytes},\"pixel_format\":\"argb8\",\"checksum\":\"{checksum}\",\
+                 \"rowbytes\":{rowbytes},\"pixel_format\":\"argb8\",\"packed_bytes\":{packed_bytes},\
                  \"guards_intact\":true}},\"render_error\":0,\"generation\":{reported_generation}}}",
                 rowbytes = width * 4,
             );

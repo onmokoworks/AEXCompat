@@ -114,7 +114,8 @@ def test_video_batch_renders_a_sequence_through_one_resident_worker(tmp_path: Pa
     for index in range(3):
         assert (output_directory / f"frame-{index:06}.png").is_file()
     # Identical inputs through a stateless fixture produce identical
-    # transferred outputs; the checksums are the worker's slot hashes.
+    # transferred outputs; the batch manifest's checksums are computed by the
+    # broker from the frames it wrote (issue #690).
     checksums = {frame["checksum"] for frame in report["frames"]}
     assert len(checksums) == 1
     # The auxiliary observation options reached the real worker: world
