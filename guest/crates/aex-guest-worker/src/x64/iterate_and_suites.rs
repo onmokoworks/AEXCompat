@@ -1252,6 +1252,16 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         finish_acquire_suite_success(unicorn);
         return;
     }
+    if name == "AEGP Compute Cache"
+        && version == 1
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_AEGP_COMPUTE_CACHE_SUITE_V1.to_le_bytes())
+            .is_ok()
+    {
+        finish_acquire_suite_success(unicorn);
+        return;
+    }
     if unicorn.get_data().selector_dispatch_active {
         let caller_rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or_default();
         let mut return_bytes = [0u8; 8];
@@ -1273,6 +1283,111 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         });
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
+}
+
+fn install_aegp_compute_cache_suite(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<(), GuestError> {
+    let mut table = [0u8; 48];
+    for (slot, address) in HOST_AEGP_COMPUTE_CACHE_CALLBACKS.into_iter().enumerate() {
+        uc(
+            "write AEGP Compute Cache callback",
+            unicorn.mem_write(address, &[0xc3]),
+        )?;
+        if slot == 0 {
+            uc(
+                "install AEGP Compute Cache class-register callback",
+                unicorn.add_code_hook(address, address, emulate_aegp_compute_cache_class_register),
+            )?;
+        } else {
+            uc(
+                "install unsupported AEGP Compute Cache callback",
+                unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+                    let state = unicorn.get_data_mut();
+                    record_named_unsupported_suite_call(
+                        &mut state.unsupported_suite_calls,
+                        &mut state.dropped_unsupported_suite_calls,
+                        "AEGP Compute Cache",
+                        1,
+                        slot,
+                    );
+                    let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+                }),
+            )?;
+        }
+        table[slot * 8..slot * 8 + 8].copy_from_slice(&address.to_le_bytes());
+    }
+    uc(
+        "write AEGP Compute Cache v1 table",
+        unicorn.mem_write(HOST_AEGP_COMPUTE_CACHE_SUITE_V1, &table),
+    )
+}
+
+fn emulate_aegp_compute_cache_class_register(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    _: u64,
+    _: u32,
+) {
+    const MAX_CLASS_ID_BYTES: u64 = 256;
+    const MAX_CLASSES: usize = 64;
+    const A_ERR_STRUCT: u64 = 2;
+    const A_ERR_PARAMETER: u64 = 3;
+    const A_ERR_ALLOC: u64 = 4;
+
+    let class_pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let callbacks_pointer = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    if class_pointer == 0 || callbacks_pointer == 0 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    let mut class_bytes = Vec::new();
+    for offset in 0..MAX_CLASS_ID_BYTES {
+        let mut byte = [0u8; 1];
+        if unicorn.mem_read(class_pointer + offset, &mut byte).is_err() {
+            let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+            return;
+        }
+        if byte[0] == 0 {
+            break;
+        }
+        class_bytes.push(byte[0]);
+    }
+    if class_bytes.is_empty() || class_bytes.len() == MAX_CLASS_ID_BYTES as usize {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    let class_id = class_bytes;
+    let mut callback_bytes = [0u8; 32];
+    if unicorn
+        .mem_read(callbacks_pointer, &mut callback_bytes)
+        .is_err()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    let callbacks = std::array::from_fn(|index| {
+        u64::from_le_bytes(
+            callback_bytes[index * 8..index * 8 + 8]
+                .try_into()
+                .expect("eight-byte callback slot"),
+        )
+    });
+    if callbacks
+        .iter()
+        .any(|callback| !image_executable_address(unicorn.get_data(), *callback))
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_STRUCT);
+        return;
+    }
+    let classes = &mut unicorn.get_data_mut().aegp_compute_cache_classes;
+    if classes.contains_key(&class_id) {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_STRUCT);
+    } else if classes.len() >= MAX_CLASSES {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_ALLOC);
+    } else {
+        classes.insert(class_id, callbacks);
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    }
 }
 
 fn emulate_color_param_value(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {

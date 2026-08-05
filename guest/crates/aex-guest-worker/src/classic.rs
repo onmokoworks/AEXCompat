@@ -157,6 +157,8 @@ pub struct ResidentCloseReport {
     pub frame_setdown_error: i32,
     pub sequence_setdown_error: i32,
     pub global_setdown_error: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub global_setdown_diagnostic: Option<ResidentFailureDiagnostic>,
     pub suite_requests: Vec<String>,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     pub dropped_unsupported_suite_calls: u64,
@@ -722,7 +724,12 @@ impl ClassicHost {
 
     pub fn close_resident_session(&mut self) -> ResidentCloseReport {
         let sequence_setdown_error = cleanup_error_code(self.end_sequence(false));
-        let global_setdown_error = cleanup_error_code(self.end_global());
+        let global_setdown_result = self.end_global();
+        let global_setdown_diagnostic = global_setdown_result
+            .as_ref()
+            .err()
+            .map(|error| self.resident_failure_diagnostic("global_setdown", error));
+        let global_setdown_error = cleanup_error_code(global_setdown_result);
         ResidentCloseReport {
             schema_version: 1,
             execution_backend: self.engine.backend_name(),
@@ -730,6 +737,7 @@ impl ClassicHost {
             frame_setdown_error: self.resident_frame_setdown_error,
             sequence_setdown_error,
             global_setdown_error,
+            global_setdown_diagnostic,
             suite_requests: self.engine.suite_requests().to_vec(),
             unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
             dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),

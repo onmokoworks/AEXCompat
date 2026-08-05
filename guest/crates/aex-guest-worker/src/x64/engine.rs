@@ -745,6 +745,7 @@ impl GuestEngine<'static> {
                 &HOST_POINT_PARAM_VALUE.to_le_bytes(),
             ),
         )?;
+        install_aegp_compute_cache_suite(&mut unicorn)?;
         install_aegp_utility_suites(&mut unicorn)?;
         for (address, name) in [
             (HOST_ADD_PARAM, "add_param"),

@@ -821,6 +821,124 @@
     }
 
     #[test]
+    fn aegp_compute_cache_v1_registers_bounded_executable_callbacks() {
+        let mut engine = test_engine(&[0xc3]);
+        let suite_name = engine.allocate(19, 1).unwrap();
+        engine
+            .write(suite_name, b"AEGP Compute Cache\0")
+            .unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [suite_name, 1, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut pointer = [0u8; 8];
+        engine.read(suite_output, &mut pointer).unwrap();
+        assert_eq!(
+            u64::from_le_bytes(pointer),
+            HOST_AEGP_COMPUTE_CACHE_SUITE_V1
+        );
+        let mut slots = [0u64; 6];
+        for (slot, callback) in slots.iter_mut().enumerate() {
+            engine
+                .read(
+                    HOST_AEGP_COMPUTE_CACHE_SUITE_V1 + (slot * 8) as u64,
+                    &mut pointer,
+                )
+                .unwrap();
+            *callback = u64::from_le_bytes(pointer);
+        }
+        assert_eq!(slots, HOST_AEGP_COMPUTE_CACHE_CALLBACKS);
+
+        let key = engine.allocate(4, 1).unwrap();
+        engine.write(key, b"olm\0").unwrap();
+        let callbacks = engine.allocate(32, 8).unwrap();
+        let mut callback_record = [0u8; 32];
+        for chunk in callback_record.chunks_exact_mut(8) {
+            chunk.copy_from_slice(&TEST_CODE.to_le_bytes());
+        }
+        engine.write(callbacks, &callback_record).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(slots[0], [key, callbacks, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .call_win64(slots[0], [key, callbacks, 0, 0, 0, 0])
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            engine.call_win64(slots[1], [key, 0, 0, 0, 0, 0]).unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.unsupported_suite_calls().last(),
+            Some(&UnsupportedSuiteCall {
+                name: "AEGP Compute Cache".into(),
+                version: 1,
+                slot: 1,
+                call_count: 1,
+            })
+        );
+        assert_eq!(
+            engine.suite_requests().last().map(String::as_str),
+            Some("AEGP Compute Cache v1")
+        );
+    }
+
+    #[test]
+    fn aegp_compute_cache_v1_rejects_malformed_registration_boundaries() {
+        let mut engine = test_engine(&[0xc3]);
+        let unterminated = engine.allocate(256, 1).unwrap();
+        engine.write(unterminated, &[b'x'; 256]).unwrap();
+        let callbacks = engine.allocate(32, 8).unwrap();
+        engine.write(callbacks, &[0; 32]).unwrap();
+        let class_id = engine.allocate(8, 1).unwrap();
+        engine.write(class_id, b"foreign\0").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_AEGP_COMPUTE_CACHE_CALLBACKS[0],
+                    [class_id, callbacks, 0, 0, 0, 0]
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_AEGP_COMPUTE_CACHE_CALLBACKS[0],
+                    [0, callbacks, 0, 0, 0, 0]
+                )
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_AEGP_COMPUTE_CACHE_CALLBACKS[0],
+                    [unterminated, callbacks, 0, 0, 0, 0]
+                )
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            engine
+                .call_win64(
+                    HOST_AEGP_COMPUTE_CACHE_CALLBACKS[0],
+                    [unterminated, 0, 0, 0, 0, 0]
+                )
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
     fn aegp_memory_v1_slots_zero_through_five_are_bounded_and_fail_closed() {
         let mut engine = test_engine(&[0xc3]);
         let suite_name = engine.allocate(18, 1).unwrap();
