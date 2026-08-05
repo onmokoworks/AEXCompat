@@ -4,7 +4,8 @@ use aexcompat_broker::host_core::{boundary, error, handle, report, session};
 fn broker_paths_reexport_the_dependency_minimal_core_types() {
     let context: aexcompat_host_core::boundary::HostCallContext =
         boundary::HostCallContext::new(41, 73);
-    let handle: aexcompat_host_core::boundary::HostOpaqueHandle = boundary::HostOpaqueHandle(19);
+    let handle: aexcompat_host_core::boundary::HostOpaqueHandle =
+        boundary::HostOpaqueHandle(19);
     let code: aexcompat_host_core::error::HostErrorCode = error::HostErrorCode::WrongOwner;
     let kind: aexcompat_host_core::handle::HandleKind = handle::HandleKind::Session;
     let phase: aexcompat_host_core::report::ReportPhase = report::ReportPhase::Session;

@@ -1,8 +1,8 @@
 use aexcompat_broker::opencl_runtime_probe::{
+    collect_with_compute, missing_symbol_observation, no_loader_observation,
     AggregateLoaderObservation, ApiFailure, BuildLogObservation, BuildLogStatus,
-    COMPUTE_ELEMENT_COUNT, ComputeDeviceObservation, ComputeDeviceProbe, ComputeStage,
-    MAX_BUILD_LOG_BYTES, OpenClApi, QueueApi, collect_with_compute, missing_symbol_observation,
-    no_loader_observation,
+    ComputeDeviceObservation, ComputeDeviceProbe, ComputeStage, OpenClApi, QueueApi,
+    COMPUTE_ELEMENT_COUNT, MAX_BUILD_LOG_BYTES,
 };
 
 fn main() {
@@ -34,7 +34,7 @@ mod platform {
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
     use windows_sys::Win32::System::LibraryLoader::{
-        GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
     };
 
     const CL_SUCCESS: i32 = 0;

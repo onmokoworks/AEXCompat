@@ -112,9 +112,7 @@ impl ValidatedClusterManifest {
     ) -> io::Result<Self> {
         if let Some(payloads) = swap_payloads {
             if payloads.len() != plugins.len() {
-                return Err(invalid(
-                    "cluster swap payloads must parallel the plugin list",
-                ));
+                return Err(invalid("cluster swap payloads must parallel the plugin list"));
             }
         }
         let artifact_entry = |artifact: &ApprovedImageArtifact, kind: &str| {
@@ -172,9 +170,7 @@ impl ValidatedClusterManifest {
         // declared set larger than the bound could never pass the audit:
         // reject the unsatisfiable manifest at build time.
         if dto.plugins.len() + dto.dependencies.len() > dto.module_bound as usize {
-            return Err(invalid(
-                "cluster declared module count exceeds the module bound",
-            ));
+            return Err(invalid("cluster declared module count exceeds the module bound"));
         }
 
         let mut basenames = HashSet::with_capacity(dto.plugins.len() + dto.dependencies.len());
@@ -252,8 +248,7 @@ impl ValidatedClusterManifest {
                 .collect(),
             module_bound: self.module_bound,
         };
-        let json =
-            serde_json::to_string_pretty(&dto).map_err(|error| invalid(error.to_string()))?;
+        let json = serde_json::to_string_pretty(&dto).map_err(|error| invalid(error.to_string()))?;
         if json.len() > MAX_CLUSTER_MANIFEST_BYTES {
             return Err(invalid("cluster manifest body exceeds 4 MiB"));
         }
@@ -265,9 +260,7 @@ impl ValidatedClusterManifest {
     }
 
     pub fn plugin_basename(&self, index: usize) -> Option<&str> {
-        self.plugins
-            .get(index)
-            .map(|plugin| plugin.basename.as_str())
+        self.plugins.get(index).map(|plugin| plugin.basename.as_str())
     }
 
     pub fn plugin_sha256(&self, index: usize) -> Option<[u8; 32]> {
@@ -284,11 +277,9 @@ impl ValidatedClusterManifest {
         self.plugins
             .iter()
             .map(|plugin| plugin.basename.clone())
-            .chain(
-                self.dependencies
-                    .iter()
-                    .map(|dependency| dependency.basename.clone()),
-            )
+            .chain(self.dependencies.iter().map(|dependency| {
+                dependency.basename.clone()
+            }))
             .collect()
     }
 }
@@ -338,9 +329,7 @@ impl ClusterManifestTransport {
                 return Err(error);
             }
         };
-        let written = output
-            .write_all(json.as_bytes())
-            .and_then(|()| output.sync_all());
+        let written = output.write_all(json.as_bytes()).and_then(|()| output.sync_all());
         if let Err(error) = written {
             drop(output);
             let _ = fs::remove_file(&path);
@@ -350,10 +339,7 @@ impl ClusterManifestTransport {
         drop(output);
         // Verify the bytes on disk the way the aux sidecars are verified
         // after write; a torn transport must fail the launch, not the worker.
-        if fs::read(&path)
-            .map(|bytes| bytes != json.as_bytes())
-            .unwrap_or(true)
-        {
+        if fs::read(&path).map(|bytes| bytes != json.as_bytes()).unwrap_or(true) {
             let _ = fs::remove_file(&path);
             let _ = fs::remove_dir(&dir);
             return Err(invalid("cluster manifest verification failed after write"));
@@ -482,13 +468,8 @@ mod tests {
         let json = manifest.to_json().unwrap();
         assert!(json.contains("\"payload\": \"v2|0=2.0\""));
         assert!(
-            ValidatedClusterManifest::from_approved(
-                &plugins,
-                &dependencies,
-                Some(&payloads[..1]),
-                64
-            )
-            .is_err()
+            ValidatedClusterManifest::from_approved(&plugins, &dependencies, Some(&payloads[..1]), 64)
+                .is_err()
         );
         fs::remove_dir_all(source).unwrap();
     }
