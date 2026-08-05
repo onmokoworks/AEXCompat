@@ -3214,6 +3214,14 @@
             Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CosF)
         );
         assert_eq!(
+            dispatch_win64_import(crt_math, "ceilf"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CeilF)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "ceilf"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        assert_eq!(
             dispatch_win64_import(crt_math, "cos"),
             Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Cos)
         );
@@ -3237,6 +3245,51 @@
             dispatch_win64_import("OpenCL.DLL", "cosf"),
             Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
         );
+    }
+
+    #[test]
+    fn win64_crt_ceilf_uses_xmm0_f32_abi_and_preserves_special_values() {
+        const CEILF_IMPORT: u64 = STUB_BASE + 0x1a0;
+
+        fn call_ceilf(engine: &mut GuestEngine<'static>, input: f32) -> f32 {
+            let upper = [0xa5; 12];
+            let mut xmm0 = [0u8; 16];
+            xmm0[..4].copy_from_slice(&input.to_le_bytes());
+            xmm0[4..].copy_from_slice(&upper);
+            engine
+                .unicorn
+                .reg_write_long(RegisterX86::XMM0, &xmm0)
+                .unwrap();
+            engine.call_win64(CEILF_IMPORT, [0; 6]).unwrap();
+            let xmm0 = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+            f32::from_le_bytes(xmm0[..4].try_into().unwrap())
+        }
+
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.mem_write(CEILF_IMPORT, &[0xc3]).unwrap();
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                CEILF_IMPORT,
+                "api-ms-win-crt-math-l1-1-0.dll",
+                "ceilf",
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CeilF)
+        );
+
+        assert_eq!(call_ceilf(&mut engine, 1.25), 2.0);
+        assert_eq!(call_ceilf(&mut engine, -1.25), -1.0);
+        assert_eq!(call_ceilf(&mut engine, f32::INFINITY), f32::INFINITY);
+        assert_eq!(call_ceilf(&mut engine, f32::NEG_INFINITY), f32::NEG_INFINITY);
+        assert!(call_ceilf(&mut engine, f32::NAN).is_nan());
+        assert_eq!(call_ceilf(&mut engine, -0.0).to_bits(), (-0.0f32).to_bits());
+        assert!(engine
+            .unicorn
+            .get_data()
+            .math_calls
+            .iter()
+            .any(|call| call.starts_with("ceilf(")));
     }
 
     #[test]
