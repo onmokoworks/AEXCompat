@@ -264,7 +264,9 @@ Suite1 g_suite1{&gaussian_blur, &box_blur};
 }  // namespace
 
 bool configure(const Hooks& hooks) noexcept {
-  if (!hooks.effect_ref || !hooks.resolve_world) return false;
+  if (!hooks.effect_ref || !hooks.resolve_world || !hooks.acquire_suite ||
+      !hooks.release_suite)
+    return false;
   g_hooks = hooks;
   return true;
 }
@@ -274,59 +276,129 @@ const Suite1* suite1() noexcept { return &g_suite1; }
 bool selftest() {
   constexpr int32_t width = 3;
   constexpr int32_t height = 1;
+  const void* raw_suite{};
+  const void* rejected_suite = reinterpret_cast<const void*>(1);
+  if (g_hooks.acquire_suite(kSuiteName, kSuiteVersion1, &raw_suite) != 0 ||
+      !raw_suite ||
+      g_hooks.acquire_suite(kSuiteName, kSuiteVersion1 + 1,
+                            &rejected_suite) == 0 ||
+      rejected_suite != nullptr)
+    return false;
+  const auto* suite = static_cast<const Suite1*>(raw_suite);
+  if (!suite->gaussian_blur || !suite->box_blur) {
+    g_hooks.release_suite(kSuiteName, kSuiteVersion1);
+    return false;
+  }
+
+  const auto make_world = [=](void* pixels, int32_t rowbytes) {
+    world_safety::LocalEffectWorld world{};
+    world.data = pixels;
+    world.rowbytes = rowbytes;
+    world.width = width;
+    world.height = height;
+    world.extent_hint = {0, 0, width, height};
+    world.pix_aspect_ratio = {1, 1};
+    return world;
+  };
+
   std::array<uint8_t, width * height * 4> source{
       255, 0, 0, 0, 255, 255, 60, 30, 255, 0, 0, 0};
   std::array<uint8_t, width * height * 4> destination{};
   const auto source_before = source;
-  const world_safety::DispatchWorldFormat source_world{
-      nullptr, source.data(), width, height, width * 4,
-      world_registry::kPixelFormatArgb32, 1};
-  const world_safety::DispatchWorldFormat destination_world{
-      nullptr, destination.data(), width, height, width * 4,
-      world_registry::kPixelFormatArgb32, 1};
-  if (blur_worlds(source_world, destination_world, 1.0f, 0.0f,
-                  kHorizontal | kAllChannels, false, 1) != 0)
-    return false;
-  const bool blurred = destination[5] < source[5] && destination[1] > 0 &&
-      destination[9] > 0;
-  const bool source_unchanged = source == source_before;
+  auto source_world = make_world(source.data(), width * 4);
+  auto destination_world = make_world(destination.data(), width * 4);
 
   std::array<uint16_t, width * height * 4> source16{
       32768, 0, 0, 0, 32768, 32768, 1000, 500, 32768, 0, 0, 0};
   std::array<uint16_t, width * height * 4> destination16{};
-  const world_safety::DispatchWorldFormat source_world16{
-      nullptr, source16.data(), width, height, width * 8,
-      world_registry::kPixelFormatArgb64, 1};
-  const world_safety::DispatchWorldFormat destination_world16{
-      nullptr, destination16.data(), width, height, width * 8,
-      world_registry::kPixelFormatArgb64, 1};
-  const bool argb16 = blur_worlds(
-      source_world16, destination_world16, 1.0f, 0.0f,
-      kHorizontal | kAllChannels, false, 1) == 0 &&
-      destination16[5] < source16[5] && destination16[1] > 0;
+  const auto source16_before = source16;
+  auto source_world16 = make_world(source16.data(), width * 8);
+  auto destination_world16 = make_world(destination16.data(), width * 8);
 
   std::array<float, width * height * 4> source_float{
       1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.25f, 0.125f,
       1.0f, 0.0f, 0.0f, 0.0f};
   std::array<float, width * height * 4> destination_float{};
-  const world_safety::DispatchWorldFormat source_world_float{
-      nullptr, source_float.data(), width, height, width * 16,
-      world_registry::kPixelFormatArgb128, 1};
-  const world_safety::DispatchWorldFormat destination_world_float{
-      nullptr, destination_float.data(), width, height, width * 16,
-      world_registry::kPixelFormatArgb128, 1};
-  const bool argb32f = blur_worlds(
-      source_world_float, destination_world_float, 1.0f, 0.0f,
-      kHorizontal | kAllChannels, true, 1) == 0 &&
-      destination_float[5] < source_float[5] && destination_float[1] > 0.0f;
+  const auto source_float_before = source_float;
+  auto source_world_float = make_world(source_float.data(), width * 16);
+  auto destination_world_float =
+      make_world(destination_float.data(), width * 16);
 
-  return blurred && source_unchanged && argb16 && argb32f &&
-      blur_worlds(source_world, destination_world, -1.0f, 0.0f,
-                  kHorizontal | kAllChannels, false, 1) == kBadCallbackParam &&
-      blur_worlds(source_world, destination_world, 1.0f, 0.0f, 0, false, 1) ==
+  world_safety::DispatchWorldFormatScope formats;
+  bool ok = formats.register_world(&source_world,
+                                   world_registry::kPixelFormatArgb32) &&
+      formats.register_world(&destination_world,
+                             world_registry::kPixelFormatArgb32) &&
+      formats.register_world(&source_world16,
+                             world_registry::kPixelFormatArgb64) &&
+      formats.register_world(&destination_world16,
+                             world_registry::kPixelFormatArgb64) &&
+      formats.register_world(&source_world_float,
+                             world_registry::kPixelFormatArgb128) &&
+      formats.register_world(&destination_world_float,
+                             world_registry::kPixelFormatArgb128);
+
+  const std::array<uint8_t, width * height * 4> expected8{
+      170, 85, 20, 10, 255, 85, 20, 10, 170, 85, 20, 10};
+  ok = ok && suite->box_blur(
+      g_hooks.effect_ref, &source_world, 1.0f, 0.0f, 1,
+      kHorizontal | kAllChannels, 0, 1, &destination_world) == 0 &&
+      destination == expected8 && source == source_before;
+
+  const std::array<uint16_t, width * height * 4> expected16{
+      21845, 10923, 333, 167, 32768, 10923, 333, 167,
+      21845, 10923, 333, 167};
+  ok = ok && suite->box_blur(
+      g_hooks.effect_ref, &source_world16, 1.0f, 0.0f, 1,
+      kHorizontal | kAllChannels, 0, 1, &destination_world16) == 0 &&
+      destination16 == expected16 && source16 == source16_before;
+
+  ok = ok && suite->gaussian_blur(
+      g_hooks.effect_ref, &source_world_float, 1.0f, 0.0f,
+      kHorizontal | kRepeatEdgePixels | kAllChannels, 1, 0, 1,
+      &destination_world_float) == 0 &&
+      source_float == source_float_before;
+  constexpr std::array<float, 3> expected_red{
+      0.10650698f, 0.78698605f, 0.10650698f};
+  for (int32_t x = 0; x < width; ++x) {
+    const std::size_t pixel = static_cast<std::size_t>(x) * 4;
+    ok = ok && std::abs(destination_float[pixel] - 1.0f) < 1e-6f &&
+        std::abs(destination_float[pixel + 1] - expected_red[x]) < 1e-5f &&
+        std::abs(destination_float[pixel + 2] - expected_red[x] * 0.25f) <
+            1e-5f &&
+        std::abs(destination_float[pixel + 3] - expected_red[x] * 0.125f) <
+            1e-5f;
+  }
+
+  ok = ok && suite->gaussian_blur(
+      reinterpret_cast<void*>(1), &source_world, 1.0f, 0.0f,
+      kHorizontal | kAllChannels, 1, 0, 1, &destination_world) ==
           kBadCallbackParam &&
-      blur_worlds(source_world, destination_world, 1.0f, 0.0f,
-                  kHorizontal | kAllChannels, false, 0) == kBadCallbackParam;
+      suite->gaussian_blur(
+          g_hooks.effect_ref, &source_world, 1.0f, 0.0f,
+          kHorizontal | kAllChannels, 2, 0, 1, &destination_world) ==
+          kBadCallbackParam &&
+      suite->gaussian_blur(
+          g_hooks.effect_ref, &source_world, 1.0f, 0.0f,
+          kHorizontal | kAllChannels, 1, 2, 1, &destination_world) ==
+          kBadCallbackParam &&
+      suite->box_blur(
+          g_hooks.effect_ref, &source_world, -1.0f, 0.0f, 1,
+          kHorizontal | kAllChannels, 0, 1, &destination_world) ==
+          kBadCallbackParam &&
+      suite->box_blur(
+          g_hooks.effect_ref, &source_world, 1.0f, 0.0f, 0,
+          kHorizontal | kAllChannels, 0, 1, &destination_world) ==
+          kBadCallbackParam &&
+      suite->box_blur(
+          g_hooks.effect_ref, &source_world, 1.0f, 0.0f, 1, 0, 0, 1,
+          &destination_world) == kBadCallbackParam &&
+      suite->box_blur(
+          g_hooks.effect_ref, nullptr, 1.0f, 0.0f, 1,
+          kHorizontal | kAllChannels, 0, 1, &destination_world) ==
+          kBadCallbackParam;
+
+  return g_hooks.release_suite(kSuiteName, kSuiteVersion1) == 0 && ok;
 }
 
 }  // namespace aexcompat::flt_blur

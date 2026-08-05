@@ -541,7 +541,9 @@ int configure_worker_entry_bootstrap() {
           &g_effect,
           [](const void* world, DispatchWorldFormat& result) -> bool {
             return resolve_dispatch_world_format(world, result);
-          }}))
+          },
+          &acquire_suite,
+          &release_suite}))
     return 1;
   return aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
 }

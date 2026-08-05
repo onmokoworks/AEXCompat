@@ -20,6 +20,8 @@ inline constexpr int32_t kHorizontal = 0x40;
 
 using ResolveWorld = bool (*)(
     const void*, world_safety::DispatchWorldFormat&);
+using AcquireSuite = int32_t (__cdecl *)(const char*, int32_t, const void**);
+using ReleaseSuite = int32_t (__cdecl *)(const char*, int32_t);
 
 // ABI recovered from the four AE 2026 callers tracked by issue #737. Both
 // worlds are borrowed for the duration of the call: source is read-only and
@@ -32,6 +34,8 @@ using ResolveWorld = bool (*)(
 struct Hooks {
   void* effect_ref{};
   ResolveWorld resolve_world{};
+  AcquireSuite acquire_suite{};
+  ReleaseSuite release_suite{};
 };
 
 using GaussianBlur = int32_t (__cdecl *)(
