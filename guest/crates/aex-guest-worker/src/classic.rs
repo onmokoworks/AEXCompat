@@ -48,6 +48,7 @@ pub(crate) const MAX_FAILURE_TEXT_BYTES: usize = 1024;
 pub(crate) const MAX_FAILURE_SUITE_REQUEST_BYTES: usize = 256;
 const MAX_FAILURE_SUITE_REQUESTS: usize = 64;
 const MAX_FAILURE_UNSUPPORTED_SUITE_CALLS: usize = 64;
+const MAX_FAILURE_CRASH_SNAPSHOT_BYTES: usize = 32 * 1024;
 pub const MAX_RENDER_WIDTH: u32 = 1920;
 pub const MAX_RENDER_HEIGHT: u32 = 1080;
 
@@ -814,7 +815,7 @@ impl ClassicHost {
             error_code,
             message: bounded_failure_text(&message),
             crash_reason: crash_reason.map(|reason| bounded_failure_text(&reason)),
-            crash_snapshot,
+            crash_snapshot: crash_snapshot.map(bounded_crash_snapshot),
             suite_requests: suite_requests
                 .iter()
                 .take(MAX_FAILURE_SUITE_REQUESTS)
@@ -2670,6 +2671,35 @@ fn bounded_failure_text(value: &str) -> String {
     bounded_text(value, MAX_FAILURE_TEXT_BYTES)
 }
 
+fn bounded_crash_snapshot(snapshot: serde_json::Value) -> serde_json::Value {
+    if serde_json::to_vec(&snapshot)
+        .is_ok_and(|bytes| bytes.len() <= MAX_FAILURE_CRASH_SNAPSHOT_BYTES)
+    {
+        return snapshot;
+    }
+
+    let scalar = |name: &str| {
+        snapshot
+            .get(name)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    };
+    serde_json::json!({
+        "truncated": true,
+        "reason": bounded_failure_text(snapshot.get("reason").and_then(|value| value.as_str()).unwrap_or("")),
+        "registers": scalar("registers"),
+        "instruction_address": scalar("instruction_address"),
+        "instruction_rva": scalar("instruction_rva"),
+        "instruction_bytes": bounded_text(snapshot.get("instruction_bytes").and_then(|value| value.as_str()).unwrap_or(""), 256),
+        "runtime_target": scalar("runtime_target"),
+        "live_handle_count": scalar("live_handle_count"),
+        "next_pf_handle_data": scalar("next_pf_handle_data"),
+        "pf_handle_data_end": scalar("pf_handle_data_end"),
+        "handle_allocation_count": snapshot.get("handle_allocations").and_then(|value| value.as_array()).map_or(0, Vec::len),
+        "handle_allocation_failure_count": snapshot.get("handle_allocation_failures").and_then(|value| value.as_array()).map_or(0, Vec::len),
+    })
+}
+
 fn decode_return_message(bytes: &[u8]) -> Option<String> {
     let end = bytes
         .iter()
@@ -2700,6 +2730,29 @@ mod tests {
         assert!(bounded.len() <= MAX_FAILURE_TEXT_BYTES);
         assert!(bounded.is_char_boundary(bounded.len()));
         assert_eq!(bounded, "界".repeat(MAX_FAILURE_TEXT_BYTES / 3));
+    }
+
+    #[test]
+    fn resident_crash_snapshot_drops_unbounded_history_but_keeps_crash_location() {
+        let snapshot = serde_json::json!({
+            "reason": "unmapped write",
+            "registers": {"rip": 0x18000539bu64, "rcx": 0x100001000u64},
+            "instruction_address": 0x18000539bu64,
+            "instruction_rva": 0x539bu64,
+            "instruction_bytes": "48".repeat(32),
+            "runtime_target": null,
+            "handle_allocations": vec![4096u64; 16_384],
+            "handle_allocation_failures": vec!["failure"; 1024],
+            "live_handle_count": 1,
+            "next_pf_handle_data": 0x100002000u64,
+            "pf_handle_data_end": 0x110000000u64,
+        });
+
+        let bounded = bounded_crash_snapshot(snapshot);
+        assert_eq!(bounded["truncated"], true);
+        assert_eq!(bounded["instruction_rva"], 0x539bu64);
+        assert_eq!(bounded["handle_allocation_count"], 16_384);
+        assert!(serde_json::to_vec(&bounded).unwrap().len() <= MAX_FAILURE_CRASH_SNAPSHOT_BYTES);
     }
 
     #[test]
