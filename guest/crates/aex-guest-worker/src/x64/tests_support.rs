@@ -1850,6 +1850,134 @@
     }
 
     #[test]
+    fn msvcp_exception_ptr_null_lifecycle_is_deterministic_and_library_qualified() {
+        const BASE: u64 = STUB_BASE + 0x5b0;
+        const SYMBOLS: [(&str, LegacyWin64Import); 6] = [
+            (
+                "?__ExceptionPtrCreate@@YAXPEAX@Z",
+                LegacyWin64Import::MsvcpExceptionPtrCreate,
+            ),
+            (
+                "?__ExceptionPtrCopy@@YAXPEAXPEBX@Z",
+                LegacyWin64Import::MsvcpExceptionPtrCopy,
+            ),
+            (
+                "?__ExceptionPtrAssign@@YAXPEAXPEBX@Z",
+                LegacyWin64Import::MsvcpExceptionPtrAssign,
+            ),
+            (
+                "?__ExceptionPtrDestroy@@YAXPEAX@Z",
+                LegacyWin64Import::MsvcpExceptionPtrDestroy,
+            ),
+            (
+                "?__ExceptionPtrCurrentException@@YAXPEAX@Z",
+                LegacyWin64Import::MsvcpExceptionPtrCurrentException,
+            ),
+            (
+                "?__ExceptionPtrRethrow@@YAXPEBX@Z",
+                LegacyWin64Import::MsvcpExceptionPtrRethrow,
+            ),
+        ];
+        let mut engine = test_engine(&[0xc3]);
+        for (index, (symbol, implementation)) in SYMBOLS.iter().copied().enumerate() {
+            let stub = BASE + index as u64 * 0x10;
+            assert_eq!(
+                install_win64_import(&mut engine.unicorn, stub, "MSVCP140.DLL", symbol).unwrap(),
+                Win64ImportDispatch::LegacyImplemented(implementation)
+            );
+            assert_eq!(
+                dispatch_win64_import("fixture.dll", symbol),
+                Win64ImportDispatch::UnsupportedLegacyImport
+            );
+        }
+
+        let create = BASE;
+        let copy = BASE + 0x10;
+        let assign = BASE + 0x20;
+        let destroy = BASE + 0x30;
+        let current = BASE + 0x40;
+        let first = DATA_BASE + 0xb00;
+        let second = DATA_BASE + 0xb20;
+        engine.write(first, &[0xaa; MSVCP_EXCEPTION_PTR_BYTES]).unwrap();
+        engine.write(second, &[0xbb; MSVCP_EXCEPTION_PTR_BYTES]).unwrap();
+
+        assert_eq!(engine.call_win64(create, [first, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(engine.unicorn.mem_read_as_vec(first, 16).unwrap(), [0; 16]);
+        assert_eq!(
+            engine.call_win64(copy, [second, first, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(second, 16).unwrap(), [0; 16]);
+        assert_eq!(
+            engine.call_win64(assign, [first, second, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.call_win64(current, [first, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(engine.call_win64(destroy, [first, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(engine.call_win64(destroy, [second, 0, 0, 0, 0, 0]).unwrap(), 0);
+
+        let other = test_engine(&[0xc3]);
+        assert_eq!(
+            other.unicorn.mem_read_as_vec(first, MSVCP_EXCEPTION_PTR_BYTES).unwrap(),
+            [0; MSVCP_EXCEPTION_PTR_BYTES]
+        );
+    }
+
+    #[test]
+    fn msvcp_exception_ptr_nonnull_rethrow_and_invalid_memory_fail_closed() {
+        let mut engine = test_engine(&[0xc3]);
+        let object = DATA_BASE + 0xb00;
+        engine.write(object, &[0; MSVCP_EXCEPTION_PTR_BYTES]).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RCX, object).unwrap();
+        emulate_msvcp_exception_ptr(
+            &mut engine.unicorn,
+            LegacyWin64Import::MsvcpExceptionPtrRethrow,
+        );
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains("bad_exception"))
+        );
+
+        let mut engine = test_engine(&[0xc3]);
+        engine.write(object, &[1; MSVCP_EXCEPTION_PTR_BYTES]).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RCX, object).unwrap();
+        emulate_msvcp_exception_ptr(
+            &mut engine.unicorn,
+            LegacyWin64Import::MsvcpExceptionPtrDestroy,
+        );
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains("unmodeled non-null"))
+        );
+
+        let mut engine = test_engine(&[0xc3]);
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RCX, 0xdead_beef)
+            .unwrap();
+        emulate_msvcp_exception_ptr(
+            &mut engine.unicorn,
+            LegacyWin64Import::MsvcpExceptionPtrDestroy,
+        );
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains("read failed"))
+        );
+    }
+
+    #[test]
     fn vcruntime_exception_copy_shares_unowned_data_and_destroy_is_idempotent() {
         const COPY: u64 = STUB_BASE + 0x2c0;
         const DESTROY: u64 = STUB_BASE + 0x2d0;
