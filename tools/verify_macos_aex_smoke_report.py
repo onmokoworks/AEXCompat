@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import struct
 import sys
+import zlib
 
 
 # A bounded 50,000-event execution trace is commonly about 5 MiB. Keep the
@@ -19,6 +20,94 @@ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 def fail(message: str) -> "NoReturn":
     raise SystemExit(f"macos_aex_smoke_error: {message}")
+
+
+def validate_png(payload: bytes) -> tuple[int, int]:
+    if payload[:8] != PNG_SIGNATURE:
+        fail("render output does not have a PNG signature")
+    offset = len(PNG_SIGNATURE)
+    ihdr: bytes | None = None
+    idat = bytearray()
+    saw_iend = False
+    saw_non_idat_after_idat = False
+    palette = False
+    while offset < len(payload):
+        if len(payload) - offset < 12:
+            fail("render output has a truncated PNG chunk")
+        length = struct.unpack(">I", payload[offset : offset + 4])[0]
+        chunk_type = payload[offset + 4 : offset + 8]
+        chunk_end = offset + 12 + length
+        if length > MAX_OUTPUT_BYTES or chunk_end > len(payload):
+            fail("render output has an invalid PNG chunk length")
+        data = payload[offset + 8 : offset + 8 + length]
+        expected_crc = struct.unpack(">I", payload[offset + 8 + length : chunk_end])[0]
+        if zlib.crc32(chunk_type + data) != expected_crc:
+            fail("render output has an invalid PNG chunk CRC")
+        if ihdr is None and chunk_type != b"IHDR":
+            fail("render output PNG does not begin with IHDR")
+        if chunk_type == b"IHDR":
+            if ihdr is not None or length != 13:
+                fail("render output has an invalid or duplicate IHDR")
+            ihdr = data
+        elif chunk_type == b"PLTE":
+            if idat or length == 0 or length % 3 != 0 or length > 768:
+                fail("render output has an invalid PLTE")
+            palette = True
+        elif chunk_type == b"IDAT":
+            if saw_non_idat_after_idat:
+                fail("render output has non-consecutive IDAT chunks")
+            idat.extend(data)
+            if len(idat) > MAX_OUTPUT_BYTES:
+                fail("render output IDAT payload is too large")
+        elif chunk_type == b"IEND":
+            if length != 0 or not idat or chunk_end != len(payload):
+                fail("render output has an invalid IEND or trailing bytes")
+            saw_iend = True
+        elif idat:
+            saw_non_idat_after_idat = True
+        offset = chunk_end
+        if saw_iend:
+            break
+    if ihdr is None or not idat or not saw_iend:
+        fail("render output is missing required PNG chunks")
+
+    width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(
+        ">IIBBBBB", ihdr
+    )
+    if width == 0 or height == 0 or width > 32768 or height > 32768:
+        fail("render output dimensions are invalid")
+    allowed_depths = {
+        0: {1, 2, 4, 8, 16},
+        2: {8, 16},
+        3: {1, 2, 4, 8},
+        4: {8, 16},
+        6: {8, 16},
+    }
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+    if color_type not in allowed_depths or bit_depth not in allowed_depths[color_type]:
+        fail("render output has an unsupported PNG color/depth combination")
+    if color_type == 3 and not palette:
+        fail("indexed render output is missing PLTE")
+    if compression != 0 or filtering != 0 or interlace != 0:
+        fail("render output uses unsupported PNG compression/filter/interlace")
+    row_bytes = (width * channels[color_type] * bit_depth + 7) // 8
+    expected_size = height * (row_bytes + 1)
+    if expected_size > MAX_OUTPUT_BYTES:
+        fail("render output decoded pixels exceed the bounded contract")
+    decoder = zlib.decompressobj()
+    try:
+        decoded = decoder.decompress(bytes(idat), expected_size + 1)
+        if len(decoded) > expected_size:
+            fail("render output decoded scanline size is invalid")
+        decoded += decoder.flush(expected_size + 1 - len(decoded))
+    except zlib.error as error:
+        fail(f"render output IDAT is not valid zlib data: {error}")
+    if not decoder.eof or decoder.unused_data or len(decoded) != expected_size:
+        fail("render output decoded scanline size is invalid")
+    stride = row_bytes + 1
+    if any(decoded[offset] > 4 for offset in range(0, len(decoded), stride)):
+        fail("render output contains an invalid PNG filter byte")
+    return width, height
 
 
 def validate(report_path: Path, output_path: Path) -> dict[str, object]:
@@ -70,11 +159,7 @@ def validate(report_path: Path, output_path: Path) -> dict[str, object]:
     if size < 24 or size > MAX_OUTPUT_BYTES:
         fail("render output size is outside the bounded PNG contract")
     payload = output_path.read_bytes()
-    if payload[:8] != PNG_SIGNATURE or payload[12:16] != b"IHDR":
-        fail("render output is not a PNG with an IHDR")
-    width, height = struct.unpack(">II", payload[16:24])
-    if width == 0 or height == 0 or width > 32768 or height > 32768:
-        fail("render output dimensions are invalid")
+    width, height = validate_png(payload)
     return {
         "schema_version": 1,
         "status": "verified",

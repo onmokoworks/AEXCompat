@@ -1,7 +1,11 @@
 import importlib.util
+import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import struct
+import subprocess
 import zlib
 
 import pytest
@@ -121,6 +125,25 @@ def test_rejects_invalid_json_and_non_png_output(tmp_path):
     with pytest.raises(SystemExit, match="PNG contract"):
         MODULE.validate(report_path, output_path)
 
+    output_path.write_bytes(
+        MODULE.PNG_SIGNATURE + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", 2, 1)
+    )
+    with pytest.raises(SystemExit, match="PNG chunk"):
+        MODULE.validate(report_path, output_path)
+
+
+def test_rejects_png_with_bad_crc_or_truncated_idat(tmp_path):
+    report_path, output_path = write_fixture(tmp_path, valid_report())
+    payload = bytearray(output_path.read_bytes())
+    payload[29] ^= 1
+    output_path.write_bytes(payload)
+    with pytest.raises(SystemExit, match="chunk CRC"):
+        MODULE.validate(report_path, output_path)
+
+    output_path.write_bytes(png()[:-12])
+    with pytest.raises(SystemExit, match="required PNG chunks"):
+        MODULE.validate(report_path, output_path)
+
 
 def test_rejects_report_larger_than_the_trace_envelope(tmp_path):
     report_path, output_path = write_fixture(tmp_path, valid_report())
@@ -130,24 +153,134 @@ def test_rejects_report_larger_than_the_trace_envelope(tmp_path):
         MODULE.validate(report_path, output_path)
 
 
-def test_package_scripts_pair_inputs_and_execute_the_mounted_arm64_worker():
-    verifier = (ROOT / "tools/verify-macos-aex-carrier-package.sh").read_text(
-        encoding="utf-8"
+def test_package_verifier_executes_mounted_arm64_worker_and_propagates_inputs(tmp_path):
+    shell = shutil.which("sh")
+    if shell is None:
+        pytest.skip("POSIX shell is unavailable")
+    fake_bin = tmp_path / "bin"
+    payload = tmp_path / "payload"
+    fake_bin.mkdir()
+    (payload / "arm64").mkdir(parents=True)
+    worker = payload / "arm64" / "aex-guest-worker"
+    worker.write_text(
+        """#!/bin/sh
+set -eu
+if [ "${1:-}" = "--help" ]; then exit 2; fi
+test "$1" = render-trace-png
+test "$2" = "$EXPECTED_AEX"
+test "$3" = "$EXPECTED_INPUT"
+cp "$FAKE_OUTPUT_PNG" "$4"
+printf '%s\\n' '{"schema_version":1,"render_error":0,"gpu":{"requested_backend":"cpu","pre_render":{"attempted":true,"completed":true,"error":0},"render":{"attempted":true,"completed":true,"error":0},"cleanup_complete":true},"suite_requests":[],"unsupported_suite_calls":[],"dropped_unsupported_suite_calls":0}'
+""",
+        encoding="utf-8",
     )
-    prepare = (ROOT / "tools/prepare-local-macos-aex-carriers.sh").read_text(
-        encoding="utf-8"
+    worker.chmod(0o755)
+    worker_payload = worker.read_bytes()
+    manifest = {
+        "schema": "aexcompat-macos-carriers-v1",
+        "distribution_tier": "local-adhoc",
+        "workers": [
+            {
+                "architecture": "arm64",
+                "backend": "unicorn",
+                "path": "arm64/aex-guest-worker",
+                "sha256": hashlib.sha256(worker_payload).hexdigest(),
+                "size": len(worker_payload),
+            }
+        ],
+    }
+    (payload / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    (fake_bin / "uname").write_text("#!/bin/sh\necho Darwin\n", encoding="utf-8")
+    (fake_bin / "file").write_text(
+        '#!/bin/sh\necho "$1: Mach-O 64-bit executable arm64"\n', encoding="utf-8"
     )
-    for contract in (
-        'smoke_aex=${2:-}',
-        'smoke_input_png=${3:-}',
-        '"$arm64_worker" render-trace-png',
-        'verify_macos_aex_smoke_report.py',
-        '"$smoke_report" "$smoke_output"',
-    ):
-        assert contract in verifier
-    assert "x86_64/aex-guest-worker" not in verifier.split(
-        'if [ -n "$smoke_aex" ]; then', 1
-    )[1].split("fi", 1)[0]
-    assert "AEXCOMPAT_SMOKE_AEX" in prepare
-    assert "AEXCOMPAT_SMOKE_INPUT_PNG" in prepare
-    assert '"$output" "$smoke_aex" "$smoke_input_png"' in prepare
+    (fake_bin / "codesign").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "hdiutil").write_text(
+        """#!/bin/sh
+set -eu
+case "$1" in
+  verify|detach) exit 0 ;;
+  attach)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "-mountpoint" ]; then
+        shift
+        mkdir -p "$1"
+        cp -R "$FAKE_PAYLOAD"/. "$1"/
+        exit 0
+      fi
+      shift
+    done
+    ;;
+esac
+exit 2
+""",
+        encoding="utf-8",
+    )
+    for command in fake_bin.iterdir():
+        command.chmod(0o755)
+
+    artifact = tmp_path / "carriers.dmg"
+    artifact.write_bytes(b"fake-dmg")
+    aex = tmp_path / "effect.aex"
+    input_png = tmp_path / "input.png"
+    output_png = tmp_path / "worker-output.png"
+    aex.write_bytes(b"MZ")
+    input_png.write_bytes(png())
+    output_png.write_bytes(png())
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{fake_bin}:{environment.get('PATH', '')}",
+            "FAKE_PAYLOAD": str(payload),
+            "FAKE_OUTPUT_PNG": str(output_png),
+            "EXPECTED_AEX": str(aex),
+            "EXPECTED_INPUT": str(input_png),
+        }
+    )
+    verifier = ROOT / "tools" / "verify-macos-aex-carrier-package.sh"
+    result = subprocess.run(
+        [shell, str(verifier), str(artifact), str(aex), str(input_png)],
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '"status": "verified"' in result.stdout
+    assert "arm64 Unicorn render, diagnostics, and cleanup verified" in result.stdout
+
+
+def test_package_verifier_rejects_unpaired_smoke_inputs_before_mount(tmp_path):
+    shell = shutil.which("sh")
+    if shell is None:
+        pytest.skip("POSIX shell is unavailable")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name, body in {
+        "uname": "#!/bin/sh\necho Darwin\n",
+        "hdiutil": "#!/bin/sh\nexit 99\n",
+    }.items():
+        command = fake_bin / name
+        command.write_text(body, encoding="utf-8")
+        command.chmod(0o755)
+    artifact = tmp_path / "carriers.dmg"
+    artifact.write_bytes(b"fake")
+    aex = tmp_path / "effect.aex"
+    aex.write_bytes(b"MZ")
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}:{environment.get('PATH', '')}"
+    result = subprocess.run(
+        [
+            shell,
+            str(ROOT / "tools" / "verify-macos-aex-carrier-package.sh"),
+            str(artifact),
+            str(aex),
+        ],
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "requires both" in result.stderr
