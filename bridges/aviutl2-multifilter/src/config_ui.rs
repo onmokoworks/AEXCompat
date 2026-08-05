@@ -14,11 +14,18 @@
 // the file at load, so an active override is called out in the dialog rather
 // than silently making a saved value appear to do nothing.
 
-use windows_sys::Win32::Foundation::{HINSTANCE as WsHINSTANCE, HWND as WsHWND, LPARAM, WPARAM};
+use windows_sys::Win32::Foundation::{
+    HINSTANCE as WsHINSTANCE, HWND as WsHWND, LPARAM, RECT, WPARAM,
+};
+use windows_sys::Win32::UI::Controls::{
+    ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_WIDTH, LVCOLUMNW,
+    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_GETITEMSTATE, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE, LVS_EX_CHECKBOXES,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DialogBoxIndirectParamW, EndDialog, GetDlgItem, GetWindowTextLengthW, GetWindowTextW,
-    MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW, SetDlgItemTextW, WM_COMMAND,
-    WM_INITDIALOG,
+    DialogBoxIndirectParamW, EndDialog, GetClientRect, GetDlgItem, GetWindowTextLengthW,
+    GetWindowTextW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW, SendMessageW,
+    SetDlgItemTextW, SetWindowLongPtrW, WM_COMMAND, WM_INITDIALOG,
 };
 
 /// The values shown in (and read back from) the dialog, all as text. List
@@ -46,6 +53,77 @@ struct ConfigEdit {
     repository: Option<String>,
     dependency_module_limit: Option<usize>,
     dependency_byte_limit: Option<u64>,
+}
+
+/// One known effect in the ignore checklist (issue #858).
+#[derive(PartialEq, Debug)]
+struct IgnoreRow {
+    /// The file stem the ignore list matches on, in a spelling seen on disk.
+    name: String,
+    /// Whether the current ignore list matches it (= the checkbox state).
+    ignored: bool,
+}
+
+/// The checklist rows for `known` effect paths under the current `ignore`
+/// list, plus the ignore entries no known effect matches (which go to the
+/// manual field — dropping them would silently un-ignore an effect that is
+/// merely not visible this launch, and #307's rule is that absence is not
+/// evidence). Rows are deduplicated by stem (ignore matching is stem-based
+/// and case-insensitive, so two same-stem AEX in different folders are one
+/// decision) and sorted for the display.
+fn ignore_rows(known: &[PathBuf], ignore: &[String]) -> (Vec<IgnoreRow>, Vec<String>) {
+    let mut stems: Vec<&str> = known
+        .iter()
+        .filter_map(|path| path.file_stem().and_then(|stem| stem.to_str()))
+        .collect();
+    stems.sort_by_key(|stem| stem.to_ascii_lowercase());
+    stems.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    let rows: Vec<IgnoreRow> = stems
+        .into_iter()
+        .map(|stem| IgnoreRow {
+            name: stem.to_owned(),
+            ignored: ignore
+                .iter()
+                .any(|entry| strip_aex_ext(entry).eq_ignore_ascii_case(stem)),
+        })
+        .collect();
+    let manual: Vec<String> = ignore
+        .iter()
+        .filter(|entry| {
+            !rows
+                .iter()
+                .any(|row| strip_aex_ext(entry).eq_ignore_ascii_case(&row.name))
+        })
+        .cloned()
+        .collect();
+    (rows, manual)
+}
+
+/// The saved ignore list: every checked row plus the manual lines, minus
+/// duplicates (a manual line naming a checked effect, with or without the
+/// `.aex` spelling).
+fn compose_ignore(checked: Vec<String>, manual: &str) -> Vec<String> {
+    let mut ignore = checked;
+    for entry in parse_lines(manual) {
+        if !ignore
+            .iter()
+            .any(|kept| strip_aex_ext(kept).eq_ignore_ascii_case(strip_aex_ext(&entry)))
+        {
+            ignore.push(entry);
+        }
+    }
+    ignore
+}
+
+/// Every AEX the checklist can offer: what the current config's folders hold
+/// right now (ignored ones included — they are exactly what the list is for)
+/// plus everything the discovery cache remembers (an effect missing this
+/// launch can still be un-ignored).
+fn known_effects(config: &Config) -> Vec<PathBuf> {
+    let (dirs, _) = resolve_scan_dirs(config);
+    let mut known = collect_aex(&dirs, &[]).seen;
+    known.extend(load_cache().keys().map(PathBuf::from));
+    known
 }
 
 /// One trimmed, non-empty entry per line (either line ending).
@@ -276,14 +354,24 @@ const IDC_REPOSITORY: u16 = 1004;
 const IDC_MODULE_LIMIT: u16 = 1005;
 const IDC_BYTE_LIMIT: u16 = 1006;
 const IDC_ENV_NOTE: u16 = 1007;
+const IDC_IGNORE_LIST: u16 = 1008;
 const IDC_OK: u16 = 1; // IDOK
 const IDC_CANCEL: u16 = 2; // IDCANCEL
 
-/// What `WM_INITDIALOG` fills the controls from. Passed by reference through
-/// `dwInitParam`; the dialog is modal, so the caller's frame outlives it.
+/// The dialog's per-window slot for application data. WinUser.h defines it as
+/// `DWLP_DLGPROC + sizeof(LONG_PTR)` where `DWLP_DLGPROC` is
+/// `DWLP_MSGRESULT + sizeof(LRESULT)`; windows-sys does not carry the derived
+/// constant.
+const DWLP_USER: i32 = 2 * std::mem::size_of::<isize>() as i32;
+
+/// What `WM_INITDIALOG` fills the controls from — and what the save reads the
+/// checklist rows back through (the list control holds check states by index;
+/// the names live here). Passed by reference through `dwInitParam` and stashed
+/// in `DWLP_USER`; the dialog is modal, so the caller's frame outlives it.
 struct DialogInit {
     form: ConfigForm,
     env_note: String,
+    rows: Vec<IgnoreRow>,
 }
 
 /// Registers the settings-menu entry. Called from `RegisterPlugin` before any
@@ -309,10 +397,24 @@ unsafe extern "C" fn config_menu_entry(
 }
 
 fn show_config_dialog(parent: WsHWND, instance: WsHINSTANCE) {
+    let config = load_config();
+    let (rows, manual) = ignore_rows(&known_effects(&config), &config.ignore);
+    let mut form = form_from_config(&config);
+    // The known effects moved into the checklist; the text field keeps only
+    // the entries the checklist cannot express.
+    form.ignore = join_lines(&manual);
     let init = DialogInit {
-        form: form_from_config(&load_config()),
+        form,
         env_note: env_override_note(),
+        rows,
     };
+    // The checklist is a common control; registering its class is idempotent.
+    let icc = INITCOMMONCONTROLSEX {
+        dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+        dwICC: ICC_LISTVIEW_CLASSES,
+    };
+    // SAFETY: the struct is initialized and alive for the call.
+    unsafe { InitCommonControlsEx(&icc) };
     let template = build_dialog_template();
     // SAFETY: the template buffer and `init` outlive the call (the dialog is
     // modal); the dialog proc matches the DLGPROC contract.
@@ -355,6 +457,9 @@ fn handle_dialog_message(dialog: WsHWND, message: u32, wparam: WPARAM, lparam: L
             // SAFETY: `lparam` is the `&DialogInit` passed to
             // `DialogBoxIndirectParamW` above, alive for the modal call.
             let init = unsafe { &*(lparam as *const DialogInit) };
+            // Stashed so the save can pair the checklist's by-index states
+            // with their names. SAFETY: `dialog` is this proc's live dialog.
+            unsafe { SetWindowLongPtrW(dialog, DWLP_USER, lparam) };
             set_item_text(dialog, IDC_DIRS, &init.form.dirs);
             set_item_text(dialog, IDC_DEPENDENCY_DIRS, &init.form.dependency_dirs);
             set_item_text(dialog, IDC_IGNORE, &init.form.ignore);
@@ -362,6 +467,7 @@ fn handle_dialog_message(dialog: WsHWND, message: u32, wparam: WPARAM, lparam: L
             set_item_text(dialog, IDC_MODULE_LIMIT, &init.form.module_limit);
             set_item_text(dialog, IDC_BYTE_LIMIT, &init.form.byte_limit);
             set_item_text(dialog, IDC_ENV_NOTE, &init.env_note);
+            fill_ignore_list(dialog, &init.rows);
             1
         }
         WM_COMMAND => match (wparam & 0xFFFF) as u16 {
@@ -386,13 +492,35 @@ fn handle_dialog_message(dialog: WsHWND, message: u32, wparam: WPARAM, lparam: L
     }
 }
 
+/// The state stashed at `WM_INITDIALOG`, or `None` if it never ran.
+fn dialog_init(dialog: WsHWND) -> Option<&'static DialogInit> {
+    // SAFETY: the slot holds the `&DialogInit` stored at WM_INITDIALOG (or 0),
+    // and the pointee outlives the modal dialog. `'static` overstates the
+    // lifetime but the reference never escapes the dialog's callbacks.
+    unsafe {
+        let stored =
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(dialog, DWLP_USER);
+        (stored != 0).then(|| &*(stored as *const DialogInit))
+    }
+}
+
 /// Reads the controls back, validates, and saves. `false` keeps the dialog
 /// open (the message box already said why).
 fn save_from_dialog(dialog: WsHWND) -> bool {
+    let Some(init) = dialog_init(dialog) else {
+        return false;
+    };
+    let checked: Vec<String> = init
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| ignore_list_checked(dialog, *index))
+        .map(|(_, row)| row.name.clone())
+        .collect();
     let form = ConfigForm {
         dirs: item_text(dialog, IDC_DIRS),
         dependency_dirs: item_text(dialog, IDC_DEPENDENCY_DIRS),
-        ignore: item_text(dialog, IDC_IGNORE),
+        ignore: join_lines(compose_ignore(checked, &item_text(dialog, IDC_IGNORE))),
         repository: item_text(dialog, IDC_REPOSITORY),
         module_limit: item_text(dialog, IDC_MODULE_LIMIT),
         byte_limit: item_text(dialog, IDC_BYTE_LIMIT),
@@ -423,6 +551,79 @@ fn save_from_dialog(dialog: WsHWND) -> bool {
             message_box(dialog, &message, MB_ICONERROR);
             false
         }
+    }
+}
+
+/// A `LVIS_STATEIMAGEMASK` state image: 1 = unchecked box, 2 = checked box.
+fn state_image(checked: bool) -> u32 {
+    ((if checked { 2 } else { 1 }) as u32) << 12
+}
+
+/// Populates the ignore checklist: one single-column row per known effect,
+/// checkbox reflecting the current ignore list.
+fn fill_ignore_list(dialog: WsHWND, rows: &[IgnoreRow]) {
+    // SAFETY: `dialog` is the live dialog; every struct passed to SendMessageW
+    // is initialized and alive for that call, and pszText buffers are
+    // null-terminated.
+    unsafe {
+        let list = GetDlgItem(dialog, IDC_IGNORE_LIST as i32);
+        if list.is_null() {
+            return;
+        }
+        SendMessageW(
+            list,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            LVS_EX_CHECKBOXES as WPARAM,
+            LVS_EX_CHECKBOXES as LPARAM,
+        );
+        // One full-width column; the view is LVS_REPORT with no header.
+        let mut client = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        GetClientRect(list, &mut client);
+        let mut column: LVCOLUMNW = std::mem::zeroed();
+        column.mask = LVCF_WIDTH;
+        column.cx = client.right - client.left;
+        SendMessageW(list, LVM_INSERTCOLUMNW, 0, &column as *const LVCOLUMNW as LPARAM);
+        for (index, row) in rows.iter().enumerate() {
+            let mut name: Vec<u16> = row.name.encode_utf16().chain([0]).collect();
+            let mut item: LVITEMW = std::mem::zeroed();
+            item.mask = LVIF_TEXT;
+            item.iItem = index as i32;
+            item.pszText = name.as_mut_ptr();
+            SendMessageW(list, LVM_INSERTITEMW, 0, &item as *const LVITEMW as LPARAM);
+            let mut state: LVITEMW = std::mem::zeroed();
+            state.state = state_image(row.ignored);
+            state.stateMask = LVIS_STATEIMAGEMASK;
+            SendMessageW(
+                list,
+                LVM_SETITEMSTATE,
+                index as WPARAM,
+                &state as *const LVITEMW as LPARAM,
+            );
+        }
+    }
+}
+
+/// Whether the checklist row at `index` is checked. A missing control reads
+/// as unchecked, which the caller's empty `rows` makes unreachable anyway.
+fn ignore_list_checked(dialog: WsHWND, index: usize) -> bool {
+    // SAFETY: `dialog` is the live dialog; the message carries no pointers.
+    unsafe {
+        let list = GetDlgItem(dialog, IDC_IGNORE_LIST as i32);
+        if list.is_null() {
+            return false;
+        }
+        let state = SendMessageW(
+            list,
+            LVM_GETITEMSTATE,
+            index as WPARAM,
+            LVIS_STATEIMAGEMASK as LPARAM,
+        );
+        state as u32 & LVIS_STATEIMAGEMASK == state_image(true)
     }
 }
 
@@ -478,10 +679,20 @@ const ES_WANTRETURN: u32 = 0x1000;
 const ES_NUMBER: u32 = 0x2000;
 const SS_NOPREFIX: u32 = 0x0080;
 const BS_DEFPUSHBUTTON: u32 = 0x0001;
+const LVS_REPORT: u32 = 0x0001;
+const LVS_SINGLESEL: u32 = 0x0004;
+const LVS_NOCOLUMNHEADER: u32 = 0x4000;
 
 const ATOM_BUTTON: u16 = 0x0080;
 const ATOM_EDIT: u16 = 0x0081;
 const ATOM_STATIC: u16 = 0x0082;
+
+/// A dialog item's window class: one of the predefined class atoms, or a
+/// registered class by name (the checklist's `SysListView32`).
+enum ItemClass {
+    Atom(u16),
+    Named(&'static str),
+}
 
 /// Builds the `DLGTEMPLATE` stream. Returned as `Vec<u32>` because the
 /// template must be DWORD-aligned and a `Vec<u16>`'s allocation only promises
@@ -496,7 +707,7 @@ fn build_dialog_template() -> Vec<u32> {
     push_u32(&mut words, 0);
     let count_at = words.len();
     words.push(0);
-    for value in [0i16, 0, 340, 299] {
+    for value in [0i16, 0, 340, 361] {
         words.push(value as u16);
     }
     words.push(0);
@@ -510,8 +721,8 @@ fn build_dialog_template() -> Vec<u32> {
     let single = ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP;
     let number = ES_NUMBER | single;
 
-    let mut item = |style: u32, rect: [i16; 4], id: u16, atom: u16, text: &str| {
-        push_item(&mut words, style, rect, id, atom, text);
+    let mut item = |style: u32, rect: [i16; 4], id: u16, class: ItemClass, text: &str| {
+        push_item(&mut words, style, rect, id, class, text);
         items += 1;
     };
 
@@ -519,73 +730,129 @@ fn build_dialog_template() -> Vec<u32> {
         SS_NOPREFIX,
         [7, 7, 326, 8],
         0xFFFF,
-        ATOM_STATIC,
+        ItemClass::Atom(ATOM_STATIC),
         "スキャンフォルダ (1行に1つ / 空欄なら After Effects と MediaCore の既定フォルダ)",
     );
-    item(multiline, [7, 17, 326, 46], IDC_DIRS, ATOM_EDIT, "");
+    item(multiline, [7, 17, 326, 46], IDC_DIRS, ItemClass::Atom(ATOM_EDIT), "");
 
     item(
         SS_NOPREFIX,
         [7, 69, 326, 8],
         0xFFFF,
-        ATOM_STATIC,
+        ItemClass::Atom(ATOM_STATIC),
         "依存 DLL フォルダ (1行に1つ / 空欄なら After Effects の既定)",
     );
-    item(multiline, [7, 79, 326, 34], IDC_DEPENDENCY_DIRS, ATOM_EDIT, "");
+    item(
+        multiline,
+        [7, 79, 326, 34],
+        IDC_DEPENDENCY_DIRS,
+        ItemClass::Atom(ATOM_EDIT),
+        "",
+    );
 
     item(
         SS_NOPREFIX,
         [7, 119, 326, 8],
         0xFFFF,
-        ATOM_STATIC,
-        "無視するエフェクト (1行に1つ / .aex 拡張子は省略可)",
+        ItemClass::Atom(ATOM_STATIC),
+        "無視するエフェクト (チェック = 無視 / 一覧はスキャン結果と discovery キャッシュ)",
     );
-    item(multiline, [7, 129, 326, 34], IDC_IGNORE, ATOM_EDIT, "");
+    item(
+        LVS_REPORT | LVS_SINGLESEL | LVS_NOCOLUMNHEADER | WS_BORDER | WS_TABSTOP,
+        [7, 129, 326, 64],
+        IDC_IGNORE_LIST,
+        ItemClass::Named("SysListView32"),
+        "",
+    );
+    item(
+        SS_NOPREFIX,
+        [7, 197, 326, 8],
+        0xFFFF,
+        ItemClass::Atom(ATOM_STATIC),
+        "一覧に無いエフェクトを手動指定 (1行に1つ / .aex 拡張子は省略可)",
+    );
+    item(
+        multiline,
+        [7, 207, 326, 20],
+        IDC_IGNORE,
+        ItemClass::Atom(ATOM_EDIT),
+        "",
+    );
 
     item(
         SS_NOPREFIX,
-        [7, 169, 326, 8],
+        [7, 231, 326, 8],
         0xFFFF,
-        ATOM_STATIC,
+        ItemClass::Atom(ATOM_STATIC),
         "worker リポジトリ (通常は空欄: プラグインと同じフォルダの worker を使用)",
     );
-    item(single, [7, 179, 326, 13], IDC_REPOSITORY, ATOM_EDIT, "");
+    item(
+        single,
+        [7, 241, 326, 13],
+        IDC_REPOSITORY,
+        ItemClass::Atom(ATOM_EDIT),
+        "",
+    );
 
     item(
         SS_NOPREFIX,
-        [7, 198, 170, 8],
+        [7, 260, 170, 8],
         0xFFFF,
-        ATOM_STATIC,
+        ItemClass::Atom(ATOM_STATIC),
         "依存 DLL 数の上限 (空欄 = 無制限)",
     );
-    item(number, [181, 196, 60, 13], IDC_MODULE_LIMIT, ATOM_EDIT, "");
+    item(
+        number,
+        [181, 258, 60, 13],
+        IDC_MODULE_LIMIT,
+        ItemClass::Atom(ATOM_EDIT),
+        "",
+    );
     item(
         SS_NOPREFIX,
-        [7, 214, 170, 8],
+        [7, 276, 170, 8],
         0xFFFF,
-        ATOM_STATIC,
+        ItemClass::Atom(ATOM_STATIC),
         "依存 DLL 合計バイト数の上限 (空欄 = 無制限)",
     );
-    item(number, [181, 212, 90, 13], IDC_BYTE_LIMIT, ATOM_EDIT, "");
+    item(
+        number,
+        [181, 274, 90, 13],
+        IDC_BYTE_LIMIT,
+        ItemClass::Atom(ATOM_EDIT),
+        "",
+    );
 
     // Tall enough for every env-override line at once (four are possible).
-    item(SS_NOPREFIX, [7, 230, 326, 34], IDC_ENV_NOTE, ATOM_STATIC, "");
     item(
         SS_NOPREFIX,
-        [7, 266, 326, 8],
+        [7, 292, 326, 34],
+        IDC_ENV_NOTE,
+        ItemClass::Atom(ATOM_STATIC),
+        "",
+    );
+    item(
+        SS_NOPREFIX,
+        [7, 328, 326, 8],
         0xFFFF,
-        ATOM_STATIC,
+        ItemClass::Atom(ATOM_STATIC),
         "変更は AviUtl2 の再起動後に反映されます。",
     );
 
     item(
         BS_DEFPUSHBUTTON | WS_TABSTOP,
-        [222, 278, 50, 14],
+        [222, 340, 50, 14],
         IDC_OK,
-        ATOM_BUTTON,
+        ItemClass::Atom(ATOM_BUTTON),
         "OK",
     );
-    item(WS_TABSTOP, [277, 278, 56, 14], IDC_CANCEL, ATOM_BUTTON, "キャンセル");
+    item(
+        WS_TABSTOP,
+        [277, 340, 56, 14],
+        IDC_CANCEL,
+        ItemClass::Atom(ATOM_BUTTON),
+        "キャンセル",
+    );
 
     words[count_at] = items;
 
@@ -611,8 +878,15 @@ fn push_wsz(words: &mut Vec<u16>, text: &str) {
 }
 
 /// One `DLGITEMTEMPLATE` (DWORD-aligned): style, exstyle, rect, id, the window
-/// class as an atom, the title, and no creation data.
-fn push_item(words: &mut Vec<u16>, style: u32, rect: [i16; 4], id: u16, atom: u16, text: &str) {
+/// class (atom or name), the title, and no creation data.
+fn push_item(
+    words: &mut Vec<u16>,
+    style: u32,
+    rect: [i16; 4],
+    id: u16,
+    class: ItemClass,
+    text: &str,
+) {
     if words.len() % 2 != 0 {
         words.push(0);
     }
@@ -622,8 +896,13 @@ fn push_item(words: &mut Vec<u16>, style: u32, rect: [i16; 4], id: u16, atom: u1
         words.push(value as u16);
     }
     words.push(id);
-    words.push(0xFFFF);
-    words.push(atom);
+    match class {
+        ItemClass::Atom(atom) => {
+            words.push(0xFFFF);
+            words.push(atom);
+        }
+        ItemClass::Named(name) => push_wsz(words, name),
+    }
     push_wsz(words, text);
     words.push(0);
 }
