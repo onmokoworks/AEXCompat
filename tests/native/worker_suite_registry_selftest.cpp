@@ -953,7 +953,10 @@ int main() {
       probe_report.find("\"0x0000000000000077\"") == std::string::npos &&
       probe_report.find("\"0x0000000000000088\"") == std::string::npos &&
       probe_report.find("\"caller_rva\":\"0x") != std::string::npos &&
-      count_occurrences(probe_report, "\"truncated\":false") == 2 &&
+      // One per probe target. Counted against the report's own target list so
+      // that registering another target does not silently fail this check.
+      count_occurrences(probe_report, "\"truncated\":false") ==
+          count_occurrences(probe_report, "\"version\":") &&
       probe_report.find("\"configuration_truncated\":false") !=
           std::string::npos;
   SetEnvironmentVariableW(L"AEXCOMPAT_SUITE_CALL_SLOT_PROBE", nullptr);

@@ -165,7 +165,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 25> simple_commands{{
+  const std::array<selftest::SimpleCommand, 26> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -218,6 +218,8 @@ Result dispatch(const Request& request, const Hooks& hooks) {
        ",\"reached_via_in_data_utils\":true,\"offsets\":[160,168,176,184,440,464]"},
       {L"--self-test-flt-blur-suite1", "flt_blur_suite1",
        hooks.simple.flt_blur_suite1},
+      {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",
+       hooks.simple.aefx_ace_suite1},
   }};
   if (const auto exit = selftest::dispatch_simple(
           request.argc, request.argv, simple_commands.data(), simple_commands.size()))

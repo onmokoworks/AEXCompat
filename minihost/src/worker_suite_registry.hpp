@@ -54,6 +54,7 @@ enum class UnsupportedSuiteId : uint8_t {
   pf_effect_custom_ui_overlay_theme_1,
   aegp_dynamic_stream_2,
   pf_batch_sampling_1,
+  aefx_ace_1,
 };
 
 int32_t record_unsupported_suite_call(UnsupportedSuiteId suite,

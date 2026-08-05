@@ -201,6 +201,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_suite_call_slot_probe.cpp
     src/worker_suite_registry.cpp
     src/worker_flt_blur_suite.cpp
+    src/worker_aefx_ace_suite.cpp
     src/worker_runtime_admission.cpp
     src/worker_entry_admission.cpp
     src/worker_session.cpp
