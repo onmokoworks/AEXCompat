@@ -29,8 +29,14 @@ fn artifact(path: &std::path::Path) -> ApprovedImageArtifact {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let plugin1 = PathBuf::from(args.next().expect("usage: cluster_diag <p1> <p2> [deps-dir]"));
-    let plugin2 = PathBuf::from(args.next().expect("usage: cluster_diag <p1> <p2> [deps-dir]"));
+    let plugin1 = PathBuf::from(
+        args.next()
+            .expect("usage: cluster_diag <p1> <p2> [deps-dir]"),
+    );
+    let plugin2 = PathBuf::from(
+        args.next()
+            .expect("usage: cluster_diag <p1> <p2> [deps-dir]"),
+    );
     let repository = PathBuf::from(
         std::env::var_os("AEXCOMPAT_MULTIFILTER_REPOSITORY")
             .expect("set AEXCOMPAT_MULTIFILTER_REPOSITORY"),
@@ -40,9 +46,8 @@ fn main() {
         .and_then(|parent| std::fs::canonicalize(parent).ok())
         .into_iter()
         .collect();
-    roots.extend(args.map(|dir| {
-        std::fs::canonicalize(&dir).unwrap_or_else(|_| PathBuf::from(dir))
-    }));
+    roots
+        .extend(args.map(|dir| std::fs::canonicalize(&dir).unwrap_or_else(|_| PathBuf::from(dir))));
 
     let closure = resolve_dependency_closure(DependencyClosureRequest::new(&plugin1, &roots))
         .expect("resolve closure for plugin1");

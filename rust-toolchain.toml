@@ -1,0 +1,11 @@
+# Pins the toolchain so `cargo fmt --check` means the same thing on every
+# machine. rustfmt's default `style_edition` follows the crate edition (2024
+# here), and its import-ordering rules changed between style editions, so an
+# unpinned toolchain reformats files nobody touched (issue #656: a `cargo fmt
+# --all` in bridges/ rewrote 12 untouched broker files three PRs in a row).
+#
+# Raising this is a deliberate change: run `cargo fmt --all` across every
+# manifest in the same commit, and add that commit to .git-blame-ignore-revs.
+[toolchain]
+channel = "1.93.1"
+components = ["rustfmt", "clippy"]
