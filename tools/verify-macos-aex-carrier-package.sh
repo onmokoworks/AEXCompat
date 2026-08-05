@@ -8,10 +8,22 @@ fi
 
 artifact=${1:-}
 if [ -z "$artifact" ] || [ ! -f "$artifact" ]; then
-  echo "usage: $0 <aexcompat-macos-carriers.dmg>" >&2
+  echo "usage: $0 <aexcompat-macos-carriers.dmg> [x64.aex input.png]" >&2
+  exit 2
+fi
+smoke_aex=${2:-}
+smoke_input_png=${3:-}
+if { [ -n "$smoke_aex" ] && [ -z "$smoke_input_png" ]; } || \
+   { [ -z "$smoke_aex" ] && [ -n "$smoke_input_png" ]; }; then
+  echo "smoke validation requires both x64.aex and input.png" >&2
+  exit 2
+fi
+if [ -n "$smoke_aex" ] && { [ ! -f "$smoke_aex" ] || [ ! -f "$smoke_input_png" ]; }; then
+  echo "smoke AEX or input PNG does not exist" >&2
   exit 2
 fi
 
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/aexcompat-package-verify.XXXXXX")
 mount_point="$scratch/mount"
 attached=0
@@ -108,6 +120,21 @@ file "$arm64_worker" | grep -q arm64
 codesign --verify --strict --verbose=2 "$arm64_worker"
 "$arm64_worker" --help >/dev/null 2>&1 || [ "$?" -eq 2 ]
 
+if [ -n "$smoke_aex" ]; then
+  smoke_output="$scratch/smoke-output.png"
+  smoke_report="$scratch/smoke-diagnostic.json"
+  smoke_stderr="$scratch/smoke-stderr.txt"
+  if ! "$arm64_worker" render-trace-png \
+      "$smoke_aex" "$smoke_input_png" "$smoke_output" \
+      >"$smoke_report" 2>"$smoke_stderr"; then
+    echo "packaged arm64 render/diagnose smoke failed" >&2
+    sed -n '1,80p' "$smoke_stderr" >&2
+    exit 1
+  fi
+  /usr/bin/python3 "$root/tools/verify_macos_aex_smoke_report.py" \
+    "$smoke_report" "$smoke_output"
+fi
+
 native_worker="$mount_point/x86_64/aex-guest-worker"
 if [ -f "$native_worker" ]; then
   file "$native_worker" | grep -q x86_64
@@ -116,4 +143,8 @@ if [ -f "$native_worker" ]; then
 fi
 
 detach_image
-echo "macOS carrier DMG integrity, manifest, signatures, architectures, and launch probes verified"
+if [ -n "$smoke_aex" ]; then
+  echo "macOS carrier DMG integrity, arm64 Unicorn render, diagnostics, and cleanup verified"
+else
+  echo "macOS carrier DMG integrity, manifest, signatures, architectures, and launch probes verified"
+fi
