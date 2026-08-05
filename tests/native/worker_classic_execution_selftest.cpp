@@ -48,6 +48,7 @@ struct Host {
   int32_t end_saw_error{-999};
 
   bool click_result{true};
+  bool close_ui_result{true};
   int32_t prepare_output_result{};
   int32_t selector_result{};
 };
@@ -82,7 +83,8 @@ const RenderHooks& render_hooks() {
         ++h.prepare_output_calls; return h.prepare_output_result; },
       +[](void* opaque) { auto& h = host_of(opaque);
         ++h.selector_calls; return h.selector_result; },
-      +[](void* opaque) { ++host_of(opaque).close_ui_calls; return true; }};
+      +[](void* opaque) { auto& h = host_of(opaque);
+        ++h.close_ui_calls; return h.close_ui_result; }};
   return value;
 }
 
@@ -129,9 +131,11 @@ void a_clean_setup_still_runs_every_step() {
   check(host.lifecycle.disposed, "a clean lifecycle is disposed too");
 }
 
-// The pre-render hooks are host-side probes, and their -5 is a different path
-// from a setup error: setup succeeded, so the accessor must not mask it, and
-// the steps after the failing one still have to be skipped.
+// The pre-render hooks dispatch into the plug-in too, but they report failure
+// as a bool, so their -5 is synthesized by begin_lifecycle rather than coming
+// from the plug-in. That is a different path from a setup error: setup itself
+// succeeded, so the accessor must not mask it, and the steps after the failing
+// one still have to be skipped.
 void a_failing_pre_render_hook_is_still_minus_five() {
   Host host;
   host.click_result = false;
@@ -195,16 +199,30 @@ void a_clean_dispatch_reaches_the_selector() {
         "a clean dispatch runs every step once");
 }
 
-// A selector that fails is the one case where the plug-in may have left a UI
-// context open, so close_ui has to run and its error must not overwrite the
-// selector's.
-void a_failing_selector_still_closes_the_ui() {
-  Host host;
-  host.selector_result = 512;
-  const int32_t error = dispatch_render(&host, 0, render_hooks());
-  check(error == 512, "the selector's error is the frame's error");
-  check(host.selector_calls == 1, "the selector ran");
-  check(host.close_ui_calls == 1, "close_ui ran after a failing selector");
+// close_ui runs after a failing selector too, and it only becomes the frame's
+// error when there is not one already: `if (!close_ui(host) && error == 0)`.
+// So a teardown failure is silently dropped whenever the frame already failed -
+// which is why #735 cannot just emit a stage marker for it unconditionally.
+void a_failing_close_ui_never_overwrites_an_existing_error() {
+  Host selector_failed;
+  selector_failed.selector_result = 512;
+  selector_failed.close_ui_result = false;
+  const int32_t kept = dispatch_render(&selector_failed, 0, render_hooks());
+  check(kept == 512, "the selector's error survives a failing close_ui");
+  check(selector_failed.selector_calls == 1, "the selector ran");
+  check(selector_failed.close_ui_calls == 1, "close_ui ran after a failing selector");
+
+  // With nothing else wrong, the same teardown failure does become the error.
+  Host only_close_failed;
+  only_close_failed.close_ui_result = false;
+  const int32_t surfaced = dispatch_render(&only_close_failed, 0, render_hooks());
+  check(surfaced == -5, "a failing close_ui is -5 on an otherwise clean frame");
+
+  // And on a frame short-circuited before the selector, the drop applies too.
+  Host short_circuited;
+  short_circuited.close_ui_result = false;
+  const int32_t incoming = dispatch_render(&short_circuited, 4, render_hooks());
+  check(incoming == 4, "the incoming error survives a failing close_ui");
 }
 
 }  // namespace
@@ -218,7 +236,7 @@ int main() {
   a_nonzero_incoming_error_skips_everything_but_the_ui_close();
   a_refused_output_stops_before_the_selector();
   a_clean_dispatch_reaches_the_selector();
-  a_failing_selector_still_closes_the_ui();
+  a_failing_close_ui_never_overwrites_an_existing_error();
   if (failures == 0) std::printf("{\"classic_execution_selftest\":\"passed\"}\n");
   return failures == 0 ? 0 : 1;
 }
