@@ -34,6 +34,7 @@ enum LegacyWin64Import {
     VcruntimeExceptionCopy,
     VcruntimeExceptionDestroy,
     CxxThrowException,
+    Cos,
     CosF,
     ExpF,
     FloorF,
@@ -305,6 +306,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("api-ms-win-crt-environment-l1-1-0.dll", "getenv") => LegacyWin64Import::CrtGetenv,
         (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll", "cos") => LegacyWin64Import::Cos,
+        (_, "cos") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "sin") => LegacyWin64Import::Sin,
         (_, "sin") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm") => LegacyWin64Import::CrtInitterm,
@@ -552,6 +555,9 @@ fn install_win64_import(
                         emulate_cxx_throw_exception(unicorn);
                     }),
                 )?;
+            }
+            LegacyWin64Import::Cos => {
+                install_double_import(unicorn, stub, "cos", f64::cos)?;
             }
             LegacyWin64Import::CosF => {
                 install_float_import(unicorn, stub, "cosf", f32::cos)?;
