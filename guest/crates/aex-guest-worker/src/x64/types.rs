@@ -107,6 +107,8 @@ struct GuestState {
     crt_terminate_handler: u64,
     windows_critical_sections: HashMap<u64, u32>,
     windows_condition_variables: HashSet<u64>,
+    windows_fls_slots: BTreeMap<u32, WindowsFlsSlot>,
+    pending_fls_free: Option<PendingFlsFree>,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
     crt_heap: CrtHeap,
@@ -169,6 +171,19 @@ struct PendingCrtInitterm {
     return_address: u64,
     continuation_rsp: u64,
     stop_on_error: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowsFlsSlot {
+    callback: u64,
+    value: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingFlsFree {
+    index: u32,
+    return_address: u64,
+    continuation_rsp: u64,
 }
 
 #[derive(Clone, Debug)]

@@ -279,6 +279,18 @@ impl GuestEngine<'static> {
                 continue_crt_initterm,
             ),
         )?;
+        uc(
+            "write FLS free continuation",
+            unicorn.mem_write(HOST_FLS_FREE_CONTINUE, &[0x41, 0xff, 0xe3]),
+        )?;
+        uc(
+            "install FLS free continuation",
+            unicorn.add_code_hook(
+                HOST_FLS_FREE_CONTINUE,
+                HOST_FLS_FREE_CONTINUE,
+                continue_fls_free,
+            ),
+        )?;
         install_windows_condition_variable_callbacks(&mut unicorn)?;
         uc(
             "write add_param callback",
@@ -802,6 +814,7 @@ impl GuestEngine<'static> {
             (HOST_ITERATE16, "iterate16"),
             (HOST_ITERATE16_CONTINUE, "iterate16_continue"),
             (HOST_CRT_INITTERM_CONTINUE, "crt_initterm_continue"),
+            (HOST_FLS_FREE_CONTINUE, "fls_free_continue"),
             (
                 HOST_INITIALIZE_CONDITION_VARIABLE,
                 "initialize_condition_variable",
