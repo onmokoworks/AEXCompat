@@ -195,6 +195,9 @@ const CRT_MEMORY_COPY_CHUNK: usize = 64 * 1024;
 const MAX_CRT_STDIO_BUFFER_BYTES: u64 = 1024 * 1024;
 const MAX_CRT_STDIO_FORMAT_BYTES: u64 = 4 * 1024;
 const MAX_CRT_STDIO_ARGUMENTS: usize = 32;
+const OBSERVED_MSVCP_MUTEX_TYPE: u32 = 0x102;
+const MAX_MSVCP_MUTEXES: usize = 256;
+const MAX_MSVCP_MUTEX_RECURSION: u32 = 1024;
 
 pub(crate) fn utility_suite_layout(version: u32) -> Option<(usize, usize, usize)> {
     match version {

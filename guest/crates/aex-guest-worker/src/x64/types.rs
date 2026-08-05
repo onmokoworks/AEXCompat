@@ -100,6 +100,7 @@ struct GuestState {
     pending_iterate: Option<PendingIterate>,
     vcomp_dynamic_loop: Option<VcompDynamicLoop>,
     vcomp_requested_threads: Option<u32>,
+    msvcp_mutexes: HashMap<u64, MsvcpMutex>,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
     crt_heap: CrtHeap,
@@ -141,6 +142,12 @@ struct VcompDynamicLoop {
     upper: i32,
     chunk: i32,
     exhausted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MsvcpMutex {
+    mutex_type: u32,
+    lock_count: u32,
 }
 
 #[derive(Clone, Debug)]

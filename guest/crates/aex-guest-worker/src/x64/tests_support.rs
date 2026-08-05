@@ -1348,6 +1348,187 @@
     }
 
     #[test]
+    fn msvcp_mutex_lifecycle_is_recursive_serial_and_session_local() {
+        const INIT: u64 = STUB_BASE + 0x210;
+        const LOCK: u64 = STUB_BASE + 0x220;
+        const UNLOCK: u64 = STUB_BASE + 0x230;
+        const DESTROY: u64 = STUB_BASE + 0x240;
+        const HARDWARE: u64 = STUB_BASE + 0x250;
+        let mut engine = test_engine(&[0xc3]);
+        for (stub, symbol) in [
+            (INIT, "_Mtx_init_in_situ"),
+            (LOCK, "_Mtx_lock"),
+            (UNLOCK, "_Mtx_unlock"),
+            (DESTROY, "_Mtx_destroy_in_situ"),
+            (HARDWARE, "_Thrd_hardware_concurrency"),
+        ] {
+            install_win64_import(&mut engine.unicorn, stub, "MSVCP140.DLL", symbol).unwrap();
+        }
+        let object = DATA_BASE + 0x900;
+
+        assert_eq!(
+            engine
+                .call_win64(INIT, [object, OBSERVED_MSVCP_MUTEX_TYPE as u64, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.call_win64(LOCK, [object, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(engine.call_win64(LOCK, [object, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(
+            engine.unicorn.get_data().msvcp_mutexes.get(&object),
+            Some(&MsvcpMutex {
+                mutex_type: OBSERVED_MSVCP_MUTEX_TYPE,
+                lock_count: 2,
+            })
+        );
+        assert_eq!(
+            engine.call_win64(UNLOCK, [object, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.call_win64(UNLOCK, [object, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.call_win64(DESTROY, [object, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert!(engine.unicorn.get_data().msvcp_mutexes.is_empty());
+        assert_eq!(engine.call_win64(HARDWARE, [0; 6]).unwrap(), 1);
+        assert!(
+            test_engine(&[0xc3])
+                .unicorn
+                .get_data()
+                .msvcp_mutexes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn msvcp_mutex_rejects_invalid_and_unbalanced_lifecycle() {
+        const INIT: u64 = STUB_BASE + 0x260;
+        const LOCK: u64 = STUB_BASE + 0x270;
+        const UNLOCK: u64 = STUB_BASE + 0x280;
+        const DESTROY: u64 = STUB_BASE + 0x290;
+        let mut engine = test_engine(&[0xc3]);
+        for (stub, symbol) in [
+            (INIT, "_Mtx_init_in_situ"),
+            (LOCK, "_Mtx_lock"),
+            (UNLOCK, "_Mtx_unlock"),
+            (DESTROY, "_Mtx_destroy_in_situ"),
+        ] {
+            install_win64_import(&mut engine.unicorn, stub, "msvcp140.dll", symbol).unwrap();
+        }
+        let object = DATA_BASE + 0xa00;
+
+        let error = engine
+            .call_win64(INIT, [object, 1, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("mutex type"), "{error}");
+        engine.unicorn.get_data_mut().callback_error = None;
+        engine
+            .call_win64(INIT, [object, OBSERVED_MSVCP_MUTEX_TYPE as u64, 0, 0, 0, 0])
+            .unwrap();
+
+        let error = engine
+            .call_win64(INIT, [object, OBSERVED_MSVCP_MUTEX_TYPE as u64, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("already initialized"), "{error}");
+        engine.unicorn.get_data_mut().callback_error = None;
+        let error = engine
+            .call_win64(UNLOCK, [object, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("unbalanced"), "{error}");
+        engine.unicorn.get_data_mut().callback_error = None;
+        engine.call_win64(LOCK, [object, 0, 0, 0, 0, 0]).unwrap();
+        let error = engine
+            .call_win64(DESTROY, [object, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("lock count 1"), "{error}");
+        engine.unicorn.get_data_mut().callback_error = None;
+        let foreign = DATA_BASE + 0xb00;
+        let error = engine
+            .call_win64(LOCK, [foreign, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("not initialized"), "{error}");
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        engine
+            .call_win64(UNLOCK, [object, 0, 0, 0, 0, 0])
+            .unwrap();
+        engine
+            .call_win64(DESTROY, [object, 0, 0, 0, 0, 0])
+            .unwrap();
+        let error = engine
+            .call_win64(DESTROY, [object, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("not initialized"), "{error}");
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        let error = engine
+            .call_win64(INIT, [0, OBSERVED_MSVCP_MUTEX_TYPE as u64, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("object is null"), "{error}");
+    }
+
+    #[test]
+    fn msvcp_mutex_is_library_qualified_and_bounded() {
+        for symbol in [
+            "_Mtx_init_in_situ",
+            "_Mtx_lock",
+            "_Mtx_unlock",
+            "_Mtx_destroy_in_situ",
+            "_Thrd_hardware_concurrency",
+        ] {
+            assert_eq!(
+                dispatch_win64_import("fixture.dll", symbol),
+                Win64ImportDispatch::UnsupportedLegacyImport
+            );
+        }
+
+        const INIT: u64 = STUB_BASE + 0x2a0;
+        const LOCK: u64 = STUB_BASE + 0x2b0;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            INIT,
+            "msvcp140.dll",
+            "_Mtx_init_in_situ",
+        )
+        .unwrap();
+        install_win64_import(&mut engine.unicorn, LOCK, "msvcp140.dll", "_Mtx_lock")
+            .unwrap();
+        let object = DATA_BASE + 0xc00;
+        for index in 0..MAX_MSVCP_MUTEXES {
+            engine.unicorn.get_data_mut().msvcp_mutexes.insert(
+                0x1000 + index as u64,
+                MsvcpMutex {
+                    mutex_type: OBSERVED_MSVCP_MUTEX_TYPE,
+                    lock_count: 0,
+                },
+            );
+        }
+        let error = engine
+            .call_win64(INIT, [object, OBSERVED_MSVCP_MUTEX_TYPE as u64, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("mutex count"), "{error}");
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        engine.unicorn.get_data_mut().msvcp_mutexes.clear();
+        engine.unicorn.get_data_mut().msvcp_mutexes.insert(
+            object,
+            MsvcpMutex {
+                mutex_type: OBSERVED_MSVCP_MUTEX_TYPE,
+                lock_count: MAX_MSVCP_MUTEX_RECURSION,
+            },
+        );
+        let error = engine
+            .call_win64(LOCK, [object, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("recursion"), "{error}");
+    }
+
+    #[test]
     fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
         let mut engine = test_engine(&[0xc3]);
         engine
