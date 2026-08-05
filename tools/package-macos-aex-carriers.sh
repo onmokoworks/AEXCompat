@@ -100,3 +100,4 @@ if [ "$distribution_tier" = "developer-id" ]; then
 else
   echo "Local-only package: ad-hoc signatures are not notarized or Gatekeeper-approved for distribution"
 fi
+echo "Verify package: $root/tools/verify-macos-aex-carrier-package.sh '$output'"

@@ -76,6 +76,7 @@ def test_distribution_tiers_keep_arm64_local_default_and_publication_fail_closed
     build = source("tools/build-macos-aex-carriers.sh")
     package = source("tools/package-macos-aex-carriers.sh")
     notarize = source("tools/notarize-macos-aex-carriers.sh")
+    package_verifier = source("tools/verify-macos-aex-carrier-package.sh")
 
     for contract in (
         "codesign --verify --strict",
@@ -118,6 +119,19 @@ def test_distribution_tiers_keep_arm64_local_default_and_publication_fail_closed
     assert 'if [ "$include_native" = "1" ]' in signer
     assert 'include_native=${AEXCOMPAT_INCLUDE_NATIVE_CARRIER:-0}' in verifier
     assert 'if [ "$include_native" = "1" ]' in verifier
+    for contract in (
+        "hdiutil verify",
+        "hdiutil attach -nobrowse -readonly",
+        'data["schema"] != "aexcompat-macos-carriers-v1"',
+        'data["distribution_tier"] not in {"local-adhoc", "developer-id"}',
+        'hashlib.sha256(payload).hexdigest()',
+        'actual_paths != declared_paths',
+        "codesign --verify --strict",
+        '"$arm64_worker" --help',
+        'if [ -f "$native_worker" ]',
+        "hdiutil detach",
+    ):
+        assert contract in package_verifier
 
 
 def test_guest_execution_admission_is_fail_closed():

@@ -134,6 +134,11 @@ is the supported Mac-only development package: it is not notarized or approved
 by Gatekeeper for third-party distribution. Setting
 `AEXCOMPAT_DISTRIBUTION_TIER=developer-id` selects the optional publication
 path and requires Developer ID Application signatures.
+`tools/verify-macos-aex-carrier-package.sh` verifies the DMG checksum, mounts it
+read-only, strictly validates the closed manifest and exact file set, recomputes
+worker sizes and SHA-256 identities, checks nested signatures and thin
+architectures, launches every included helper, and detaches the image. The
+normal arm64-only package verification never invokes Rosetta.
 `tools/notarize-macos-aex-carriers.sh` requires a named Keychain profile in
 `AEXCOMPAT_NOTARYTOOL_PROFILE`, waits for the submission, retains the complete
 submission response and notary log, requires `Accepted`, staples and validates
