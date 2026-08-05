@@ -26,6 +26,11 @@ enum LegacyWin64Import {
     MemoryCopy,
     MemChr,
     StdioVsnprintfS,
+    MsvcpMutexInit,
+    MsvcpMutexLock,
+    MsvcpMutexUnlock,
+    MsvcpMutexDestroy,
+    MsvcpHardwareConcurrency,
     CxxThrowException,
     CosF,
     ExpF,
@@ -266,6 +271,25 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "__stdio_common_vsnprintf_s") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("msvcp140.dll", "_Mtx_init_in_situ") => LegacyWin64Import::MsvcpMutexInit,
+        ("msvcp140.dll", "_Mtx_lock") => LegacyWin64Import::MsvcpMutexLock,
+        ("msvcp140.dll", "_Mtx_unlock") => LegacyWin64Import::MsvcpMutexUnlock,
+        ("msvcp140.dll", "_Mtx_destroy_in_situ") => LegacyWin64Import::MsvcpMutexDestroy,
+        ("msvcp140.dll", "_Thrd_hardware_concurrency") => {
+            LegacyWin64Import::MsvcpHardwareConcurrency
+        }
+        (_, symbol)
+            if matches!(
+                symbol,
+                "_Mtx_init_in_situ"
+                    | "_Mtx_lock"
+                    | "_Mtx_unlock"
+                    | "_Mtx_destroy_in_situ"
+                    | "_Thrd_hardware_concurrency"
+            ) =>
+        {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         (_, symbol) => match symbol {
             "malloc" => LegacyWin64Import::Malloc,
             "calloc" => LegacyWin64Import::Calloc,
@@ -390,6 +414,48 @@ fn install_win64_import(
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_stdio_common_vsnprintf_s(unicorn);
                     }),
+                )?;
+            }
+            LegacyWin64Import::MsvcpMutexInit => {
+                uc("write mutex init return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install mutex init import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_msvcp_mutex_init(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::MsvcpMutexLock => {
+                uc("write mutex lock return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install mutex lock import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_msvcp_mutex_lock(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::MsvcpMutexUnlock => {
+                uc("write mutex unlock return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install mutex unlock import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_msvcp_mutex_unlock(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::MsvcpMutexDestroy => {
+                uc("write mutex destroy return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install mutex destroy import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_msvcp_mutex_destroy(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::MsvcpHardwareConcurrency => {
+                uc(
+                    "install deterministic hardware concurrency import",
+                    unicorn.mem_write(stub, &deterministic_i32_stub(1)),
                 )?;
             }
             LegacyWin64Import::CxxThrowException => {

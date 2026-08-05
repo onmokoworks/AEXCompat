@@ -931,6 +931,123 @@ fn emulate_stdio_common_vsnprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn finish_msvcp_mutex_callback(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    result: Result<(), String>,
+) {
+    match result {
+        Ok(()) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn read_msvcp_mutex_object(
+    unicorn: &Unicorn<'_, GuestState>,
+    operation: &str,
+) -> Result<u64, String> {
+    let object = read_win64_import_argument(unicorn, 0)?;
+    if object == 0 {
+        return Err(format!("MSVCP mutex {operation} object is null"));
+    }
+    unicorn
+        .mem_read_as_vec(object, 1)
+        .map_err(|error| format!("MSVCP mutex {operation} object is not mapped: {error}"))?;
+    Ok(object)
+}
+
+fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| {
+        let object = read_msvcp_mutex_object(unicorn, "init")?;
+        let mutex_type = read_win64_import_argument(unicorn, 1)? as u32;
+        if mutex_type != OBSERVED_MSVCP_MUTEX_TYPE {
+            return Err(format!(
+                "MSVCP mutex type {mutex_type:#x} is unsupported; expected {OBSERVED_MSVCP_MUTEX_TYPE:#x}"
+            ));
+        }
+        let state = unicorn.get_data_mut();
+        if state.msvcp_mutexes.contains_key(&object) {
+            return Err(format!("MSVCP mutex {object:#x} is already initialized"));
+        }
+        if state.msvcp_mutexes.len() >= MAX_MSVCP_MUTEXES {
+            return Err(format!(
+                "MSVCP mutex count exceeds {MAX_MSVCP_MUTEXES}"
+            ));
+        }
+        state.msvcp_mutexes.insert(
+            object,
+            MsvcpMutex {
+                mutex_type,
+                lock_count: 0,
+            },
+        );
+        Ok(())
+    })();
+    finish_msvcp_mutex_callback(unicorn, result);
+}
+
+fn emulate_msvcp_mutex_lock(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| {
+        let object = read_msvcp_mutex_object(unicorn, "lock")?;
+        let mutex = unicorn
+            .get_data_mut()
+            .msvcp_mutexes
+            .get_mut(&object)
+            .ok_or_else(|| format!("MSVCP mutex {object:#x} is not initialized"))?;
+        if mutex.lock_count >= MAX_MSVCP_MUTEX_RECURSION {
+            return Err(format!(
+                "MSVCP mutex {object:#x} recursion exceeds {MAX_MSVCP_MUTEX_RECURSION}"
+            ));
+        }
+        mutex.lock_count += 1;
+        Ok(())
+    })();
+    finish_msvcp_mutex_callback(unicorn, result);
+}
+
+fn emulate_msvcp_mutex_unlock(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| {
+        let object = read_msvcp_mutex_object(unicorn, "unlock")?;
+        let mutex = unicorn
+            .get_data_mut()
+            .msvcp_mutexes
+            .get_mut(&object)
+            .ok_or_else(|| format!("MSVCP mutex {object:#x} is not initialized"))?;
+        if mutex.lock_count == 0 {
+            return Err(format!("MSVCP mutex {object:#x} unlock is unbalanced"));
+        }
+        mutex.lock_count -= 1;
+        Ok(())
+    })();
+    finish_msvcp_mutex_callback(unicorn, result);
+}
+
+fn emulate_msvcp_mutex_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| {
+        let object = read_msvcp_mutex_object(unicorn, "destroy")?;
+        let state = unicorn.get_data_mut();
+        let mutex = state
+            .msvcp_mutexes
+            .get(&object)
+            .ok_or_else(|| format!("MSVCP mutex {object:#x} is not initialized"))?;
+        if mutex.lock_count != 0 {
+            return Err(format!(
+                "MSVCP mutex {object:#x} destroyed with lock count {}",
+                mutex.lock_count
+            ));
+        }
+        state.msvcp_mutexes.remove(&object);
+        Ok(())
+    })();
+    finish_msvcp_mutex_callback(unicorn, result);
+}
+
 fn emulate_strncpy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let destination = unicorn
