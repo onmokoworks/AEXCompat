@@ -102,7 +102,9 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
        in.input_write_advertised},
       {smart.runtime->wide_time_checkout_allowed, smart.runtime->shutter_dependency_advertised,
        !in.nop_render_advertised, smart.selector_dispatched, false},
-      smart.runtime->rejected_temporal_checkouts,
+      report::make_temporal_checkout_counters(
+          report::LayerTemporalRefusals{smart.runtime->rejected_temporal_checkouts},
+          report::ParameterTemporalRefusals{checkout.rejected_temporal}),
       {host_telemetry.comp_bg_color_successes.load(std::memory_order_relaxed),
        host_telemetry.comp_bg_color_rejections.load(std::memory_order_relaxed),
        host_telemetry.guid_mix_in_calls.load(std::memory_order_relaxed),
