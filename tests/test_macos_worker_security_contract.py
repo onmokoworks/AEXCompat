@@ -130,8 +130,29 @@ def test_distribution_tiers_keep_arm64_local_default_and_publication_fail_closed
         '"$arm64_worker" --help',
         'if [ -f "$native_worker" ]',
         "hdiutil detach",
+        "hdiutil detach -force",
+        'while [ "$attempts" -lt 5 ]',
+        'if [ "$attached" = "0" ]',
     ):
         assert contract in package_verifier
+
+
+def test_local_prepare_path_is_arm64_only_by_default_and_credential_free():
+    prepare = source("tools/prepare-local-macos-aex-carriers.sh")
+    build = source("tools/build-macos-aex-carriers.sh")
+
+    for contract in (
+        "build-macos-aex-carriers.sh",
+        "AEXCOMPAT_CODESIGN_IDENTITY=-",
+        "AEXCOMPAT_DISTRIBUTION_TIER=local-adhoc",
+        "package-macos-aex-carriers.sh",
+        "verify-macos-aex-carrier-package.sh",
+    ):
+        assert contract in prepare
+    assert "notarytool" not in prepare
+    assert "Developer ID" not in prepare
+    assert "AEXCOMPAT_INCLUDE_NATIVE_CARRIER=" not in prepare
+    assert 'include_native=${AEXCOMPAT_INCLUDE_NATIVE_CARRIER:-0}' in build
 
 
 def test_guest_execution_admission_is_fail_closed():

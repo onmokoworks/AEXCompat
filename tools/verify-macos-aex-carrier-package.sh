@@ -16,11 +16,31 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/aexcompat-package-verify.XXXXXX")
 mount_point="$scratch/mount"
 attached=0
 
+detach_image() {
+  attempts=0
+  while [ "$attempts" -lt 5 ]; do
+    if hdiutil detach "$mount_point" >/dev/null 2>&1; then
+      attached=0
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.2
+  done
+  if hdiutil detach -force "$mount_point" >/dev/null 2>&1; then
+    attached=0
+    return 0
+  fi
+  echo "failed to detach owned package mount: $mount_point" >&2
+  return 1
+}
+
 cleanup() {
   if [ "$attached" = "1" ]; then
-    hdiutil detach "$mount_point" >/dev/null 2>&1 || true
+    detach_image || true
   fi
-  rm -rf "$scratch"
+  if [ "$attached" = "0" ]; then
+    rm -rf "$scratch"
+  fi
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -95,6 +115,5 @@ if [ -f "$native_worker" ]; then
   arch -x86_64 "$native_worker" --help >/dev/null 2>&1 || [ "$?" -eq 2 ]
 fi
 
-hdiutil detach "$mount_point" >/dev/null
-attached=0
+detach_image
 echo "macOS carrier DMG integrity, manifest, signatures, architectures, and launch probes verified"
