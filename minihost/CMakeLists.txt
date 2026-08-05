@@ -169,14 +169,6 @@ target_include_directories(aexcompat_trace_writer PUBLIC
   ../instruments/common
 )
 
-add_executable(aex_l1_worker
-  src/main.cpp
-  src/worker_openmp_policy.cpp
-)
-target_compile_features(aex_l1_worker PRIVATE cxx_std_17)
-target_compile_definitions(aex_l1_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(aex_l1_worker PRIVATE bcrypt)
-
 set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/gpu_cuda_backend.cpp
     src/gpu_directx_backend.cpp

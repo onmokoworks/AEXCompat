@@ -101,19 +101,14 @@ fn main() {
         };
         std::process::exit(if passed { 0 } else { 3 });
     }
-    if args.len() == 4 && (args[1] == "l1" || args[1] == "l2") {
+    if args.len() == 4 && args[1] == "l2" {
         let output = PathBuf::from(&args[3]);
         if !args[3].ends_with(".json") {
             eprintln!("observation output must be JSON");
             std::process::exit(2);
         }
-        let result = if args[1] == "l1" {
-            let worker = repository.join("target/minihost-build/aex_l1_worker.exe");
-            aexcompat_broker::l1::run(repository, &worker, &args[2], &output)
-        } else {
-            let worker = repository.join("target/minihost-build/aex_l2_worker.exe");
-            aexcompat_broker::l2::run(repository, &worker, &args[2], &output)
-        };
+        let worker = repository.join("target/minihost-build/aex_l2_worker.exe");
+        let result = aexcompat_broker::l2::run(repository, &worker, &args[2], &output);
         let passed = match result {
             Ok(passed) => passed,
             Err(_) => {
@@ -125,16 +120,9 @@ fn main() {
     }
     if args.len() != 3 || !args[2].ends_with(".json") {
         eprintln!(
-            "usage: broker <selftest|l1-scattermap|l2-scattermap|render-scattermap|smart-scattermap> <create-new-json-output>"
+            "usage: broker <selftest|l2-scattermap|render-scattermap|smart-scattermap> <create-new-json-output>"
         );
         std::process::exit(2);
-    }
-    if args[1] == "l1-scattermap" {
-        let worker = repository.join("target/minihost-build/aex_l1_worker.exe");
-        let passed =
-            aexcompat_broker::l1::run(repository, &worker, "scattermap", &PathBuf::from(&args[2]))
-                .expect("L1 broker run");
-        std::process::exit(if passed { 0 } else { 1 });
     }
     if args[1] == "l2-scattermap" {
         let worker = repository.join("target/minihost-build/aex_l2_worker.exe");

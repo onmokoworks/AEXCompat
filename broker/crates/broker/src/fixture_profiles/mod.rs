@@ -17,7 +17,6 @@ pub struct L2ObservationPolicy {
 }
 
 pub struct ObservationProfile {
-    pub l1_selection: SelectionPolicy,
     pub l2: L2ObservationPolicy,
     pub descriptor_manifest: ManifestPolicy,
 }
@@ -77,17 +76,11 @@ static MASKOFFSET: RegisteredProfile = RegisteredProfile {
 };
 
 static SCATTERMAP_OBSERVATION: ObservationProfile = ObservationProfile {
-    l1_selection: SelectionPolicy {
-        allowlist_path: "target/l1-allowlist/active.local.json",
-    },
     l2: SCATTERMAP.l2_observation,
     descriptor_manifest: SCATTERMAP.descriptor_manifest,
 };
 
 static MASKOFFSET_OBSERVATION: ObservationProfile = ObservationProfile {
-    l1_selection: SelectionPolicy {
-        allowlist_path: "target/l1-allowlist/maskoffset.active.local.json",
-    },
     l2: L2ObservationPolicy {
         selection: SelectionPolicy {
             allowlist_path: "target/l2-allowlist/maskoffset.active.local.json",

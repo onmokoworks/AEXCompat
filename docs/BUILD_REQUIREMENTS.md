@@ -10,7 +10,7 @@
 |---|---|---|
 | Rust broker / harness (`broker/`) | `aexcompat-harness.exe` (GUI) ほか | Rust + MSVC Build Tools + Windows SDK |
 | Python テスト (`tests/`) | - | uv (`pyproject.toml` + `uv.lock`、一部は下記 SDK / VS も) |
-| C++ worker (`minihost/`) | `aex_l1_worker.exe` / `aex_l2_worker.exe` ほか | CMake + MSVC (After Effects SDK 不要) |
+| C++ worker (`minihost/`) | `aex_l2_worker.exe` / `aex_render_worker.exe` ほか | CMake + MSVC (After Effects SDK 不要) |
 | probe AEX (`instruments/`) | `pf_*_probe.aex` ほか | CMake + Visual Studio + After Effects SDK |
 | SDK sample fixture (v143 固定分: Grabba / Supervisor 等) | `Grabba.aex` ほか | v143 toolset + MSBuild + After Effects SDK (Supervisor は VS 2022 Build Tools 既定パス固定) |
 | AE oracle 取得 (`tools/*.jsx`) | 参照画像 / trace | After Effects 25.2 実機 |
@@ -101,7 +101,7 @@ cmake --build target\minihost-build
 
 ```powershell
 Get-ChildItem target\minihost-build\aex_*.exe
-# aex_l1_worker.exe / aex_l2_worker.exe / aex_render_worker.exe / aex_smart_worker.exe
+# aex_l2_worker.exe / aex_render_worker.exe / aex_smart_worker.exe ほか
 ```
 
 ### ヘッダ依存追跡の検証 (issue #657)
