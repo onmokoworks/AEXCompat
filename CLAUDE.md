@@ -52,24 +52,24 @@ and bounded image input/output are now the main implementation path.
   protection belongs in cache keys (the multifilter `BuildFingerprint` pattern:
   results are keyed by plug-in bytes + host build, so a rebuild invalidates its
   own cache), not in dispatch gates.
-- Implementation gap: the code still contains the enforcement this policy
-  removes. Approval receipts still gate the `l1`/`l2`/`render*`/`smart*`/
-  `render_request` CLI routes read a selection file that still names the
-  plug-in, and `l1` still dispatches through normal-token `run_isolated` with
-  an argv path (#732). The worker freshness gate (#729), the module audit
-  (#730), the selection file's recorded identity (#732), and the interactive
-  pre-selection hash match (#739) were all demoted to recorded warnings; the restricted
-  token, protected DACL, and staged-tree deny ACEs were removed in #731
-  (staging now records which bytes ran; the worker shares the broker's token).
-  Until the rest lands,
-  do not treat the existing enforcement as policy, do not add new enforcement,
-  and when touching one of these routes migrate it toward the floor rather
-  than extending the gate. `l1` is the last plug-in-loading normal-token route
-  and is settled by #732. `selftest` launches only the broker's own probe
-  workers and loads no plug-in, so it is out of scope. The receipt-free routes
-  that already exist (`render-video-batch`, `InteractiveRenderSession`,
-  self-hash admission in `dispatch_secure_image`) are the floor's reference
-  implementations.
+- Implementation gap: most of the enforcement this policy removes is gone.
+  The worker freshness gate (#729), the module audit (#730), the selection
+  file's recorded identity (#732), and the interactive pre-selection hash
+  match (#739) are recorded warnings rather than refusals; the restricted
+  token, protected DACL, and staged-tree deny ACEs were removed in #731 (the
+  worker shares the broker's token, and staging records which bytes ran); the
+  compiled-in fixture identities went with #733; and the per-frame output hash
+  became an extent cross-check in #690. What remains: the
+  `l1`/`l2`/`render*`/`smart*`/`render_request` CLI routes read a selection
+  file that names the plug-in and its dependencies, and `l1` still dispatches
+  through normal-token `run_isolated` with an argv path (#732, the last
+  plug-in-loading normal-token route; `selftest` launches only the broker's own
+  probe workers and is out of scope). Sealed staging still copies and hashes
+  the load tree, which #751 is reconsidering. Do not add new enforcement, and
+  when touching one of these routes migrate it toward the floor rather than
+  extending a gate. The receipt-free routes that already exist
+  (`render-video-batch`, `InteractiveRenderSession`, self-hash admission in
+  `dispatch_secure_image`) are the floor's reference implementations.
 - Keep `imports/` as frozen provenance. Do not redistribute Adobe SDK headers
   or source; the SDK selected by `AFTER_EFFECTS_SDK_ROOT` is an external ABI
   verification and fixture-build input only.
