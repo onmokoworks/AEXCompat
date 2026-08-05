@@ -1048,6 +1048,173 @@ fn emulate_msvcp_mutex_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_msvcp_mutex_callback(unicorn, result);
 }
 
+fn read_vcruntime_exception_data(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    label: &str,
+) -> Result<VcruntimeExceptionData, String> {
+    if address == 0 {
+        return Err(format!("VCRUNTIME exception {label} pointer is null"));
+    }
+    let bytes = unicorn
+        .mem_read_as_vec(address, VCRUNTIME_EXCEPTION_DATA_BYTES)
+        .map_err(|error| format!("VCRUNTIME exception {label} read: {error}"))?;
+    let what = u64::from_le_bytes(
+        bytes[..8]
+            .try_into()
+            .map_err(|_| format!("VCRUNTIME exception {label} what has wrong size"))?,
+    );
+    let do_free = match bytes[8] {
+        0 => false,
+        1 => true,
+        value => {
+            return Err(format!(
+                "VCRUNTIME exception {label} ownership flag {value} is invalid"
+            ));
+        }
+    };
+    Ok(VcruntimeExceptionData { what, do_free })
+}
+
+fn write_vcruntime_exception_data(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    address: u64,
+    data: VcruntimeExceptionData,
+    label: &str,
+) -> Result<(), String> {
+    let mut bytes = [0u8; VCRUNTIME_EXCEPTION_DATA_BYTES];
+    bytes[..8].copy_from_slice(&data.what.to_le_bytes());
+    bytes[8] = u8::from(data.do_free);
+    unicorn
+        .mem_write(address, &bytes)
+        .map_err(|error| format!("VCRUNTIME exception {label} write: {error}"))
+}
+
+fn finish_vcruntime_exception_callback(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    result: Result<(), String>,
+) {
+    match result {
+        Ok(()) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_vcruntime_exception_copy(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| {
+        let source_address = read_win64_import_argument(unicorn, 0)?;
+        let destination_address = read_win64_import_argument(unicorn, 1)?;
+        let source = read_vcruntime_exception_data(unicorn, source_address, "source")?;
+        let destination =
+            read_vcruntime_exception_data(unicorn, destination_address, "destination")?;
+        if destination.what != 0 || destination.do_free {
+            return Err("VCRUNTIME exception copy destination is not empty".to_string());
+        }
+
+        if !source.do_free || source.what == 0 {
+            return write_vcruntime_exception_data(
+                unicorn,
+                destination_address,
+                VcruntimeExceptionData {
+                    what: source.what,
+                    do_free: false,
+                },
+                "destination",
+            );
+        }
+
+        let source_allocation = unicorn
+            .get_data()
+            .crt_heap
+            .allocations()
+            .find_map(|(pointer, allocation)| (pointer == source.what).then_some(allocation))
+            .ok_or_else(|| {
+                format!(
+                    "VCRUNTIME exception owned string {:#x} is not a live CRT allocation",
+                    source.what
+                )
+            })?;
+        let string = read_crt_stdio_c_string(
+            unicorn,
+            source.what,
+            source_allocation.requested_size,
+            "exception string",
+        )?;
+        let allocation_size = (string.len() as u64)
+            .checked_add(1)
+            .ok_or_else(|| "VCRUNTIME exception string size overflow".to_string())?;
+        let copy = allocate_crt_region(unicorn, allocation_size).map_err(|error| error.to_string())?;
+        let mut terminated = string;
+        terminated.push(0);
+        if let Err(error) = unicorn.mem_write(copy, &terminated) {
+            let _ = free_crt_region(unicorn, copy);
+            return Err(format!("VCRUNTIME exception string copy write: {error}"));
+        }
+        if let Err(error) = write_vcruntime_exception_data(
+            unicorn,
+            destination_address,
+            VcruntimeExceptionData {
+                what: copy,
+                do_free: true,
+            },
+            "destination",
+        ) {
+            let _ = free_crt_region(unicorn, copy);
+            return Err(error);
+        }
+        Ok(())
+    })();
+    finish_vcruntime_exception_callback(unicorn, result);
+}
+
+fn emulate_vcruntime_exception_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| {
+        let data_address = read_win64_import_argument(unicorn, 0)?;
+        let data = read_vcruntime_exception_data(unicorn, data_address, "data")?;
+        // Verify writability before releasing owned storage so a read-only
+        // object cannot turn a failed destroy into a leaked stale pointer.
+        write_vcruntime_exception_data(unicorn, data_address, data, "data preflight")?;
+        if data.do_free && data.what != 0 {
+            let allocation = unicorn
+                .get_data()
+                .crt_heap
+                .allocations()
+                .find_map(|(pointer, allocation)| (pointer == data.what).then_some(allocation))
+                .ok_or_else(|| {
+                    format!(
+                        "VCRUNTIME exception owned string {:#x} is not a live CRT allocation",
+                        data.what
+                    )
+                })?;
+            let allocation_end = data
+                .what
+                .checked_add(allocation.backing_size)
+                .ok_or_else(|| "VCRUNTIME exception owned allocation overflow".to_string())?;
+            if (data.what..allocation_end).contains(&data_address) {
+                return Err("VCRUNTIME exception data overlaps its owned string allocation".into());
+            }
+            free_crt_region(unicorn, data.what)?;
+        }
+        write_vcruntime_exception_data(
+            unicorn,
+            data_address,
+            VcruntimeExceptionData {
+                what: 0,
+                do_free: false,
+            },
+            "data",
+        )
+    })();
+    finish_vcruntime_exception_callback(unicorn, result);
+}
+
 fn emulate_strncpy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let destination = unicorn

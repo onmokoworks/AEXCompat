@@ -31,6 +31,8 @@ enum LegacyWin64Import {
     MsvcpMutexUnlock,
     MsvcpMutexDestroy,
     MsvcpHardwareConcurrency,
+    VcruntimeExceptionCopy,
+    VcruntimeExceptionDestroy,
     CxxThrowException,
     CosF,
     ExpF,
@@ -290,6 +292,15 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("vcruntime140.dll", "__std_exception_copy") => {
+            LegacyWin64Import::VcruntimeExceptionCopy
+        }
+        ("vcruntime140.dll", "__std_exception_destroy") => {
+            LegacyWin64Import::VcruntimeExceptionDestroy
+        }
+        (_, "__std_exception_copy" | "__std_exception_destroy") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         (_, symbol) => match symbol {
             "malloc" => LegacyWin64Import::Malloc,
             "calloc" => LegacyWin64Import::Calloc,
@@ -456,6 +467,24 @@ fn install_win64_import(
                 uc(
                     "install deterministic hardware concurrency import",
                     unicorn.mem_write(stub, &deterministic_i32_stub(1)),
+                )?;
+            }
+            LegacyWin64Import::VcruntimeExceptionCopy => {
+                uc("write exception copy return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install exception copy import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_vcruntime_exception_copy(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::VcruntimeExceptionDestroy => {
+                uc("write exception destroy return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install exception destroy import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_vcruntime_exception_destroy(unicorn);
+                    }),
                 )?;
             }
             LegacyWin64Import::CxxThrowException => {

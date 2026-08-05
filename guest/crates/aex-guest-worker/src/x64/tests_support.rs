@@ -1529,6 +1529,240 @@
     }
 
     #[test]
+    fn vcruntime_exception_copy_shares_unowned_data_and_destroy_is_idempotent() {
+        const COPY: u64 = STUB_BASE + 0x2c0;
+        const DESTROY: u64 = STUB_BASE + 0x2d0;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                COPY,
+                "VCRUNTIME140.DLL",
+                "__std_exception_copy",
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::VcruntimeExceptionCopy)
+        );
+        install_win64_import(
+            &mut engine.unicorn,
+            DESTROY,
+            "vcruntime140.dll",
+            "__std_exception_destroy",
+        )
+        .unwrap();
+        let source = DATA_BASE + 0x100;
+        let destination = DATA_BASE + 0x120;
+        let message = DATA_BASE + 0x200;
+        engine.unicorn.mem_write(message, b"static error\0").unwrap();
+        write_vcruntime_exception_data(
+            &mut engine.unicorn,
+            source,
+            VcruntimeExceptionData {
+                what: message,
+                do_free: false,
+            },
+            "test source",
+        )
+        .unwrap();
+        write_vcruntime_exception_data(
+            &mut engine.unicorn,
+            destination,
+            VcruntimeExceptionData {
+                what: 0,
+                do_free: false,
+            },
+            "test destination",
+        )
+        .unwrap();
+
+        assert_eq!(
+            engine
+                .call_win64(COPY, [source, destination, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            read_vcruntime_exception_data(&engine.unicorn, destination, "test").unwrap(),
+            VcruntimeExceptionData {
+                what: message,
+                do_free: false,
+            }
+        );
+        assert_eq!(
+            engine
+                .call_win64(DESTROY, [destination, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .call_win64(DESTROY, [destination, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(destination, VCRUNTIME_EXCEPTION_DATA_BYTES)
+                .unwrap(),
+            [0; VCRUNTIME_EXCEPTION_DATA_BYTES]
+        );
+    }
+
+    #[test]
+    fn vcruntime_exception_copy_deep_copies_and_frees_owned_crt_string() {
+        const COPY: u64 = STUB_BASE + 0x2e0;
+        const DESTROY: u64 = STUB_BASE + 0x2f0;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            COPY,
+            "vcruntime140.dll",
+            "__std_exception_copy",
+        )
+        .unwrap();
+        install_win64_import(
+            &mut engine.unicorn,
+            DESTROY,
+            "vcruntime140.dll",
+            "__std_exception_destroy",
+        )
+        .unwrap();
+        let source = DATA_BASE + 0x300;
+        let destination = DATA_BASE + 0x320;
+        let message = b"owned exception\0";
+        let owned = allocate_crt_region(&mut engine.unicorn, message.len() as u64).unwrap();
+        engine.unicorn.mem_write(owned, message).unwrap();
+        write_vcruntime_exception_data(
+            &mut engine.unicorn,
+            source,
+            VcruntimeExceptionData {
+                what: owned,
+                do_free: true,
+            },
+            "test source",
+        )
+        .unwrap();
+        engine
+            .unicorn
+            .mem_write(destination, &[0; VCRUNTIME_EXCEPTION_DATA_BYTES])
+            .unwrap();
+
+        engine
+            .call_win64(COPY, [source, destination, 0, 0, 0, 0])
+            .unwrap();
+        let copied =
+            read_vcruntime_exception_data(&engine.unicorn, destination, "test").unwrap();
+        assert!(copied.do_free);
+        assert_ne!(copied.what, owned);
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(copied.what, message.len())
+                .unwrap(),
+            message
+        );
+        assert_eq!(
+            engine.unicorn.get_data().crt_heap.live_bytes(),
+            (message.len() * 2) as u64
+        );
+
+        engine
+            .call_win64(DESTROY, [destination, 0, 0, 0, 0, 0])
+            .unwrap();
+        engine
+            .call_win64(DESTROY, [source, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+        assert!(engine.unicorn.mem_read_as_vec(owned, 1).is_err());
+        assert!(engine.unicorn.mem_read_as_vec(copied.what, 1).is_err());
+    }
+
+    #[test]
+    fn vcruntime_exception_data_is_library_qualified_and_fails_closed() {
+        for symbol in ["__std_exception_copy", "__std_exception_destroy"] {
+            assert_eq!(
+                dispatch_win64_import("fixture.dll", symbol),
+                Win64ImportDispatch::UnsupportedLegacyImport
+            );
+        }
+        const COPY: u64 = STUB_BASE + 0x300;
+        const DESTROY: u64 = STUB_BASE + 0x310;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            COPY,
+            "vcruntime140.dll",
+            "__std_exception_copy",
+        )
+        .unwrap();
+        install_win64_import(
+            &mut engine.unicorn,
+            DESTROY,
+            "vcruntime140.dll",
+            "__std_exception_destroy",
+        )
+        .unwrap();
+        let source = DATA_BASE + 0x400;
+        let destination = DATA_BASE + 0x420;
+        let mut malformed = [0u8; VCRUNTIME_EXCEPTION_DATA_BYTES];
+        malformed[8] = 2;
+        engine.unicorn.mem_write(source, &malformed).unwrap();
+        let error = engine
+            .call_win64(DESTROY, [source, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("ownership flag"), "{error}");
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        write_vcruntime_exception_data(
+            &mut engine.unicorn,
+            source,
+            VcruntimeExceptionData {
+                what: DATA_BASE + 0x500,
+                do_free: true,
+            },
+            "test foreign",
+        )
+        .unwrap();
+        let error = engine
+            .call_win64(DESTROY, [source, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not a live CRT allocation"),
+            "{error}"
+        );
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        let unterminated = allocate_crt_region(&mut engine.unicorn, 4).unwrap();
+        engine.unicorn.mem_write(unterminated, b"abcd").unwrap();
+        write_vcruntime_exception_data(
+            &mut engine.unicorn,
+            source,
+            VcruntimeExceptionData {
+                what: unterminated,
+                do_free: true,
+            },
+            "test unterminated",
+        )
+        .unwrap();
+        engine
+            .unicorn
+            .mem_write(destination, &[0; VCRUNTIME_EXCEPTION_DATA_BYTES])
+            .unwrap();
+        let error = engine
+            .call_win64(COPY, [source, destination, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds 4 bytes"), "{error}");
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(destination, VCRUNTIME_EXCEPTION_DATA_BYTES)
+                .unwrap(),
+            [0; VCRUNTIME_EXCEPTION_DATA_BYTES]
+        );
+    }
+
+    #[test]
     fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
         let mut engine = test_engine(&[0xc3]);
         engine

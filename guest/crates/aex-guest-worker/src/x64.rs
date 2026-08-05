@@ -198,6 +198,7 @@ const MAX_CRT_STDIO_ARGUMENTS: usize = 32;
 const OBSERVED_MSVCP_MUTEX_TYPE: u32 = 0x102;
 const MAX_MSVCP_MUTEXES: usize = 256;
 const MAX_MSVCP_MUTEX_RECURSION: u32 = 1024;
+const VCRUNTIME_EXCEPTION_DATA_BYTES: usize = 16;
 
 pub(crate) fn utility_suite_layout(version: u32) -> Option<(usize, usize, usize)> {
     match version {
