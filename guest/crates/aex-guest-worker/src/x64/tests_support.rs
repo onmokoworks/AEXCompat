@@ -1184,11 +1184,21 @@
         );
         assert_eq!(
             dispatch_win64_import("fixture.dll", "unknown_scalar"),
-            Win64ImportDispatch::LegacyZero
+            Win64ImportDispatch::UnsupportedLegacyImport
         );
         assert_eq!(
             dispatch_win64_import("KERNEL32.DLL", "unknown_system_symbol"),
-            Win64ImportDispatch::LegacyZero
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        assert_eq!(
+            dispatch_win64_import("KERNEL32.DLL", "GetSystemTimeAsFileTime"),
+            Win64ImportDispatch::LegacyImplemented(
+                LegacyWin64Import::GetSystemTimeAsFileTime
+            )
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "GetSystemTimeAsFileTime"),
+            Win64ImportDispatch::UnsupportedLegacyImport
         );
         assert_eq!(
             canonical_import_trace_label(
@@ -1197,6 +1207,72 @@
             ),
             "opencl.dll!clCreateKernel"
         );
+    }
+
+    #[test]
+    fn system_time_import_writes_a_deterministic_validated_filetime() {
+        let mut engine = test_engine(&[0xc3]);
+        let output = engine.allocate(8, 8).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RCX, output).unwrap();
+        emulate_get_system_time_as_file_time(&mut engine.unicorn);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+            132_223_104_000_000_000u64.to_le_bytes()
+        );
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+
+        engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+        emulate_get_system_time_as_file_time(&mut engine.unicorn);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains("output pointer is null"))
+        );
+    }
+
+    #[test]
+    fn bounded_windows_runtime_imports_write_outputs_and_remain_library_scoped() {
+        for (symbol, implementation) in [
+            (
+                "GetCurrentThreadId",
+                LegacyWin64Import::GetCurrentThreadId,
+            ),
+            (
+                "GetCurrentProcessId",
+                LegacyWin64Import::GetCurrentProcessId,
+            ),
+            (
+                "QueryPerformanceCounter",
+                LegacyWin64Import::QueryPerformanceCounter,
+            ),
+            ("InitializeSListHead", LegacyWin64Import::InitializeSListHead),
+            (
+                "DisableThreadLibraryCalls",
+                LegacyWin64Import::DisableThreadLibraryCalls,
+            ),
+        ] {
+            assert_eq!(
+                dispatch_win64_import("kernel32.dll", symbol),
+                Win64ImportDispatch::LegacyImplemented(implementation)
+            );
+            assert_eq!(
+                dispatch_win64_import("fixture.dll", symbol),
+                Win64ImportDispatch::UnsupportedLegacyImport
+            );
+        }
+
+        let mut engine = test_engine(&[0xc3]);
+        let output = engine.allocate(16, 16).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RCX, output).unwrap();
+        emulate_query_performance_counter(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 1);
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), 1u64.to_le_bytes());
+        engine.unicorn.mem_write(output, &[0xff; 16]).unwrap();
+        emulate_initialize_slist_head(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 16).unwrap(), [0; 16]);
     }
 
     #[test]
@@ -1321,7 +1397,7 @@
         ] {
             assert_eq!(
                 dispatch_win64_import(library, "same_symbol"),
-                Win64ImportDispatch::LegacyZero
+                Win64ImportDispatch::UnsupportedLegacyImport
             );
         }
     }

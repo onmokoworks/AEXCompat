@@ -1,3 +1,70 @@
+fn seal_unicorn_image(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    image: &PeImage,
+    image_size: u64,
+) -> Result<(), GuestError> {
+    let page_count = usize::try_from(image_size / PAGE_SIZE)
+        .map_err(|_| GuestError::ImageProtection("PE image page count overflow".into()))?;
+    let mut pages = vec![(false, false); page_count];
+    for section in image.section_protections() {
+        let start = section.virtual_address / PAGE_SIZE as usize;
+        let unaligned_end = section
+            .virtual_address
+            .checked_add(section.virtual_size)
+            .ok_or_else(|| GuestError::ImageProtection("PE section protection overflow".into()))?;
+        let end = unaligned_end
+            .checked_add(PAGE_SIZE as usize - 1)
+            .ok_or_else(|| {
+                GuestError::ImageProtection("PE section page alignment overflow".into())
+            })?
+            / PAGE_SIZE as usize;
+        if end > pages.len() {
+            return Err(GuestError::ImageProtection(
+                "PE section protection exceeds mapped image".into(),
+            ));
+        }
+        for (writable, executable) in &mut pages[start..end] {
+            *writable |= section.writable;
+            *executable |= section.executable;
+            if *writable && *executable {
+                return Err(GuestError::ImageProtection(
+                    "PE section page combines writable and executable permissions".into(),
+                ));
+            }
+        }
+    }
+    uc(
+        "seal PE headers and unassigned pages read-only",
+        unicorn.mem_protect(image.image_base(), image_size, Prot::READ),
+    )?;
+    let mut run_start = 0usize;
+    while run_start < pages.len() {
+        let permission = pages[run_start];
+        let mut run_end = run_start + 1;
+        while run_end < pages.len() && pages[run_end] == permission {
+            run_end += 1;
+        }
+        let mut protection = Prot::READ;
+        if permission.0 {
+            protection |= Prot::WRITE;
+        }
+        if permission.1 {
+            protection |= Prot::EXEC;
+        }
+        let address = image
+            .image_base()
+            .checked_add((run_start as u64) * PAGE_SIZE)
+            .ok_or_else(|| GuestError::ImageProtection("PE protection address overflow".into()))?;
+        let size = ((run_end - run_start) as u64) * PAGE_SIZE;
+        uc(
+            "apply PE section page protections",
+            unicorn.mem_protect(address, size, protection),
+        )?;
+        run_start = run_end;
+    }
+    Ok(())
+}
+
 impl GuestEngine<'static> {
     pub fn backend_name(&self) -> &'static str {
         "unicorn-x86_64"
@@ -126,6 +193,7 @@ impl GuestEngine<'static> {
                 stub_index += 1;
             }
         }
+        seal_unicorn_image(&mut unicorn, image, image_size)?;
         uc(
             "write return sentinel",
             unicorn.mem_write(RETURN_ADDRESS, &[0xcc]),
@@ -678,6 +746,10 @@ impl GuestEngine<'static> {
                 },
             );
         }
+        uc(
+            "seal import and host callback stubs read-execute",
+            unicorn.mem_protect(STUB_BASE, STUB_SIZE, Prot::READ | Prot::EXEC),
+        )?;
         let mut engine = Self {
             unicorn,
             next_data: DATA_BASE,
