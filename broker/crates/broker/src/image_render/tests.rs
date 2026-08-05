@@ -2292,18 +2292,21 @@ mod tests {
 
         // A frame that never reached the selector carries no `classic_render`
         // pair, because the markers live inside the selector hook rather than
-        // around the dispatch call. `dispatch_render` short-circuits every step
-        // on a non-zero incoming error, so bracketing the call would re-emit
-        // that error under the selector's name; `failure_stage` takes the last
-        // failing stage and would blame a RENDER the plug-in never saw.
+        // around the dispatch call. On a non-zero incoming error
+        // `dispatch_render` skips the draw, prepare_output, and selector steps,
+        // so bracketing the call would re-emit that error under the selector's
+        // name; `failure_stage` takes the last failing stage and would blame a
+        // RENDER the plug-in never saw. (It does not skip close_ui, which does
+        // enter the plug-in and is still unbracketed - issue #735.)
         //
-        // FRAME_SETUP is not yet one of those short-circuits: the `render_once`
-        // path drops its error instead of propagating it and dispatches RENDER
-        // anyway (issue #725), so a real setup refusal still shows both stages
-        // today - correctly, because RENDER really does run. This trace is the
-        // one a lifecycle refusal produces once it propagates, and the one the
-        // session path at worker_classic_render_runtime.cpp:805 already
-        // produces, since that call site does honor setup_error.
+        // FRAME_SETUP is not yet one of the steps that gets skipped: the
+        // `render_once` path drops its error instead of propagating it and
+        // dispatches RENDER anyway (issue #725), so a real setup refusal still
+        // shows both stages today - correctly, because RENDER really does run.
+        // This trace is the one a lifecycle refusal produces once it
+        // propagates, and the one `smart_render_runtime` already produces at
+        // its `lifecycle.setup_error != 0` check, since that call site honors
+        // the field the classic path drops.
         let lifecycle_refused = worker_diagnostics(
             "stage:frame_setup_begin\nstage:frame_setup_end error=512\n",
             false,
