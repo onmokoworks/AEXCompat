@@ -21,17 +21,6 @@ const MAX_AGGREGATE_BYTES: u64 = 64 * 1024 * 1024;
 const CLI_CONTRACT_SCHEMA: &str = "aexcompat.harness-cli-contract";
 const CLI_CONTRACT_VERSION: u64 = 1;
 
-const SCATTERMAP_HASH: &str = "223FF5EC542DD74374C727F16AA6C068073D1C2D7A5CABF20512CB289F0716EB";
-const MASKOFFSET_HASH: &str = "B7C41F4F906FCE74B26BD2F06520F6BFDF75DCD1A2682DBB85D50D1DE833877B";
-
-fn profile_for_hash(hash: &str) -> Option<&'static str> {
-    match hash {
-        SCATTERMAP_HASH => Some("scattermap"),
-        MASKOFFSET_HASH => Some("maskoffset"),
-        _ => None,
-    }
-}
-
 fn decode_sha256(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("SHA-256 must be exactly 64 hexadecimal characters".into());
@@ -48,7 +37,6 @@ struct Selection {
     path: PathBuf,
     size: u64,
     sha256: String,
-    profile: Option<&'static str>,
     modified: Option<SystemTime>,
 }
 

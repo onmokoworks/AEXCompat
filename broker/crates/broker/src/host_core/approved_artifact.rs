@@ -326,18 +326,6 @@ fn validate_v2_basename(name: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn decode_sha256(value: &str) -> io::Result<[u8; 32]> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(invalid("load entry SHA-256 must be 32 hex-encoded bytes"));
-    }
-    let mut digest = [0u8; 32];
-    for (output, pair) in digest.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
-        let pair = std::str::from_utf8(pair).map_err(|_| invalid("invalid SHA-256 encoding"))?;
-        *output = u8::from_str_radix(pair, 16).map_err(|_| invalid("invalid SHA-256 encoding"))?;
-    }
-    Ok(digest)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

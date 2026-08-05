@@ -14,11 +14,6 @@ pub struct WorkerSpec {
 #[derive(Clone, Copy)]
 pub struct L2ObservationPolicy {
     pub selection: SelectionPolicy,
-    pub about_substrings: &'static [&'static str],
-    pub out_flags: u64,
-    pub out_flags2: u64,
-    pub update_params_ui_advertised: bool,
-    pub query_dynamic_flags_advertised: bool,
 }
 
 pub struct ObservationProfile {
@@ -46,15 +41,9 @@ static SCATTERMAP: RegisteredProfile = RegisteredProfile {
         selection: SelectionPolicy {
             allowlist_path: "target/l2-allowlist/active.local.json",
         },
-        about_substrings: &["ScatterMap v1.0", "Written in Rust"],
-        out_flags: 33_554_432,
-        out_flags2: 167_777_280,
-        update_params_ui_advertised: false,
-        query_dynamic_flags_advertised: false,
     },
     descriptor_manifest: ManifestPolicy {
         path: "profiles/scattermap/parameter_descriptors.json",
-        sha256: "C797EC7C45A603D2C86FB980DC5279E8B075D0E27D466315A2ABFA15BE608C37",
     },
     parameterized_render: ParameterizedRenderAdapter::ScatterMap,
     classic_worker: Some(WorkerSpec {
@@ -103,15 +92,9 @@ static MASKOFFSET_OBSERVATION: ObservationProfile = ObservationProfile {
         selection: SelectionPolicy {
             allowlist_path: "target/l2-allowlist/maskoffset.active.local.json",
         },
-        about_substrings: &["ONMK MaskOffset v1.0", "Written in Rust"],
-        out_flags: 4,
-        out_flags2: 525_312,
-        update_params_ui_advertised: false,
-        query_dynamic_flags_advertised: false,
     },
     descriptor_manifest: ManifestPolicy {
         path: "profiles/maskoffset/parameter_descriptors.json",
-        sha256: "13876295DB0A58D4B401525E88E44071A1C489D649B146F7149FD408B651DB13",
     },
 };
 

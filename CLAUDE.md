@@ -174,6 +174,9 @@ formatting-only commits listed there.
 ## Project Direction
 
 1. Discover and diagnose arbitrary Effect AEX binaries without fixture names.
+   The harness no longer recognizes fixtures by a compiled-in hash, and L2
+   checks the host's own contract rather than a fixture's flags (issue #733);
+   keep it that way.
 2. Implement observed missing suites, slots, selectors, and scene semantics as
    general host capabilities.
 3. Verify image input/output across Classic, SmartFX, depths, and multiple inputs.

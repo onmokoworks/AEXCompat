@@ -162,7 +162,7 @@ impl HarnessApp {
             sha256: selection.sha256.clone(),
             size: selection.size,
         };
-        if selection.profile.is_none() {
+        {
             if let Err(error) =
                 persist_preflight_warnings(&self.repository, &identity, &self.preflight_warnings)
             {
@@ -391,7 +391,7 @@ impl HarnessApp {
             sha256: selection.sha256.clone(),
             size: selection.size,
         };
-        let diagnostic_eligible = selection.profile.is_none();
+        let diagnostic_eligible = true;
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let result = work();
@@ -671,7 +671,6 @@ impl HarnessApp {
             Ok(bytes) => {
                 let hash = format!("{:X}", Sha256::digest(&bytes));
                 let metadata = fs::metadata(&path).ok();
-                let profile = profile_for_hash(&hash);
                 let identity_changed = hash != previous_hash;
                 if identity_changed {
                     // Do not keep a worker holding the previous build alive.
@@ -681,7 +680,6 @@ impl HarnessApp {
                     path: path.clone(),
                     size: bytes.len() as u64,
                     sha256: hash,
-                    profile,
                     modified: metadata.and_then(|value| value.modified().ok()),
                 });
                 self.selection_stale = false;
@@ -1300,7 +1298,6 @@ impl HarnessApp {
         let repository = self.repository.clone();
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
-        let registered = selection.profile == Some("scattermap");
         let parameters = self.parameters.clone();
         let host_context = self.host_context.clone();
         let smart = interactive_selection.path.is_smart();
@@ -1348,12 +1345,6 @@ impl HarnessApp {
                 "Remove dependencies or disable the audio sidecar before rendering.".into();
             return;
         }
-        let use_registered_default = registered
-            && parameters.is_empty()
-            && self.frame == 0
-            && custom_ui_action.is_none()
-            && pixel_format == aexcompat_broker::image_render::RenderPixelFormat::Argb8
-            && audio_sidecar.is_none();
         // The resident-session selector path follows the existing inspection
         // result and explicit GUI override.  SmartFX-capable AEXes must open a
         // Smart session: routing them through Classic RENDER can yield a
@@ -1365,7 +1356,6 @@ impl HarnessApp {
                 && custom_ui_action.is_none()
                 && audio_sidecar.is_none()
                 && gpu_backend == aexcompat_broker::image_render::RenderGpuBackend::Auto
-                && !use_registered_default
                 && !parameters.iter().any(|parameter| parameter.kind == "layer");
             if live_eligible {
                 let identity = DispatchIdentity {
@@ -1376,10 +1366,7 @@ impl HarnessApp {
                         .map(|item| item.size)
                         .unwrap_or_default(),
                 };
-                let diagnostic_eligible = self
-                    .selection
-                    .as_ref()
-                    .is_some_and(|item| item.profile.is_none());
+                let diagnostic_eligible = self.selection.is_some();
                 let (respond, receiver) = mpsc::channel();
                 let request = LiveRenderRequest {
                     repository,
@@ -1435,13 +1422,6 @@ impl HarnessApp {
                     &output,
                     &parameters,
                     timing,
-                )
-            } else if !smart && use_registered_default && dependencies.is_empty() {
-                aexcompat_broker::image_render::render_scattermap_fixture(
-                    &repository,
-                    "scattermap",
-                    &input,
-                    &output,
                 )
             } else {
                 aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
@@ -2051,7 +2031,6 @@ impl HarnessApp {
             let mut lines = result.body.lines();
             if let (Some(path), Some(size), Some(hash)) = (lines.next(), lines.next(), lines.next())
             {
-                let profile = profile_for_hash(hash);
                 // A newly selected AEX replaces whatever the resident worker
                 // was opened for.
                 self.close_live_session();
@@ -2059,7 +2038,6 @@ impl HarnessApp {
                     path: path.into(),
                     size: size.parse().unwrap_or(0),
                     sha256: hash.into(),
-                    profile,
                     modified: fs::metadata(path)
                         .ok()
                         .and_then(|value| value.modified().ok()),
@@ -2258,7 +2236,6 @@ impl eframe::App for HarnessApp {
                 let selected_path = selected.path.display().to_string();
                 let selected_size = selected.size;
                 let selected_hash = selected.sha256.clone();
-                let selected_profile = selected.profile;
                 ui.group(|ui| {
                     ui.label(RichText::new(selected_path).strong());
                     ui.collapsing("Binary details and dependency DLLs", |ui| {
@@ -2266,9 +2243,6 @@ impl eframe::App for HarnessApp {
                     ui.monospace(&selected_hash);
                     if self.selection_stale {
                         ui.colored_label(Color32::from_rgb(210, 75, 55), "Build changed: native execution is paused until reload");
-                    }
-                    if let Some(profile) = selected_profile {
-                        ui.colored_label(Color32::from_rgb(30, 150, 95), format!("Registered profile: {profile}"));
                     }
                     ui.separator();
                     ui.label(RichText::new("Local diagnostics").strong());
@@ -2350,10 +2324,7 @@ impl eframe::App for HarnessApp {
                             self.report = error;
                         }
                     }
-                    if selected_profile.is_none() {
-                        ui.colored_label(Color32::from_rgb(215, 145, 40), "Unregistered AEX: direct isolated execution enabled");
-                        ui.label("The selected binary is hashed automatically and runs in a timeout-limited restricted worker. This is not a complete security sandbox.");
-                    }
+                    ui.label("The selected binary is hashed automatically and runs in a crash-contained worker. This is not a security sandbox.");
                     if ui.add_enabled(!self.busy, egui::Button::new("Reload rebuilt AEX")).clicked() {
                         self.refresh_aex();
                     }
