@@ -611,6 +611,20 @@ fn worker_diagnostics(
         "frame_setdown",
         "sequence_setdown",
         "render",
+        // Per frame, unlike "render" which brackets the whole session. Without
+        // these a classic session's frame errors carried no stage at all
+        // (issue #722). Only "classic_render" is the plug-in's own selector:
+        // "classic_output_resize" is the host refusing the requested output
+        // resize before RENDER runs, and "classic_finalize" appears only when
+        // the host's own finalize changed the error the selector returned.
+        // Keeping three names is the point - a host-side refusal filed under
+        // the plug-in's selector is what this issue was about. For the same
+        // reason none of them is the "output_validation" that session.rs
+        // assigns from `output_pixels_valid`: that is a smart-only check on the
+        // pixels that came back, not a refused resize.
+        "classic_render",
+        "classic_output_resize",
+        "classic_finalize",
         "smart_render",
         "smart_pre_render",
         "smart_render_cpu",
@@ -655,7 +669,7 @@ fn worker_diagnostics(
         } else {
             continue;
         };
-        if !allowed.contains(&stage) || events.len() >= MAX_STAGE_EVENTS {
+        if !allowed.contains(&stage) {
             continue;
         }
         let errors = detail
@@ -686,7 +700,13 @@ fn worker_diagnostics(
                 failure_stage = Some(stage.to_owned());
             }
         }
-        events.push(json!({"stage": stage, "state": state, "errors": errors}));
+        // The cap bounds the reported list, not the failure tracking above: a
+        // long session used to stop noticing failures entirely once the list
+        // filled, which is exactly when a frame that fails every time overruns
+        // it (issue #722).
+        if events.len() < MAX_STAGE_EVENTS {
+            events.push(json!({"stage": stage, "state": state, "errors": errors}));
+        }
     }
     let active_stage = active_stages.last().cloned();
     if failure_stage.is_none() && classification != "ok" {

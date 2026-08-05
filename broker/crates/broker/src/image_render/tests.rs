@@ -2234,6 +2234,107 @@ mod tests {
         assert_eq!(cleanup_failure["failure_stage"], "global_setdown");
     }
 
+    /// A classic session's frame errors used to carry no stage at all: the
+    /// `render` pair brackets the whole session, so a frame that failed came
+    /// back with `first_failure_stage: null` and nothing said which selector
+    /// did it. 29 of the 56 failing AE 2026 effects looked like that
+    /// (issue #722).
+    #[test]
+    fn a_classic_frame_names_the_selector_that_failed() {
+        // The plug-in's own RENDER refused this frame.
+        let selector = worker_diagnostics(
+            "stage:frame_setup_begin\nstage:frame_setup_end error=0\n\
+             stage:classic_render_begin\nstage:classic_render_end error=512\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(selector["first_failure_stage"], "classic_render");
+        assert_eq!(selector["failure_stage"], "classic_render");
+
+        // The selector returned cleanly and the host's finalize added the
+        // error, which has to read as a different stage - otherwise a host-side
+        // refusal is filed against the plug-in.
+        let finalize = worker_diagnostics(
+            "stage:classic_render_begin\nstage:classic_render_end error=0\n\
+             stage:classic_finalize_end error=4\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(finalize["first_failure_stage"], "classic_finalize");
+
+        // The host refused the plug-in's requested output resize, so RENDER was
+        // never dispatched. `prepare_output` runs inside the same
+        // classic_execution::dispatch_render call as the selector but never
+        // calls the plug-in, so it gets its own name instead of being filed
+        // under RENDER. It is not the `output_validation` that session.rs
+        // assigns from `output_pixels_valid` - that one is smart-only and means
+        // the returned pixels were empty, untouched, or non-finite.
+        let host_refused_resize = worker_diagnostics(
+            "stage:frame_setup_begin\nstage:frame_setup_end error=0\n\
+             stage:classic_output_resize_end error=4\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(
+            host_refused_resize["first_failure_stage"],
+            "classic_output_resize"
+        );
+        assert_eq!(
+            host_refused_resize["failure_stage"],
+            "classic_output_resize"
+        );
+
+        // A frame that never reached the selector carries no `classic_render`
+        // pair, because the markers live inside the selector hook rather than
+        // around the dispatch call. On a non-zero incoming error
+        // `dispatch_render` skips the draw, prepare_output, and selector steps,
+        // so bracketing the call would re-emit that error under the selector's
+        // name; `failure_stage` takes the last failing stage and would blame a
+        // RENDER the plug-in never saw. (It does not skip close_ui, which does
+        // enter the plug-in and is still unbracketed - issue #735.)
+        //
+        // FRAME_SETUP is not yet one of the steps that gets skipped: the
+        // `render_once` path drops its error instead of propagating it and
+        // dispatches RENDER anyway (issue #725), so a real setup refusal still
+        // shows both stages today - correctly, because RENDER really does run.
+        // This trace is the one a lifecycle refusal produces once it
+        // propagates, and the one `smart_render_runtime` already produces at
+        // its `lifecycle.setup_error != 0` check, since that call site honors
+        // the field the classic path drops.
+        let lifecycle_refused = worker_diagnostics(
+            "stage:frame_setup_begin\nstage:frame_setup_end error=512\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(lifecycle_refused["first_failure_stage"], "frame_setup");
+        assert_eq!(lifecycle_refused["failure_stage"], "frame_setup");
+    }
+
+    /// The event cap bounds what is reported, not what is noticed. A frame that
+    /// fails on every frame of a long session overruns the list, and that is
+    /// exactly when the failure must still be attributed (issue #722).
+    #[test]
+    fn the_event_cap_does_not_hide_a_failure_past_it() {
+        let mut trace = "stage:classic_render_begin\nstage:classic_render_end error=0\n"
+            .repeat(MAX_STAGE_EVENTS);
+        trace.push_str("stage:classic_render_begin\nstage:classic_render_end error=512\n");
+        let diagnostics = worker_diagnostics(&trace, false, "ok", 0, 9);
+        assert_eq!(
+            diagnostics["stage_events"].as_array().unwrap().len(),
+            MAX_STAGE_EVENTS
+        );
+        assert_eq!(diagnostics["failure_stage"], "classic_render");
+        assert_eq!(diagnostics["last_completed_stage"], "classic_render");
+    }
+
     #[test]
     fn worker_stage_diagnostics_are_bounded() {
         let trace = "stage:render_begin\n".repeat(MAX_STAGE_EVENTS + 20);

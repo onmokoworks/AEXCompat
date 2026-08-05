@@ -27,6 +27,7 @@
 #include "worker_world_safety.hpp"
 
 #include <array>
+#include <iostream>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -313,8 +314,36 @@ struct ClassicRenderDispatchOwner {
     static const aexcompat::worker_runtime::classic_execution::RenderHooks value{
         +[](void* opaque) { auto& h = *static_cast<ClassicRenderDispatchOwner*>(opaque);
           return dispatch_render_draw(h.entry, h.input, h.output, h.definitions); },
-        +[](void* opaque) { return static_cast<ClassicRenderDispatchOwner*>(opaque)->prepare_output(); },
-        +[](void* opaque) { return static_cast<ClassicRenderDispatchOwner*>(opaque)->dispatch_selector(); },
+        // The stage markers sit inside the hooks, not around
+        // classic_execution::dispatch_render, so each one brackets only what it
+        // actually names. dispatch_render short-circuits on a non-zero incoming
+        // error and runs prepare_output before the selector, so a bracket around
+        // the whole call would file a frame that never reached RENDER - or one
+        // the host itself refused - under the plug-in's selector (issue #722).
+        //
+        // prepare_output is entirely host-side: it validates the plug-in's
+        // requested output resize and re-lays the output world. It never calls
+        // the plug-in, so its refusals get their own name rather than the
+        // selector's. It emits no `_begin` because there is no foreign code
+        // inside it for a crash to be attributed to.
+        //
+        // Deliberately not the broker's "output_validation": that override
+        // (image_render/session.rs) keys on `output_pixels_valid`, which only
+        // the smart report emits (worker_smart_report.cpp) and which means the
+        // output pixels came back empty, still at the 0xCC fill, or non-finite.
+        // A different condition, so a different name.
+        +[](void* opaque) {
+          const int32_t error = static_cast<ClassicRenderDispatchOwner*>(opaque)->prepare_output();
+          if (error != 0)
+            std::cerr << "stage:classic_output_resize_end error=" << error << "\n" << std::flush;
+          return error; },
+        // The plug-in's RENDER. The unbalanced `_begin` left by a crash or hang
+        // in here is what lets active_stage name this frame's selector.
+        +[](void* opaque) {
+          std::cerr << "stage:classic_render_begin\n" << std::flush;
+          const int32_t error = static_cast<ClassicRenderDispatchOwner*>(opaque)->dispatch_selector();
+          std::cerr << "stage:classic_render_end error=" << error << "\n" << std::flush;
+          return error; },
         +[](void* opaque) { auto& h = *static_cast<ClassicRenderDispatchOwner*>(opaque);
           return !g_render_ui_context_active || close_render_ui_context(h.entry, h.input, h.output, h.definitions); }};
     return value;
@@ -552,10 +581,21 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         external_total_time, external_time_scale, case_id, requested, external_rgba,
         external_layers, external_width, external_height, *classic_context, logical_source,
         output_validation_failed};
+    // The `stage:classic_render_*` and `stage:classic_output_resize_end` markers are
+    // emitted per frame from inside RenderHooks (see ClassicRenderDispatchOwner)
+    // so each brackets only the step it names. The session-wide `stage:render_*`
+    // pair in worker_invocation_orchestration.cpp is emitted once, so before
+    // this a classic session's frame errors carried no stage at all and every
+    // one of them came back with `first_failure_stage: null` (issue #722).
     error = dispatch_owner.run(error);
     lifecycle.error = error;
     error = lifecycle_owner.finish(lifecycle);
   }
+  // Everything the plug-in itself got a say in (RENDER plus the setdown half of
+  // the frame lifecycle), before the host's own finalize can add to it. Kept so
+  // the two can be told apart: a frame that fails only past this point failed in
+  // the host, not in the plug-in (issue #722).
+  const int32_t selector_error = error;
   aexcompat::worker_runtime::classic_execution::Context final_context{
       destination, rowbytes, width, height, pixel_bytes, error,
       external_current_time, external_time_step, external_time_scale,
@@ -578,6 +618,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
             static_cast<const unsigned char*>(pixels), width, height, bytes);
       },
       +[](const char* format) { smart_state().pixel_format = format; }});
+  if (error != selector_error)
+    std::cerr << "stage:classic_finalize_end error=" << error << "\n" << std::flush;
   // The render dispatch hook (ClassicRenderDispatchOwner, RenderHooks) already
   // closes the UI context when it is active, so only close here if it is still
   // open. Without the g_render_ui_context_active guard this re-closes an
