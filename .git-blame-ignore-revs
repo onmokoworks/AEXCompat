@@ -1,0 +1,9 @@
+# Commits that only reformat. `git blame` skips them with:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# (GitHub's blame view applies this file automatically.) Add a commit here
+# only when it is formatting-only, and say which reformat it was.
+
+# Pin the toolchain and reformat to its style edition (issue #656).
+779b1046806d04a134f5c1cd3708d8e713776b46
