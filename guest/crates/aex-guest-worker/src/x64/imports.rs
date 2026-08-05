@@ -30,6 +30,7 @@ enum LegacyWin64Import {
     MemChr,
     MemCmp,
     StdioVsnprintfS,
+    StdioVsprintf,
     MsvcpMutexInit,
     MsvcpMutexLock,
     MsvcpMutexUnlock,
@@ -377,6 +378,12 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "__stdio_common_vsnprintf_s") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__stdio_common_vsprintf") => {
+            LegacyWin64Import::StdioVsprintf
+        }
+        (_, "__stdio_common_vsprintf") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "_strdup") => {
             LegacyWin64Import::CrtStrdup
         }
@@ -604,6 +611,15 @@ fn install_win64_import(
                     "install stdio formatter import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_stdio_common_vsnprintf_s(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::StdioVsprintf => {
+                uc("write vsprintf return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install vsprintf import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_stdio_common_vsprintf(unicorn);
                     }),
                 )?;
             }

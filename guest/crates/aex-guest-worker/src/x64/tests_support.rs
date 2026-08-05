@@ -1584,6 +1584,77 @@
     }
 
     #[test]
+    fn stdio_vsprintf_formats_observed_olm_parameter_name_with_size_max() {
+        const VSPRINTF: u64 = STUB_BASE + 0x200;
+        let mut engine = test_engine(&[0xc3]);
+        for library in ["api-ms-win-crt-stdio-l1-1-0.dll", "ucrtbase.dll"] {
+            assert_eq!(
+                dispatch_win64_import(library, "__stdio_common_vsprintf"),
+                Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::StdioVsprintf)
+            );
+        }
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "__stdio_common_vsprintf"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        install_win64_import(
+            &mut engine.unicorn,
+            VSPRINTF,
+            "api-ms-win-crt-stdio-l1-1-0.dll",
+            "__stdio_common_vsprintf",
+        )
+        .unwrap();
+
+        let format = DATA_BASE + 0x100;
+        let label = DATA_BASE + 0x200;
+        let va_list = DATA_BASE + 0x300;
+        let output = DATA_BASE + 0x500;
+        engine.unicorn.mem_write(format, b"%s %d\0").unwrap();
+        engine.unicorn.mem_write(label, b"Threshold\0").unwrap();
+        let values = [label, 7u64]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        engine.unicorn.mem_write(va_list, &values).unwrap();
+
+        let written = engine
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0x25, output, u64::MAX, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap();
+        assert_eq!(written, 11);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 12).unwrap(),
+            b"Threshold 7\0"
+        );
+
+        engine.unicorn.mem_write(output, b"unchanged\0").unwrap();
+        let error = engine
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0x25, output, 8, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("finite vsprintf buffer count 8"), "{error}");
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 10).unwrap(),
+            b"unchanged\0"
+        );
+
+        let error = engine
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0, output, u64::MAX, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("formatting options 0x0"), "{error}");
+    }
+
+    #[test]
     fn stdio_vsnprintf_s_truncates_with_nul_and_negative_one() {
         const VSNPRINTF: u64 = STUB_BASE + 0x1e0;
         let mut engine = test_engine(&[0xc3]);
