@@ -31,6 +31,8 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi_Common",
 ] }
+toml_edit = "0.25.13"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 # Diagnostic examples (issue #304): discover_timing (serial vs parallel timing),
 # discover_with_deps (one plug-in with its sealed closure), and discover_sweep

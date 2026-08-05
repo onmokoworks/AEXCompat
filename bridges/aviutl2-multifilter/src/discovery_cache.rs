@@ -145,6 +145,9 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         log_warn("the host passed no registration table; no AEX filter is registered");
         return;
     }
+    // Before any early return below: the settings dialog (issue #855) is how a
+    // user repairs the very config whose absence causes those returns.
+    register_settings_menu(host);
     let config = load_config();
     let Some((repository, root_source)) = resolve_worker_root(
         std::env::var_os(ENV_REPOSITORY).map(PathBuf::from),
