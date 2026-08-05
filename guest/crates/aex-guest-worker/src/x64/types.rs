@@ -107,6 +107,7 @@ struct GuestState {
     extended_string_table_valid: bool,
     avx_fallback_instructions: u64,
     avx_defined_ymm: [bool; 16],
+    avx_state_sync_points: HashMap<u64, AvxStateSync>,
     gpu_runtime: GpuRuntime,
     gpu_suite: GpuSuiteState,
 }
