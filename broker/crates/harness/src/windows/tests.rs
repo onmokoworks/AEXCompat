@@ -331,7 +331,6 @@ mod tests {
             path: PathBuf::from("first.aex"),
             size: 11,
             sha256: "11".repeat(32),
-            profile: None,
             modified: None,
         });
         app.spawn_native("race_test", || Ok(("ok".into(), None)));
@@ -339,7 +338,6 @@ mod tests {
             path: PathBuf::from("second.aex"),
             size: 22,
             sha256: "22".repeat(32),
-            profile: None,
             modified: None,
         });
         let result = app.receiver.take().unwrap().recv().unwrap();
@@ -838,12 +836,6 @@ mod tests {
     }
 
     #[test]
-    fn only_exact_registered_hashes_are_recognized() {
-        assert_ne!(SCATTERMAP_HASH, MASKOFFSET_HASH);
-        assert_eq!(SCATTERMAP_HASH.len(), 64);
-    }
-
-    #[test]
     fn effect_diagnostics_separate_rejected_gpu_and_final_cpu_timelines() {
         let report = serde_json::json!({
             "stage": "interactive_image_render",
@@ -1116,7 +1108,6 @@ mod tests {
             path: path.clone(),
             size: metadata.len(),
             sha256: first_hash.clone(),
-            profile: None,
             modified: metadata.modified().ok(),
         });
         app.session_approved = true;

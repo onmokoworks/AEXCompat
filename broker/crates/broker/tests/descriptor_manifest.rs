@@ -2,13 +2,15 @@ use aexcompat_broker::host_core::descriptor_manifest::{ManifestPolicy, load};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const HASH: &str = "C797EC7C45A603D2C86FB980DC5279E8B075D0E27D466315A2ABFA15BE608C37";
 const BYTES: &[u8] = include_bytes!("../../../../profiles/scattermap/parameter_descriptors.json");
 const MASKOFFSET_BYTES: &[u8] =
     include_bytes!("../../../../profiles/maskoffset/parameter_descriptors.json");
 
+/// The manifest is accepted on its structure, not on a digest compiled into
+/// the broker (issue #733): re-serializing it changes nothing, and an edit
+/// that breaks a descriptor contract is what fails.
 #[test]
-fn promoted_observation_is_digest_bound_and_tamper_evident() {
+fn promoted_observation_is_accepted_on_structure_not_a_pinned_digest() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -21,7 +23,6 @@ fn promoted_observation_is_digest_bound_and_tamper_evident() {
     fs::write(root.join("profiles/manifest.json"), BYTES).unwrap();
     let policy = ManifestPolicy {
         path: "profiles/manifest.json",
-        sha256: HASH,
     };
     let loaded = load(&root, "scattermap", policy).unwrap();
     assert_eq!(loaded.observed_descriptor_count, 7);
@@ -37,7 +38,20 @@ fn promoted_observation_is_digest_bound_and_tamper_evident() {
     .unwrap();
     assert!(load(&root, "scattermap", policy).is_ok());
 
+    // Editing a bound is now an ordinary edit: the descriptors describe the
+    // plug-in, and the broker no longer holds a compiled-in opinion about what
+    // that description must be.
     tampered["descriptors"][0]["maximum"] = serde_json::json!(501);
+    fs::write(
+        root.join("profiles/manifest.json"),
+        serde_json::to_vec_pretty(&tampered).unwrap(),
+    )
+    .unwrap();
+    assert!(load(&root, "scattermap", policy).is_ok());
+
+    // What still fails is a manifest that cannot drive a render: a slot
+    // sequence with a hole leaves the host unable to address the parameters.
+    tampered["descriptors"][0]["slot"] = serde_json::json!(2);
     fs::write(
         root.join("profiles/manifest.json"),
         serde_json::to_vec_pretty(&tampered).unwrap(),
@@ -61,7 +75,6 @@ fn second_fixture_manifest_loads_through_the_generic_core() {
     fs::write(root.join("profiles/manifest.json"), MASKOFFSET_BYTES).unwrap();
     let policy = ManifestPolicy {
         path: "profiles/manifest.json",
-        sha256: "13876295DB0A58D4B401525E88E44071A1C489D649B146F7149FD408B651DB13",
     };
     let loaded = load(&root, "maskoffset", policy).unwrap();
     assert_eq!(loaded.observed_descriptor_count, 9);

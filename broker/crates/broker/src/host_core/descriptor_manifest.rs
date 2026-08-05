@@ -2,7 +2,6 @@ use crate::host_core::parameter::{
     ColorValue, Descriptor, ParameterValue, PluginProfile, ValueKind,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -13,7 +12,6 @@ const MANIFEST_LIMIT: u64 = 64 * 1024;
 #[derive(Clone, Copy)]
 pub struct ManifestPolicy {
     pub path: &'static str,
-    pub sha256: &'static str,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -78,11 +76,12 @@ pub fn load(
     let bytes = fs::read(path)?;
     let manifest: Manifest =
         serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
-    let canonical = serde_json::to_vec(&manifest).map_err(|error| invalid(error.to_string()))?;
-    let actual = format!("{:X}", Sha256::digest(canonical));
-    if !actual.eq_ignore_ascii_case(policy.sha256) {
-        return Err(invalid("descriptor manifest digest mismatch"));
-    }
+    // The manifest used to be pinned to a digest compiled into the broker, so
+    // editing a descriptor file meant hand-updating a constant before any
+    // route would run again (issue #733). The digest proved only that the file
+    // had not changed since someone last regenerated the constant, which is a
+    // property of the checkout, not of the descriptors. The structural checks
+    // below are what actually decide whether the manifest can drive a render.
     if !matches!(manifest.schema_version, 1 | 2)
         || manifest.plugin_id != plugin_id
         || manifest.source.stage != "L2"

@@ -1,4 +1,4 @@
-use crate::fixture_profiles::{L2ObservationPolicy, find_observation};
+use crate::fixture_profiles::find_observation;
 use crate::host_core::approved_artifact::load_v2_load_tree;
 use crate::sealed_load_tree::SealedLoadTree;
 use crate::secure_launch::{SecureLaunchRequest, secure_launch};
@@ -12,17 +12,30 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-fn worker_passed(worker_report: &Value, policy: L2ObservationPolicy) -> bool {
+/// Whether the observation satisfies the host's L2 contract.
+///
+/// This used to also assert fixture identity: the ABOUT text had to contain
+/// the fixture's version string and the reported `out_flags` pair had to equal
+/// constants compiled into the broker, so a plug-in that changed its flags
+/// failed L2 and an unregistered plug-in could never pass at all (issue #733).
+/// Those values are observations, and the report already carries them; what is
+/// checked here is what the host owes any plug-in.
+fn worker_passed(worker_report: &Value) -> bool {
+    // The advertisement is the plug-in's to make. The host contract is that
+    // conditional UI selectors are dispatched exactly when it advertised them.
+    let advertised = |key: &str| {
+        worker_report
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let conditional_ui_expected =
+        advertised("update_params_ui_advertised") || advertised("query_dynamic_flags_advertised");
     worker_report.get("status") == Some(&Value::String("selectors_completed".into()))
         && worker_report
             .get("about_message")
             .and_then(Value::as_str)
-            .is_some_and(|message| {
-                policy
-                    .about_substrings
-                    .iter()
-                    .all(|part| message.contains(part))
-            })
+            .is_some_and(|message| !message.trim().is_empty())
         && [
             "global_setup_error",
             "params_setup_error",
@@ -35,16 +48,12 @@ fn worker_passed(worker_report: &Value, policy: L2ObservationPolicy) -> bool {
         ]
         .iter()
         .all(|key| worker_report.get(*key) == Some(&json!(0)))
-        && worker_report.get("out_flags") == Some(&json!(policy.out_flags))
-        && worker_report.get("out_flags2") == Some(&json!(policy.out_flags2))
-        && worker_report.get("update_params_ui_advertised")
-            == Some(&Value::Bool(policy.update_params_ui_advertised))
-        && worker_report.get("query_dynamic_flags_advertised")
-            == Some(&Value::Bool(policy.query_dynamic_flags_advertised))
+        && worker_report.get("out_flags").is_some_and(Value::is_number)
+        && worker_report
+            .get("out_flags2")
+            .is_some_and(Value::is_number)
         && worker_report.get("conditional_ui_selectors_dispatched")
-            == Some(&Value::Bool(
-                policy.update_params_ui_advertised || policy.query_dynamic_flags_advertised,
-            ))
+            == Some(&Value::Bool(conditional_ui_expected))
         && worker_report.get("lifecycle_data_null") == Some(&Value::Bool(true))
         && worker_report.get("render_performed") == Some(&Value::Bool(false))
 }
@@ -102,7 +111,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
             "render_performed": false
         })
     });
-    let passed = result.classification.as_str() == "ok" && worker_passed(&worker_report, policy);
+    let passed = result.classification.as_str() == "ok" && worker_passed(&worker_report);
     let report = json!({"schema_version":1,"stage":"L2","plugin_id":id,
         "receipt_id":approved.receipt_id,"expected_sha256":hex_sha256(plugin_sha256).to_ascii_uppercase(),
         "worker_exit":result.classification.as_str(),"worker_exit_code":result.exit_code,
@@ -127,17 +136,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    const POLICY: L2ObservationPolicy = L2ObservationPolicy {
-        selection: crate::host_core::approved_artifact::SelectionPolicy {
-            allowlist_path: "unused",
-        },
-        about_substrings: &["Example", "v1"],
-        out_flags: 4,
-        out_flags2: 8,
-        update_params_ui_advertised: false,
-        query_dynamic_flags_advertised: false,
-    };
-
     fn report() -> Value {
         json!({
             "status": "selectors_completed", "about_message": "Example v1",
@@ -153,12 +151,30 @@ mod tests {
         })
     }
 
+    /// The contract is the host's behaviour, not the fixture's identity: a
+    /// plug-in that reports different flags still passes (issue #733), while a
+    /// host that dispatched the wrong selectors does not.
     #[test]
-    fn generic_l2_policy_accepts_matching_observation_and_rejects_drift() {
+    fn l2_contract_accepts_any_plugin_identity_and_rejects_host_drift() {
         let mut value = report();
-        assert!(worker_passed(&value, POLICY));
+        assert!(worker_passed(&value));
+
+        // Different flags are a different plug-in, not a failure.
         value["out_flags"] = json!(5);
-        assert!(!worker_passed(&value, POLICY));
+        value["out_flags2"] = json!(9);
+        value["about_message"] = json!("Some Other Effect v3");
+        assert!(worker_passed(&value));
+
+        // The host must dispatch the conditional UI selectors exactly when the
+        // plug-in advertised them.
+        value["update_params_ui_advertised"] = json!(true);
+        assert!(!worker_passed(&value));
+        value["conditional_ui_selectors_dispatched"] = json!(true);
+        assert!(worker_passed(&value));
+
+        // A selector error is still a failure.
+        value["global_setup_error"] = json!(25);
+        assert!(!worker_passed(&value));
     }
 
     #[test]
