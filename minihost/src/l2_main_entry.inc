@@ -318,30 +318,236 @@ int32_t __cdecl timeline_get_audio_data(
           channels, format));
 }
 
+int32_t utility_callback_result(aexcompat::callback_diagnostics::Callback callback,
+                                int32_t result,
+                                aexcompat::callback_diagnostics::Reason failure_reason =
+                                    aexcompat::callback_diagnostics::Reason::CallbackError) {
+  using aexcompat::callback_diagnostics::Reason;
+  const auto reason = result == 0 ? Reason::None : failure_reason;
+  aexcompat::callback_diagnostics::record(callback, result, reason);
+  if (extended_diag_enabled()) {
+    std::cerr << "extended_diag:"
+              << aexcompat::callback_diagnostics::CALLBACK_NAMES[
+                     static_cast<std::size_t>(callback)]
+              << " -> " << result;
+    if (result != 0)
+      std::cerr << " ("
+                << aexcompat::callback_diagnostics::REASON_NAMES[
+                       static_cast<std::size_t>(reason)]
+                << ')';
+    std::cerr << '\n' << std::flush;
+  }
+  return result;
+}
+
+int32_t __cdecl diag_blend_world(void* effect_ref, const void* source1,
+                                 const void* source2, int32_t ratio, void* destination) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Blend,
+      blend_world(effect_ref, source1, source2, ratio, destination),
+      !source1 || !source2 || !destination
+          ? aexcompat::callback_diagnostics::Reason::InvalidArguments
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_convolve_world(void* effect_ref, void* source, const LegacyRect* area,
+                                    uint32_t flags, int32_t kernel_size, void* alpha_kernel,
+                                    void* red_kernel, void* green_kernel, void* blue_kernel,
+                                    void* destination) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Convolve,
+      convolve_world(effect_ref, source, area, flags, kernel_size, alpha_kernel, red_kernel,
+                     green_kernel, blue_kernel, destination),
+      !source || !destination
+          ? aexcompat::callback_diagnostics::Reason::InvalidArguments
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_copy_world(void* effect_ref, void* source, void* destination,
+                               const LegacyRect* source_rect,
+                               const LegacyRect* destination_rect) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Copy,
+      copy_world8(effect_ref, source, destination, source_rect, destination_rect),
+      !source || !destination
+          ? aexcompat::callback_diagnostics::Reason::MissingWorld
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_fill_world(void* effect_ref, const void* color,
+                               const LegacyRect* area, void* world) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Fill,
+      fill_world8(effect_ref, color, area, world),
+      !world ? aexcompat::callback_diagnostics::Reason::MissingWorld
+             : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_fill_world16(void* effect_ref, const void* color,
+                                 const LegacyRect* area, void* world) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Fill,
+      fill_world16(effect_ref, color, area, world),
+      !world ? aexcompat::callback_diagnostics::Reason::MissingWorld
+             : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_premultiply_world(void* effect_ref, int32_t forward, void* world) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Premultiply,
+      premultiply_world8(effect_ref, forward, world),
+      !world ? aexcompat::callback_diagnostics::Reason::MissingWorld
+             : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_premultiply_color(void* effect_ref, void* source, const void* color,
+                                      int32_t forward, void* destination) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Premultiply,
+      premultiply_color8(effect_ref, source, color, forward, destination),
+      !source || !destination
+          ? aexcompat::callback_diagnostics::Reason::MissingWorld
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_premultiply_color16(void* effect_ref, void* source, const void* color,
+                                        int32_t forward, void* destination) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Premultiply,
+      premultiply_color16(effect_ref, source, color, forward, destination),
+      !source || !destination
+          ? aexcompat::callback_diagnostics::Reason::MissingWorld
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_new_world(void* effect_ref, int32_t width, int32_t height,
+                              int32_t flags, void* world) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::NewWorld,
+      legacy_new_world(effect_ref, width, height, flags, world),
+      !world || width <= 0 || height <= 0
+          ? aexcompat::callback_diagnostics::Reason::InvalidArguments
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_dispose_world(void* effect_ref, void* world) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::DisposeWorld,
+      dispose_world(effect_ref, world),
+      !world ? aexcompat::callback_diagnostics::Reason::MissingWorld
+             : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_transfer_rect(void* effect_ref, int32_t quality, uint32_t mode_flags,
+                                  int32_t field, const LegacyRect* source_rect,
+                                  const void* source_world, const void* composite_mode,
+                                  const void* mask_world, int32_t destination_x,
+                                  int32_t destination_y, void* destination_world) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::TransferRect,
+      transfer_rect(effect_ref, quality, mode_flags, field, source_rect, source_world,
+                    composite_mode, mask_world, destination_x, destination_y,
+                    destination_world),
+      !effect_ref || !source_world || !composite_mode || !destination_world
+          ? aexcompat::callback_diagnostics::Reason::MissingWorld
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_transform_world(void* effect_ref, int32_t quality, uint32_t mode_flags,
+                                     int32_t field, const void* source_world,
+                                     const void* composite_mode, const void* mask_world,
+                                     const void* matrices, int32_t matrix_count,
+                                     uint8_t source_to_destination,
+                                     const LegacyRect* destination_rect,
+                                     void* destination_world) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::TransformWorld,
+      transform_world(effect_ref, quality, mode_flags, field, source_world, composite_mode,
+                      mask_world, matrices, matrix_count, source_to_destination,
+                      destination_rect, destination_world),
+      !effect_ref || !source_world || !composite_mode || !matrices || !destination_world
+          ? aexcompat::callback_diagnostics::Reason::InvalidArguments
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+int32_t __cdecl diag_get_callback_addr(void* effect_ref, int32_t quality,
+                                       uint32_t mode_flags, int32_t id, void** callback) {
+  const int32_t result = get_callback_addr(effect_ref, quality, mode_flags, id, callback);
+  // Callback ID 9 is COPY. Preserve diagnostic coverage when a plug-in obtains
+  // it indirectly instead of reading utils.copy; sampling IDs already point at
+  // their directly instrumented implementations.
+  if (result == 0 && callback && id == 9)
+    *callback = reinterpret_cast<void*>(&diag_copy_world);
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::GetCallbackAddr,
+      result,
+      !callback ? aexcompat::callback_diagnostics::Reason::InvalidArguments
+                : aexcompat::callback_diagnostics::Reason::Unsupported);
+}
+int32_t __cdecl diag_get_platform_data(void* effect_ref, int32_t which, void* data) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::PlatformData,
+      get_platform_data(effect_ref, which, data),
+      !effect_ref || !data
+          ? aexcompat::callback_diagnostics::Reason::InvalidArguments
+          : aexcompat::callback_diagnostics::Reason::Unsupported);
+}
+int32_t __cdecl diag_get_pixel_data8(void* world, void* pixels, void** output) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::PixelData,
+      get_pixel_data8(world, pixels, output),
+      !world ? aexcompat::callback_diagnostics::Reason::MissingWorld
+             : aexcompat::callback_diagnostics::Reason::InvalidArguments);
+}
+int32_t __cdecl diag_get_pixel_data16(void* world, void* pixels, void** output) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::PixelData,
+      get_pixel_data16(world, pixels, output),
+      !world ? aexcompat::callback_diagnostics::Reason::MissingWorld
+             : aexcompat::callback_diagnostics::Reason::InvalidArguments);
+}
+int32_t __cdecl diag_host_app(void* effect_ref, int32_t selector, void* arg) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::App,
+      host_app_callback(effect_ref, selector, arg),
+      !effect_ref ? aexcompat::callback_diagnostics::Reason::InvalidArguments
+                  : aexcompat::callback_diagnostics::Reason::Unsupported);
+}
+
+void** __cdecl diag_new_handle(uint64_t size) {
+  void** result = new_handle(size);
+  utility_callback_result(aexcompat::callback_diagnostics::Callback::Handle,
+                          result ? 0 : 4);
+  return result;
+}
+void* __cdecl diag_lock_handle(void** handle) {
+  void* result = lock_handle(handle);
+  utility_callback_result(aexcompat::callback_diagnostics::Callback::Handle,
+                          result ? 0 : 4);
+  return result;
+}
+void __cdecl diag_unlock_handle(void** handle) {
+  const auto before = aexcompat::worker_runtime::handles::statistics().invalid_operations;
+  unlock_handle(handle);
+  const auto after = aexcompat::worker_runtime::handles::statistics().invalid_operations;
+  utility_callback_result(aexcompat::callback_diagnostics::Callback::Handle,
+                          after == before ? 0 : 4);
+}
+void __cdecl diag_dispose_handle(void** handle) {
+  const auto before = aexcompat::worker_runtime::handles::statistics().invalid_operations;
+  dispose_handle(handle);
+  const auto after = aexcompat::worker_runtime::handles::statistics().invalid_operations;
+  utility_callback_result(aexcompat::callback_diagnostics::Callback::Handle,
+                          after == before ? 0 : 4);
+}
+uint64_t __cdecl diag_handle_size(void** handle) {
+  const bool valid = aexcompat::worker_runtime::handles::host_handle_is_live(handle);
+  const uint64_t result = handle_size(handle);
+  utility_callback_result(aexcompat::callback_diagnostics::Callback::Handle,
+                          valid ? 0 : 4);
+  return result;
+}
+int32_t __cdecl diag_resize_handle(uint64_t size, void*** handle) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Handle,
+      resize_handle(size, handle));
+}
+
 aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks() {
+  aexcompat::callback_diagnostics::reset();
   aexcompat::pf_utility_callbacks::Sources sources{};
   sources.begin_sampling = reinterpret_cast<void*>(&begin_sampling8);
   sources.subpixel_sample = reinterpret_cast<void*>(&subpixel_sample8);
   sources.area_sample = reinterpret_cast<void*>(&area_sample8);
   sources.end_sampling = reinterpret_cast<void*>(&end_sampling8);
-  sources.blend = reinterpret_cast<void*>(&blend_world);
-  sources.convolve = reinterpret_cast<void*>(&convolve_world);
-  sources.copy = reinterpret_cast<void*>(&copy_world8);
-  sources.fill = reinterpret_cast<void*>(&fill_world8);
-  sources.premultiply = reinterpret_cast<void*>(&premultiply_world8);
-  sources.premultiply_color = reinterpret_cast<void*>(&premultiply_color8);
+  sources.blend = reinterpret_cast<void*>(&diag_blend_world);
+  sources.convolve = reinterpret_cast<void*>(&diag_convolve_world);
+  sources.copy = reinterpret_cast<void*>(&diag_copy_world);
+  sources.fill = reinterpret_cast<void*>(&diag_fill_world);
+  sources.premultiply = reinterpret_cast<void*>(&diag_premultiply_world);
+  sources.premultiply_color = reinterpret_cast<void*>(&diag_premultiply_color);
   sources.subpixel_sample16 = reinterpret_cast<void*>(&subpixel_sample16);
   sources.area_sample16 = reinterpret_cast<void*>(&area_sample16);
-  sources.fill16 = reinterpret_cast<void*>(&fill_world16);
-  sources.premultiply_color16 = reinterpret_cast<void*>(&premultiply_color16);
+  sources.fill16 = reinterpret_cast<void*>(&diag_fill_world16);
+  sources.premultiply_color16 = reinterpret_cast<void*>(&diag_premultiply_color16);
   sources.iterate16 = reinterpret_cast<void*>(&iterate_world16);
   sources.iterate = reinterpret_cast<void*>(&iterate_world8);
   sources.iterate_origin = reinterpret_cast<void*>(&iterate_origin8);
-  sources.new_world = reinterpret_cast<void*>(&legacy_new_world);
-  sources.dispose_world = reinterpret_cast<void*>(&dispose_world);
-  sources.transfer_rect = reinterpret_cast<void*>(&transfer_rect);
-  sources.transform_world = reinterpret_cast<void*>(&transform_world);
-  sources.get_callback_addr = reinterpret_cast<void*>(&get_callback_addr);
+  sources.new_world = reinterpret_cast<void*>(&diag_new_world);
+  sources.dispose_world = reinterpret_cast<void*>(&diag_dispose_world);
+  sources.transfer_rect = reinterpret_cast<void*>(&diag_transfer_rect);
+  sources.transform_world = reinterpret_cast<void*>(&diag_transform_world);
+  sources.get_callback_addr = reinterpret_cast<void*>(&diag_get_callback_addr);
   sources.ansi_ceil = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_ceil);
   sources.ansi_cos = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_cos);
   sources.ansi_fabs = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs);
@@ -353,16 +559,16 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
   sources.ansi_strcpy = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy);
   sources.ansi_asin = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_asin);
   sources.ansi_acos = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_acos);
-  sources.get_platform_data = reinterpret_cast<void*>(&get_platform_data);
-  sources.get_pixel_data8 = reinterpret_cast<void*>(&get_pixel_data8);
-  sources.get_pixel_data16 = reinterpret_cast<void*>(&get_pixel_data16);
-  sources.host_new_handle = reinterpret_cast<void*>(&new_handle);
-  sources.host_lock_handle = reinterpret_cast<void*>(&lock_handle);
-  sources.host_unlock_handle = reinterpret_cast<void*>(&unlock_handle);
-  sources.host_dispose_handle = reinterpret_cast<void*>(&dispose_handle);
-  sources.host_get_handle_size = reinterpret_cast<void*>(&handle_size);
-  sources.host_resize_handle = reinterpret_cast<void*>(&resize_handle);
-  sources.app = reinterpret_cast<void*>(&host_app_callback);
+  sources.get_platform_data = reinterpret_cast<void*>(&diag_get_platform_data);
+  sources.get_pixel_data8 = reinterpret_cast<void*>(&diag_get_pixel_data8);
+  sources.get_pixel_data16 = reinterpret_cast<void*>(&diag_get_pixel_data16);
+  sources.host_new_handle = reinterpret_cast<void*>(&diag_new_handle);
+  sources.host_lock_handle = reinterpret_cast<void*>(&diag_lock_handle);
+  sources.host_unlock_handle = reinterpret_cast<void*>(&diag_unlock_handle);
+  sources.host_dispose_handle = reinterpret_cast<void*>(&diag_dispose_handle);
+  sources.host_get_handle_size = reinterpret_cast<void*>(&diag_handle_size);
+  sources.host_resize_handle = reinterpret_cast<void*>(&diag_resize_handle);
+  sources.app = reinterpret_cast<void*>(&diag_host_app);
   const auto utility_callbacks = aexcompat::pf_utility_callbacks::build(sources);
 
   return {{reinterpret_cast<void*>(&timeline_checkout_param),
