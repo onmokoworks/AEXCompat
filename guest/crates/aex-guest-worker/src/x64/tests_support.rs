@@ -1192,6 +1192,162 @@
     }
 
     #[test]
+    fn stdio_vsnprintf_s_formats_observed_opencv_string_and_signed_integers() {
+        const VSNPRINTF: u64 = STUB_BASE + 0x1d0;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                VSNPRINTF,
+                "API-MS-WIN-CRT-STDIO-L1-1-0.DLL",
+                "__stdio_common_vsnprintf_s",
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::StdioVsnprintfS)
+        );
+
+        let format = DATA_BASE + 0x100;
+        let va_list = DATA_BASE + 0x300;
+        let output = DATA_BASE + 0x500;
+        engine
+            .unicorn
+            .mem_write(
+                format,
+                b"OpenCV(%s) %s:%d: error: (%d:%s) %s in function '%s'\n\0",
+            )
+            .unwrap();
+        let strings = [
+            (DATA_BASE + 0x700, b"4.10.0".as_slice()),
+            (DATA_BASE + 0x740, b"resize.cpp".as_slice()),
+            (DATA_BASE + 0x780, b"Bad argument".as_slice()),
+            (DATA_BASE + 0x7c0, b"width > 0".as_slice()),
+            (DATA_BASE + 0x800, b"resize".as_slice()),
+        ];
+        for (address, value) in strings {
+            let mut terminated = value.to_vec();
+            terminated.push(0);
+            engine.unicorn.mem_write(address, &terminated).unwrap();
+        }
+        let values = [
+            DATA_BASE + 0x700,
+            DATA_BASE + 0x740,
+            1737,
+            u32::MAX as u64 - 214,
+            DATA_BASE + 0x780,
+            DATA_BASE + 0x7c0,
+            DATA_BASE + 0x800,
+        ];
+        let va_bytes = values
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        engine.unicorn.mem_write(va_list, &va_bytes).unwrap();
+
+        let written = engine
+            .call_win64_with_timeout(
+                VSNPRINTF,
+                &[0x24, output, 1024, u64::MAX, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap();
+        let expected = b"OpenCV(4.10.0) resize.cpp:1737: error: (-215:Bad argument) width > 0 in function 'resize'\n\0";
+        assert_eq!(written, (expected.len() - 1) as u64);
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(output, expected.len())
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn stdio_vsnprintf_s_truncates_with_nul_and_negative_one() {
+        const VSNPRINTF: u64 = STUB_BASE + 0x1e0;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            VSNPRINTF,
+            "api-ms-win-crt-stdio-l1-1-0.dll",
+            "__stdio_common_vsnprintf_s",
+        )
+        .unwrap();
+        let format = DATA_BASE + 0x100;
+        let output = DATA_BASE + 0x300;
+        engine.unicorn.mem_write(format, b"0123456789\0").unwrap();
+
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    VSNPRINTF,
+                    &[0x24, output, 8, u64::MAX, format, 0, 0],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            u32::MAX as u64
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+            b"0123456\0"
+        );
+    }
+
+    #[test]
+    fn stdio_vsnprintf_s_is_library_qualified_bounded_and_fail_closed() {
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "__stdio_common_vsnprintf_s"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        const VSNPRINTF: u64 = STUB_BASE + 0x1f0;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            VSNPRINTF,
+            "api-ms-win-crt-stdio-l1-1-0.dll",
+            "__stdio_common_vsnprintf_s",
+        )
+        .unwrap();
+        let format = DATA_BASE + 0x100;
+        let output = DATA_BASE + 0x300;
+        engine.unicorn.mem_write(format, b"unsupported=%x\0").unwrap();
+        engine.unicorn.mem_write(output, b"unchanged\0").unwrap();
+
+        let error = engine
+            .call_win64_with_timeout(
+                VSNPRINTF,
+                &[0x24, output, 32, u64::MAX, format, 0, DATA_BASE + 0x500],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported conversion '%x'"),
+            "{error}"
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 10).unwrap(),
+            b"unchanged\0"
+        );
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        let error = engine
+            .call_win64_with_timeout(
+                VSNPRINTF,
+                &[
+                    0x24,
+                    output,
+                    MAX_CRT_STDIO_BUFFER_BYTES + 1,
+                    u64::MAX,
+                    format,
+                    0,
+                    DATA_BASE + 0x500,
+                ],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("stdio buffer count"), "{error}");
+    }
+
+    #[test]
     fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
         let mut engine = test_engine(&[0xc3]);
         engine

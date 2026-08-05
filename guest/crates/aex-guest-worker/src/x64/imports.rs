@@ -25,6 +25,7 @@ enum LegacyWin64Import {
     Memset,
     MemoryCopy,
     MemChr,
+    StdioVsnprintfS,
     CxxThrowException,
     CosF,
     ExpF,
@@ -259,6 +260,12 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "memchr") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vsnprintf_s") => {
+            LegacyWin64Import::StdioVsnprintfS
+        }
+        (_, "__stdio_common_vsnprintf_s") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         (_, symbol) => match symbol {
             "malloc" => LegacyWin64Import::Malloc,
             "calloc" => LegacyWin64Import::Calloc,
@@ -373,6 +380,15 @@ fn install_win64_import(
                     "install memchr import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_memchr(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::StdioVsnprintfS => {
+                uc("write stdio formatter return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install stdio formatter import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_stdio_common_vsnprintf_s(unicorn);
                     }),
                 )?;
             }

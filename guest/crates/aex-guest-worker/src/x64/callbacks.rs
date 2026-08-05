@@ -777,6 +777,160 @@ fn emulate_crt_memchr(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn read_crt_stdio_c_string(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    limit: u64,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    if address == 0 {
+        return Err(format!("stdio {label} pointer is null"));
+    }
+    let mut bytes = Vec::new();
+    for offset in 0..limit {
+        let address = address
+            .checked_add(offset)
+            .ok_or_else(|| format!("stdio {label} range overflow"))?;
+        let mut byte = [0u8; 1];
+        unicorn
+            .mem_read(address, &mut byte)
+            .map_err(|error| format!("stdio {label} read: {error}"))?;
+        if byte[0] == 0 {
+            return Ok(bytes);
+        }
+        bytes.push(byte[0]);
+    }
+    Err(format!("stdio {label} exceeds {limit} bytes"))
+}
+
+fn emulate_stdio_common_vsnprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(u64, Vec<u8>, u64), String> {
+        let options = read_win64_import_argument(unicorn, 0)?;
+        let destination = read_win64_import_argument(unicorn, 1)?;
+        let buffer_count = read_win64_import_argument(unicorn, 2)?;
+        let max_count = read_win64_import_argument(unicorn, 3)?;
+        let format_address = read_win64_import_argument(unicorn, 4)?;
+        let locale = read_win64_import_argument(unicorn, 5)?;
+        let va_list = read_win64_import_argument(unicorn, 6)?;
+
+        if options != 0x24 {
+            return Err(format!("stdio unsupported formatting options {options:#x}"));
+        }
+        if locale != 0 {
+            return Err("stdio locale-aware formatting is unsupported".to_string());
+        }
+        if destination == 0 || buffer_count == 0 {
+            return Err("stdio destination and buffer count must be nonzero".to_string());
+        }
+        if buffer_count > MAX_CRT_STDIO_BUFFER_BYTES {
+            return Err(format!(
+                "stdio buffer count {buffer_count} exceeds {MAX_CRT_STDIO_BUFFER_BYTES}"
+            ));
+        }
+        if max_count != u64::MAX && max_count >= buffer_count {
+            return Err(format!(
+                "stdio max count {max_count} must be smaller than buffer count {buffer_count}"
+            ));
+        }
+
+        let format = read_crt_stdio_c_string(
+            unicorn,
+            format_address,
+            MAX_CRT_STDIO_FORMAT_BYTES,
+            "format",
+        )?;
+        let mut output = Vec::new();
+        let mut format_index = 0usize;
+        let mut argument_index = 0usize;
+        while format_index < format.len() {
+            if format[format_index] != b'%' {
+                output.push(format[format_index]);
+                format_index += 1;
+            } else {
+                format_index += 1;
+                let conversion = *format
+                    .get(format_index)
+                    .ok_or_else(|| "stdio format ends with '%'".to_string())?;
+                format_index += 1;
+                if conversion == b'%' {
+                    output.push(b'%');
+                    continue;
+                }
+                if argument_index >= MAX_CRT_STDIO_ARGUMENTS {
+                    return Err(format!(
+                        "stdio conversion count exceeds {MAX_CRT_STDIO_ARGUMENTS}"
+                    ));
+                }
+                let slot_address = va_list
+                    .checked_add((argument_index as u64) * 8)
+                    .ok_or_else(|| "stdio va_list address overflow".to_string())?;
+                let slot = unicorn
+                    .mem_read_as_vec(slot_address, 8)
+                    .map_err(|error| format!("stdio va_list read: {error}"))?;
+                let value = u64::from_le_bytes(
+                    slot.try_into()
+                        .map_err(|_| "stdio va_list slot has wrong size".to_string())?,
+                );
+                argument_index += 1;
+                match conversion {
+                    b's' => output.extend(read_crt_stdio_c_string(
+                        unicorn,
+                        value,
+                        MAX_CRT_STDIO_BUFFER_BYTES,
+                        "string argument",
+                    )?),
+                    b'd' => output.extend((value as u32 as i32).to_string().as_bytes()),
+                    other => {
+                        return Err(format!(
+                            "stdio unsupported conversion '%{}'",
+                            char::from(other)
+                        ));
+                    }
+                }
+            }
+            if output.len() as u64 > MAX_CRT_STDIO_BUFFER_BYTES {
+                return Err(format!(
+                    "stdio formatted output exceeds {MAX_CRT_STDIO_BUFFER_BYTES} bytes"
+                ));
+            }
+        }
+
+        let limit = if max_count == u64::MAX {
+            buffer_count - 1
+        } else {
+            max_count
+        };
+        let truncated = output.len() as u64 > limit;
+        output.truncate(limit as usize);
+        output.push(0);
+        let return_value = if truncated {
+            u32::MAX as u64
+        } else {
+            (output.len() - 1) as u64
+        };
+        Ok((destination, output, return_value))
+    })();
+    match result {
+        Ok((destination, output, return_value)) => {
+            if let Err(error) = unicorn.mem_write(destination, &output) {
+                if unicorn.get_data().callback_error.is_none() {
+                    unicorn.get_data_mut().callback_error =
+                        Some(format!("stdio destination write: {error}"));
+                }
+                let _ = unicorn.emu_stop();
+            } else {
+                let _ = unicorn.reg_write(RegisterX86::RAX, return_value);
+            }
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn emulate_strncpy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let destination = unicorn
