@@ -269,6 +269,30 @@ bool verify_aegp_layer_suite1_slots() {
       ok = ok && slots[here] == later[there] && slots[here] != later[here];
   }
   ok = compat_release_suite("AEGP Layer Suite", 14) == 0 && ok;
+
+  // Version 11 is `AEGP_LayerSuite5`. Its slot 7 is the legacy three-argument
+  // fixed-buffer `AEGP_GetLayerName`, not the four-argument MemHandle form
+  // implemented by `aegp_get_layer_name`. Pin it to the exact unsupported stub
+  // so a future neighbouring-table copy cannot silently restore the ABI
+  // mismatch (issue #718).
+  const bool saved_mode = g_aegp_comp_idle_roundtrip_mode;
+  g_aegp_comp_idle_roundtrip_mode = true;
+  const void* version11_raw = nullptr;
+  const bool version11_acquired =
+      compat_acquire_suite("AEGP Layer Suite", 11, &version11_raw) == 0;
+  if (version11_acquired) {
+    const auto* version11 = static_cast<void* const*>(version11_raw);
+    const auto& version11_stubs =
+        aexcompat::worker_runtime::unsupported_suite_slots<
+            aexcompat::worker_runtime::UnsupportedSuiteId::aegp_layer_11, 46>();
+    ok = ok && version11 && version11_raw == g_aegp_layer_suite5.data() &&
+        version11[7] == version11_stubs[7] &&
+        version11[7] != reinterpret_cast<void*>(&aegp_get_layer_name);
+    ok = compat_release_suite("AEGP Layer Suite", 11) == 0 && ok;
+  } else {
+    ok = false;
+  }
+  g_aegp_comp_idle_roundtrip_mode = saved_mode;
   return finish(ok);
 }
 

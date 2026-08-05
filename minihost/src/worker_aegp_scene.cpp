@@ -2302,7 +2302,10 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_layer_suite5[3] = reinterpret_cast<void*>(&aegp_get_layer_index);
     g_aegp_layer_suite5[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
     g_aegp_layer_suite5[6] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
-    g_aegp_layer_suite5[7] = reinterpret_cast<void*>(&aegp_get_layer_name);
+    // `AEGP_LayerSuite5::AEGP_GetLayerName` is the legacy three-argument
+    // fixed-buffer form. `aegp_get_layer_name` implements the later
+    // four-argument MemHandle form, so slot 7 must remain the fail-closed stub
+    // until a matching legacy implementation exists (issue #718).
     g_aegp_layer_suite5[15] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
     g_aegp_layer_suite5[16] = reinterpret_cast<void*>(&aegp_get_layer_duration);
     g_aegp_layer_suite5[17] = reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
