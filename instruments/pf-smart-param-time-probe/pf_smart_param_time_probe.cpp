@@ -87,6 +87,9 @@ PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
   if (error != PF_Err_NONE) return error;
   if (!input || !output || !input->data || !output->data)
     return PF_Err_BAD_CALLBACK_PARAM;
+  // 8-bit only: the copy is `width * 4` bytes per row. The gate under test does
+  // not depend on depth, so the probe does not open the deep paths; a caller
+  // that wants one must widen this first rather than get a short copy.
   const A_long height = input->height < output->height ? input->height : output->height;
   const A_long width = input->width < output->width ? input->width : output->width;
   for (A_long y = 0; y < height; ++y)
