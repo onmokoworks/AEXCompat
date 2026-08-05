@@ -594,6 +594,12 @@ pub(crate) fn isolated_worker_diagnostics(
     if let Some(reason) = isolated.worker_freshness_warning {
         object.insert("worker_freshness_warning".into(), json!(reason));
     }
+    // Recorded when a required module audit could not confirm that only known
+    // modules loaded (issue #730). A warning, not a gate: the module list
+    // explains observations, it does not decide their validity.
+    if let Some(reason) = &isolated.module_audit_warning {
+        object.insert("module_audit_warning".into(), json!(reason));
+    }
     diagnostics
 }
 

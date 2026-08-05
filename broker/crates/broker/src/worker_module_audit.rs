@@ -59,6 +59,30 @@ pub(crate) fn parse_report_prefix(stdout: &str) -> io::Result<Value> {
     }
 }
 
+/// The audit as a recorded observation (issue #730): `None` when the report
+/// confirms that only known modules loaded, `Some(reason)` otherwise. The
+/// classifier below is unchanged; what moved is the boundary — an unknown or
+/// unconfirmable module list rides the launch result as a warning instead of
+/// failing the dispatch. The module list explains observations (a runtime DLL
+/// difference can change pixels); it does not decide their validity.
+pub fn observe_required_worker_audit(stdout: &str, stdout_truncated: bool) -> Option<String> {
+    validate_required_worker_audit(stdout, stdout_truncated)
+        .err()
+        .map(|error| error.to_string())
+}
+
+/// Cluster-session variant of [`observe_required_worker_audit`], wrapping
+/// [`validate_cluster_worker_audit`] the same way.
+pub fn observe_cluster_worker_audit(
+    stdout: &str,
+    stdout_truncated: bool,
+    declaration: &ClusterAuditDeclaration,
+) -> Option<String> {
+    validate_cluster_worker_audit(stdout, stdout_truncated, declaration)
+        .err()
+        .map(|error| error.to_string())
+}
+
 pub fn validate_required_worker_audit(stdout: &str, stdout_truncated: bool) -> io::Result<()> {
     if stdout_truncated {
         return Err(invalid("secure worker report was truncated"));
@@ -510,6 +534,24 @@ mod tests {
     #[test]
     fn accepts_complete_cumulative_audit() {
         validate_required_worker_audit(&valid_report(), false).unwrap();
+    }
+
+    /// The recording boundary (issue #730): a passing audit adds nothing, and
+    /// every classifier rejection becomes a recorded reason instead of an
+    /// error the dispatch would have died on.
+    #[test]
+    fn observation_wrappers_record_instead_of_failing() {
+        assert_eq!(observe_required_worker_audit(&valid_report(), false), None);
+        let warning = observe_required_worker_audit("{}", false)
+            .expect("a missing audit is recorded, not enforced");
+        assert!(warning.contains("module audit"), "{warning}");
+        assert_eq!(
+            observe_cluster_worker_audit(&valid_cluster_report(), false, &cluster_declaration()),
+            None
+        );
+        let warning = observe_cluster_worker_audit("not-json", false, &cluster_declaration())
+            .expect("a malformed cluster report is recorded, not enforced");
+        assert!(!warning.is_empty());
     }
 
     #[test]

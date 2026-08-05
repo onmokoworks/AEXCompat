@@ -55,10 +55,10 @@ and bounded image input/output are now the main implementation path.
 - Implementation gap: the code still contains the enforcement this policy
   removes. Approval receipts still gate the `l1`/`l2`/`render*`/`smart*`/
   `render_request` CLI routes (#732), interactive image dispatch still enforces
-  a per-session pre-selection hash match (`ApprovedImageArtifact`, #739), the
-  module audit still fails closed (#730), and the sealed/restricted launch machinery
-  is still wired (#731). The worker freshness gate was demoted to a recorded
-  warning in #729. Until the rest lands,
+  a per-session pre-selection hash match (`ApprovedImageArtifact`, #739), and
+  the sealed/restricted launch machinery is still wired (#731). The worker
+  freshness gate (#729) and the module audit (#730) were demoted to recorded
+  warnings. Until the rest lands,
   do not treat the existing enforcement as policy, do not add new enforcement,
   and when touching one of these routes migrate it toward the floor rather
   than extending the gate. `l1` is the last plug-in-loading normal-token route

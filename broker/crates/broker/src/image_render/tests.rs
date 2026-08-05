@@ -2591,12 +2591,17 @@ mod tests {
             memory_limit_reached: true,
             dismissed_windows: Vec::new(),
             worker_freshness_warning: Some("source_newer_than_worker"),
+            module_audit_warning: Some("secure worker module audit did not pass".to_owned()),
         };
         let diagnostics = isolated_worker_diagnostics(&isolated, 1_234);
         assert_eq!(diagnostics["kill_reason"], "memory_limit");
         assert_eq!(
             diagnostics["worker_freshness_warning"],
             "source_newer_than_worker"
+        );
+        assert_eq!(
+            diagnostics["module_audit_warning"],
+            "secure worker module audit did not pass"
         );
         assert_eq!(diagnostics["memory_limit_reached"], true);
         assert_eq!(diagnostics["worker_peak_commit_bytes"], 529_000_000u64);
@@ -2621,6 +2626,7 @@ mod tests {
             memory_limit_reached: false,
             dismissed_windows: Vec::new(),
             worker_freshness_warning: None,
+            module_audit_warning: None,
         };
         let diagnostics = isolated_worker_diagnostics(&alive, 5);
         assert_eq!(diagnostics["kill_reason"], Value::Null);
@@ -2628,6 +2634,10 @@ mod tests {
         assert!(
             diagnostics.get("worker_freshness_warning").is_none(),
             "a fresh worker adds no freshness key"
+        );
+        assert!(
+            diagnostics.get("module_audit_warning").is_none(),
+            "a passing audit adds no audit key"
         );
     }
 

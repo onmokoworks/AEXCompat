@@ -2731,7 +2731,7 @@ mod tests {
         }
 
         #[test]
-        fn render_close_audit_failure_is_recorded_not_rounded_to_success() {
+        fn render_close_audit_warning_closes_clean_and_records_no_failure() {
             let _guard = BEHAVIOR_LOCK
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
@@ -2769,8 +2769,8 @@ mod tests {
             })
             .expect("open cluster render session");
             let tx = session.sender().expect("fresh session sender");
-            // The frame renders; the close-time cluster module audit fails
-            // only afterwards (the fixture injects an undeclared module into
+            // The frame renders; the close-time cluster module audit sees an
+            // undeclared module only afterwards (the fixture injects it into
             // the final report's observed union).
             let reply = render_on(&tx, 0, 0, vec![7u8; 8 * 4 * 4], None, None);
             assert!(
@@ -2779,9 +2779,10 @@ mod tests {
             );
             // The session thread's recv loop ends only when every sender is
             // gone, so the reply clone goes first; dropping the handle then
-            // drives RenderSession::close on the session thread, and the
-            // close-time audit failure must be recorded, never dropped with
-            // the close summary.
+            // drives RenderSession::close on the session thread. Since issue
+            // #730 the audit outcome is a recorded warning on the close
+            // report, not an invalidation: the close stays clean and no
+            // close failure is recorded for the delivered frame.
             drop(tx);
             drop(session);
             let failures: Vec<SessionCloseFailure> = SESSION_CLOSE_FAILURES
@@ -2791,28 +2792,9 @@ mod tests {
             unsafe {
                 std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
             }
-            let failure = failures
-                .iter()
-                .find(|failure| failure.plugin == one)
-                .expect("the close-time audit failure is recorded");
-            assert!(failure.close_reason.contains("module_audit"), "{failure:?}");
-            assert!(failure.clustered);
-            assert!(!failure.smart);
-            assert_eq!(failure.frames_ok, 1, "{failure:?}");
-            assert_eq!(failure.frames_errored, 0, "{failure:?}");
-            assert_eq!(failure.fallback, "reopen_fresh_session");
-            assert_eq!(failure.plugin_sha256, sha_of(&one));
-            assert_eq!(
-                failure.worker.file_name().and_then(|name| name.to_str()),
-                Some("aex_render_worker.exe")
-            );
-            assert_eq!(failure.worker_sha256.as_deref().map(str::len), Some(64));
             assert!(
-                failure
-                    .module_audit
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains("module audit")),
-                "{failure:?}"
+                !failures.iter().any(|failure| failure.plugin == one),
+                "an audit-only close records no failure (issue #730): {failures:?}"
             );
             std::fs::remove_dir_all(&root).unwrap();
         }

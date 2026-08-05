@@ -1471,11 +1471,14 @@ struct SessionCloseFailure {
     plugin_sha256: String,
     smart: bool,
     clustered: bool,
-    /// Why the close was not clean: the session invalidation reason (e.g.
-    /// `module_audit_mismatch`), or the worker exit classification.
+    /// Why the close was not clean: the session invalidation reason (e.g. a
+    /// teardown failure), or the worker exit classification. Since issue #730
+    /// the module audit no longer invalidates a close; its outcome rides
+    /// `module_audit` below instead.
     close_reason: String,
     /// The close-time module audit outcome when the worker left a final
-    /// report (the audit status or the invalidation detail).
+    /// report (the recorded audit warning, the invalidation detail, or the
+    /// audit status).
     module_audit: Option<String>,
     /// Identity of the worker image that ran the session, hashed at close.
     worker: PathBuf,
@@ -1499,6 +1502,18 @@ static SESSION_CLOSE_FAILURES: Mutex<Vec<SessionCloseFailure>> = Mutex::new(Vec:
 /// with no request in flight — from being dropped.
 fn record_session_close(config: &MfSessionConfig, close: &serde_json::Value) {
     if close.get("session_clean") == Some(&serde_json::Value::Bool(true)) {
+        // Since issue #730 an unconfirmed module audit closes clean and rides
+        // the close report as a recorded warning. Say it in the log so the
+        // observation is not dropped with the close summary.
+        if let Some(warning) = close
+            .get("module_audit_warning")
+            .and_then(serde_json::Value::as_str)
+        {
+            log_warn(&format!(
+                "session close for {} carried a module audit warning: {warning}",
+                config.plugin.display()
+            ));
+        }
         return;
     }
     let as_u32 = |key: &str| {
@@ -1521,10 +1536,16 @@ fn record_session_close(config: &MfSessionConfig, close: &serde_json::Value) {
                 .to_owned()
         });
     let module_audit = close
-        .get("invalidated_reason")
-        .and_then(|reason| reason.get("detail"))
+        .get("module_audit_warning")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
+        .or_else(|| {
+            close
+                .get("invalidated_reason")
+                .and_then(|reason| reason.get("detail"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
         .or_else(|| {
             close
                 .get("final_report")
