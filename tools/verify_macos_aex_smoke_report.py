@@ -148,10 +148,14 @@ def validate(report_path: Path, output_path: Path) -> dict[str, object]:
     pre_render = gpu.get("pre_render")
     if not isinstance(pre_render, dict):
         fail("diagnostic is missing pre_render state")
-    if pre_render.get("attempted") is True and (
-        pre_render.get("completed") is not True or pre_render.get("error") != 0
-    ):
-        fail("diagnostic pre_render did not complete cleanly")
+    if pre_render.get("attempted") is True:
+        if pre_render.get("completed") is not True or pre_render.get("error") != 0:
+            fail("diagnostic pre_render did not complete cleanly")
+    elif pre_render.get("attempted") is False:
+        if pre_render.get("completed") is not False or pre_render.get("error") is not None:
+            fail("diagnostic unattempted pre_render state is inconsistent")
+    else:
+        fail("diagnostic pre_render attempted flag is malformed")
     render = gpu.get("render")
     if not isinstance(render, dict):
         fail("diagnostic is missing render state")

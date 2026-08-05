@@ -84,6 +84,25 @@ def test_accepts_classic_render_without_a_pre_render_selector(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "pre_render",
+    [
+        {"completed": False},
+        {"attempted": "false", "completed": False},
+        {"attempted": False, "completed": True},
+        {"attempted": False, "completed": False, "error": 4},
+        {"attempted": True, "completed": False, "error": 0},
+        {"attempted": True, "completed": True, "error": 4},
+    ],
+)
+def test_rejects_malformed_or_inconsistent_pre_render_state(tmp_path, pre_render):
+    report = valid_report()
+    report["gpu"]["pre_render"] = pre_render
+    report_path, output_path = write_fixture(tmp_path, report)
+    with pytest.raises(SystemExit, match="pre_render"):
+        MODULE.validate(report_path, output_path)
+
+
+@pytest.mark.parametrize(
     ("mutation", "message"),
     [
         (lambda value: value.update(schema_version=2), "schema_version"),
