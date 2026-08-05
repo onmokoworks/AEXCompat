@@ -329,6 +329,10 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
     reinterpret_cast<void*>(&blend_world), reinterpret_cast<void*>(&convolve_world),
     reinterpret_cast<void*>(&copy_world8), reinterpret_cast<void*>(&fill_world8),
     reinterpret_cast<void*>(&premultiply_world8), reinterpret_cast<void*>(&premultiply_color8),
+    // The 16-bit sampling pair. Left unwired until issue #777: a deep-colour
+    // plug-in that sampled - AE's own Displacement does - called through a null
+    // slot and access-violated at address 0.
+    reinterpret_cast<void*>(&subpixel_sample16), reinterpret_cast<void*>(&area_sample16),
     reinterpret_cast<void*>(&fill_world16), reinterpret_cast<void*>(&premultiply_color16),
     reinterpret_cast<void*>(&iterate_world16), reinterpret_cast<void*>(&iterate_world8),
     reinterpret_cast<void*>(&iterate_origin8),
@@ -355,6 +359,34 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
       utility_callbacks.size() ==
           aexcompat::abi::x86_64_windows::UTILITY_CALLBACK_OFFSETS.size(),
       "native utility hooks must match the generated ABI table one-to-one");
+  // The assert above is a count, not an ordering: transposing two entries in
+  // this list still builds, and every plug-in then gets the wrong callback
+  // through the right-looking slot. Nothing in the tree catches that for the
+  // other 36 entries (issue #792). Pin at least the pair this file just added,
+  // since a same-signature neighbour is exactly what they could swap with.
+  {
+    const auto& offsets = aexcompat::abi::x86_64_windows::UTILITY_CALLBACK_OFFSETS;
+    const auto index_of = [&offsets](std::size_t offset) {
+      for (std::size_t index = 0; index < offsets.size(); ++index)
+        if (offsets[index] == offset) return index;
+      return offsets.size();
+    };
+    const auto subpixel16 =
+        index_of(aexcompat::abi::x86_64_windows::UTILS_SUBPIXEL_SAMPLE16_OFFSET);
+    const auto area16 =
+        index_of(aexcompat::abi::x86_64_windows::UTILS_AREA_SAMPLE16_OFFSET);
+    if (subpixel16 >= utility_callbacks.size() || area16 >= utility_callbacks.size() ||
+        utility_callbacks[subpixel16] != reinterpret_cast<void*>(&subpixel_sample16) ||
+        utility_callbacks[area16] != reinterpret_cast<void*>(&area_sample16)) {
+      // `_end error=` is the shape the broker's stage parser accepts; a bare
+      // marker is dropped, and the abort below would then read as an
+      // unattributed 0xC0000409 crash. The -5 is this host's generic internal
+      // failure code, used here because the condition is a host wiring bug with
+      // no PF error that describes it.
+      std::cerr << "stage:utility_table_mismatch_end error=-5\n" << std::flush;
+      std::abort();
+    }
+  }
 
   return {{reinterpret_cast<void*>(&timeline_checkout_param),
     reinterpret_cast<void*>(&timeline_checkin_param),

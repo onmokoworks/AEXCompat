@@ -651,6 +651,11 @@ fn worker_diagnostics(
         "audio_render",
         "audio_setdown",
         "global_setdown",
+        // Not a selector: the worker's own refusal to run with a utility
+        // callback table whose entries do not sit at the offsets the generated
+        // contract names for them. It aborts immediately after, so without this
+        // the abort reads as an unattributed 0xC0000409 crash (issue #777).
+        "utility_table_mismatch",
     ];
     let mut events = Vec::new();
     let mut active_stages: Vec<String> = Vec::new();

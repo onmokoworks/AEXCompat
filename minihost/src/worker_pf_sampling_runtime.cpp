@@ -54,10 +54,31 @@ void configure_pf_sampling_runtime(const PfSamplingHostHooks& hooks) noexcept {
   g_hooks = hooks;
 }
 
+// `effect_ref` is accepted and ignored. It used to be rejected when null, which
+// cost AE's own Displacement every frame: its SMART_RENDER pixel function calls
+// the `utils->subpixel_sample` slot directly with a null ref - not through the
+// PF_SUBPIXEL_SAMPLE macro, which would have passed `in_data->effect_ref` - and
+// returned the 4 it got back as its own PF_Err_OUT_OF_MEMORY (issue #777). The
+// host does populate `in_data->effect_ref`; the plug-in just does not use it
+// here. That a first-party effect ships this way and renders in AE is the
+// evidence that AE tolerates it (an inference from the plug-in's behaviour, not
+// an observation of AE's own callback).
+//
+// Dropping the check costs no protection, and not because anything downstream
+// re-establishes it: `resolve_world` bounds-checks the world the plug-in points
+// at (worker_world_safety.cpp, `bounded_typed_world`) but consults no ownership
+// registry, so it never refused a world *for being foreign* - only for failing
+// its bounds or deep-flag checks. The reason is simpler: the plug-in runs in
+// this process and is handed `effect_ref` in `in_data`, so it could always have
+// passed whatever value the check demanded. The check caught accident, never
+// abuse, and on a correct plug-in its only effect was turning a valid sample
+// into a refusal reported as PF_Err_OUT_OF_MEMORY (which is itself the wrong
+// code for an argument rejection - issue #813).
 int32_t subpixel_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x,
                               int32_t fixed_y, const void* sampling_params,
                               void* destination_pixel) {
-  if (!effect_ref || !sampling_params || !destination_pixel) return 4;
+  (void)effect_ref;
+  if (!sampling_params || !destination_pixel) return 4;
   void* source_world{};
   std::memcpy(&source_world, static_cast<const std::byte*>(sampling_params) + 16,
               sizeof(source_world));
@@ -98,10 +119,12 @@ int32_t subpixel_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fix
   return 0;
 }
 
+// `effect_ref` accepted and ignored, for the same reason as above (issue #777).
 int32_t nearest_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x,
                              int32_t fixed_y, const void* sampling_params,
                              void* destination_pixel) {
-  if (!effect_ref || !sampling_params || !destination_pixel) return 4;
+  (void)effect_ref;
+  if (!sampling_params || !destination_pixel) return 4;
   void* source_world{};
   std::memcpy(&source_world, static_cast<const std::byte*>(sampling_params) + 16,
               sizeof(source_world));
@@ -134,10 +157,14 @@ int32_t __cdecl nearest_sample_float(void* effect_ref, int32_t x, int32_t y,
   return nearest_sample_typed(16, effect_ref, x, y, params, pixel);
 }
 
+// `effect_ref` accepted and ignored, for the same reason as the other two
+// samplers (issue #777). PF_SUBPIXEL_SAMPLE and PF_AREA_SAMPLE take the same
+// argument on the same terms, so they answer a null ref the same way.
 int32_t area_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x,
                           int32_t fixed_y, const void* sampling_params,
                           void* destination_pixel) {
-  if (!effect_ref || !sampling_params || !destination_pixel) return 4;
+  (void)effect_ref;
+  if (!sampling_params || !destination_pixel) return 4;
   int32_t fixed_radius_x{}, fixed_radius_y{}, fixed_area{};
   uint32_t edge_behavior{};
   void* source_world{};

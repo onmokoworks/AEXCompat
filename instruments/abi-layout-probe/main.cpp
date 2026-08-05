@@ -142,6 +142,8 @@ static_assert(offsetof(PF_UtilCallbacks, host_unlock_handle) == 176);
 static_assert(offsetof(PF_UtilCallbacks, host_dispose_handle) == 184);
 static_assert(offsetof(PF_UtilCallbacks, host_get_handle_size) == 440);
 static_assert(offsetof(PF_UtilCallbacks, host_resize_handle) == 464);
+static_assert(offsetof(PF_UtilCallbacks, subpixel_sample16) == 472);
+static_assert(offsetof(PF_UtilCallbacks, area_sample16) == 480);
 
 template <typename T>
 void field(const char* name, std::size_t offset, bool& first) {
@@ -323,6 +325,11 @@ int main() {
   field<decltype(PF_UtilCallbacks::dispose_world)>("utils.dispose_world", offsetof(PF_UtilCallbacks, dispose_world), first);
   field<decltype(PF_UtilCallbacks::transfer_rect)>("utils.transfer_rect", offsetof(PF_UtilCallbacks, transfer_rect), first);
   field<decltype(PF_UtilCallbacks::transform_world)>("utils.transform_world", offsetof(PF_UtilCallbacks, transform_world), first);
+  // The 16-bit sampling pair sits between host_resize_handle and fill16. Both
+  // slots were left out of the emitted contract, so the host never wired them
+  // and a 16-bit plug-in calling them jumped to address 0 (issue #777).
+  field<decltype(PF_UtilCallbacks::subpixel_sample16)>("utils.subpixel_sample16", offsetof(PF_UtilCallbacks, subpixel_sample16), first);
+  field<decltype(PF_UtilCallbacks::area_sample16)>("utils.area_sample16", offsetof(PF_UtilCallbacks, area_sample16), first);
   field<decltype(PF_UtilCallbacks::fill16)>("utils.fill16", offsetof(PF_UtilCallbacks, fill16), first);
   field<decltype(PF_UtilCallbacks::premultiply_color16)>("utils.premultiply_color16", offsetof(PF_UtilCallbacks, premultiply_color16), first);
   field<decltype(PF_UtilCallbacks::get_platform_data)>("utils.get_platform_data", offsetof(PF_UtilCallbacks, get_platform_data), first);

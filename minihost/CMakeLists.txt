@@ -434,6 +434,16 @@ add_executable(extended_inter_memory_selftest
 target_compile_features(extended_inter_memory_selftest PRIVATE cxx_std_17)
 target_include_directories(extended_inter_memory_selftest PRIVATE src)
 
+add_executable(worker_pf_sampling_wiring_selftest
+  ../tests/native/worker_pf_sampling_wiring_selftest.cpp
+  src/worker_pf_sampling_runtime.cpp
+  src/worker_effect_bootstrap.cpp
+)
+target_compile_features(worker_pf_sampling_wiring_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_pf_sampling_wiring_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_pf_sampling_wiring_selftest PRIVATE src)
+
 add_executable(worker_classic_execution_selftest
   ../tests/native/worker_classic_execution_selftest.cpp
   src/worker_classic_execution.cpp
