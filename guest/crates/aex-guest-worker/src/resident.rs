@@ -230,8 +230,9 @@ pub fn run_resident_session(
     })();
 
     let close = host.close_resident_session();
-    let close_value = serde_json::to_value(&close)
+    let mut close_value = serde_json::to_value(&close)
         .map_err(|error| SessionError::Protocol(format!("serialize close report: {error}")))?;
+    bound_session_close(&setup, std::process::id(), &mut close_value)?;
     write_message(
         &mut response,
         &SessionClosed {
@@ -249,6 +250,52 @@ pub fn run_resident_session(
         ));
     }
     Ok(())
+}
+
+fn bound_session_close(
+    setup: &SetupReport,
+    worker_pid: u32,
+    close: &mut Value,
+) -> Result<(), SessionError> {
+    let fits = |close: &Value| {
+        serde_json::to_vec(&SessionClosed {
+            v: 1,
+            kind: "session_closed",
+            worker_pid,
+            setup,
+            close: close.clone(),
+        })
+        .map(|payload| payload.len() <= MAX_CONTROL_MESSAGE_BYTES)
+        .map_err(|error| SessionError::Protocol(format!("serialize close response: {error}")))
+    };
+    if fits(close)? {
+        return Ok(());
+    }
+
+    if let Some(snapshot) = close.pointer_mut("/global_setdown_diagnostic/crash_snapshot") {
+        *snapshot =
+            serde_json::json!({"truncated": true, "reason": "resident control message budget"});
+    }
+    for pointer in [
+        "/global_setdown_diagnostic/suite_requests",
+        "/global_setdown_diagnostic/unsupported_suite_calls",
+        "/suite_requests",
+        "/unsupported_suite_calls",
+    ] {
+        if fits(close)? {
+            return Ok(());
+        }
+        if let Some(value) = close.pointer_mut(pointer) {
+            *value = serde_json::Value::Array(Vec::new());
+        }
+    }
+    if fits(close)? {
+        Ok(())
+    } else {
+        Err(SessionError::Protocol(
+            "resident close response exceeds the control bound after diagnostic truncation".into(),
+        ))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -570,7 +617,9 @@ fn write_message(writer: &mut impl Write, value: &impl Serialize) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classic::{MAX_FAILURE_SUITE_REQUEST_BYTES, MAX_FAILURE_TEXT_BYTES};
+    use crate::classic::{
+        MAX_FAILURE_CRASH_SNAPSHOT_BYTES, MAX_FAILURE_SUITE_REQUEST_BYTES, MAX_FAILURE_TEXT_BYTES,
+    };
 
     #[test]
     fn probe_failure_response_carries_bounded_structured_diagnostics() {
@@ -583,6 +632,7 @@ mod tests {
             error_code: None,
             message: "guest callback failed".into(),
             crash_reason: None,
+            crash_snapshot: None,
             suite_requests: vec!["PF Iterate8 Suite v1".into()],
             dropped_suite_requests: 0,
             unsupported_suite_calls: Vec::new(),
@@ -624,6 +674,7 @@ mod tests {
             error_code: Some(-40),
             message: "m".repeat(MAX_FAILURE_TEXT_BYTES),
             crash_reason: Some("c".repeat(MAX_FAILURE_TEXT_BYTES)),
+            crash_snapshot: None,
             suite_requests: vec!["s".repeat(MAX_FAILURE_SUITE_REQUEST_BYTES); 64],
             dropped_suite_requests: u64::MAX,
             unsupported_suite_calls: vec![
@@ -648,6 +699,70 @@ mod tests {
                 guards_intact: false,
                 render_error: -40,
                 failure: Some(diagnostic),
+            },
+        )
+        .unwrap();
+        assert!(framed.len() - 4 <= MAX_CONTROL_MESSAGE_BYTES);
+    }
+
+    #[test]
+    fn maximal_close_diagnostic_with_snapshot_fits_control_message_bound() {
+        let calls = vec![
+            crate::x64::UnsupportedSuiteCall {
+                name: "AEGP Utility Suite",
+                version: u32::MAX,
+                slot: usize::MAX,
+                call_count: u64::MAX,
+            };
+            64
+        ];
+        let setup = SetupReport {
+            schema_version: 1,
+            execution_backend: "unicorn-x86_64",
+            global_setup_error: 0,
+            params_setup_error: 0,
+            advertised_num_params: 0,
+            out_flags: u32::MAX,
+            out_flags2: u32::MAX,
+            parameters: Vec::new(),
+            suite_requests: vec!["s".repeat(MAX_FAILURE_SUITE_REQUEST_BYTES); 64],
+            unsupported_suite_calls: calls.clone(),
+            dropped_unsupported_suite_calls: u64::MAX,
+        };
+        let mut close = serde_json::json!({
+            "schema_version": 1,
+            "execution_backend": "unicorn-x86_64",
+            "frames_rendered": 1,
+            "frame_setdown_error": 0,
+            "sequence_setdown_error": 0,
+            "global_setdown_error": -40,
+            "global_setdown_diagnostic": {
+                "message": "m".repeat(MAX_FAILURE_TEXT_BYTES),
+                "crash_reason": "c".repeat(MAX_FAILURE_TEXT_BYTES),
+                "crash_snapshot": {"payload": "x".repeat(MAX_FAILURE_CRASH_SNAPSHOT_BYTES)},
+                "suite_requests": vec!["s".repeat(MAX_FAILURE_SUITE_REQUEST_BYTES); 64],
+                "unsupported_suite_calls": calls,
+            },
+            "suite_requests": vec!["s".repeat(MAX_FAILURE_SUITE_REQUEST_BYTES); 64],
+            "unsupported_suite_calls": vec![crate::x64::UnsupportedSuiteCall {
+                name: "AEGP Utility Suite",
+                version: u32::MAX,
+                slot: usize::MAX,
+                call_count: u64::MAX,
+            }; 64],
+            "dropped_unsupported_suite_calls": u64::MAX,
+            "session_clean": false,
+        });
+        bound_session_close(&setup, u32::MAX, &mut close).unwrap();
+        let mut framed = Vec::new();
+        write_message(
+            &mut framed,
+            &SessionClosed {
+                v: 1,
+                kind: "session_closed",
+                worker_pid: u32::MAX,
+                setup: &setup,
+                close,
             },
         )
         .unwrap();
