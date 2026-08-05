@@ -4,15 +4,14 @@ use crate::fixture_profiles::maskoffset::{
 };
 use crate::fixture_profiles::scattermap::expected_argb8_hash;
 use crate::fixture_profiles::{ParameterizedRenderAdapter, RegisteredProfile};
-use crate::host_core::approved_artifact::load_v2_load_tree;
+use crate::host_core::approved_artifact::{ApprovedLoadTree, load_v2_load_tree};
 use crate::host_core::descriptor_manifest::{LoadedManifest, load as load_manifest};
 use crate::host_core::parameter::{
     ParameterValue, PluginProfile, ValidatedAssignments, ValidationError, ValueKind,
     apply_defaults, encode_worker_payload, validate_assignments,
 };
 use crate::render_approval::{ApprovalIdentity, admit_launch};
-use crate::sealed_load_tree::SealedLoadTree;
-use crate::secure_launch::{SecureLaunchRequest, secure_launch};
+use crate::secure_launch::{SecureLaunchRequest, secure_launch_in_place};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
@@ -470,6 +469,35 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+fn launch_approved_in_place(
+    approved: &ApprovedLoadTree,
+    worker: &Path,
+    args_before_plugin: &[String],
+    args_after_plugin: &[String],
+    repository: &Path,
+    timeout_ms: u64,
+) -> io::Result<crate::secure_launch::SecureLaunchResult> {
+    let plugin_path = fs::canonicalize(&approved.main.source)?;
+    let dirs = approved.dependency_search_dirs()?;
+    let joined = crate::secure_image_dispatch::joined_dependency_search_dirs(&dirs)?;
+    let mut tail = args_after_plugin.to_vec();
+    tail.extend(["--dependency-dirs-v1".to_owned(), joined]);
+    secure_launch_in_place(
+        &plugin_path,
+        SecureLaunchRequest {
+            worker_program: worker,
+            worker_expected_sha256: approved.worker_sha256,
+            worker_expected_size: approved.worker_byte_size,
+            args_before_plugin,
+            args_after_plugin: &tail,
+            repository,
+            require_module_audit: true,
+        },
+        Some(Duration::from_millis(timeout_ms)),
+        None,
+    )
+}
+
 pub(crate) fn validate_image_buffer_layout(
     width: u64,
     height: u64,
@@ -690,7 +718,6 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         } else {
             repository.join(&approved.worker_path)
         };
-        let plugin_basename = approved.main.relative_basename.clone();
         let fixture_sha256 = approved
             .main
             .expected_sha256
@@ -708,13 +735,13 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         let worker_sha256 = approved.worker_sha256;
         let worker_byte_size = approved.worker_byte_size;
         let timeout_ms = approved.timeout_ms;
-        let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        let image_set_digest = approved.image_set_digest();
         // The receipt is reloaded per determinism run, so pin the whole approved
         // identity across runs. The sealed manifest digest covers the main entry and
         // every dependency; the fixture digest alone would miss a swapped worker
         // build or dependency set (#312 review).
         let identity = ApprovalIdentity {
-            sealed_manifest_sha256: tree.manifest_digest(),
+            sealed_manifest_sha256: image_set_digest,
             worker_sha256,
             worker_byte_size,
             timeout_ms,
@@ -728,19 +755,13 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         approved_identity = Some(identity);
         let args_before_plugin = [worker_spec.request_mode.to_string()];
         let args_after_plugin = [fixture_sha256, payload.clone()];
-        let isolated = secure_launch(
-            tree,
-            SecureLaunchRequest {
-                worker_program: &receipt_worker,
-                worker_expected_sha256: worker_sha256,
-                worker_expected_size: worker_byte_size,
-                plugin_basename: Some(&plugin_basename),
-                args_before_plugin: &args_before_plugin,
-                args_after_plugin: &args_after_plugin,
-                repository,
-                require_module_audit: true,
-            },
-            Some(Duration::from_millis(timeout_ms)),
+        let isolated = launch_approved_in_place(
+            &approved,
+            &receipt_worker,
+            &args_before_plugin,
+            &args_after_plugin,
+            repository,
+            timeout_ms,
         )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
@@ -937,13 +958,13 @@ pub fn execute_smart(
         let worker_sha256 = approved.worker_sha256;
         let worker_byte_size = approved.worker_byte_size;
         let timeout_ms = approved.timeout_ms;
-        let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        let image_set_digest = approved.image_set_digest();
         // The receipt is reloaded per determinism run, so pin the whole approved
         // identity across runs. The sealed manifest digest covers the main entry and
         // every dependency; the fixture digest alone would miss a swapped worker
         // build or dependency set (#312 review).
         let identity = ApprovalIdentity {
-            sealed_manifest_sha256: tree.manifest_digest(),
+            sealed_manifest_sha256: image_set_digest,
             worker_sha256,
             worker_byte_size,
             timeout_ms,
@@ -955,8 +976,7 @@ pub fn execute_smart(
             &identity,
         )?;
         approved_identity = Some(identity);
-        let sealed_manifest_sha256 = tree
-            .manifest_digest()
+        let sealed_manifest_sha256 = image_set_digest
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
@@ -965,24 +985,18 @@ pub fn execute_smart(
         if let Some(host_context) = args.get(2) {
             args_after_plugin.push(host_context.clone());
         }
-        let isolated = secure_launch(
-            tree,
-            SecureLaunchRequest {
-                worker_program: &receipt_worker,
-                worker_expected_sha256: worker_sha256,
-                worker_expected_size: worker_byte_size,
-                plugin_basename: Some(&plugin_basename),
-                args_before_plugin: &args_before_plugin,
-                args_after_plugin: &args_after_plugin,
-                repository,
-                require_module_audit: true,
-            },
-            Some(Duration::from_millis(timeout_ms)),
+        let isolated = launch_approved_in_place(
+            &approved,
+            &receipt_worker,
+            &args_before_plugin,
+            &args_after_plugin,
+            repository,
+            timeout_ms,
         )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
         secure_launches.push(json!({
-            "launch_mode":"sealed_load_tree_staged_worker",
+            "launch_mode":"in_place_authenticated_worker",
             "worker_authenticated":true,
             "worker_size_bytes":worker_byte_size,
             "worker_sha256":worker_sha256.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
@@ -1323,7 +1337,6 @@ pub fn execute_smart_suite_fault(
         } else {
             repository.join(&approved.worker_path)
         };
-        let plugin_basename = approved.main.relative_basename.clone();
         let fixture_sha256 = approved
             .main
             .expected_sha256
@@ -1341,13 +1354,13 @@ pub fn execute_smart_suite_fault(
         let worker_sha256 = approved.worker_sha256;
         let worker_byte_size = approved.worker_byte_size;
         let timeout_ms = approved.timeout_ms;
-        let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        let image_set_digest = approved.image_set_digest();
         // The receipt is reloaded per determinism run, so pin the whole approved
         // identity across runs. The sealed manifest digest covers the main entry and
         // every dependency; the fixture digest alone would miss a swapped worker
         // build or dependency set (#312 review).
         let identity = ApprovalIdentity {
-            sealed_manifest_sha256: tree.manifest_digest(),
+            sealed_manifest_sha256: image_set_digest,
             worker_sha256,
             worker_byte_size,
             timeout_ms,
@@ -1361,19 +1374,13 @@ pub fn execute_smart_suite_fault(
         approved_identity = Some(identity);
         let args_before_plugin = [worker_mode.to_string()];
         let args_after_plugin = [fixture_sha256, payload.clone()];
-        let isolated = secure_launch(
-            tree,
-            SecureLaunchRequest {
-                worker_program: &receipt_worker,
-                worker_expected_sha256: worker_sha256,
-                worker_expected_size: worker_byte_size,
-                plugin_basename: Some(&plugin_basename),
-                args_before_plugin: &args_before_plugin,
-                args_after_plugin: &args_after_plugin,
-                repository,
-                require_module_audit: true,
-            },
-            Some(Duration::from_millis(timeout_ms)),
+        let isolated = launch_approved_in_place(
+            &approved,
+            &receipt_worker,
+            &args_before_plugin,
+            &args_after_plugin,
+            repository,
+            timeout_ms,
         )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
@@ -1644,7 +1651,6 @@ pub fn execute_smart_mask_scene(
         } else {
             repository.join(&approved.worker_path)
         };
-        let plugin_basename = approved.main.relative_basename.clone();
         let fixture_sha256 = approved
             .main
             .expected_sha256
@@ -1662,13 +1668,13 @@ pub fn execute_smart_mask_scene(
         let worker_sha256 = approved.worker_sha256;
         let worker_byte_size = approved.worker_byte_size;
         let timeout_ms = approved.timeout_ms;
-        let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+        let image_set_digest = approved.image_set_digest();
         // The receipt is reloaded per determinism run, so pin the whole approved
         // identity across runs. The sealed manifest digest covers the main entry and
         // every dependency; the fixture digest alone would miss a swapped worker
         // build or dependency set (#312 review).
         let identity = ApprovalIdentity {
-            sealed_manifest_sha256: tree.manifest_digest(),
+            sealed_manifest_sha256: image_set_digest,
             worker_sha256,
             worker_byte_size,
             timeout_ms,
@@ -1682,19 +1688,13 @@ pub fn execute_smart_mask_scene(
         approved_identity = Some(identity);
         let args_before_plugin = ["--smart-mask-scene-request".to_string()];
         let args_after_plugin = [fixture_sha256, payload.clone(), scene_id.to_string()];
-        let isolated = secure_launch(
-            tree,
-            SecureLaunchRequest {
-                worker_program: &receipt_worker,
-                worker_expected_sha256: worker_sha256,
-                worker_expected_size: worker_byte_size,
-                plugin_basename: Some(&plugin_basename),
-                args_before_plugin: &args_before_plugin,
-                args_after_plugin: &args_after_plugin,
-                repository,
-                require_module_audit: true,
-            },
-            Some(Duration::from_millis(timeout_ms)),
+        let isolated = launch_approved_in_place(
+            &approved,
+            &receipt_worker,
+            &args_before_plugin,
+            &args_after_plugin,
+            repository,
+            timeout_ms,
         )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));

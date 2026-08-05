@@ -1,6 +1,5 @@
 use crate::runtime_module_policy::{AuthenticatedGpuModuleReport, RuntimeBackend};
-use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
-use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult, secure_launch};
+use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult};
 use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -131,50 +130,28 @@ fn dispatch_secure_image_session_with_policy(
     let worker_program = input
         .repository
         .join(input.worker_kind.repository_relative_program());
-    if !input.dependency_search_dirs.is_empty() {
-        validate_in_place_input(&input.dependencies, true, &input.plugin)?;
-        let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
-        let admitted = admit_local_worker(input.repository, &worker_program)?;
-        let mut args_after_plugin = input.args_after_plugin.to_vec();
-        args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
-        let request = SecureLaunchRequest {
-            worker_program: &worker_program,
-            worker_expected_sha256: admitted.sha256,
-            worker_expected_size: admitted.size,
-            plugin_basename: None,
-            args_before_plugin: input.args_before_plugin,
-            args_after_plugin: &args_after_plugin,
-            repository: input.repository,
-            require_module_audit: true,
-        };
-        let mut process = crate::secure_launch::secure_launch_session_in_place(
-            Some(&input.plugin.path),
-            request,
-            session,
-            desktop_policy,
-        )?;
-        process.record_worker_freshness_warning(admitted.freshness_warning);
-        return Ok(process);
-    }
-    let main = load_entry(input.plugin)?;
-    let plugin_basename = main.relative_basename.clone();
-    let dependencies = input
-        .dependencies
-        .into_iter()
-        .map(load_entry)
-        .collect::<io::Result<Vec<_>>>()?;
-    let tree = SealedLoadTree::create(main, dependencies)?;
-    launch_session_with_admission(
-        &worker_program,
-        tree,
-        Some(&plugin_basename),
-        input.args_before_plugin,
-        input.args_after_plugin,
-        input.repository,
-        true,
+    validate_in_place_input(&input.dependencies, &input.plugin)?;
+    let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
+    let admitted = admit_local_worker(input.repository, &worker_program)?;
+    let mut args_after_plugin = input.args_after_plugin.to_vec();
+    args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
+    let request = SecureLaunchRequest {
+        worker_program: &worker_program,
+        worker_expected_sha256: admitted.sha256,
+        worker_expected_size: admitted.size,
+        args_before_plugin: input.args_before_plugin,
+        args_after_plugin: &args_after_plugin,
+        repository: input.repository,
+        require_module_audit: true,
+    };
+    let mut process = crate::secure_launch::secure_launch_session_in_place(
+        Some(&input.plugin.path),
+        request,
         session,
         desktop_policy,
-    )
+    )?;
+    process.record_worker_freshness_warning(admitted.freshness_warning);
+    Ok(process)
 }
 
 /// The shared session launch boundary for the single-plugin and cluster
@@ -183,212 +160,6 @@ fn dispatch_secure_image_session_with_policy(
 /// the sealed tree to the desktop-policy-aware session launch.
 #[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
-fn launch_session_with_admission(
-    worker_program: &Path,
-    tree: SealedLoadTree,
-    plugin_basename: Option<&str>,
-    args_before_plugin: &[String],
-    args_after_plugin: &[String],
-    repository: &Path,
-    require_module_audit: bool,
-    session: &crate::windows_process::SessionChildHandles,
-    desktop_policy: crate::windows_process::WorkerDesktopPolicy,
-) -> io::Result<crate::secure_launch::SecureSessionProcess> {
-    let admitted = admit_local_worker(repository, worker_program)?;
-    let request = SecureLaunchRequest {
-        worker_program,
-        worker_expected_sha256: admitted.sha256,
-        worker_expected_size: admitted.size,
-        plugin_basename,
-        args_before_plugin,
-        args_after_plugin,
-        repository,
-        require_module_audit,
-    };
-    let mut process = match desktop_policy {
-        crate::windows_process::WorkerDesktopPolicy::Dedicated => {
-            crate::secure_launch::secure_launch_session(tree, request, session)
-        }
-        crate::windows_process::WorkerDesktopPolicy::Current => {
-            crate::secure_launch::secure_launch_session_on_current_desktop(tree, request, session)
-        }
-    }?;
-    process.record_worker_freshness_warning(admitted.freshness_warning);
-    Ok(process)
-}
-
-/// Cluster session dispatch input (issue #405): an ordered plugin cluster
-/// sharing one dependency closure, staged into a single sealed load tree so
-/// staging, hashing, and the ACL happen once per cluster.
-pub struct SecureClusterImageDispatch<'a> {
-    pub repository: &'a Path,
-    pub worker_kind: WorkerKind,
-    /// The ordered cluster; `plugins[0]` is the launch plugin of a render
-    /// session. Must be non-empty.
-    pub plugins: Vec<ApprovedImageArtifact>,
-    /// The shared closure, authenticated and staged once with the plugins.
-    pub dependencies: Vec<ApprovedImageArtifact>,
-    /// Authenticated data resources staged into `<root>/<subdir>/` (issue
-    /// #362); not modules, so they ride no manifest entry and no audit
-    /// declared set — the sealed tree stages them with the same strength.
-    pub sealed_resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
-    /// Whether the positional argv image slot carries plugins[0]. Render
-    /// sessions pass `true` (the positional contract names plugins[0]);
-    /// discovery sessions pass `false` and no plugin path rides argv at all.
-    pub positional_plugin: bool,
-    /// Render sessions carry the swap payloads for `plugins[1..]` (parallel
-    /// to `plugins`; the entry for `plugins[0]` is ignored because the launch
-    /// argv payload wins, design §2.2). Discovery sessions pass `None` so the
-    /// manifest carries no `payload` keys at all.
-    pub swap_payloads: Option<&'a [Option<String>]>,
-    /// The declared module bound the session's module audit is validated
-    /// against at close (design §5).
-    pub module_bound: u32,
-    pub args_before_plugin: &'a [String],
-    pub args_after_plugin: &'a [String],
-}
-
-/// A launched cluster session plus the launch-authenticated manifest (the
-/// swap and audit reference the caller validates the session against). The
-/// manifest document itself is staged inside the sealed root; its lifetime
-/// is the tree's.
-#[cfg(windows)]
-pub struct SecureClusterSessionLaunch {
-    pub process: crate::secure_launch::SecureSessionProcess,
-    pub manifest: crate::cluster_manifest::ValidatedClusterManifest,
-}
-
-/// Cluster variant of `dispatch_secure_image_session` (issue #405,
-/// docs/CLOSURE_SESSION_PROTOCOL_2026-07-23.md): the whole plugin cluster,
-/// the shared closure, and the launch-authenticated `cluster-manifest-v1`
-/// document are sealed into one tree, and the worker launches with the
-/// staged manifest path on argv as `--cluster-manifest-v1 <path>` (design
-/// §2.3: the manifest sits directly inside the sealed root, which is what
-/// the worker pins against) plus the inherited session transport. The
-/// module audit is validated at session close against the manifest's
-/// declared set (`worker_module_audit::validate_cluster_worker_audit`), so
-/// the one-shot validator stays disabled here.
-#[cfg(windows)]
-pub fn dispatch_secure_cluster_image_session(
-    input: SecureClusterImageDispatch<'_>,
-    session: &crate::windows_process::SessionChildHandles,
-) -> io::Result<SecureClusterSessionLaunch> {
-    dispatch_secure_cluster_image_session_with_policy(
-        input,
-        session,
-        crate::windows_process::WorkerDesktopPolicy::Dedicated,
-    )
-}
-
-#[cfg(windows)]
-pub(crate) fn dispatch_secure_cluster_image_session_on_current_desktop(
-    input: SecureClusterImageDispatch<'_>,
-    session: &crate::windows_process::SessionChildHandles,
-) -> io::Result<SecureClusterSessionLaunch> {
-    dispatch_secure_cluster_image_session_with_policy(
-        input,
-        session,
-        crate::windows_process::WorkerDesktopPolicy::Current,
-    )
-}
-
-#[cfg(windows)]
-fn dispatch_secure_cluster_image_session_with_policy(
-    input: SecureClusterImageDispatch<'_>,
-    session: &crate::windows_process::SessionChildHandles,
-    desktop_policy: crate::windows_process::WorkerDesktopPolicy,
-) -> io::Result<SecureClusterSessionLaunch> {
-    crate::trace_policy::validate_broker_trace_directory(input.repository)?;
-    let worker_program = input
-        .repository
-        .join(input.worker_kind.repository_relative_program());
-    // The manifest is built from the same broker-approved artifacts that are
-    // staged below, so the declared basenames/hashes and the sealed tree can
-    // never diverge; any bound or shape violation fails the launch here
-    // (fail-closed, the caller falls back to the per-plugin path).
-    let manifest = crate::cluster_manifest::ValidatedClusterManifest::from_approved(
-        &input.plugins,
-        &input.dependencies,
-        input.swap_payloads,
-        input.module_bound,
-    )?;
-    // The manifest document is staged into the sealed root like every other
-    // entry (design §2.3): written to a broker-owned staging source, copied
-    // and hash-verified by the tree, then the source is removed. The worker
-    // receives only the staged path inside the sealed root.
-    let staging_source =
-        crate::cluster_manifest::ClusterManifestTransport::write(input.repository, &manifest)?;
-    let manifest_bytes = std::fs::read(staging_source.path())?;
-    let manifest_entry = LoadEntry {
-        source: staging_source.path().to_path_buf(),
-        relative_basename: crate::cluster_manifest::CLUSTER_MANIFEST_SEALED_BASENAME.to_owned(),
-        expected_sha256: Sha256::digest(&manifest_bytes).into(),
-        expected_size: manifest_bytes.len() as u64,
-    };
-    let positional_basename = if input.positional_plugin {
-        Some(
-            input
-                .plugins
-                .first()
-                .ok_or_else(|| invalid("a cluster session requires at least one plugin"))?
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned)
-                .ok_or_else(|| invalid("plugin path must have a UTF-8 basename"))?,
-        )
-    } else {
-        None
-    };
-    let plugin_entries = input
-        .plugins
-        .into_iter()
-        .map(load_entry)
-        .collect::<io::Result<Vec<_>>>()?;
-    let mut dependencies = input
-        .dependencies
-        .into_iter()
-        .map(load_entry)
-        .collect::<io::Result<Vec<_>>>()?;
-    // The manifest rides the tree as a non-plugin entry: staged, hashed, and
-    // ACL'd with the closure, but never resolvable as a plugin path.
-    dependencies.push(manifest_entry);
-    let tree = SealedLoadTree::create_cluster_with_resources(
-        plugin_entries,
-        dependencies,
-        input.sealed_resources,
-    )?
-    .0;
-    drop(staging_source);
-    let staged_manifest = tree
-        .root()
-        .join(crate::cluster_manifest::CLUSTER_MANIFEST_SEALED_BASENAME);
-    // The manifest option pair rides argv's tail, behind every other
-    // auxiliary option pair, so the worker's auxiliary-option peeling sees it
-    // last; render sessions keep their positional contract untouched.
-    let mut args_after_plugin = input.args_after_plugin.to_vec();
-    args_after_plugin.extend([
-        "--cluster-manifest-v1".to_owned(),
-        staged_manifest.to_string_lossy().into_owned(),
-    ]);
-    let process = launch_session_with_admission(
-        &worker_program,
-        tree,
-        positional_basename.as_deref(),
-        input.args_before_plugin,
-        &args_after_plugin,
-        input.repository,
-        // Cluster sessions follow the declared-set audit model (design §5);
-        // the broker validates the final report at close with
-        // validate_cluster_worker_audit instead of the one-shot validator.
-        false,
-        session,
-        desktop_policy,
-    )?;
-    Ok(SecureClusterSessionLaunch { process, manifest })
-}
-
 /// In-place cluster session dispatch (issue #751, `cluster-manifest-v2`):
 /// the manifest names each plug-in by its real absolute path plus SHA-256 and
 /// carries the validated dependency search directories; nothing is staged.
@@ -489,7 +260,7 @@ pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
         args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
     }
     args_after_plugin.extend([
-        "--cluster-manifest-v1".to_owned(),
+        "--cluster-manifest-v2".to_owned(),
         transport.path().to_string_lossy().into_owned(),
     ]);
     let admitted = admit_local_worker(input.repository, &worker_program)?;
@@ -497,7 +268,6 @@ pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
         worker_program: &worker_program,
         worker_expected_sha256: admitted.sha256,
         worker_expected_size: admitted.size,
-        plugin_basename: None,
         args_before_plugin: input.args_before_plugin,
         args_after_plugin: &args_after_plugin,
         repository: input.repository,
@@ -521,24 +291,14 @@ pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
 }
 
 pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<SecureLaunchResult> {
-    dispatch_secure_image_impl(input, Vec::new(), None)
+    dispatch_secure_image_impl(input, None)
 }
 
 pub(crate) fn dispatch_secure_image_with_process_memory_limit(
     input: SecureImageDispatch<'_>,
     process_memory_limit: usize,
 ) -> io::Result<SecureLaunchResult> {
-    dispatch_secure_image_impl(input, Vec::new(), Some(process_memory_limit))
-}
-
-/// Resource-carrying variant of `dispatch_secure_image` (issue #362): the
-/// sealed tree also stages authenticated data resources into
-/// `<root>/<subdir>/` (docs/SEALED_DATA_RESOURCE_POLICY_2026-07-25.md).
-pub fn dispatch_secure_image_with_resources(
-    input: SecureImageDispatch<'_>,
-    resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
-) -> io::Result<SecureLaunchResult> {
-    dispatch_secure_image_impl(input, resources, None)
+    dispatch_secure_image_impl(input, Some(process_memory_limit))
 }
 
 /// Validates and joins the in-place dependency search directories (issue
@@ -546,7 +306,7 @@ pub fn dispatch_secure_image_with_resources(
 /// an absolute, canonicalizable directory whose canonical form does not
 /// contain the `;` separator, and the bounded count matches the worker's
 /// re-validation.
-fn joined_dependency_search_dirs(dirs: &[PathBuf]) -> io::Result<String> {
+pub(crate) fn joined_dependency_search_dirs(dirs: &[PathBuf]) -> io::Result<String> {
     const MAX_SEARCH_DIRS: usize = 16;
     let mut joined: Vec<String> = Vec::with_capacity(dirs.len());
     for dir in dirs {
@@ -616,17 +376,11 @@ fn strip_extended_prefix(path: &Path) -> PathBuf {
 /// sealed resources cannot ride an in-place launch.
 fn validate_in_place_input(
     dependencies: &[ApprovedImageArtifact],
-    resources_empty: bool,
     plugin: &ApprovedImageArtifact,
 ) -> io::Result<()> {
     if !dependencies.is_empty() {
         return Err(invalid(
             "an in-place dispatch resolves dependencies by search directory, not by staged artifact",
-        ));
-    }
-    if !resources_empty {
-        return Err(invalid(
-            "an in-place dispatch reads data resources from the plugin's own directory",
         ));
     }
     if !plugin.path.is_absolute() {
@@ -637,72 +391,34 @@ fn validate_in_place_input(
 
 fn dispatch_secure_image_impl(
     input: SecureImageDispatch<'_>,
-    resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
     process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
     crate::trace_policy::validate_broker_trace_directory(input.repository)?;
     let worker_program = input
         .repository
         .join(input.worker_kind.repository_relative_program());
-    if !input.dependency_search_dirs.is_empty() {
-        validate_in_place_input(&input.dependencies, resources.is_empty(), &input.plugin)?;
-        let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
-        let admitted = admit_local_worker(input.repository, &worker_program)?;
-        let mut args_after_plugin = input.args_after_plugin.to_vec();
-        args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
-        let request = SecureLaunchRequest {
-            worker_program: &worker_program,
-            worker_expected_sha256: admitted.sha256,
-            worker_expected_size: admitted.size,
-            plugin_basename: None,
-            args_before_plugin: input.args_before_plugin,
-            args_after_plugin: &args_after_plugin,
-            repository: input.repository,
-            // Recorded, never enforced (issue #730/#751): the worker emits
-            // the loaded-module record and an unconfirmable list rides the
-            // result as a warning.
-            require_module_audit: true,
-        };
-        let mut result = crate::secure_launch::secure_launch_in_place(
-            &input.plugin.path,
-            request,
-            input.timeout,
-            process_memory_limit,
-        )?;
-        result.worker_freshness_warning = admitted.freshness_warning;
-        return Ok(result);
-    }
-    let main = load_entry(input.plugin)?;
-    let plugin_basename = main.relative_basename.clone();
-    let dependencies = input
-        .dependencies
-        .into_iter()
-        .map(load_entry)
-        .collect::<io::Result<Vec<_>>>()?;
-    let tree = SealedLoadTree::create_with_resources(main, dependencies, resources)?;
+    validate_in_place_input(&input.dependencies, &input.plugin)?;
+    let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
     let admitted = admit_local_worker(input.repository, &worker_program)?;
+    let mut args_after_plugin = input.args_after_plugin.to_vec();
+    args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
     let request = SecureLaunchRequest {
         worker_program: &worker_program,
         worker_expected_sha256: admitted.sha256,
         worker_expected_size: admitted.size,
-        plugin_basename: Some(&plugin_basename),
         args_before_plugin: input.args_before_plugin,
-        args_after_plugin: input.args_after_plugin,
+        args_after_plugin: &args_after_plugin,
         // The repository is carried to the Windows launch boundary so the
         // optional minidump file handle is created there for every dispatch.
         repository: input.repository,
         require_module_audit: true,
     };
-    let mut result = if let Some(limit) = process_memory_limit {
-        crate::secure_launch::secure_launch_with_process_memory_limit(
-            tree,
-            request,
-            input.timeout,
-            limit,
-        )
-    } else {
-        secure_launch(tree, request, input.timeout)
-    }?;
+    let mut result = crate::secure_launch::secure_launch_in_place(
+        &input.plugin.path,
+        request,
+        input.timeout,
+        process_memory_limit,
+    )?;
     result.worker_freshness_warning = admitted.freshness_warning;
     Ok(result)
 }
@@ -920,24 +636,6 @@ fn newest_source_modified(root: &Path) -> io::Result<SystemTime> {
     })
 }
 
-fn load_entry(artifact: ApprovedImageArtifact) -> io::Result<LoadEntry> {
-    if artifact.expected_size == 0 {
-        return Err(invalid("approved artifact size must be nonzero"));
-    }
-    let basename = artifact
-        .path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| invalid("approved artifact path must have a UTF-8 filename"))?;
-    Ok(LoadEntry {
-        source: artifact.path.clone(),
-        relative_basename: basename.to_owned(),
-        expected_sha256: artifact.expected_sha256,
-        expected_size: artifact.expected_size,
-    })
-}
-
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -1003,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_local_worker_after_sealing_the_plugin() {
+    fn rejects_missing_local_worker_after_validating_in_place_input() {
         let root = std::env::temp_dir().join(format!(
             "aexcompat-secure-image-dispatch-{:032x}",
             rand::random::<u128>()
@@ -1016,7 +714,7 @@ mod tests {
             worker_kind: WorkerKind::Render,
             plugin,
             dependencies: vec![],
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: vec![root.clone()],
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
@@ -1125,43 +823,6 @@ mod tests {
     }
 
     #[test]
-    fn in_place_dispatch_rejects_sealed_resources() {
-        let root = std::env::temp_dir().join(format!(
-            "aexcompat-secure-image-dispatch-{:032x}",
-            rand::random::<u128>()
-        ));
-        fs::create_dir(&root).unwrap();
-        let plugin = artifact(&root, "plugin.plugin", b"plugin");
-        let resource = root.join("Film Stocks");
-        fs::create_dir(&resource).unwrap();
-        let resource_file = resource.join("stock.grain");
-        fs::write(&resource_file, b"grain").unwrap();
-        let entry = crate::sealed_load_tree::SealedResourceEntry {
-            source: resource_file,
-            relative_path: "Film Stocks/stock.grain".into(),
-            expected_sha256: Sha256::digest(b"grain").into(),
-            expected_size: 5,
-        };
-        let error = dispatch_secure_image_with_resources(
-            SecureImageDispatch {
-                repository: &root,
-                worker_kind: WorkerKind::L2,
-                plugin,
-                dependencies: vec![],
-                dependency_search_dirs: vec![root.clone()],
-                args_before_plugin: &[],
-                args_after_plugin: &[],
-                timeout: Some(Duration::from_secs(1)),
-            },
-            vec![entry],
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("data resources"));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn rejects_empty_local_worker_before_launch() {
         let root = std::env::temp_dir().join(format!(
             "aexcompat-secure-image-dispatch-{:032x}",
@@ -1184,7 +845,7 @@ mod tests {
             worker_kind: WorkerKind::Render,
             plugin,
             dependencies: vec![],
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: vec![root.clone()],
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
@@ -1493,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn dependencies_are_authenticated_as_part_of_the_sealed_tree() {
+    fn staged_dependency_artifacts_are_rejected() {
         let root = std::env::temp_dir().join(format!(
             "aexcompat-secure-image-dispatch-{:032x}",
             rand::random::<u128>()

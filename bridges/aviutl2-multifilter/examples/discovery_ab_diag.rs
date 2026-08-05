@@ -1,14 +1,13 @@
 //! Diagnostic: run the multifilter's real discovery pass (`discover_all`)
 //! over a directory of AEX and report per-plugin outcomes and the total wall
-//! time — the A/B lever for issue #751's in-place discovery.
+//! time for the in-place-only discovery route (#816).
 //!
 //! Run:
 //!   set AEXCOMPAT_MULTIFILTER_REPOSITORY=C:\path\to\AEXCompat
 //!   cargo run --release --example discovery_ab_diag -- "<effects dir>" [deps-dir...]
 //!
-//! `AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY=1` selects the staged (closure
-//! walk + sealed tree) pipeline; unset runs the in-place default. Everything
-//! else — clustering, sessions, fallbacks — is the code the bridge ships.
+//! Clustering, sessions, and fallbacks are the code the bridge ships. The
+//! former staged A/B environment variable was removed by #816.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -37,12 +36,9 @@ fn main() {
         })
         .collect();
     paths.sort();
-    let staged =
-        std::env::var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY").is_ok_and(|value| value == "1");
     eprintln!(
-        "discovering {} plug-in(s) via the {} pipeline",
+        "discovering {} plug-in(s) via the in-place pipeline",
         paths.len(),
-        if staged { "staged" } else { "in-place" }
     );
     let started = Instant::now();
     let mut results = discover_all_for_diagnostics(&repository, &paths, dependency_dirs);

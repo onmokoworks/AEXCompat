@@ -2662,14 +2662,14 @@ mod tests {
         }
 
         #[test]
-        fn cluster_discovery_sweeps_same_closure_plugins_in_one_session() {
+        fn removed_staged_escape_hatch_cannot_change_discovery_route() {
             let _guard = BEHAVIOR_LOCK
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             unsafe {
                 std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
-                // This asserts the staged pipeline's closure identity; the
-                // in-place default (issue #751) is covered separately below.
+                // Issue #816: a stale deployment setting must not resurrect
+                // closure walking or sealed staging.
                 std::env::set_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY", "1");
             }
             let (root, one, two) = cluster_repository();
@@ -2683,7 +2683,12 @@ mod tests {
                 .map(|(_, entry)| &entry.closure_identity)
                 .collect();
             assert_eq!(identities[0], identities[1]);
-            assert!(identities[0].is_some(), "both closures resolved");
+            assert!(
+                identities[0]
+                    .as_deref()
+                    .is_some_and(|identity| identity.starts_with("in-place:")),
+                "the retired variable cannot select a staged identity"
+            );
             for (path, entry) in &results {
                 assert!(
                     entry.ok,
@@ -2738,18 +2743,12 @@ mod tests {
             let _guard = BEHAVIOR_LOCK
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            // Both discovery pipelines share the fallback contract (issue
-            // #751): the member the session died on is a structured failure,
-            // the rest re-inspect per-plugin with the note.
-            for staged in [true, false] {
-                unsafe {
-                    std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", "crash_on_inspect");
-                    if staged {
-                        std::env::set_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY", "1");
-                    } else {
-                        std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
-                    }
-                }
+            // The in-place member the session died on is a structured
+            // failure; the rest re-inspect per-plugin with the note.
+            unsafe {
+                std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", "crash_on_inspect");
+                std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
+            }
                 let (root, one, two) = cluster_repository();
                 let results =
                     discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
@@ -2772,7 +2771,7 @@ mod tests {
                 assert_eq!(
                     first.failure_classification.as_deref(),
                     Some("cluster_session_invalidated"),
-                    "staged={staged}"
+                    "in-place session failure"
                 );
                 let fallback = first.cluster_fallback.as_ref().expect("fallback note");
                 assert_eq!(fallback.at_member, 0);
@@ -2784,8 +2783,7 @@ mod tests {
                 let fallback = second.cluster_fallback.as_ref().expect("fallback note");
                 assert_eq!(fallback.at_member, 0);
                 assert_eq!(fallback.resolution, "one_shot_fallback");
-                std::fs::remove_dir_all(&root).unwrap();
-            }
+            std::fs::remove_dir_all(&root).unwrap();
         }
 
         #[test]

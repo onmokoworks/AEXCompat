@@ -152,13 +152,13 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         return self.strip_comments(route if cut == -1 else route[:cut])
 
     def launch_sites(self, route):
-        """Number of real `secure_launch(` call sites in `route`.
+        """Number of real in-place launch-helper call sites in `route`.
 
         Asserts a floor so a module that lost every launch cannot make the
         `== launches` checks pass vacuously as `0 == 0`.
         """
-        sites = len(re.findall(r"(?<![a-z_])secure_launch\(", route))
-        self.assertGreaterEqual(sites, 4, "render_request.rs lost its sealed launches")
+        sites = len(re.findall(r"let isolated = launch_approved_in_place\(", route))
+        self.assertGreaterEqual(sites, 4, "render_request.rs lost its in-place launches")
         return sites
 
     def report_object(self, route, marker_at, stage):
@@ -207,24 +207,22 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         self.assertNotIn("run_isolated", route)
         self.assertNotIn("windows_process", route)
 
-    def test_every_route_launches_through_the_sealed_load_tree(self):
+    def test_every_route_launches_through_the_authenticated_in_place_helper(self):
         route = self.route_source()
         # Counted against the number of launches rather than a fixed 4, so a
-        # correctly-sealed fifth route passes while an unsealed one fails:
+        # correctly-routed fifth route passes while a direct launch fails:
         # execute (parameter request), execute_smart, execute_smart_suite_fault,
         # execute_smart_mask_scene today.
         launches = self.launch_sites(route)
-        for marker in (
-            "SealedLoadTree::create(",
-            "load_v2_load_tree(",
-            "require_module_audit: true",
-        ):
-            self.assertEqual(route.count(marker), launches, marker)
+        self.assertEqual(route.count("let isolated = launch_approved_in_place("), launches)
+        self.assertEqual(route.count("secure_launch_in_place("), 1)
+        self.assertEqual(route.count("require_module_audit: true"), 1)
+        self.assertNotIn("SealedLoadTree", route)
 
     def test_no_route_passes_the_plugin_as_an_argv_path(self):
         route = self.route_source()
-        # secure_launch injects the sealed plug-in between the before/after argv
-        # slices, so no route may serialize a plug-in path into its own args.
+        # The helper injects the authenticated in-place plug-in between the
+        # before/after argv slices, so routes must not duplicate it in args.
         self.assertNotIn("plugin_path.to_string_lossy()", route)
         # #405 widened SecureLaunchRequest::plugin_basename to Option<&str> so the
         # cluster discovery session can launch with no positional plug-in at all.
@@ -232,12 +230,8 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         # name the basename explicitly — as the pre-#405 `&plugin_basename` or the
         # Option-wrapped `Some(&plugin_basename)` — and `plugin_basename: None`
         # must never appear here (it belongs to the discovery session only).
-        launches = self.launch_sites(route)
-        named = route.count("plugin_basename: &plugin_basename") + route.count(
-            "plugin_basename: Some(&plugin_basename)"
-        )
-        self.assertEqual(named, launches)
-        self.assertNotIn("plugin_basename: None", route)
+        self.launch_sites(route)
+        self.assertNotIn("plugin_basename:", route)
 
     def test_migrated_reports_add_no_keys_outside_their_contract_schema(self):
         """The three migrated routes must not grow report keys their schema forbids.

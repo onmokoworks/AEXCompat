@@ -22,12 +22,11 @@
 //!
 //! Cluster session support (issue #405,
 //! docs/CLOSURE_SESSION_PROTOCOL_2026-07-23.md): when the launch argv carries
-//! `--cluster-manifest-v1 <path>`, the fixture validates the transport the
-//! way the real loader does (staged directly inside the sealed root, 4 MiB
-//! bound, v1 schema), cross-checks the positional plugin against
+//! `--cluster-manifest-v2 <path>`, the fixture validates the in-place transport
+//! the way the real loader does (4 MiB bound, v2 schema), cross-checks the positional plugin against
 //! `plugins[0]`, answers `swap_plugin` with `swap_done`, and records swap
 //! epochs for the final report's cluster module audit. It also serves
-//! `--discovery-session-v1 --cluster-manifest-v1 <path>`, answering
+//! `--discovery-session-v1 --cluster-manifest-v2 <path>`, answering
 //! `inspect_plugin` with `inspect_done`. Additional misbehaviors:
 //!
 //! - `crash_on_swap`: dies with an access-violation exit code on the first
@@ -237,23 +236,14 @@ mod worker {
         }
     }
 
-    /// The fixture's view of a `cluster-manifest-v1` document (issue #405):
-    /// the ordered plugin basenames/hashes a swap or inspect may select, and
-    /// the pinned dependency basenames the audit report lists.
+    /// The fixture's view of the `cluster-manifest-v2` document.
     struct ClusterManifest {
         plugins: Vec<(String, String)>,
-        dependencies: Vec<String>,
-        /// `cluster-manifest-v2` (issue #751): plug-ins load from real paths
-        /// and no sealed root exists, so the render launch skips the
-        /// sealed-sibling check.
-        in_place: bool,
     }
 
     /// Loads and validates the manifest transport the way the real worker's
-    /// loader does (design §2.3): an absolute existing file staged directly
-    /// inside the sealed load root (the `aexcompat-sealed-` directory the
-    /// broker staged every cluster image into), bounded to 4 MiB, with the
-    /// v1 schema and well-formed entries.
+    /// loader does: an absolute existing file bounded to 4 MiB, with the v2
+    /// schema, absolute plug-in paths, and absolute dependency search roots.
     fn load_cluster_manifest(path: &str) -> Option<ClusterManifest> {
         let path = std::path::Path::new(path);
         if !path.is_absolute() || !path.is_file() {
@@ -264,77 +254,37 @@ mod worker {
             return None;
         }
         let document: Value = serde_json::from_slice(&bytes).ok()?;
-        // The in-place manifest (issue #751, cluster-manifest-v2) names each
-        // plug-in by real absolute path, carries search directories instead
-        // of a pinned closure, and does not live in a sealed root. The
-        // fixture mirrors the real loader's shape gates.
-        if document.get("schema").and_then(Value::as_str) == Some("cluster-manifest-v2") {
-            let mut plugins = Vec::new();
-            for plugin in document.get("plugins")?.as_array()? {
-                let path = plugin.get("path")?.as_str()?;
-                if !std::path::Path::new(path).is_absolute() {
-                    return None;
-                }
-                let basename = std::path::Path::new(path).file_name()?.to_str()?.to_owned();
-                let sha256 = plugin.get("sha256")?.as_str()?.to_owned();
-                plugins.push((basename, sha256));
-            }
-            let dirs = document.get("search_dirs")?.as_array()?;
-            if plugins.is_empty()
-                || dirs.is_empty()
-                || dirs.len() > 16
-                || !dirs.iter().all(|dir| {
-                    dir.as_str()
-                        .is_some_and(|dir| std::path::Path::new(dir).is_absolute())
-                })
-            {
-                return None;
-            }
-            return Some(ClusterManifest {
-                plugins,
-                dependencies: Vec::new(),
-                in_place: true,
-            });
-        }
-        let sealed_root = path
-            .parent()
-            .and_then(|parent| parent.canonicalize().ok())?;
-        let inside_sealed_root = sealed_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("aexcompat-sealed-"));
-        if !inside_sealed_root {
-            return None;
-        }
-        if document.get("schema").and_then(Value::as_str) != Some("cluster-manifest-v1") {
+        if document.get("schema").and_then(Value::as_str) != Some("cluster-manifest-v2") {
             return None;
         }
         let mut plugins = Vec::new();
         for plugin in document.get("plugins")?.as_array()? {
-            let basename = plugin.get("basename")?.as_str()?.to_owned();
+            let path = plugin.get("path")?.as_str()?;
+            if !std::path::Path::new(path).is_absolute() {
+                return None;
+            }
+            let basename = std::path::Path::new(path).file_name()?.to_str()?.to_owned();
             let sha256 = plugin.get("sha256")?.as_str()?.to_owned();
             plugins.push((basename, sha256));
         }
-        if plugins.is_empty() {
+        let dirs = document.get("search_dirs")?.as_array()?;
+        if plugins.is_empty()
+            || dirs.is_empty()
+            || dirs.len() > 16
+            || !dirs.iter().all(|dir| {
+                dir.as_str()
+                    .is_some_and(|dir| std::path::Path::new(dir).is_absolute())
+            })
+        {
             return None;
         }
-        let mut dependencies = Vec::new();
-        for dependency in document.get("dependencies")?.as_array()? {
-            dependencies.push(dependency.get("basename")?.as_str()?.to_owned());
-        }
-        Some(ClusterManifest {
-            plugins,
-            dependencies,
-            in_place: false,
-        })
+        Some(ClusterManifest { plugins })
     }
-
     /// One audit snapshot for the cluster report: the worker image plus the
     /// plugin-class modules loaded from the sealed root — the given plugin
     /// and the pinned closure.
     fn cluster_audit_snapshot(manifest: &ClusterManifest, plugin_index: usize) -> Value {
-        let mut plugin = vec![manifest.plugins[plugin_index].0.clone()];
-        plugin.extend(manifest.dependencies.iter().cloned());
+        let plugin = vec![manifest.plugins[plugin_index].0.clone()];
         json!({
             "status": "passed",
             "unknown_count": 0,
@@ -363,7 +313,6 @@ mod worker {
                 union_plugin.push(basename.clone());
             }
         }
-        union_plugin.extend(manifest.dependencies.iter().cloned());
         if behavior == "audit_undeclared_module" {
             union_plugin.push("evil.dll".to_owned());
         }
@@ -486,7 +435,7 @@ mod worker {
         // Discovery session mode (issue #405, design §2.2): no positional
         // plugin rides argv, only the cluster manifest transport.
         if args.len() >= 2 && args[1] == "--discovery-session-v1" {
-            if args.len() != 4 || args[2] != "--cluster-manifest-v1" {
+            if args.len() != 4 || args[2] != "--cluster-manifest-v2" {
                 return 2;
             }
             let Some(manifest) = load_cluster_manifest(&args[3]) else {
@@ -509,7 +458,6 @@ mod worker {
         // so a broker writing the sidecar somewhere the real worker would
         // reject fails these tests too.
         let mut cluster_manifest: Option<ClusterManifest> = None;
-        let mut cluster_manifest_path: Option<String> = None;
         let mut effective = args.len();
         while effective >= 12 && args[effective - 2].starts_with("--") {
             let value = &args[effective - 1];
@@ -597,16 +545,13 @@ mod worker {
                         return 3;
                     }
                 }
-                // The cluster manifest transport (issue #405): staged inside
-                // the sealed root (design §2.3), with the same shape gate the
-                // real worker's loader enforces. A missing or malformed
-                // manifest fails the launch.
-                "--cluster-manifest-v1" => {
+                // The in-place cluster manifest transport, with the same shape
+                // gate the real worker loader enforces.
+                "--cluster-manifest-v2" => {
                     cluster_manifest = load_cluster_manifest(value);
                     if cluster_manifest.is_none() {
                         return 3;
                     }
-                    cluster_manifest_path = Some(value.clone());
                 }
                 _ => {}
             }
@@ -647,33 +592,17 @@ mod worker {
         }
         // The positional argv contract names plugins[0] (design §2.2): the
         // plugin path's basename and the sha256 slot must match the manifest
-        // exactly, and the manifest must sit beside the positional plugin in
-        // the sealed root (design §2.3), or the launch fails.
+        // exactly, or the launch fails.
         if let Some(manifest) = &cluster_manifest {
             let basename_matches = std::path::Path::new(&args[2])
                 .file_name()
                 .and_then(|name| name.to_str())
                 == Some(manifest.plugins[0].0.as_str());
-            // The in-place manifest (issue #751) has no sealed root; the
-            // fixture matches the positional plugin by basename + sha only —
+            // The fixture matches the positional plugin by basename + sha only —
             // weaker than the real worker's full-path canonical identity
             // (worker_cluster_manifest.cpp matches_launch_plugin), which the
             // real-worker integration tests cover.
-            let same_sealed_root = manifest.in_place
-                || cluster_manifest_path
-                    .as_deref()
-                    .is_some_and(|manifest_path| {
-                        let canonical_parent = |path: &str| {
-                            std::path::Path::new(path)
-                                .parent()
-                                .and_then(|parent| parent.canonicalize().ok())
-                        };
-                        canonical_parent(&args[2]) == canonical_parent(manifest_path)
-                    });
-            if !basename_matches
-                || !args[3].eq_ignore_ascii_case(&manifest.plugins[0].1)
-                || !same_sealed_root
-            {
+            if !basename_matches || !args[3].eq_ignore_ascii_case(&manifest.plugins[0].1) {
                 return 3;
             }
         }
@@ -1270,7 +1199,7 @@ mod worker {
                     "status": "passed",
                     "unknown_count": 0,
                     "worker": ["session_protocol_worker.exe"],
-                    "plugin": manifest.dependencies,
+                    "plugin": [],
                     "system32": ["kernel32.dll"]
                 });
                 json!({

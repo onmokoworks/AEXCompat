@@ -26,7 +26,6 @@ pub mod render_session;
 pub mod runtime_module_authorization;
 pub mod runtime_module_identity;
 pub mod runtime_module_policy;
-pub mod sealed_load_tree;
 pub mod secure_image_dispatch;
 pub mod secure_launch;
 #[cfg(windows)]

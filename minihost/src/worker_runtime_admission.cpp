@@ -105,8 +105,6 @@ int admit_runtime(const RuntimeHostHooks& hooks,
   const std::filesystem::path plugin_path =
       std::filesystem::absolute(request.plugin_argument);
   if (!plugin_path.is_absolute()) return 11;
-  const bool sealed = has_prefixed_basename(plugin_path.parent_path(),
-                                            L"aexcompat-sealed-");
 
   // Authorization is parsed before LoadLibraryExW. The parser verifies every
   // exact dependency identity and fails closed before the target can execute.
@@ -130,17 +128,11 @@ int admit_runtime(const RuntimeHostHooks& hooks,
     return report_load_failure("set_default_dll_directories", GetLastError());
   }
   // Static imports use DLL_LOAD_DIR below. Delay-load helpers call
-  // LoadLibrary(name) later, so only an authenticated sealed root or the
-  // broker-validated in-place search directories (issue #751) are admitted
+  // LoadLibrary(name) later, so only broker-validated in-place search
+  // directories are admitted
   // to the process-wide USER_DIRS search set. PATH/CWD and arbitrary absolute
   // paths remain excluded by SetDefaultDllDirectories.
   DLL_DIRECTORY_COOKIE sealed_directory_cookie{};
-  if (sealed) {
-    sealed_directory_cookie = AddDllDirectory(plugin_path.parent_path().c_str());
-    if (!sealed_directory_cookie) {
-      return report_load_failure("add_dll_directory", GetLastError());
-    }
-  }
   std::vector<DLL_DIRECTORY_COOKIE> search_directory_cookies;
   const auto remove_cookies = [&]() noexcept {
     remove_directory_cookies(search_directory_cookies);
@@ -171,10 +163,7 @@ int admit_runtime(const RuntimeHostHooks& hooks,
   ModuleAuditReport& audit = module_audit_report();
   // Record, never enforce (issue #678/#751): the in-place route captures the
   // loaded-module set as provenance, and no status here fails the launch.
-  // `sealed` is only a directory-name observation, so a real directory that
-  // happens to carry the staging prefix must not turn an in-place launch
-  // into an enforced audit; in-place wins.
-  audit.required = sealed && !in_place;
+  audit.required = false;
   audit.recorded = in_place;
   audit.plugin_path = plugin_path;
   if (in_place)

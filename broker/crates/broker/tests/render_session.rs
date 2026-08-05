@@ -16,9 +16,8 @@ mod windows_e2e {
     };
     use aexcompat_broker::render_session::{
         AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, ClusterRenderPlugins,
-        DiscoverySession, DiscoverySessionOpenRequest, FrameStatus,
-        InPlaceDiscoverySessionOpenRequest, InspectOutcome, RenderSession, SessionLayer,
-        SessionOpenRequest, SwapOutcome, run_video_batch,
+        DiscoverySession, FrameStatus, InPlaceDiscoverySessionOpenRequest, InspectOutcome,
+        RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome, run_video_batch,
     };
     use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
     use sha2::{Digest, Sha256};
@@ -2920,15 +2919,14 @@ mod windows_e2e {
     }
 
     fn open_discovery_session(cluster: &TempCluster) -> DiscoverySession {
-        DiscoverySession::open(DiscoverySessionOpenRequest {
+        DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
             repository: &cluster.repository.0,
             plugins: cluster
                 .plugins
                 .iter()
                 .map(|(path, _)| approved_artifact(path))
                 .collect(),
-            dependencies: vec![approved_artifact(&cluster.dependency)],
-            sealed_resources: Vec::new(),
+            dependency_search_dirs: vec![cluster.dependency.parent().unwrap().to_path_buf()],
             module_bound: 64,
             inspect_deadline: Duration::from_secs(30),
         })

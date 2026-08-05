@@ -1,6 +1,5 @@
 use crate::host_core::approved_artifact::load_v2_load_tree;
-use crate::sealed_load_tree::SealedLoadTree;
-use crate::secure_launch::{SecureLaunchRequest, secure_launch};
+use crate::secure_launch::{SecureLaunchRequest, secure_launch_in_place};
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -96,25 +95,31 @@ pub fn run(
                 "requested SmartFX worker differs from the approved trusted worker",
             ));
         }
-        let plugin_basename = approved.main.relative_basename.clone();
+        let plugin_path = fs::canonicalize(&approved.main.source)?;
+        let search_dirs = approved.dependency_search_dirs()?;
+        let joined = crate::secure_image_dispatch::joined_dependency_search_dirs(&search_dirs)?;
         let fixture_sha256 = encode_sha256(approved.main.expected_sha256);
         let args_before_plugin = ["--smart".into()];
-        let args_after_plugin = [fixture_sha256.to_ascii_lowercase(), case_id.into()];
+        let args_after_plugin = [
+            fixture_sha256.to_ascii_lowercase(),
+            case_id.into(),
+            "--dependency-dirs-v1".to_owned(),
+            joined,
+        ];
         let timeout = Duration::from_millis(approved.timeout_ms);
-        let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
-        let isolated = secure_launch(
-            tree,
+        let isolated = secure_launch_in_place(
+            &plugin_path,
             SecureLaunchRequest {
                 worker_program: &receipt_worker,
                 worker_expected_sha256: approved.worker_sha256,
                 worker_expected_size: approved.worker_byte_size,
-                plugin_basename: Some(&plugin_basename),
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
                 repository,
                 require_module_audit: true,
             },
             Some(timeout),
+            None,
         )?;
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));

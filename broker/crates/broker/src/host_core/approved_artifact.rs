@@ -91,8 +91,8 @@ struct TrustedWorkerReceipt {
 }
 
 pub struct ApprovedLoadTree {
-    pub main: crate::sealed_load_tree::LoadEntry,
-    pub dependencies: Vec<crate::sealed_load_tree::LoadEntry>,
+    pub main: LoadEntry,
+    pub dependencies: Vec<LoadEntry>,
     /// Echoed from the selection file into reports as provenance for which
     /// record selected this plug-in. Not checked against anything (#732).
     pub receipt_id: String,
@@ -100,6 +100,53 @@ pub struct ApprovedLoadTree {
     pub worker_path: PathBuf,
     pub worker_sha256: [u8; 32],
     pub worker_byte_size: u64,
+}
+
+/// An authenticated image at its real location. The historical name remains
+/// in schema-v2 receipts, but #816 no longer copies this entry into a sealed
+/// tree before execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadEntry {
+    pub source: PathBuf,
+    pub relative_basename: String,
+    pub expected_sha256: [u8; 32],
+    pub expected_size: u64,
+}
+
+impl ApprovedLoadTree {
+    /// Stable approval identity over the real-path image set. This replaces
+    /// the former staged manifest digest without making transport details part
+    /// of the trust claim.
+    pub fn image_set_digest(&self) -> [u8; 32] {
+        let mut entries: Vec<&LoadEntry> = std::iter::once(&self.main)
+            .chain(self.dependencies.iter())
+            .collect();
+        entries.sort_by_key(|entry| entry.relative_basename.to_lowercase());
+        let mut hasher = Sha256::new();
+        hasher.update(b"aexcompat-approved-image-set-v1\0");
+        for entry in entries {
+            hasher.update((entry.relative_basename.len() as u64).to_le_bytes());
+            hasher.update(entry.relative_basename.as_bytes());
+            hasher.update(entry.expected_sha256);
+            hasher.update(entry.expected_size.to_le_bytes());
+        }
+        hasher.finalize().into()
+    }
+
+    pub fn dependency_search_dirs(&self) -> io::Result<Vec<PathBuf>> {
+        let mut dirs = Vec::new();
+        for entry in std::iter::once(&self.main).chain(self.dependencies.iter()) {
+            let canonical = fs::canonicalize(&entry.source)?;
+            let parent = canonical
+                .parent()
+                .ok_or_else(|| invalid("approved image has no parent directory"))?
+                .to_path_buf();
+            if !dirs.iter().any(|seen: &PathBuf| seen == &parent) {
+                dirs.push(parent);
+            }
+        }
+        Ok(dirs)
+    }
 }
 
 #[derive(Deserialize)]
@@ -122,10 +169,10 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-/// Parses an approved schema-v2 receipt into inputs for `SealedLoadTree`.
+/// Parses an approved schema-v2 receipt into an authenticated in-place load set.
 ///
-/// This only authenticates receipt structure and policy fields. `SealedLoadTree::create`
-/// remains responsible for opening and authenticating the source files.
+/// This authenticates receipt structure and policy fields and observes the
+/// source files that will be loaded in place.
 pub fn load_v2_load_tree(
     repository: &Path,
     id: &str,
@@ -200,7 +247,7 @@ pub fn load_v2_load_tree(
 fn convert_load_entry(
     receipt: LoadEntryReceipt,
     names: &mut HashSet<String>,
-) -> io::Result<crate::sealed_load_tree::LoadEntry> {
+) -> io::Result<LoadEntry> {
     validate_v2_basename(&receipt.basename)?;
     if receipt
         .source_path
@@ -213,10 +260,8 @@ fn convert_load_entry(
     if !names.insert(receipt.basename.to_lowercase()) {
         return Err(invalid("duplicate or case-insensitive basename collision"));
     }
-    // Hash the file that is actually about to be staged. `SealedLoadTree`
-    // still verifies its copy against this identity, so staging keeps proving
-    // "the bytes that ran are the bytes we hashed"; what changed is that the
-    // identity comes from the file rather than from the selection record.
+    // Hash the file that is actually about to be loaded in place; identity
+    // comes from the file rather than from the selection record.
     let (observed_sha256, observed_size) = observe_identity(&receipt.source_path)?;
     if observed_size == 0 {
         return Err(invalid("load entry file is empty"));
@@ -228,7 +273,7 @@ fn convert_load_entry(
         observed_sha256,
         observed_size,
     );
-    Ok(crate::sealed_load_tree::LoadEntry {
+    Ok(LoadEntry {
         source: receipt.source_path,
         relative_basename: receipt.basename,
         expected_sha256: observed_sha256,

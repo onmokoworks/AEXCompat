@@ -17,7 +17,7 @@ struct AuxiliaryOptionHooks {
   // manifest basename on a GPU render so the render/smart worker authorizes the
   // GPU runtime DLLs for the module audit. Null on paths that never carry it.
   bool (*set_runtime_module_authorization)(void* context, const wchar_t* value){};
-  // Optional (issue #405): captures the `--cluster-manifest-v1 <path>`
+  // Optional: captures the `--cluster-manifest-v2 <path>`
   // auxiliary option for cluster sessions (render swap / discovery session).
   // Null on paths that never carry it.
   bool (*load_cluster_manifest)(void* context, const wchar_t* value){};
@@ -45,7 +45,7 @@ struct WorkerMode {
   bool request_mode{};
   bool command_accepted{};
   bool render_session_mode{};
-  // Discovery session (`--discovery-session-v1 --cluster-manifest-v1 <path>`,
+  // Discovery session (`--discovery-session-v1 --cluster-manifest-v2 <path>`,
   // closure-session design §2.2): no positional plug-in arguments; the
   // cluster manifest (already stripped as an auxiliary option) is the only
   // launch input.

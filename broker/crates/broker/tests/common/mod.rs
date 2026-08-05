@@ -32,8 +32,7 @@
 
 #[cfg(windows)]
 mod windows_probe {
-    use aexcompat_broker::sealed_load_tree::{LoadEntry, SealedLoadTree};
-    use aexcompat_broker::secure_launch::{SecureLaunchRequest, secure_launch};
+    use aexcompat_broker::secure_launch::{SecureLaunchRequest, secure_launch_in_place};
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
     use std::sync::OnceLock;
@@ -104,27 +103,16 @@ mod windows_probe {
         if std::fs::write(&payload, payload_bytes).is_err() {
             return true;
         }
-        let entry = LoadEntry {
-            source: payload,
-            relative_basename: "probe.plugin".into(),
-            expected_sha256: Sha256::digest(payload_bytes).into(),
-            expected_size: payload_bytes.len() as u64,
-        };
-        let tree = match SealedLoadTree::create(entry, vec![]) {
-            Ok(tree) => tree,
-            Err(_) => return true,
-        };
         let request = SecureLaunchRequest {
             worker_program: &worker,
             worker_expected_sha256: Sha256::digest(&worker_bytes).into(),
             worker_expected_size: worker_bytes.len() as u64,
-            plugin_basename: Some("probe.plugin"),
             args_before_plugin: &[],
             args_after_plugin: &[],
             repository: &repository.0,
             require_module_audit: false,
         };
-        match secure_launch(tree, request, Some(Duration::from_secs(60))) {
+        match secure_launch_in_place(&payload, request, Some(Duration::from_secs(60)), None) {
             Ok(result) if result.exit_code == STATUS_DLL_INIT_FAILED => {
                 // println!, not eprintln!: libtest's --show-output is what makes
                 // these lines survive into the CI log, and stdout is the stream

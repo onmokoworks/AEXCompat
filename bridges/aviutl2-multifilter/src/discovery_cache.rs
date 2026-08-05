@@ -217,8 +217,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
 
     // A first launch — no discovery cache file at all — would register nothing
     // and defer every filter to the next launch. With in-place discovery
-    // (issue #751) a full After Effects install takes tens of seconds (the
-    // `AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY=1` escape hatch takes minutes),
+    // (issue #751) a full After Effects install takes tens of seconds,
     // so that one launch blocks here, discovers everything, and the loop below
     // registers the results immediately (issue #838). The block is unbounded
     // in the worst case — discovery deliberately carries no deadline, and this
@@ -1100,24 +1099,6 @@ fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf]) -> Vec<PathBuf> 
         }
     }
     roots
-}
-
-/// The dependency closure sealed with `plugin`, or an error string.
-///
-/// Failing here is not softened into "no dependencies": a plug-in whose closure
-/// cannot be resolved would only fail again inside the worker as an opaque
-/// `LoadLibraryExW` failure, so the reason is kept and surfaced by the caller.
-fn dependency_closure_for(
-    plugin: &Path,
-    dependency: &DependencyConfig,
-    roots: &[PathBuf],
-) -> Result<ResolvedDependencyClosure, String> {
-    resolve_dependency_closure(DependencyClosureRequest {
-        max_dependencies: dependency.module_limit,
-        max_total_bytes: dependency.byte_limit,
-        ..DependencyClosureRequest::new(plugin, roots)
-    })
-    .map_err(|error| format!("dependency closure resolution failed: {error}"))
 }
 
 /// Whether a name is a Windows API set, which the loader resolves on its own.
@@ -2038,12 +2019,10 @@ fn dependency_inputs_fingerprint(dependency: &DependencyConfig) -> u64 {
     hasher.update(b"limits\0");
     hasher.update(dependency.module_limit.unwrap_or(usize::MAX).to_le_bytes());
     hasher.update(dependency.byte_limit.unwrap_or(u64::MAX).to_le_bytes());
-    // The discovery pipeline (in-place vs staged, issue #751) decides an
-    // entry's outcome the same way the ceilings do: switching modes must
-    // re-verify entries the other pipeline produced, not reuse them
-    // (stale-reuse protection belongs in cache keys).
+    // Issue #816 removed the staged discovery mode. Retain a fixed pipeline
+    // discriminator so entries produced before the removal are reverified.
     hasher.update(b"pipeline\0");
-    hasher.update([u8::from(in_place_discovery_enabled())]);
+    hasher.update([1]);
     let digest = hasher.finalize();
     u64::from_le_bytes(digest[..8].try_into().unwrap_or_default())
 }
