@@ -1,11 +1,8 @@
 import json
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_SHIFTER_TRANSFORM_SAMPLING_RESULT_2026-07-15.json"
-SOURCES = source_owners.contract_files("sdk_shifter_transform_sampling_result")
 def test_shifter_covers_classic_transform_and_smart_sampling_at_all_depths():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     classic = result["classic"]
@@ -23,5 +20,4 @@ def test_shifter_covers_classic_transform_and_smart_sampling_at_all_depths():
         assert section["suite_leases_balanced"] is True
         assert section["handle_lifetimes_balanced"] is True
         assert section["world_lifetimes_balanced"] is True
-
 

@@ -1,14 +1,10 @@
 import json
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_RENDER_PATH_NEGOTIATION_RESULT_2026-07-15.json"
-MINIHOST = source_owners.L2_MAIN
 RENDER_REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
-
 
 def test_classic_only_sdk_effects_are_capability_gated_before_smart_dispatch():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -30,7 +26,6 @@ def test_classic_only_sdk_effects_are_capability_gated_before_smart_dispatch():
     assert gate["selector_error"] is None
     assert gate["non_applicable_not_counted_as_failure"] is True
 
-
 def test_smart_positive_control_still_completes_all_depths_and_paths():
     control = json.loads(RESULT.read_text(encoding="utf-8"))["positive_control"]
 
@@ -38,5 +33,4 @@ def test_smart_positive_control_still_completes_all_depths_and_paths():
     assert control["matrix_applicable"] == 6
     assert control["matrix_passed"] == 6
     assert control["matrix_failed"] == 0
-
 

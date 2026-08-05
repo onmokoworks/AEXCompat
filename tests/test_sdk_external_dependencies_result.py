@@ -1,20 +1,15 @@
 import json
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_EXTERNAL_DEPENDENCIES_RESULT_2026-07-15.json"
-WORKER = source_owners.L2_MAIN
 MODE_EXECUTION = ROOT / "minihost" / "src" / "l2_mode_execution.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
 
-
 def result():
     return json.loads(RESULT.read_text(encoding="utf-8"))
-
 
 def test_convolutrix_returns_a_bounded_host_owned_dependency_string():
     query = result()["all_dependencies"]
@@ -28,7 +23,6 @@ def test_convolutrix_returns_a_bounded_host_owned_dependency_string():
     assert query["handle_host_disposed"] is True
     assert query["handles_created"] == query["handles_disposed"] == 1
 
-
 def test_null_missing_dependency_handle_is_a_valid_empty_result():
     query = result()["missing_dependencies_none"]
     assert query["check_type"] == 2
@@ -38,5 +32,4 @@ def test_null_missing_dependency_handle_is_a_valid_empty_result():
     assert query["handle_returned"] is False
     assert query["null_handle_is_valid_empty_result"] is True
     assert query["handles_created"] == query["handles_disposed"] == 0
-
 

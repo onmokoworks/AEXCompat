@@ -1,16 +1,12 @@
 import json
 import subprocess
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_runtime.cpp"
 SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_selftests.cpp"
 CALLBACK_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
-L2_SOURCE = source_owners.L2_MAIN
 CMAKE = ROOT / "minihost" / "CMakeLists.txt"
-
 
 def _worker() -> Path:
     candidates = (
@@ -18,13 +14,6 @@ def _worker() -> Path:
         ROOT / "target" / "minihost-build-v18" / "aex_render_worker.exe",
     )
     return next(path for path in candidates if path.exists())
-
-
-
-
-
-
-
 
 def test_path_hardening_runtime_self_test():
     completed = subprocess.run(

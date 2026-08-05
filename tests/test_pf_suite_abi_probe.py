@@ -1,15 +1,11 @@
 import json
 import subprocess
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "build-pf-suite-abi-probe.ps1"
 RESULT = ROOT / "target" / "pf-suite-abi-probe-build" / "pf-suite-abi.json"
-MINIHOST = source_owners.L2_MAIN
 SUITE_ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
-
 
 def test_pf_suite_abi_probe_builds_and_records_sdk_layouts():
     subprocess.run(
@@ -51,9 +47,6 @@ def test_pf_suite_abi_probe_builds_and_records_sdk_layouts():
         ]
         assert all(entry["size"] == report["scalars"]["pointer"] for entry in members)
 
-
-
-
 def test_pf_suite_abi_probe_records_receipt_suite_member_names():
     report = json.loads(RESULT.read_text(encoding="utf-8"))
 
@@ -75,5 +68,4 @@ def test_pf_suite_abi_probe_records_receipt_suite_member_names():
         "AEGP_CheckoutOrRender_ItemFrame_AsyncManager",
         "AEGP_CheckoutOrRender_LayerFrame_AsyncManager",
     ]
-
 

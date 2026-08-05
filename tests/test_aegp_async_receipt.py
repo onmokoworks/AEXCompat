@@ -2,14 +2,10 @@ import json
 import os
 import pathlib
 import subprocess
-import source_owners
-
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
 RECEIPTS = ROOT / "minihost" / "src" / "worker_render_receipts.cpp"
 WORLD_SELFTESTS = ROOT / "minihost" / "src" / "worker_aegp_world_selftests.cpp"
-
 
 def _worker() -> pathlib.Path | None:
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
@@ -19,13 +15,6 @@ def _worker() -> pathlib.Path | None:
         ROOT / "target" / "minihost-build-v18" / "aex_render_worker.exe",
     ]
     return next((candidate for candidate in candidates if candidate and candidate.is_file()), None)
-
-
-
-
-
-
-
 
 def test_async_ready_receipt_runtime_lifecycle():
     worker = _worker()

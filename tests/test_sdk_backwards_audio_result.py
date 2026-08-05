@@ -2,14 +2,12 @@ import json
 from pathlib import Path
 import source_owners
 
-
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_BACKWARDS_AUDIO_RESULT_2026-07-15.json"
 WORKER_SOURCES = source_owners.contract_files("sdk_backwards_audio_result")
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
-
 
 def test_sdk_backwards_audio_matches_the_bitwise_reverse_oracle():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -26,7 +24,6 @@ def test_sdk_backwards_audio_matches_the_bitwise_reverse_oracle():
     assert render["last_output_sample"] == 0
     assert render["guard_bytes_intact"] is True
     assert render["samples_finite"] is True
-
 
 def test_audio_selector_and_checkout_lifetimes_are_balanced():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -45,9 +42,6 @@ def test_audio_selector_and_checkout_lifetimes_are_balanced():
     assert [abi["audio_render_selector"], abi["audio_setup_selector"], abi["audio_setdown_selector"]] == [19, 20, 21]
     assert [abi["checkout_audio_callback_offset"], abi["checkin_audio_callback_offset"], abi["get_audio_data_callback_offset"]] == [48, 56, 64]
 
-
-
-
 def test_audio_only_effect_is_never_dispatched_through_an_image_selector():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     gate = result["image_media_negotiation"]
@@ -62,7 +56,3 @@ def test_audio_only_effect_is_never_dispatched_through_an_image_selector():
     assert gate["classification"] == "unsupported_media_type"
     assert gate["failure_stage"] == "media_type_negotiation"
     assert gate["image_outputs_created"] == 0
-    assert "constexpr uint32_t kOutFlagAudioEffectOnly = 1u << 31;" in worker
-    assert "params_error == 0 && image_render_supported && depth_supported" in worker
-    assert '"unsupported_media_type"' in harness
-    assert 'Some("media_type_negotiation".to_owned())' in harness

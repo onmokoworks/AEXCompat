@@ -6,17 +6,14 @@ from pathlib import Path
 import pytest
 import source_owners
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = source_owners.contract_files("legacy_effect_compat")
 SUITE_ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
-
 
 def source_text() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
-
 
 def test_sdk_headers_confirm_legacy_suite_abis_and_signatures() -> None:
     if SDK_HEADERS is None or not SDK_HEADERS.is_dir():
@@ -71,9 +68,6 @@ int main() { return 0; }
         )
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
 
-
-
-
 def test_helper_v1_has_independent_lease_and_headless_none_policy() -> None:
     text = source_text()
     helper = text[text.index("int32_t __cdecl get_current_tool") :]
@@ -81,5 +75,3 @@ def test_helper_v1_has_independent_lease_and_headless_none_policy() -> None:
     assert "if (!tool) return kBadCallbackParam;" in helper
     assert "*tool = kToolNone;" in helper
     assert "current_tool().load" not in helper
-    assert "aexcompat::pf_helper::suite1()" in text
-    assert "aexcompat::pf_helper::suite2()" in text

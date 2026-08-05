@@ -1,17 +1,9 @@
 import subprocess
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = source_owners.contract_files("pf_ae_adv_item_suite")
 PROBE = ROOT / "instruments/pf-ae-adv-item-probe/pf_ae_adv_item_probe.cpp"
 BUILD = ROOT / "tools/build-pf-ae-adv-item-probe.ps1"
-
-
-
-
-
 
 def test_probe_builds_and_fixes_all_five_sdk_slots_and_lease_balance():
     subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",

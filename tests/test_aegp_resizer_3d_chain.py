@@ -5,21 +5,16 @@ import tempfile
 from pathlib import Path
 
 import pytest
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = source_owners.contract_files("aegp_resizer_3d_chain")
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
-
 
 def _sdk_headers() -> Path:
     if HEADERS is None or not HEADERS.is_dir():
         pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
     return HEADERS
-
 
 def test_sdk_frozen_layer_and_stream_slots_compile() -> None:
     headers = _sdk_headers()
@@ -68,9 +63,6 @@ int main() { return 0; }
             encoding="ascii",
         )
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
-
-
-
 
 def test_native_chain_passes_all_release_workers() -> None:
     expected = {

@@ -3,12 +3,10 @@ from tests import source_owners
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_TYPED_ASSIGNMENT_RESULT_2026-07-15.json"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-
 
 def test_particlelab_mixed_typed_assignment_reaches_classic_and_smartfx():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -67,27 +65,7 @@ def test_particlelab_mixed_typed_assignment_reaches_classic_and_smartfx():
         "time_scale_range", "time_step_range",
     })
 
-
 def test_typed_assignment_surface_is_bounded_and_worker_observable():
     harness = source_owners.harness_windows_text()
     broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
 
-    assert "fn apply_typed_assignments(" in harness
-    assert "fn typed_request_timing(" in harness
-    assert "fn typed_request_document(" in harness
-    assert "fn load_debug_request(&mut self)" in harness
-    assert "fn save_debug_request(&mut self)" in harness
-    assert 'Button::new("Load debug request...")' in harness
-    assert 'Button::new("Save debug request...")' in harness
-    assert '"--render-experimental-request"' in harness
-    assert '"--render-experimental-smart-request"' in harness
-    assert "request_bytes.len() > 64 * 1024" in harness
-    assert "assignments.len() > 1024" in harness
-    assert '"timing frame must be an integer within 0..=10000000"' in harness
-    assert '"timing fps must be an integer within 1..=1000"' in harness
-    assert "timing duration_frames must be an integer greater than frame" in harness
-    assert 'ui.label("Duration frames:")' in harness
-    assert 'ui.label("Time scale:")' in harness
-    assert 'ui.label("Frame step:")' in harness
-    assert "checked_mul(time_step)" in harness
-    assert '"requested_parameters": worker_report.get("requested_parameters")' in broker

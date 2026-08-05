@@ -1,13 +1,9 @@
 import json
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_PATHMASTER_HARD_EDGE_RESULT_2026-07-15.json"
-WORKER_SOURCES = source_owners.contract_files("sdk_pathmaster_hard_edge_result")
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-
 
 def test_pathmaster_hard_edge_mask_matches_the_independent_alpha_oracle():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -21,7 +17,6 @@ def test_pathmaster_hard_edge_mask_matches_the_independent_alpha_oracle():
     assert render["inside_alpha_values"] == [255]
     assert render["outside_alpha_values"] == [0]
     assert render["input_sha256"] != render["output_sha256"]
-
 
 def test_pf_path_checkout_mask_and_lifecycle_ownership_are_balanced():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -42,9 +37,6 @@ def test_pf_path_checkout_mask_and_lifecycle_ownership_are_balanced():
     for invariant in ("handles_balanced", "suites_balanced", "worlds_balanced", "guards_intact"):
         assert lifecycle[invariant] is True
 
-
-
-
 def test_anisotropic_feather_produces_bounded_directional_alpha_gradients():
     feather = json.loads(RESULT.read_text(encoding="utf-8"))["anisotropic_feather"]
 
@@ -56,7 +48,6 @@ def test_anisotropic_feather_produces_bounded_directional_alpha_gradients():
     assert feather["vertical_centerline_partial_pixels"] == 4
     assert feather["horizontal_centerline_partial_pixels"] > feather["vertical_centerline_partial_pixels"]
     assert feather["ownership_balanced"] is True
-
 
 def test_bezier_tangents_produce_a_curve_instead_of_the_vertex_diamond():
     bezier = json.loads(RESULT.read_text(encoding="utf-8"))["bezier_path"]

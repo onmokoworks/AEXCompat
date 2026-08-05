@@ -5,20 +5,14 @@ import shutil
 import subprocess
 import zlib
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER_SOURCE = source_owners.L2_MAIN
 DISPATCH_SOURCE = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 RENDER_SOURCE = ROOT / "minihost" / "src" / "render_subsystem.cpp"
 BROKER_SOURCE = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "target" / "release" / "aexcompat-harness.exe"
 FIXTURE = ROOT / "target" / "sdk-fixtures" / "shifter" / "Shifter.aex"
 INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"
-
-
-
 
 def test_world_dumps_and_row_channel_checksums_match_the_raw_output(
     tmp_path: Path,

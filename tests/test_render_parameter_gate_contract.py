@@ -3,18 +3,14 @@ import json
 import unittest
 from pathlib import Path
 from jsonschema import Draft202012Validator
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = source_owners.L2_SOURCE
 CLI_DISPATCH = ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp"
 RUNTIME_ADMISSION = ROOT / "minihost" / "src" / "worker_runtime_admission.cpp"
 ENTRY_ADMISSION = ROOT / "minihost" / "src" / "worker_entry_admission.cpp"
 REQUEST_PARSER = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 RENDER_REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
 PARAMETER_EXECUTION = ROOT / "minihost" / "src" / "worker_parameter_execution.cpp"
-
 
 class RenderParameterGateContractTests(unittest.TestCase):
     def test_request_is_strict_and_caller_cannot_supply_descriptors(self):
@@ -49,7 +45,6 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertFalse(schema["properties"]["native_process_started"]["const"])
         self.assertEqual(schema["properties"]["assignment_count"]["maximum"], 64)
 
-
     def test_parameterized_execution_contract_separates_rejection_and_native_success(self):
         schema = json.loads((ROOT / "contracts/aex/parameterized_classic_render_report.schema.json").read_text(encoding="utf-8"))
         self.assertFalse(schema["additionalProperties"])
@@ -58,7 +53,6 @@ class RenderParameterGateContractTests(unittest.TestCase):
             self.assertIn(marker, text)
         self.assertIn('"native_process_started": {"const": false}', text)
         self.assertIn('"native_process_started": {"const": true}', text)
-
 
     def test_parameterized_smartfx_contract_requires_both_selectors_and_rects(self):
         schema = json.loads((ROOT / "contracts/aex/parameterized_smartfx_render_report.schema.json").read_text(encoding="utf-8"))
@@ -77,7 +71,6 @@ class RenderParameterGateContractTests(unittest.TestCase):
         self.assertIn("worker_spec.request_mode", route)
         self.assertIn("SmartFX render is not supported for plugin profile", route)
         self.assertIn("classic render is not supported for plugin profile", route)
-
 
 class RenderRequestSecureLaunchContractTests(unittest.TestCase):
     """Every worker launch in render_request.rs goes through the sealed load tree.
@@ -455,7 +448,6 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
                     ).iter_errors([broken])
                 )
             )
-
 
 if __name__ == "__main__":
     unittest.main()

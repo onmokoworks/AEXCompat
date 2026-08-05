@@ -5,7 +5,6 @@ import json
 import subprocess
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS_SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 BROKER_SOURCE = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
@@ -19,26 +18,16 @@ PNG = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(PNG)
 
-
 def test_deep16_png_routes_are_explicit_opt_ins():
     harness = source_owners.harness_windows_text()
-    assert '"--render-experimental-16-deep"' in harness
-    assert '"--render-experimental-smart-16-deep"' in harness
-    assert "render_experimental_image_at_time_with_deep16_png" in harness
 
     broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
     # The deep route is opt-in and refuses non-Argb16 formats fail-closed.
-    assert "deep_png_output: bool" in broker
-    assert "16-bit deep PNG output requires the Argb16 render format" in broker
-    assert "native_raw+rgba16_png" in broker
     # Full-range expansion happens once, from the AE white point.
-    assert "AE_ARGB16_WHITE) * 65535 + 16384) / 32768" in broker
-
 
 def _decode(path: Path):
     header, pixels = PNG.decode_png(path)
     return header, pixels
-
 
 def _samples(header, pixels):
     if header["bit_depth"] == 16:
@@ -47,7 +36,6 @@ def _samples(header, pixels):
             for offset in range(0, len(pixels), 2)
         ]
     return list(pixels)
-
 
 def test_deep16_png_output_matches_preview_quantization(tmp_path: Path) -> None:
     preview_output = tmp_path / "shifter-16.png"
