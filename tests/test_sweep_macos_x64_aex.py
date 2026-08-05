@@ -51,6 +51,27 @@ def test_map_corpus_uses_sha_not_basename(tmp_path):
     assert mapped[0]["windows_match_count"] == 1
 
 
+def test_map_corpus_orders_deterministically_by_sha(tmp_path):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    first_by_name = corpus / "a.aex"
+    last_by_name = corpus / "z.aex"
+    first_by_name.write_bytes(b"payload-z")
+    last_by_name.write_bytes(b"payload-a")
+    entries = [
+        {"sha256": SWEEP.sha256_file(path), "architecture": "x64"}
+        for path in (first_by_name, last_by_name)
+    ]
+
+    mapped = SWEEP.map_corpus(
+        {"schema_version": 1, "entries": entries}, [corpus]
+    )
+
+    assert [item["sha256"] for item in mapped] == sorted(
+        item["sha256"] for item in mapped
+    )
+
+
 def test_map_corpus_fails_closed_for_unmapped_binary(tmp_path):
     corpus = tmp_path / "corpus"
     corpus.mkdir()
@@ -376,15 +397,42 @@ def test_unicorn_only_cli_does_not_require_native_worker(tmp_path):
     assert args.native_worker is None
 
 
-def test_default_both_mode_rejects_missing_native_worker(tmp_path, capsys):
+def test_default_mode_is_unicorn_only_and_does_not_require_native_worker(tmp_path):
+    unicorn = tmp_path / "unicorn-worker"
+
+    args = SWEEP.parse_args(
+        _required_cli_args(tmp_path) + ["--unicorn-worker", str(unicorn)]
+    )
+
+    assert args.backend is None
+    assert SWEEP.requested_backends(args) == ["unicorn"]
+    assert args.native_worker is None
+
+
+def test_explicit_native_mode_still_requires_native_worker(tmp_path, capsys):
     with pytest.raises(SystemExit) as captured:
-        SWEEP.parse_args(
-            _required_cli_args(tmp_path)
-            + ["--unicorn-worker", str(tmp_path / "unicorn-worker")]
-        )
+        SWEEP.parse_args(_required_cli_args(tmp_path) + ["--backend", "native"])
 
     assert captured.value.code == 2
     assert "--native-worker is required for native backend" in capsys.readouterr().err
+
+
+def test_cli_rejects_duplicate_backend_selection(tmp_path, capsys):
+    with pytest.raises(SystemExit) as captured:
+        SWEEP.parse_args(
+            _required_cli_args(tmp_path)
+            + [
+                "--backend",
+                "unicorn",
+                "--backend",
+                "unicorn",
+                "--unicorn-worker",
+                str(tmp_path / "unicorn-worker"),
+            ]
+        )
+
+    assert captured.value.code == 2
+    assert "must not be duplicated" in capsys.readouterr().err
 
 
 def test_unicorn_only_resolves_and_hashes_only_selected_worker(tmp_path, monkeypatch):
@@ -479,6 +527,17 @@ def test_signal_evidence_is_classified_as_crash():
     assert SWEEP.classify_failure("signal=SIGSEGV(11)") == "crash"
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("unsupported Win64 import: ucrtbase.dll!ceilf", "import"),
+        ("native AVX state sync point capacity exceeded", "emulation"),
+    ],
+)
+def test_pre_ready_guest_errors_keep_actionable_failure_class(message, expected):
+    assert SWEEP.classify_failure(message) == expected
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="POSIX process-group contract is macOS-only")
 def test_runner_initiated_termination_is_not_classified_as_guest_crash():
     process = subprocess.Popen(
@@ -493,3 +552,171 @@ def test_runner_initiated_termination_is_not_classified_as_guest_crash():
 
     assert "terminated_by_runner=SIGTERM" in evidence
     assert SWEEP.classify_failure(evidence) != "crash"
+
+
+def _metric_entry(identity, result):
+    return {"sha256": identity, "name": f"{identity}.aex", "backends": {"unicorn": result}}
+
+
+def _rendered(checksum="a" * 64):
+    return {
+        "status": "rendered",
+        "output_sha256": checksum,
+        "milestones": {
+            "admission_success": True,
+            "render_success": True,
+            "cleanup_success": True,
+        },
+    }
+
+
+def _failed(failure_class="Suite", selector="SMART_RENDER", admission=True):
+    return {
+        "status": "failed",
+        "failure_class": failure_class,
+        "diagnostic": {"selector": selector},
+        "milestones": {
+            "admission_success": admission,
+            "render_success": False,
+            "cleanup_success": False,
+        },
+    }
+
+
+def test_compatibility_summary_uses_fixed_entry_denominator_and_exact_rates():
+    entries = [
+        _metric_entry("1" * 64, _rendered()),
+        _metric_entry("2" * 64, _failed()),
+        _metric_entry("3" * 64, _failed("import", "GLOBAL_SETUP", False)),
+    ]
+
+    summary = SWEEP.summarize_compatibility(entries, ["unicorn"])
+
+    assert summary["denominator"] == 3
+    assert summary["by_backend"]["unicorn"] == {
+        "denominator": 3,
+        "admission_success": 2,
+        "admission_rate": {"numerator": 2, "denominator": 3},
+        "render_success": 1,
+        "render_rate": {"numerator": 1, "denominator": 3},
+        "cleanup_success": 1,
+        "cleanup_rate": {"numerator": 1, "denominator": 3},
+    }
+    assert summary["blockers"] == [
+        {
+            "backend": "unicorn",
+            "failure_class": "Suite",
+            "selector": "SMART_RENDER",
+            "count": 1,
+        },
+        {
+            "backend": "unicorn",
+            "failure_class": "import",
+            "selector": "GLOBAL_SETUP",
+            "count": 1,
+        },
+    ]
+
+
+def _report(entries, worker_sha="f" * 64):
+    return {
+        "schema_version": SWEEP.SCHEMA_VERSION,
+        "source": {
+            "windows_inventory_sha256": "a" * 64,
+            "windows_summary_sha256": "b" * 64,
+            "input_png_sha256": "c" * 64,
+            "input_dimensions": [64, 64],
+            "backends": ["unicorn"],
+            "unicorn_worker_sha256": worker_sha,
+        },
+        "entries": entries,
+    }
+
+
+def test_baseline_comparison_reports_gain_without_regression():
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _failed())])
+    current = _report([_metric_entry(identity, _rendered())])
+
+    comparison = SWEEP.compare_baseline(current, baseline)
+
+    assert comparison["regression"] is False
+    assert comparison["by_backend"]["unicorn"]["gained_render"] == [identity]
+
+
+def test_baseline_comparison_marks_render_loss_and_output_change_as_regression():
+    lost_identity = "1" * 64
+    changed_identity = "2" * 64
+    baseline = _report(
+        [
+            _metric_entry(lost_identity, _rendered("a" * 64)),
+            _metric_entry(changed_identity, _rendered("b" * 64)),
+        ]
+    )
+    current = _report(
+        [
+            _metric_entry(lost_identity, _failed()),
+            _metric_entry(changed_identity, _rendered("c" * 64)),
+        ]
+    )
+
+    comparison = SWEEP.compare_baseline(current, baseline)
+
+    assert comparison["regression"] is True
+    assert comparison["by_backend"]["unicorn"]["lost_render"] == [lost_identity]
+    assert comparison["by_backend"]["unicorn"]["output_changed"] == [changed_identity]
+
+
+@pytest.mark.parametrize("difference", ["input", "identity"])
+def test_baseline_comparison_fails_closed_on_condition_or_identity_drift(difference):
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    current = _report([_metric_entry(identity, _rendered())])
+    if difference == "input":
+        current["source"]["input_dimensions"] = [32, 32]
+    else:
+        current["entries"][0]["sha256"] = "2" * 64
+
+    with pytest.raises(SWEEP.SweepError, match="conditions differ|identity order differs"):
+        SWEEP.compare_baseline(current, baseline)
+
+
+def test_baseline_comparison_allows_worker_change_and_records_both_identities():
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _failed())], worker_sha="a" * 64)
+    current = _report([_metric_entry(identity, _rendered())], worker_sha="b" * 64)
+
+    comparison = SWEEP.compare_baseline(current, baseline)
+
+    assert comparison["baseline_workers"] == {"unicorn_worker_sha256": "a" * 64}
+    assert comparison["current_workers"] == {"unicorn_worker_sha256": "b" * 64}
+    assert comparison["regression"] is False
+
+
+def test_baseline_comparison_rejects_missing_worker_identity():
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    del baseline["source"]["unicorn_worker_sha256"]
+    current = _report([_metric_entry(identity, _rendered())])
+
+    with pytest.raises(SWEEP.SweepError, match="unicorn_worker_sha256 is invalid"):
+        SWEEP.compare_baseline(current, baseline)
+
+
+@pytest.mark.parametrize("malformation", ["identity", "milestone", "output"])
+def test_baseline_comparison_rejects_malformed_success_contract(malformation):
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    current = _report([_metric_entry(identity, _rendered())])
+    result = baseline["entries"][0]["backends"]["unicorn"]
+    if malformation == "identity":
+        baseline["entries"][0]["sha256"] = "not-a-sha"
+    elif malformation == "milestone":
+        result["milestones"]["cleanup_success"] = "yes"
+    else:
+        result["output_sha256"] = "not-a-sha"
+
+    with pytest.raises(
+        SWEEP.SweepError, match="identity is invalid|milestones are invalid|output SHA-256 is invalid"
+    ):
+        SWEEP.compare_baseline(current, baseline)

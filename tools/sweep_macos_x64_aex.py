@@ -20,7 +20,7 @@ from typing import BinaryIO
 from PIL import Image
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_MESSAGE_BYTES = 64 * 1024
 MAX_ERROR_BYTES = 4096
 MAX_DURABLE_ERROR_BYTES = 1024
@@ -42,6 +42,21 @@ class AdmissionFailure(SweepError):
             "resident admission probe failed: "
             f"{diagnostic['category']} {diagnostic['message']}"
         )
+
+
+class BackendFailure(SweepError):
+    def __init__(
+        self,
+        cause: Exception,
+        failure_stage: str,
+        admission_success: bool,
+        render_success: bool,
+    ):
+        self.cause = cause
+        self.failure_stage = failure_stage
+        self.admission_success = admission_success
+        self.render_success = render_success
+        super().__init__(str(cause))
 
 
 def bounded_utf8(value: str, limit: int) -> str:
@@ -168,7 +183,7 @@ def map_corpus(
                 ),
             }
         )
-    return mapped
+    return sorted(mapped, key=lambda item: item["sha256"])
 
 
 def png_to_argb8(path: Path) -> tuple[int, int, bytes]:
@@ -648,21 +663,26 @@ def run_backend(
     output_slot = directory / "output.argb8"
     input_slot.write_bytes(argb8)
     output_slot.write_bytes(bytes(len(argb8)))
-    probe, probe_ready = launch_ready(
-        worker,
-        plugin,
-        input_slot,
-        output_slot,
-        width,
-        height,
-        extra_environment,
-    )
+    try:
+        probe, probe_ready = launch_ready(
+            worker,
+            plugin,
+            input_slot,
+            output_slot,
+            width,
+            height,
+            extra_environment,
+        )
+    except Exception as error:
+        raise BackendFailure(error, "admission_setup", False, False) from error
+    admission_success = False
     try:
         require_backend(probe_ready, expected_backend, "probe")
         if probe.stdin is None or probe.stdout is None:
             raise SweepError("probe control pipes are unavailable")
         write_message(probe.stdin, {"v": 1, "type": "probe"})
         validate_probe(read_message(probe.stdout, RENDER_TIMEOUT_SECONDS), probe.pid)
+        admission_success = True
         close_worker(probe, 0)
     except AdmissionFailure as error:
         error.termination_evidence = terminate_worker(probe)
@@ -670,18 +690,23 @@ def run_backend(
     except Exception as error:
         stderr = terminate_worker(probe)
         if stderr:
-            raise SweepError(f"{error}; worker stderr: {stderr}") from error
-        raise
+            error = SweepError(f"{error}; worker stderr: {stderr}")
+        stage = "admission_cleanup" if admission_success else "admission_probe"
+        raise BackendFailure(error, stage, admission_success, False) from error
 
-    process, ready = launch_ready(
-        worker,
-        plugin,
-        input_slot,
-        output_slot,
-        width,
-        height,
-        extra_environment,
-    )
+    try:
+        process, ready = launch_ready(
+            worker,
+            plugin,
+            input_slot,
+            output_slot,
+            width,
+            height,
+            extra_environment,
+        )
+    except Exception as error:
+        raise BackendFailure(error, "render_setup", True, False) from error
+    render_success = False
     try:
         require_backend(ready, expected_backend, "render")
         if process.stdin is None or process.stdout is None:
@@ -702,12 +727,14 @@ def run_backend(
             raise SweepError(f"output slot size differs: {len(output)} != {len(argb8)}")
         checksum = hashlib.sha256(output).hexdigest()
         validate_frame(frame, width, height, checksum)
+        render_success = True
         close = close_worker(process, 1)
     except Exception as error:
         stderr = terminate_worker(process)
         if stderr:
-            raise SweepError(f"{error}; worker stderr: {stderr}") from error
-        raise
+            error = SweepError(f"{error}; worker stderr: {stderr}")
+        stage = "render_cleanup" if render_success else "render"
+        raise BackendFailure(error, stage, True, render_success) from error
     return {
         "status": "rendered",
         "fresh_after_probe": probe_ready["worker_pid"] != ready["worker_pid"],
@@ -716,6 +743,11 @@ def run_backend(
         "suite_requests": close["close"].get("suite_requests", []),
         "unsupported_suite_calls": close["close"].get("unsupported_suite_calls", []),
         "session_clean": True,
+        "milestones": {
+            "admission_success": True,
+            "render_success": True,
+            "cleanup_success": True,
+        },
     }
 
 
@@ -729,6 +761,8 @@ def classify_failure(message: str) -> str:
         ("cpu exception", "crash"),
         ("missing import", "import"),
         ("unsupported import", "import"),
+        ("unsupported win64 import", "import"),
+        ("native avx", "emulation"),
         ("dllmain", "DllMain"),
         ("tls", "TLS"),
         ("seh", "SEH"),
@@ -785,7 +819,7 @@ def validate_source_pair(
 
 
 def requested_backends(args: argparse.Namespace) -> list[str]:
-    return args.backend or ["native", "unicorn"]
+    return args.backend or ["unicorn"]
 
 
 def resolve_workers(
@@ -836,6 +870,207 @@ def source_worker_identity(
     if "unicorn" in workers:
         identity["unicorn_worker_sha256"] = sha256_file(workers["unicorn"][0])
     return identity
+
+
+def _rate(numerator: int, denominator: int) -> dict[str, int]:
+    return {"numerator": numerator, "denominator": denominator}
+
+
+def summarize_compatibility(
+    entries: list[dict[str, object]], backends: list[str]
+) -> dict[str, object]:
+    denominator = len(entries)
+    by_backend: dict[str, object] = {}
+    blocker_counts: Counter[tuple[str, str, str | None]] = Counter()
+    for backend in backends:
+        admission = render = cleanup = 0
+        for entry in entries:
+            result = entry["backends"][backend]
+            milestones = result["milestones"]
+            admission += int(milestones["admission_success"] is True)
+            render += int(milestones["render_success"] is True)
+            cleanup += int(milestones["cleanup_success"] is True)
+            if result["status"] == "failed":
+                selector = None
+                diagnostic = result.get("diagnostic")
+                if isinstance(diagnostic, dict):
+                    selector = diagnostic.get("selector")
+                blocker_counts[(backend, str(result["failure_class"]), selector)] += 1
+        by_backend[backend] = {
+            "denominator": denominator,
+            "admission_success": admission,
+            "admission_rate": _rate(admission, denominator),
+            "render_success": render,
+            "render_rate": _rate(render, denominator),
+            "cleanup_success": cleanup,
+            "cleanup_rate": _rate(cleanup, denominator),
+        }
+    blockers = [
+        {
+            "backend": backend,
+            "failure_class": failure_class,
+            "selector": selector,
+            "count": count,
+        }
+        for (backend, failure_class, selector), count in sorted(
+            blocker_counts.items(),
+            key=lambda item: (-item[1], item[0][0], item[0][1], item[0][2] or ""),
+        )
+    ]
+    return {"denominator": denominator, "by_backend": by_backend, "blockers": blockers}
+
+
+def _entry_identity(report: dict[str, object]) -> list[str]:
+    entries = report.get("entries")
+    if not isinstance(entries, list):
+        raise SweepError("baseline report entries must be an array")
+    identities = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str):
+            raise SweepError("baseline report entry identity is invalid")
+        identity = entry["sha256"]
+        if len(identity) != 64 or any(
+            character not in "0123456789abcdef" for character in identity
+        ):
+            raise SweepError("baseline report entry identity is invalid")
+        identities.append(identity)
+    if len(identities) != len(set(identities)):
+        raise SweepError("baseline report contains duplicate identities")
+    return identities
+
+
+def _validated_milestones(
+    entry: object, backend: str, label: str
+) -> tuple[dict[str, object], dict[str, bool]]:
+    if not isinstance(entry, dict) or not isinstance(entry.get("backends"), dict):
+        raise SweepError(f"{label} report backend result is invalid")
+    result = entry["backends"].get(backend)
+    if not isinstance(result, dict) or result.get("status") not in {"rendered", "failed"}:
+        raise SweepError(f"{label} report {backend} result is invalid")
+    milestones = result.get("milestones")
+    expected = {"admission_success", "render_success", "cleanup_success"}
+    if (
+        not isinstance(milestones, dict)
+        or set(milestones) != expected
+        or any(type(milestones[key]) is not bool for key in expected)
+        or (milestones["render_success"] and not milestones["admission_success"])
+        or (milestones["cleanup_success"] and not milestones["render_success"])
+        or (
+            result["status"] == "rendered"
+            and not all(milestones[key] for key in expected)
+        )
+    ):
+        raise SweepError(f"{label} report {backend} milestones are invalid")
+    checksum = result.get("output_sha256")
+    if result["status"] == "rendered" and (
+        not isinstance(checksum, str)
+        or len(checksum) != 64
+        or any(character not in "0123456789abcdef" for character in checksum)
+    ):
+        raise SweepError(f"{label} report {backend} output SHA-256 is invalid")
+    return result, milestones
+
+
+def compare_baseline(
+    report: dict[str, object], baseline: dict[str, object]
+) -> dict[str, object]:
+    if baseline.get("schema_version") != SCHEMA_VERSION:
+        raise SweepError(f"baseline report schema_version must be {SCHEMA_VERSION}")
+    source = report["source"]
+    baseline_source = baseline.get("source")
+    if not isinstance(baseline_source, dict):
+        raise SweepError("baseline report source is invalid")
+    condition_keys = {
+        "windows_inventory_sha256",
+        "windows_summary_sha256",
+        "input_png_sha256",
+        "input_dimensions",
+        "backends",
+        "native_run_dllmain",
+    }
+    conditions = {key: source.get(key) for key in condition_keys if key in source}
+    baseline_conditions = {
+        key: baseline_source.get(key)
+        for key in condition_keys
+        if key in baseline_source
+    }
+    if conditions != baseline_conditions:
+        raise SweepError("baseline report execution conditions differ")
+    backends = source["backends"]
+    if (
+        not isinstance(backends, list)
+        or not backends
+        or len(backends) != len(set(backends))
+        or not all(backend in {"unicorn", "native"} for backend in backends)
+    ):
+        raise SweepError("current report backend list is invalid")
+    for backend in backends:
+        worker_key = f"{backend}_worker_sha256"
+        for label, candidate in (
+            ("current", source.get(worker_key)),
+            ("baseline", baseline_source.get(worker_key)),
+        ):
+            if (
+                not isinstance(candidate, str)
+                or len(candidate) != 64
+                or any(character not in "0123456789abcdef" for character in candidate)
+            ):
+                raise SweepError(f"{label} report {worker_key} is invalid")
+    identities = _entry_identity(report)
+    if identities != _entry_identity(baseline):
+        raise SweepError("baseline report mapped identity order differs")
+
+    comparison: dict[str, object] = {
+        "regression": False,
+        "baseline_workers": {
+            key: baseline_source[key]
+            for key in ("unicorn_worker_sha256", "native_worker_sha256")
+            if key in baseline_source
+        },
+        "current_workers": {
+            key: source[key]
+            for key in ("unicorn_worker_sha256", "native_worker_sha256")
+            if key in source
+        },
+        "by_backend": {},
+    }
+    baseline_entries = baseline["entries"]
+    for backend in backends:
+        gained = []
+        lost = []
+        cleanup_lost = []
+        output_changed = []
+        for identity, current_entry, baseline_entry in zip(
+            identities, report["entries"], baseline_entries, strict=True
+        ):
+            current, current_milestones = _validated_milestones(
+                current_entry, backend, "current"
+            )
+            previous, previous_milestones = _validated_milestones(
+                baseline_entry, backend, "baseline"
+            )
+            if current_milestones["render_success"] and not previous_milestones["render_success"]:
+                gained.append(identity)
+            if previous_milestones["render_success"] and not current_milestones["render_success"]:
+                lost.append(identity)
+            if previous_milestones["cleanup_success"] and not current_milestones["cleanup_success"]:
+                cleanup_lost.append(identity)
+            if (
+                current_milestones["render_success"]
+                and previous_milestones["render_success"]
+                and current.get("output_sha256") != previous.get("output_sha256")
+            ):
+                output_changed.append(identity)
+        backend_regression = bool(lost or cleanup_lost or output_changed)
+        comparison["regression"] = comparison["regression"] or backend_regression
+        comparison["by_backend"][backend] = {
+            "gained_render": gained,
+            "lost_render": lost,
+            "lost_cleanup": cleanup_lost,
+            "output_changed": output_changed,
+            "regression": backend_regression,
+        }
+    return comparison
 
 
 def run_sweep(args: argparse.Namespace) -> dict[str, object]:
@@ -900,22 +1135,50 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
                 result = {
                     "status": "failed",
                     "failure_class": classify_diagnostic(diagnostic),
+                    "failure_stage": "admission_probe",
                     "render_error": error.render_error,
                     "diagnostic": diagnostic,
                     "termination_evidence": sanitize_error_text(
                         error.termination_evidence, redactions
                     ),
                     "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                    "milestones": {
+                        "admission_success": False,
+                        "render_success": False,
+                        "cleanup_success": False,
+                    },
                 }
                 counts[f"{backend}:{result['failure_class']}"] += 1
+            except BackendFailure as error:
+                message = sanitize_error_text(str(error), redactions)
+                bucket = classify_failure(message)
+                result = {
+                    "status": "failed",
+                    "failure_class": bucket,
+                    "failure_stage": error.failure_stage,
+                    "error": message,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                    "milestones": {
+                        "admission_success": error.admission_success,
+                        "render_success": error.render_success,
+                        "cleanup_success": False,
+                    },
+                }
+                counts[f"{backend}:{bucket}"] += 1
             except Exception as error:
                 message = sanitize_error_text(str(error), redactions)
                 bucket = classify_failure(message)
                 result = {
                     "status": "failed",
                     "failure_class": bucket,
+                    "failure_stage": "runner",
                     "error": message,
                     "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                    "milestones": {
+                        "admission_success": False,
+                        "render_success": False,
+                        "cleanup_success": False,
+                    },
                 }
                 counts[f"{backend}:{bucket}"] += 1
             backend_results[backend] = result
@@ -937,19 +1200,27 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
             "mapped_entries": len(mapped),
             "input_png_sha256": sha256_file(input_png),
             "input_dimensions": [width, height],
+            "backends": list(workers),
         }
         | source_worker_identity(workers, args.native_run_dllmain),
         "summary": {
             "entry_count": len(entries),
             "backend_attempts": len(entries) * len(workers),
             "counts": dict(sorted(counts.items())),
+            "compatibility": summarize_compatibility(entries, list(workers)),
         },
         "entries": entries,
     }
+    if args.baseline_report is not None:
+        report["baseline_comparison"] = compare_baseline(
+            report, load_json_strict(args.baseline_report.resolve(strict=True))
+        )
     output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    if report.get("baseline_comparison", {}).get("regression") is True:
+        raise SweepError("baseline regression detected; report was retained")
     return report
 
 
@@ -965,9 +1236,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--backend",
         action="append",
         choices=("native", "unicorn"),
-        help="backend to run; repeat for both (default: both)",
+        help="backend to run; repeat for both (default: unicorn)",
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--baseline-report",
+        type=Path,
+        help="schema-v2 report from an identical corpus and execution condition",
+    )
     parser.add_argument("--expected-inventory-sha256", required=True)
     parser.add_argument("--expected-summary-sha256", required=True)
     parser.add_argument(
@@ -977,6 +1253,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
     selected = requested_backends(args)
+    if len(selected) != len(set(selected)):
+        parser.error("--backend values must not be duplicated")
     for backend in selected:
         if getattr(args, f"{backend}_worker") is None:
             parser.error(f"--{backend}-worker is required for {backend} backend")
