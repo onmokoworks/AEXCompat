@@ -4107,6 +4107,65 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // --- the ignore checklist (issue #858) ----------------------------------
+
+    fn known(paths: &[&str]) -> Vec<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
+
+    /// Two same-stem AEX in different folders are one ignore decision (the
+    /// list matches by stem, case-insensitively), and rows come out sorted.
+    #[test]
+    fn ignore_rows_dedupe_stems_across_folders() {
+        let known = known(&[
+            r"C:\a\Tint.aex",
+            r"C:\b\TINT.aex",
+            r"C:\a\Blur.aex",
+            r"C:\cache-only\Gone.aex",
+        ]);
+        let (rows, manual) = ignore_rows(&known, &[]);
+        let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names, ["Blur", "Gone", "Tint"]);
+        assert!(rows.iter().all(|row| !row.ignored));
+        assert!(manual.is_empty());
+    }
+
+    /// The checkbox state mirrors the ignore list under its own matching
+    /// rules: case-insensitive, `.aex` optional.
+    #[test]
+    fn ignore_rows_check_matching_entries() {
+        let known = known(&[r"C:\a\Tint.aex", r"C:\a\Blur.aex"]);
+        let ignore = vec!["tint.AEX".to_owned(), "Sharpen".to_owned()];
+        let (rows, manual) = ignore_rows(&known, &ignore);
+        assert_eq!(
+            rows,
+            vec![
+                IgnoreRow {
+                    name: "Blur".into(),
+                    ignored: false
+                },
+                IgnoreRow {
+                    name: "Tint".into(),
+                    ignored: true
+                },
+            ]
+        );
+        // An entry no known effect matches survives via the manual field; it
+        // may name an effect that simply is not visible this launch.
+        assert_eq!(manual, ["Sharpen"]);
+    }
+
+    /// The saved list is checked rows plus manual lines, without letting a
+    /// manual respelling duplicate a checked effect.
+    #[test]
+    fn compose_ignore_merges_checks_and_manual_lines() {
+        let ignore = compose_ignore(
+            vec!["Tint".into(), "Blur".into()],
+            "Sharpen\r\n tint.aex \r\nBlur",
+        );
+        assert_eq!(ignore, ["Tint", "Blur", "Sharpen"]);
+    }
+
     /// The template stream is what keeps the dialog alive at all; a malformed
     /// header (wrong item count, odd alignment) fails at runtime inside
     /// AviUtl2, so pin the invariants that are checkable here.
@@ -4144,8 +4203,15 @@ mod tests {
             let item_style = (words[at] as u32) | ((words[at + 1] as u32) << 16);
             assert_ne!(item_style & WS_CHILD, 0, "item {found} carries WS_CHILD");
             at += 4 + 4 + 1; // style, exstyle, rect, id
-            assert_eq!(words[at], 0xFFFF, "item {found} uses a class atom");
-            at += 2;
+            if words[at] == 0xFFFF {
+                at += 2; // class atom
+            } else {
+                assert_ne!(words[at], 0, "item {found} has a class (atom or name)");
+                while words[at] != 0 {
+                    at += 1; // class name (the SysListView32 checklist)
+                }
+                at += 1;
+            }
             while words[at] != 0 {
                 at += 1; // title
             }
