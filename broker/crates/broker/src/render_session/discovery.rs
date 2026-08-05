@@ -545,30 +545,24 @@ impl DiscoverySession {
                 None,
             ),
         };
-        // The final report's module audit is validated against the launch
+        // The final report's module audit is checked against the launch
         // manifest's declared set (design §5), replacing the one-shot
-        // fixed-cap validator the cluster dispatch disabled at launch. A
-        // mismatch is fail-closed even when the exit looked clean.
-        if self.invalidation.is_none() {
-            if let Some(CollectedExit {
+        // fixed-cap validator the cluster dispatch disabled at launch. Since
+        // issue #730 the outcome is recorded on the close report instead of
+        // invalidating the session.
+        let module_audit_warning = match &collected {
+            Some(CollectedExit {
                 result: Some(result),
                 ..
-            }) = &collected
-            {
-                if result.classification == crate::ExitClassification::Ok {
-                    if let Err(error) = crate::worker_module_audit::validate_cluster_worker_audit(
-                        &result.stdout,
-                        result.stdout_truncated,
-                        &self.audit,
-                    ) {
-                        self.invalidation = Some(SessionInvalidation {
-                            reason: "module_audit_mismatch",
-                            detail: format!("the cluster module audit failed at close: {error}"),
-                        });
-                    }
-                }
+            }) if result.classification == crate::ExitClassification::Ok => {
+                crate::worker_module_audit::observe_cluster_worker_audit(
+                    &result.stdout,
+                    result.stdout_truncated,
+                    &self.audit,
+                )
             }
-        }
+            _ => None,
+        };
         let session_clean = self.invalidation.is_none()
             && matches!(
                 &collected,
@@ -588,6 +582,7 @@ impl DiscoverySession {
                 "reason": invalidation.reason,
                 "detail": invalidation.detail,
             })),
+            "module_audit_warning": module_audit_warning,
             "worker": worker,
             "final_report": final_report,
             "session_clean": session_clean,

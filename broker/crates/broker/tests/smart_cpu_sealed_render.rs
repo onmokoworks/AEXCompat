@@ -3,7 +3,10 @@
 //! fix, the smart worker unconditionally started a CUDA context, which pulled
 //! nvcuda.dll and NVIDIA driver-store DLLs into the module audit as unknowns
 //! and failed every sealed smart render on NVIDIA machines (exit 14,
-//! module_audit_failed) while classic renders passed. The assertion is
+//! module_audit_failed) while classic renders passed. Since issue #730 the
+//! audit can no longer fail a dispatch (it is recorded instead), so the
+//! guarded regression is the render completing; the no-CUDA-on-CPU behavior
+//! itself is what keeps the recorded audit clean. The assertion is
 //! machine-portable; its sensitivity is highest where an NVIDIA driver is
 //! installed. Requires the real smart worker and the pf_smart_geometry_probe
 //! fixture from this checkout; skips (with a message) when either is not

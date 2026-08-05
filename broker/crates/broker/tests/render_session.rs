@@ -2939,9 +2939,9 @@ mod windows_e2e {
     }
 
     #[test]
-    fn cluster_close_rejects_an_audit_module_outside_the_declared_set() {
+    fn cluster_close_records_an_audit_module_outside_the_declared_set() {
         if crate::common::skip_without_restricted_token_launch(
-            "cluster_close_rejects_an_audit_module_outside_the_declared_set",
+            "cluster_close_records_an_audit_module_outside_the_declared_set",
         ) {
             return;
         }
@@ -2953,12 +2953,16 @@ mod windows_e2e {
             .expect("frame 0 renders");
         session.swap_plugin(1).expect("swap to plugins[1]");
         let close = session.close();
-        // The exit code and report looked clean, but the observed union
-        // carried a module the manifest never declared: fail-closed.
-        assert_eq!(close["invalidated"], true, "close: {close}");
-        assert_eq!(close["session_clean"], false, "close: {close}");
-        assert_eq!(
-            close["invalidated_reason"]["reason"], "module_audit_mismatch",
+        // The observed union carried a module the manifest never declared.
+        // Since issue #730 that is a recorded observation on the close report,
+        // not an invalidation: the module list explains the frames, it does
+        // not decide whether they were valid.
+        assert_eq!(close["invalidated"], false, "close: {close}");
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert!(
+            close["module_audit_warning"]
+                .as_str()
+                .is_some_and(|warning| !warning.is_empty()),
             "close: {close}"
         );
     }

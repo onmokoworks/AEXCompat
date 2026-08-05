@@ -2715,37 +2715,29 @@ impl RenderSession {
                 None,
             ),
         };
-        // Cluster sessions validate the final report's module audit against
-        // the launch manifest's declared set (design §5), replacing the
-        // one-shot fixed-cap validator the cluster dispatch disabled at
-        // launch. A mismatch is fail-closed: the close is recorded as an
-        // invalidation even when the exit code and the report looked clean.
-        if self.invalidation.is_none() {
-            if let Some(cluster) = &self.cluster {
-                if let Some(CollectedExit {
+        // Cluster sessions check the final report's module audit against the
+        // launch manifest's declared set (design §5), replacing the one-shot
+        // fixed-cap validator the cluster dispatch disabled at launch. Since
+        // issue #730 the outcome is recorded on the close report instead of
+        // invalidating the session: the module list explains observations
+        // (a runtime DLL difference can change pixels), it does not decide
+        // whether the frames were valid.
+        let module_audit_warning = match (&self.cluster, &collected) {
+            (
+                Some(cluster),
+                Some(CollectedExit {
                     result: Some(result),
                     ..
-                }) = &collected
-                {
-                    if result.classification == crate::ExitClassification::Ok {
-                        if let Err(error) =
-                            crate::worker_module_audit::validate_cluster_worker_audit(
-                                &result.stdout,
-                                result.stdout_truncated,
-                                &cluster.audit,
-                            )
-                        {
-                            self.invalidation = Some(SessionInvalidation {
-                                reason: "module_audit_mismatch",
-                                detail: format!(
-                                    "the cluster module audit failed at close: {error}"
-                                ),
-                            });
-                        }
-                    }
-                }
+                }),
+            ) if result.classification == crate::ExitClassification::Ok => {
+                crate::worker_module_audit::observe_cluster_worker_audit(
+                    &result.stdout,
+                    result.stdout_truncated,
+                    &cluster.audit,
+                )
             }
-        }
+            _ => None,
+        };
         let session_clean = self.invalidation.is_none()
             && matches!(
                 &collected,
@@ -2770,6 +2762,7 @@ impl RenderSession {
                 "reason": invalidation.reason,
                 "detail": invalidation.detail,
             })),
+            "module_audit_warning": module_audit_warning,
             "worker": worker,
             "final_report": final_report,
             "session_clean": session_clean,

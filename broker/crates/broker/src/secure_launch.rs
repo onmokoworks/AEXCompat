@@ -32,6 +32,13 @@ pub struct SecureLaunchResult {
     /// Receipt-driven flows do not pass through local admission and stay
     /// `None`.
     pub worker_freshness_warning: Option<&'static str>,
+    /// Module-audit observation (issue #730): `Some(reason)` when a required
+    /// audit could not confirm that only known modules loaded (unknown
+    /// modules, a missing or malformed report, truncated stdout). Recorded so
+    /// the observation reaches diagnostics; it never fails the dispatch.
+    /// `None` when the audit passed, was not required, or the exit was not
+    /// clean (a dead worker's stdout proves nothing either way).
+    pub module_audit_warning: Option<String>,
 }
 
 pub struct SecureLaunchRequest<'a> {
@@ -178,13 +185,17 @@ fn secure_launch_impl(
         )
     }
     .map_err(|error| stage_error("restricted process launch", error))?;
-    if require_module_audit && result.classification == ExitClassification::Ok {
-        crate::worker_module_audit::validate_required_worker_audit(
-            &result.stdout,
-            result.stdout_truncated,
-        )
-        .map_err(|error| stage_error("worker module audit validation", error))?;
-    }
+    // Recorded, not enforced (issue #730): an audit that cannot confirm the
+    // module list rides the result as a warning, and the dispatch stands.
+    let module_audit_warning = (require_module_audit
+        && result.classification == ExitClassification::Ok)
+        .then(|| {
+            crate::worker_module_audit::observe_required_worker_audit(
+                &result.stdout,
+                result.stdout_truncated,
+            )
+        })
+        .flatten();
     Ok(SecureLaunchResult {
         classification: result.classification,
         exit_code: result.exit_code,
@@ -200,6 +211,7 @@ fn secure_launch_impl(
         memory_limit_reached: result.memory_limit_reached,
         dismissed_windows: result.dismissed_windows,
         worker_freshness_warning: None,
+        module_audit_warning,
     })
 }
 
@@ -264,13 +276,16 @@ impl SecureSessionProcess {
             .expect("session process already collected")
             .wait_and_collect(timeout)
             .map_err(|error| stage_error("session worker collection", error))?;
-        if self.require_module_audit && result.classification == ExitClassification::Ok {
-            crate::worker_module_audit::validate_required_worker_audit(
-                &result.stdout,
-                result.stdout_truncated,
-            )
-            .map_err(|error| stage_error("worker module audit validation", error))?;
-        }
+        // Same recording boundary as the one-shot path (issue #730).
+        let module_audit_warning = (self.require_module_audit
+            && result.classification == ExitClassification::Ok)
+            .then(|| {
+                crate::worker_module_audit::observe_required_worker_audit(
+                    &result.stdout,
+                    result.stdout_truncated,
+                )
+            })
+            .flatten();
         Ok(SecureLaunchResult {
             classification: result.classification,
             exit_code: result.exit_code,
@@ -286,6 +301,7 @@ impl SecureSessionProcess {
             memory_limit_reached: result.memory_limit_reached,
             dismissed_windows: result.dismissed_windows,
             worker_freshness_warning: self.worker_freshness_warning,
+            module_audit_warning,
         })
     }
 }
