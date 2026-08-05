@@ -168,6 +168,10 @@ impl GuestError {
     pub fn crash_reason(&self) -> Option<&str> {
         None
     }
+
+    pub fn crash_snapshot(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 #[derive(Clone, Debug)]

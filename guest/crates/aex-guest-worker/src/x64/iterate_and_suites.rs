@@ -2019,6 +2019,7 @@ fn emulate_new_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
                 data,
                 size,
                 locks: 0,
+                pending_dispose: false,
                 handle_region,
                 data_region,
                 data_mapped_size,
@@ -2058,6 +2059,7 @@ fn emulate_lock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
         .get_data_mut()
         .handles
         .get_mut(&handle)
+        .filter(|record| !record.pending_dispose)
         .map(|record| {
             record.locks = record.locks.saturating_add(1);
             record.data
@@ -2075,47 +2077,73 @@ fn emulate_lock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
 
 fn emulate_unlock_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
-    let valid = unicorn
-        .get_data_mut()
-        .handles
-        .get_mut(&handle)
-        .is_some_and(|record| {
-            if record.locks == 0 {
-                false
-            } else {
+    let (valid, release) = {
+        let state = unicorn.get_data_mut();
+        match state.handles.get_mut(&handle) {
+            Some(record) if record.locks != 0 => {
                 record.locks -= 1;
-                true
+                let release = record.locks == 0 && record.pending_dispose;
+                (true, release)
             }
-        });
+            _ => (false, false),
+        }
+    };
     if !valid {
         unicorn.get_data_mut().callback_error = Some(format!(
             "PF Handle unlock received stale or unlocked handle {handle:#x}"
         ));
         let _ = unicorn.emu_stop();
+    } else if release
+        && let Some(record) = unicorn.get_data_mut().handles.remove(&handle)
+        && let Err(error) = unmap_pf_handle(unicorn, record)
+    {
+        unicorn.get_data_mut().callback_error = Some(error);
+        let _ = unicorn.emu_stop();
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
+fn unmap_pf_handle(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    record: GuestHandle,
+) -> Result<(), String> {
+    let data_error = unicorn
+        .mem_unmap(record.data_region, record.data_mapped_size)
+        .err();
+    let header_error = unicorn.mem_unmap(record.handle_region, PAGE_SIZE).err();
+    match (data_error, header_error) {
+        (None, None) => Ok(()),
+        (Some(error), None) => Err(format!("PF Handle data unmap failed: {error}")),
+        (None, Some(error)) => Err(format!("PF Handle header unmap failed: {error}")),
+        (Some(data), Some(header)) => Err(format!(
+            "PF Handle data/header unmap failed: data={data}, header={header}"
+        )),
+    }
+}
+
 fn emulate_dispose_handle(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
-    match unicorn.get_data_mut().handles.remove(&handle) {
-        Some(record) => {
-            // PF_DisposeHandle is the terminal ownership operation. Real AE
-            // plug-ins may dispose a handle while its data pointer is still
-            // locked; disposal consumes those outstanding locks together with
-            // the handle instead of requiring a separate unlock first.
-            if let Err(error) = unicorn.mem_unmap(record.data_region, record.data_mapped_size) {
-                unicorn.get_data_mut().callback_error =
-                    Some(format!("PF Handle data unmap failed: {error}"));
-                let _ = unicorn.emu_stop();
+    let disposition = {
+        let state = unicorn.get_data_mut();
+        match state.handles.get_mut(&handle) {
+            Some(record) if record.pending_dispose => None,
+            Some(record) if record.locks != 0 => {
+                record.pending_dispose = true;
+                Some(None)
             }
-            if let Err(error) = unicorn.mem_unmap(record.handle_region, PAGE_SIZE) {
-                unicorn.get_data_mut().callback_error =
-                    Some(format!("PF Handle header unmap failed: {error}"));
+            Some(_) => Some(state.handles.remove(&handle)),
+            None => None,
+        }
+    };
+    match disposition {
+        Some(Some(record)) => {
+            if let Err(error) = unmap_pf_handle(unicorn, record) {
+                unicorn.get_data_mut().callback_error = Some(error);
                 let _ = unicorn.emu_stop();
             }
         }
-        _ => {
+        Some(None) => {}
+        None => {
             unicorn.get_data_mut().callback_error = Some(format!(
                 "PF Handle dispose received stale or foreign handle {handle:#x}"
             ));

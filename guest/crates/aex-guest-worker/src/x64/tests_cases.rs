@@ -2646,6 +2646,11 @@
             error.to_string().contains("before the guest returned"),
             "{error}"
         );
+        let diagnostic_snapshot = error
+            .crash_snapshot()
+            .expect("resident diagnostics retain the crash snapshot");
+        assert_eq!(diagnostic_snapshot["instruction_rva"], 0);
+        assert_eq!(diagnostic_snapshot["registers"].as_object().unwrap().len(), 18);
         let GuestError::ExecutionCrash { snapshot, .. } = error else {
             panic!("expected structured crash snapshot");
         };

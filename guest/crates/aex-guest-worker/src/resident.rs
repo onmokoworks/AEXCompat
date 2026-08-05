@@ -583,6 +583,7 @@ mod tests {
             error_code: None,
             message: "guest callback failed".into(),
             crash_reason: None,
+            crash_snapshot: None,
             suite_requests: vec!["PF Iterate8 Suite v1".into()],
             dropped_suite_requests: 0,
             unsupported_suite_calls: Vec::new(),
@@ -624,6 +625,7 @@ mod tests {
             error_code: Some(-40),
             message: "m".repeat(MAX_FAILURE_TEXT_BYTES),
             crash_reason: Some("c".repeat(MAX_FAILURE_TEXT_BYTES)),
+            crash_snapshot: None,
             suite_requests: vec!["s".repeat(MAX_FAILURE_SUITE_REQUEST_BYTES); 64],
             dropped_suite_requests: u64::MAX,
             unsupported_suite_calls: vec![

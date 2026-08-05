@@ -143,6 +143,8 @@ pub struct ResidentFailureDiagnostic {
     pub error_code: Option<i32>,
     pub message: String,
     pub crash_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crash_snapshot: Option<serde_json::Value>,
     pub suite_requests: Vec<String>,
     pub dropped_suite_requests: u64,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
@@ -774,13 +776,14 @@ impl ClassicHost {
         stage: &'static str,
         error: &ClassicError,
     ) -> ResidentFailureDiagnostic {
-        let (category, selector, error_code, message, crash_reason) = match error {
+        let (category, selector, error_code, message, crash_reason, crash_snapshot) = match error {
             ClassicError::Guest(source) => (
                 source.diagnostic_category(),
                 None,
                 None,
                 source.diagnostic_message(),
                 source.crash_reason().map(str::to_owned),
+                source.crash_snapshot(),
             ),
             ClassicError::SelectorGuest { selector, source } => (
                 source.diagnostic_category(),
@@ -788,6 +791,7 @@ impl ClassicHost {
                 None,
                 source.diagnostic_message(),
                 source.crash_reason().map(str::to_owned),
+                source.crash_snapshot(),
             ),
             ClassicError::Selector { selector, error } => (
                 "selector",
@@ -795,8 +799,9 @@ impl ClassicHost {
                 Some(*error),
                 format!("selector {selector} returned {error}"),
                 None,
+                None,
             ),
-            ClassicError::Input(message) => ("input", None, None, message.clone(), None),
+            ClassicError::Input(message) => ("input", None, None, message.clone(), None, None),
         };
         let suite_requests = self.engine.suite_requests();
         let unsupported_suite_calls = self.engine.unsupported_suite_calls();
@@ -809,6 +814,7 @@ impl ClassicHost {
             error_code,
             message: bounded_failure_text(&message),
             crash_reason: crash_reason.map(|reason| bounded_failure_text(&reason)),
+            crash_snapshot,
             suite_requests: suite_requests
                 .iter()
                 .take(MAX_FAILURE_SUITE_REQUESTS)

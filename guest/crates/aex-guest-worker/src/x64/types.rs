@@ -232,6 +232,7 @@ struct GuestHandle {
     data: u64,
     size: u64,
     locks: u32,
+    pending_dispose: bool,
     handle_region: u64,
     data_region: u64,
     data_mapped_size: u64,

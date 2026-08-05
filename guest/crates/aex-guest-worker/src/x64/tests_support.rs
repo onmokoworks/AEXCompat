@@ -4311,6 +4311,7 @@
                     data: 0,
                     size: observed_size,
                     locks: 0,
+                    pending_dispose: false,
                     handle_region: 0,
                     data_region: 0,
                     data_mapped_size: PAGE_SIZE,
@@ -4329,6 +4330,7 @@
                     data: 0,
                     size: 0,
                     locks: 0,
+                    pending_dispose: false,
                     handle_region: 0,
                     data_region: 0,
                     data_mapped_size: PAGE_SIZE,
@@ -4346,6 +4348,7 @@
                     data: 0,
                     size: 0,
                     locks: 0,
+                    pending_dispose: false,
                     handle_region: 0,
                     data_region: 0,
                     data_mapped_size: PAGE_SIZE,
@@ -4564,7 +4567,7 @@
     }
 
     #[test]
-    fn pf_handle_dispose_consumes_outstanding_locks_and_rejects_stale_handles() {
+    fn pf_handle_dispose_defers_locked_unmap_until_final_unlock() {
         let mut engine = test_engine(&[0xc3]);
         let handle = engine
             .call_win64(HOST_NEW_HANDLE, [4096, 0, 0, 0, 0, 0])
@@ -4581,7 +4584,23 @@
                 .unwrap(),
             0
         );
+        let pending = &engine.unicorn.get_data().handles[&handle];
+        assert_eq!(pending.locks, 1);
+        assert!(pending.pending_dispose);
+        engine.write(data, &[0xa5]).unwrap();
+
+        let error = engine
+            .call_win64(HOST_LOCK_HANDLE, [handle, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown handle"));
+        assert_eq!(
+            engine
+                .call_win64(HOST_UNLOCK_HANDLE, [handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
         assert!(!engine.unicorn.get_data().handles.contains_key(&handle));
+        assert!(engine.write(data, &[0x5a]).is_err());
 
         let error = engine
             .call_win64(HOST_DISPOSE_HANDLE, [handle, 0, 0, 0, 0, 0])

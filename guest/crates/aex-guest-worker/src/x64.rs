@@ -344,6 +344,13 @@ impl GuestError {
             _ => None,
         }
     }
+
+    pub fn crash_snapshot(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::ExecutionCrash { snapshot, .. } => serde_json::to_value(snapshot).ok(),
+            _ => None,
+        }
+    }
 }
 
 fn uc<T>(
