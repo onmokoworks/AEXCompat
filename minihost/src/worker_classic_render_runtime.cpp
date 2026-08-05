@@ -855,6 +855,16 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       (dynamic_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0;
   smart_state().shutter_dependency_advertised =
       (dynamic_out_flags & kOutFlagIUseShutterAngle) != 0;
+  // The smart path serves parameter checkouts from the hosted ledger, not from a
+  // classic dispatch context, and that ledger kept its default current_time 0 /
+  // time_scale 1 because nothing ever set it. `checkout_param` refuses any other
+  // time, so every SmartFX frame past t=0 had its first checkout answered with
+  // PF_Err_OUT_OF_MEMORY and the plug-in gave up - AviUtl2 renders at the cursor,
+  // so no smart effect worked anywhere but frame 0 (issue #828). The classic path
+  // has always configured the equivalent state on its context.
+  aexcompat::l2_detail::configure_hosted_checkout_time(
+      external_current_time, external_time_scale,
+      smart_state().wide_time_checkout_allowed);
   const bool nop_render =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
   if (nop_render) {

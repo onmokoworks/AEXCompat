@@ -93,6 +93,15 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   return 4;
 }
 
+void configure_hosted_checkout_time(int32_t current_time, uint32_t time_scale,
+                                    bool wide_time_allowed) noexcept {
+  g_checkout_current_time = current_time;
+  // A zero scale would make every comparison in checkout_param collapse to
+  // 0 == 0 and admit any time at all, which is the opposite of the gate.
+  g_checkout_current_time_scale = time_scale == 0 ? 1 : time_scale;
+  g_wide_time_checkout_allowed = wide_time_allowed;
+}
+
 int32_t __cdecl checkin_param(void*, void* definition) {
   if (auto* context = aexcompat::worker_runtime::classic::active_context())
     return context->checkin(definition);

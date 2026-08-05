@@ -51,10 +51,25 @@ use aexcompat_broker::render_session::{
 };
 use sha2::{Digest, Sha256};
 
-const WIDTH: u32 = 256;
-const HEIGHT: u32 = 144;
+// Overridable because a defect can be resolution-dependent: AviUtl2 renders at
+// the project size (1920x1080 in the reproduction project) while this example's
+// default is small enough to iterate on.
+fn frame_size() -> (u32, u32) {
+    match std::env::var("AEXCOMPAT_DIAG_SIZE").ok().as_deref() {
+        Some(value) => match value.split_once('x') {
+            Some((width, height)) => match (width.trim().parse(), height.trim().parse()) {
+                (Ok(width), Ok(height)) => (width, height),
+                _ => (256, 144),
+            },
+            None => (256, 144),
+        },
+        None => (256, 144),
+    }
+}
 
 fn main() {
+    let (width, height) = frame_size();
+    eprintln!("size: {width}x{height}");
     let mut args = std::env::args().skip(1);
     let plugin = PathBuf::from(
         args.next()
@@ -153,10 +168,10 @@ fn main() {
 
     // A map with structure, so an effect that samples it cannot answer
     // identically for every pixel by accident.
-    let layer_pixels: Vec<u8> = (0..WIDTH * HEIGHT)
+    let layer_pixels: Vec<u8> = (0..width * height)
         .flat_map(|index| {
-            let x = (index % WIDTH) as u8;
-            let y = (index / WIDTH) as u8;
+            let x = (index % width) as u8;
+            let y = (index / width) as u8;
             [x, y, x ^ y, 255]
         })
         .collect();
@@ -165,11 +180,15 @@ fn main() {
         .filter(|_| std::env::var("AEXCOMPAT_DIAG_NO_LAYER").is_err())
         .map(|&slot| SessionLayer {
             slot,
-            width: WIDTH,
-            height: HEIGHT,
+            width,
+            height,
             rgba: layer_pixels,
             timed: None,
-            dynamic: false,
+            // The multifilter opens the virtual-buffer layer dynamic so the map
+            // can follow a moving scene (issue #674); a static layer takes a
+            // different transport, so a defect can live on one and not the
+            // other.
+            dynamic: std::env::var("AEXCOMPAT_DIAG_DYNAMIC_LAYER").is_ok_and(|v| v == "1"),
         })
         .into_iter()
         .collect();
@@ -198,8 +217,8 @@ fn main() {
         layers: &layers,
         dependencies,
         dependency_search_dirs,
-        width: WIDTH,
-        height: HEIGHT,
+        width,
+        height,
         pixel_format,
         time_step: 1,
         total_time: 300,
@@ -212,10 +231,20 @@ fn main() {
     })
     .expect("open a render session with the secondary layer");
 
-    let input: Vec<u8> = (0..WIDTH * HEIGHT)
+    let input: Vec<u8> = (0..width * height)
         .flat_map(|_| [32u8, 64, 128, 255])
         .collect();
-    match session.render_frame(0, 0, &input) {
+    // `frame_index` is the session's own counter - the multifilter starts it at
+    // 0 and increments per frame - while `current_time` is the timeline
+    // position. AviUtl2 renders wherever the cursor is, so a session's first
+    // frame can carry a non-zero current_time, and the time-dependent host
+    // paths key on that, not on the counter.
+    let current_time: i32 = std::env::var("AEXCOMPAT_DIAG_TIME")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    eprintln!("current_time: {current_time}");
+    match session.render_frame(0, current_time, &input) {
         Ok(outcome) => match outcome.status {
             FrameStatus::Rendered { width, height, .. } => {
                 println!("frame rendered {width}x{height}")
