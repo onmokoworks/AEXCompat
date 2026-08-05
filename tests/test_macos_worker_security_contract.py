@@ -72,6 +72,35 @@ def test_hardened_runtime_entitlements_are_minimal_and_distinct():
     assert "disable-library-validation" in verifier
 
 
+def test_distribution_gate_is_developer_id_notarized_and_fail_closed():
+    package = source("tools/package-macos-aex-carriers.sh")
+    notarize = source("tools/notarize-macos-aex-carriers.sh")
+
+    for contract in (
+        "codesign --verify --strict",
+        "Authority=Developer ID Application:",
+        "AEXCOMPAT_ALLOW_ADHOC_PACKAGE",
+        '"schema": "aexcompat-macos-carriers-v1"',
+        '"backend": "unicorn"',
+        '"backend": "native-carrier-trusted-only"',
+        "shasum -a 256",
+        "hdiutil create",
+    ):
+        assert contract in package
+
+    for contract in (
+        "AEXCOMPAT_NOTARYTOOL_PROFILE",
+        "notarytool submit",
+        "--wait",
+        "notarytool log",
+        'status" != "Accepted',
+        "stapler staple",
+        "stapler validate",
+        "context:primary-signature",
+    ):
+        assert contract in notarize
+
+
 def test_guest_execution_admission_is_fail_closed():
     pe = source("guest/crates/aex-guest-worker/src/pe.rs")
     unicorn = source("guest/crates/aex-guest-worker/src/x64/imports.rs")

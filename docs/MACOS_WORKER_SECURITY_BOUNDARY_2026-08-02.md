@@ -121,7 +121,18 @@ notary log, stapling the ticket to a bundle/DMG/package, `codesign --strict`, an
 Gatekeeper (`spctl`) assessment must be run on the final nested-code-signed
 distribution. Standalone binaries can be notarized as archive contents but
 cannot themselves carry a stapled ticket, so the release must define a bundle,
-DMG, or package. This work did not submit, staple, publish, or push a release.
+DMG, or package.
+
+`tools/package-macos-aex-carriers.sh` defines that minimum distribution as a DMG
+with separate arm64 Unicorn and x86_64 trusted-only native-carrier helpers plus
+a size/SHA-256 manifest. It refuses ad-hoc signatures by default; the
+`AEXCOMPAT_ALLOW_ADHOC_PACKAGE=1` escape hatch exists only for a local packaging
+smoke test and does not make the image eligible for notarization.
+`tools/notarize-macos-aex-carriers.sh` requires a named Keychain profile in
+`AEXCOMPAT_NOTARYTOOL_PROFILE`, waits for the submission, retains the complete
+submission response and notary log, requires `Accepted`, staples and validates
+the ticket, and runs Gatekeeper's primary-signature assessment. This work did
+not submit, staple, publish, or push a release.
 
 Apple references:
 
