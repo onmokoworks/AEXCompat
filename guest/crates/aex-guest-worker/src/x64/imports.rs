@@ -21,6 +21,8 @@ enum LegacyWin64Import {
     Calloc,
     Free,
     CrtStrdup,
+    AlignedMalloc,
+    AlignedFree,
     CallNewHandler,
     Strncpy,
     Memset,
@@ -368,6 +370,15 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtStrdup
         }
         (_, "_strdup") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-heap-l1-1-0.dll" | "ucrtbase.dll", "_aligned_malloc") => {
+            LegacyWin64Import::AlignedMalloc
+        }
+        ("api-ms-win-crt-heap-l1-1-0.dll" | "ucrtbase.dll", "_aligned_free") => {
+            LegacyWin64Import::AlignedFree
+        }
+        (_, "_aligned_malloc" | "_aligned_free") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("msvcp140.dll", "_Mtx_init_in_situ") => LegacyWin64Import::MsvcpMutexInit,
         ("msvcp140.dll", "_Mtx_lock") => LegacyWin64Import::MsvcpMutexLock,
         ("msvcp140.dll", "_Mtx_unlock") => LegacyWin64Import::MsvcpMutexUnlock,
@@ -478,6 +489,30 @@ fn install_win64_import(
                     "install _strdup import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_strdup(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::AlignedMalloc => {
+                uc(
+                    "write _aligned_malloc return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install _aligned_malloc import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_aligned_malloc(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::AlignedFree => {
+                uc(
+                    "write _aligned_free return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install _aligned_free import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_aligned_free(unicorn);
                     }),
                 )?;
             }
