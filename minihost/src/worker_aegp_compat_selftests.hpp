@@ -91,6 +91,7 @@ bool verify_aegp_apply_effect();
 bool verify_aegp_effect_stack();
 bool verify_aegp_projector_levels();
 bool verify_aegp_layer_source_item();
+bool verify_aegp_layer_suite1_slots();
 bool verify_aegp_scene_registry_suites();
 bool verify_aegp_scene_mutation_transactions();
 AegpSceneModelSelftestReport verify_aegp_scene_model();

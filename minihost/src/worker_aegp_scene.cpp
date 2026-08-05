@@ -2094,6 +2094,13 @@ std::array<void*, 41> g_aegp_comp_suite10{};
 std::array<void*, 28> g_aegp_comp_suite4{};
 std::array<void*, 44> g_aegp_comp_suite11{};
 std::array<void*, 44> g_aegp_comp_suite12{};
+// `AEGP_LayerSuite1` (acquired as version 5, frozen in AE 5.0) is the oldest
+// shape and needs its own table: two functions were inserted before version 11,
+// so its slots do not line up with `g_aegp_layer_suite5` - which, confusingly,
+// is `AEGP_LayerSuite5` and is acquired as version 11 (issue #712). Everything
+// here is named after the struct rather than the acquire version to keep the
+// two apart.
+std::array<void*, 39> g_aegp_layer_suite1{};
 std::array<void*, 46> g_aegp_layer_suite5{};
 std::array<void*, 50> g_aegp_layer_suite8{};
 std::array<void*, 53> g_aegp_layer_suite9{};
@@ -2238,6 +2245,53 @@ SceneSuiteAcquireResult scene_acquire_suite(
       *suite = g_aegp_layer_suite9.data();
       return SceneSuiteAcquireResult::acquired;
     }
+  }
+  // Version 5 is `AEGP_LayerSuite1`, frozen in AE 5.0. The suite struct number
+  // and the version a plug-in acquires with do not line up - `AEGP_LayerSuite5`
+  // is acquired as 11, `Suite8` as 14, `Suite9` as 15 - and 5 is the oldest
+  // shape. `Unmult.aex` asks for it and reported
+  // PF_Err_INTERNAL_STRUCT_DAMAGED when it could not be acquired (issue #712).
+  //
+  // Its slots are not the later table shifted by a constant. Version 11
+  // inserted `AEGP_GetLayerSourceItemID` at 5 and `AEGP_ConvertLayerToCompTime`
+  // at 35, so a slot here moves by +1 from 5 through 33 and by +2 from 34 on:
+  // `AEGP_GetLayerTransferMode` is 21 here and 22 there, `AEGP_GetLayerID` is
+  // 35 here and 37 there. Using the later indices would hand the plug-in a
+  // different function at every one of them.
+  //
+  // Only functions whose version 1 declaration matches the implementation are
+  // wired; the rest keep the unsupported stub, so a call is recorded instead of
+  // guessed at. `AEGP_GetLayerName` (slot 6) is one of those on purpose:
+  // versions 1 and 5 hand back two `A_char` buffers, while
+  // `aegp_get_layer_name` implements the version 8 shape (a plug-in id plus two
+  // `AEGP_MemHandle` outputs). Pointing one at the other would be a different
+  // call, not a compatible one.
+  //
+  // Unconditional, like version 14 beside it. Version 11 is behind
+  // `comp_idle_roundtrip_mode` and version 15 withholds part of its table under
+  // a render receipt; neither gate is adopted here because this table exposes
+  // nothing they withhold that version 14 does not already expose ungated.
+  if (named("AEGP Layer Suite") && version == 5) {
+    g_aegp_layer_suite1 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_5, 39>();
+    g_aegp_layer_suite1[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
+    g_aegp_layer_suite1[1] = reinterpret_cast<void*>(&aegp_get_comp_layer_by_index);
+    g_aegp_layer_suite1[2] = reinterpret_cast<void*>(&aegp_get_active_layer);
+    g_aegp_layer_suite1[3] = reinterpret_cast<void*>(&aegp_get_layer_index);
+    g_aegp_layer_suite1[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
+    g_aegp_layer_suite1[5] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
+    g_aegp_layer_suite1[9] = reinterpret_cast<void*>(&aegp_get_layer_flags);
+    g_aegp_layer_suite1[10] = reinterpret_cast<void*>(&aegp_set_layer_flag);
+    g_aegp_layer_suite1[14] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
+    g_aegp_layer_suite1[15] = reinterpret_cast<void*>(&aegp_get_layer_duration);
+    g_aegp_layer_suite1[16] =
+        reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
+    g_aegp_layer_suite1[21] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+    g_aegp_layer_suite1[27] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
+    g_aegp_layer_suite1[35] = reinterpret_cast<void*>(&aegp_get_layer_id);
+    g_aegp_layer_suite1[36] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
+    *suite = g_aegp_layer_suite1.data();
+    return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Layer Suite") && version == 11 && state().comp_idle_roundtrip_mode) {
     g_aegp_layer_suite5 =

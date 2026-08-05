@@ -182,6 +182,96 @@ bool verify_aegp_layer_source_item() {
   return ok;
 }
 
+// `AEGP Layer Suite` version 5 is the SDK's `AEGP_LayerSuite1`, frozen in AE
+// 5.0. Its slots are not the later table shifted by a constant: version 11
+// (`AEGP_LayerSuite5`) inserted `AEGP_GetLayerSourceItemID` at 5 and
+// `AEGP_ConvertLayerToCompTime` at 35, so a version 1 slot moves by +1 from 5
+// through 33 and by +2 from 34 on. Wiring the later indices here would hand the
+// plug-in a different function at every one of them (issue #712).
+//
+// The offset is pinned against version 14 rather than only against a literal
+// list, and on both sides of the second insertion, so a wrong constant fails
+// whichever direction it is wrong in. `AEGP_GetLayerName` is pinned as
+// *unwired*: version 1 hands back two `A_char` buffers while
+// `aegp_get_layer_name` implements the version 8 shape (a plug-in id and two
+// `AEGP_MemHandle` outputs).
+bool verify_aegp_layer_suite1_slots() {
+  if (!g_hooks.acquire_suite || !g_hooks.release_suite ||
+      !g_hooks.suite_leases_balanced)
+    return false;
+  const void* raw = nullptr;
+  if (compat_acquire_suite("AEGP Layer Suite", 5, &raw) != 0) return false;
+  // Everything past the acquire runs through this, so no exit path leaves the
+  // lease held - a leaked lease would poison the balance check that other
+  // self-tests in this process depend on.
+  const auto finish = [](bool result) {
+    const bool released = compat_release_suite("AEGP Layer Suite", 5) == 0;
+    return result && released && g_hooks.suite_leases_balanced();
+  };
+  const auto* slots = static_cast<void* const*>(raw);
+  if (!slots || raw != g_aegp_layer_suite1.data()) return finish(false);
+
+  const std::array<std::pair<std::size_t, void*>, 15> wired{{
+      {0, reinterpret_cast<void*>(&aegp_get_comp_num_layers)},
+      {1, reinterpret_cast<void*>(&aegp_get_comp_layer_by_index)},
+      {2, reinterpret_cast<void*>(&aegp_get_active_layer)},
+      {3, reinterpret_cast<void*>(&aegp_get_layer_index)},
+      {4, reinterpret_cast<void*>(&aegp_get_layer_source_item)},
+      {5, reinterpret_cast<void*>(&aegp_get_layer_parent_comp)},
+      {9, reinterpret_cast<void*>(&aegp_get_layer_flags)},
+      {10, reinterpret_cast<void*>(&aegp_set_layer_flag)},
+      {14, reinterpret_cast<void*>(&aegp_get_layer_in_point)},
+      {15, reinterpret_cast<void*>(&aegp_get_layer_duration)},
+      {16, reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration)},
+      {21, reinterpret_cast<void*>(&aegp_get_layer_transfer_mode)},
+      {27, reinterpret_cast<void*>(&aegp_get_layer_object_type)},
+      {35, reinterpret_cast<void*>(&aegp_get_layer_id)},
+      {36, reinterpret_cast<void*>(&aegp_get_layer_to_world_xform)},
+  }};
+  bool ok = true;
+  for (const auto& [slot, implementation] : wired)
+    ok = ok && slots[slot] == implementation;
+
+  // Every slot this table does not claim is exactly the stub, not merely
+  // non-null: wiring a real function into the wrong slot has to fail.
+  const auto& stubs = aexcompat::worker_runtime::unsupported_suite_slots<
+      aexcompat::worker_runtime::UnsupportedSuiteId::aegp_layer_5, 39>();
+  const auto claimed = [&wired](std::size_t slot) {
+    for (const auto& entry : wired)
+      if (entry.first == slot) return true;
+    return false;
+  };
+  for (std::size_t slot = 0; slot < stubs.size(); ++slot)
+    if (!claimed(slot)) ok = ok && slots[slot] == stubs[slot];
+  // `AEGP_GetLayerName` is one of those, and is the one that must stay a stub
+  // for a reason other than "not implemented yet".
+  ok = ok && slots[6] != reinterpret_cast<void*>(&aegp_get_layer_name);
+
+  // Both tables are filled at acquire time, so version 14 has to be acquired
+  // for the comparison to mean anything. Four pairs are compared, straddling
+  // the second insertion, so the +1 and the +2 are both pinned.
+  const void* later_raw = nullptr;
+  if (compat_acquire_suite("AEGP Layer Suite", 14, &later_raw) != 0)
+    return finish(false);
+  const auto* later = static_cast<void* const*>(later_raw);
+  ok = ok && later && later_raw == g_aegp_layer_suite8.data();
+  if (later) {
+    // Only functions wired in both tables can be compared this way, which is
+    // why `AEGP_GetLayerToWorldXform` carries the +2 rather than
+    // `AEGP_GetLayerID`: version 14 leaves slot 37 on its stub.
+    const std::array<std::pair<std::size_t, std::size_t>, 4> offsets{{
+        {5, 6},    // +1, first slot after AEGP_GetLayerSourceItemID
+        {10, 11},  // +1
+        {21, 22},  // +1, last slot before AEGP_ConvertLayerToCompTime
+        {36, 38},  // +2, after it
+    }};
+    for (const auto& [here, there] : offsets)
+      ok = ok && slots[here] == later[there] && slots[here] != later[here];
+  }
+  ok = compat_release_suite("AEGP Layer Suite", 14) == 0 && ok;
+  return finish(ok);
+}
+
 bool verify_aegp_scene_registry_suites() {
   if (!g_hooks.acquire_suite || !g_hooks.release_suite ||
       !g_hooks.comp_idle_roundtrip_mode ||
