@@ -43,7 +43,7 @@
 //! imports from the admitted search directories directly. This resolver is
 //! retained for the staged escape hatches
 //! (`AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY` / `..._STAGED_RENDER`), for GPU
-//! (AEXRMA1) render, which the in-place dispatch does not support yet (#815),
+//! (AEXRMA1) staged escape path; GPU in-place transport is handled separately (#815),
 //! and as the failure-survey probe that records why a staged closure
 //! resolution failed (cache convergence evidence). Removing the staged
 //! machinery once those uses age out is #816. Do not grow this module's

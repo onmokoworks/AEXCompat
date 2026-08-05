@@ -57,16 +57,17 @@ bool parse_l2_conformance_render_settings(void*, const wchar_t* value) {
   return aexcompat::worker_render_report::parse_conformance_render_settings(value);
 }
 
-// Captures the sealed AEXRMA1 manifest basename carried by a GPU render's
+// Captures the AEXRMA1 manifest reference carried by a GPU render's
 // `--runtime-module-authorization-v1` trailer (#290/#300). The render/smart
-// worker must parse the manifest just like the params-inspect path so the GPU
+// worker accepts a sealed basename or, for #815 in-place dispatch, the
+// broker-owned absolute transport path. It parses the manifest before the GPU
 // runtime DLLs it loads classify as authorized `policy` modules instead of
 // `unknown` in the required module audit. Stored in a global because the
 // auxiliary-option hook runs during request parsing, before runtime admission.
-std::wstring g_gpu_runtime_authorization_basename;
+std::wstring g_gpu_runtime_authorization_manifest;
 bool capture_l2_runtime_module_authorization(void*, const wchar_t* value) {
   if (!value || !*value) return false;
-  g_gpu_runtime_authorization_basename = value;
+  g_gpu_runtime_authorization_manifest = value;
   return true;
 }
 
@@ -1382,16 +1383,16 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // required module audit instead of `unknown` (#290/#300). The params-inspect path
   // keeps its argv[5] convention.
   const bool render_gpu_authorization =
-      is_rendering_worker() && !g_gpu_runtime_authorization_basename.empty();
+      is_rendering_worker() && !g_gpu_runtime_authorization_manifest.empty();
   const bool authorize_runtime_modules =
       render_gpu_authorization ||
       (!is_rendering_worker() && invocation.runtime_module_authorization_mode);
-  const wchar_t* authorization_basename =
-      render_gpu_authorization  ? g_gpu_runtime_authorization_basename.c_str()
+  const wchar_t* authorization_manifest =
+      render_gpu_authorization  ? g_gpu_runtime_authorization_manifest.c_str()
       : invocation.runtime_module_authorization_mode ? argv[5]
                                                      : nullptr;
   const int request_error = aexcompat::worker_runtime::prepare_runtime_request(
-      argv[2], argv[3], authorize_runtime_modules, authorization_basename, runtime_request);
+      argv[2], argv[3], authorize_runtime_modules, authorization_manifest, runtime_request);
   if (request_error != 0) return request_error;
   if (!g_dependency_search_dirs.empty()) {
     const int dirs_error = aexcompat::worker_runtime::apply_dependency_search_dirs(

@@ -112,7 +112,8 @@ int admit_runtime(const RuntimeHostHooks& hooks,
   // exact dependency identity and fails closed before the target can execute.
   if (request.authorize_runtime_modules &&
       !parse_runtime_module_authorization(plugin_path,
-                                          request.authorization_manifest)) return 15;
+                                          request.authorization_manifest,
+                                          !request.dependency_search_dirs.empty())) return 15;
 
   // This worker only supports PF effects. Reject an AEGP candidate from an
   // image-only preflight so its DllMain and delay-loaded dependencies never

@@ -444,16 +444,25 @@ void record_module_audit_epoch(uint32_t plugin_index,
 }
 
 bool parse_runtime_module_authorization(const std::filesystem::path& plugin_path,
-                                        const std::filesystem::path& manifest_name) {
+                                        const std::filesystem::path& manifest_name,
+                                        bool in_place_transport) {
   g_authorized_runtime_modules.clear();
   g_authorized_session_identity.fill(0);
   g_authorized_backend = 0;
-  if (!g_file_sha256 || manifest_name.empty() || manifest_name.is_absolute() ||
-      manifest_name.has_parent_path() || manifest_name.filename() != manifest_name) return false;
+  if (!g_file_sha256 || manifest_name.empty() ||
+      manifest_name.is_absolute() != in_place_transport) return false;
   std::filesystem::path plugin_root, manifest_path;
-  if (!canonical_path(plugin_path.parent_path(), plugin_root) ||
-      !canonical_path(plugin_root / manifest_name, manifest_path) ||
-      !same_path(manifest_path.parent_path(), plugin_root)) return false;
+  if (in_place_transport) {
+    // #815: the broker owns this absolute target/image-transport document and
+    // keeps it alive for the resident session. It is parsed completely before
+    // LoadLibraryExW, and never becomes a DLL search root or executable path.
+    if (!canonical_path(manifest_name, manifest_path)) return false;
+  } else {
+    if (manifest_name.has_parent_path() || manifest_name.filename() != manifest_name ||
+        !canonical_path(plugin_path.parent_path(), plugin_root) ||
+        !canonical_path(plugin_root / manifest_name, manifest_path) ||
+        !same_path(manifest_path.parent_path(), plugin_root)) return false;
+  }
   std::error_code error;
   const uint64_t manifest_size = std::filesystem::file_size(manifest_path, error);
   if (error || manifest_size > 16 * 1024 * 1024) return false;

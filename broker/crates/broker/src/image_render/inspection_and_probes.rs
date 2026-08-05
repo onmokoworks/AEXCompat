@@ -28,9 +28,8 @@ fn inspect_experimental_impl(
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     // In-place inspection (issue #751): the loader resolves the closure, so
-    // staged dependencies and resources cannot ride the same launch, and the
-    // GPU authorization manifest (staged beside the plug-in) has no staged
-    // directory to live in.
+    // staged dependencies and resources cannot ride the same launch. Runtime
+    // policy inspection remains outside #815's GPU render-session migration.
     if !dependency_search_dirs.is_empty()
         && (!dependencies.is_empty() || !resources.is_empty() || runtime_policy.is_some())
     {
@@ -47,13 +46,9 @@ fn inspect_experimental_impl(
         })
         .transpose()?;
     if let Some(authorization) = &authorization {
-        args_after_plugin.push("--runtime-module-authorization-v1".into());
-        args_after_plugin.push(authorization.basename.clone());
+        authorization.append_launch(false, &mut args_after_plugin, &mut dependencies);
     }
     let started = Instant::now();
-    if let Some(authorization) = &authorization {
-        dependencies.push(authorization.artifact.clone());
-    }
     // Parameter inspection runs with no deadline (issue #354). A watchdog here
     // contains nothing the job object does not already contain, and it decides
     // discovery results by wall-clock: a plug-in still mapping its sealed
