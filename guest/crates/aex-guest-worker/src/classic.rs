@@ -48,7 +48,7 @@ pub(crate) const MAX_FAILURE_TEXT_BYTES: usize = 1024;
 pub(crate) const MAX_FAILURE_SUITE_REQUEST_BYTES: usize = 256;
 const MAX_FAILURE_SUITE_REQUESTS: usize = 64;
 const MAX_FAILURE_UNSUPPORTED_SUITE_CALLS: usize = 64;
-const MAX_FAILURE_CRASH_SNAPSHOT_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_FAILURE_CRASH_SNAPSHOT_BYTES: usize = 8 * 1024;
 pub const MAX_RENDER_WIDTH: u32 = 1920;
 pub const MAX_RENDER_HEIGHT: u32 = 1080;
 

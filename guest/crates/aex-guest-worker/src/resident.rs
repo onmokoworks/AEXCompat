@@ -570,7 +570,9 @@ fn write_message(writer: &mut impl Write, value: &impl Serialize) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classic::{MAX_FAILURE_SUITE_REQUEST_BYTES, MAX_FAILURE_TEXT_BYTES};
+    use crate::classic::{
+        MAX_FAILURE_CRASH_SNAPSHOT_BYTES, MAX_FAILURE_SUITE_REQUEST_BYTES, MAX_FAILURE_TEXT_BYTES,
+    };
 
     #[test]
     fn probe_failure_response_carries_bounded_structured_diagnostics() {
@@ -650,6 +652,54 @@ mod tests {
                 guards_intact: false,
                 render_error: -40,
                 failure: Some(diagnostic),
+            },
+        )
+        .unwrap();
+        assert!(framed.len() - 4 <= MAX_CONTROL_MESSAGE_BYTES);
+    }
+
+    #[test]
+    fn maximal_close_diagnostic_with_snapshot_fits_control_message_bound() {
+        let calls = vec![
+            crate::x64::UnsupportedSuiteCall {
+                name: "AEGP Utility Suite",
+                version: u32::MAX,
+                slot: usize::MAX,
+                call_count: u64::MAX,
+            };
+            64
+        ];
+        let setup = SetupReport {
+            schema_version: 1,
+            execution_backend: "unicorn-x86_64",
+            global_setup_error: 0,
+            params_setup_error: 0,
+            advertised_num_params: 0,
+            out_flags: u32::MAX,
+            out_flags2: u32::MAX,
+            parameters: Vec::new(),
+            suite_requests: vec!["s".repeat(MAX_FAILURE_SUITE_REQUEST_BYTES); 64],
+            unsupported_suite_calls: calls.clone(),
+            dropped_unsupported_suite_calls: u64::MAX,
+        };
+        let close = serde_json::json!({
+            "global_setdown_diagnostic": {
+                "message": "m".repeat(MAX_FAILURE_TEXT_BYTES),
+                "crash_reason": "c".repeat(MAX_FAILURE_TEXT_BYTES),
+                "crash_snapshot": {"payload": "x".repeat(MAX_FAILURE_CRASH_SNAPSHOT_BYTES)},
+                "suite_requests": vec!["s".repeat(MAX_FAILURE_SUITE_REQUEST_BYTES); 64],
+                "unsupported_suite_calls": calls,
+            }
+        });
+        let mut framed = Vec::new();
+        write_message(
+            &mut framed,
+            &SessionClosed {
+                v: 1,
+                kind: "session_closed",
+                worker_pid: u32::MAX,
+                setup: &setup,
+                close,
             },
         )
         .unwrap();
