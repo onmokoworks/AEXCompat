@@ -79,8 +79,11 @@ def test_distribution_gate_is_developer_id_notarized_and_fail_closed():
     for contract in (
         "codesign --verify --strict",
         "Authority=Developer ID Application:",
-        "AEXCOMPAT_ALLOW_ADHOC_PACKAGE",
+        "AEXCOMPAT_DISTRIBUTION_TIER",
+        "local-adhoc",
+        "developer-id",
         '"schema": "aexcompat-macos-carriers-v1"',
+        '"distribution_tier": "$distribution_tier"',
         '"backend": "unicorn"',
         '"backend": "native-carrier-trusted-only"',
         "shasum -a 256",
@@ -99,6 +102,9 @@ def test_distribution_gate_is_developer_id_notarized_and_fail_closed():
         "context:primary-signature",
     ):
         assert contract in notarize
+
+    assert "AEXCOMPAT_ALLOW_ADHOC_PACKAGE" not in package
+    assert "Local-only package" in package
 
 
 def test_guest_execution_admission_is_fail_closed():

@@ -125,14 +125,20 @@ DMG, or package.
 
 `tools/package-macos-aex-carriers.sh` defines that minimum distribution as a DMG
 with separate arm64 Unicorn and x86_64 trusted-only native-carrier helpers plus
-a size/SHA-256 manifest. It refuses ad-hoc signatures by default; the
-`AEXCOMPAT_ALLOW_ADHOC_PACKAGE=1` escape hatch exists only for a local packaging
-smoke test and does not make the image eligible for notarization.
+a size/SHA-256 manifest. Its default `local-adhoc` distribution tier requires
+ad-hoc Hardened Runtime signatures and records that tier in the manifest. This
+is the supported Mac-only development package: it is not notarized or approved
+by Gatekeeper for third-party distribution. Setting
+`AEXCOMPAT_DISTRIBUTION_TIER=developer-id` selects the optional publication
+path and requires Developer ID Application signatures.
 `tools/notarize-macos-aex-carriers.sh` requires a named Keychain profile in
 `AEXCOMPAT_NOTARYTOOL_PROFILE`, waits for the submission, retains the complete
 submission response and notary log, requires `Accepted`, staples and validates
 the ticket, and runs Gatekeeper's primary-signature assessment. This work did
-not submit, staple, publish, or push a release.
+not submit, staple, publish, or push a release. Developer ID and notarization
+are not completion gates for the supported local-only package because the
+operator does not maintain those credentials; their absence must not make the
+local build, signing, packaging, launch, or diagnostics path fail.
 
 Apple references:
 

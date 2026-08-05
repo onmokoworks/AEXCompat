@@ -10,9 +10,17 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 arm64_worker=${1:-"$root/guest/target/release/aex-guest-worker"}
 native_worker=${2:-"$root/guest/target/x86_64-apple-darwin/release/aex-guest-worker"}
 output=${3:-"$root/guest/target/aexcompat-macos-carriers.dmg"}
-allow_adhoc=${AEXCOMPAT_ALLOW_ADHOC_PACKAGE:-0}
+distribution_tier=${AEXCOMPAT_DISTRIBUTION_TIER:-local-adhoc}
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/aexcompat-package.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+
+case "$distribution_tier" in
+  local-adhoc|developer-id) ;;
+  *)
+    echo "unsupported AEXCOMPAT_DISTRIBUTION_TIER: $distribution_tier" >&2
+    exit 2
+    ;;
+esac
 
 if [ -e "$output" ]; then
   echo "refusing to replace existing package: $output" >&2
@@ -31,12 +39,12 @@ verify_worker() {
   codesign --verify --strict --verbose=2 "$worker"
   signature=$(codesign -dvv "$worker" 2>&1)
   echo "$signature" | grep -q 'flags=.*runtime'
-  if echo "$signature" | grep -q '^Signature=adhoc$' && [ "$allow_adhoc" != "1" ]; then
-    echo "refusing to package an ad-hoc signed worker: $worker" >&2
-    echo "set AEXCOMPAT_ALLOW_ADHOC_PACKAGE=1 only for a local package smoke test" >&2
-    exit 2
-  fi
-  if [ "$allow_adhoc" != "1" ]; then
+  if [ "$distribution_tier" = "local-adhoc" ]; then
+    echo "$signature" | grep -q '^Signature=adhoc$' || {
+      echo "local-adhoc package requires an ad-hoc signed worker: $worker" >&2
+      exit 2
+    }
+  else
     echo "$signature" | grep -q '^Authority=Developer ID Application:' || {
       echo "worker is not signed with Developer ID Application: $worker" >&2
       exit 2
@@ -60,6 +68,7 @@ native_size=$(stat -f %z "$payload/x86_64/aex-guest-worker")
 cat >"$payload/manifest.json" <<EOF
 {
   "schema": "aexcompat-macos-carriers-v1",
+  "distribution_tier": "$distribution_tier",
   "workers": [
     {"architecture": "arm64", "backend": "unicorn", "path": "arm64/aex-guest-worker", "sha256": "$arm64_sha", "size": $arm64_size},
     {"architecture": "x86_64", "backend": "native-carrier-trusted-only", "path": "x86_64/aex-guest-worker", "sha256": "$native_sha", "size": $native_size}
@@ -72,8 +81,8 @@ hdiutil create -quiet -fs HFS+ -format UDZO -volname "AEXCompat Carriers" \
   -srcfolder "$payload" "$output"
 
 echo "Created macOS carrier distribution: $output"
-if [ "$allow_adhoc" = "1" ]; then
-  echo "Local smoke package only: ad-hoc signatures are not eligible for notarization"
-else
+if [ "$distribution_tier" = "developer-id" ]; then
   echo "Submit, staple, and assess: $root/tools/notarize-macos-aex-carriers.sh '$output'"
+else
+  echo "Local-only package: ad-hoc signatures are not notarized or Gatekeeper-approved for distribution"
 fi
