@@ -997,13 +997,30 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                     let declared = plugins.len() + dependency_count;
                     // The in-place session (issue #751) declares no closure:
                     // its module bound is the recorded audit's enumeration
-                    // capacity, and only the plugin count gates feasibility.
+                    // capacity, and feasibility is the plugin count plus the
+                    // admitted-directory bound the manifest validation
+                    // enforces (search dirs and member parents, deduplicated)
+                    // — an over-scattered cluster degrades to per-effect
+                    // sessions instead of failing every open.
+                    let admitted_dirs = {
+                        let mut dirs: std::collections::HashSet<String> = roots
+                            .iter()
+                            .map(|root| root.to_string_lossy().to_lowercase())
+                            .collect();
+                        for (path, _) in &cluster.plugins {
+                            if let Some(parent) = path.parent() {
+                                dirs.insert(parent.to_string_lossy().to_lowercase());
+                            }
+                        }
+                        dirs.len()
+                    };
                     let module_bound = if in_place {
                         MAX_CLUSTER_MODULE_BOUND as u32
                     } else {
                         (declared + CLUSTER_MODULE_HEADROOM) as u32
                     };
                     let infeasible = plugins.len() > MAX_CLUSTER_PLUGINS
+                        || (in_place && admitted_dirs > MAX_CLUSTER_ADMITTED_DIRS)
                         || (!in_place
                             && declared + CLUSTER_MODULE_HEADROOM > MAX_CLUSTER_MODULE_BOUND);
                     if infeasible {

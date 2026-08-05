@@ -509,9 +509,10 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   g_plugin_file_path = path.wstring();
   context.current_plugin_index = plugin_index;
   // Entrypoint resolution follows the launch rules (PiPL, then PluginData on a
-  // missing PiPL only). An unresolvable entrypoint is plug-in-local: the
-  // session stays alive and later frames get the continuation-impossible
-  // response while the broker owns the continue/stop decision.
+  // missing PiPL only). A null entry in the swap result fails the session
+  // closed like every other swap failure (the frame loop treats it as
+  // swap_failure, exit 25): mid-session member changes reopen through the
+  // broker's invalidation path rather than limping on a member-less session.
   PiplEntrypoint pipl_entrypoint = discover_pipl_entrypoint(module);
   if (pipl_entrypoint.kind == PiplPluginKind::Missing)
     pipl_entrypoint = discover_plugin_data_entrypoint(module);
