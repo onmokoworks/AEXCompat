@@ -3,7 +3,7 @@ mod common;
 #[cfg(windows)]
 mod windows {
     use aexcompat_broker::cuda_compute_probe::{
-        launch_system_cuda_compute_probe, CudaAggregateStatus, CudaStage, ProbeLaunchStatus,
+        CudaAggregateStatus, CudaStage, ProbeLaunchStatus, launch_system_cuda_compute_probe,
     };
     use std::path::Path;
     use std::time::Duration;

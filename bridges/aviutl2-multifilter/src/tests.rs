@@ -2624,14 +2624,14 @@ mod tests {
                 "aexcompat-mf-cluster-{}-{nonce:032x}",
                 std::process::id()
             ));
-            // The broker's worker-freshness gate (#613) walks
-            // `<repository>/minihost/src` and refuses a worker older than the
-            // newest source file, or a repository where that walk finds nothing
-            // (`metadata_unavailable`, fail-closed). Give the synthetic
-            // repository one source file whose mtime is far in the past:
-            // `std::fs::copy` preserves the fixture's own (build-time) mtime on
-            // the worker, so "now" would count as newer and still trip the gate
-            // (issue #646). Same anchor the broker's own session tests use.
+            // The broker's worker-freshness check (#613, a recorded warning
+            // rather than a gate since #729) walks `<repository>/minihost/src`
+            // and flags a worker older than the newest source file. Give the
+            // synthetic repository one source file whose mtime is far in the
+            // past so the fixture stays warning-free: `std::fs::copy` preserves
+            // the fixture's own (build-time) mtime on the worker, so "now"
+            // would count as newer (issue #646). Same anchor the broker's own
+            // session tests use.
             let source_dir = root.join("minihost/src");
             std::fs::create_dir_all(&source_dir).unwrap();
             let anchor = source_dir.join("fixture.cpp");

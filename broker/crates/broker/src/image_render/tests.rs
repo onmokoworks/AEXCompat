@@ -2489,9 +2489,14 @@ mod tests {
             process_memory_limit_bytes: 536_870_912,
             memory_limit_reached: true,
             dismissed_windows: Vec::new(),
+            worker_freshness_warning: Some("source_newer_than_worker"),
         };
         let diagnostics = isolated_worker_diagnostics(&isolated, 1_234);
         assert_eq!(diagnostics["kill_reason"], "memory_limit");
+        assert_eq!(
+            diagnostics["worker_freshness_warning"],
+            "source_newer_than_worker"
+        );
         assert_eq!(diagnostics["memory_limit_reached"], true);
         assert_eq!(diagnostics["worker_peak_commit_bytes"], 529_000_000u64);
         assert_eq!(diagnostics["peak_process_memory_bytes"], 530_000_000u64);
@@ -2514,10 +2519,15 @@ mod tests {
             process_memory_limit_bytes: 536_870_912,
             memory_limit_reached: false,
             dismissed_windows: Vec::new(),
+            worker_freshness_warning: None,
         };
         let diagnostics = isolated_worker_diagnostics(&alive, 5);
         assert_eq!(diagnostics["kill_reason"], Value::Null);
         assert_eq!(diagnostics["memory_limit_reached"], false);
+        assert!(
+            diagnostics.get("worker_freshness_warning").is_none(),
+            "a fresh worker adds no freshness key"
+        );
     }
 
     #[test]

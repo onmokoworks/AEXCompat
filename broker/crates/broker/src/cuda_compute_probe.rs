@@ -1,6 +1,6 @@
-use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
-use crate::secure_launch::{secure_launch, SecureLaunchRequest, SecureLaunchResult};
 use crate::ExitClassification;
+use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
+use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult, secure_launch};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -1165,6 +1165,7 @@ mod tests {
             process_memory_limit_bytes: 0,
             memory_limit_reached: false,
             dismissed_windows: Vec::new(),
+            worker_freshness_warning: None,
         }
     }
 

@@ -1,8 +1,8 @@
 use aexcompat_broker::cuda_compute_probe::{
-    collect_with_api, device_name, missing_symbol_observation, no_driver_observation,
-    uuid_fingerprint, ApiFailure, CudaAggregateObservation, CudaCleanupFailure, CudaCleanupTarget,
-    CudaDeviceObservation, CudaProbeApi, CudaStage, JitLogObservation, PciLocation,
-    COMPUTE_ELEMENT_COUNT, MAX_DEVICE_NAME_BYTES, MAX_JIT_LOG_BYTES,
+    ApiFailure, COMPUTE_ELEMENT_COUNT, CudaAggregateObservation, CudaCleanupFailure,
+    CudaCleanupTarget, CudaDeviceObservation, CudaProbeApi, CudaStage, JitLogObservation,
+    MAX_DEVICE_NAME_BYTES, MAX_JIT_LOG_BYTES, PciLocation, collect_with_api, device_name,
+    missing_symbol_observation, no_driver_observation, uuid_fingerprint,
 };
 
 fn main() {
@@ -33,7 +33,7 @@ mod platform {
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
     use windows_sys::Win32::System::LibraryLoader::{
-        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+        GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
     };
 
     const CUDA_SUCCESS: i32 = 0;
@@ -1106,8 +1106,8 @@ DONE:\n\
     mod tests {
         use super::*;
         use std::cell::RefCell;
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Mutex, OnceLock};
 
         struct MockLoadedResolver {
@@ -2014,9 +2014,11 @@ DONE:\n\
             assert!(EMBEDDED_PTX.ends_with(b"\0"));
             assert!(EMBEDDED_PTX.len() < 4096);
             let affine_instruction = b"mad.lo.u32 %r3";
-            assert!(EMBEDDED_PTX
-                .windows(affine_instruction.len())
-                .any(|item| item == affine_instruction));
+            assert!(
+                EMBEDDED_PTX
+                    .windows(affine_instruction.len())
+                    .any(|item| item == affine_instruction)
+            );
             assert_eq!(size_of::<CuDevicePtr>(), 8);
             assert_eq!(COMPUTE_ELEMENT_COUNT, 64);
         }

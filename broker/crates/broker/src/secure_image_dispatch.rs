@@ -1,7 +1,6 @@
 use crate::runtime_module_policy::{AuthenticatedGpuModuleReport, RuntimeBackend};
 use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
 use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult, secure_launch};
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -160,25 +159,27 @@ fn launch_session_with_admission(
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
 ) -> io::Result<crate::secure_launch::SecureSessionProcess> {
-    let (worker_sha256, worker_size) = admit_local_worker(repository, worker_program)?;
+    let admitted = admit_local_worker(repository, worker_program)?;
     let request = SecureLaunchRequest {
         worker_program,
-        worker_expected_sha256: worker_sha256,
-        worker_expected_size: worker_size,
+        worker_expected_sha256: admitted.sha256,
+        worker_expected_size: admitted.size,
         plugin_basename,
         args_before_plugin,
         args_after_plugin,
         repository,
         require_module_audit,
     };
-    match desktop_policy {
+    let mut process = match desktop_policy {
         crate::windows_process::WorkerDesktopPolicy::Dedicated => {
             crate::secure_launch::secure_launch_session(tree, request, session)
         }
         crate::windows_process::WorkerDesktopPolicy::Current => {
             crate::secure_launch::secure_launch_session_on_current_desktop(tree, request, session)
         }
-    }
+    }?;
+    process.record_worker_freshness_warning(admitted.freshness_warning);
+    Ok(process)
 }
 
 /// Cluster session dispatch input (issue #405): an ordered plugin cluster
@@ -391,11 +392,11 @@ fn dispatch_secure_image_impl(
         .map(load_entry)
         .collect::<io::Result<Vec<_>>>()?;
     let tree = SealedLoadTree::create_with_resources(main, dependencies, resources)?;
-    let (worker_sha256, worker_size) = admit_local_worker(input.repository, &worker_program)?;
+    let admitted = admit_local_worker(input.repository, &worker_program)?;
     let request = SecureLaunchRequest {
         worker_program: &worker_program,
-        worker_expected_sha256: worker_sha256,
-        worker_expected_size: worker_size,
+        worker_expected_sha256: admitted.sha256,
+        worker_expected_size: admitted.size,
         plugin_basename: Some(&plugin_basename),
         args_before_plugin: input.args_before_plugin,
         args_after_plugin: input.args_after_plugin,
@@ -404,7 +405,7 @@ fn dispatch_secure_image_impl(
         repository: input.repository,
         require_module_audit: true,
     };
-    if let Some(limit) = process_memory_limit {
+    let mut result = if let Some(limit) = process_memory_limit {
         crate::secure_launch::secure_launch_with_process_memory_limit(
             tree,
             request,
@@ -413,7 +414,19 @@ fn dispatch_secure_image_impl(
         )
     } else {
         secure_launch(tree, request, input.timeout)
-    }
+    }?;
+    result.worker_freshness_warning = admitted.freshness_warning;
+    Ok(result)
+}
+
+/// The locally built worker as admitted for one launch: its identity, and the
+/// freshness observation that rides the dispatch result as a warning.
+struct AdmittedLocalWorker {
+    sha256: [u8; 32],
+    size: u64,
+    /// `Some(reason)` when the worker could not be confirmed current
+    /// (issue #729). Recorded, never enforced.
+    freshness_warning: Option<&'static str>,
 }
 
 /// Admits the locally built worker by reading it exactly once. The returned
@@ -422,7 +435,7 @@ fn dispatch_secure_image_impl(
 /// replace the worker binary can equally rebuild the broker that dispatches
 /// it. Receipt-driven flows keep supplying an externally pinned identity
 /// through `secure_launch` and do not pass through this admission.
-fn admit_local_worker(repository: &Path, path: &Path) -> io::Result<([u8; 32], u64)> {
+fn admit_local_worker(repository: &Path, path: &Path) -> io::Result<AdmittedLocalWorker> {
     let bytes = std::fs::read(path).map_err(|error| {
         io::Error::new(error.kind(), "local worker binary is missing or unreadable")
     })?;
@@ -432,9 +445,13 @@ fn admit_local_worker(repository: &Path, path: &Path) -> io::Result<([u8; 32], u
     // Read once: the provenance the freshness decision needs is in the same
     // bytes the identity is taken from, so recognizing it costs no extra I/O and
     // cannot describe a different file than the one admitted.
-    ensure_local_worker_freshness(repository, path, WorkerProvenance::find(&bytes))?;
-    let size = bytes.len() as u64;
-    Ok((Sha256::digest(&bytes).into(), size))
+    let freshness_warning =
+        local_worker_freshness_warning(repository, path, WorkerProvenance::find(&bytes));
+    Ok(AdmittedLocalWorker {
+        sha256: Sha256::digest(&bytes).into(),
+        size: bytes.len() as u64,
+        freshness_warning,
+    })
 }
 
 /// What a worker records about the tree it was built from (issue #649).
@@ -505,80 +522,84 @@ fn broker_provenance() -> WorkerProvenance {
 }
 
 /// A local minihost worker carries source-side logic (notably module-audit
-/// classification). Do not let a stale build produce a convincing-looking
-/// compatibility receipt for current broker sources.
+/// classification), so a stale build can mislabel observations made for
+/// current broker sources. Since issue #729 that observation is a recorded
+/// warning on the dispatch result, not a launch gate: the observation is
+/// bound to the worker hash either way, a wrong pairing disqualifies the
+/// result at comparison time, and stale-*reuse* protection belongs to cache
+/// keys (the multifilter `BuildFingerprint` pattern), not to dispatch.
 ///
-/// The source mtimes decide this whenever they are readable, exactly as before.
-/// They are the only signal that sees a developer's uncommitted edit: a revision
-/// describes the tree the same way before and after one, so accepting a matching
-/// revision *instead* would admit precisely the stale build this exists to stop.
+/// The source mtimes decide the verdict whenever they are readable. They are
+/// the only signal that sees a developer's uncommitted edit: a revision
+/// describes the tree the same way before and after one, so a matching
+/// revision *instead* would miss precisely the stale build this looks for.
 ///
 /// The recorded revisions answer the one question mtimes cannot: a worker with no
 /// repository around it. Shipped beside the plugin there is no `minihost/src` to
-/// be newer than anything, and the old rule could only call that "indeterminate"
-/// and refuse — which is what kept the worker-beside-the-plugin layout from
-/// working at all (issue #649). Both sides decide their revision at build time,
-/// so a bundle built from one tree recognizes itself with nothing else present.
-///
-/// A dirty or unknown revision names no tree and is never treated as a match.
-fn ensure_local_worker_freshness(
+/// be newer than anything (issue #649). Both sides decide their revision at
+/// build time, so a bundle built from one tree recognizes itself with nothing
+/// else present. A dirty or unknown revision names no tree and is never
+/// treated as a match.
+fn local_worker_freshness_warning(
     repository: &Path,
     worker: &Path,
     provenance: Option<WorkerProvenance>,
-) -> io::Result<()> {
-    ensure_local_worker_freshness_against(repository, worker, provenance, broker_provenance())
+) -> Option<&'static str> {
+    local_worker_freshness_warning_against(repository, worker, provenance, broker_provenance())
 }
 
 /// The decision, with the broker's own side passed in so it can be exercised
 /// from a tree that does not identify itself — which is every working tree with
 /// an uncommitted change, i.e. the normal one.
-fn ensure_local_worker_freshness_against(
+fn local_worker_freshness_warning_against(
     repository: &Path,
     worker: &Path,
     provenance: Option<WorkerProvenance>,
     broker: WorkerProvenance,
-) -> io::Result<()> {
+) -> Option<&'static str> {
     let source_root = repository.join("minihost").join("src");
     let source_modified = match newest_source_modified(&source_root) {
         Ok(modified) => modified,
-        // Only "there is no source tree here" hands the decision to the recorded
+        // Only "there is no source tree here" hands the verdict to the recorded
         // revisions. Every other failure — the planted-symlink refusal, a file
         // locked mid-walk — happens *inside* a checkout whose sources exist, and
-        // treating those as "no sources" would route a stale local build around
-        // the very comparison that catches it.
+        // treating those as "no sources" would let a stale local build dodge
+        // the very comparison that spots it.
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return admit_without_sources(provenance, broker);
+            return freshness_warning_without_sources(provenance, broker);
         }
-        Err(_) => return Err(worker_freshness_error("metadata_unavailable")),
+        Err(_) => return Some("metadata_unavailable"),
     };
-    let worker_modified = std::fs::metadata(worker)
-        .and_then(|metadata| metadata.modified())
-        .map_err(|_| worker_freshness_error("metadata_unavailable"))?;
+    let worker_modified = match std::fs::metadata(worker).and_then(|metadata| metadata.modified()) {
+        Ok(modified) => modified,
+        Err(_) => return Some("metadata_unavailable"),
+    };
     if source_modified > worker_modified {
-        return Err(worker_freshness_error("source_newer_than_worker"));
+        return Some("source_newer_than_worker");
     }
-    Ok(())
+    None
 }
 
 /// The worker's sources are not here to be compared against, so the recorded
-/// revisions are all there is. Every outcome below was a flat rejection before.
-fn admit_without_sources(
+/// revisions are all there is. Every outcome below was a flat rejection before
+/// issue #729 demoted the gate to a warning.
+fn freshness_warning_without_sources(
     provenance: Option<WorkerProvenance>,
     broker: WorkerProvenance,
-) -> io::Result<()> {
+) -> Option<&'static str> {
     let Some(provenance) = provenance else {
-        return Err(worker_freshness_error("worker_provenance_unavailable"));
+        return Some("worker_provenance_unavailable");
     };
     if !provenance.identifies_a_tree() || !broker.identifies_a_tree() {
         // Built from modified or unidentifiable sources. Nothing here can tell
         // whether the two halves belong together, and there are no mtimes to
         // fall back on.
-        return Err(worker_freshness_error("worker_provenance_indeterminate"));
+        return Some("worker_provenance_indeterminate");
     }
     if provenance.revision != broker.revision {
-        return Err(worker_freshness_error("worker_revision_mismatch"));
+        return Some("worker_revision_mismatch");
     }
-    Ok(())
+    None
 }
 
 fn newest_source_modified(root: &Path) -> io::Result<SystemTime> {
@@ -609,18 +630,6 @@ fn newest_source_modified(root: &Path) -> io::Result<SystemTime> {
             "minihost source metadata is indeterminate",
         )
     })
-}
-
-fn worker_freshness_error(reason: &'static str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        json!({
-            "classification": "stale_worker",
-            "stage": "worker_freshness",
-            "reason": reason,
-        })
-        .to_string(),
-    )
 }
 
 fn load_entry(artifact: ApprovedImageArtifact) -> io::Result<LoadEntry> {
@@ -765,45 +774,42 @@ mod tests {
     }
 
     #[test]
-    fn current_local_worker_is_admitted_when_newer_than_sources() {
+    fn current_local_worker_is_admitted_without_a_warning() {
         let root = std::env::temp_dir().join(format!(
             "aexcompat-worker-freshness-{:032x}",
             rand::random::<u128>()
         ));
         fs::create_dir(&root).unwrap();
         let worker = freshness_fixture(&root, true);
-        let (_, size) = admit_local_worker(&root, &worker).expect("current worker is admitted");
-        assert_eq!(size, 6);
+        let admitted = admit_local_worker(&root, &worker).expect("current worker is admitted");
+        assert_eq!(admitted.size, 6);
+        assert_eq!(admitted.freshness_warning, None);
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// The gate this used to be rejected the dispatch outright; since issue
+    /// #729 a stale worker launches, and the observation rides the result as
+    /// a recorded warning instead.
     #[test]
-    fn stale_local_worker_is_rejected_before_launch() {
+    fn stale_local_worker_is_admitted_with_a_warning() {
         let root = std::env::temp_dir().join(format!(
             "aexcompat-worker-freshness-{:032x}",
             rand::random::<u128>()
         ));
         fs::create_dir(&root).unwrap();
         let worker = freshness_fixture(&root, false);
-        let error = admit_local_worker(&root, &worker).expect_err("stale worker must not launch");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&error.to_string()).unwrap(),
-            json!({
-                "classification": "stale_worker",
-                "stage": "worker_freshness",
-                "reason": "source_newer_than_worker",
-            })
-        );
+        let admitted =
+            admit_local_worker(&root, &worker).expect("a stale worker still launches (issue #729)");
+        assert_eq!(admitted.freshness_warning, Some("source_newer_than_worker"));
         fs::remove_dir_all(root).unwrap();
     }
 
     /// A worker with neither sources to compare against nor a recorded build is
-    /// unidentifiable, and unidentifiable is not admissible. The reason names
-    /// which of the two is missing, because they are fixed differently: build the
-    /// worker from a tree that records its revision, or dispatch from a checkout.
+    /// unidentifiable. The reason names which of the two is missing, because
+    /// they are fixed differently: build the worker from a tree that records
+    /// its revision, or dispatch from a checkout.
     #[test]
-    fn an_unidentifiable_worker_is_rejected_before_launch() {
+    fn an_unidentifiable_worker_is_admitted_with_a_warning() {
         let root = std::env::temp_dir().join(format!(
             "aexcompat-worker-freshness-{:032x}",
             rand::random::<u128>()
@@ -812,16 +818,11 @@ mod tests {
         let worker = root.join("target/minihost-build/aex_render_worker.exe");
         fs::create_dir_all(worker.parent().unwrap()).unwrap();
         fs::write(&worker, b"worker").unwrap();
-        let error = admit_local_worker(&root, &worker)
-            .expect_err("missing source metadata must not permit a worker launch");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let admitted = admit_local_worker(&root, &worker)
+            .expect("missing source metadata warns instead of blocking (issue #729)");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&error.to_string()).unwrap(),
-            json!({
-                "classification": "stale_worker",
-                "stage": "worker_freshness",
-                "reason": "worker_provenance_unavailable",
-            })
+            admitted.freshness_warning,
+            Some("worker_provenance_unavailable")
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -846,54 +847,49 @@ mod tests {
         }
     }
 
-    fn freshness_reason(error: &io::Error) -> String {
-        serde_json::from_str::<serde_json::Value>(&error.to_string()).unwrap()["reason"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    }
-
     /// A worker with no repository around it is exactly what issue #649 is
     /// about: shipped beside the plugin, it has no `minihost/src` to be judged
-    /// against, and the old rule could only call that indeterminate and refuse.
-    /// Matching build revisions answer it without any of that.
+    /// against. Matching build revisions answer it without any of that.
     ///
     /// The broker's side is injected rather than read from `env!`, so this runs
     /// in a working tree with uncommitted changes — the normal one, where the
     /// real broker identifies no tree and the test would otherwise assert
     /// nothing while reporting `ok`.
     #[test]
-    fn a_worker_built_from_this_revision_is_admitted_without_any_sources() {
-        ensure_local_worker_freshness_against(
-            Path::new(r"C:\no\such\repository"),
-            Path::new(r"C:\no\such\worker.exe"),
-            Some(identified("0123456789ab")),
-            identified("0123456789ab"),
-        )
-        .expect("a worker built from this revision needs no sources");
+    fn a_worker_built_from_this_revision_carries_no_warning_without_sources() {
+        assert_eq!(
+            local_worker_freshness_warning_against(
+                Path::new(r"C:\no\such\repository"),
+                Path::new(r"C:\no\such\worker.exe"),
+                Some(identified("0123456789ab")),
+                identified("0123456789ab"),
+            ),
+            None,
+            "a worker built from this revision needs no sources"
+        );
     }
 
-    /// A bundle whose halves came from different commits is refused. There is no
-    /// mtime relationship that would reveal it, so this is the only thing that
-    /// can.
+    /// A bundle whose halves came from different commits is flagged. There is
+    /// no mtime relationship that would reveal it, so this is the only thing
+    /// that can.
     #[test]
-    fn a_worker_built_from_another_revision_is_refused_without_sources() {
-        let error = ensure_local_worker_freshness_against(
-            Path::new(r"C:\no\such\repository"),
-            Path::new(r"C:\no\such\worker.exe"),
-            Some(identified("0000deadbeef")),
-            identified("0123456789ab"),
-        )
-        .expect_err("a worker from another commit must not launch");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(freshness_reason(&error), "worker_revision_mismatch");
+    fn a_worker_built_from_another_revision_warns_without_sources() {
+        assert_eq!(
+            local_worker_freshness_warning_against(
+                Path::new(r"C:\no\such\repository"),
+                Path::new(r"C:\no\such\worker.exe"),
+                Some(identified("0000deadbeef")),
+                identified("0123456789ab"),
+            ),
+            Some("worker_revision_mismatch")
+        );
     }
 
     /// Either half built from modified or unidentifiable sources says nothing
     /// about whether they belong together, and without sources there is nothing
     /// to fall back on.
     #[test]
-    fn an_unidentifiable_half_is_refused_without_sources() {
+    fn an_unidentifiable_half_warns_without_sources() {
         let dirty = WorkerProvenance {
             revision: "0123456789ab".to_owned(),
             dirty: true,
@@ -903,16 +899,14 @@ mod tests {
             (identified("0123456789ab"), dirty.clone()),
             (identified("unknown"), identified("unknown")),
         ] {
-            let error = ensure_local_worker_freshness_against(
-                Path::new(r"C:\no\such\repository"),
-                Path::new(r"C:\no\such\worker.exe"),
-                Some(worker.clone()),
-                broker.clone(),
-            )
-            .unwrap_err();
             assert_eq!(
-                freshness_reason(&error),
-                "worker_provenance_indeterminate",
+                local_worker_freshness_warning_against(
+                    Path::new(r"C:\no\such\repository"),
+                    Path::new(r"C:\no\such\worker.exe"),
+                    Some(worker.clone()),
+                    broker.clone(),
+                ),
+                Some("worker_provenance_indeterminate"),
                 "{worker:?} vs {broker:?}"
             );
         }
@@ -921,7 +915,7 @@ mod tests {
     /// With the sources present the mtimes decide, whatever the revisions say.
     /// They are the only signal that sees an uncommitted edit — a revision reads
     /// the same before and after one — so letting a matching revision stand in
-    /// for them would admit exactly the stale build this gate exists to stop.
+    /// for them would miss exactly the stale build this looks for.
     #[test]
     fn matching_revisions_do_not_excuse_a_worker_older_than_its_sources() {
         let root = std::env::temp_dir().join(format!(
@@ -931,20 +925,22 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let worker = freshness_fixture(&root, false);
 
-        let error = ensure_local_worker_freshness_against(
-            &root,
-            &worker,
-            Some(identified("0123456789ab")),
-            identified("0123456789ab"),
-        )
-        .expect_err("a worker older than its sources is stale however it identifies");
-        assert_eq!(freshness_reason(&error), "source_newer_than_worker");
+        assert_eq!(
+            local_worker_freshness_warning_against(
+                &root,
+                &worker,
+                Some(identified("0123456789ab")),
+                identified("0123456789ab"),
+            ),
+            Some("source_newer_than_worker"),
+            "a worker older than its sources is stale however it identifies"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     /// ...and a revision that disagrees does not condemn a worker the sources
     /// vouch for either. A developer who commits without reconfiguring cmake has
-    /// a current worker with a stale recorded revision; refusing it would stop
+    /// a current worker with a stale recorded revision; flagging it would tag
     /// every dispatch until someone re-ran configure.
     #[test]
     fn a_mismatched_revision_does_not_condemn_a_worker_newer_than_its_sources() {
@@ -955,13 +951,16 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let worker = freshness_fixture(&root, true);
 
-        ensure_local_worker_freshness_against(
-            &root,
-            &worker,
-            Some(identified("0000deadbeef")),
-            identified("0123456789ab"),
-        )
-        .expect("the sources are here and they say the worker is current");
+        assert_eq!(
+            local_worker_freshness_warning_against(
+                &root,
+                &worker,
+                Some(identified("0000deadbeef")),
+                identified("0123456789ab"),
+            ),
+            None,
+            "the sources are here and they say the worker is current"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

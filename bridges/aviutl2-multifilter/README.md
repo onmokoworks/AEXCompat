@@ -68,14 +68,13 @@ AEX は別プロセスの worker (`aex_l2_worker.exe` 等) で実行するので
 ルートが切り替わった起動では worker fingerprint が変わるため、登録は維持したまま
 全エントリがバックグラウンド再 discovery に回る (issue #307 の再検証機構)。
 
-> **現状 3 だけでは動かない**: broker の worker freshness gate (#613) が
-> `<root>\minihost\src` のソース mtime を読むため、ソースを含まない配布形態は
-> `metadata_unavailable` で discovery も render も失敗する。3 は配布形態への
-> 準備であって、まだ end-to-end では通らない。配布物向けのゲート置き換えは
-> #649 の残りスコープ。それまでは開発チェックアウトを `repository` に
-> 指定する運用が確実。
+> worker freshness (#613) は #729 で「拒否」から「記録される警告」に降格された。
+> ソースを含まない配布形態でも discovery / render は通り、worker と DLL を同じ
+> コミットのクリーンなツリーからビルドしていれば build provenance (#649) の
+> revision 一致で警告なしに認識される。それ以外の組み合わせは動作しつつ
+> `worker_freshness_warning` が診断に記録される。
 
-ゲート置き換え後は、プラグインと worker を一緒に置くだけでユーザーのチェックアウトに
+プラグインと worker を一緒に置くだけでユーザーのチェックアウトに
 実行時依存しなくなる:
 
 ```powershell
