@@ -2668,9 +2668,15 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner());
             unsafe {
                 std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+                // This asserts the staged pipeline's closure identity; the
+                // in-place default (issue #751) is covered separately below.
+                std::env::set_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY", "1");
             }
             let (root, one, two) = cluster_repository();
             let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
+            }
             assert_eq!(results.len(), 2, "every plug-in gets a result");
             let identities: Vec<&Option<String>> = results
                 .iter()
@@ -2685,6 +2691,41 @@ mod tests {
                     path.display()
                 );
                 assert!(entry.cluster_fallback.is_none());
+            }
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+
+        /// The in-place default (issue #751): the same two plug-ins cluster
+        /// by their shared search-root set, sweep in one in-place session,
+        /// and record no closure identity (the render cluster pool stays on
+        /// the staged identity until it migrates).
+        #[test]
+        fn in_place_cluster_discovery_sweeps_same_root_plugins_in_one_session() {
+            let _guard = BEHAVIOR_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+                std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
+            }
+            let (root, one, two) = cluster_repository();
+            let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+            assert_eq!(results.len(), 2, "every plug-in gets a result");
+            for (path, entry) in &results {
+                assert!(
+                    entry.ok,
+                    "in-place cluster discovery must succeed for {}",
+                    path.display()
+                );
+                assert!(entry.cluster_fallback.is_none());
+                assert!(
+                    entry.closure_identity.is_none(),
+                    "in-place discovery records no closure identity (issue #751 step 3)"
+                );
+                assert!(
+                    entry.closure.sealed.is_empty(),
+                    "in-place discovery walks no closure"
+                );
             }
             std::fs::remove_dir_all(&root).unwrap();
         }
