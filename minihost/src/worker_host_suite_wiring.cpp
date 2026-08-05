@@ -1,6 +1,7 @@
 #include "worker_host_suite_catalog.hpp"
 #include "worker_host_suite_router.hpp"
 #include "worker_extended_diag.hpp"
+#include "worker_flt_blur_suite.hpp"
 #include "worker_suite_call_slot_probe.hpp"
 #include "worker_suite_registry.hpp"
 
@@ -480,6 +481,9 @@ const void* provide_color_settings7(void*) {
   configure_host_hooks({&composition_handle, &acquire_suite, &release_suite});
   return aexcompat::color_settings::suite();
 }
+const void* provide_flt_blur1(void*) {
+  return aexcompat::flt_blur::suite1();
+}
 // Versions 4 and 6 of "PF Color Settings Suite" are frozen prefixes of the v7
 // table, so all three are served from it (issue #362: the OCIO family acquires
 // exactly v6; issue #716: `Unmult.aex` acquires v4). Checked against the SDK
@@ -711,6 +715,8 @@ bool configure_component_suite_catalog() {
       {"PF Color Settings Suite", 4, nullptr, &provide_color_settings7},
       {"PF Color Settings Suite", 6, nullptr, &provide_color_settings7},
       {"PF Color Settings Suite", 7, nullptr, &provide_color_settings7},
+      {aexcompat::flt_blur::kSuiteName,
+       aexcompat::flt_blur::kSuiteVersion1, nullptr, &provide_flt_blur1},
       {"PF Iterate8 Suite", 1, nullptr, &provide_iterate8},
       {"PF Iterate8 Suite", 2, nullptr, &provide_iterate8},
       {"PF iterate16 Suite", 1, &g_iterate16_suite2},

@@ -318,6 +318,7 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
     reinterpret_cast<void*>(&premultiply_world8), reinterpret_cast<void*>(&premultiply_color8),
     reinterpret_cast<void*>(&fill_world16), reinterpret_cast<void*>(&premultiply_color16),
     reinterpret_cast<void*>(&iterate_world16), reinterpret_cast<void*>(&iterate_world8),
+    reinterpret_cast<void*>(&iterate_origin8),
     reinterpret_cast<void*>(&legacy_new_world),
     reinterpret_cast<void*>(&dispose_world), reinterpret_cast<void*>(&transfer_rect),
     reinterpret_cast<void*>(&transform_world),
