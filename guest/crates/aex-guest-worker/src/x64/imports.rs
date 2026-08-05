@@ -35,6 +35,12 @@ enum LegacyWin64Import {
     MsvcpMutexUnlock,
     MsvcpMutexDestroy,
     MsvcpHardwareConcurrency,
+    MsvcpExceptionPtrCreate,
+    MsvcpExceptionPtrCopy,
+    MsvcpExceptionPtrAssign,
+    MsvcpExceptionPtrDestroy,
+    MsvcpExceptionPtrCurrentException,
+    MsvcpExceptionPtrRethrow,
     VcruntimeExceptionCopy,
     VcruntimeExceptionDestroy,
     CxxThrowException,
@@ -398,6 +404,27 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("msvcp140.dll", "?__ExceptionPtrCreate@@YAXPEAX@Z") => {
+            LegacyWin64Import::MsvcpExceptionPtrCreate
+        }
+        ("msvcp140.dll", "?__ExceptionPtrCopy@@YAXPEAXPEBX@Z") => {
+            LegacyWin64Import::MsvcpExceptionPtrCopy
+        }
+        ("msvcp140.dll", "?__ExceptionPtrAssign@@YAXPEAXPEBX@Z") => {
+            LegacyWin64Import::MsvcpExceptionPtrAssign
+        }
+        ("msvcp140.dll", "?__ExceptionPtrDestroy@@YAXPEAX@Z") => {
+            LegacyWin64Import::MsvcpExceptionPtrDestroy
+        }
+        ("msvcp140.dll", "?__ExceptionPtrCurrentException@@YAXPEAX@Z") => {
+            LegacyWin64Import::MsvcpExceptionPtrCurrentException
+        }
+        ("msvcp140.dll", "?__ExceptionPtrRethrow@@YAXPEBX@Z") => {
+            LegacyWin64Import::MsvcpExceptionPtrRethrow
+        }
+        (_, symbol) if symbol.contains("__ExceptionPtr") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("vcruntime140.dll", "__std_exception_copy") => {
             LegacyWin64Import::VcruntimeExceptionCopy
         }
@@ -615,6 +642,23 @@ fn install_win64_import(
                 uc(
                     "install deterministic hardware concurrency import",
                     unicorn.mem_write(stub, &deterministic_i32_stub(1)),
+                )?;
+            }
+            LegacyWin64Import::MsvcpExceptionPtrCreate
+            | LegacyWin64Import::MsvcpExceptionPtrCopy
+            | LegacyWin64Import::MsvcpExceptionPtrAssign
+            | LegacyWin64Import::MsvcpExceptionPtrDestroy
+            | LegacyWin64Import::MsvcpExceptionPtrCurrentException
+            | LegacyWin64Import::MsvcpExceptionPtrRethrow => {
+                uc(
+                    "write MSVC exception_ptr return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install MSVC exception_ptr import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_msvcp_exception_ptr(unicorn, implementation);
+                    }),
                 )?;
             }
             LegacyWin64Import::VcruntimeExceptionCopy => {
@@ -1387,6 +1431,103 @@ fn emulate_windows_last_error(
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn read_msvcp_exception_ptr(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    label: &str,
+) -> Result<[u8; MSVCP_EXCEPTION_PTR_BYTES], String> {
+    if address == 0 {
+        return Err(format!("MSVC exception_ptr {label} pointer is null"));
+    }
+    let mut bytes = [0u8; MSVCP_EXCEPTION_PTR_BYTES];
+    unicorn
+        .mem_read(address, &mut bytes)
+        .map_err(|error| format!("MSVC exception_ptr {label} read failed: {error}"))?;
+    Ok(bytes)
+}
+
+fn require_null_msvcp_exception_ptr(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    label: &str,
+) -> Result<(), String> {
+    let bytes = read_msvcp_exception_ptr(unicorn, address, label)?;
+    if bytes != [0; MSVCP_EXCEPTION_PTR_BYTES] {
+        return Err(format!(
+            "MSVC exception_ptr {label} contains an unmodeled non-null exception reference"
+        ));
+    }
+    Ok(())
+}
+
+fn write_null_msvcp_exception_ptr(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    address: u64,
+    label: &str,
+) -> Result<(), String> {
+    if address == 0 {
+        return Err(format!("MSVC exception_ptr {label} pointer is null"));
+    }
+    unicorn
+        .mem_write(address, &[0; MSVCP_EXCEPTION_PTR_BYTES])
+        .map_err(|error| format!("MSVC exception_ptr {label} write failed: {error}"))
+}
+
+fn emulate_msvcp_exception_ptr(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
+    let result = (|| -> Result<(), String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        match operation {
+            LegacyWin64Import::MsvcpExceptionPtrCreate => {
+                write_null_msvcp_exception_ptr(unicorn, destination, "create destination")
+            }
+            LegacyWin64Import::MsvcpExceptionPtrCopy => {
+                let source = read_win64_import_argument(unicorn, 1)?;
+                require_null_msvcp_exception_ptr(unicorn, source, "copy source")?;
+                write_null_msvcp_exception_ptr(unicorn, destination, "copy destination")
+            }
+            LegacyWin64Import::MsvcpExceptionPtrAssign => {
+                let source = read_win64_import_argument(unicorn, 1)?;
+                require_null_msvcp_exception_ptr(unicorn, destination, "assign destination")?;
+                require_null_msvcp_exception_ptr(unicorn, source, "assign source")?;
+                write_null_msvcp_exception_ptr(unicorn, destination, "assign destination")
+            }
+            LegacyWin64Import::MsvcpExceptionPtrDestroy => {
+                require_null_msvcp_exception_ptr(unicorn, destination, "destroy object")?;
+                write_null_msvcp_exception_ptr(unicorn, destination, "destroy object")
+            }
+            LegacyWin64Import::MsvcpExceptionPtrCurrentException => {
+                require_null_msvcp_exception_ptr(
+                    unicorn,
+                    destination,
+                    "current-exception destination",
+                )?;
+                // The single-thread backend has no modeled in-flight SEH/C++
+                // exception at this boundary, so the documented result is null.
+                write_null_msvcp_exception_ptr(
+                    unicorn,
+                    destination,
+                    "current-exception destination",
+                )
+            }
+            LegacyWin64Import::MsvcpExceptionPtrRethrow => {
+                require_null_msvcp_exception_ptr(unicorn, destination, "rethrow source")?;
+                Err("MSVC exception_ptr rethrow of null would raise bad_exception; exception transport is not modeled".into())
+            }
+            _ => Err("invalid MSVC exception_ptr operation".into()),
+        }
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
 fn emulate_crt_set_terminate(unicorn: &mut Unicorn<'_, GuestState>) {
