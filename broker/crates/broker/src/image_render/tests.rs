@@ -2266,7 +2266,8 @@ mod tests {
         );
         assert_eq!(finalize["first_failure_stage"], "classic_finalize");
 
-        // A frame that refuses before the selector still names FRAME_SETUP.
+        // A frame whose lifecycle refused never reaches RENDER, so the worker
+        // emits no `classic_render` pair and the setup stage stands alone.
         let setup = worker_diagnostics(
             "stage:frame_setup_begin\nstage:frame_setup_end error=512\n",
             false,
@@ -2275,6 +2276,29 @@ mod tests {
             9,
         );
         assert_eq!(setup["first_failure_stage"], "frame_setup");
+        assert_eq!(setup["failure_stage"], "frame_setup");
+
+        // Why the worker suppresses rather than bracketing unconditionally:
+        // `classic_execution::dispatch_render` short-circuits on a non-zero
+        // incoming error and hands it straight back, so bracketing it anyway
+        // would append that same error again under the selector's name. Here
+        // `failure_stage` takes the last failing stage and would blame a RENDER
+        // the plug-in never saw - a shape this parser cannot tell apart from a
+        // real one, so the emitting side has to not produce it.
+        //
+        // Today only the host-side hook failures (-5) reach that guard: the
+        // `render_once` path drops FRAME_SETUP's error instead of propagating
+        // it and dispatches RENDER anyway (issue #725), so a real setup refusal
+        // still shows both stages - correctly, because RENDER really did run.
+        let bracketed_short_circuit = worker_diagnostics(
+            "stage:frame_setup_begin\nstage:frame_setup_end error=512\n\
+             stage:classic_render_begin\nstage:classic_render_end error=512\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(bracketed_short_circuit["failure_stage"], "classic_render");
     }
 
     /// The event cap bounds what is reported, not what is noticed. A frame that

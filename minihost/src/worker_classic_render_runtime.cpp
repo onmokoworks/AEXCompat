@@ -558,15 +558,25 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     // session's frame errors carried no stage at all and every one of them
     // came back with `first_failure_stage: null` (issue #722). The name is
     // distinct from `render` so the two do not nest under one label.
-    std::cerr << "stage:classic_render_begin\n" << std::flush;
+    //
+    // Only bracket a dispatch that runs. classic_execution::dispatch_render
+    // short-circuits every step when the incoming error is already non-zero and
+    // hands it straight back, so a frame that failed in FRAME_SETUP would
+    // otherwise get `classic_render_end error=<setup error>` and be blamed on a
+    // RENDER the plug-in never saw.
+    const bool selector_runs = error == 0;
+    if (selector_runs)
+      std::cerr << "stage:classic_render_begin\n" << std::flush;
     error = dispatch_owner.run(error);
-    std::cerr << "stage:classic_render_end error=" << error << "\n" << std::flush;
+    if (selector_runs)
+      std::cerr << "stage:classic_render_end error=" << error << "\n" << std::flush;
     lifecycle.error = error;
     error = lifecycle_owner.finish(lifecycle);
   }
-  // What the plug-in's selector returned, before the host's own finalize can
-  // add to it. Kept so the two can be told apart: a frame that fails only after
-  // this point failed in the host, not in the plug-in (issue #722).
+  // Everything the plug-in itself got a say in (RENDER plus the setdown half of
+  // the frame lifecycle), before the host's own finalize can add to it. Kept so
+  // the two can be told apart: a frame that fails only past this point failed in
+  // the host, not in the plug-in (issue #722).
   const int32_t selector_error = error;
   aexcompat::worker_runtime::classic_execution::Context final_context{
       destination, rowbytes, width, height, pixel_bytes, error,

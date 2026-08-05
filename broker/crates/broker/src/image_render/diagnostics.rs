@@ -697,10 +697,6 @@ fn worker_diagnostics(
         // long session used to stop noticing failures entirely once the list
         // filled, which is exactly when a frame that fails every time overruns
         // it (issue #722).
-        // The cap bounds the reported list, not the failure tracking above: a
-        // long session used to stop noticing failures entirely once the list
-        // filled, which is exactly when a frame that fails every time overruns
-        // it (issue #722).
         if events.len() < MAX_STAGE_EVENTS {
             events.push(json!({"stage": stage, "state": state, "errors": errors}));
         }
