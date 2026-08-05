@@ -14,6 +14,7 @@ WorkerSession::WorkerSession(RuntimeContext& context, TraceWriter* trace_writer,
     : plugin_path_(std::move(context.plugin_path)),
       module_(context.module),
       sealed_directory_cookie_(context.sealed_directory_cookie),
+      search_directory_cookies_(std::move(context.search_directory_cookies)),
       restore_native_stdout_(context.restore_native_stdout),
       stdout_redirected_(context.stdout_redirected),
       trace_writer_(trace_writer),
@@ -80,6 +81,10 @@ bool WorkerSession::capture_terminal_audit() noexcept {
     terminal_audit_passed_ = terminal_audit_passed_ &&
                              audit.pre_unload.status == "passed" &&
                              module_audit_passed();
+  } else if (audit.recorded && module_) {
+    // Recorded, never enforced (issue #751): the terminal snapshot reaches
+    // the report, and its status never turns this lifecycle's verdict.
+    audit.pre_unload = capture_module_audit();
   }
   return terminal_audit_passed_;
 }
@@ -103,19 +108,17 @@ void WorkerSession::unload_module() noexcept {
   }
   if (deferred_module_release_) {
     // Deferred release (issue #474): nothing is freed mid-process. The
-    // current and retired plug-in images and the sealed-directory cookie all
+    // current and retired plug-in images and the directory cookies all
     // unload in one loader-ordered pass at process exit.
     if (module_) retired_modules_.push_back(module_);
     module_ = nullptr;
     retired_modules_.clear();
     sealed_directory_cookie_ = nullptr;
+    search_directory_cookies_.clear();
     return;
   }
   if (!module_) {
-    if (sealed_directory_cookie_) {
-      RemoveDllDirectory(sealed_directory_cookie_);
-      sealed_directory_cookie_ = nullptr;
-    }
+    release_directory_cookies();
     return;
   }
   // Defensive coverage for future unload paths that do not capture an audit.
@@ -123,6 +126,13 @@ void WorkerSession::unload_module() noexcept {
   if (!quiesce_once()) return;
   FreeLibrary(module_);
   module_ = nullptr;
+  release_directory_cookies();
+}
+
+void WorkerSession::release_directory_cookies() noexcept {
+  for (DLL_DIRECTORY_COOKIE cookie : search_directory_cookies_)
+    if (cookie) RemoveDllDirectory(cookie);
+  search_directory_cookies_.clear();
   if (sealed_directory_cookie_) {
     RemoveDllDirectory(sealed_directory_cookie_);
     sealed_directory_cookie_ = nullptr;

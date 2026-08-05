@@ -161,6 +161,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -380,6 +381,7 @@ mod windows_e2e {
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -405,6 +407,61 @@ mod windows_e2e {
         assert_eq!(close["final_report"]["session_render_error"], 0);
     }
 
+    /// In-place session launch (issue #751): the positional argv slot carries
+    /// the plug-in's real path (no sealed staging exists) and the
+    /// `--dependency-dirs-v1` auxiliary pair carries the admitted search
+    /// directories, which the fixture shape-checks like the real worker's
+    /// apply_dependency_search_dirs. The session then renders and closes
+    /// clean over the same transport as a staged launch.
+    #[test]
+    fn in_place_session_renders_with_dependency_search_dirs() {
+        if crate::common::skip_without_sealed_worker_launch(
+            "in_place_session_renders_with_dependency_search_dirs",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_repository();
+        let search_dir = plugin.parent().expect("plugin parent").to_path_buf();
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            payload_override: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            audio_trailer: None,
+            layers: &[],
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            dependencies: Vec::new(),
+            dependency_search_dirs: vec![search_dir],
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+        })
+        .expect("open in-place render session");
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(29))
+            .expect("in-place session frame renders");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
     #[test]
     fn smart_session_with_an_explicit_gpu_backend_requires_a_policy() {
         let _behavior = BehaviorGuard::set(None);
@@ -427,6 +484,7 @@ mod windows_e2e {
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb32f,
@@ -477,6 +535,7 @@ mod windows_e2e {
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -588,6 +647,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -651,6 +711,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -725,6 +786,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -821,6 +883,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -883,6 +946,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -952,6 +1016,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1014,6 +1079,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1064,6 +1130,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1108,6 +1175,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1158,6 +1226,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1207,6 +1276,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1270,6 +1340,7 @@ mod windows_e2e {
                 conformance_render_settings: None,
                 layers: &[],
                 dependencies: Vec::new(),
+                dependency_search_dirs: Vec::new(),
                 width: WIDTH,
                 height: HEIGHT,
                 pixel_format: RenderPixelFormat::Argb8,
@@ -1338,6 +1409,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1412,6 +1484,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1502,6 +1575,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1546,6 +1620,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1585,6 +1660,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1624,6 +1700,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1718,6 +1795,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -2088,6 +2166,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -2768,6 +2847,7 @@ mod windows_e2e {
                 layers: &[],
                 // The shared closure rides the base request's dependencies.
                 dependencies: vec![approved_artifact(&cluster.dependency)],
+                dependency_search_dirs: Vec::new(),
                 width: WIDTH,
                 height: HEIGHT,
                 pixel_format: RenderPixelFormat::Argb8,

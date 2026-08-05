@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace aexcompat::worker_runtime {
 
@@ -28,12 +29,20 @@ struct RuntimeAdmissionRequest {
   // invocation modes. PF routes retain the pre-execution AEGP rejection gate.
   bool allow_aegp_plugin{};
   std::filesystem::path authorization_manifest;
+  // In-place load mode (issue #751): broker-validated directories admitted
+  // into the process-wide USER_DIRS search set so an unstaged plug-in's
+  // dependency closure resolves from where it actually lives. Empty on the
+  // sealed staging path.
+  std::vector<std::filesystem::path> dependency_search_dirs;
 };
 
 struct RuntimeContext {
   std::filesystem::path plugin_path;
   HMODULE module{};
   DLL_DIRECTORY_COOKIE sealed_directory_cookie{};
+  // Cookies for the in-place dependency search directories (issue #751);
+  // removed with the sealed cookie in the same lifecycle order.
+  std::vector<DLL_DIRECTORY_COOKIE> search_directory_cookies;
   bool stdout_redirected{};
   RuntimeStdoutRestore restore_native_stdout{};
 };
@@ -56,5 +65,12 @@ int prepare_runtime_request(const wchar_t* plugin_argument,
                             bool authorize_runtime_modules,
                             const wchar_t* authorization_manifest,
                             RuntimeAdmissionRequest& request);
+
+// Parses the `--dependency-dirs-v1` value (issue #751): absolute directories
+// joined by ';', bounded in count and shape. Returns the historical
+// malformed-argument code (2) on any violation so a malformed launch never
+// widens the search set silently.
+int apply_dependency_search_dirs(const wchar_t* joined,
+                                 RuntimeAdmissionRequest& request);
 
 }  // namespace aexcompat::worker_runtime

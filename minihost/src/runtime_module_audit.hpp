@@ -33,6 +33,12 @@ struct ModuleAuditEpoch {
 
 struct ModuleAuditReport {
   bool required{};
+  // In-place plugin loads (issue #751) capture and report the loaded-module
+  // set as provenance without making it a launch verdict: snapshots are
+  // taken and serialized exactly like a required audit, but no lifecycle
+  // path fails or exits on their status. `required` implies enforcement;
+  // `recorded` never does.
+  bool recorded{};
   ModuleAuditSnapshot post_load;
   ModuleAuditSnapshot pre_unload;
   ModuleAuditSnapshot observed_union;
@@ -74,6 +80,14 @@ LoadedModuleProvenance classify_loaded_module_provenance(
 // (fail-closed). `declared_plugin_basenames` must be lowercased.
 void configure_module_audit_cluster(std::size_t module_bound,
                                     std::vector<std::string> declared_plugin_basenames);
+
+// In-place load mode (issue #751): admits the broker-supplied dependency
+// search directories as classification roots, so a module resolved from one
+// of them records as `plugin` instead of `unknown`. Roots that cannot be
+// canonicalized classify nothing (their modules stay `unknown` in the
+// recorded snapshot).
+void configure_module_audit_search_roots(
+    const std::vector<std::filesystem::path>& roots);
 
 // Appends one swap epoch to the report. The snapshots are the values the
 // caller captured via capture_module_audit() (which already accumulated them

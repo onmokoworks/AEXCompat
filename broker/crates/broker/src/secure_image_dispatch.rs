@@ -37,6 +37,16 @@ pub struct SecureImageDispatch<'a> {
     pub worker_kind: WorkerKind,
     pub plugin: ApprovedImageArtifact,
     pub dependencies: Vec<ApprovedImageArtifact>,
+    /// In-place load mode (issue #751): non-empty switches the dispatch from
+    /// sealed staging to loading the plug-in at `plugin.path` itself, with
+    /// these directories admitted into the worker's DLL search set so the
+    /// dependency closure resolves from where it actually lives. Mutually
+    /// exclusive with `dependencies` (the closure is the loader's job here)
+    /// and with sealed resources (the plug-in's own directory already holds
+    /// its data files). On this route the broker does not re-read
+    /// `plugin.expected_sha256`/`expected_size`; the identity record is the
+    /// argv sha256 the worker verifies against the bytes it actually loads.
+    pub dependency_search_dirs: Vec<PathBuf>,
     pub args_before_plugin: &'a [String],
     pub args_after_plugin: &'a [String],
     pub timeout: Option<Duration>,
@@ -61,6 +71,13 @@ pub fn dispatch_secure_gpu_image_session(
     if authorization.backend == RuntimeBackend::Cpu {
         return Err(invalid("GPU dispatch cannot use the CPU backend"));
     }
+    // The AEXRMA1 authorization manifest is staged beside the plug-in, which
+    // an in-place launch (issue #751) has no staged directory for.
+    if !input.dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "an in-place dispatch does not support GPU runtime authorization yet",
+        ));
+    }
     authorization
         .module_report
         .authorize_dispatch(&authorization.session_identity, authorization.backend)?;
@@ -75,6 +92,13 @@ pub(crate) fn dispatch_secure_gpu_image_session_on_current_desktop(
 ) -> io::Result<crate::secure_launch::SecureSessionProcess> {
     if authorization.backend == RuntimeBackend::Cpu {
         return Err(invalid("GPU dispatch cannot use the CPU backend"));
+    }
+    // The AEXRMA1 authorization manifest is staged beside the plug-in, which
+    // an in-place launch (issue #751) has no staged directory for.
+    if !input.dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "an in-place dispatch does not support GPU runtime authorization yet",
+        ));
     }
     authorization
         .module_report
@@ -121,6 +145,31 @@ fn dispatch_secure_image_session_with_policy(
     let worker_program = input
         .repository
         .join(input.worker_kind.repository_relative_program());
+    if !input.dependency_search_dirs.is_empty() {
+        validate_in_place_input(&input.dependencies, true, &input.plugin)?;
+        let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
+        let admitted = admit_local_worker(input.repository, &worker_program)?;
+        let mut args_after_plugin = input.args_after_plugin.to_vec();
+        args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
+        let request = SecureLaunchRequest {
+            worker_program: &worker_program,
+            worker_expected_sha256: admitted.sha256,
+            worker_expected_size: admitted.size,
+            plugin_basename: None,
+            args_before_plugin: input.args_before_plugin,
+            args_after_plugin: &args_after_plugin,
+            repository: input.repository,
+            require_module_audit: true,
+        };
+        let mut process = crate::secure_launch::secure_launch_session_in_place(
+            &input.plugin.path,
+            request,
+            session,
+            desktop_policy,
+        )?;
+        process.record_worker_freshness_warning(admitted.freshness_warning);
+        return Ok(process);
+    }
     let main = load_entry(input.plugin)?;
     let plugin_basename = main.relative_basename.clone();
     let dependencies = input
@@ -375,6 +424,100 @@ pub fn dispatch_secure_image_with_resources(
     dispatch_secure_image_impl(input, resources, None)
 }
 
+/// Validates and joins the in-place dependency search directories (issue
+/// #751) into the `--dependency-dirs-v1` argv value: each directory must be
+/// an absolute, canonicalizable directory whose canonical form does not
+/// contain the `;` separator, and the bounded count matches the worker's
+/// re-validation.
+fn joined_dependency_search_dirs(dirs: &[PathBuf]) -> io::Result<String> {
+    const MAX_SEARCH_DIRS: usize = 16;
+    let mut joined: Vec<String> = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        if !dir.is_absolute() {
+            return Err(invalid("dependency search directory must be absolute"));
+        }
+        let canonical = std::fs::canonicalize(dir).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("dependency search directory is unavailable: {error}"),
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(invalid("dependency search directory is not a directory"));
+        }
+        // `canonicalize` returns verbatim `\\?\C:\...` paths on Windows; hand
+        // the worker the plain form like every other path that crosses the
+        // argv boundary (issue #231's aux-manifest lesson).
+        let plain = strip_extended_prefix(&canonical);
+        let text = plain
+            .to_str()
+            .ok_or_else(|| invalid("dependency search directory must be UTF-8"))?
+            .to_owned();
+        if text.contains(';') {
+            return Err(invalid(
+                "dependency search directory must not contain the ';' separator",
+            ));
+        }
+        if !joined.iter().any(|seen| seen.eq_ignore_ascii_case(&text)) {
+            joined.push(text);
+        }
+    }
+    if joined.is_empty() {
+        return Err(invalid("dependency search directories are empty"));
+    }
+    // Bounded after dedupe so a caller repeating one directory is not
+    // rejected for a set the worker would accept.
+    if joined.len() > MAX_SEARCH_DIRS {
+        return Err(invalid("too many dependency search directories"));
+    }
+    let joined = joined.join(";");
+    // The worker re-validates the joined value against the same bound; fail
+    // here so an oversized launch never reaches it as an opaque worker exit.
+    const MAX_JOINED_LENGTH: usize = 32768;
+    if joined.len() > MAX_JOINED_LENGTH {
+        return Err(invalid("dependency search directories are too long"));
+    }
+    Ok(joined)
+}
+
+/// Strip the Windows `\\?\` (or `\\?\UNC\`) extended-length prefix; the same
+/// de-verbatim rule as `types_and_transport::strip_extended_prefix` and the
+/// minidump/trace policies (issue #231). Identity on plain paths.
+fn strip_extended_prefix(path: &Path) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// The shared precondition of both in-place dispatch shapes (issue #751):
+/// the closure is the loader's job, so approved dependency artifacts and
+/// sealed resources cannot ride an in-place launch.
+fn validate_in_place_input(
+    dependencies: &[ApprovedImageArtifact],
+    resources_empty: bool,
+    plugin: &ApprovedImageArtifact,
+) -> io::Result<()> {
+    if !dependencies.is_empty() {
+        return Err(invalid(
+            "an in-place dispatch resolves dependencies by search directory, not by staged artifact",
+        ));
+    }
+    if !resources_empty {
+        return Err(invalid(
+            "an in-place dispatch reads data resources from the plugin's own directory",
+        ));
+    }
+    if !plugin.path.is_absolute() {
+        return Err(invalid("in-place plugin path must be absolute"));
+    }
+    Ok(())
+}
+
 fn dispatch_secure_image_impl(
     input: SecureImageDispatch<'_>,
     resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
@@ -384,6 +527,34 @@ fn dispatch_secure_image_impl(
     let worker_program = input
         .repository
         .join(input.worker_kind.repository_relative_program());
+    if !input.dependency_search_dirs.is_empty() {
+        validate_in_place_input(&input.dependencies, resources.is_empty(), &input.plugin)?;
+        let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
+        let admitted = admit_local_worker(input.repository, &worker_program)?;
+        let mut args_after_plugin = input.args_after_plugin.to_vec();
+        args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
+        let request = SecureLaunchRequest {
+            worker_program: &worker_program,
+            worker_expected_sha256: admitted.sha256,
+            worker_expected_size: admitted.size,
+            plugin_basename: None,
+            args_before_plugin: input.args_before_plugin,
+            args_after_plugin: &args_after_plugin,
+            repository: input.repository,
+            // Recorded, never enforced (issue #730/#751): the worker emits
+            // the loaded-module record and an unconfirmable list rides the
+            // result as a warning.
+            require_module_audit: true,
+        };
+        let mut result = crate::secure_launch::secure_launch_in_place(
+            &input.plugin.path,
+            request,
+            input.timeout,
+            process_memory_limit,
+        )?;
+        result.worker_freshness_warning = admitted.freshness_warning;
+        return Ok(result);
+    }
     let main = load_entry(input.plugin)?;
     let plugin_basename = main.relative_basename.clone();
     let dependencies = input
@@ -728,6 +899,7 @@ mod tests {
             worker_kind: WorkerKind::Render,
             plugin,
             dependencies: vec![],
+            dependency_search_dirs: Vec::new(),
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
@@ -737,6 +909,138 @@ mod tests {
             error.to_string(),
             "local worker binary is missing or unreadable"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // --- in-place dispatch (issue #751) --------------------------------------
+
+    #[test]
+    fn in_place_dispatch_rejects_staged_dependencies_and_relative_plugins() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-secure-image-dispatch-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let plugin = artifact(&root, "plugin.plugin", b"plugin");
+        let dependency = artifact(&root, "dependency.dll", b"dependency");
+
+        // Staged dependency artifacts and search directories describe two
+        // different owners of closure resolution; carrying both is a caller
+        // bug and must not silently prefer either.
+        let error = dispatch_secure_image(SecureImageDispatch {
+            repository: &root,
+            worker_kind: WorkerKind::Render,
+            plugin: plugin.clone(),
+            dependencies: vec![dependency],
+            dependency_search_dirs: vec![root.clone()],
+            args_before_plugin: &[],
+            args_after_plugin: &[],
+            timeout: Some(Duration::from_secs(1)),
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("in-place dispatch"));
+
+        let error = dispatch_secure_image(SecureImageDispatch {
+            repository: &root,
+            worker_kind: WorkerKind::Render,
+            plugin: ApprovedImageArtifact {
+                path: PathBuf::from("relative.plugin"),
+                expected_sha256: plugin.expected_sha256,
+                expected_size: plugin.expected_size,
+            },
+            dependencies: vec![],
+            dependency_search_dirs: vec![root.clone()],
+            args_before_plugin: &[],
+            args_after_plugin: &[],
+            timeout: Some(Duration::from_secs(1)),
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "in-place plugin path must be absolute");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn in_place_search_dirs_are_canonicalized_bounded_and_separator_free() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-search-dirs-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+
+        // Relative and missing directories fail closed before any launch.
+        let error = joined_dependency_search_dirs(&[PathBuf::from("relative")]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(joined_dependency_search_dirs(&[root.join("missing")]).is_err());
+
+        // A directory whose name carries the separator cannot be encoded.
+        let hostile = root.join("with;separator");
+        fs::create_dir(&hostile).unwrap();
+        let error = joined_dependency_search_dirs(&[hostile]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("separator"));
+
+        // The bounded count matches the worker's re-validation, judged after
+        // dedupe so only genuinely distinct directories count.
+        let too_many: Vec<PathBuf> = (0..17)
+            .map(|index| {
+                let dir = root.join(format!("dir-{index}"));
+                fs::create_dir(&dir).unwrap();
+                dir
+            })
+            .collect();
+        assert!(joined_dependency_search_dirs(&too_many).is_err());
+        assert!(joined_dependency_search_dirs(&too_many[..16]).is_ok());
+
+        // Case-insensitive duplicates collapse to one canonical entry, and the
+        // worker receives the plain (de-verbatim) form (issue #231).
+        let joined = joined_dependency_search_dirs(&[root.clone(), root.clone()]).unwrap();
+        assert!(
+            !joined.contains(';'),
+            "one directory, no separator: {joined}"
+        );
+        assert!(
+            !joined.starts_with(r"\\?\"),
+            "worker paths are de-verbatim: {joined}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn in_place_dispatch_rejects_sealed_resources() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-secure-image-dispatch-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let plugin = artifact(&root, "plugin.plugin", b"plugin");
+        let resource = root.join("Film Stocks");
+        fs::create_dir(&resource).unwrap();
+        let resource_file = resource.join("stock.grain");
+        fs::write(&resource_file, b"grain").unwrap();
+        let entry = crate::sealed_load_tree::SealedResourceEntry {
+            source: resource_file,
+            relative_path: "Film Stocks/stock.grain".into(),
+            expected_sha256: Sha256::digest(b"grain").into(),
+            expected_size: 5,
+        };
+        let error = dispatch_secure_image_with_resources(
+            SecureImageDispatch {
+                repository: &root,
+                worker_kind: WorkerKind::L2,
+                plugin,
+                dependencies: vec![],
+                dependency_search_dirs: vec![root.clone()],
+                args_before_plugin: &[],
+                args_after_plugin: &[],
+                timeout: Some(Duration::from_secs(1)),
+            },
+            vec![entry],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("data resources"));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -763,6 +1067,7 @@ mod tests {
             worker_kind: WorkerKind::Render,
             plugin,
             dependencies: vec![],
+            dependency_search_dirs: Vec::new(),
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
@@ -1086,6 +1391,7 @@ mod tests {
             worker_kind: WorkerKind::Smart,
             plugin,
             dependencies: vec![dependency],
+            dependency_search_dirs: Vec::new(),
             args_before_plugin: &["--before".into()],
             args_after_plugin: &["--after".into()],
             timeout: Some(Duration::from_secs(1)),
@@ -1124,6 +1430,7 @@ mod tests {
                 expected_size: 1,
             },
             dependencies: vec![],
+            dependency_search_dirs: Vec::new(),
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),

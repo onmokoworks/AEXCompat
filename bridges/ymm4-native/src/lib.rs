@@ -163,6 +163,7 @@ fn open_session(
         conformance_render_settings: None,
         layers: &[],
         dependencies: Vec::new(),
+        dependency_search_dirs: Vec::new(),
         width,
         height,
         pixel_format: RenderPixelFormat::Argb8,

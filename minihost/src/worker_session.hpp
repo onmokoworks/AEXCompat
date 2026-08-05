@@ -4,6 +4,7 @@
 #include "worker_runtime_admission.hpp"
 
 #include <filesystem>
+#include <vector>
 
 namespace aexcompat {
 class TraceWriter;
@@ -94,12 +95,16 @@ class WorkerSession final {
   bool capture_terminal_audit() noexcept;
   void stop_trace() noexcept;
   void unload_module() noexcept;
+  void release_directory_cookies() noexcept;
   void restore_stdout() noexcept;
   void emit_audit_failure() noexcept;
 
   std::filesystem::path plugin_path_;
   HMODULE module_{};
   DLL_DIRECTORY_COOKIE sealed_directory_cookie_{};
+  // In-place dependency search directory cookies (issue #751); released in
+  // the same lifecycle order as the sealed cookie.
+  std::vector<DLL_DIRECTORY_COOKIE> search_directory_cookies_{};
   RuntimeStdoutRestore restore_native_stdout_{};
   bool stdout_redirected_{};
   bool terminal_audit_captured_{};

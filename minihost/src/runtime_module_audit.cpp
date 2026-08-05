@@ -27,6 +27,10 @@ constexpr std::size_t kMaxAuditFailureRejections = 16;
 // legacy fixed-bound behavior.
 std::size_t g_cluster_module_bound = 0;
 std::set<std::string> g_declared_plugin_basenames;
+// In-place load mode (issue #751): dependency search directories admitted at
+// runtime admission, already canonicalized by configure below. A module whose
+// parent is one of these roots classifies as `plugin`.
+std::vector<std::filesystem::path> g_audit_search_roots;
 
 std::size_t audit_module_bound() {
   return g_cluster_module_bound != 0 ? g_cluster_module_bound : kMaxAuditedModules;
@@ -301,6 +305,11 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
         snapshot.plugin.push_back(basename);
       }
     }
+    else if (std::any_of(g_audit_search_roots.begin(), g_audit_search_roots.end(),
+                         [&](const std::filesystem::path& root) {
+                           return same_path(module_path.parent_path(), root);
+                         }))
+      snapshot.plugin.push_back(basename);
     else if (same_path(module_path.parent_path(), system32)) snapshot.system32.push_back(basename);
     else if (is_winsxs_module(module_path, winsxs_root) &&
              !contains_reparse_component(module_buffer.data()))
@@ -317,8 +326,12 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
   return snapshot;
 }
 
+bool module_audit_observing() {
+  return g_module_audit.required || g_module_audit.recorded;
+}
+
 void accumulate_module_audit(const ModuleAuditSnapshot& snapshot) {
-  if (!g_module_audit.required) return;
+  if (!module_audit_observing()) return;
   ++g_module_audit.phase_count;
   // Cluster sessions may only WIDEN the historical fixed cap to the manifest's
   // declared module_bound (design §5); it never shrinks, so the fixed-cap
@@ -411,6 +424,15 @@ void configure_module_audit_cluster(std::size_t module_bound,
   g_declared_plugin_basenames.clear();
   for (const std::string& basename : declared_plugin_basenames)
     g_declared_plugin_basenames.insert(lowercase(basename));
+}
+
+void configure_module_audit_search_roots(
+    const std::vector<std::filesystem::path>& roots) {
+  g_audit_search_roots.clear();
+  for (const std::filesystem::path& root : roots) {
+    std::filesystem::path canonical;
+    if (canonical_path(root, canonical)) g_audit_search_roots.push_back(canonical);
+  }
 }
 
 void record_module_audit_epoch(uint32_t plugin_index,
@@ -559,12 +581,18 @@ LoadedModuleProvenance classify_loaded_module_provenance(
         return LoadedModuleProvenance::system;
     }
 
-    if (!g_module_audit.required || g_module_audit.plugin_path.empty())
+    if (!module_audit_observing() || g_module_audit.plugin_path.empty())
       return LoadedModuleProvenance::unrecognized;
     std::filesystem::path plugin_root;
-    if (!canonical_path(g_module_audit.plugin_path.parent_path(),
-                        plugin_root) ||
-        !same_path(module_path.parent_path(), plugin_root))
+    const bool in_plugin_root =
+        canonical_path(g_module_audit.plugin_path.parent_path(), plugin_root) &&
+        same_path(module_path.parent_path(), plugin_root);
+    const bool in_search_root = std::any_of(
+        g_audit_search_roots.begin(), g_audit_search_roots.end(),
+        [&](const std::filesystem::path& root) {
+          return same_path(module_path.parent_path(), root);
+        });
+    if (!in_plugin_root && !in_search_root)
       return LoadedModuleProvenance::unrecognized;
     const std::string basename = audit_basename(module_path);
     const auto observed = [&](const std::vector<std::string>& modules) {
@@ -581,14 +609,14 @@ LoadedModuleProvenance classify_loaded_module_provenance(
 }
 
 ModuleAuditSnapshot capture_module_audit() {
-  if (!g_module_audit.required) return {};
+  if (!module_audit_observing()) return {};
   ModuleAuditSnapshot snapshot = audit_loaded_modules(g_module_audit.plugin_path);
   accumulate_module_audit(snapshot);
   return snapshot;
 }
 
 void capture_module_audit_phase() {
-  if (!g_module_audit.required) return;
+  if (!module_audit_observing()) return;
   accumulate_module_audit(audit_loaded_modules(g_module_audit.plugin_path));
 }
 
@@ -599,9 +627,13 @@ bool module_audit_passed() {
 
 std::string module_audit_json() {
   std::ostringstream output;
+  // A recorded (in-place, #751) audit serializes the same passed/failed
+  // judgement as a required one; only the enforcement differs, and that
+  // lives in the lifecycle paths, not here.
   output << "{\"schema\":1,\"status\":\""
-         << (g_module_audit.required
-                 ? (module_audit_passed() ? "passed" : "failed")
+         << (module_audit_observing()
+                 ? (g_module_audit.observed_union.status == "passed" ? "passed"
+                                                                     : "failed")
                  : "not_required")
          << "\",\"post_load\":" << module_audit_snapshot_json(g_module_audit.post_load)
          << ",\"pre_unload\":" << module_audit_snapshot_json(g_module_audit.pre_unload)

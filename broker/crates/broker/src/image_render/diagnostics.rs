@@ -109,6 +109,7 @@ fn dispatch_approved_image(
         },
         // Session approval currently covers only the selected plugin image.
         dependencies: vec![],
+        dependency_search_dirs: Vec::new(),
         args_before_plugin,
         args_after_plugin,
         timeout,
@@ -134,6 +135,7 @@ fn dispatch_approved_image_with_dependencies(
             expected_size: fs::metadata(plugin_path)?.len(),
         },
         dependencies,
+        dependency_search_dirs: Vec::new(),
         args_before_plugin,
         args_after_plugin,
         timeout,

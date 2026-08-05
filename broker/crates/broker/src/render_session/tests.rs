@@ -618,6 +618,7 @@ fn open_rejects_timing_the_worker_could_never_render() {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width: 8,
             height: 4,
             pixel_format: RenderPixelFormat::Argb8,
@@ -634,6 +635,53 @@ fn open_rejects_timing_the_worker_could_never_render() {
         };
         assert_eq!(error.to_string(), "render session timing is invalid");
     }
+}
+
+#[test]
+fn open_rejects_in_place_search_dirs_combined_with_staged_dependencies() {
+    // Both closure owners on one open is a caller bug; rejected before any
+    // file or transport work, so the fake paths are never touched.
+    let result = RenderSession::open(SessionOpenRequest {
+        repository: Path::new("missing-repository"),
+        plugin_path: Path::new("missing-plugin.aex"),
+        plugin_sha256: &"0".repeat(64),
+        parameters: None,
+        payload_override: None,
+        parameter_animation: None,
+        aux_manifest: None,
+        world_dump_dir: None,
+        output_checksum_detail: false,
+        mask_trailer: None,
+        spatial_trailer: None,
+        render_environment_trailer: None,
+        audio_trailer: None,
+        alpha_as_coverage_params: &[],
+        conformance_render_settings: None,
+        layers: &[],
+        dependencies: vec![crate::secure_image_dispatch::ApprovedImageArtifact {
+            path: std::path::PathBuf::from("missing-dependency.dll"),
+            expected_sha256: [0; 32],
+            expected_size: 1,
+        }],
+        dependency_search_dirs: vec![std::path::PathBuf::from(r"C:\missing-search-dir")],
+        width: 8,
+        height: 4,
+        pixel_format: RenderPixelFormat::Argb8,
+        time_step: 1,
+        total_time: 300,
+        time_scale: 30,
+        frame_deadline: Duration::from_secs(1),
+        smart: false,
+        gpu_backend: RenderGpuBackend::Cpu,
+        gpu_runtime_policy: None,
+    });
+    let Err(error) = result else {
+        panic!("in-place search dirs combined with staged dependencies must be rejected");
+    };
+    assert_eq!(
+        error.to_string(),
+        "an in-place session resolves dependencies by search directory, not by staged artifact"
+    );
 }
 
 #[test]

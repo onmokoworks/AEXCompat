@@ -21,6 +21,10 @@ struct AuxiliaryOptionHooks {
   // auxiliary option for cluster sessions (render swap / discovery session).
   // Null on paths that never carry it.
   bool (*load_cluster_manifest)(void* context, const wchar_t* value){};
+  // Optional (issue #751): captures the `--dependency-dirs-v1 <dirs>` value
+  // (absolute directories joined by ';') that switches admission to the
+  // in-place load mode. Null on paths that never carry it.
+  bool (*set_dependency_search_dirs)(void* context, const wchar_t* value){};
 };
 
 struct AuxiliaryOptionResult {

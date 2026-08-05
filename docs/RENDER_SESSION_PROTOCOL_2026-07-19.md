@@ -120,6 +120,7 @@ aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
     [--conformance-render-settings-v1 <v1|mode|0|-|0|renderer>]
     [--aux-manifest-v1 <path>] [--parameter-animation-v1 <path>]
     [--dump-worlds-v1 <dir>] [--output-checksum-detail-v1 1] [--minidump-v1 <dir>]
+    [--dependency-dirs-v1 <dir;dir;...>]
 ```
 
 静的コンテキスト trailer は one-shot と同じ位置引数順 (mask → spatial →
@@ -128,6 +129,15 @@ auxiliary option が tail)。audio-source trailer (`session-audio:v1|`) は
 静的コンテキストのさらに後ろ、位置引数の最末尾に置く (#339)。worker は
 auxiliary option を tail から剥がした後、audio → render → spatial → mask の
 順に位置引数末尾から剥がして 10 スロットのセッション契約に還元する。
+
+`--dependency-dirs-v1 <dir;dir;...>` (issue #751) は in-place load mode の
+auxiliary option: broker が検証・canonical 化・de-verbatim した絶対ディレクトリ
+(';' 連結、重複除去後 16 個以内) を運び、worker admission が各ディレクトリを
+`AddDllDirectory` してから positional slot の**実パス**の AEX を
+`LOAD_LIBRARY_SEARCH_USER_DIRS` 込みでロードする。このモードでは sealed staging
+は行われず、module audit は recorded (記録のみ、enforce しない)。staged
+dependencies / sealed resources / GPU runtime authorization / cluster との
+併用は broker が明示拒否する。
 
 `session-audio:v1|<samples>|<rate>|<path>` は classic session 専用 (broker が
 SmartFX + audio を拒否するため smart session 側は剥がさない)。one-shot の

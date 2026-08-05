@@ -2661,4 +2661,22 @@ mod tests {
         );
         assert_eq!(runtime_backend(RenderGpuBackend::Cpu), None);
     }
+
+    #[test]
+    fn in_place_inspection_requires_search_dirs_before_touching_the_plugin() {
+        // The empty-dirs rejection fires before any file access, so the fake
+        // path is never read (issue #751).
+        let error = inspect_experimental_in_place(
+            std::path::Path::new("missing-repository"),
+            std::path::Path::new("missing-plugin.aex"),
+            &"0".repeat(64),
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires at least one dependency search directory")
+        );
+    }
 }

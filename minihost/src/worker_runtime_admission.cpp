@@ -18,6 +18,12 @@ void remove_directory_cookie(DLL_DIRECTORY_COOKIE& cookie) noexcept {
   cookie = nullptr;
 }
 
+void remove_directory_cookies(
+    std::vector<DLL_DIRECTORY_COOKIE>& cookies) noexcept {
+  for (DLL_DIRECTORY_COOKIE& cookie : cookies) remove_directory_cookie(cookie);
+  cookies.clear();
+}
+
 bool pipl_resource_is_aegp(const unsigned char* bytes,
                            std::size_t size) noexcept {
   constexpr std::size_t kMaxPiplBytes = 1024 * 1024;
@@ -123,7 +129,8 @@ int admit_runtime(const RuntimeHostHooks& hooks,
     return report_load_failure("set_default_dll_directories", GetLastError());
   }
   // Static imports use DLL_LOAD_DIR below. Delay-load helpers call
-  // LoadLibrary(name) later, so only an authenticated sealed root is admitted
+  // LoadLibrary(name) later, so only an authenticated sealed root or the
+  // broker-validated in-place search directories (issue #751) are admitted
   // to the process-wide USER_DIRS search set. PATH/CWD and arbitrary absolute
   // paths remain excluded by SetDefaultDllDirectories.
   DLL_DIRECTORY_COOKIE sealed_directory_cookie{};
@@ -133,16 +140,44 @@ int admit_runtime(const RuntimeHostHooks& hooks,
       return report_load_failure("add_dll_directory", GetLastError());
     }
   }
+  std::vector<DLL_DIRECTORY_COOKIE> search_directory_cookies;
+  const auto remove_cookies = [&]() noexcept {
+    remove_directory_cookies(search_directory_cookies);
+    remove_directory_cookie(sealed_directory_cookie);
+  };
+  for (const std::filesystem::path& directory :
+       request.dependency_search_dirs) {
+    const DLL_DIRECTORY_COOKIE cookie = AddDllDirectory(directory.c_str());
+    if (!cookie) {
+      const DWORD error = GetLastError();
+      remove_cookies();
+      return report_load_failure("add_dll_directory", error);
+    }
+    search_directory_cookies.push_back(cookie);
+  }
+  // In-place loads (issue #751) resolve the plug-in's static imports through
+  // the USER_DIRS search set as well, because the dependency closure lives in
+  // its real directories instead of beside a staged copy.
+  const bool in_place = !request.dependency_search_dirs.empty();
   HMODULE module = LoadLibraryExW(plugin_path.c_str(), nullptr,
-      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32 |
+      (in_place ? LOAD_LIBRARY_SEARCH_USER_DIRS : 0));
   if (!module) {
     const DWORD error = GetLastError();
-    remove_directory_cookie(sealed_directory_cookie);
+    remove_cookies();
     return report_load_failure("load_library", error);
   }
   ModuleAuditReport& audit = module_audit_report();
-  audit.required = sealed;
+  // Record, never enforce (issue #678/#751): the in-place route captures the
+  // loaded-module set as provenance, and no status here fails the launch.
+  // `sealed` is only a directory-name observation, so a real directory that
+  // happens to carry the staging prefix must not turn an in-place launch
+  // into an enforced audit; in-place wins.
+  audit.required = sealed && !in_place;
+  audit.recorded = in_place;
   audit.plugin_path = plugin_path;
+  if (in_place)
+    configure_module_audit_search_roots(request.dependency_search_dirs);
   if (audit.required) {
     audit.post_load = capture_module_audit();
     if (audit.post_load.status != "passed") {
@@ -151,18 +186,21 @@ int admit_runtime(const RuntimeHostHooks& hooks,
                    "\"status\":\"module_audit_failed\",\"module_audit\":"
                 << module_audit_json() << "}\n";
       FreeLibrary(module);
-      remove_directory_cookie(sealed_directory_cookie);
+      remove_cookies();
       return 14;
     }
+  } else if (audit.recorded) {
+    audit.post_load = capture_module_audit();
   }
   if (!hooks.redirect_native_stdout()) {
     FreeLibrary(module);
-    remove_directory_cookie(sealed_directory_cookie);
+    remove_cookies();
     return 13;
   }
   context.plugin_path = plugin_path;
   context.module = module;
   context.sealed_directory_cookie = sealed_directory_cookie;
+  context.search_directory_cookies = std::move(search_directory_cookies);
   context.stdout_redirected = true;
   context.restore_native_stdout = hooks.restore_native_stdout;
   return 0;
@@ -173,6 +211,7 @@ void release_runtime_context(RuntimeContext& context) noexcept {
     FreeLibrary(context.module);
     context.module = nullptr;
   }
+  remove_directory_cookies(context.search_directory_cookies);
   remove_directory_cookie(context.sealed_directory_cookie);
   if (context.stdout_redirected && context.restore_native_stdout) {
     context.restore_native_stdout();
@@ -196,6 +235,32 @@ int prepare_runtime_request(const wchar_t* plugin_argument,
     if (!authorization_manifest) return 2;
     request.authorize_runtime_modules = true;
     request.authorization_manifest = authorization_manifest;
+  }
+  return 0;
+}
+
+int apply_dependency_search_dirs(const wchar_t* joined,
+                                 RuntimeAdmissionRequest& request) {
+  constexpr std::size_t kMaxSearchDirs = 16;
+  constexpr std::size_t kMaxJoinedLength = 32768;
+  if (!joined || !*joined) return 2;
+  const std::wstring text(joined);
+  if (text.size() > kMaxJoinedLength) return 2;
+  request.dependency_search_dirs.clear();
+  std::size_t start = 0;
+  while (start <= text.size()) {
+    const std::size_t end = text.find(L';', start);
+    const std::wstring entry = text.substr(
+        start, end == std::wstring::npos ? std::wstring::npos : end - start);
+    const std::filesystem::path directory(entry);
+    if (entry.empty() || !directory.is_absolute() ||
+        request.dependency_search_dirs.size() >= kMaxSearchDirs) {
+      request.dependency_search_dirs.clear();
+      return 2;
+    }
+    request.dependency_search_dirs.push_back(directory);
+    if (end == std::wstring::npos) break;
+    start = end + 1;
   }
   return 0;
 }

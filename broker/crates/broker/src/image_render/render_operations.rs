@@ -1462,6 +1462,31 @@ pub fn inspect_experimental_with_approved_dependencies_and_resources(
     )
 }
 
+/// In-place variant (issue #751): the plug-in loads from its real path and
+/// its dependency closure resolves through `dependency_search_dirs` inside
+/// the worker, so nothing is staged and no dependency closure is walked.
+pub fn inspect_experimental_in_place(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    if dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "in-place inspection requires at least one dependency search directory",
+        ));
+    }
+    inspect_experimental_impl(
+        repository,
+        plugin_path,
+        approved_sha256,
+        Vec::new(),
+        dependency_search_dirs,
+        Vec::new(),
+        None,
+    )
+}
+
 pub fn inspect_experimental_with_runtime_policy(
     repository: &Path,
     plugin_path: &Path,
