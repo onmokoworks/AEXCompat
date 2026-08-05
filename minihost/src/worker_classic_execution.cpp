@@ -2,12 +2,27 @@
 namespace aexcompat::worker_runtime::classic_execution {
 LifecycleResult begin_lifecycle(void* host, const LifecycleHooks& h) {
   LifecycleResult result{};
-  if (!host || !h.begin || !h.end || !h.dispose_lifecycle) {
+  if (!host || !h.begin || !h.setup_error || !h.end || !h.dispose_lifecycle) {
     result.error = -5;
     return result;
   }
   result.lifecycle = h.begin(host);
   if (!result.lifecycle) { result.error = -5; return result; }
+  // SEQUENCE_SETUP or FRAME_SETUP did not succeed. Everything past this point
+  // dispatches further selectors into the plug-in, and dispatch_render's
+  // short-circuit only holds if that reaches LifecycleResult::error. It did
+  // not: `begin` returns the lifecycle opaquely, so the outcome stayed sealed
+  // inside it and the caller saw success. RENDER then ran against frame-local
+  // state that begin_frame returns before transferring, which is how eight AE
+  // 2026 effects took an access violation in RENDER whose FRAME_SETUP had
+  // already faulted - and because the SEH telemetry keeps only the last fault,
+  // the second one hid the first (issue #725).
+  //
+  // Stop here rather than at the caller: finish_lifecycle still runs the
+  // teardown, and end_frame/end_render already handle a frame that never
+  // started.
+  result.error = h.setup_error(result.lifecycle);
+  if (result.error != 0) return result;
   auto apply = [&](bool (*operation)(void*)) {
     if (result.error == 0 && operation && !operation(host)) result.error = -5;
   };

@@ -258,6 +258,8 @@ struct ClassicLifecycleOwner {
               : begin_frame_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data());
           return new (std::nothrow) RenderLifecycle(lifecycle);
         },
+        +[](void* lifecycle) {
+          return static_cast<RenderLifecycle*>(lifecycle)->setup_error; },
         +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
           return dispatch_render_click(h.entry, h.input, h.output, h.definitions); },
         +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
