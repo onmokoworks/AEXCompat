@@ -1737,6 +1737,84 @@
     }
 
     #[test]
+    fn vcomp_set_num_threads_records_a_bounded_request_but_remains_serial() {
+        const VCOMP_SET_THREADS: u64 = STUB_BASE + 0x180;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                VCOMP_SET_THREADS,
+                "VCOMP140.DLL",
+                "_vcomp_set_num_threads",
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::VcompSetNumThreads)
+        );
+
+        engine
+            .call_win64(VCOMP_SET_THREADS, [8, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_eq!(engine.unicorn.get_data().vcomp_requested_threads, Some(8));
+        assert_eq!(deterministic_import_i32("omp_get_max_threads"), Some(1));
+
+        engine
+            .call_win64(VCOMP_SET_THREADS, [2, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_eq!(engine.unicorn.get_data().vcomp_requested_threads, Some(2));
+        assert!(
+            test_engine(&[0xc3])
+                .unicorn
+                .get_data()
+                .vcomp_requested_threads
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn vcomp_set_num_threads_rejects_invalid_counts_without_losing_prior_state() {
+        const VCOMP_SET_THREADS: u64 = STUB_BASE + 0x190;
+        for invalid in [
+            0u64,
+            u32::MAX as u64,
+            (MAX_VCOMP_REQUESTED_THREADS + 1) as u64,
+        ] {
+            let mut engine = test_engine(&[0xc3]);
+            install_win64_import(
+                &mut engine.unicorn,
+                VCOMP_SET_THREADS,
+                "vcomp140.dll",
+                "_vcomp_set_num_threads",
+            )
+            .unwrap();
+            engine
+                .call_win64(VCOMP_SET_THREADS, [4, 0, 0, 0, 0, 0])
+                .unwrap();
+
+            let error = engine
+                .call_win64(VCOMP_SET_THREADS, [invalid, 0, 0, 0, 0, 0])
+                .unwrap_err();
+
+            assert!(
+                error.to_string().contains("requested thread count"),
+                "{error}"
+            );
+            assert_eq!(engine.unicorn.get_data().vcomp_requested_threads, Some(4));
+        }
+    }
+
+    #[test]
+    fn vcomp_set_num_threads_is_library_qualified_and_unknown_vcomp_stays_closed() {
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "_vcomp_set_num_threads"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        assert_eq!(
+            dispatch_win64_import("vcomp140.dll", "_vcomp_future_runtime_entry"),
+            Win64ImportDispatch::UnsupportedVcomp
+        );
+    }
+
+    #[test]
     fn plugin_data_v2_and_v1_callbacks_decode_distinct_win64_stack_arguments() {
         const CALLBACK_V2: u64 = STUB_BASE + 0x180;
         const CALLBACK_V1: u64 = STUB_BASE + 0x190;
