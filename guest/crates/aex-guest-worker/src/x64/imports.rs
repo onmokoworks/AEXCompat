@@ -56,6 +56,8 @@ enum LegacyWin64Import {
     QueryPerformanceCounter,
     QueryPerformanceFrequency,
     GetEnvironmentVariableA,
+    GetLastError,
+    SetLastError,
     FlsAlloc,
     FlsGetValue,
     FlsSetValue,
@@ -270,6 +272,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "GetEnvironmentVariableA") => {
             LegacyWin64Import::GetEnvironmentVariableA
         }
+        ("kernel32.dll", "GetLastError") => LegacyWin64Import::GetLastError,
+        ("kernel32.dll", "SetLastError") => LegacyWin64Import::SetLastError,
         ("kernel32.dll", "FlsAlloc") => LegacyWin64Import::FlsAlloc,
         ("kernel32.dll", "FlsGetValue") => LegacyWin64Import::FlsGetValue,
         ("kernel32.dll", "FlsSetValue") => LegacyWin64Import::FlsSetValue,
@@ -750,6 +754,15 @@ fn install_win64_import(
                     "install GetEnvironmentVariableA import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_environment_variable_a(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetLastError | LegacyWin64Import::SetLastError => {
+                uc("write last-error import return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install last-error import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_windows_last_error(unicorn, implementation);
                     }),
                 )?;
             }
@@ -1250,6 +1263,7 @@ fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
             "GetEnvironmentVariableA",
         )?;
         let Some(value) = deterministic_guest_environment_value(&name) else {
+            unicorn.get_data_mut().windows_last_error = ERROR_ENVVAR_NOT_FOUND;
             return Ok(0);
         };
         let required = u32::try_from(value.len() + 1)
@@ -1277,6 +1291,36 @@ fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
                 unicorn.get_data_mut().callback_error = Some(error);
             }
             let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_windows_last_error(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
+    let result = (|| -> Result<u64, String> {
+        match operation {
+            LegacyWin64Import::GetLastError => Ok(u64::from(
+                unicorn.get_data().windows_last_error,
+            )),
+            LegacyWin64Import::SetLastError => {
+                unicorn.get_data_mut().windows_last_error =
+                    read_win64_import_argument(unicorn, 0)? as u32;
+                Ok(0)
+            }
+            _ => Err("invalid last-error operation".into()),
+        }
+    })();
+    match result {
+        Ok(returned) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
             let _ = unicorn.emu_stop();
         }
     }
