@@ -821,21 +821,35 @@ mod tests {
     }
 
     fn in_place_dto() -> InPlaceClusterManifestDto {
+        #[cfg(windows)]
+        let (first, second, support, effects) = (
+            r"C:\effects\alpha.aex",
+            r"C:\effects\cyco\alpha.aex",
+            r"C:\ae\Support Files",
+            r"C:\effects",
+        );
+        #[cfg(not(windows))]
+        let (first, second, support, effects) = (
+            "/effects/alpha.aex",
+            "/effects/cyco/alpha.aex",
+            "/ae/Support Files",
+            "/effects",
+        );
         InPlaceClusterManifestDto {
             schema: IN_PLACE_CLUSTER_MANIFEST_SCHEMA.to_owned(),
             plugins: vec![
                 InPlaceClusterPluginDto {
-                    path: r"C:\effects\alpha.aex".into(),
+                    path: first.into(),
                     sha256: "a".repeat(64),
                     payload: None,
                 },
                 InPlaceClusterPluginDto {
-                    path: r"C:\effects\cyco\alpha.aex".into(),
+                    path: second.into(),
                     sha256: "b".repeat(64),
                     payload: None,
                 },
             ],
-            search_dirs: vec![r"C:\ae\Support Files".into(), r"C:\effects".into()],
+            search_dirs: vec![support.into(), effects.into()],
             module_bound: 4096,
         }
     }
@@ -844,15 +858,16 @@ mod tests {
     fn in_place_manifest_validates_and_round_trips() {
         let manifest = ValidatedInPlaceClusterManifest::validate(in_place_dto()).unwrap();
         assert_eq!(manifest.plugin_count(), 2);
+        let expected = in_place_dto();
         assert_eq!(
             manifest.plugin_path(0),
-            Some(Path::new(r"C:\effects\alpha.aex"))
+            Some(Path::new(&expected.plugins[0].path))
         );
         // Same basename in different directories is legal in place; identity
         // is the full path.
         assert_eq!(
             manifest.plugin_path(1),
-            Some(Path::new(r"C:\effects\cyco\alpha.aex"))
+            Some(Path::new(&expected.plugins[1].path))
         );
         let json = manifest.to_json().unwrap();
         let reparsed = ValidatedInPlaceClusterManifest::parse(json.as_bytes()).unwrap();
@@ -870,7 +885,11 @@ mod tests {
         assert!(ValidatedInPlaceClusterManifest::validate(verbatim).is_err());
 
         let mut colliding = in_place_dto();
-        colliding.plugins[1].path = r"C:\EFFECTS\ALPHA.AEX".into();
+        colliding.plugins[1].path = if cfg!(windows) {
+            r"C:\EFFECTS\ALPHA.AEX".into()
+        } else {
+            "/EFFECTS/ALPHA.AEX".into()
+        };
         assert!(ValidatedInPlaceClusterManifest::validate(colliding).is_err());
 
         let mut relative_dir = in_place_dto();
@@ -878,7 +897,15 @@ mod tests {
         assert!(ValidatedInPlaceClusterManifest::validate(relative_dir).is_err());
 
         let mut too_many_dirs = in_place_dto();
-        too_many_dirs.search_dirs = (0..17).map(|index| format!(r"C:\dir-{index}")).collect();
+        too_many_dirs.search_dirs = (0..17)
+            .map(|index| {
+                if cfg!(windows) {
+                    format!(r"C:\dir-{index}")
+                } else {
+                    format!("/dir-{index}")
+                }
+            })
+            .collect();
         assert!(ValidatedInPlaceClusterManifest::validate(too_many_dirs).is_err());
 
         let mut no_dirs = in_place_dto();
@@ -895,7 +922,11 @@ mod tests {
         let mut scattered = in_place_dto();
         scattered.plugins = (0..65)
             .map(|index| InPlaceClusterPluginDto {
-                path: format!(r"C:\scattered\dir-{index}\plugin.aex"),
+                path: if cfg!(windows) {
+                    format!(r"C:\scattered\dir-{index}\plugin.aex")
+                } else {
+                    format!("/scattered/dir-{index}/plugin.aex")
+                },
                 sha256: "a".repeat(64),
                 payload: None,
             })

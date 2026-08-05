@@ -12,11 +12,15 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
+        let requested_root = std::env::temp_dir().join(format!(
             "aexcompat-session-manifest-{:032x}",
             rand::random::<u128>()
         ));
-        fs::create_dir(&root).unwrap();
+        fs::create_dir(&requested_root).unwrap();
+        // macOS commonly exposes /var through the /private/var symlink. The
+        // manifest intentionally rejects paths containing symlink components,
+        // so the positive fixture must use the canonical directory it created.
+        let root = requested_root.canonicalize().unwrap();
         let main_path = root.join("main.plugin");
         fs::write(&main_path, b"main").unwrap();
         Self {
