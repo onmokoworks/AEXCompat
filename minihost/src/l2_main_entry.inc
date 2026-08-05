@@ -72,7 +72,7 @@ bool capture_l2_runtime_module_authorization(void*, const wchar_t* value) {
 }
 
 // Captures the cluster-session manifest path carried by a
-// `--cluster-manifest-v1` auxiliary option (issue #405): render sessions use
+// `--cluster-manifest-v2` auxiliary option: render sessions use
 // it for plug-in swap, the discovery session as its only launch input. Stored
 // in a global because the auxiliary-option hook runs during request parsing,
 // before runtime admission; the manifest itself is loaded and validated after
@@ -803,50 +803,15 @@ int run_discovery_session(const std::wstring& manifest_argument,
   if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 |
                                 LOAD_LIBRARY_SEARCH_USER_DIRS))
     return 11;
-  cluster::ClosurePins pins;
-  DLL_DIRECTORY_COOKIE sealed_cookie{};
-  if (manifest.in_place) {
-    // In-place session (issue #751, cluster-manifest-v2): admit the
-    // broker-validated search directories plus each plug-in's own directory
-    // into the process-wide USER_DIRS set. Cookies stay for the process
-    // lifetime (deferred release, issue #474). There is no pinned closure —
-    // dependencies load through each plug-in's imports and stay mapped
-    // because nothing is freed mid-process.
-    if (const int admit_error = cluster::admit_in_place_manifest_dirs(manifest))
-      return admit_error;
-    // Every admitted root classifies loaded modules in the recorded audit,
-    // so a dependency resolved from a search directory (or a retired
-    // plug-in's directory) records as `plugin` instead of `unknown`.
-    wr::configure_module_audit_search_roots(cluster::in_place_audit_roots(manifest));
-  } else {
-    sealed_cookie = AddDllDirectory(manifest.sealed_root.c_str());
-    if (!sealed_cookie) return 11;
-    if (!pins.pin(manifest, runtime_hooks.hash_file)) {
-      RemoveDllDirectory(sealed_cookie);
-      return 11;
-    }
-    // Deferred release (issue #474): this session never frees plug-in images
-    // or pins mid-process; everything unloads in one loader-ordered pass at
-    // process exit, so the closure's CRT atexit handlers (the dvacore
-    // notification registry, BIB) can never dereference an unmapped plug-in.
-    pins.suppress_release_on_destroy();
-  }
-  // The sealed session keeps the enforced declared-set audit (design §5);
-  // the in-place session records the loaded-module set without a declared
-  // narrowing and never fails on its status (record, never enforce,
-  // issue #678/#751). Both use the manifest's module bound as the bounded
-  // enumeration capacity.
-  wr::configure_module_audit_cluster(
-      manifest.module_bound,
-      manifest.in_place ? std::vector<std::string>{}
-                        : cluster::declared_basenames(manifest));
+  if (const int admit_error = cluster::admit_in_place_manifest_dirs(manifest))
+    return admit_error;
+  wr::configure_module_audit_search_roots(cluster::in_place_audit_roots(manifest));
+  wr::configure_module_audit_cluster(manifest.module_bound, {});
   wr::ModuleAuditReport& audit = wr::module_audit_report();
-  audit.required = !manifest.in_place;
-  audit.recorded = manifest.in_place;
+  audit.required = false;
+  audit.recorded = true;
   audit.plugin_path = cluster::plugin_path(manifest, 0);
   if (!runtime_hooks.redirect_native_stdout()) {
-    pins.release();
-    if (sealed_cookie) RemoveDllDirectory(sealed_cookie);
     return 13;
   }
 
@@ -1003,7 +968,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
       }
       HMODULE module = LoadLibraryExW(path.c_str(), nullptr,
           LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32 |
-          (manifest.in_place ? LOAD_LIBRARY_SEARCH_USER_DIRS : 0));
+          LOAD_LIBRARY_SEARCH_USER_DIRS);
       if (!module) load_error_kind = "load_failed";
       return module;
     };
@@ -1061,14 +1026,6 @@ int run_discovery_session(const std::wstring& manifest_argument,
         // The in-place session records the snapshot without judging it
         // (record, never enforce, issue #751).
         pre_unload = wr::capture_module_audit();
-        if (!manifest.in_place &&
-            (pre_unload.status != "passed" || !wr::module_audit_passed())) {
-          std::cerr << "stage:cluster_swap step=pre_unload_audit status="
-                    << pre_unload.status << " unknown=" << pre_unload.unknown_count
-                    << "\n" << std::flush;
-          swap_failure = true;
-          break;
-        }
         // Deferred release (issue #474): the outgoing plug-in image is
         // retired, not freed — its logical teardown already happened and it
         // stays mapped until process exit. Later snapshots keep listing it
@@ -1080,36 +1037,24 @@ int run_discovery_session(const std::wstring& manifest_argument,
       }
       HMODULE module = load_manifest_plugin(plugin_index);
       if (!module) {
-        if (manifest.in_place) {
-          // Plug-in-local on the in-place path (issue #751): report the
-          // structured cause and keep the session serving other members. The
-          // retired predecessor's epoch is still recorded — its pre_unload
-          // was captured above, and the paired snapshot is the state after
-          // the failed load (nothing new mapped) — so the record keeps
-          // matching what actually ran.
-          std::cerr << "stage:cluster_swap step=load_plugin index=" << plugin_index
-                    << " kind=" << load_error_kind << " error=" << GetLastError()
-                    << "\n" << std::flush;
-          if (outgoing_index >= 0)
-            wr::record_module_audit_epoch(static_cast<uint32_t>(outgoing_index),
-                                          std::move(pre_unload),
-                                          wr::capture_module_audit());
-          error_kind = load_error_kind;
-          std::string reply =
-              "{\"v\":1,\"type\":\"inspect_done\",\"plugin_index\":" +
-              std::to_string(plugin_index) + ",\"request_index\":" +
-              std::to_string(request_index) + ",\"status\":\"error\"" +
-              ",\"error_kind\":\"" + error_kind + "\"}";
-          if (!pipes.write_message(reply)) {
-            protocol_violation = true;
-            break;
-          }
-          continue;
-        }
         std::cerr << "stage:cluster_swap step=load_plugin index=" << plugin_index
-                  << " error=" << GetLastError() << "\n" << std::flush;
-        swap_failure = true;
-        break;
+                  << " kind=" << load_error_kind << " error=" << GetLastError()
+                  << "\n" << std::flush;
+        if (outgoing_index >= 0)
+          wr::record_module_audit_epoch(static_cast<uint32_t>(outgoing_index),
+                                        std::move(pre_unload),
+                                        wr::capture_module_audit());
+        error_kind = load_error_kind;
+        std::string reply =
+            "{\"v\":1,\"type\":\"inspect_done\",\"plugin_index\":" +
+            std::to_string(plugin_index) + ",\"request_index\":" +
+            std::to_string(request_index) + ",\"status\":\"error\"" +
+            ",\"error_kind\":\"" + error_kind + "\"}";
+        if (!pipes.write_message(reply)) {
+          protocol_violation = true;
+          break;
+        }
+        continue;
       }
       wr::ModuleAuditSnapshot post_load = wr::capture_module_audit();
       if (outgoing_index >= 0)
@@ -1122,14 +1067,6 @@ int run_discovery_session(const std::wstring& manifest_argument,
         // overwriting the baseline.
         audit.post_load = post_load;
       session_post_load_recorded = true;
-      if (!manifest.in_place &&
-          (post_load.status != "passed" || !wr::module_audit_passed())) {
-        std::cerr << "stage:cluster_swap step=post_load_audit status="
-                  << post_load.status << " unknown=" << post_load.unknown_count
-                  << "\n" << std::flush;
-        swap_failure = true;
-        break;
-      }
       current_module = module;
       current_index = plugin_index;
       g_plugin_file_path =
@@ -1608,16 +1545,9 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // invoke_entry_seh(entry, kParamsSetup)
   // invoke_entry_seh(entry, kGlobalSetdown)
 
-  // Cluster session wiring (closure-session design §2.2/§3, issue #405): a
-  // render session launched with `--cluster-manifest-v1` validates the
-  // manifest against the admitted launch plug-in (plugins[0]), pins the
-  // shared closure for the session lifetime, switches the module audit to
-  // the declared module_bound + basename set, and arms the swap hook the
-  // frame loop consults on swap_plugin messages. Every rejection is a
-  // fail-closed launch error before the session can start.
+  // In-place cluster session wiring (#751/#816).
   namespace cluster = aexcompat::worker_runtime::cluster;
   cluster::Manifest cluster_manifest;
-  cluster::ClosurePins cluster_pins;
   ClusterSwapContext cluster_swap_context;
   aexcompat::worker_render_session::SwapPluginHook cluster_swap_hook;
   if (is_render_worker() && invocation.render_session_mode &&
@@ -1629,42 +1559,16 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       if (*character > 0x7f) return session.finish(3);
       argv_sha256.push_back(static_cast<char>(*character));
     }
-    if (cluster_manifest.in_place) {
-      // In-place render cluster (issue #751): plugins[0] must be the file
-      // the admission loaded (full-path identity), the manifest's search
-      // union joins the USER_DIRS set the admission already opened from the
-      // argv dirs, and the recorded audit classifies against the union. No
-      // sealed root and no pins exist; the module audit stays recorded,
-      // never enforced.
-      if (!cluster::matches_launch_plugin(cluster_manifest, session.plugin_path(),
-                                          argv_sha256))
-        return session.finish(3);
-      if (const int admit_error =
-              cluster::admit_in_place_manifest_dirs(cluster_manifest))
-        return session.finish(admit_error);
-      aexcompat::worker_runtime::configure_module_audit_cluster(
-          cluster_manifest.module_bound, {});
-      aexcompat::worker_runtime::configure_module_audit_search_roots(
-          cluster::in_place_audit_roots(cluster_manifest));
-    } else {
-      std::error_code cluster_canonical_error;
-      const std::filesystem::path launch_plugin_root = std::filesystem::canonical(
-          session.plugin_path().parent_path(), cluster_canonical_error);
-      if (cluster_canonical_error ||
-          cluster_manifest.sealed_root != launch_plugin_root ||
-          !cluster::matches_launch_plugin(cluster_manifest, session.plugin_path(),
-                                          argv_sha256))
-        return session.finish(3);
-      aexcompat::worker_runtime::configure_module_audit_cluster(
-          cluster_manifest.module_bound,
-          cluster::declared_basenames(cluster_manifest));
-      if (!cluster_pins.pin(cluster_manifest, runtime_hooks.hash_file))
-        return session.finish(11);
-      // Deferred release (issue #474): this cluster session never frees
-      // plug-in images or pins mid-process; everything unloads in one
-      // loader-ordered pass at process exit.
-      cluster_pins.suppress_release_on_destroy();
-    }
+    if (!cluster::matches_launch_plugin(cluster_manifest, session.plugin_path(),
+                                        argv_sha256))
+      return session.finish(3);
+    if (const int admit_error =
+            cluster::admit_in_place_manifest_dirs(cluster_manifest))
+      return session.finish(admit_error);
+    aexcompat::worker_runtime::configure_module_audit_cluster(
+        cluster_manifest.module_bound, {});
+    aexcompat::worker_runtime::configure_module_audit_search_roots(
+        cluster::in_place_audit_roots(cluster_manifest));
     session.set_deferred_module_release();
     cluster_swap_context.session = &session;
     cluster_swap_context.entry = &entry;

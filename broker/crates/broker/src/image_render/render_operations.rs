@@ -1404,7 +1404,6 @@ pub fn inspect_experimental_with_diagnostics(
         plugin_path,
         approved_sha256,
         Vec::new(),
-        Vec::new(),
         None,
     )
 }
@@ -1420,7 +1419,6 @@ pub fn inspect_experimental_with_approved_dependencies(
         plugin_path,
         approved_sha256,
         dependencies,
-        Vec::new(),
         None,
     )
     .map(|(parameters, _)| parameters)
@@ -1437,28 +1435,6 @@ pub fn inspect_experimental_with_approved_dependencies_and_diagnostics(
         plugin_path,
         approved_sha256,
         dependencies,
-        Vec::new(),
-        None,
-    )
-}
-
-/// Resource-carrying variant (issue #362): sealed data resources
-/// (`<plugin dir>/<subdir>/` data files such as `Film Stocks/*.grain`) are
-/// staged into the sealed root with the same authentication strength as the
-/// DLL closure (docs/SEALED_DATA_RESOURCE_POLICY_2026-07-25.md).
-pub fn inspect_experimental_with_approved_dependencies_and_resources(
-    repository: &Path,
-    plugin_path: &Path,
-    approved_sha256: &str,
-    dependencies: Vec<ApprovedImageArtifact>,
-    resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
-) -> io::Result<(Vec<InteractiveParameter>, Value)> {
-    inspect_experimental_with_diagnostics_and_runtime_policy(
-        repository,
-        plugin_path,
-        approved_sha256,
-        dependencies,
-        resources,
         None,
     )
 }
@@ -1483,7 +1459,6 @@ pub fn inspect_experimental_in_place(
         approved_sha256,
         Vec::new(),
         dependency_search_dirs,
-        Vec::new(),
         None,
     )
 }
@@ -1504,7 +1479,6 @@ pub fn inspect_experimental_with_runtime_policy(
         repository,
         plugin_path,
         approved_sha256,
-        Vec::new(),
         Vec::new(),
         Some((policy, backend)),
     )

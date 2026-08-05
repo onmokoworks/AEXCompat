@@ -40,7 +40,7 @@ int parse_l2_modes(int argc, wchar_t** argv, InvocationState& target,
   // manifest is the only launch input; plug-ins load per inspect_plugin.
   target.discovery_session_mode = argc == 4 &&
       std::wstring(argv[1]) == L"--discovery-session-v1" &&
-      std::wstring(argv[2]) == L"--cluster-manifest-v1";
+      std::wstring(argv[2]) == L"--cluster-manifest-v2";
   if (target.discovery_session_mode) {
     target.cluster_manifest_path = argv[3];
     return 0;

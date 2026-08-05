@@ -1,6 +1,5 @@
 use crate::ExitClassification;
-use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
-use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult, secure_launch};
+use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult, secure_launch_without_plugin};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -777,45 +776,17 @@ pub fn launch_system_cuda_compute_probe(
     let worker_bytes = fs::read(worker_program)?;
     let worker_size = worker_bytes.len() as u64;
     let worker_sha256: [u8; 32] = Sha256::digest(&worker_bytes).into();
-    let tree = probe_guard_tree()?;
     let request = SecureLaunchRequest {
         worker_program,
         worker_expected_sha256: worker_sha256,
         worker_expected_size: worker_size,
-        plugin_basename: None,
         args_before_plugin: &[],
         args_after_plugin: &[],
         repository,
         require_module_audit: false,
     };
-    let result = secure_launch(tree, request, Some(timeout))?;
+    let result = secure_launch_without_plugin(request, Some(timeout), None)?;
     Ok(report_from_launch(result))
-}
-
-fn probe_guard_tree() -> io::Result<SealedLoadTree> {
-    let source = std::env::temp_dir().join(format!(
-        "aexcompat-cuda-probe-guard-{:032x}",
-        rand::random::<u128>()
-    ));
-    fs::create_dir(&source)?;
-    let source_file = source.join("probe.guard");
-    let bytes = b"aexcompat system CUDA probe guard";
-    fs::write(&source_file, bytes)?;
-    let tree = SealedLoadTree::create(
-        LoadEntry {
-            source: source_file,
-            relative_basename: "probe.guard".into(),
-            expected_sha256: Sha256::digest(bytes).into(),
-            expected_size: bytes.len() as u64,
-        },
-        Vec::new(),
-    );
-    let cleanup = fs::remove_dir_all(&source);
-    match (tree, cleanup) {
-        (Ok(tree), Ok(())) => Ok(tree),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-    }
 }
 
 fn report_from_launch(result: SecureLaunchResult) -> SystemCudaComputeProbeReport {

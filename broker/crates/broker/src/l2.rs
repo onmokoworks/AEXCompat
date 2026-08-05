@@ -1,7 +1,6 @@
 use crate::fixture_profiles::find_observation;
 use crate::host_core::approved_artifact::load_v2_load_tree;
-use crate::sealed_load_tree::SealedLoadTree;
-use crate::secure_launch::{SecureLaunchRequest, secure_launch};
+use crate::secure_launch::{SecureLaunchRequest, secure_launch_in_place};
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -84,25 +83,30 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
         return Err(invalid("output outside L2 result root"));
     }
     let approved = load_v2_load_tree(repository, id, policy.selection)?;
-    let plugin_basename = approved.main.relative_basename.clone();
     let plugin_sha256 = approved.main.expected_sha256;
-    let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
+    let plugin_path = fs::canonicalize(&approved.main.source)?;
+    let search_dirs = approved.dependency_search_dirs()?;
+    let joined = crate::secure_image_dispatch::joined_dependency_search_dirs(&search_dirs)?;
     let before = ["--l2".to_owned()];
-    let after = [hex_sha256(plugin_sha256)];
+    let after = [
+        hex_sha256(plugin_sha256),
+        "--dependency-dirs-v1".to_owned(),
+        joined,
+    ];
     let request = SecureLaunchRequest {
         worker_program: worker,
         worker_expected_sha256: approved.worker_sha256,
         worker_expected_size: approved.worker_byte_size,
-        plugin_basename: Some(&plugin_basename),
         args_before_plugin: &before,
         args_after_plugin: &after,
         repository,
         require_module_audit: true,
     };
-    let result = secure_launch(
-        tree,
+    let result = secure_launch_in_place(
+        &plugin_path,
         request,
         Some(Duration::from_millis(approved.timeout_ms)),
+        None,
     )?;
     let worker_report: Value = serde_json::from_str(result.stdout.trim()).unwrap_or_else(|_| {
         json!({

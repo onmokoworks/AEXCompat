@@ -736,14 +736,9 @@ fn route_session(
     // whose parameter layouts differ, so a layer slot valid for one member may
     // be a non-layer parameter in another, which the worker fails closed).
     //
-    // A search-root identity (in-place discovery, issue #751) pools only when
-    // render is in-place too: members sharing search roots need not share a
-    // closure, so a staged (sealed) cluster built from the opener's closure
-    // would fail their swaps. The A/B escape hatch therefore renders such
-    // effects on per-effect sessions.
-    let identity_pools = ctx.closure_identity.as_deref().is_some_and(|identity| {
-        !identity.starts_with("in-place:") || in_place_render_enabled()
-    });
+    // Issue #816: discovery and render are both in-place, so a search-root
+    // identity can always pool compatible members.
+    let identity_pools = ctx.closure_identity.is_some();
     if ctx.layer_slots.is_empty()
         && identity_pools
         && let Some(closure_identity) = &ctx.closure_identity
@@ -906,28 +901,15 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
             // the open request, and used by the frame loop below to tell "there
             // is no map to update" from "the map no longer fits".
             let dynamic_layer_open = config.layers.iter().any(|layer| layer.dynamic);
-            // In-place render (issue #751, the default): the worker resolves
-            // the closure through the search roots, so nothing is walked or
-            // staged here — the same route discovery inspected on. The
-            // staged pipeline re-resolves the closure the discovery pass
-            // sealed (issue #304) and stays selectable for A/B.
+            // Issue #816: render is in-place only. The worker resolves the
+            // closure through the same search roots discovery inspected.
             let roots = search_roots_for(&config.plugin, &config.dependency.dirs);
-            let in_place = in_place_render_enabled();
-            let (dependencies, dependency_search_dirs) = if in_place {
-                if roots.is_empty() {
-                    let _ = open_tx.send(Err("no dependency search roots resolved".to_owned()));
-                    return;
-                }
-                (Vec::new(), roots.clone())
-            } else {
-                match dependency_closure_for(&config.plugin, &config.dependency, &roots) {
-                    Ok(closure) => (closure.into_dependencies(), Vec::new()),
-                    Err(error) => {
-                        let _ = open_tx.send(Err(error));
-                        return;
-                    }
-                }
-            };
+            if roots.is_empty() {
+                let _ = open_tx.send(Err("no dependency search roots resolved".to_owned()));
+                return;
+            }
+            let dependencies = Vec::new();
+            let dependency_search_dirs = roots.clone();
             let dependency_count = dependencies.len();
             let request = SessionOpenRequest {
                 repository: &config.repository,

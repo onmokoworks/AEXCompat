@@ -3,7 +3,6 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     plugin_path: &Path,
     approved_sha256: &str,
     dependencies: Vec<ApprovedImageArtifact>,
-    resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     inspect_experimental_impl(
@@ -12,7 +11,6 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         approved_sha256,
         dependencies,
         Vec::new(),
-        resources,
         runtime_policy,
     )
 }
@@ -24,17 +22,14 @@ fn inspect_experimental_impl(
     approved_sha256: &str,
     mut dependencies: Vec<ApprovedImageArtifact>,
     dependency_search_dirs: Vec<std::path::PathBuf>,
-    resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     // In-place inspection (issue #751): the loader resolves the closure, so
     // staged dependencies and resources cannot ride the same launch. Runtime
     // policy inspection remains outside #815's GPU render-session migration.
-    if !dependency_search_dirs.is_empty()
-        && (!dependencies.is_empty() || !resources.is_empty() || runtime_policy.is_some())
-    {
+    if !dependency_search_dirs.is_empty() && (!dependencies.is_empty() || runtime_policy.is_some()) {
         return Err(invalid(
-            "in-place inspection cannot combine staged dependencies, resources, or a runtime policy",
+            "in-place inspection cannot combine approved dependencies or a runtime policy",
         ));
     }
     let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
@@ -55,11 +50,8 @@ fn inspect_experimental_impl(
     // closure was reported as "timed out", and that verdict was then cached.
     // Containment stays — the job object kills the tree when the launch handle
     // drops, and the sealed root is still torn down.
-    let isolated = if !dependencies.is_empty()
-        || !resources.is_empty()
-        || !dependency_search_dirs.is_empty()
-    {
-        crate::secure_image_dispatch::dispatch_secure_image_with_resources(
+    let isolated = if !dependencies.is_empty() || !dependency_search_dirs.is_empty() {
+        crate::secure_image_dispatch::dispatch_secure_image(
             SecureImageDispatch {
                 repository,
                 worker_kind: WorkerKind::L2,
@@ -74,7 +66,6 @@ fn inspect_experimental_impl(
                 args_after_plugin: &args_after_plugin,
                 timeout: None,
             },
-            resources,
         )?
     } else {
         dispatch_approved_image(

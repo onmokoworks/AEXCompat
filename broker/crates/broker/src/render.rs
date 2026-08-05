@@ -1,6 +1,5 @@
 use crate::host_core::approved_artifact::{ApprovedLoadTree, load_v2_load_tree};
-use crate::sealed_load_tree::SealedLoadTree;
-use crate::secure_launch::{SecureLaunchRequest, secure_launch};
+use crate::secure_launch::{SecureLaunchRequest, secure_launch_in_place};
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -97,7 +96,9 @@ pub fn run(
                 "render worker differs from approved trusted worker",
             ));
         }
-        let plugin_basename = entry.main.relative_basename.clone();
+        let plugin_path = fs::canonicalize(&entry.main.source)?;
+        let search_dirs = entry.dependency_search_dirs()?;
+        let joined = crate::secure_image_dispatch::joined_dependency_search_dirs(&search_dirs)?;
         let plugin_sha256 = entry
             .main
             .expected_sha256
@@ -107,9 +108,8 @@ pub fn run(
         let worker_sha256 = entry.worker_sha256;
         let worker_byte_size = entry.worker_byte_size;
         let timeout_ms = entry.timeout_ms;
-        let tree = SealedLoadTree::create(entry.main, entry.dependencies)?;
         let identity = (
-            tree.manifest_digest(),
+            entry.image_set_digest(),
             worker_sha256,
             worker_byte_size,
             timeout_ms,
@@ -125,19 +125,28 @@ pub fn run(
             fixture_sha256 = plugin_sha256.to_ascii_uppercase();
         }
         let args_before_plugin = ["--render".into()];
-        let args_after_plugin = [plugin_sha256, case_id.to_string()];
+        let args_after_plugin = [
+            plugin_sha256,
+            case_id.to_string(),
+            "--dependency-dirs-v1".to_owned(),
+            joined,
+        ];
         let request = SecureLaunchRequest {
             worker_program: worker,
             worker_expected_sha256: worker_sha256,
             worker_expected_size: worker_byte_size,
-            plugin_basename: Some(&plugin_basename),
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
             repository,
             require_module_audit: true,
         };
         let start = Instant::now();
-        let result = secure_launch(tree, request, Some(Duration::from_millis(timeout_ms)))?;
+        let result = secure_launch_in_place(
+            &plugin_path,
+            request,
+            Some(Duration::from_millis(timeout_ms)),
+            None,
+        )?;
         let elapsed = start.elapsed().as_millis().min(30_000) as u64;
         let worker_report: Value =
             serde_json::from_str(result.stdout.trim()).unwrap_or_else(|_| {

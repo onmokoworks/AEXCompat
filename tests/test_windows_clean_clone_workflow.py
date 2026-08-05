@@ -40,15 +40,9 @@ def test_windows_clean_clone_runs_canonical_source_reproducible_gates():
     directives = "\n".join(
         line for line in workflow.splitlines() if not line.lstrip().startswith("#"))
     assert "--skip " not in directives
-    for name in (
-            "external_worker_reads_sealed_plugin_and_tree_is_cleaned_after_exit",
-            "timeout_kills_worker_and_cleans_sealed_and_staged_trees"):
-        assert name not in directives, (
-            f"{name} is skipped by the test itself now, not by the workflow")
-        guard = (ROOT / "broker/crates/broker/tests/secure_launch.rs").read_text(encoding="utf-8")
-        anchor = guard.index(f"fn {name}(")
-        assert "skip_without_sealed_worker_launch" in guard[anchor:anchor + 400], (
-            f"{name} lost its launch guard; the workflow no longer skips it")
+    assert not (ROOT / "broker/crates/broker/tests/secure_launch.rs").exists(), (
+        "the sealed-launch integration suite was retired with issue #816"
+    )
     assert "uv sync --locked" in workflow
     assert "uv run python -m pytest --collect-only -q --validate-local-artifact-manifest" in workflow
     assert "uv run python -m pytest -q" in workflow
@@ -77,12 +71,6 @@ def test_pre_launch_rejection_tests_keep_running_on_a_launch_limited_host():
             "open_rejects_a_non_empty_world_dump_directory",
             "open_rejects_a_world_dump_directory_outside_the_target_tree",
             "open_rejects_animation_bound_to_an_unknown_slot",
-        ),
-        "secure_launch.rs": (
-            "worker_hash_mismatch_never_starts_process_and_cleans_tree",
-            # Fails inside SealedLoadTree::create, before secure_launch is even
-            # entered.
-            "tampered_plugin_is_rejected_before_process_can_start",
         ),
         # The forced-fallback tests return before RenderSession::open /
         # AudioRenderSession::open, so they never create a process either.

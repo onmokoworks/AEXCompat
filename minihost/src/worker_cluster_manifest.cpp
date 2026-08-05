@@ -79,25 +79,6 @@ bool same_path(const std::filesystem::path& left,
   return lowercase(left.wstring()) == lowercase(right.wstring());
 }
 
-// Verifies that `path` resolves to a regular file directly inside
-// `sealed_root` (never through a parent escape) and authenticates its size
-// and SHA-256 before the bytes are allowed to execute.
-bool authenticate_file(const std::filesystem::path& path,
-                       const std::filesystem::path& sealed_root,
-                       const std::string& declared_sha256, uint64_t declared_size,
-                       FileSha256 hash_file) {
-  std::filesystem::path canonical;
-  if (!canonical_of(path, canonical) || !same_path(canonical.parent_path(), sealed_root))
-    return false;
-  std::error_code error;
-  if (!std::filesystem::is_regular_file(canonical, error) || error) return false;
-  const uint64_t size = std::filesystem::file_size(canonical, error);
-  if (error || size != declared_size) return false;
-  std::string digest;
-  return hash_file && hash_file(canonical, digest) &&
-      hash_equals(digest, declared_sha256);
-}
-
 }  // namespace
 
 bool hash_equals(const std::string& actual, const std::string& declared) {
@@ -126,7 +107,6 @@ bool parse_in_place_manifest(const JsonValue::Object& object, Manifest& parsed) 
       module_bound > kMaxModuleBound)
     return false;
   parsed.module_bound = static_cast<uint32_t>(module_bound);
-  parsed.in_place = true;
   const auto* plugins_value = json_member(object, "plugins");
   const auto* dirs_value = json_member(object, "search_dirs");
   if (!plugins_value || !std::holds_alternative<JsonValue::Array>(plugins_value->value) ||
@@ -191,13 +171,9 @@ bool parse_in_place_manifest(const JsonValue::Object& object, Manifest& parsed) 
 
 bool load_manifest(const std::filesystem::path& path, Manifest& result) {
   if (path.empty() || !path.is_absolute()) return false;
-  // The broker hands over the verbatim (\\?\-prefixed) canonical form of the
-  // staged path; normalize before canonicalizing (see normalize_verbatim).
   const std::filesystem::path argument = normalize_verbatim(path);
   std::filesystem::path canonical;
   if (!canonical_of(argument, canonical)) return false;
-  // Same absolute+canonical identity rule as load_aux_manifest: the broker
-  // hands over the exact path it wrote, with no symlink indirection.
   std::error_code error;
   const std::filesystem::path absolute = std::filesystem::absolute(argument, error);
   if (error || absolute.lexically_normal() != canonical) return false;
@@ -212,110 +188,25 @@ bool load_manifest(const std::filesystem::path& path, Manifest& result) {
     return false;
   const auto& object = std::get<JsonValue::Object>(root.value);
   std::string schema;
-  {
-    // Schema dispatch: v2 (in-place, issue #751) parses its own shape and
-    // needs no sealed root; v1 (sealed) continues below.
-    std::string probe;
-    if (json_string(object, "schema", probe) && probe == "cluster-manifest-v2") {
-      Manifest parsed;
-      if (!parse_in_place_manifest(object, parsed)) return false;
-      parsed.manifest_path = canonical;
-      result = std::move(parsed);
-      return true;
-    }
-  }
-  uint64_t module_bound = 0;
-  if (!json_exact_keys(object, {"schema", "plugins", "dependencies", "module_bound"}) ||
-      !json_string(object, "schema", schema) || schema != "cluster-manifest-v1" ||
-      !json_u64(object, "module_bound", module_bound) || module_bound == 0 ||
-      module_bound > kMaxModuleBound)
+  if (!json_string(object, "schema", schema) ||
+      schema != "cluster-manifest-v2")
     return false;
-  const auto* plugins_value = json_member(object, "plugins");
-  const auto* dependencies_value = json_member(object, "dependencies");
-  if (!plugins_value || !std::holds_alternative<JsonValue::Array>(plugins_value->value) ||
-      !dependencies_value ||
-      !std::holds_alternative<JsonValue::Array>(dependencies_value->value))
-    return false;
-  const auto& plugins = std::get<JsonValue::Array>(plugins_value->value);
-  const auto& dependencies = std::get<JsonValue::Array>(dependencies_value->value);
-  if (plugins.empty() || plugins.size() > kMaxPlugins ||
-      dependencies.size() > kMaxModuleBound)
-    return false;
-
   Manifest parsed;
-  parsed.module_bound = static_cast<uint32_t>(module_bound);
-  std::set<std::string> basenames;
-  for (const auto& plugin_value : plugins) {
-    if (!std::holds_alternative<JsonValue::Object>(plugin_value.value)) return false;
-    const auto& plugin_object = std::get<JsonValue::Object>(plugin_value.value);
-    PluginEntry entry;
-    const bool with_payload = json_exact_keys(plugin_object, {"basename", "sha256", "payload"});
-    if (!with_payload &&
-        !json_exact_keys(plugin_object, {"basename", "sha256"}))
-      return false;
-    if (!json_string(plugin_object, "basename", entry.basename) ||
-        !windows_safe_basename(entry.basename) ||
-        !json_string(plugin_object, "sha256", entry.sha256) ||
-        !valid_sha256(entry.sha256) ||
-        !basenames.insert(lowercase_ascii(entry.basename)).second)
-      return false;
-    if (with_payload) {
-      if (!json_string(plugin_object, "payload", entry.payload) ||
-          entry.payload.size() > kMaxPayloadBytes)
-        return false;
-      for (const unsigned char ch : entry.payload)
-        if (ch < 0x20 || ch > 0x7e) return false;
-      entry.has_payload = true;
-    }
-    parsed.plugins.push_back(std::move(entry));
-  }
-  for (const auto& dependency_value : dependencies) {
-    if (!std::holds_alternative<JsonValue::Object>(dependency_value.value))
-      return false;
-    const auto& dependency_object = std::get<JsonValue::Object>(dependency_value.value);
-    DependencyEntry entry;
-    if (!json_exact_keys(dependency_object, {"basename", "sha256", "size"}) ||
-        !json_string(dependency_object, "basename", entry.basename) ||
-        !windows_safe_basename(entry.basename) ||
-        !json_string(dependency_object, "sha256", entry.sha256) ||
-        !valid_sha256(entry.sha256) ||
-        !json_u64(dependency_object, "size", entry.size) || entry.size == 0 ||
-        !basenames.insert(lowercase_ascii(entry.basename)).second)
-      return false;
-    parsed.dependencies.push_back(std::move(entry));
-  }
-
-  // The manifest lives directly inside the sealed root so every entry path is
-  // `sealed_root / basename`; the root must carry the sealed-staging prefix
-  // the module audit and admission already require.
+  if (!parse_in_place_manifest(object, parsed)) return false;
   parsed.manifest_path = canonical;
-  parsed.sealed_root = canonical.parent_path();
-  if (parsed.sealed_root.empty() ||
-      !has_prefixed_basename(parsed.sealed_root, L"aexcompat-sealed-"))
-    return false;
   result = std::move(parsed);
   return true;
 }
-
 bool matches_launch_plugin(const Manifest& manifest,
                            const std::filesystem::path& plugin_path,
                            const std::string& plugin_sha256) {
   if (manifest.plugins.empty()) return false;
   const PluginEntry& first = manifest.plugins.front();
-  if (manifest.in_place) {
-    // In-place manifests (issue #751) name plugins[0] by its real path; the
-    // launch positional must canonicalize to the same file.
-    std::filesystem::path launch_canonical;
-    std::filesystem::path declared_canonical;
-    return canonical_of(normalize_verbatim(plugin_path), launch_canonical) &&
-        canonical_of(first.path, declared_canonical) &&
-        same_path(launch_canonical, declared_canonical) &&
-        hash_equals(plugin_sha256, first.sha256);
-  }
-  const std::wstring basename = lowercase(plugin_path.filename().wstring());
-  std::wstring declared;
-  for (const unsigned char ch : first.basename) declared.push_back(ch);
-  return basename == lowercase(declared) &&
+  std::filesystem::path launch_canonical;
+  std::filesystem::path declared_canonical;
+  return canonical_of(normalize_verbatim(plugin_path), launch_canonical) &&
+      canonical_of(first.path, declared_canonical) &&
+      same_path(launch_canonical, declared_canonical) &&
       hash_equals(plugin_sha256, first.sha256);
 }
 
@@ -350,68 +241,7 @@ std::vector<std::filesystem::path> in_place_audit_roots(const Manifest& manifest
 
 std::filesystem::path plugin_path(const Manifest& manifest, std::size_t index) {
   if (index >= manifest.plugins.size()) return {};
-  // In-place manifests (issue #751) name the real path; sealed manifests
-  // resolve `sealed_root / basename`.
-  if (manifest.in_place) return manifest.plugins[index].path;
-  return manifest.sealed_root / std::filesystem::u8path(manifest.plugins[index].basename);
-}
-
-std::vector<std::string> declared_basenames(const Manifest& manifest) {
-  std::vector<std::string> declared;
-  declared.reserve(manifest.plugins.size() + manifest.dependencies.size());
-  for (const auto& plugin : manifest.plugins)
-    declared.push_back(lowercase_ascii(plugin.basename));
-  for (const auto& dependency : manifest.dependencies)
-    declared.push_back(lowercase_ascii(dependency.basename));
-  return declared;
-}
-
-ClosurePins::~ClosurePins() {
-  if (release_on_destroy_) release();
-}
-
-bool ClosurePins::pin(const Manifest& manifest, FileSha256 hash_file) {
-  if (!pins_.empty()) return false;
-  for (const auto& dependency : manifest.dependencies) {
-    const std::filesystem::path path =
-        manifest.sealed_root / std::filesystem::u8path(dependency.basename);
-    std::filesystem::path canonical;
-    // Authenticate the file before its bytes may execute (fail-closed double
-    // of the broker staging check), then load with the admission flags.
-    if (!canonical_of(path, canonical) ||
-        !authenticate_file(canonical, manifest.sealed_root, dependency.sha256,
-                           dependency.size, hash_file)) {
-      release();
-      return false;
-    }
-    HMODULE module = LoadLibraryExW(canonical.c_str(), nullptr,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!module) {
-      release();
-      return false;
-    }
-    // The loaded module must be the authenticated file directly under the
-    // sealed root (design §3): a loader redirect to any other directory fails
-    // the pin.
-    std::array<wchar_t, 32768> loaded_buffer{};
-    const DWORD loaded_length = GetModuleFileNameW(
-        module, loaded_buffer.data(), static_cast<DWORD>(loaded_buffer.size()));
-    std::filesystem::path loaded_path;
-    if (loaded_length == 0 || loaded_length >= loaded_buffer.size() ||
-        !canonical_of(loaded_buffer.data(), loaded_path) ||
-        !same_path(loaded_path, canonical)) {
-      FreeLibrary(module);
-      release();
-      return false;
-    }
-    pins_.push_back(module);
-  }
-  return true;
-}
-
-void ClosurePins::release() noexcept {
-  for (auto it = pins_.rbegin(); it != pins_.rend(); ++it) FreeLibrary(*it);
-  pins_.clear();
+  return manifest.plugins[index].path;
 }
 
 }  // namespace aexcompat::worker_runtime::cluster
