@@ -322,14 +322,20 @@ struct ClassicRenderDispatchOwner {
         // the host itself refused - under the plug-in's selector (issue #722).
         //
         // prepare_output is entirely host-side: it validates the plug-in's
-        // requested resize and re-lays the output world. It never calls the
-        // plug-in, so its refusals get the same name the broker already gives
-        // them, and it emits no `_begin` because there is no foreign code inside
-        // it for a crash to be attributed to.
+        // requested output resize and re-lays the output world. It never calls
+        // the plug-in, so its refusals get their own name rather than the
+        // selector's. It emits no `_begin` because there is no foreign code
+        // inside it for a crash to be attributed to.
+        //
+        // Deliberately not the broker's "output_validation": that override
+        // (image_render/session.rs) keys on `output_pixels_valid`, which only
+        // the smart report emits (worker_smart_report.cpp) and which means the
+        // output pixels came back empty, still at the 0xCC fill, or non-finite.
+        // A different condition, so a different name.
         +[](void* opaque) {
           const int32_t error = static_cast<ClassicRenderDispatchOwner*>(opaque)->prepare_output();
           if (error != 0)
-            std::cerr << "stage:output_validation_end error=" << error << "\n" << std::flush;
+            std::cerr << "stage:classic_output_resize_end error=" << error << "\n" << std::flush;
           return error; },
         // The plug-in's RENDER. The unbalanced `_begin` left by a crash or hang
         // in here is what lets active_stage name this frame's selector.
@@ -575,7 +581,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         external_total_time, external_time_scale, case_id, requested, external_rgba,
         external_layers, external_width, external_height, *classic_context, logical_source,
         output_validation_failed};
-    // The `stage:classic_render_*` and `stage:output_validation_end` markers are
+    // The `stage:classic_render_*` and `stage:classic_output_resize_end` markers are
     // emitted per frame from inside RenderHooks (see ClassicRenderDispatchOwner)
     // so each brackets only the step it names. The session-wide `stage:render_*`
     // pair in worker_invocation_orchestration.cpp is emitted once, so before

@@ -2269,23 +2269,26 @@ mod tests {
         // The host refused the plug-in's requested output resize, so RENDER was
         // never dispatched. `prepare_output` runs inside the same
         // classic_execution::dispatch_render call as the selector but never
-        // calls the plug-in, so it gets its own name - the broker already calls
-        // this refusal `output_validation` when it overrides failure_stage on
-        // the session route, and emitting it from the worker makes
-        // first_failure_stage and the event list agree on every route.
-        let host_refused_output = worker_diagnostics(
+        // calls the plug-in, so it gets its own name instead of being filed
+        // under RENDER. It is not the `output_validation` that session.rs
+        // assigns from `output_pixels_valid` - that one is smart-only and means
+        // the returned pixels were empty, untouched, or non-finite.
+        let host_refused_resize = worker_diagnostics(
             "stage:frame_setup_begin\nstage:frame_setup_end error=0\n\
-             stage:output_validation_end error=4\n",
+             stage:classic_output_resize_end error=4\n",
             false,
             "ok",
             0,
             9,
         );
         assert_eq!(
-            host_refused_output["first_failure_stage"],
-            "output_validation"
+            host_refused_resize["first_failure_stage"],
+            "classic_output_resize"
         );
-        assert_eq!(host_refused_output["failure_stage"], "output_validation");
+        assert_eq!(
+            host_refused_resize["failure_stage"],
+            "classic_output_resize"
+        );
 
         // A frame that never reached the selector carries no `classic_render`
         // pair, because the markers live inside the selector hook rather than

@@ -614,13 +614,16 @@ fn worker_diagnostics(
         // Per frame, unlike "render" which brackets the whole session. Without
         // these a classic session's frame errors carried no stage at all
         // (issue #722). Only "classic_render" is the plug-in's own selector:
-        // "output_validation" is the host refusing the requested output resize
-        // before RENDER runs, and "classic_finalize" appears only when the
-        // host's own finalize changed the error the selector returned. Keeping
-        // three names is the point - a host-side refusal filed under the
-        // plug-in's selector is what this issue was about.
+        // "classic_output_resize" is the host refusing the requested output
+        // resize before RENDER runs, and "classic_finalize" appears only when
+        // the host's own finalize changed the error the selector returned.
+        // Keeping three names is the point - a host-side refusal filed under
+        // the plug-in's selector is what this issue was about. For the same
+        // reason none of them is the "output_validation" that session.rs
+        // assigns from `output_pixels_valid`: that is a smart-only check on the
+        // pixels that came back, not a refused resize.
         "classic_render",
-        "output_validation",
+        "classic_output_resize",
         "classic_finalize",
         "smart_render",
         "smart_pre_render",
