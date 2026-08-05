@@ -4,7 +4,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]

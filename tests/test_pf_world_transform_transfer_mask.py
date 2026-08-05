@@ -1,7 +1,6 @@
 import json
 import subprocess
 from pathlib import Path
-import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
