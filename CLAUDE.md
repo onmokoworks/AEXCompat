@@ -161,6 +161,13 @@ After Effects SDK, approved AEX fixtures, a matching GPU driver, or AE itself.
 Run the named build/gate script rather than relying on untracked `target/`
 artifacts from a previous checkout.
 
+`rust-toolchain.toml` pins the toolchain, so `cargo fmt --check` means the same
+thing on every machine (issue #656). Raising the pin is a deliberate change:
+run `cargo fmt --all` across every workspace in that same commit and add the
+commit to `.git-blame-ignore-revs`. Run `git config blame.ignoreRevsFile
+.git-blame-ignore-revs` once per clone so local `git blame` skips the
+formatting-only commits listed there.
+
 ## Project Direction
 
 1. Discover and diagnose arbitrary Effect AEX binaries without fixture names.

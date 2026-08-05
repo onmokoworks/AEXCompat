@@ -111,7 +111,10 @@ fn main() {
             });
         }
         if !resources.is_empty() {
-            eprintln!("sealed data resources: {} files under Film Stocks/", resources.len());
+            eprintln!(
+                "sealed data resources: {} files under Film Stocks/",
+                resources.len()
+            );
         }
     }
 

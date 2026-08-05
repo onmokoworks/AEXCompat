@@ -165,7 +165,13 @@ impl SealedLoadTree {
             ..StagingStats::default()
         };
         let root = create_random_root(&temp_parent)?;
-        let result = Self::populate(root.clone(), temp_parent.clone(), plugins, dependencies, resources);
+        let result = Self::populate(
+            root.clone(),
+            temp_parent.clone(),
+            plugins,
+            dependencies,
+            resources,
+        );
         if result.is_err() {
             let _ = remove_owned_root_impl(&root, &temp_parent, true);
         }
@@ -1130,7 +1136,8 @@ mod tests {
         let main = fixture(&parent, "main.plugin", b"main");
         let dependency = fixture(&parent, "helper.dll", b"dependency");
         let first =
-            SealedLoadTree::create_at(&parent, vec![main.clone()], vec![dependency.clone()]).unwrap();
+            SealedLoadTree::create_at(&parent, vec![main.clone()], vec![dependency.clone()])
+                .unwrap();
         drop(first);
 
         let second = SealedLoadTree::create_at(&parent, vec![main], vec![dependency]).unwrap();
@@ -1169,9 +1176,11 @@ mod tests {
         let alpha = fixture(&source, "alpha.plugin", b"alpha");
         let beta = fixture(&source, "beta.plugin", b"beta");
         let dependency = fixture(&source, "helper.dll", b"dependency");
-        let tree =
-            SealedLoadTree::create_cluster(vec![alpha, beta], vec![dependency]).unwrap();
-        assert_eq!(fs::read(tree.root().join("alpha.plugin")).unwrap(), b"alpha");
+        let tree = SealedLoadTree::create_cluster(vec![alpha, beta], vec![dependency]).unwrap();
+        assert_eq!(
+            fs::read(tree.root().join("alpha.plugin")).unwrap(),
+            b"alpha"
+        );
         assert_eq!(fs::read(tree.root().join("beta.plugin")).unwrap(), b"beta");
         assert_eq!(
             tree.cluster_plugin_basenames(),
@@ -1189,7 +1198,9 @@ mod tests {
             io::ErrorKind::PermissionDenied
         );
         assert_eq!(
-            tree.cluster_plugin_path("unknown.plugin").unwrap_err().kind(),
+            tree.cluster_plugin_path("unknown.plugin")
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::PermissionDenied
         );
         assert_eq!(
@@ -1209,8 +1220,7 @@ mod tests {
         let source = source_dir();
         let main = fixture(&source, "main.plugin", b"main");
         let dependency = fixture(&source, "helper.dll", b"dependency");
-        let plain =
-            SealedLoadTree::create(main.clone(), vec![dependency.clone()]).unwrap();
+        let plain = SealedLoadTree::create(main.clone(), vec![dependency.clone()]).unwrap();
         let plain_digest = plain.manifest_digest();
         drop(plain);
         let clustered = SealedLoadTree::create_cluster(vec![main], vec![dependency]).unwrap();
@@ -1239,8 +1249,7 @@ mod tests {
         let plain = SealedLoadTree::create(main.clone(), vec![]).unwrap();
         let plain_digest = plain.manifest_digest();
         drop(plain);
-        let tree =
-            SealedLoadTree::create_with_resources(main, vec![], vec![grain]).unwrap();
+        let tree = SealedLoadTree::create_with_resources(main, vec![], vec![grain]).unwrap();
         // A resource-carrying tree digests differently (role 3 + path).
         assert_ne!(plain_digest, tree.manifest_digest());
         let staged = tree.root().join("Film Stocks").join("100T.grain");
@@ -1255,7 +1264,10 @@ mod tests {
         let root = tree.root().to_path_buf();
         drop(tree);
         // Drop removes the staged file, the subdirectory, and the root.
-        assert!(!root.exists(), "drop removes the whole tree including subdirs");
+        assert!(
+            !root.exists(),
+            "drop removes the whole tree including subdirs"
+        );
         fs::remove_dir_all(source).unwrap();
     }
 
@@ -1277,23 +1289,17 @@ mod tests {
         // The subdirectory name must not collide with a flat manifest entry.
         let main = fixture(&source, "main.plugin", b"main");
         let collision = resource_fixture(&source, "main.plugin/x.grain", b"x");
-        assert!(
-            SealedLoadTree::create_with_resources(main, vec![], vec![collision]).is_err()
-        );
+        assert!(SealedLoadTree::create_with_resources(main, vec![], vec![collision]).is_err());
         // Duplicate resource paths fail closed, case-insensitively.
         let main = fixture(&source, "main.plugin", b"main");
         let first = resource_fixture(&source, "Film Stocks/a.grain", b"a");
         let second = resource_fixture(&source, "Film Stocks/A.grain", b"a2");
-        assert!(
-            SealedLoadTree::create_with_resources(main, vec![], vec![first, second]).is_err()
-        );
+        assert!(SealedLoadTree::create_with_resources(main, vec![], vec![first, second]).is_err());
         // The staged basename must match the source file name.
         let main = fixture(&source, "main.plugin", b"main");
         let mut mismatched = resource_fixture(&source, "Film Stocks/other.grain", b"other");
         mismatched.source = source.join("main.plugin");
-        assert!(
-            SealedLoadTree::create_with_resources(main, vec![], vec![mismatched]).is_err()
-        );
+        assert!(SealedLoadTree::create_with_resources(main, vec![], vec![mismatched]).is_err());
         fs::remove_dir_all(source).unwrap();
     }
 
