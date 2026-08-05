@@ -12,8 +12,10 @@
 //     (offset 464) and `fill16` (488), so slots 472 and 480 stayed null and a
 //     deep-colour plug-in that sampled jumped to address 0.
 //
-// Both are checked here against the generated ABI contract rather than against
-// hand-written offsets, so a regenerated contract moves the test with it.
+// The offsets come from the generated ABI contract, so a regenerated contract
+// moves the test with it - except for the two literal 472/480 assertions at the
+// end, which deliberately pin today's SDK layout so a silent contract change
+// has to be noticed rather than absorbed.
 
 #include "generated/aex_abi_contract.hpp"
 #include "worker_effect_bootstrap.hpp"
@@ -46,9 +48,10 @@ void check(bool condition, const char* what) {
   ++failures;
 }
 
-// One 2x2 source world per depth, resolved through the host hook the sampling
-// runtime asks for. The pixel values do not matter - only that a sample with no
-// effect_ref reaches them and reports success.
+// A 2x2 source world, reused across depths by reassigning `pixel_bytes`, and
+// resolved through the host hook the sampling runtime asks for. The pixel values
+// do not matter - only that a sample with no effect_ref reaches them and reports
+// success.
 struct World {
   std::array<unsigned char, 2 * 2 * 16> pixels{};
   int32_t pixel_bytes{};
@@ -112,7 +115,7 @@ void a_null_effect_ref_still_samples() {
     g_world.pixel_bytes = depth.pixel_bytes;
     auto params = sampling_params(&g_world);
     auto area_params = area_sampling_params(&g_world);
-    std::array<unsigned char, 16> destination{};
+    alignas(16) std::array<unsigned char, 16> destination{};
     // Mid-pixel in 16.16 fixed point, so the bilinear path runs rather than
     // landing exactly on a sample.
     const int32_t half = 32768;
@@ -140,7 +143,10 @@ void a_null_effect_ref_still_samples() {
                   depth.name);
     check(depth.subpixel(nullptr, half, half, params.data(), nullptr) == 4, message);
 
-    // A world this worker cannot resolve is still refused.
+    // A world the resolver rejects is still refused. This stub keys on
+    // pixel_bytes; the production resolver bounds-checks the struct instead
+    // (worker_world_safety.cpp). Either way the point is that dropping the
+    // effect_ref check did not drop the world check with it.
     World foreign;
     foreign.pixel_bytes = depth.pixel_bytes == 4 ? 8 : 4;
     auto foreign_params = sampling_params(&foreign);
@@ -174,7 +180,10 @@ void the_utility_table_is_wired_one_to_one() {
     ++failures;
   }
 
-  // The two that were missing, named explicitly so a regression reads clearly.
+  // The two that were missing. The null checks below cannot catch a wiring
+  // regression on their own - this function filled every slot itself - so they
+  // stand as a readable name for the offsets, and the literal offsets are what
+  // actually pin the layout.
   void* subpixel16{};
   void* area16{};
   std::memcpy(&subpixel16, state.utils.data() + contract::UTILS_SUBPIXEL_SAMPLE16_OFFSET,

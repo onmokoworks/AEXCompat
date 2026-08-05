@@ -24,9 +24,14 @@
 //!   directories (issue #751), instead of resolving the dependency closure
 //!   and staging a sealed tree. The A/B against the default staged mode is
 //!   the acceptance measurement for #751/#753.
-//! * `AEXCOMPAT_DIAG_DEPTH=8|16|32` - open the session at that bit depth. A
-//!   plug-in that advertises `PF_OutFlag2_FLOAT_COLOR_AWARE` may behave
-//!   differently per depth, and the default 8 hides that.
+//! * `AEXCOMPAT_DIAG_DEPTH=8|16|32` - open the session at that bit depth. The
+//!   deep-colour paths are reached through different host callbacks than the
+//!   8-bit one, so a plug-in can fail at one depth and not another, and the
+//!   fixed 8 hid that. Displacement advertises both depth flags -
+//!   `PF_OutFlag_DEEP_COLOR_AWARE` (out_flags 1<<25, 16-bit) and
+//!   `PF_OutFlag2_FLOAT_COLOR_AWARE` (out_flags2 1<<12, 32-bit) - which is what
+//!   lets the two deep depths open; 8-bit needs no flag. It answered 4 at 8 and 32 bits
+//!   while access-violating at 16: two different host defects (issue #777).
 //!
 //! `AEXCOMPAT_EXTENDED_DIAG=1` additionally turns on the worker's host-callback
 //! trace; it reaches stderr, which the session collects but does not report.
@@ -34,10 +39,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::image_render::{
     inspect_experimental_in_place, inspect_experimental_with_approved_dependencies_and_resources,
 };
-use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::plugin_dependency_closure::{
     DependencyClosureRequest, resolve_dependency_closure,
 };

@@ -56,14 +56,24 @@ void configure_pf_sampling_runtime(const PfSamplingHostHooks& hooks) noexcept {
 
 // `effect_ref` is accepted and ignored. It used to be rejected when null, which
 // cost AE's own Displacement every frame: its SMART_RENDER pixel function calls
-// PF_SUBPIXEL_SAMPLE with a null ref, took the 4 back, and returned it as its
-// own PF_Err_OUT_OF_MEMORY (issue #777). The host's `in_data->effect_ref` is
-// populated - the plug-in simply does not pass it, and AE samples anyway.
+// the `utils->subpixel_sample` slot directly with a null ref - not through the
+// PF_SUBPIXEL_SAMPLE macro, which would have passed `in_data->effect_ref` - and
+// returned the 4 it got back as its own PF_Err_OUT_OF_MEMORY (issue #777). The
+// host does populate `in_data->effect_ref`; the plug-in just does not use it
+// here. That a first-party effect ships this way and renders in AE is the
+// evidence that AE tolerates it (an inference from the plug-in's behaviour, not
+// an observation of AE's own callback).
 //
-// Nothing here needs it: the world being sampled comes from the sampling
-// parameter block, and `resolve_world` below still refuses a world this worker
-// does not own. Rejecting on the unused argument protected nothing and turned a
-// valid sample into an allocation failure.
+// Dropping the check costs no protection, and not because anything downstream
+// re-establishes it: `resolve_world` bounds-checks the world the plug-in points
+// at (worker_world_safety.cpp, `bounded_typed_world`) but consults no ownership
+// registry, so it never refused a world *for being foreign* - only for failing
+// its bounds or deep-flag checks. The reason is simpler: the plug-in runs in
+// this process and is handed `effect_ref` in `in_data`, so it could always have
+// passed whatever value the check demanded. The check caught accident, never
+// abuse, and on a correct plug-in its only effect was turning a valid sample
+// into a refusal reported as PF_Err_OUT_OF_MEMORY (which is itself the wrong
+// code for an argument rejection - issue #813).
 int32_t subpixel_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x,
                               int32_t fixed_y, const void* sampling_params,
                               void* destination_pixel) {
