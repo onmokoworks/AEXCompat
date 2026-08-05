@@ -1,0 +1,37 @@
+name: linux pytest probe
+
+# issue #743 の実測用の一時 workflow。probe ブランチへの push でだけ走り、
+# ubuntu 上でフル suite を流して pass/fail/skip の境界を観測する。
+# 本採用時にはこのファイルは削除し、windows-clean-clone.yml を再構成する。
+on:
+  push:
+    branches: [issue743-linux-pytest-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+      - name: Install Python test dependencies
+        run: uv sync --locked
+      - name: Run full pytest on linux (observation only)
+        shell: bash
+        run: |
+          uv run python -m pytest -q -n auto --dist worksteal -m "not dev_infra" \
+            --durations=20 -rs > pytest-linux.txt 2>&1 || true
+          echo "=== tail ==="
+          tail -n 60 pytest-linux.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-linux-log
+          path: pytest-linux.txt
