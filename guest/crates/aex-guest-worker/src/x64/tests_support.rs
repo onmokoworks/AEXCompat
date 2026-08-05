@@ -2246,11 +2246,12 @@
         )
         .unwrap();
         let name = DATA_BASE + 0xa80;
-        engine.write(name, b"OPENCV_FOR_THREADS_NUM\0").unwrap();
-        assert_eq!(
-            engine.call_win64(GETENV, [name, 0, 0, 0, 0, 0]).unwrap(),
-            0
-        );
+        engine.write(name, b"opencv_for_threads_num\0").unwrap();
+        let value = engine.call_win64(GETENV, [name, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(value, HOST_ENVIRONMENT_VALUE);
+        assert_eq!(engine.unicorn.mem_read_as_vec(value, 2).unwrap(), b"1\0");
+        engine.write(name, b"HOME\0").unwrap();
+        assert_eq!(engine.call_win64(GETENV, [name, 0, 0, 0, 0, 0]).unwrap(), 0);
         engine
             .call_win64(OMP_SET_DYNAMIC, [1, 0, 0, 0, 0, 0])
             .unwrap();
@@ -2259,6 +2260,108 @@
             .call_win64(OMP_SET_DYNAMIC, [2, 0, 0, 0, 0, 0])
             .unwrap_err();
         assert!(error.to_string().contains("expected 0 or 1"), "{error}");
+    }
+
+    #[test]
+    fn get_environment_variable_a_matches_win32_size_and_allowlist_contract() {
+        const GET_ENVIRONMENT: u64 = STUB_BASE + 0x4d0;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                GET_ENVIRONMENT,
+                "kernel32.dll",
+                "GetEnvironmentVariableA",
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(
+                LegacyWin64Import::GetEnvironmentVariableA
+            )
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "GetEnvironmentVariableA"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        let name = DATA_BASE + 0xb00;
+        let output = DATA_BASE + 0xb80;
+        engine.write(name, b"OpEnCv_FoR_ThReAdS_NuM\0").unwrap();
+        engine.write(output, &[0xaa; 4]).unwrap();
+
+        assert_eq!(
+            engine
+                .call_win64(GET_ENVIRONMENT, [name, 0, 0, 0, 0, 0])
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            engine
+                .call_win64(GET_ENVIRONMENT, [name, output, 1, 0, 0, 0])
+                .unwrap(),
+            2
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 4).unwrap(), [0xaa; 4]);
+        assert_eq!(
+            engine
+                .call_win64(GET_ENVIRONMENT, [name, output, 2, 0, 0, 0])
+                .unwrap(),
+            1
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 2).unwrap(), b"1\0");
+
+        engine.write(name, b"HOME\0").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(GET_ENVIRONMENT, [name, 0, u32::MAX as u64, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn get_environment_variable_a_rejects_invalid_names_and_outputs() {
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+        emulate_get_environment_variable_a(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error == "GetEnvironmentVariableA name pointer is null")
+        );
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        let name = DATA_BASE + 0xc00;
+        engine
+            .write(name, &vec![b'A'; MAX_WINDOWS_ENVIRONMENT_NAME_BYTES + 1])
+            .unwrap();
+        engine.unicorn.reg_write(RegisterX86::RCX, name).unwrap();
+        emulate_get_environment_variable_a(&mut engine.unicorn);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains("name exceeds 255 bytes"))
+        );
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        engine.write(name, b"OPENCV_FOR_THREADS_NUM\0").unwrap();
+        engine.unicorn.reg_write(RegisterX86::RCX, name).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, 0).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R8, 2).unwrap();
+        emulate_get_environment_variable_a(&mut engine.unicorn);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error == "GetEnvironmentVariableA output pointer is null")
+        );
     }
 
     #[test]

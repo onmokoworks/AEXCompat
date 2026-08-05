@@ -55,6 +55,7 @@ enum LegacyWin64Import {
     GetCurrentProcessId,
     QueryPerformanceCounter,
     QueryPerformanceFrequency,
+    GetEnvironmentVariableA,
     FlsAlloc,
     FlsGetValue,
     FlsSetValue,
@@ -265,6 +266,9 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("kernel32.dll", "QueryPerformanceFrequency") => {
             LegacyWin64Import::QueryPerformanceFrequency
+        }
+        ("kernel32.dll", "GetEnvironmentVariableA") => {
+            LegacyWin64Import::GetEnvironmentVariableA
         }
         ("kernel32.dll", "FlsAlloc") => LegacyWin64Import::FlsAlloc,
         ("kernel32.dll", "FlsGetValue") => LegacyWin64Import::FlsGetValue,
@@ -733,6 +737,22 @@ fn install_win64_import(
                     }),
                 )?;
             }
+            LegacyWin64Import::GetEnvironmentVariableA => {
+                uc(
+                    "write deterministic guest environment value",
+                    unicorn.mem_write(HOST_ENVIRONMENT_VALUE, b"1\0"),
+                )?;
+                uc(
+                    "write GetEnvironmentVariableA return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetEnvironmentVariableA import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_environment_variable_a(unicorn);
+                    }),
+                )?;
+            }
             LegacyWin64Import::FlsAlloc
             | LegacyWin64Import::FlsGetValue
             | LegacyWin64Import::FlsSetValue => {
@@ -791,6 +811,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::CrtGetenv => {
+                uc(
+                    "write deterministic guest environment value",
+                    unicorn.mem_write(HOST_ENVIRONMENT_VALUE, b"1\0"),
+                )?;
                 uc("write deterministic getenv return", unicorn.mem_write(stub, &[0xc3]))?;
                 uc(
                     "install deterministic getenv import",
@@ -1154,28 +1178,20 @@ fn emulate_crt_onexit(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWi
 fn emulate_crt_getenv(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<(), String> {
         let pointer = read_win64_import_argument(unicorn, 0)?;
-        if pointer == 0 {
-            return Err("CRT getenv name pointer is null".into());
-        }
-        let mut terminated = false;
-        for index in 0..256u64 {
-            let address = pointer
-                .checked_add(index)
-                .ok_or_else(|| "CRT getenv name address overflow".to_string())?;
-            let byte = unicorn
-                .mem_read_as_vec(address, 1)
-                .map_err(|error| format!("CRT getenv name read failed: {error}"))?[0];
-            if byte == 0 {
-                terminated = true;
-                break;
-            }
-        }
-        if !terminated {
-            return Err("CRT getenv name exceeds 255 bytes".into());
-        }
-        // Do not leak the macOS host environment into the deterministic guest.
+        let name = read_windows_environment_name(unicorn, pointer, "CRT getenv")?;
+        let returned = if let Some(value) = deterministic_guest_environment_value(&name) {
+            let mut terminated = Vec::with_capacity(value.len() + 1);
+            terminated.extend_from_slice(value);
+            terminated.push(0);
+            unicorn
+                .mem_write(HOST_ENVIRONMENT_VALUE, &terminated)
+                .map_err(|error| format!("CRT getenv value write failed: {error}"))?;
+            HOST_ENVIRONMENT_VALUE
+        } else {
+            0
+        };
         unicorn
-            .reg_write(RegisterX86::RAX, 0)
+            .reg_write(RegisterX86::RAX, returned)
             .map_err(|error| format!("CRT getenv return write failed: {error}"))
     })();
     if let Err(error) = result {
@@ -1183,6 +1199,86 @@ fn emulate_crt_getenv(unicorn: &mut Unicorn<'_, GuestState>) {
             unicorn.get_data_mut().callback_error = Some(error);
         }
         let _ = unicorn.emu_stop();
+    }
+}
+
+fn read_windows_environment_name(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    pointer: u64,
+    function: &str,
+) -> Result<Vec<u8>, String> {
+    if pointer == 0 {
+        return Err(format!("{function} name pointer is null"));
+    }
+    let mut name = Vec::new();
+    for index in 0..=MAX_WINDOWS_ENVIRONMENT_NAME_BYTES {
+        let address = pointer
+            .checked_add(index as u64)
+            .ok_or_else(|| format!("{function} name address overflow"))?;
+        let byte = unicorn
+            .mem_read_as_vec(address, 1)
+            .map_err(|error| format!("{function} name read failed: {error}"))?[0];
+        if byte == 0 {
+            return Ok(name);
+        }
+        if index == MAX_WINDOWS_ENVIRONMENT_NAME_BYTES {
+            break;
+        }
+        name.push(byte);
+    }
+    Err(format!(
+        "{function} name exceeds {MAX_WINDOWS_ENVIRONMENT_NAME_BYTES} bytes"
+    ))
+}
+
+fn deterministic_guest_environment_value(name: &[u8]) -> Option<&'static [u8]> {
+    if name.eq_ignore_ascii_case(b"OPENCV_FOR_THREADS_NUM") {
+        Some(b"1")
+    } else {
+        None
+    }
+}
+
+fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let name_pointer = read_win64_import_argument(unicorn, 0)?;
+        let buffer = read_win64_import_argument(unicorn, 1)?;
+        let size = read_win64_import_argument(unicorn, 2)? as u32;
+        let name = read_windows_environment_name(
+            unicorn,
+            name_pointer,
+            "GetEnvironmentVariableA",
+        )?;
+        let Some(value) = deterministic_guest_environment_value(&name) else {
+            return Ok(0);
+        };
+        let required = u32::try_from(value.len() + 1)
+            .map_err(|_| "GetEnvironmentVariableA value length exceeds DWORD".to_string())?;
+        if size < required {
+            return Ok(u64::from(required));
+        }
+        if buffer == 0 {
+            return Err("GetEnvironmentVariableA output pointer is null".into());
+        }
+        let mut terminated = Vec::with_capacity(value.len() + 1);
+        terminated.extend_from_slice(value);
+        terminated.push(0);
+        unicorn.mem_write(buffer, &terminated).map_err(|error| {
+            format!("GetEnvironmentVariableA output {buffer:#x} is not writable: {error}")
+        })?;
+        Ok(value.len() as u64)
+    })();
+    match result {
+        Ok(returned) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            let _ = unicorn.emu_stop();
+        }
     }
 }
 
