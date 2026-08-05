@@ -147,6 +147,19 @@ dependency_dirs = ['C:\Program Files\Adobe\Adobe After Effects 2025\Support File
 `dir`(+`dirs`) / `repository` / `dependency_dirs` を上書きする (env > TOML)。config は
 プラグインのロード時に一度だけ読むので、変更後は AviUtl2 を再起動する。
 
+### 設定ダイアログ (issue #855)
+
+TOML を手で書かなくても、AviUtl2 の設定メニュー内「AEXCompat multi-filter」から
+同じ項目を編集できる。保存先は上記の config.toml と同一 (`AEXCOMPAT_MULTIFILTER_CONFIG`
+も同様に効く) で、手書きした既存ファイルのコメント・未知キーは保存後も維持される
+(`toml_edit` によるマージ。単一フォルダ指定の `dir` だけは保存時に `dirs` へ畳まれる)。
+既存ファイルが TOML として解析できない場合は `config.toml.bak` に退避してから書き直す。
+
+ダイアログが編集するのはファイルであってロード済みの状態ではない: config はロード時に
+一度だけ読まれ、フィルタの config セットも AviUtl2 がロード時に凍結するため、**保存した
+変更は次回の AviUtl2 起動から反映される**。また env 上書き (上記) はファイルより常に
+優先されるので、該当の環境変数が設定されている間はダイアログにその旨の注意が出る。
+
 ### 依存 DLL の封入 (issue #304)
 
 worker は AEX を隔離した sealed load tree からロードし、探索先は

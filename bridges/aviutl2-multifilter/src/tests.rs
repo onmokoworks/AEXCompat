@@ -3851,4 +3851,202 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[1].contains("worker exited"), "{lines:?}");
     }
+
+    // --- settings dialog (issue #855): the text⇄config⇄TOML mapping ---------
+
+    fn full_form() -> ConfigForm {
+        ConfigForm {
+            dirs: "C:\\plugins\r\n  D:\\more \r\n\r\n".into(),
+            dependency_dirs: "C:\\ae\\Support Files".into(),
+            ignore: "Noisy.aex\r\nSlow".into(),
+            repository: "  C:\\repo  ".into(),
+            module_limit: " 40 ".into(),
+            byte_limit: "1073741824".into(),
+        }
+    }
+
+    /// Blank lines and padding are user typing, not config: entries are the
+    /// trimmed non-empty lines.
+    #[test]
+    fn form_lines_are_trimmed_and_blank_lines_dropped() {
+        let edit = parse_form(&full_form()).expect("a fully valid form parses");
+        assert_eq!(edit.dirs, vec!["C:\\plugins", "D:\\more"]);
+        assert_eq!(edit.ignore, vec!["Noisy.aex", "Slow"]);
+        assert_eq!(edit.repository.as_deref(), Some("C:\\repo"));
+        assert_eq!(edit.dependency_module_limit, Some(40));
+        assert_eq!(edit.dependency_byte_limit, Some(1 << 30));
+    }
+
+    /// Empty text fields mean "no value", matching the absent TOML keys they
+    /// map to (no ceiling, default folders, default worker resolution).
+    #[test]
+    fn an_empty_form_is_all_defaults() {
+        let edit = parse_form(&ConfigForm::default()).expect("an empty form is valid");
+        assert!(edit.dirs.is_empty());
+        assert_eq!(edit.repository, None);
+        assert_eq!(edit.dependency_module_limit, None);
+        assert_eq!(edit.dependency_byte_limit, None);
+    }
+
+    /// A limit that does not parse is a user error to show, not a value to
+    /// guess at or silently drop.
+    #[test]
+    fn a_malformed_limit_is_rejected_with_its_text() {
+        let form = ConfigForm {
+            module_limit: "many".into(),
+            ..ConfigForm::default()
+        };
+        let error = parse_form(&form).expect_err("'many' is not a count");
+        assert!(error.contains("many"), "{error}");
+    }
+
+    /// TOML integers are i64: a byte limit beyond that would be written and
+    /// then fail to load, so it is rejected at the dialog instead.
+    #[test]
+    fn a_byte_limit_beyond_toml_range_is_rejected() {
+        let form = ConfigForm {
+            byte_limit: u64::MAX.to_string(),
+            ..ConfigForm::default()
+        };
+        parse_form(&form).expect_err("u64::MAX does not fit a TOML integer");
+    }
+
+    /// The dialog shows what the file says: `dir` and `dirs` fold together,
+    /// and absent values are empty fields.
+    #[test]
+    fn the_form_mirrors_the_config_file() {
+        let config = Config {
+            dir: Some(PathBuf::from("C:\\single")),
+            dirs: vec![PathBuf::from("C:\\more")],
+            repository: None,
+            dependency_dirs: Vec::new(),
+            dependency_module_limit: Some(7),
+            dependency_byte_limit: None,
+            ignore: vec!["Noisy".into()],
+        };
+        let form = form_from_config(&config);
+        assert_eq!(form.dirs, "C:\\single\r\nC:\\more");
+        assert_eq!(form.repository, "");
+        assert_eq!(form.module_limit, "7");
+        assert_eq!(form.byte_limit, "");
+        assert_eq!(form.ignore, "Noisy");
+    }
+
+    /// A dialog save must not destroy what it does not manage: comments and
+    /// unknown keys in a hand-written config survive, and the round-tripped
+    /// text still parses to the values that were saved.
+    #[test]
+    fn a_save_preserves_comments_and_unknown_keys() {
+        let existing = "# my notes\nfuture_key = true\ndir = 'C:\\old'\nrepository = 'C:\\repo'\n";
+        let edit = parse_form(&full_form()).expect("a fully valid form parses");
+        let (text, backed_up) = merged_config_text(existing, &edit);
+        assert!(!backed_up, "a parseable file is merged, not replaced");
+        assert!(text.contains("# my notes"), "{text}");
+        assert!(text.contains("future_key = true"), "{text}");
+        assert!(!text.contains("C:\\old"), "`dir` folds into `dirs`: {text}");
+        let reloaded: toml::Value = toml::from_str(&text).expect("the written file parses");
+        assert_eq!(
+            reloaded["dirs"],
+            toml::Value::Array(vec!["C:\\plugins".into(), "D:\\more".into()]),
+            "{text}"
+        );
+        assert_eq!(reloaded["dependency_module_limit"], toml::Value::Integer(40));
+    }
+
+    /// Clearing a field removes its key: an absent key already means "use the
+    /// default", and a lingering stale value would override it.
+    #[test]
+    fn a_cleared_field_removes_its_key() {
+        let existing =
+            "dirs = ['C:\\plugins']\nrepository = 'C:\\repo'\ndependency_byte_limit = 9\n";
+        let edit = parse_form(&ConfigForm::default()).expect("an empty form is valid");
+        let (text, backed_up) = merged_config_text(existing, &edit);
+        assert!(!backed_up);
+        let reloaded: toml::Value = toml::from_str(&text).expect("the written file parses");
+        let table = reloaded.as_table().expect("a TOML document is a table");
+        assert!(table.is_empty(), "every managed key was removed: {text}");
+    }
+
+    /// An unparseable existing file cannot be merged into; the save still
+    /// succeeds against an empty document, and the caller is told so it backs
+    /// the original up first.
+    #[test]
+    fn an_unparseable_file_is_flagged_for_backup() {
+        let edit = parse_form(&full_form()).expect("a fully valid form parses");
+        let (text, backed_up) = merged_config_text("not toml [", &edit);
+        assert!(backed_up);
+        toml::from_str::<toml::Value>(&text).expect("the replacement parses");
+    }
+
+    /// What the dialog writes is what `load_config` reads: the full form
+    /// round-trips through the real `Config` deserialization.
+    #[test]
+    fn a_saved_form_round_trips_through_config() {
+        let edit = parse_form(&full_form()).expect("a fully valid form parses");
+        let (text, _) = merged_config_text("", &edit);
+        let config: Config = toml::from_str(&text).expect("the written file parses as Config");
+        assert_eq!(config.dir, None);
+        assert_eq!(
+            config.dirs,
+            vec![PathBuf::from("C:\\plugins"), PathBuf::from("D:\\more")]
+        );
+        assert_eq!(config.repository, Some(PathBuf::from("C:\\repo")));
+        assert_eq!(config.dependency_byte_limit, Some(1 << 30));
+        assert_eq!(config.ignore, vec!["Noisy.aex", "Slow"]);
+        // And the reload shows in the dialog what was typed (modulo trimming).
+        let form = form_from_config(&config);
+        assert_eq!(form.dirs, "C:\\plugins\r\nD:\\more");
+        assert_eq!(form.module_limit, "40");
+    }
+
+    /// The template stream is what keeps the dialog alive at all; a malformed
+    /// header (wrong item count, odd alignment) fails at runtime inside
+    /// AviUtl2, so pin the invariants that are checkable here.
+    #[test]
+    fn the_dialog_template_is_well_formed() {
+        let template = build_dialog_template();
+        let words: &[u16] = unsafe {
+            std::slice::from_raw_parts(template.as_ptr().cast(), template.len() * 2)
+        };
+        // Header: style, exstyle, then the item count at u16 index 4.
+        let style = (words[0] as u32) | ((words[1] as u32) << 16);
+        assert_ne!(style & DS_SETFONT, 0, "the font block below is only read with DS_SETFONT");
+        let declared = words[4] as usize;
+        // Count the DLGITEMTEMPLATE headers by walking the stream: after the
+        // header (menu=0, class=0, title, pointsize, face), each item starts
+        // DWORD-aligned with style|WS_CHILD|WS_VISIBLE.
+        let mut found = 0;
+        let mut at = 5 + 4; // past style/exstyle/cdit + x,y,cx,cy
+        assert_eq!(words[at], 0, "no menu");
+        assert_eq!(words[at + 1], 0, "default dialog class");
+        at += 2;
+        while words[at] != 0 {
+            at += 1; // title
+        }
+        at += 1;
+        at += 1; // point size
+        while words[at] != 0 {
+            at += 1; // font face
+        }
+        at += 1;
+        while found < declared {
+            if at % 2 != 0 {
+                at += 1;
+            }
+            let item_style = (words[at] as u32) | ((words[at + 1] as u32) << 16);
+            assert_ne!(item_style & WS_CHILD, 0, "item {found} carries WS_CHILD");
+            at += 4 + 4 + 1; // style, exstyle, rect, id
+            assert_eq!(words[at], 0xFFFF, "item {found} uses a class atom");
+            at += 2;
+            while words[at] != 0 {
+                at += 1; // title
+            }
+            at += 1;
+            assert_eq!(words[at], 0, "item {found} has no creation data");
+            at += 1;
+            found += 1;
+        }
+        assert_eq!(found, declared);
+        assert!(at <= words.len());
+    }
 }

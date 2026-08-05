@@ -447,6 +447,7 @@ fn log_warn(message: &str) {
     log_line(LogLevel::Warn, message);
 }
 
+include!("config_ui.rs");
 include!("discovery_cache.rs");
 include!("discovery_inspection.rs");
 include!("runtime.rs");
