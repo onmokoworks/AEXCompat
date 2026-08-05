@@ -555,6 +555,32 @@ pub(crate) fn validate_animation_bindings(
     Ok(())
 }
 
+/// The plug-in's identity as observed right now, with a note when it differs
+/// from the identity the caller selected.
+///
+/// Dispatch used to refuse here ("selected AEX changed after session
+/// approval"): the hash recorded when the user picked the file had to still
+/// match, so rebuilding a plug-in mid-session turned every route into an
+/// error until it was re-selected. Since issue #739 the mismatch is a state
+/// change, not a fault (the #309 pattern): the freshly observed identity is
+/// what binds the dispatch and travels into the report, and the caller's
+/// stale selection is logged. The worker still re-hashes the file it is
+/// asked to load, so what executed is still recorded.
+fn observe_selected_plugin(plugin_path: &Path, selected_sha256: &str) -> io::Result<String> {
+    observe_selected_plugin_bytes(&fs::read(plugin_path)?, selected_sha256)
+}
+
+/// The same, for callers that already read the bytes.
+fn observe_selected_plugin_bytes(bytes: &[u8], selected_sha256: &str) -> io::Result<String> {
+    let observed = format!("{:X}", Sha256::digest(bytes));
+    if !observed.eq_ignore_ascii_case(selected_sha256) {
+        tracing::warn!(
+            "the selected AEX changed since it was picked; dispatching the bytes on disk"
+        );
+    }
+    Ok(observed)
+}
+
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }

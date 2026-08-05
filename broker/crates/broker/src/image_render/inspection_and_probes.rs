@@ -6,10 +6,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     resources: Vec<crate::sealed_load_tree::SealedResourceEntry>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--l2-params-only".into()];
     let mut args_after_plugin = vec![actual.to_ascii_lowercase()];
     let authorization = runtime_policy
@@ -314,10 +311,7 @@ pub fn probe_experimental_custom_ui_cursor(
     approved_sha256: &str,
     parameters: &[InteractiveParameter],
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--l2-adjust-cursor".into()];
     let args_after_plugin = vec![
         actual.to_ascii_lowercase(),
@@ -354,10 +348,7 @@ pub fn probe_experimental_custom_ui_draw(
     approved_sha256: &str,
     parameters: &[InteractiveParameter],
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--l2-draw-event".into()];
     let args_after_plugin = vec![
         actual.to_ascii_lowercase(),
@@ -411,10 +402,7 @@ pub fn probe_experimental_custom_ui_lifecycle(
     approved_sha256: &str,
     parameters: &[InteractiveParameter],
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--l2-ui-lifecycle".into()];
     let args_after_plugin = vec![
         actual.to_ascii_lowercase(),
@@ -454,10 +442,7 @@ pub fn probe_experimental_custom_ui_idle(
     approved_sha256: &str,
     parameters: &[InteractiveParameter],
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--l2-ui-idle".into()];
     let args_after_plugin = vec![
         actual.to_ascii_lowercase(),
@@ -503,10 +488,7 @@ pub fn probe_experimental_custom_ui_keydown(
     if keycode & 0x3fff_0000 != 0 {
         return Err(invalid("custom UI keycode contains unsupported bits"));
     }
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--l2-ui-keydown".into()];
     let args_after_plugin = vec![
         actual.to_ascii_lowercase(),
@@ -549,10 +531,7 @@ pub fn probe_experimental_custom_ui_mouse_exited(
     approved_sha256: &str,
     parameters: &[InteractiveParameter],
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--l2-ui-mouse-exited".into()];
     let args_after_plugin = vec![
         actual.to_ascii_lowercase(),
@@ -604,10 +583,7 @@ pub fn probe_experimental_custom_ui_click(
     {
         return Err(invalid("custom UI click color is invalid"));
     }
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let payload = format!(
         "{},{},{},{},{},{}",
         point[0], point[1], color[0], color[1], color[2], color[3]
@@ -664,10 +640,7 @@ pub fn probe_experimental_custom_ui_drag(
     if steps == 0 || steps > 32 {
         return Err(invalid("custom UI drag step count is invalid"));
     }
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--l2-drag-event".into()];
     let args_after_plugin = vec![
         actual.to_ascii_lowercase(),
@@ -712,10 +685,7 @@ pub fn trigger_experimental_button(
     if slot == 0 || slot > MAX_PARAMETERS {
         return Err(invalid("button parameter slot is invalid"));
     }
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     if !parameters
         .iter()
         .any(|parameter| parameter.slot == slot && parameter.supervised)
@@ -756,10 +726,7 @@ pub fn initialize_experimental_aegp(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-init".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
@@ -793,10 +760,7 @@ pub fn dispatch_experimental_aegp_update_menu(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-update-menu".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
@@ -831,10 +795,7 @@ pub fn dispatch_experimental_aegp_idle(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-idle".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
@@ -874,10 +835,7 @@ pub fn dispatch_experimental_aegp_command_roundtrip(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-command-roundtrip".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
@@ -913,10 +871,7 @@ pub fn dispatch_experimental_aegp_active_idle_roundtrip(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-active-idle-roundtrip".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
@@ -954,10 +909,7 @@ pub fn dispatch_experimental_aegp_comp_idle_roundtrip(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-comp-idle-roundtrip".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
@@ -1142,10 +1094,7 @@ pub fn dispatch_experimental_aegp_keyframe_roundtrip(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-keyframe-roundtrip".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
@@ -1209,10 +1158,7 @@ pub fn dispatch_experimental_aegp_seek_roundtrip(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-seek-roundtrip".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
@@ -1269,10 +1215,7 @@ pub fn dispatch_experimental_aegp_trim_roundtrip(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-trim-roundtrip".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
@@ -1321,10 +1264,7 @@ pub fn dispatch_experimental_aegp_switch_roundtrip(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-switch-roundtrip".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(

@@ -273,10 +273,7 @@ pub fn render_experimental_audio(
 ) -> io::Result<Value> {
     const MAX_SAMPLES: usize = 10_000_000;
     let plugin_bytes = fs::read(plugin_path)?;
-    let actual = format!("{:X}", Sha256::digest(&plugin_bytes));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin_bytes(&plugin_bytes, approved_sha256)?;
     if output_path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -303,7 +300,8 @@ pub fn render_experimental_audio(
     match render_audio_via_length_one_session(
         repository,
         plugin_path,
-        approved_sha256,
+        // The observed identity, so the session binds the bytes on disk.
+        &actual,
         &input,
         output_path,
         parameters,
@@ -532,10 +530,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
     gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
 ) -> io::Result<Value> {
     let bytes = fs::read(plugin_path)?;
-    let actual = format!("{:X}", Sha256::digest(&bytes));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin_bytes(&bytes, approved_sha256)?;
     render_with_artifact(
         repository,
         "experimental",
@@ -600,10 +595,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_deep16_png(
     dependencies: Vec<ApprovedImageArtifact>,
 ) -> io::Result<Value> {
     let bytes = fs::read(plugin_path)?;
-    let actual = format!("{:X}", Sha256::digest(&bytes));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin_bytes(&bytes, approved_sha256)?;
     render_with_artifact(
         repository,
         "experimental",
@@ -642,10 +634,7 @@ pub fn render_experimental_image_with_timed_layers(
     pixel_format: RenderPixelFormat,
 ) -> io::Result<Value> {
     let bytes = fs::read(plugin_path)?;
-    let actual = format!("{:X}", Sha256::digest(&bytes));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin_bytes(&bytes, approved_sha256)?;
     render_with_artifact(
         repository,
         "experimental-timed-layers",
@@ -684,10 +673,7 @@ pub fn render_experimental_image_with_parameter_animation(
     parameter_animation_sidecar_json(animations)?;
     validate_animation_bindings(parameters, animations)?;
     let bytes = fs::read(plugin_path)?;
-    let actual = format!("{:X}", Sha256::digest(&bytes));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin_bytes(&bytes, approved_sha256)?;
     // Issue #227: encode the base payload from the same parameters the session
     // wrapper reconstructs (`render_session.rs` builds `encode_interactive_payload`
     // from the parameter set). A fixed `"v5|"` placeholder never matched that
@@ -737,10 +723,7 @@ pub fn render_experimental_image_with_audio_sidecar(
     timing: RenderTiming,
 ) -> io::Result<Value> {
     let bytes = fs::read(plugin_path)?;
-    let actual = format!("{:X}", Sha256::digest(&bytes));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin_bytes(&bytes, approved_sha256)?;
     render_with_artifact(
         repository,
         "experimental-audio-sidecar",
@@ -822,10 +805,7 @@ pub fn inspect_experimental_external_dependencies(
     approved_sha256: &str,
     missing_only: bool,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let check_type = if missing_only { 2 } else { 1 };
     let args_before_plugin = vec!["--l2-external-dependencies".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase(), check_type.to_string()];
@@ -872,10 +852,7 @@ pub fn probe_experimental_options_dialog(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--l2-do-dialog".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let started = Instant::now();
@@ -930,10 +907,7 @@ pub fn probe_experimental_automatic_options_dialog(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--l2-auto-dialog".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let started = Instant::now();
@@ -991,10 +965,7 @@ pub fn probe_experimental_nop_render(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--render".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase(), "default".into()];
     let started = Instant::now();
@@ -1041,10 +1012,7 @@ pub fn probe_experimental_smart_nop_render(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--smart".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase(), "default".into()];
     let started = Instant::now();
@@ -1095,10 +1063,7 @@ pub fn probe_experimental_input_buffer_write(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--render".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase(), "default".into()];
     let started = Instant::now();
@@ -1145,10 +1110,7 @@ pub fn probe_experimental_smart_input_buffer_write(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--smart".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase(), "default".into()];
     let started = Instant::now();
@@ -1206,10 +1168,7 @@ fn probe_experimental_frame_resize(
     approved_sha256: &str,
     direction: FrameResizeDirection,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--render".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase(), "default".into()];
     let started = Instant::now();
@@ -1297,10 +1256,7 @@ pub fn probe_experimental_persistent_sequence(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--render".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase(), "persistent_sequence".into()];
     let started = Instant::now();
@@ -1348,10 +1304,7 @@ pub fn probe_experimental_flattened_sequence(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--render".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase(), "flattened_sequence".into()];
     let started = Instant::now();
@@ -1397,10 +1350,7 @@ pub fn probe_experimental_copied_flattened_sequence(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    let actual = format!("{:X}", Sha256::digest(fs::read(plugin_path)?));
-    if !actual.eq_ignore_ascii_case(approved_sha256) {
-        return Err(invalid("selected AEX changed after session approval"));
-    }
+    let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--render".into()];
     let args_after_plugin = vec![
         actual.to_ascii_lowercase(),
