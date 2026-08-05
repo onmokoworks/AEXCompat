@@ -4590,6 +4590,10 @@
         engine.write(data, &[0xa5]).unwrap();
 
         let error = engine
+            .call_win64(HOST_HANDLE_SIZE, [handle, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown handle"));
+        let error = engine
             .call_win64(HOST_LOCK_HANDLE, [handle, 0, 0, 0, 0, 0])
             .unwrap_err();
         assert!(error.to_string().contains("unknown handle"));

@@ -2159,6 +2159,7 @@ fn emulate_handle_size(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
         .get_data()
         .handles
         .get(&handle)
+        .filter(|record| !record.pending_dispose)
         .map(|record| record.size)
     {
         let _ = unicorn.reg_write(RegisterX86::RAX, size);
