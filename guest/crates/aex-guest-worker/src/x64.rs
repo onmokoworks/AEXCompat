@@ -182,7 +182,13 @@ const MAX_TRACE_WITNESSES: usize = 256;
 const MAX_UNSUPPORTED_SUITE_CALLS: usize = 256;
 const MAX_SUITE_REQUESTS: usize = 256;
 const MAX_AVX_FALLBACK_INSTRUCTIONS: u64 = 1_000_000;
-const MAX_AVX_STATE_SYNC_POINTS: usize = 4_096;
+// Small images keep precise one-address hooks. Large executable sections use
+// one range hook plus a bounded address map, avoiding hundreds of thousands of
+// Unicorn hook objects. The independent hard point budget is 1/512 of the
+// maximum accepted 256 MiB PE image size and bounds retained map memory even
+// when a smaller executable section contains dense or false-positive decodes.
+const MAX_SPARSE_AVX_STATE_SYNC_HOOKS: usize = 4_096;
+const MAX_AVX_STATE_SYNC_POINTS: usize = 512 * 1_024;
 const MAX_CRT_MEMORY_COPY_BYTES: u64 = 128 * 1024 * 1024;
 const CRT_MEMORY_COPY_CHUNK: usize = 64 * 1024;
 
@@ -244,8 +250,8 @@ pub enum GuestError {
     UnsupportedImport { library: String, symbol: String },
     #[error("guest data arena exhausted")]
     DataCapacity,
-    #[error("native AVX state sync point capacity exceeded")]
-    AvxStateCapacity,
+    #[error("native AVX state sync point capacity exceeded ({observed} > {limit})")]
+    AvxStateCapacity { observed: usize, limit: usize },
     #[error("guest callback failed: {0}")]
     Callback(String),
     #[error(
@@ -271,7 +277,9 @@ impl GuestError {
     pub fn diagnostic_category(&self) -> &'static str {
         match self {
             Self::Unicorn { .. } => "emulation",
-            Self::ImageAlignment | Self::ImageProtection(_) | Self::AvxStateCapacity => "image",
+            Self::ImageAlignment | Self::ImageProtection(_) | Self::AvxStateCapacity { .. } => {
+                "image"
+            }
             Self::StubCapacity | Self::IatRange | Self::UnsupportedImport { .. } => "import",
             Self::DataCapacity => "memory",
             Self::Callback(_) => "callback",

@@ -1386,7 +1386,10 @@ fn discover_avx_state_sync_points(
         };
         if let Some(sync) = sync {
             if points.len() >= MAX_AVX_STATE_SYNC_POINTS {
-                return Err(GuestError::AvxStateCapacity);
+                return Err(GuestError::AvxStateCapacity {
+                    observed: points.len() + 1,
+                    limit: MAX_AVX_STATE_SYNC_POINTS,
+                });
             }
             points.push((instruction.ip(), sync));
         }
@@ -1435,14 +1438,50 @@ fn install_avx_state_sync_points(
     unicorn: &mut Unicorn<'static, GuestState>,
     points: Vec<(u64, AvxStateSync)>,
 ) -> Result<(), GuestError> {
-    if points.len() > MAX_AVX_STATE_SYNC_POINTS {
-        return Err(GuestError::AvxStateCapacity);
-    }
+    let mut unique = HashMap::with_capacity(points.len().min(MAX_AVX_STATE_SYNC_POINTS));
     for (address, sync) in points {
+        let observed = unique.len();
+        match unique.entry(address) {
+            std::collections::hash_map::Entry::Occupied(_) => {}
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                if observed >= MAX_AVX_STATE_SYNC_POINTS {
+                    return Err(GuestError::AvxStateCapacity {
+                        observed: observed + 1,
+                        limit: MAX_AVX_STATE_SYNC_POINTS,
+                    });
+                }
+                entry.insert(sync);
+            }
+        }
+    }
+    if unique.len() <= MAX_SPARSE_AVX_STATE_SYNC_HOOKS {
+        for (address, sync) in unique {
+            uc(
+                "install sparse native AVX state sync",
+                unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+                    synchronize_native_avx_state(unicorn, sync);
+                }),
+            )?;
+        }
+    } else {
+        let first = *unique.keys().min().ok_or_else(|| {
+            GuestError::Callback("dense AVX state sync map is unexpectedly empty".into())
+        })?;
+        let last = *unique.keys().max().ok_or_else(|| {
+            GuestError::Callback("dense AVX state sync map is unexpectedly empty".into())
+        })?;
+        unicorn.get_data_mut().avx_state_sync_points = unique;
         uc(
-            "install native AVX state sync",
-            unicorn.add_code_hook(address, address, move |unicorn, _, _| {
-                synchronize_native_avx_state(unicorn, sync);
+            "install dense native AVX state sync",
+            unicorn.add_code_hook(first, last, |unicorn, address, _| {
+                let sync = unicorn
+                    .get_data()
+                    .avx_state_sync_points
+                    .get(&address)
+                    .copied();
+                if let Some(sync) = sync {
+                    synchronize_native_avx_state(unicorn, sync);
+                }
             }),
         )?;
     }
@@ -1786,7 +1825,7 @@ fn install_avx_fallback(unicorn: &mut Unicorn<'static, GuestState>) -> Result<()
 fn discover_image_avx_state_sync_points(
     image: &PeImage,
 ) -> Result<Vec<(u64, AvxStateSync)>, GuestError> {
-    let mut points = Vec::new();
+    let mut points = BTreeMap::new();
     for section in image
         .section_protections()
         .iter()
@@ -1803,14 +1842,17 @@ fn discover_image_avx_state_sync_points(
             &image.mapped_bytes()[start..end],
             image.image_base() + start as u64,
         )?;
-        if points.len().saturating_add(section_points.len()) > MAX_AVX_STATE_SYNC_POINTS {
-            return Err(GuestError::AvxStateCapacity);
+        for (address, sync) in section_points {
+            points.entry(address).or_insert(sync);
+            if points.len() > MAX_AVX_STATE_SYNC_POINTS {
+                return Err(GuestError::AvxStateCapacity {
+                    observed: points.len(),
+                    limit: MAX_AVX_STATE_SYNC_POINTS,
+                });
+            }
         }
-        points.extend(section_points);
     }
-    points.sort_unstable_by_key(|(address, _)| *address);
-    points.dedup_by_key(|(address, _)| *address);
-    Ok(points)
+    Ok(points.into_iter().collect())
 }
 
 fn classify_trace_value(raw: u64, image_base: u64, image_end: u64) -> TraceValue {

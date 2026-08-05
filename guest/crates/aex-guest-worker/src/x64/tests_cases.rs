@@ -2233,6 +2233,13 @@
             code.extend_from_slice(&[0xc5, 0xf8, 0x58, 0xc0]); // vaddps xmm0,xmm0,xmm0
         }
         let discovery_error = discover_avx_state_sync_points(&code, CODE).unwrap_err();
+        assert!(matches!(
+            &discovery_error,
+            GuestError::AvxStateCapacity {
+                observed,
+                limit: MAX_AVX_STATE_SYNC_POINTS
+            } if *observed == MAX_AVX_STATE_SYNC_POINTS + 1
+        ));
         assert!(
             discovery_error
                 .to_string()
@@ -2243,19 +2250,108 @@
         let mut engine = test_engine(&[0xc3]);
         let error = install_avx_state_sync_points(
             &mut engine.unicorn,
-            std::iter::repeat_n(
-                (CODE, AvxStateSync::RegisterUpper(0)),
-                MAX_AVX_STATE_SYNC_POINTS + 1,
-            )
-            .collect(),
+            (0..=MAX_AVX_STATE_SYNC_POINTS)
+                .map(|offset| {
+                    (
+                        CODE + offset as u64,
+                        AvxStateSync::RegisterUpper(0),
+                    )
+                })
+                .collect(),
         )
         .unwrap_err();
 
+        assert!(matches!(
+            &error,
+            GuestError::AvxStateCapacity {
+                observed,
+                limit: MAX_AVX_STATE_SYNC_POINTS
+            } if *observed == MAX_AVX_STATE_SYNC_POINTS + 1
+        ));
         assert!(
             error
                 .to_string()
                 .contains("native AVX state sync point capacity exceeded"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn avx_state_sync_accepts_the_exact_hard_limit_with_one_dense_hook() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[0xc3]);
+        let points = (0..MAX_AVX_STATE_SYNC_POINTS)
+            .map(|offset| {
+                (
+                    CODE + offset as u64,
+                    AvxStateSync::RegisterUpper(0),
+                )
+            })
+            .collect();
+
+        install_avx_state_sync_points(&mut engine.unicorn, points).unwrap();
+
+        assert_eq!(
+            engine.unicorn.get_data().avx_state_sync_points.len(),
+            MAX_AVX_STATE_SYNC_POINTS
+        );
+    }
+
+    #[test]
+    fn duplicate_avx_sync_points_do_not_consume_the_dense_budget() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[0xc3]);
+
+        install_avx_state_sync_points(
+            &mut engine.unicorn,
+            std::iter::repeat_n(
+                (CODE, AvxStateSync::RegisterUpper(0)),
+                MAX_SPARSE_AVX_STATE_SYNC_HOOKS + 1,
+            )
+            .collect(),
+        )
+        .unwrap();
+
+        assert!(engine.unicorn.get_data().avx_state_sync_points.is_empty());
+    }
+
+    #[test]
+    fn dense_avx_sync_map_preserves_vex128_upper_zeroing() {
+        const CODE: u64 = 0x1000_0000;
+        let mut engine = test_engine(&[0x90, 0xc3]);
+        engine
+            .unicorn
+            .mem_write(
+                CODE,
+                &[
+                    0xc5, 0xf9, 0xef, 0xc0, // vpxor xmm0,xmm0,xmm0
+                    0xc5, 0xfc, 0x11, 0x01, // vmovups [rcx],ymm0
+                    0xc3,
+                ],
+            )
+            .unwrap();
+        let points = (0..=MAX_SPARSE_AVX_STATE_SYNC_HOOKS)
+            .map(|offset| {
+                (
+                    CODE + offset as u64,
+                    AvxStateSync::RegisterUpper(0),
+                )
+            })
+            .collect::<Vec<_>>();
+        install_avx_state_sync_points(&mut engine.unicorn, points).unwrap();
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::YMM0, &[0x5a; 32])
+            .unwrap();
+
+        engine.call_win64(CODE, [DATA_BASE, 0, 0, 0, 0, 0]).unwrap();
+
+        let mut output = [0xff; 32];
+        engine.unicorn.mem_read(DATA_BASE, &mut output).unwrap();
+        assert_eq!(output, [0; 32]);
+        assert_eq!(
+            engine.unicorn.get_data().avx_state_sync_points.len(),
+            MAX_SPARSE_AVX_STATE_SYNC_HOOKS + 1
         );
     }
 
