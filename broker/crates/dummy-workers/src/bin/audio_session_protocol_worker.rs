@@ -132,6 +132,26 @@ mod worker {
     }
 
     pub fn run() -> i32 {
+        // In-place dependency search directories (issue #751): the real
+        // worker's apply_dependency_search_dirs requires non-empty absolute
+        // directories joined by ';', bounded at 16. Mirror the image session
+        // fixture's shape gate so a malformed broker join fails the audio
+        // in-place tests too instead of passing silently.
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(position) = args.iter().position(|arg| arg == "--dependency-dirs-v1") {
+            let Some(value) = args.get(position + 1) else {
+                return 3;
+            };
+            let dirs: Vec<&str> = value.split(';').collect();
+            let shape_ok = !value.is_empty()
+                && dirs.len() <= 16
+                && dirs
+                    .iter()
+                    .all(|dir| !dir.is_empty() && std::path::Path::new(dir).is_absolute());
+            if !shape_ok {
+                return 3;
+            }
+        }
         // Reuses the image session's inherited-handle env names (the broker's
         // SessionChildHandles sets these); the audio session is distinguished by
         // the CLI command word, not the env name.

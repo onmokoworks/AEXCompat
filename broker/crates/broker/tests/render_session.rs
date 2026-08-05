@@ -275,6 +275,7 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: None,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             max_samples: 1024,
             channels: 1,
             time_scale: 44100,
@@ -318,6 +319,50 @@ mod windows_e2e {
         assert_eq!(close["session_clean"], true, "close: {close}");
     }
 
+    /// In-place parity (issue #751): an audio session opened with
+    /// `dependency_search_dirs` launches the worker on the plug-in's real path
+    /// (no staging) and still renders and closes clean. This exercises the
+    /// broker-side in-place branch (search-dir validation + in-place launch)
+    /// end to end; the fixture worker shape-gates the appended
+    /// `--dependency-dirs-v1` pair the way the real worker's
+    /// `apply_dependency_search_dirs` does, so a malformed broker join fails
+    /// here instead of passing silently.
+    #[test]
+    fn audio_session_renders_in_place() {
+        if crate::common::skip_without_sealed_worker_launch("audio_session_renders_in_place") {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let (repository, plugin, sha) = temp_audio_repository();
+        let search_dir = repository.0.join("deps");
+        std::fs::create_dir_all(&search_dir).unwrap();
+        let mut session = AudioRenderSession::open(AudioSessionOpenRequest {
+            repository: &repository.0,
+            plugin_path: &plugin,
+            plugin_sha256: &sha,
+            parameters: None,
+            dependencies: Vec::new(),
+            dependency_search_dirs: vec![search_dir],
+            max_samples: 1024,
+            channels: 1,
+            time_scale: 44100,
+            frame_deadline: Duration::from_secs(30),
+        })
+        .expect("open in-place audio session");
+
+        let input: Vec<f32> = vec![0.5, -0.25, 1.0, -1.0];
+        let outcome = session.render_span(0, &input).expect("span renders");
+        let AudioSpanStatus::Rendered { samples, .. } = outcome.status else {
+            panic!("span errored");
+        };
+        let expected: Vec<u8> = input.iter().flat_map(|s| (-s).to_le_bytes()).collect();
+        assert_eq!(samples, expected);
+
+        let close = session.close();
+        assert_eq!(close["requests_ok"], 1);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
     /// The broker independently bounds the reported output window against the
     /// submitted input span (Codex #252): a worker that reports
     /// start_sample + sample_count past input.len() is rejected as a
@@ -337,6 +382,7 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: None,
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             max_samples: 1024,
             channels: 1,
             time_scale: 44100,

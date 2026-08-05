@@ -36,6 +36,19 @@
 //!   already loaded, is therefore sealed and then never used. That costs a copy;
 //!   it does not change which module loads, and the sealed tree stays a superset
 //!   of what the plug-in needs.
+//!
+//! Status (issue #751): in-place loading (`--dependency-dirs-v1` +
+//! `AddDllDirectory` on the plug-in's real path) is the default pipeline for
+//! discovery and render, which needs no closure at all — the loader resolves
+//! imports from the admitted search directories directly. This resolver is
+//! retained for the staged escape hatches
+//! (`AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY` / `..._STAGED_RENDER`), for GPU
+//! (AEXRMA1) render, which the in-place dispatch does not support yet (#815),
+//! and as the failure-survey probe that records why a staged closure
+//! resolution failed (cache convergence evidence). Removing the staged
+//! machinery once those uses age out is #816. Do not grow this module's
+//! emulation surface: a name the walk cannot see is an argument for the
+//! in-place pipeline, not for deeper loader modeling here.
 
 use crate::secure_image_dispatch::ApprovedImageArtifact;
 use crate::session_dependency_manifest::{
