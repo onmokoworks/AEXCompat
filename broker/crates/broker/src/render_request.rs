@@ -989,7 +989,7 @@ pub fn execute_smart(
         let report: Value = serde_json::from_str(isolated.stdout.trim())
             .unwrap_or_else(|_| json!({"status":"worker_report_unavailable"}));
         secure_launches.push(json!({
-            "launch_mode":"sealed_load_tree_restricted_token",
+            "launch_mode":"sealed_load_tree_staged_worker",
             "worker_authenticated":true,
             "worker_size_bytes":worker_byte_size,
             "worker_sha256":worker_sha256.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),

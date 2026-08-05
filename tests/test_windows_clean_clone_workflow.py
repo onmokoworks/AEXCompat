@@ -26,13 +26,13 @@ def test_windows_clean_clone_runs_canonical_source_reproducible_gates():
     # --show-output is load-bearing: libtest captures the output of passing
     # tests, and a test that skips itself passes. Without it a run where the
     # probe suppressed every worker-launching test looks exactly like full
-    # coverage (issue #335).
+    # coverage (issue #335; the restricted token it named is gone since #731).
     assert "cargo test --workspace --locked -- --show-output" in workflow
-    assert "Report restricted-token skips" in workflow
-    assert "cannot launch a restricted-token worker" in workflow
-    assert "no restricted-token skips" in workflow, (
+    assert "Report sealed-worker skips" in workflow
+    assert "cannot launch a sealed worker" in workflow
+    assert "no sealed-worker skips" in workflow, (
         "the report must state the no-skip case explicitly, not by staying silent")
-    # The hosted runner's restricted token cannot initialize a worker, so the
+    # A hosted runner may be unable to launch a sealed worker at all, so the
     # tests that drive one detect that themselves and report a skip (issue #335).
     # The workflow must not carry a hand-maintained --skip list again: that list
     # did not follow the tests added after it was written, and main went red with
@@ -47,18 +47,18 @@ def test_windows_clean_clone_runs_canonical_source_reproducible_gates():
             f"{name} is skipped by the test itself now, not by the workflow")
         guard = (ROOT / "broker/crates/broker/tests/secure_launch.rs").read_text(encoding="utf-8")
         anchor = guard.index(f"fn {name}(")
-        assert "skip_without_restricted_token_launch" in guard[anchor:anchor + 400], (
-            f"{name} lost its restricted-token guard; the workflow no longer skips it")
+        assert "skip_without_sealed_worker_launch" in guard[anchor:anchor + 400], (
+            f"{name} lost its launch guard; the workflow no longer skips it")
     assert "uv sync --locked" in workflow
     assert "uv run python -m pytest --collect-only -q --validate-local-artifact-manifest" in workflow
     assert "uv run python -m pytest -q" in workflow
     assert "--run-local-artifact-tests" not in workflow
 
 
-def test_pre_launch_rejection_tests_keep_running_on_a_restricted_token_host():
+def test_pre_launch_rejection_tests_keep_running_on_a_launch_limited_host():
     """Rejection paths that never start a process must not carry the #335 guard.
 
-    The guard exists because a hosted runner's restricted token cannot
+    The guard exists because a hosted runner may be unable to
     initialize a worker. A test that asserts the launch is *refused* before any
     process is created is unaffected by that, so guarding it would delete real
     CI coverage of the refusal. `RenderSession::open` performs every argument
@@ -96,7 +96,7 @@ def test_pre_launch_rejection_tests_keep_running_on_a_restricted_token_host():
         for name in names:
             anchor = source.index(f"fn {name}(")
             head = source[anchor:anchor + 400]
-            assert "skip_without_restricted_token_launch" not in head, (
+            assert "skip_without_sealed_worker_launch" not in head, (
                 f"{filename}::{name} rejects before any process starts; guarding it "
                 "removes CI coverage of the refusal")
 
@@ -124,19 +124,20 @@ def test_ae_sdk_workflow_runs_native_parameter_animation_coverage_after_clean_bu
         in workflow
     )
     assert "coverage_source_commit=" in workflow
-    assert "Report parameter-animation restricted-token skips" in workflow
-    assert "cannot launch a restricted-token worker" in workflow
+    assert "Report parameter-animation sealed-worker skips" in workflow
+    assert "cannot launch a sealed worker" in workflow
 
 
-def test_the_restricted_token_skip_is_opt_in_and_only_ci_opts_in():
+def test_the_sealed_worker_skip_is_opt_in_and_only_ci_opts_in():
     """The skip must never be reachable without an explicit opt-in.
 
     0xC0000142 is what a hosted runner produces, and it is equally what a
-    regression in the restricted token itself would produce -- drop an entry
-    from COMPATIBILITY_SIDS or change the CreateRestrictedToken flags and the
-    worker stops loading its system DLLs everywhere. The probe cannot tell those
-    apart, so the opt-in is what keeps a developer machine failing loudly
-    instead of skipping 56 tests (issue #335).
+    regression in the launch path itself would produce -- break the staged
+    worker copy or its environment and the worker stops loading its system DLLs
+    everywhere. The probe cannot tell those apart, so the opt-in is what keeps a
+    developer machine failing loudly instead of skipping 56 tests (issue #335).
+    The env var still carries the old restricted-token name; the token itself
+    went away in #731 and renaming it is left to the CI work in flight.
     """
     probe = (ROOT / "broker/crates/broker/tests/common/mod.rs").read_text(encoding="utf-8")
     assert 'const ALLOW_SKIP_ENV: &str = "AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP"' in probe

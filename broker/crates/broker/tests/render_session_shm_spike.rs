@@ -2,8 +2,8 @@
 //!
 //! 検証する主張:
 //! 1. broker が作った無名 file mapping (pagefile 裏、SEC_COMMIT) は、名前も
-//!    パスも介さず継承 handle だけで restricted token の worker から
-//!    MapViewOfFile でき、双方向に読み書きできる。
+//!    パスも介さず継承 handle だけで worker から MapViewOfFile でき、双方向に
+//!    読み書きできる。
 //! 2. 共有 view のページ touch は worker の private commit (PagefileUsage) に
 //!    ほぼ課金されず、Job Object の ProcessMemoryLimit を食い潰さない。
 //!    決め手として上限 (128MB) < section (256MB) の構成で全ページ touch が
@@ -12,15 +12,16 @@
 //!    (レイテンシは参考値として表示のみ、assert しない)。
 //!
 //! launch は windows_process.rs の run_isolated_impl と同じ形状
-//! (CreateProcessAsUserW + PROC_THREAD_ATTRIBUTE_HANDLE_LIST + Job assign 後
+//! (CreateProcessW + PROC_THREAD_ATTRIBUTE_HANDLE_LIST + Job assign 後
 //! resume) をテスト内に再現する。spike なので production API は変更しない。
+//! restricted token は #731 で撤去済みなので、この spike も通常トークンで
+//! 起動する (証明対象は継承 handle と Job Object の課金であってトークンでは
+//! ない)。
 
 mod common;
 
 #[cfg(windows)]
 mod windows_e2e {
-    use aexcompat_broker::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
-    use aexcompat_broker::restricted_worker_token::create_restricted_worker_token;
     use std::ffi::c_void;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
@@ -42,7 +43,7 @@ mod windows_e2e {
     };
     use windows_sys::Win32::System::Threading::{
         CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateEventW,
-        CreateProcessAsUserW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
         GetExitCodeProcess, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
         PROCESS_INFORMATION, ResumeThread, STARTUPINFOEXW, SetEvent, TerminateProcess,
         UpdateProcThreadAttribute, WaitForSingleObject,
@@ -178,12 +179,7 @@ mod windows_e2e {
     }
 
     #[test]
-    fn restricted_worker_maps_inherited_anonymous_section_without_commit_charge() {
-        if crate::common::skip_without_restricted_token_launch(
-            "restricted_worker_maps_inherited_anonymous_section_without_commit_charge",
-        ) {
-            return;
-        }
+    fn worker_maps_inherited_anonymous_section_without_commit_charge() {
         let fixture = build_fixture();
         let root = TempTree(std::env::temp_dir().join(format!(
             "aexcompat-session-shm-spike-{}-{:032x}",
@@ -192,10 +188,6 @@ mod windows_e2e {
         )));
         std::fs::create_dir(&root.0).unwrap();
         std::fs::copy(fixture, root.0.join("session_shm_probe.exe")).unwrap();
-
-        let sid = RestrictedWorkerSid::generate();
-        protect_sealed_load_tree(&root.0, &["session_shm_probe.exe"], &sid).unwrap();
-        let token = create_restricted_worker_token(&sid).unwrap();
 
         let parent_commit_before_section = parent_private_commit();
 
@@ -329,8 +321,7 @@ mod windows_e2e {
         startup.lpAttributeList = attribute_list;
         let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         let created = unsafe {
-            CreateProcessAsUserW(
-                token.as_raw_handle(),
+            CreateProcessW(
                 application.as_ptr(),
                 command.as_mut_ptr(),
                 null(),
@@ -349,7 +340,7 @@ mod windows_e2e {
         assert_ne!(
             created,
             0,
-            "CreateProcessAsUserW failed: {}",
+            "CreateProcessW failed: {}",
             io::Error::last_os_error()
         );
         let process_handle = OwnedHandle::new(process.hProcess).unwrap();

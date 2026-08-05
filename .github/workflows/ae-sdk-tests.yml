@@ -194,10 +194,10 @@ jobs:
             Tee-Object -FilePath (Join-Path $root 'parameter-animation-output.txt')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # A hosted runner may be unable to create the restricted-token worker
+      # A hosted runner may be unable to create the sealed worker
       # (#335).  Keep that limitation visible while retaining the exact target
       # and prerequisite checks above.
-      - name: Report parameter-animation restricted-token skips
+      - name: Report parameter-animation sealed-worker skips
         shell: pwsh
         if: always()
         run: |
@@ -206,12 +206,12 @@ jobs:
             Write-Host 'parameter-animation produced no log; the coverage step did not start.'
             exit 0
           }
-          $skips = Select-String -Path $log -Pattern 'cannot launch a restricted-token worker'
+          $skips = Select-String -Path $log -Pattern 'cannot launch a sealed worker'
           if ($skips) {
-            Write-Host "::warning::$($skips.Count) parameter-animation tests did not run: this runner cannot launch a restricted-token worker (issue #335)"
+            Write-Host "::warning::$($skips.Count) parameter-animation tests did not run: this runner cannot launch a sealed worker (issue #335)"
             $skips | ForEach-Object { $_.Line }
           } else {
-            Write-Host 'Every parameter-animation integration test ran without a restricted-token skip.'
+            Write-Host 'Every parameter-animation integration test ran without a sealed-worker skip.'
           }
 
       # built_artifact テスト (test_sdk_backwards_audio_worker) が参照する
@@ -247,11 +247,11 @@ jobs:
       # AFTER_EFFECTS_SDK_ROOT が通っていれば SDK 由来の skip は 1 件も出ないはず。
       # 同様に、worker/probe をビルド済みなので built_artifact テストが成果物
       # 不在の inline skip ("... is not built" 等) で黙って skip されたら fail。
-      # The restricted-token limitation reaches the Python side too: the video
+      # The launch limitation reaches the Python side too: the video
       # batch CLI drives a live worker. That skip is legitimate on a hosted
       # runner, so the gate below must not fail on it, but it must not be
       # invisible either -- report it the way the Rust side does (#335).
-      - name: Report restricted-token skips
+      - name: Report sealed-worker skips
         shell: pwsh
         if: always()
         run: |
@@ -260,12 +260,12 @@ jobs:
             exit 0
           }
           $skips = Select-String -Path pytest-output.txt `
-            -Pattern 'cannot launch a restricted-token worker'
+            -Pattern 'cannot launch a sealed worker'
           if ($skips) {
-            Write-Host "::warning::$($skips.Count) Python tests did not run: this runner cannot launch a restricted-token worker (issue #335)"
+            Write-Host "::warning::$($skips.Count) Python tests did not run: this runner cannot launch a sealed worker (issue #335)"
             $skips | ForEach-Object { $_.Line }
           } else {
-            Write-Host 'Every worker-launching Python test ran: no restricted-token skips.'
+            Write-Host 'Every worker-launching Python test ran: no sealed-worker skips.'
           }
 
       - name: Fail if SDK or built-artifact tests were skipped

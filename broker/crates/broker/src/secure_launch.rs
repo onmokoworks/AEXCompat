@@ -122,7 +122,10 @@ pub(crate) fn secure_launch_with_process_memory_limit(
 
 #[cfg(windows)]
 fn secure_launch_impl(
-    tree: SealedLoadTree,
+    // Taken by value and dropped when this returns: the tree's retained
+    // handles are what keep the staged plug-in bytes in place for the whole
+    // launch, so its lifetime is the point even though nothing reads it here.
+    _tree: SealedLoadTree,
     worker_program: &Path,
     worker_expected_sha256: [u8; 32],
     worker_expected_size: u64,
@@ -132,31 +135,11 @@ fn secure_launch_impl(
     timeout: Option<Duration>,
     process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
-    use crate::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
-    use crate::restricted_worker_token::create_restricted_worker_token;
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
-    let worker_sid = RestrictedWorkerSid::generate();
-    let token = create_restricted_worker_token(&worker_sid)
-        .map_err(|error| stage_error("restricted token creation", error))?;
-    if !token
-        .contains_restricting_sid(&worker_sid)
-        .map_err(|error| stage_error("restricted token verification", error))?
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "restricted token does not contain the generated worker SID",
-        ));
-    }
-    protect_sealed_load_tree(tree.root(), tree.manifest_basenames(), &worker_sid)
-        .map_err(|error| stage_error("sealed tree ACL application", error))?;
-    let worker_stage = TrustedWorkerStage::create(
-        worker_program,
-        worker_expected_sha256,
-        worker_expected_size,
-        &worker_sid,
-    )
-    .map_err(|error| stage_error("trusted worker staging", error))?;
+    let worker_stage =
+        TrustedWorkerStage::create(worker_program, worker_expected_sha256, worker_expected_size)
+            .map_err(|error| stage_error("trusted worker staging", error))?;
     // Never expose the repository root as a worker CWD. The native sidecar
     // loader pins relative access to <cwd>/image-transport, which is the same
     // broker-owned <repository>/target/image-transport boundary as before.
@@ -164,27 +147,25 @@ fn secure_launch_impl(
     std::fs::create_dir_all(&worker_cwd)
         .map_err(|error| stage_error("worker cwd creation", error))?;
     let result = if let Some(limit) = process_memory_limit {
-        crate::windows_process::run_isolated_with_restricted_token_and_memory_limit(
+        crate::windows_process::run_isolated_staged_with_memory_limit(
             worker_stage.worker_path(),
             args,
             timeout,
-            &token,
             &worker_cwd,
             repository,
             limit,
         )
     } else {
-        crate::windows_process::run_isolated_with_restricted_token(
+        crate::windows_process::run_isolated_staged(
             worker_stage.worker_path(),
             args,
             timeout,
-            &token,
             &worker_cwd,
             // Repository root for the launch-boundary minidump handle (issue #18).
             repository,
         )
     }
-    .map_err(|error| stage_error("restricted process launch", error))?;
+    .map_err(|error| stage_error("staged process launch", error))?;
     // Recorded, not enforced (issue #730): an audit that cannot confirm the
     // module list rides the result as a warning, and the dispatch stands.
     let module_audit_warning = (require_module_audit
@@ -215,11 +196,11 @@ fn secure_launch_impl(
     })
 }
 
-/// A sealed worker launched for a resident render session. Every trust
-/// artifact whose lifetime the one-shot path scoped to a single dispatch
-/// (sealed tree with its verified handles and ACL, staged worker copy,
-/// restricted token) is held here for the whole session; dropping without
-/// `finish` terminates the worker through the job's kill-on-close limit.
+/// A sealed worker launched for a resident render session. Every artifact
+/// whose lifetime the one-shot path scoped to a single dispatch (sealed tree
+/// with its verified handles, staged worker copy) is held here for the whole
+/// session; dropping without `finish` terminates the worker through the job's
+/// kill-on-close limit.
 #[cfg(windows)]
 pub struct SecureSessionProcess {
     launched: Option<crate::windows_process::LaunchedIsolatedProcess>,
@@ -229,7 +210,6 @@ pub struct SecureSessionProcess {
     worker_freshness_warning: Option<&'static str>,
     _tree: SealedLoadTree,
     _stage: crate::trusted_worker_stage::TrustedWorkerStage,
-    _token: crate::restricted_worker_token::RestrictedWorkerToken,
 }
 
 #[cfg(windows)]
@@ -306,10 +286,10 @@ impl SecureSessionProcess {
     }
 }
 
-/// Session variant of `secure_launch`: identical trust pipeline (restricted
-/// token, sealed tree ACL, trusted worker staging), but the worker is left
-/// running with the inherited session transport and returned to the caller
-/// instead of being awaited.
+/// Session variant of `secure_launch`: identical staging pipeline (sealed
+/// tree, trusted worker staging), but the worker is left running with the
+/// inherited session transport and returned to the caller instead of being
+/// awaited.
 #[cfg(windows)]
 pub fn secure_launch_session(
     tree: SealedLoadTree,
@@ -345,30 +325,13 @@ fn secure_launch_session_with_desktop_policy(
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
 ) -> io::Result<SecureSessionProcess> {
-    use crate::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
-    use crate::restricted_worker_token::create_restricted_worker_token;
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
     let args = build_launch_args(&tree, &request)?;
-    let worker_sid = RestrictedWorkerSid::generate();
-    let token = create_restricted_worker_token(&worker_sid)
-        .map_err(|error| stage_error("restricted token creation", error))?;
-    if !token
-        .contains_restricting_sid(&worker_sid)
-        .map_err(|error| stage_error("restricted token verification", error))?
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "restricted token does not contain the generated worker SID",
-        ));
-    }
-    protect_sealed_load_tree(tree.root(), tree.manifest_basenames(), &worker_sid)
-        .map_err(|error| stage_error("sealed tree ACL application", error))?;
     let worker_stage = TrustedWorkerStage::create(
         request.worker_program,
         request.worker_expected_sha256,
         request.worker_expected_size,
-        &worker_sid,
     )
     .map_err(|error| stage_error("trusted worker staging", error))?;
     // Session workers share the same non-root CWD and transport boundary as
@@ -378,10 +341,9 @@ fn secure_launch_session_with_desktop_policy(
         .map_err(|error| stage_error("session worker cwd creation", error))?;
     let launched = match desktop_policy {
         crate::windows_process::WorkerDesktopPolicy::Dedicated => {
-            crate::windows_process::launch_isolated_session_with_restricted_token(
+            crate::windows_process::launch_isolated_session_staged(
                 worker_stage.worker_path(),
                 &args,
-                &token,
                 &worker_cwd,
                 session,
                 // Repository root for the launch-boundary minidump handle (issue #18/#224).
@@ -392,21 +354,19 @@ fn secure_launch_session_with_desktop_policy(
             crate::windows_process::launch_isolated_session_on_current_desktop(
                 worker_stage.worker_path(),
                 &args,
-                &token,
                 &worker_cwd,
                 session,
                 request.repository,
             )
         }
     }
-    .map_err(|error| stage_error("restricted session launch", error))?;
+    .map_err(|error| stage_error("staged session launch", error))?;
     Ok(SecureSessionProcess {
         launched: Some(launched),
         require_module_audit: request.require_module_audit,
         worker_freshness_warning: None,
         _tree: tree,
         _stage: worker_stage,
-        _token: token,
     })
 }
 

@@ -143,33 +143,33 @@ mod windows_probe {
         }
     }
 
-    pub fn restricted_token_launch_available() -> bool {
+    pub fn sealed_worker_launch_available() -> bool {
         static AVAILABLE: OnceLock<bool> = OnceLock::new();
         *AVAILABLE.get_or_init(probe)
     }
 }
 
 #[cfg(windows)]
-pub use windows_probe::restricted_token_launch_available;
+pub use windows_probe::sealed_worker_launch_available;
 
 #[cfg(not(windows))]
-pub fn restricted_token_launch_available() -> bool {
+pub fn sealed_worker_launch_available() -> bool {
     true
 }
 
 /// Returns true (after printing the skip line) when this environment cannot
-/// launch a restricted-token worker, so a test can `return` on it:
+/// launch a sealed worker at all, so a test can `return` on it:
 ///
 /// ```ignore
-/// if common::skip_without_restricted_token_launch("my_test") { return; }
+/// if common::skip_without_sealed_worker_launch("my_test") { return; }
 /// ```
 ///
 /// Costs nothing where launches work: the probe runs once per test binary and
-/// returns `true`, so no test is suppressed on a normal user token.
-pub fn skip_without_restricted_token_launch(test: &str) -> bool {
-    if restricted_token_launch_available() {
+/// returns `true`, so no test is suppressed on a working environment.
+pub fn skip_without_sealed_worker_launch(test: &str) -> bool {
+    if sealed_worker_launch_available() {
         return false;
     }
-    println!("skipping {test}: this environment cannot launch a restricted-token worker (#335)");
+    println!("skipping {test}: this environment cannot launch a sealed worker (#335)");
     true
 }

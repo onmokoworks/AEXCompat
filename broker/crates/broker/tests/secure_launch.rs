@@ -33,7 +33,7 @@ mod windows_e2e {
 
     #[test]
     fn external_worker_reads_sealed_plugin_and_tree_is_cleaned_after_exit() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "external_worker_reads_sealed_plugin_and_tree_is_cleaned_after_exit",
         ) {
             return;
@@ -143,7 +143,7 @@ mod windows_e2e {
 
     #[test]
     fn timeout_kills_worker_and_cleans_sealed_and_staged_trees() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "timeout_kills_worker_and_cleans_sealed_and_staged_trees",
         ) {
             return;
@@ -193,7 +193,7 @@ mod windows_e2e {
 
     #[test]
     fn timeout_kills_worker_descendant_process_too() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "timeout_kills_worker_descendant_process_too",
         ) {
             return;
@@ -234,7 +234,7 @@ mod windows_e2e {
 
     #[test]
     fn modal_ui_worker_is_started_on_a_private_desktop_before_timeout() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "modal_ui_worker_is_started_on_a_private_desktop_before_timeout",
         ) {
             return;

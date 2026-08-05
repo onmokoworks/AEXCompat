@@ -71,7 +71,7 @@
       "additionalProperties": false,
       "required": ["launch_mode", "worker_authenticated", "worker_size_bytes", "worker_sha256", "plugin_basename", "plugin_sha256", "sealed_manifest_sha256", "module_audit_required", "module_audit", "dismissed_windows"],
       "properties": {
-        "launch_mode": {"const": "sealed_load_tree_restricted_token"},
+        "launch_mode": {"const": "sealed_load_tree_staged_worker"},
         "worker_authenticated": {"const": true},
         "worker_size_bytes": {"type": "integer", "minimum": 1},
         "worker_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},

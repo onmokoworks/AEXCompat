@@ -7,6 +7,14 @@ worker isolation の「実装されている機構」「対処している失敗
 規範 (何をしてよいか) は `CLAUDE.md` の Execution Floor and Safety Rules が正本。
 本書は実装状態の記述であり、方針を追加しない。実装が変わったらこの文書を更新する。
 
+> 追記 2 (2026-08-05, issue #731): restricted token・保護 DACL・staged tree の
+> deny ACE は**撤去済み**。§2 の該当機構と §7 の "token" 列は歴史記述として
+> 読むこと。現在の sealed launch は「素の staging + ハッシュ記録 + 通常トークン
+> 起動 (Job Object + private desktop)」であり、worker は broker と同じトークンで
+> 動く。`sealed_load_tree` と `trusted_worker_stage` は「実行されたバイトの同定」
+> のために残る。report の `launch_mode` も
+> `sealed_load_tree_staged_worker` に改名した。
+>
 > 追記 (2026-08-05, issue #678): 方針が「単層の床 + record」に変更された。本書の
 > 「evidence tier (opt-in)」という枠組みは方針としては廃止され、§2 の機構
 > (sealed load tree / restricted token / module audit) と §7 の receipt 経路は

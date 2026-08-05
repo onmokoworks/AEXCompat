@@ -57,7 +57,7 @@ mod windows_real_worker {
 
     #[test]
     fn broker_dispatch_delivers_the_animation_sidecar_to_the_real_worker() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "broker_dispatch_delivers_the_animation_sidecar_to_the_real_worker",
         ) {
             return;
@@ -208,7 +208,7 @@ mod windows_real_worker {
     /// pf-layer-param-probe fixture.
     #[test]
     fn classic_parameter_animation_drives_params_array_on_the_real_worker() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "classic_parameter_animation_drives_params_array_on_the_real_worker",
         ) {
             return;

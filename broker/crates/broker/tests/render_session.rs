@@ -260,7 +260,7 @@ mod windows_e2e {
 
     #[test]
     fn audio_session_renders_spans_and_closes_clean() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "audio_session_renders_spans_and_closes_clean",
         ) {
             return;
@@ -322,7 +322,7 @@ mod windows_e2e {
     /// host-protection invariant breach, not published as a valid span.
     #[test]
     fn audio_session_rejects_out_of_range_output_start() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "audio_session_rejects_out_of_range_output_start",
         ) {
             return;
@@ -355,7 +355,7 @@ mod windows_e2e {
 
     #[test]
     fn smart_session_dispatches_the_smart_worker_and_closes_clean() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "smart_session_dispatches_the_smart_worker_and_closes_clean",
         ) {
             return;
@@ -448,7 +448,7 @@ mod windows_e2e {
 
     #[test]
     fn smart_auto_backend_without_a_policy_degrades_to_the_cpu_session() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "smart_auto_backend_without_a_policy_degrades_to_the_cpu_session",
         ) {
             return;
@@ -542,7 +542,7 @@ mod windows_e2e {
 
     #[test]
     fn secondary_layers_reach_their_shared_slots() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "secondary_layers_reach_their_shared_slots",
         ) {
             return;
@@ -616,7 +616,7 @@ mod windows_e2e {
     /// layer at open, or an update that never reached the file, fails the frame.
     #[test]
     fn a_dynamic_layer_shows_each_frame_its_own_pixels() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "a_dynamic_layer_shows_each_frame_its_own_pixels",
         ) {
             return;
@@ -690,7 +690,7 @@ mod windows_e2e {
     /// or invent, and neither may take the session down with it.
     #[test]
     fn a_dynamic_layer_update_is_bounded_by_what_it_opened_with() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "a_dynamic_layer_update_is_bounded_by_what_it_opened_with",
         ) {
             return;
@@ -765,7 +765,7 @@ mod windows_e2e {
 
     #[test]
     fn timed_layers_travel_the_session_trailer_into_their_slots() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "timed_layers_travel_the_session_trailer_into_their_slots",
         ) {
             return;
@@ -904,7 +904,7 @@ mod windows_e2e {
 
     #[test]
     fn open_admits_a_static_and_timed_layer_at_the_same_slot() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "open_admits_a_static_and_timed_layer_at_the_same_slot",
         ) {
             return;
@@ -1035,7 +1035,7 @@ mod windows_e2e {
 
     #[test]
     fn alpha_as_coverage_params_travel_the_session_launch() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "alpha_as_coverage_params_travel_the_session_launch",
         ) {
             return;
@@ -1242,7 +1242,7 @@ mod windows_e2e {
     ///      silently re-encoded `parameters` would fail here.
     #[test]
     fn a_payload_override_reaches_the_worker_verbatim() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "a_payload_override_reaches_the_worker_verbatim",
         ) {
             return;
@@ -1311,7 +1311,7 @@ mod windows_e2e {
 
     #[test]
     fn animation_sidecar_rides_the_session_and_is_cleaned_up() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "animation_sidecar_rides_the_session_and_is_cleaned_up",
         ) {
             return;
@@ -1370,7 +1370,7 @@ mod windows_e2e {
 
     #[test]
     fn arbitrary_data_parameters_accept_arbitrary_animation() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "arbitrary_data_parameters_accept_arbitrary_animation",
         ) {
             return;
@@ -1433,7 +1433,7 @@ mod windows_e2e {
 
     #[test]
     fn auxiliary_options_ride_the_session_argv_tail() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "auxiliary_options_ride_the_session_argv_tail",
         ) {
             return;
@@ -1647,7 +1647,7 @@ mod windows_e2e {
 
     #[test]
     fn session_renders_frames_and_validates_slot_transfers() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "session_renders_frames_and_validates_slot_transfers",
         ) {
             return;
@@ -1688,7 +1688,7 @@ mod windows_e2e {
 
     #[test]
     fn zero_duration_session_renders_the_single_frame() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "zero_duration_session_renders_the_single_frame",
         ) {
             return;
@@ -1753,7 +1753,7 @@ mod windows_e2e {
 
     #[test]
     fn per_frame_parameters_ride_the_v2_message_and_reach_the_worker() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "per_frame_parameters_ride_the_v2_message_and_reach_the_worker",
         ) {
             return;
@@ -1808,7 +1808,7 @@ mod windows_e2e {
 
     #[test]
     fn per_frame_ui_action_rides_the_v2_message_and_reaches_the_worker() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "per_frame_ui_action_rides_the_v2_message_and_reaches_the_worker",
         ) {
             return;
@@ -1897,7 +1897,7 @@ mod windows_e2e {
 
     #[test]
     fn interactive_session_renders_reports_and_previews_across_frames() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "interactive_session_renders_reports_and_previews_across_frames",
         ) {
             return;
@@ -1994,7 +1994,7 @@ mod windows_e2e {
 
     #[test]
     fn rejected_per_frame_parameters_leave_the_session_usable() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "rejected_per_frame_parameters_leave_the_session_usable",
         ) {
             return;
@@ -2024,7 +2024,7 @@ mod windows_e2e {
 
     #[test]
     fn frame_local_error_keeps_the_session_usable() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "frame_local_error_keeps_the_session_usable",
         ) {
             return;
@@ -2055,7 +2055,7 @@ mod windows_e2e {
 
     #[test]
     fn empty_smart_result_frame_is_accepted_as_a_valid_empty_render() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "empty_smart_result_frame_is_accepted_as_a_valid_empty_render",
         ) {
             return;
@@ -2124,7 +2124,7 @@ mod windows_e2e {
 
     #[test]
     fn frame_deadline_watchdog_terminates_the_job() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "frame_deadline_watchdog_terminates_the_job",
         ) {
             return;
@@ -2148,7 +2148,7 @@ mod windows_e2e {
 
     #[test]
     fn modal_ui_worker_uses_a_private_desktop_before_session_timeout() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "modal_ui_worker_uses_a_private_desktop_before_session_timeout",
         ) {
             return;
@@ -2186,7 +2186,7 @@ mod windows_e2e {
 
     #[test]
     fn worker_crash_invalidates_the_session_with_diagnostics() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "worker_crash_invalidates_the_session_with_diagnostics",
         ) {
             return;
@@ -2206,7 +2206,7 @@ mod windows_e2e {
 
     #[test]
     fn a_crashing_resident_session_captures_an_opt_in_minidump() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "a_crashing_resident_session_captures_an_opt_in_minidump",
         ) {
             return;
@@ -2266,7 +2266,7 @@ mod windows_e2e {
 
     #[test]
     fn a_reserved_fatal_session_error_invalidates_instead_of_continuing() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "a_reserved_fatal_session_error_invalidates_instead_of_continuing",
         ) {
             return;
@@ -2292,7 +2292,7 @@ mod windows_e2e {
 
     #[test]
     fn a_framing_violation_from_a_live_worker_invalidates_promptly() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "a_framing_violation_from_a_live_worker_invalidates_promptly",
         ) {
             return;
@@ -2320,7 +2320,7 @@ mod windows_e2e {
 
     #[test]
     fn reused_frame_indices_are_rejected_without_killing_the_session() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "reused_frame_indices_are_rejected_without_killing_the_session",
         ) {
             return;
@@ -2350,7 +2350,7 @@ mod windows_e2e {
 
     #[test]
     fn error_response_with_a_mutated_header_is_fail_closed() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "error_response_with_a_mutated_header_is_fail_closed",
         ) {
             return;
@@ -2370,7 +2370,7 @@ mod windows_e2e {
 
     #[test]
     fn a_unilateral_worker_exit_breaks_the_close_handshake_contract() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "a_unilateral_worker_exit_breaks_the_close_handshake_contract",
         ) {
             return;
@@ -2397,7 +2397,7 @@ mod windows_e2e {
 
     #[test]
     fn process_death_is_seen_even_when_a_descendant_holds_the_pipe() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "process_death_is_seen_even_when_a_descendant_holds_the_pipe",
         ) {
             return;
@@ -2426,7 +2426,7 @@ mod windows_e2e {
 
     #[test]
     fn stale_generation_and_missing_header_update_are_fail_closed() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "stale_generation_and_missing_header_update_are_fail_closed",
         ) {
             return;
@@ -2446,9 +2446,8 @@ mod windows_e2e {
 
     #[test]
     fn mutated_static_header_is_fail_closed() {
-        if crate::common::skip_without_restricted_token_launch(
-            "mutated_static_header_is_fail_closed",
-        ) {
+        if crate::common::skip_without_sealed_worker_launch("mutated_static_header_is_fail_closed")
+        {
             return;
         }
         let _behavior = BehaviorGuard::set(Some("mutate_header"));
@@ -2466,7 +2465,7 @@ mod windows_e2e {
 
     #[test]
     fn output_checksum_mismatch_is_fail_closed() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "output_checksum_mismatch_is_fail_closed",
         ) {
             return;
@@ -2504,7 +2503,7 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_cli_renders_a_png_sequence_through_one_session() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "video_batch_cli_renders_a_png_sequence_through_one_session",
         ) {
             return;
@@ -2553,7 +2552,7 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_reports_an_empty_smart_frame_without_a_png() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "video_batch_reports_an_empty_smart_frame_without_a_png",
         ) {
             return;
@@ -2612,7 +2611,7 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_empty_frame_rejects_a_stale_output_png() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "video_batch_empty_frame_rejects_a_stale_output_png",
         ) {
             return;
@@ -2659,7 +2658,7 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_aborts_on_a_frame_error_by_default() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "video_batch_aborts_on_a_frame_error_by_default",
         ) {
             return;
@@ -2810,7 +2809,7 @@ mod windows_e2e {
 
     #[test]
     fn cluster_render_session_swaps_plugins_and_closes_clean() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "cluster_render_session_swaps_plugins_and_closes_clean",
         ) {
             return;
@@ -2848,7 +2847,7 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_rejects_out_of_manifest_and_current_index_as_caller_errors() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "cluster_swap_rejects_out_of_manifest_and_current_index_as_caller_errors",
         ) {
             return;
@@ -2871,7 +2870,7 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_done_mismatch_invalidates_the_session() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "cluster_swap_done_mismatch_invalidates_the_session",
         ) {
             return;
@@ -2898,7 +2897,7 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_worker_death_is_detected_by_the_three_way_wait() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "cluster_swap_worker_death_is_detected_by_the_three_way_wait",
         ) {
             return;
@@ -2919,7 +2918,7 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_global_setup_error_is_plugin_local() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "cluster_swap_global_setup_error_is_plugin_local",
         ) {
             return;
@@ -2940,7 +2939,7 @@ mod windows_e2e {
 
     #[test]
     fn cluster_close_records_an_audit_module_outside_the_declared_set() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "cluster_close_records_an_audit_module_outside_the_declared_set",
         ) {
             return;
@@ -2969,7 +2968,7 @@ mod windows_e2e {
 
     #[test]
     fn discovery_session_inspects_every_cluster_plugin() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "discovery_session_inspects_every_cluster_plugin",
         ) {
             return;
@@ -3008,7 +3007,7 @@ mod windows_e2e {
 
     #[test]
     fn discovery_session_rejects_out_of_manifest_index_and_off_serial_requests() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "discovery_session_rejects_out_of_manifest_index_and_off_serial_requests",
         ) {
             return;
@@ -3029,7 +3028,7 @@ mod windows_e2e {
 
     #[test]
     fn discovery_session_reports_parameter_local_error_and_continues() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "discovery_session_reports_parameter_local_error_and_continues",
         ) {
             return;
@@ -3055,7 +3054,7 @@ mod windows_e2e {
 
     #[test]
     fn discovery_session_worker_death_is_detected_by_the_three_way_wait() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "discovery_session_worker_death_is_detected_by_the_three_way_wait",
         ) {
             return;

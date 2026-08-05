@@ -348,7 +348,7 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
             )
         )
         secure_launch = {
-            "launch_mode": "sealed_load_tree_restricted_token",
+            "launch_mode": "sealed_load_tree_staged_worker",
             "worker_authenticated": True,
             "worker_size_bytes": 123,
             "worker_sha256": "a" * 64,

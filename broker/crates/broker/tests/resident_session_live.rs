@@ -62,7 +62,7 @@ mod windows_e2e {
 
     #[test]
     fn per_frame_parameter_updates_change_the_real_render() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "per_frame_parameter_updates_change_the_real_render",
         ) {
             return;
