@@ -231,3 +231,25 @@ descriptor digest `host_core/descriptor_manifest.rs:68` +
   audit 記録化)、#731 (restricted token / sealed ACL 撤去と staging 簡素化)、
   #732 (receipt / allowlist 整理と l1 の始末)、#733 (fixture_profiles
   ハードコードと expires 撤去)。フレーム毎ハッシュの非暗号化は既存 #690。
+- 2026-08-05 (同日追記 4): 実装プログラムの結果。merge 済み 8 件 —
+  #728 (docs 単層化), #729 (freshness gate 記録化), #730 (module audit
+  記録化), #731 (restricted token / DACL / deny ACE 撤去), #732 前半
+  (allowlist を承認 receipt から選択ファイルへ降格、記録済み identity の
+  一致強制を撤去), #733 (fixture ハードコード撤去: descriptor digest /
+  out_flags / preflight sha256), #739 (interactive の pre-selection hash
+  強制を 37 箇所撤去), #690 (フレーム毎 SHA-256 → packed_bytes の
+  extent 相互確認、実測 約 10 ms/frame 削減)。副次的に #656 (toolchain 固定
+  + 一括整形) も解消し、`cargo fmt` が無関係ファイルを巻き込む問題が消えた。
+  保留 1 件 — #732 後半 (l1 の始末) は #751 (sealed staging をやめて実パス
+  から LoadLibrary する) の結論待ち。#751 が通ると移行先の sealed 経路自体が
+  無くなるため、順序依存として明示的に止めている (#751 は別セッションが
+  claim 済み)。
+- 2026-08-05 (同日追記 5): #751 の起点。owner の「DLL のコピーをしているが
+  普通に LoadLibrary する方向にできないか」という問いから、worker のロードが
+  既に `SetDefaultDllDirectories` + `AddDllDirectory(sealed root)` +
+  `LoadLibraryExW` の形をしており、sealed root の存在意義は「依存 closure を
+  1 ディレクトリに集約して AddDllDirectory 1 回で覆う」ことに尽きると判明。
+  実パスロード + 依存フォルダ指定に置き換えると staging I/O (#381 実測で
+  sweep の 64%)、#394 (モジュール数上限)、#351 (実行時 LoadLibrary の非封入)、
+  #653 (hardlink 残骸) が構造的に消え、`GetModuleFileName` を見るプラグイン
+  への忠実度も上がる可能性がある。仮説として #751 に記録。
