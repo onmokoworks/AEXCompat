@@ -1042,9 +1042,9 @@ impl RenderSession {
         // In-place load mode (issue #751): the closure is the loader's job, so
         // approved dependency artifacts cannot ride the same open. GPU runtime
         // authorization stages its AEXRMA1 manifest beside the plug-in, which
-        // an in-place launch has no staged directory for, and cluster sessions
-        // still pin against a sealed root; both fail closed here until they
-        // are migrated.
+        // an in-place launch has no staged directory for; it fails closed
+        // here until it is migrated. Cluster sessions ride the
+        // cluster-manifest-v2 dispatch below.
         if !request.dependency_search_dirs.is_empty() {
             if !request.dependencies.is_empty() {
                 return Err(invalid(

@@ -477,31 +477,19 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
     return result;
   }
   // Step 5: authenticate plugins[N] against the manifest, then load with the
-  // admission flags. On the sealed path a broker that staged the wrong bytes
-  // fails closed here; on the in-place path (issue #751) a hash mismatch or
-  // loader rejection is plug-in-local — the real bytes changed under the
-  // recorded identity (the #309 state transition) or the closure could not
-  // come up, the retired predecessor stays retired, and later frames get the
-  // continuation-impossible response while the broker owns the
-  // continue/stop decision (the unresolvable-entrypoint contract below).
+  // admission flags. A failure here fails the session closed on both
+  // manifest shapes: on the sealed path the broker staged the wrong bytes;
+  // on the in-place path (issue #751) the real bytes changed under the
+  // recorded identity (the #309 state transition) or the loader rejected
+  // the closure. The broker's session-invalidation path reopens fresh
+  // sessions and re-discovery converges on the new bytes, so the mismatch
+  // stays a state transition rather than a launch gate.
   const bool in_place = context.manifest->in_place;
-  const auto plugin_local_load_failure = [&]() {
-    // Close the pending swap so the session stays swappable for the other
-    // members; the epoch records the post-failure state.
-    context.session->swap_abandon();
-    *context.entry = nullptr;
-    context.current_plugin_index = plugin_index;
-    context.current_global_error = -1;
-    result.entry = nullptr;
-    result.global_setup_error = -1;
-    return result;
-  };
   const std::filesystem::path path = cluster::plugin_path(*context.manifest,
       static_cast<std::size_t>(plugin_index));
   std::string actual_sha256;
   if (!sha256(path, actual_sha256) ||
       !cluster::hash_equals(actual_sha256, plugin.sha256)) {
-    if (in_place) return plugin_local_load_failure();
     result.hard_failure = true;
     return result;
   }
@@ -509,7 +497,6 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32 |
       (in_place ? LOAD_LIBRARY_SEARCH_USER_DIRS : 0));
   if (!module) {
-    if (in_place) return plugin_local_load_failure();
     result.hard_failure = true;
     return result;
   }
@@ -608,7 +595,8 @@ int run_discovery_session(const std::wstring& manifest_argument,
     // lifetime (deferred release, issue #474). There is no pinned closure —
     // dependencies load through each plug-in's imports and stay mapped
     // because nothing is freed mid-process.
-    if (!cluster::admit_in_place_manifest_dirs(manifest)) return 11;
+    if (const int admit_error = cluster::admit_in_place_manifest_dirs(manifest))
+      return admit_error;
     // Every admitted root classifies loaded modules in the recorded audit,
     // so a dependency resolved from a search directory (or a retired
     // plug-in's directory) records as `plugin` instead of `unknown`.
@@ -1434,8 +1422,9 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       if (!cluster::matches_launch_plugin(cluster_manifest, session.plugin_path(),
                                           argv_sha256))
         return session.finish(3);
-      if (!cluster::admit_in_place_manifest_dirs(cluster_manifest))
-        return session.finish(11);
+      if (const int admit_error =
+              cluster::admit_in_place_manifest_dirs(cluster_manifest))
+        return session.finish(admit_error);
       aexcompat::worker_runtime::configure_module_audit_cluster(
           cluster_manifest.module_bound, {});
       aexcompat::worker_runtime::configure_module_audit_search_roots(

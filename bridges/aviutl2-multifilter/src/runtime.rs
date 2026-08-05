@@ -735,7 +735,17 @@ fn route_session(
     // can the virtual buffer be supplied (a pooled session is shared by members
     // whose parameter layouts differ, so a layer slot valid for one member may
     // be a non-layer parameter in another, which the worker fails closed).
+    //
+    // A search-root identity (in-place discovery, issue #751) pools only when
+    // render is in-place too: members sharing search roots need not share a
+    // closure, so a staged (sealed) cluster built from the opener's closure
+    // would fail their swaps. The A/B escape hatch therefore renders such
+    // effects on per-effect sessions.
+    let identity_pools = ctx.closure_identity.as_deref().is_some_and(|identity| {
+        !identity.starts_with("in-place:") || in_place_render_enabled()
+    });
     if ctx.layer_slots.is_empty()
+        && identity_pools
         && let Some(closure_identity) = &ctx.closure_identity
     {
         let key = PoolKey {

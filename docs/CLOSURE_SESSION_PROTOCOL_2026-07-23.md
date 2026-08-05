@@ -164,11 +164,14 @@ sealed staging を行わない in-place モード用のマニフェスト。プ�
   cluster session でも使える。launch は通常 admission (positional 実パス +
   `--dependency-dirs-v1`) を通り、plugins[0] は**フルパス identity** で
   照合する (sealed root 等値チェックは v1 のみ)。swap のロード直前ハッシュ
-  不一致・ローダ拒否は **plugin-local** で、swap は entrypoint 未解決と
-  同じ「継続不可応答 + broker が続行判断」の形に落ち、session は他メンバー
-  を提供し続ける (`WorkerSession::swap_abandon` が pending swap を epoch
-  記録付きで閉じる)。v1 の hard failure (exit 25) は不変。close 時の audit
-  検証は discovery と同じく recorded observe。
+  不一致・ローダ拒否は v1 と同じく **session 無効化 (exit 25)**: broker の
+  invalidation 経路が新しい session を開き直し、再発見が新バイトに収束する
+  ことで #309 の state transition として処理される (discovery の
+  inspect-local な `identity_changed` と違い、render swap は稼働中 session
+  の途中でメンバー構成が変わるため、fail-closed に倒して開き直す方が
+  シンプルで信頼できる)。recorded audit は swap epoch も記録する (判定は
+  v1 の required 経路のみが行う)。close 時の audit 検証は discovery と
+  同じく recorded observe。
 
 ## 3. closure のピン留め
 

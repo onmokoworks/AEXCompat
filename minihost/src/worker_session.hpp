@@ -63,14 +63,6 @@ class WorkerSession final {
   bool swap_adopt_module(HMODULE module, const std::filesystem::path& plugin_path,
                          uint32_t incoming_index) noexcept;
 
-  // In-place swap load failure (issue #751): no successor was adopted after
-  // swap_release_module. Completes the pending epoch with a post-failure
-  // snapshot and returns the session to a swappable (module-less) state, so
-  // one member whose bytes changed under the recorded identity does not
-  // brick the remaining members. The sealed path never calls this — its
-  // load failures invalidate the session.
-  void swap_abandon() noexcept;
-
   // Deferred module release (issue #474): cluster sessions set this so the
   // terminal lifecycle never frees plug-in images or the sealed-directory
   // cookie mid-process. Everything unloads in one loader-ordered pass at

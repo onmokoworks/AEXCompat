@@ -103,8 +103,9 @@ bool hash_equals(const std::string& actual, const std::string& declared);
 // In-place manifests (issue #751): admits `search_dirs` plus every plug-in's
 // parent directory (deduplicated, bounded at 64 like the broker validation)
 // into the process-wide USER_DIRS set. Cookies stay for the process lifetime
-// (deferred release, issue #474).
-bool admit_in_place_manifest_dirs(const Manifest& manifest);
+// (deferred release, issue #474). Returns 0 on success, 3 on a shape
+// violation (config rejection), 11 when the loader refuses a directory.
+int admit_in_place_manifest_dirs(const Manifest& manifest);
 
 // The same union, as the recorded module audit's classification roots.
 std::vector<std::filesystem::path> in_place_audit_roots(const Manifest& manifest);

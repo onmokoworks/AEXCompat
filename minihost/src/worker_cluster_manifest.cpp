@@ -319,24 +319,26 @@ bool matches_launch_plugin(const Manifest& manifest,
       hash_equals(plugin_sha256, first.sha256);
 }
 
-bool admit_in_place_manifest_dirs(const Manifest& manifest) {
+int admit_in_place_manifest_dirs(const Manifest& manifest) {
   // Admit the validated search directories plus every plug-in's own
   // directory into the process-wide USER_DIRS set (issue #751). Cookies stay
   // for the process lifetime (deferred release, issue #474); the broker
-  // validated the deduplicated union against the same bound.
+  // validated the deduplicated union against the same bound. A shape
+  // violation is a config rejection (3), a directory the loader refuses is a
+  // DLL policy failure (11), matching the discovery session's exit contract.
   std::set<std::wstring> admitted;
   std::vector<std::filesystem::path> roots = manifest.search_dirs;
   for (const auto& plugin : manifest.plugins)
     roots.push_back(plugin.path.parent_path());
   constexpr std::size_t kMaxAdmittedDirs = 64;
   for (const auto& root : roots) {
-    if (root.empty()) return false;
+    if (root.empty()) return 3;
     std::wstring key = lowercase(root.wstring());
     if (!admitted.insert(std::move(key)).second) continue;
-    if (admitted.size() > kMaxAdmittedDirs) return false;
-    if (!AddDllDirectory(root.c_str())) return false;
+    if (admitted.size() > kMaxAdmittedDirs) return 3;
+    if (!AddDllDirectory(root.c_str())) return 11;
   }
-  return true;
+  return 0;
 }
 
 std::vector<std::filesystem::path> in_place_audit_roots(const Manifest& manifest) {

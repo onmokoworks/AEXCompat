@@ -655,7 +655,10 @@ mod worker {
                 .and_then(|name| name.to_str())
                 == Some(manifest.plugins[0].0.as_str());
             // The in-place manifest (issue #751) has no sealed root; the
-            // positional plugin is matched by basename + sha alone.
+            // fixture matches the positional plugin by basename + sha only —
+            // weaker than the real worker's full-path canonical identity
+            // (worker_cluster_manifest.cpp matches_launch_plugin), which the
+            // real-worker integration tests cover.
             let same_sealed_root = manifest.in_place
                 || cluster_manifest_path
                     .as_deref()
