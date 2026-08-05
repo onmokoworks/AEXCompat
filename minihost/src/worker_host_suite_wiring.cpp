@@ -480,8 +480,13 @@ const void* provide_color_settings7(void*) {
   configure_host_hooks({&composition_handle, &acquire_suite, &release_suite});
   return aexcompat::color_settings::suite();
 }
-// Version 6 of "PF Color Settings Suite" is the frozen 14-function prefix of
-// the v7 table (issue #362: the OCIO family acquires exactly v6).
+// Versions 4 and 6 of "PF Color Settings Suite" are frozen prefixes of the v7
+// table, so all three are served from it (issue #362: the OCIO family acquires
+// exactly v6; issue #716: `Unmult.aex` acquires v4). Checked against the SDK
+// headers rather than assumed: v4 is `AEGP_ColorSettingsSuite3`, whose 11
+// functions match the first 11 of v6 (`Suite5`) and v7 (`Suite6`) in name and
+// argument types, and v6's 14 match the first 14 of v7. A plug-in that
+// acquired the older version reads only that many entries.
 const void* provide_iterate8(void*) {
   g_iterate8_suite2.iterate = reinterpret_cast<void*>(&iterate_world8); return &g_iterate8_suite2;
 }
@@ -703,6 +708,7 @@ bool configure_component_suite_catalog() {
       {"PF ANSI Suite", 2, nullptr, &provide_ansi2},
       {"PF AE Adv Item Suite", 1, &g_adv_item_suite1, nullptr, nullptr,
        &render_worker_suite_provider_available},
+      {"PF Color Settings Suite", 4, nullptr, &provide_color_settings7},
       {"PF Color Settings Suite", 6, nullptr, &provide_color_settings7},
       {"PF Color Settings Suite", 7, nullptr, &provide_color_settings7},
       {"PF Iterate8 Suite", 1, nullptr, &provide_iterate8},
