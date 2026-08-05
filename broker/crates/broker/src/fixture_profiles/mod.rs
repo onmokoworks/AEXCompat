@@ -1,19 +1,19 @@
 pub mod maskoffset;
 pub mod scattermap;
 
-use crate::host_core::approved_artifact::ApprovalPolicy;
+use crate::host_core::approved_artifact::SelectionPolicy;
 use crate::host_core::descriptor_manifest::ManifestPolicy;
 
 #[derive(Clone, Copy)]
 pub struct WorkerSpec {
     pub executable: &'static str,
     pub request_mode: &'static str,
-    pub approval: ApprovalPolicy,
+    pub selection: SelectionPolicy,
 }
 
 #[derive(Clone, Copy)]
 pub struct L2ObservationPolicy {
-    pub approval: ApprovalPolicy,
+    pub selection: SelectionPolicy,
     pub about_substrings: &'static [&'static str],
     pub out_flags: u64,
     pub out_flags2: u64,
@@ -22,7 +22,7 @@ pub struct L2ObservationPolicy {
 }
 
 pub struct ObservationProfile {
-    pub l1_approval: ApprovalPolicy,
+    pub l1_selection: SelectionPolicy,
     pub l2: L2ObservationPolicy,
     pub descriptor_manifest: ManifestPolicy,
 }
@@ -43,12 +43,8 @@ pub struct RegisteredProfile {
 
 static SCATTERMAP: RegisteredProfile = RegisteredProfile {
     l2_observation: L2ObservationPolicy {
-        approval: ApprovalPolicy {
+        selection: SelectionPolicy {
             allowlist_path: "target/l2-allowlist/active.local.json",
-            stage: "L2",
-            receipt_id: "scattermap-l2-20260713-001",
-            expires: "2026-08-12T23:59:59+09:00",
-            max_timeout_ms: 30_000,
         },
         about_substrings: &["ScatterMap v1.0", "Written in Rust"],
         out_flags: 33_554_432,
@@ -64,23 +60,15 @@ static SCATTERMAP: RegisteredProfile = RegisteredProfile {
     classic_worker: Some(WorkerSpec {
         executable: "target/minihost-build/aex_render_worker.exe",
         request_mode: "--render-request",
-        approval: ApprovalPolicy {
+        selection: SelectionPolicy {
             allowlist_path: "target/render-allowlist/active.local.json",
-            stage: "classic_render",
-            receipt_id: "scattermap-extended-render-20260713-001",
-            expires: "2026-08-12T23:59:59+09:00",
-            max_timeout_ms: 5_000,
         },
     }),
     smart_worker: Some(WorkerSpec {
         executable: "target/minihost-build/aex_smart_worker.exe",
         request_mode: "--smart-request",
-        approval: ApprovalPolicy {
+        selection: SelectionPolicy {
             allowlist_path: "target/smart-allowlist/active.local.json",
-            stage: "smartfx_render",
-            receipt_id: "scattermap-smartfx-20260713-001",
-            expires: "2026-08-12T23:59:59+09:00",
-            max_timeout_ms: 5_000,
         },
     }),
 };
@@ -93,43 +81,27 @@ static MASKOFFSET: RegisteredProfile = RegisteredProfile {
     smart_worker: Some(WorkerSpec {
         executable: "target/minihost-build/aex_smart_worker.exe",
         request_mode: "--smart-mask-request",
-        approval: ApprovalPolicy {
+        selection: SelectionPolicy {
             allowlist_path: "target/smart-allowlist/maskoffset.active.local.json",
-            stage: "smartfx_render",
-            receipt_id: "maskoffset-smartfx-20260713-001",
-            expires: "2026-08-12T23:59:59+09:00",
-            max_timeout_ms: 5_000,
         },
     }),
 };
 
 static SCATTERMAP_OBSERVATION: ObservationProfile = ObservationProfile {
-    l1_approval: ApprovalPolicy {
+    l1_selection: SelectionPolicy {
         allowlist_path: "target/l1-allowlist/active.local.json",
-        stage: "L1",
-        receipt_id: "scattermap-l1-20260713-001",
-        expires: "2026-08-12T23:59:59+09:00",
-        max_timeout_ms: 30_000,
     },
     l2: SCATTERMAP.l2_observation,
     descriptor_manifest: SCATTERMAP.descriptor_manifest,
 };
 
 static MASKOFFSET_OBSERVATION: ObservationProfile = ObservationProfile {
-    l1_approval: ApprovalPolicy {
+    l1_selection: SelectionPolicy {
         allowlist_path: "target/l1-allowlist/maskoffset.active.local.json",
-        stage: "L1",
-        receipt_id: "maskoffset-l1-20260713-001",
-        expires: "2026-08-12T23:59:59+09:00",
-        max_timeout_ms: 30_000,
     },
     l2: L2ObservationPolicy {
-        approval: ApprovalPolicy {
+        selection: SelectionPolicy {
             allowlist_path: "target/l2-allowlist/maskoffset.active.local.json",
-            stage: "L2",
-            receipt_id: "maskoffset-l2-20260713-001",
-            expires: "2026-08-12T23:59:59+09:00",
-            max_timeout_ms: 30_000,
         },
         about_substrings: &["ONMK MaskOffset v1.0", "Written in Rust"],
         out_flags: 4,
@@ -184,9 +156,9 @@ mod tests {
             find(scattermap::PROFILE_ID)
                 .unwrap()
                 .l2_observation
-                .approval
-                .receipt_id,
-            "scattermap-l2-20260713-001"
+                .selection
+                .allowlist_path,
+            "target/l2-allowlist/active.local.json"
         );
         assert_eq!(
             find(scattermap::PROFILE_ID).unwrap().parameterized_render,
@@ -197,9 +169,9 @@ mod tests {
             find_observation("maskoffset")
                 .unwrap()
                 .l2
-                .approval
-                .receipt_id,
-            "maskoffset-l2-20260713-001"
+                .selection
+                .allowlist_path,
+            "target/l2-allowlist/maskoffset.active.local.json"
         );
         assert!(find("maskoffset").unwrap().classic_worker.is_none());
         assert_eq!(

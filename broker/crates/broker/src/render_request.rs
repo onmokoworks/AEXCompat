@@ -674,6 +674,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
     let payload = encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?;
     let mut runs = Vec::new();
     let mut approved_fixture_sha256 = String::new();
+    let mut approved_receipt_id = String::new();
     let mut approved_identity = None;
     for _ in 0..2 {
         // secure_launch consumes both the sealed tree and the worker stage, so
@@ -681,7 +682,8 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         // reusing mutable state. The plug-in reaches the worker through the
         // sealed tree instead of an argv path, closing the TOCTOU window a
         // worker-side re-open would leave (issue #312).
-        let approved = load_v2_load_tree(repository, &request.plugin_id, worker_spec.approval)?;
+        let approved = load_v2_load_tree(repository, &request.plugin_id, worker_spec.selection)?;
+        approved_receipt_id = approved.receipt_id.clone();
         let receipt_worker = if approved.worker_path.is_absolute() {
             approved.worker_path.clone()
         } else {
@@ -772,7 +774,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         "requested_parameters":item.1.get("requested_parameters")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_classic_render",
-        "plugin_id":request.plugin_id,"receipt_id":worker_spec.approval.receipt_id,
+        "plugin_id":request.plugin_id,"receipt_id":approved_receipt_id,
         "fixture_sha256":approved_fixture_sha256,"assignment_count":assignment_count,
         "accepted":true,"native_process_started":true,"parameters":effective,
         "expected_oracle_sha256":expected,
@@ -909,11 +911,13 @@ pub fn execute_smart(
     let mut runs = Vec::new();
     let mut secure_launches = Vec::new();
     let mut approved_fixture_sha256 = String::new();
+    let mut approved_receipt_id = String::new();
     let mut approved_identity = None;
     for _ in 0..2 {
         // secure_launch consumes both the sealed tree and worker stage. Reload the
         // schema-v2 receipt so each determinism run has an independent stage.
-        let approved = load_v2_load_tree(repository, &request.plugin_id, worker_spec.approval)?;
+        let approved = load_v2_load_tree(repository, &request.plugin_id, worker_spec.selection)?;
+        approved_receipt_id = approved.receipt_id.clone();
         let receipt_worker = if approved.worker_path.is_absolute() {
             approved.worker_path.clone()
         } else {
@@ -1107,7 +1111,7 @@ pub fn execute_smart(
         "requested_parameters":item.1.get("requested_parameters")})
     };
     let report = json!({"schema_version":1,"stage":"parameterized_smartfx_render",
-        "plugin_id":request.plugin_id,"receipt_id":worker_spec.approval.receipt_id,
+        "plugin_id":request.plugin_id,"receipt_id":approved_receipt_id,
         "fixture_sha256":approved_fixture_sha256,"assignment_count":assignment_count,
         "accepted":true,"native_process_started":true,"parameters":effective,
         "host_context_mask_count":host_context_counts.map(|counts| counts.0),
@@ -1316,13 +1320,15 @@ pub fn execute_smart_suite_fault(
     let payload = encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?;
     let mut runs = Vec::new();
     let mut approved_fixture_sha256 = String::new();
+    let mut approved_receipt_id = String::new();
     let mut approved_identity = None;
     for _ in 0..2 {
         // secure_launch consumes both the sealed tree and the worker stage, so
         // reload the schema-v2 receipt for each determinism run. The plug-in
         // reaches the worker through the sealed tree instead of an argv path
         // (issue #312).
-        let approved = load_v2_load_tree(repository, plugin_id, worker_spec.approval)?;
+        let approved = load_v2_load_tree(repository, plugin_id, worker_spec.selection)?;
+        approved_receipt_id = approved.receipt_id.clone();
         let receipt_worker = if approved.worker_path.is_absolute() {
             approved.worker_path.clone()
         } else {
@@ -1591,7 +1597,7 @@ pub fn execute_smart_suite_fault(
     };
     let report = json!({
         "schema_version":1,"stage":"smartfx_suite_fault","plugin_id":plugin_id,
-        "receipt_id":worker_spec.approval.receipt_id,"fixture_sha256":approved_fixture_sha256,
+        "receipt_id":approved_receipt_id,"fixture_sha256":approved_fixture_sha256,
         "fault_id":fault_id,"expected_outcome":if expect_crash { "worker_crash" } else if expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection || expect_world_rejection || expect_pixel_format_rejection || expect_outline_rejection { "callback_error_rejected" } else { "plugin_fallback" },
         "expected_fallback_sha256":if expect_crash || expect_lifetime_rejection || expect_suite_rejection || expect_handle_rejection || expect_world_rejection || expect_pixel_format_rejection || expect_outline_rejection { Value::Null } else { json!(fallback_hash) },
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),
@@ -1642,13 +1648,15 @@ pub fn execute_smart_mask_scene(
     let payload = encode_worker_payload(&manifest.profile, &effective).map_err(invalid)?;
     let mut runs = Vec::new();
     let mut approved_fixture_sha256 = String::new();
+    let mut approved_receipt_id = String::new();
     let mut approved_identity = None;
     for _ in 0..2 {
         // secure_launch consumes both the sealed tree and the worker stage, so
         // reload the schema-v2 receipt for each determinism run. The plug-in
         // reaches the worker through the sealed tree instead of an argv path
         // (issue #312).
-        let approved = load_v2_load_tree(repository, plugin_id, worker_spec.approval)?;
+        let approved = load_v2_load_tree(repository, plugin_id, worker_spec.selection)?;
+        approved_receipt_id = approved.receipt_id.clone();
         let receipt_worker = if approved.worker_path.is_absolute() {
             approved.worker_path.clone()
         } else {
@@ -1748,7 +1756,7 @@ pub fn execute_smart_mask_scene(
     };
     let report = json!({
         "schema_version":1,"stage":"smartfx_mask_scene","plugin_id":plugin_id,
-        "receipt_id":worker_spec.approval.receipt_id,"fixture_sha256":approved_fixture_sha256,
+        "receipt_id":approved_receipt_id,"fixture_sha256":approved_fixture_sha256,
         "scene_case_id":scene_case_id,"host_scene_id":scene_id,"mask_index":mask_index,
         "expected_mask_count":expected_count,"expected_oracle_sha256":expected,
         "run_1":summarize(&runs[0]),"run_2":summarize(&runs[1]),

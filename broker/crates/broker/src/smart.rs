@@ -88,7 +88,7 @@ pub fn run(
     for _ in 0..2 {
         // secure_launch owns a tree, so determinism runs must independently
         // authenticate and materialize the v2 receipt.
-        let approved = load_v2_load_tree(repository, id, worker_spec.approval)?;
+        let approved = load_v2_load_tree(repository, id, worker_spec.selection)?;
         let receipt_worker = resolve_receipt_path(repository, &approved.worker_path);
         if fs::canonicalize(worker)? != fs::canonicalize(&receipt_worker)? {
             return Err(io::Error::new(
@@ -179,9 +179,9 @@ pub fn run(
         && crash_valid
         && success_valid
         && oracle_valid;
-    let approved = load_v2_load_tree(repository, id, worker_spec.approval)?;
+    let approved = load_v2_load_tree(repository, id, worker_spec.selection)?;
     let fixture_sha256 = encode_sha256(approved.main.expected_sha256);
-    let summary = json!({"schema_version":1,"stage":"smartfx_render","plugin_id":id,"receipt_id":worker_spec.approval.receipt_id,
+    let summary = json!({"schema_version":1,"stage":"smartfx_render","plugin_id":id,"receipt_id":approved.receipt_id,
         "fixture_sha256":fixture_sha256,"case_id":case_id,"expected_oracle_sha256":expected,
         "run_1":{"classification":reports[0].0.as_str(),"output_sha256":hashes[0],
             "smart_render_error":reports[0].1.get("smart_render_error"),

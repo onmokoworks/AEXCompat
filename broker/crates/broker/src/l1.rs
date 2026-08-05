@@ -120,7 +120,7 @@ fn worker_report_evidence(
 pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Result<bool> {
     let policy = find_observation(id)
         .ok_or_else(|| invalid_data("requested L1 profile is not registered"))?
-        .l1_approval;
+        .l1_selection;
     if output
         .components()
         .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
