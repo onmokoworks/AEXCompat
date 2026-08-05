@@ -69,6 +69,7 @@ struct GuestState {
     suite_requests: Vec<String>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
+    aegp_compute_cache_classes: HashMap<Vec<u8>, [u64; 4]>,
     selector_dispatch_active: bool,
     pending_unsupported_suite: Option<PendingUnsupportedSuite>,
     selector_abort: Option<SelectorAbortRecord>,

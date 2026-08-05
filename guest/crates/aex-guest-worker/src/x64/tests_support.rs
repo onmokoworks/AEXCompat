@@ -165,6 +165,7 @@
             world_suite[slot * 8..slot * 8 + 8].copy_from_slice(&callback.to_le_bytes());
         }
         unicorn.mem_write(HOST_WORLD_SUITE, &world_suite).unwrap();
+        install_aegp_compute_cache_suite(&mut unicorn).unwrap();
         unicorn
             .add_code_hook(HOST_ITERATE8, HOST_ITERATE8, emulate_iterate8)
             .unwrap();
