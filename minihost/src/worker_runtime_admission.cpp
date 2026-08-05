@@ -168,9 +168,12 @@ int admit_runtime(const RuntimeHostHooks& hooks,
     return report_load_failure("load_library", error);
   }
   ModuleAuditReport& audit = module_audit_report();
-  audit.required = sealed;
   // Record, never enforce (issue #678/#751): the in-place route captures the
   // loaded-module set as provenance, and no status here fails the launch.
+  // `sealed` is only a directory-name observation, so a real directory that
+  // happens to carry the staging prefix must not turn an in-place launch
+  // into an enforced audit; in-place wins.
+  audit.required = sealed && !in_place;
   audit.recorded = in_place;
   audit.plugin_path = plugin_path;
   if (in_place)

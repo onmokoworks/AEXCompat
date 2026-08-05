@@ -1064,9 +1064,13 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     invocation.cluster_manifest_path = g_cluster_manifest_path;
   // Discovery session (closure-session design §4.2): no plug-in is admitted
   // at launch; the cluster manifest and the control pipes drive everything,
-  // so the normal admission/dispatch below is skipped entirely.
-  if (invocation.discovery_session_mode)
+  // so the normal admission/dispatch below is skipped entirely. It has not
+  // migrated to in-place loading (issue #751), so a dependency-dirs option
+  // is rejected instead of silently ignored.
+  if (invocation.discovery_session_mode) {
+    if (!g_dependency_search_dirs.empty()) return 2;
     return run_discovery_session(invocation.cluster_manifest_path, runtime_hooks);
+  }
   // Every rendered effect instance belongs to a layer, even when that layer has no masks.
   if (is_rendering_worker()) aexcompat::mask_runtime::set_model_enabled(true);
   RuntimeAdmissionRequest runtime_request;

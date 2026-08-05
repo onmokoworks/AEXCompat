@@ -161,10 +161,19 @@ fn build_in_place_launch_args(
             "in-place plugin path must be absolute",
         ));
     }
+    let plugin_argument = plugin_path
+        .to_str()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "in-place plugin path must be UTF-8",
+            )
+        })?
+        .to_owned();
     let mut args =
         Vec::with_capacity(request.args_before_plugin.len() + 1 + request.args_after_plugin.len());
     args.extend_from_slice(request.args_before_plugin);
-    args.push(plugin_path.to_string_lossy().into_owned());
+    args.push(plugin_argument);
     args.extend_from_slice(request.args_after_plugin);
     Ok(args)
 }

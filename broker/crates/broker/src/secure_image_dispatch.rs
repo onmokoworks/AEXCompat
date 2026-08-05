@@ -43,7 +43,9 @@ pub struct SecureImageDispatch<'a> {
     /// dependency closure resolves from where it actually lives. Mutually
     /// exclusive with `dependencies` (the closure is the loader's job here)
     /// and with sealed resources (the plug-in's own directory already holds
-    /// its data files).
+    /// its data files). On this route the broker does not re-read
+    /// `plugin.expected_sha256`/`expected_size`; the identity record is the
+    /// argv sha256 the worker verifies against the bytes it actually loads.
     pub dependency_search_dirs: Vec<PathBuf>,
     pub args_before_plugin: &'a [String],
     pub args_after_plugin: &'a [String],
@@ -69,6 +71,13 @@ pub fn dispatch_secure_gpu_image_session(
     if authorization.backend == RuntimeBackend::Cpu {
         return Err(invalid("GPU dispatch cannot use the CPU backend"));
     }
+    // The AEXRMA1 authorization manifest is staged beside the plug-in, which
+    // an in-place launch (issue #751) has no staged directory for.
+    if !input.dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "an in-place dispatch does not support GPU runtime authorization yet",
+        ));
+    }
     authorization
         .module_report
         .authorize_dispatch(&authorization.session_identity, authorization.backend)?;
@@ -83,6 +92,13 @@ pub(crate) fn dispatch_secure_gpu_image_session_on_current_desktop(
 ) -> io::Result<crate::secure_launch::SecureSessionProcess> {
     if authorization.backend == RuntimeBackend::Cpu {
         return Err(invalid("GPU dispatch cannot use the CPU backend"));
+    }
+    // The AEXRMA1 authorization manifest is staged beside the plug-in, which
+    // an in-place launch (issue #751) has no staged directory for.
+    if !input.dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "an in-place dispatch does not support GPU runtime authorization yet",
+        ));
     }
     authorization
         .module_report
@@ -415,10 +431,7 @@ pub fn dispatch_secure_image_with_resources(
 /// re-validation.
 fn joined_dependency_search_dirs(dirs: &[PathBuf]) -> io::Result<String> {
     const MAX_SEARCH_DIRS: usize = 16;
-    if dirs.len() > MAX_SEARCH_DIRS {
-        return Err(invalid("too many dependency search directories"));
-    }
-    let mut joined = Vec::with_capacity(dirs.len());
+    let mut joined: Vec<String> = Vec::with_capacity(dirs.len());
     for dir in dirs {
         if !dir.is_absolute() {
             return Err(invalid("dependency search directory must be absolute"));
@@ -432,7 +445,11 @@ fn joined_dependency_search_dirs(dirs: &[PathBuf]) -> io::Result<String> {
         if !canonical.is_dir() {
             return Err(invalid("dependency search directory is not a directory"));
         }
-        let text = canonical
+        // `canonicalize` returns verbatim `\\?\C:\...` paths on Windows; hand
+        // the worker the plain form like every other path that crosses the
+        // argv boundary (issue #231's aux-manifest lesson).
+        let plain = strip_extended_prefix(&canonical);
+        let text = plain
             .to_str()
             .ok_or_else(|| invalid("dependency search directory must be UTF-8"))?
             .to_owned();
@@ -441,17 +458,40 @@ fn joined_dependency_search_dirs(dirs: &[PathBuf]) -> io::Result<String> {
                 "dependency search directory must not contain the ';' separator",
             ));
         }
-        if !joined
-            .iter()
-            .any(|seen: &String| seen.eq_ignore_ascii_case(&text))
-        {
+        if !joined.iter().any(|seen| seen.eq_ignore_ascii_case(&text)) {
             joined.push(text);
         }
     }
     if joined.is_empty() {
         return Err(invalid("dependency search directories are empty"));
     }
-    Ok(joined.join(";"))
+    // Bounded after dedupe so a caller repeating one directory is not
+    // rejected for a set the worker would accept.
+    if joined.len() > MAX_SEARCH_DIRS {
+        return Err(invalid("too many dependency search directories"));
+    }
+    let joined = joined.join(";");
+    // The worker re-validates the joined value against the same bound; fail
+    // here so an oversized launch never reaches it as an opaque worker exit.
+    const MAX_JOINED_LENGTH: usize = 32768;
+    if joined.len() > MAX_JOINED_LENGTH {
+        return Err(invalid("dependency search directories are too long"));
+    }
+    Ok(joined)
+}
+
+/// Strip the Windows `\\?\` (or `\\?\UNC\`) extended-length prefix; the same
+/// de-verbatim rule as `types_and_transport::strip_extended_prefix` and the
+/// minidump/trace policies (issue #231). Identity on plain paths.
+fn strip_extended_prefix(path: &Path) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 /// The shared precondition of both in-place dispatch shapes (issue #751):
@@ -941,16 +981,66 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("separator"));
 
-        // The bounded count matches the worker's re-validation.
-        let too_many = vec![root.clone(); 17];
+        // The bounded count matches the worker's re-validation, judged after
+        // dedupe so only genuinely distinct directories count.
+        let too_many: Vec<PathBuf> = (0..17)
+            .map(|index| {
+                let dir = root.join(format!("dir-{index}"));
+                fs::create_dir(&dir).unwrap();
+                dir
+            })
+            .collect();
         assert!(joined_dependency_search_dirs(&too_many).is_err());
+        assert!(joined_dependency_search_dirs(&too_many[..16]).is_ok());
 
-        // Case-insensitive duplicates collapse to one canonical entry.
+        // Case-insensitive duplicates collapse to one canonical entry, and the
+        // worker receives the plain (de-verbatim) form (issue #231).
         let joined = joined_dependency_search_dirs(&[root.clone(), root.clone()]).unwrap();
         assert!(
             !joined.contains(';'),
             "one directory, no separator: {joined}"
         );
+        assert!(
+            !joined.starts_with(r"\\?\"),
+            "worker paths are de-verbatim: {joined}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn in_place_dispatch_rejects_sealed_resources() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-secure-image-dispatch-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let plugin = artifact(&root, "plugin.plugin", b"plugin");
+        let resource = root.join("Film Stocks");
+        fs::create_dir(&resource).unwrap();
+        let resource_file = resource.join("stock.grain");
+        fs::write(&resource_file, b"grain").unwrap();
+        let entry = crate::sealed_load_tree::SealedResourceEntry {
+            source: resource_file,
+            relative_path: "Film Stocks/stock.grain".into(),
+            expected_sha256: Sha256::digest(b"grain").into(),
+            expected_size: 5,
+        };
+        let error = dispatch_secure_image_with_resources(
+            SecureImageDispatch {
+                repository: &root,
+                worker_kind: WorkerKind::L2,
+                plugin,
+                dependencies: vec![],
+                dependency_search_dirs: vec![root.clone()],
+                args_before_plugin: &[],
+                args_after_plugin: &[],
+                timeout: Some(Duration::from_secs(1)),
+            },
+            vec![entry],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("data resources"));
         fs::remove_dir_all(root).unwrap();
     }
 
