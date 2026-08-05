@@ -23,10 +23,10 @@ and bounded image input/output are now the main implementation path.
   contain and instead decides results by wall-clock — a plug-in still mapping a
   sealed closure was reported as "timed out" and that verdict was cached
   (issue #354). Deadlines stay where a caller cannot wait: the interactive
-  render session's frame deadline, `l1`'s configured per-plug-in timeout, and
-  the broker's own probe workers in `selftest`. A worker that blocks on a modal
-  dialog is a UI-containment problem (issue #351), not a reason to reintroduce a
-  discovery deadline.
+  render session's frame deadline, the selection files' per-plug-in timeouts,
+  and the broker's own probe workers in `selftest`. A worker that blocks on a
+  modal dialog is a UI-containment problem (issue #351), not a reason to
+  reintroduce a discovery deadline.
 - Evidence is a recording depth, not an execution tier. Provenance for the
   AE-equivalence/regression corpus (Project Direction 4) comes from recording
   what actually ran — the hash of the actually-loaded plug-in bytes, the
@@ -59,12 +59,13 @@ and bounded image input/output are now the main implementation path.
   token, protected DACL, and staged-tree deny ACEs were removed in #731 (the
   worker shares the broker's token, and staging records which bytes ran); the
   compiled-in fixture identities went with #733; and the per-frame output hash
-  became an extent cross-check in #690. What remains: the
-  `l1`/`l2`/`render*`/`smart*`/`render_request` CLI routes read a selection
-  file that names the plug-in and its dependencies, and `l1` still dispatches
-  through normal-token `run_isolated` with an argv path (#732, the last
-  plug-in-loading normal-token route; `selftest` launches only the broker's own
-  probe workers and is out of scope). Sealed staging still copies and hashes
+  became an extent cross-check in #690; the `l1` route (load-only probe, the
+  last plug-in-loading normal-token route) was deleted outright in #732 —
+  nothing executed it and L2 plus multifilter discovery cover the property it
+  observed. What remains: the `l2`/`render*`/`smart*`/`render_request` CLI
+  routes read a selection file that names the plug-in and its dependencies
+  (`selftest` launches only the broker's own probe workers and is out of
+  scope). Sealed staging still copies and hashes
   the load tree, which #751 is reconsidering. Do not add new enforcement, and
   when touching one of these routes migrate it toward the floor rather than
   extending a gate. The receipt-free routes that already exist

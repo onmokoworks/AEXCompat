@@ -57,13 +57,6 @@ fn warn_on_recorded_identity_drift(
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Allowlist {
-    schema_version: u32,
-    entries: Vec<ApprovedArtifact>,
-}
-
 pub const MAX_LOAD_TREE_DEPENDENCIES: usize = 64;
 
 #[derive(Deserialize)]
@@ -125,64 +118,8 @@ struct LoadEntryReceipt {
     byte_size: u64,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ApprovedArtifact {
-    pub id: String,
-    pub plugin_path: PathBuf,
-    /// The identity `load` observed on disk, not the one the file recorded
-    /// (issue #732). Lowercase hex.
-    pub sha256: String,
-    pub byte_size: u64,
-    #[allow(dead_code)]
-    approved_stage: String,
-    /// Echoed into reports as provenance from the selection file.
-    pub receipt_id: String,
-    #[allow(dead_code)]
-    expires: String,
-    pub timeout_ms: u64,
-}
-
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
-}
-
-pub fn load(repository: &Path, id: &str, policy: SelectionPolicy) -> io::Result<ApprovedArtifact> {
-    let bytes = fs::read(repository.join(policy.allowlist_path))?;
-    let list: Allowlist =
-        serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
-    if list.schema_version != 1 || list.entries.len() != 1 {
-        return Err(invalid(
-            "selection file must contain exactly one schema-v1 entry",
-        ));
-    }
-    let mut entry = list.entries.into_iter().next().unwrap();
-    // The id still has to name the entry: it is how the caller says which
-    // plug-in it means, not an approval check.
-    if entry.id != id {
-        return Err(invalid("selection entry does not name the requested id"));
-    }
-    if entry.timeout_ms == 0 || entry.timeout_ms > MAX_SELECTION_TIMEOUT_MS {
-        return Err(invalid("selection timeout is outside the bounded range"));
-    }
-    let metadata = fs::metadata(&entry.plugin_path)?;
-    if !metadata.is_file() {
-        return Err(invalid("selected plug-in is not a regular file"));
-    }
-    let (observed_sha256, observed_size) = observe_identity(&entry.plugin_path)?;
-    warn_on_recorded_identity_drift(
-        &entry.id,
-        &entry.sha256,
-        entry.byte_size,
-        observed_sha256,
-        observed_size,
-    );
-    entry.sha256 = observed_sha256
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    entry.byte_size = observed_size;
-    Ok(entry)
 }
 
 /// Parses an approved schema-v2 receipt into inputs for `SealedLoadTree`.
@@ -416,44 +353,6 @@ mod tests {
         let worker = root.join("worker.exe");
         fs::write(&worker, WORKER_BYTES).unwrap();
         worker
-    }
-
-    #[test]
-    fn v1_selection_reports_the_identity_it_observed() {
-        let root = scratch("v1");
-        let plugin = root.join("fixture.bin");
-        fs::write(&plugin, MAIN_BYTES).unwrap();
-        let write = |recorded_sha: &str, timeout_ms: u64| {
-            fs::write(
-                root.join("allowlist.json"),
-                serde_json::to_vec(&json!({"schema_version":1,"entries":[{
-                    "id":"fixture","plugin_path":plugin,"sha256":recorded_sha,
-                    "byte_size":7,"approved_stage":"render","receipt_id":"reviewed-001",
-                    "expires":"2099-01-01T00:00:00Z","timeout_ms":timeout_ms
-                }]}))
-                .unwrap(),
-            )
-            .unwrap();
-        };
-
-        write(&hex(MAIN_BYTES), 5_000);
-        let loaded = load(&root, "fixture", policy()).unwrap();
-        assert_eq!(loaded.byte_size, MAIN_BYTES.len() as u64);
-        assert_eq!(loaded.sha256, hex(MAIN_BYTES));
-
-        // A stale recorded digest no longer refuses the load; the observed
-        // identity is what comes back (issue #732).
-        write(&"a".repeat(64), 5_000);
-        let drifted = load(&root, "fixture", policy()).unwrap();
-        assert_eq!(drifted.sha256, hex(MAIN_BYTES));
-
-        // The id must still name the entry, and the timeout stays bounded.
-        assert!(load(&root, "other", policy()).is_err());
-        write(&hex(MAIN_BYTES), 0);
-        assert!(load(&root, "fixture", policy()).is_err());
-        write(&hex(MAIN_BYTES), MAX_SELECTION_TIMEOUT_MS + 1);
-        assert!(load(&root, "fixture", policy()).is_err());
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

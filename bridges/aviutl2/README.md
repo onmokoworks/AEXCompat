@@ -36,7 +36,7 @@ canonical (Ninja、直下に出力):
 cmake -S minihost -B target\minihost-build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build target\minihost-build
 Get-ChildItem target\minihost-build\aex_*.exe
-# aex_l1_worker / aex_l2_worker / aex_render_worker / aex_smart_worker
+# aex_l2_worker / aex_render_worker / aex_smart_worker ほか
 ```
 
 VS generator で出す場合は `Release\` に出るので直下へコピーする:
