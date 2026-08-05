@@ -2404,6 +2404,10 @@
                 "QueryPerformanceCounter",
                 LegacyWin64Import::QueryPerformanceCounter,
             ),
+            (
+                "QueryPerformanceFrequency",
+                LegacyWin64Import::QueryPerformanceFrequency,
+            ),
             ("InitializeSListHead", LegacyWin64Import::InitializeSListHead),
             (
                 "DisableThreadLibraryCalls",
@@ -2426,9 +2430,45 @@
         emulate_query_performance_counter(&mut engine.unicorn);
         assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 1);
         assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), 1u64.to_le_bytes());
+        engine.unicorn.reg_write(RegisterX86::RCX, output).unwrap();
+        emulate_query_performance_frequency(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 1);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+            10_000_000u64.to_le_bytes()
+        );
         engine.unicorn.mem_write(output, &[0xff; 16]).unwrap();
         emulate_initialize_slist_head(&mut engine.unicorn);
         assert_eq!(engine.unicorn.mem_read_as_vec(output, 16).unwrap(), [0; 16]);
+    }
+
+    #[test]
+    fn performance_frequency_rejects_null_and_unwritable_outputs() {
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+        emulate_query_performance_frequency(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error == "QueryPerformanceFrequency output pointer is null")
+        );
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        engine.unicorn.reg_write(RegisterX86::RCX, 0x1234).unwrap();
+        emulate_query_performance_frequency(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains("output 0x1234 is not writable"))
+        );
     }
 
     #[test]

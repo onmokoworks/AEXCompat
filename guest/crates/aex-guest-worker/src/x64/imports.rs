@@ -54,6 +54,7 @@ enum LegacyWin64Import {
     GetCurrentThreadId,
     GetCurrentProcessId,
     QueryPerformanceCounter,
+    QueryPerformanceFrequency,
     ExplicitMsvcRuntimeZero,
     CrtInitterm,
     CrtInittermE,
@@ -257,6 +258,9 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "GetCurrentProcessId") => LegacyWin64Import::GetCurrentProcessId,
         ("kernel32.dll", "QueryPerformanceCounter") => {
             LegacyWin64Import::QueryPerformanceCounter
+        }
+        ("kernel32.dll", "QueryPerformanceFrequency") => {
+            LegacyWin64Import::QueryPerformanceFrequency
         }
         ("kernel32.dll", "InitializeSListHead") => LegacyWin64Import::InitializeSListHead,
         ("kernel32.dll", "DisableThreadLibraryCalls") => {
@@ -706,6 +710,18 @@ fn install_win64_import(
                     "install QueryPerformanceCounter import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_query_performance_counter(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::QueryPerformanceFrequency => {
+                uc(
+                    "write QueryPerformanceFrequency return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install QueryPerformanceFrequency import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_query_performance_frequency(unicorn);
                     }),
                 )?;
             }
@@ -1489,15 +1505,28 @@ fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
 }
 
 fn emulate_query_performance_counter(unicorn: &mut Unicorn<'_, GuestState>) {
-    const FIXED_COUNTER: u64 = 1;
+    emulate_query_performance_value(unicorn, "QueryPerformanceCounter", 1);
+}
+
+fn emulate_query_performance_frequency(unicorn: &mut Unicorn<'_, GuestState>) {
+    // This fixed 10 MHz clock domain matches the 100 ns unit used by Windows
+    // FILETIME while remaining independent of host time and hardware timers.
+    emulate_query_performance_value(unicorn, "QueryPerformanceFrequency", 10_000_000);
+}
+
+fn emulate_query_performance_value(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    function: &str,
+    value: u64,
+) {
     let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
         if output == 0 {
-            return Err("QueryPerformanceCounter output pointer is null".to_string());
+            return Err(format!("{function} output pointer is null"));
         }
         unicorn
-            .mem_write(output, &FIXED_COUNTER.to_le_bytes())
+            .mem_write(output, &value.to_le_bytes())
             .map_err(|error| {
-                format!("QueryPerformanceCounter output {output:#x} is not writable: {error}")
+                format!("{function} output {output:#x} is not writable: {error}")
             })
     });
     match result {
