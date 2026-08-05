@@ -27,6 +27,7 @@
 #include "worker_world_safety.hpp"
 
 #include <array>
+#include <iostream>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -552,10 +553,21 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         external_total_time, external_time_scale, case_id, requested, external_rgba,
         external_layers, external_width, external_height, *classic_context, logical_source,
         output_validation_failed};
+    // Per frame, not per session. The session-wide `stage:render_*` pair in
+    // worker_invocation_orchestration.cpp is emitted once, so a classic
+    // session's frame errors carried no stage at all and every one of them
+    // came back with `first_failure_stage: null` (issue #722). The name is
+    // distinct from `render` so the two do not nest under one label.
+    std::cerr << "stage:classic_render_begin\n" << std::flush;
     error = dispatch_owner.run(error);
+    std::cerr << "stage:classic_render_end error=" << error << "\n" << std::flush;
     lifecycle.error = error;
     error = lifecycle_owner.finish(lifecycle);
   }
+  // What the plug-in's selector returned, before the host's own finalize can
+  // add to it. Kept so the two can be told apart: a frame that fails only after
+  // this point failed in the host, not in the plug-in (issue #722).
+  const int32_t selector_error = error;
   aexcompat::worker_runtime::classic_execution::Context final_context{
       destination, rowbytes, width, height, pixel_bytes, error,
       external_current_time, external_time_step, external_time_scale,
@@ -578,6 +590,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
             static_cast<const unsigned char*>(pixels), width, height, bytes);
       },
       +[](const char* format) { smart_state().pixel_format = format; }});
+  if (error != selector_error)
+    std::cerr << "stage:classic_finalize_end error=" << error << "\n" << std::flush;
   // The render dispatch hook (ClassicRenderDispatchOwner, RenderHooks) already
   // closes the UI context when it is active, so only close here if it is still
   // open. Without the g_render_ui_context_active guard this re-closes an

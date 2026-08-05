@@ -2234,6 +2234,66 @@ mod tests {
         assert_eq!(cleanup_failure["failure_stage"], "global_setdown");
     }
 
+    /// A classic session's frame errors used to carry no stage at all: the
+    /// `render` pair brackets the whole session, so a frame that failed came
+    /// back with `first_failure_stage: null` and nothing said which selector
+    /// did it. 29 of the 56 failing AE 2026 effects looked like that
+    /// (issue #722).
+    #[test]
+    fn a_classic_frame_names_the_selector_that_failed() {
+        // The plug-in's own RENDER refused this frame.
+        let selector = worker_diagnostics(
+            "stage:frame_setup_begin\nstage:frame_setup_end error=0\n\
+             stage:classic_render_begin\nstage:classic_render_end error=512\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(selector["first_failure_stage"], "classic_render");
+        assert_eq!(selector["failure_stage"], "classic_render");
+
+        // The selector returned cleanly and the host's finalize added the
+        // error, which has to read as a different stage - otherwise a host-side
+        // refusal is filed against the plug-in.
+        let finalize = worker_diagnostics(
+            "stage:classic_render_begin\nstage:classic_render_end error=0\n\
+             stage:classic_finalize_end error=4\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(finalize["first_failure_stage"], "classic_finalize");
+
+        // A frame that refuses before the selector still names FRAME_SETUP.
+        let setup = worker_diagnostics(
+            "stage:frame_setup_begin\nstage:frame_setup_end error=512\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(setup["first_failure_stage"], "frame_setup");
+    }
+
+    /// The event cap bounds what is reported, not what is noticed. A frame that
+    /// fails on every frame of a long session overruns the list, and that is
+    /// exactly when the failure must still be attributed (issue #722).
+    #[test]
+    fn the_event_cap_does_not_hide_a_failure_past_it() {
+        let mut trace = "stage:classic_render_begin\nstage:classic_render_end error=0\n"
+            .repeat(MAX_STAGE_EVENTS);
+        trace.push_str("stage:classic_render_begin\nstage:classic_render_end error=512\n");
+        let diagnostics = worker_diagnostics(&trace, false, "ok", 0, 9);
+        assert_eq!(
+            diagnostics["stage_events"].as_array().unwrap().len(),
+            MAX_STAGE_EVENTS
+        );
+        assert_eq!(diagnostics["failure_stage"], "classic_render");
+        assert_eq!(diagnostics["last_completed_stage"], "classic_render");
+    }
+
     #[test]
     fn worker_stage_diagnostics_are_bounded() {
         let trace = "stage:render_begin\n".repeat(MAX_STAGE_EVENTS + 20);
