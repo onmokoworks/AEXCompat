@@ -31,10 +31,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::image_render::{
     inspect_experimental_in_place, inspect_experimental_with_approved_dependencies_and_resources,
 };
-use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::plugin_dependency_closure::{
     DependencyClosureRequest, resolve_dependency_closure,
 };

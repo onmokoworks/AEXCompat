@@ -10,7 +10,7 @@ description = "AviUtl2 generic (.aux2) plugin registering each AEX in a folder a
 # bridge): the aviutl2 dependency tree must not enter the broker gate.
 [lib]
 name = "aexcompat_aviutl2_multifilter"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aviutl2-sys = "0.40"

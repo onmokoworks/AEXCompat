@@ -162,7 +162,7 @@ fn dispatch_secure_image_session_with_policy(
             require_module_audit: true,
         };
         let mut process = crate::secure_launch::secure_launch_session_in_place(
-            &input.plugin.path,
+            Some(&input.plugin.path),
             request,
             session,
             desktop_policy,
@@ -401,6 +401,129 @@ fn dispatch_secure_cluster_image_session_with_policy(
         desktop_policy,
     )?;
     Ok(SecureClusterSessionLaunch { process, manifest })
+}
+
+/// In-place cluster session dispatch (issue #751, `cluster-manifest-v2`):
+/// the manifest names each plug-in by its real absolute path plus SHA-256 and
+/// carries the validated dependency search directories; nothing is staged.
+/// The transport document is what the worker reads at launch (before any
+/// plug-in code runs), so it rides the launch struct and must outlive the
+/// session.
+#[cfg(windows)]
+pub struct SecureInPlaceClusterDispatch<'a> {
+    pub repository: &'a Path,
+    pub worker_kind: WorkerKind,
+    /// The ordered cluster; `plugins[0]` is the launch plugin of a render
+    /// session. Must be non-empty. Paths are the real, absolute plug-in
+    /// locations.
+    pub plugins: Vec<ApprovedImageArtifact>,
+    /// Directories the worker admits into its DLL search set; validated and
+    /// joined exactly like `--dependency-dirs-v1`.
+    pub dependency_search_dirs: Vec<PathBuf>,
+    /// Whether the positional argv image slot carries plugins[0]. Discovery
+    /// sessions pass `false` and no plugin path rides argv at all.
+    pub positional_plugin: bool,
+    /// Render sessions carry the swap payloads for `plugins[1..]`; discovery
+    /// sessions pass `None` so the manifest carries no `payload` keys.
+    pub swap_payloads: Option<&'a [Option<String>]>,
+    /// The bounded module-enumeration capacity the recorded audit uses.
+    pub module_bound: u32,
+    pub args_before_plugin: &'a [String],
+    pub args_after_plugin: &'a [String],
+}
+
+/// A launched in-place cluster session: the process, the validated manifest
+/// the caller cross-checks exchanges against, and the live transport document
+/// the worker read at launch (the caller keeps it alive for the session).
+#[cfg(windows)]
+pub struct SecureInPlaceClusterSessionLaunch {
+    pub process: crate::secure_launch::SecureSessionProcess,
+    pub manifest: crate::cluster_manifest::ValidatedInPlaceClusterManifest,
+    pub transport: crate::cluster_manifest::ClusterManifestTransport,
+}
+
+#[cfg(windows)]
+pub fn dispatch_secure_in_place_cluster_session(
+    input: SecureInPlaceClusterDispatch<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+) -> io::Result<SecureInPlaceClusterSessionLaunch> {
+    dispatch_secure_in_place_cluster_session_with_policy(
+        input,
+        session,
+        crate::windows_process::WorkerDesktopPolicy::Dedicated,
+    )
+}
+
+#[cfg(windows)]
+pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
+    input: SecureInPlaceClusterDispatch<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+    desktop_policy: crate::windows_process::WorkerDesktopPolicy,
+) -> io::Result<SecureInPlaceClusterSessionLaunch> {
+    crate::trace_policy::validate_broker_trace_directory(input.repository)?;
+    let worker_program = input
+        .repository
+        .join(input.worker_kind.repository_relative_program());
+    for plugin in &input.plugins {
+        if !plugin.path.is_absolute() {
+            return Err(invalid("in-place plugin path must be absolute"));
+        }
+    }
+    // The same canonicalize + de-verbatim + bounds pipeline as the one-shot
+    // in-place dispatch; the validated strings ride the manifest instead of
+    // an argv value, so the ';' join constraint never applies here.
+    let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
+    let search_dirs: Vec<String> = joined.split(';').map(str::to_owned).collect();
+    let manifest = crate::cluster_manifest::ValidatedInPlaceClusterManifest::from_approved(
+        &input.plugins,
+        &search_dirs,
+        input.swap_payloads,
+        input.module_bound,
+    )?;
+    let transport = manifest.write_transport(input.repository)?;
+    let positional = if input.positional_plugin {
+        Some(
+            input
+                .plugins
+                .first()
+                .ok_or_else(|| invalid("a cluster session requires at least one plugin"))?
+                .path
+                .as_path(),
+        )
+    } else {
+        None
+    };
+    let mut args_after_plugin = input.args_after_plugin.to_vec();
+    args_after_plugin.extend([
+        "--cluster-manifest-v1".to_owned(),
+        transport.path().to_string_lossy().into_owned(),
+    ]);
+    let admitted = admit_local_worker(input.repository, &worker_program)?;
+    let request = SecureLaunchRequest {
+        worker_program: &worker_program,
+        worker_expected_sha256: admitted.sha256,
+        worker_expected_size: admitted.size,
+        plugin_basename: None,
+        args_before_plugin: input.args_before_plugin,
+        args_after_plugin: &args_after_plugin,
+        repository: input.repository,
+        // The in-place cluster audit is recorded at close
+        // (`observe_in_place_cluster_audit`), not validated by the one-shot
+        // validator at collection.
+        require_module_audit: false,
+    };
+    let mut process = crate::secure_launch::secure_launch_session_in_place(
+        positional,
+        request,
+        session,
+        desktop_policy,
+    )?;
+    process.record_worker_freshness_warning(admitted.freshness_warning);
+    Ok(SecureInPlaceClusterSessionLaunch {
+        process,
+        manifest,
+        transport,
+    })
 }
 
 pub fn dispatch_secure_image(input: SecureImageDispatch<'_>) -> io::Result<SecureLaunchResult> {

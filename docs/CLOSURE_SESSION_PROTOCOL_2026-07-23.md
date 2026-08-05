@@ -119,6 +119,48 @@ manifest パス (および render の launch plugin root) の canonical 同一�
 「broker が書いた exact path と一致する」契約自体は維持する (#231 の
 aux manifest で起きた問題と同型の MSVC 差異)。
 
+### 2.4 cluster-manifest-v2 (in-place、issue #751、2026-08-05 追記)
+
+sealed staging を行わない in-place モード用のマニフェスト。プラグインは
+**実絶対パス + sha256** で宣言し、`dependencies` の代わりに検証済みの
+依存探索ディレクトリ列 `search_dirs` (canonical・de-verbatim・≤16) を運ぶ:
+
+```json
+{
+  "schema": "cluster-manifest-v2",
+  "plugins": [
+    {"path": "C:\\...\\Effects\\A.aex", "sha256": "<64hex>"}
+  ],
+  "search_dirs": ["C:\\...\\Support Files", "C:\\...\\Effects"],
+  "module_bound": 4096
+}
+```
+
+- 転送: broker 所有の `target/image-transport` 配下に書き、argv の
+  `--cluster-manifest-v1 <path>` (オプション名は共通、schema で判別) で
+  渡す。worker は launch 時・プラグインコード実行前に読む。sealed root
+  検証は行わない (aux-manifest と同じ transport 引数)。transport 文書は
+  session 寿命の間 broker 側が保持する。
+- ロード: worker はセッション開始時に `search_dirs` と各プラグインの
+  親ディレクトリ (重複除去、合計 ≤64) を `AddDllDirectory` し、
+  プラグインを実パスから `DLL_LOAD_DIR | SYSTEM32 | USER_DIRS` で
+  ロードする。§3 のピン留めは存在しない — §11 の遅延解放により
+  mid-process の FreeLibrary が無い以上、import 経由でロードされた
+  closure は process 寿命まで保持される。
+- identity: per-inspect / per-swap のロード直前に実ファイルを再ハッシュ
+  し manifest と照合する。不一致は **inspect-local の構造化エラー**
+  (`error_kind:"identity_changed"`、#309 の state transition) で、
+  session は継続する。ローダがロードを拒否した場合は
+  `error_kind:"load_failed"`。v1 の swap_failure (exit 25) には落とさない。
+- module audit: **recorded、never enforced** (issue #678/#751)。宣言集合
+  narrowing は行わず、探索ルート集合 (search_dirs + プラグイン親 dir) を
+  分類ルートに加えて snapshot/epoch を記録する。`module_bound` は
+  列挙容量としてのみ使う。close 時の broker 検証は
+  `observe_in_place_cluster_audit` (記録の存在と全モジュール分類の確認、
+  warning 記録のみ) に置き換わる。
+- basename 一意性は要求しない (実パスが identity)。大小無視の
+  **フルパス一意性**を要求する。
+
 ## 3. closure のピン留め
 
 プラグインを `FreeLibrary` すると、その import 経由でロードされた依存 DLL

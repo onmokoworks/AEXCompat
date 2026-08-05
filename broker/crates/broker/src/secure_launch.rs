@@ -381,15 +381,32 @@ pub(crate) fn secure_launch_session_on_current_desktop(
 
 /// In-place session variant (issue #751): mirrors `secure_launch_in_place`
 /// for resident sessions. No sealed tree exists; the positional argv slot
-/// carries the real plugin path.
+/// carries the real plugin path — or nothing at all for cluster discovery
+/// sessions, whose plug-ins are selected by manifest index at runtime.
 #[cfg(windows)]
 pub(crate) fn secure_launch_session_in_place(
-    plugin_path: &std::path::Path,
+    plugin_path: Option<&std::path::Path>,
     request: SecureLaunchRequest<'_>,
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
 ) -> io::Result<SecureSessionProcess> {
-    let args = build_in_place_launch_args(plugin_path, &request)?;
+    let args = match plugin_path {
+        Some(plugin_path) => build_in_place_launch_args(plugin_path, &request)?,
+        None => {
+            if request.plugin_basename.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "an in-place launch carries the plugin path itself, not a staged basename",
+                ));
+            }
+            let mut args = Vec::with_capacity(
+                request.args_before_plugin.len() + request.args_after_plugin.len(),
+            );
+            args.extend_from_slice(request.args_before_plugin);
+            args.extend_from_slice(request.args_after_plugin);
+            args
+        }
+    };
     secure_launch_session_impl(None, args, request, session, desktop_policy)
 }
 

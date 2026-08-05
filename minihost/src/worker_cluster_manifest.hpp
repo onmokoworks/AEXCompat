@@ -35,12 +35,20 @@ inline constexpr uint64_t kMaxManifestBytes = 4 * 1024 * 1024;
 // A plug-in payload rides the same encoding and bound as the launch argv
 // payload (design §2.1): ASCII printables only.
 inline constexpr std::size_t kMaxPayloadBytes = 16384;
+// In-place manifests (issue #751, `cluster-manifest-v2`): the bounded count
+// of dependency search directories, matching the broker's and the
+// `--dependency-dirs-v1` re-validation.
+inline constexpr std::size_t kMaxSearchDirs = 16;
 
 struct PluginEntry {
   std::string basename;
   std::string sha256;  // 64 hex, as written by the broker
   std::string payload;
   bool has_payload{};
+  // In-place manifests (issue #751): the plug-in's real absolute path; empty
+  // on sealed (`cluster-manifest-v1`) manifests, where the path is
+  // `sealed_root / basename`.
+  std::filesystem::path path;
 };
 
 struct DependencyEntry {
@@ -53,12 +61,19 @@ struct Manifest {
   std::vector<PluginEntry> plugins;
   std::vector<DependencyEntry> dependencies;
   uint32_t module_bound{};
-  // Canonical manifest path and its parent. The manifest must live directly
-  // inside the sealed root (the aux-manifest sibling convention), so every
+  // Canonical manifest path and its parent. On a sealed manifest the parent
+  // is the sealed root (the aux-manifest sibling convention), so every
   // plug-in and dependency path is `sealed_root / basename` and never
-  // escapes it.
+  // escapes it. On an in-place manifest (issue #751) the parent is the
+  // broker-owned transport directory and `sealed_root` stays empty.
   std::filesystem::path manifest_path;
   std::filesystem::path sealed_root;
+  // In-place mode (issue #751, `cluster-manifest-v2`): plug-ins load from
+  // their real `path` entries, the dependency closure resolves through
+  // `search_dirs` (admitted into USER_DIRS at session start), there are no
+  // pinned dependencies, and the module audit is recorded, never enforced.
+  bool in_place{};
+  std::vector<std::filesystem::path> search_dirs;
 };
 
 // Loads and strictly validates a `cluster-manifest-v1` document: exact-key
