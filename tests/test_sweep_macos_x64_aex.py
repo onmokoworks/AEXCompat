@@ -701,3 +701,22 @@ def test_baseline_comparison_rejects_missing_worker_identity():
 
     with pytest.raises(SWEEP.SweepError, match="unicorn_worker_sha256 is invalid"):
         SWEEP.compare_baseline(current, baseline)
+
+
+@pytest.mark.parametrize("malformation", ["identity", "milestone", "output"])
+def test_baseline_comparison_rejects_malformed_success_contract(malformation):
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    current = _report([_metric_entry(identity, _rendered())])
+    result = baseline["entries"][0]["backends"]["unicorn"]
+    if malformation == "identity":
+        baseline["entries"][0]["sha256"] = "not-a-sha"
+    elif malformation == "milestone":
+        result["milestones"]["cleanup_success"] = "yes"
+    else:
+        result["output_sha256"] = "not-a-sha"
+
+    with pytest.raises(
+        SWEEP.SweepError, match="identity is invalid|milestones are invalid|output SHA-256 is invalid"
+    ):
+        SWEEP.compare_baseline(current, baseline)

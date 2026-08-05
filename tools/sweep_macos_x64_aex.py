@@ -928,10 +928,47 @@ def _entry_identity(report: dict[str, object]) -> list[str]:
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str):
             raise SweepError("baseline report entry identity is invalid")
-        identities.append(entry["sha256"])
+        identity = entry["sha256"]
+        if len(identity) != 64 or any(
+            character not in "0123456789abcdef" for character in identity
+        ):
+            raise SweepError("baseline report entry identity is invalid")
+        identities.append(identity)
     if len(identities) != len(set(identities)):
         raise SweepError("baseline report contains duplicate identities")
     return identities
+
+
+def _validated_milestones(
+    entry: object, backend: str, label: str
+) -> tuple[dict[str, object], dict[str, bool]]:
+    if not isinstance(entry, dict) or not isinstance(entry.get("backends"), dict):
+        raise SweepError(f"{label} report backend result is invalid")
+    result = entry["backends"].get(backend)
+    if not isinstance(result, dict) or result.get("status") not in {"rendered", "failed"}:
+        raise SweepError(f"{label} report {backend} result is invalid")
+    milestones = result.get("milestones")
+    expected = {"admission_success", "render_success", "cleanup_success"}
+    if (
+        not isinstance(milestones, dict)
+        or set(milestones) != expected
+        or any(type(milestones[key]) is not bool for key in expected)
+        or (milestones["render_success"] and not milestones["admission_success"])
+        or (milestones["cleanup_success"] and not milestones["render_success"])
+        or (
+            result["status"] == "rendered"
+            and not all(milestones[key] for key in expected)
+        )
+    ):
+        raise SweepError(f"{label} report {backend} milestones are invalid")
+    checksum = result.get("output_sha256")
+    if result["status"] == "rendered" and (
+        not isinstance(checksum, str)
+        or len(checksum) != 64
+        or any(character not in "0123456789abcdef" for character in checksum)
+    ):
+        raise SweepError(f"{label} report {backend} output SHA-256 is invalid")
+    return result, milestones
 
 
 def compare_baseline(
@@ -1006,10 +1043,12 @@ def compare_baseline(
         for identity, current_entry, baseline_entry in zip(
             identities, report["entries"], baseline_entries, strict=True
         ):
-            current = current_entry["backends"][backend]
-            previous = baseline_entry["backends"][backend]
-            current_milestones = current["milestones"]
-            previous_milestones = previous["milestones"]
+            current, current_milestones = _validated_milestones(
+                current_entry, backend, "current"
+            )
+            previous, previous_milestones = _validated_milestones(
+                baseline_entry, backend, "baseline"
+            )
             if current_milestones["render_success"] and not previous_milestones["render_success"]:
                 gained.append(identity)
             if previous_milestones["render_success"] and not current_milestones["render_success"]:
