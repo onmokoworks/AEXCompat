@@ -2266,39 +2266,50 @@ mod tests {
         );
         assert_eq!(finalize["first_failure_stage"], "classic_finalize");
 
-        // A frame whose lifecycle refused never reaches RENDER, so the worker
-        // emits no `classic_render` pair and the setup stage stands alone.
-        let setup = worker_diagnostics(
+        // The host refused the plug-in's requested output resize, so RENDER was
+        // never dispatched. `prepare_output` runs inside the same
+        // classic_execution::dispatch_render call as the selector but never
+        // calls the plug-in, so it gets its own name - the broker already calls
+        // this refusal `output_validation` when it overrides failure_stage on
+        // the session route, and emitting it from the worker makes
+        // first_failure_stage and the event list agree on every route.
+        let host_refused_output = worker_diagnostics(
+            "stage:frame_setup_begin\nstage:frame_setup_end error=0\n\
+             stage:output_validation_end error=4\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(
+            host_refused_output["first_failure_stage"],
+            "output_validation"
+        );
+        assert_eq!(host_refused_output["failure_stage"], "output_validation");
+
+        // A frame that never reached the selector carries no `classic_render`
+        // pair, because the markers live inside the selector hook rather than
+        // around the dispatch call. `dispatch_render` short-circuits every step
+        // on a non-zero incoming error, so bracketing the call would re-emit
+        // that error under the selector's name; `failure_stage` takes the last
+        // failing stage and would blame a RENDER the plug-in never saw.
+        //
+        // FRAME_SETUP is not yet one of those short-circuits: the `render_once`
+        // path drops its error instead of propagating it and dispatches RENDER
+        // anyway (issue #725), so a real setup refusal still shows both stages
+        // today - correctly, because RENDER really does run. This trace is the
+        // one a lifecycle refusal produces once it propagates, and the one the
+        // session path at worker_classic_render_runtime.cpp:805 already
+        // produces, since that call site does honor setup_error.
+        let lifecycle_refused = worker_diagnostics(
             "stage:frame_setup_begin\nstage:frame_setup_end error=512\n",
             false,
             "ok",
             0,
             9,
         );
-        assert_eq!(setup["first_failure_stage"], "frame_setup");
-        assert_eq!(setup["failure_stage"], "frame_setup");
-
-        // Why the worker suppresses rather than bracketing unconditionally:
-        // `classic_execution::dispatch_render` short-circuits on a non-zero
-        // incoming error and hands it straight back, so bracketing it anyway
-        // would append that same error again under the selector's name. Here
-        // `failure_stage` takes the last failing stage and would blame a RENDER
-        // the plug-in never saw - a shape this parser cannot tell apart from a
-        // real one, so the emitting side has to not produce it.
-        //
-        // Today only the host-side hook failures (-5) reach that guard: the
-        // `render_once` path drops FRAME_SETUP's error instead of propagating
-        // it and dispatches RENDER anyway (issue #725), so a real setup refusal
-        // still shows both stages - correctly, because RENDER really did run.
-        let bracketed_short_circuit = worker_diagnostics(
-            "stage:frame_setup_begin\nstage:frame_setup_end error=512\n\
-             stage:classic_render_begin\nstage:classic_render_end error=512\n",
-            false,
-            "ok",
-            0,
-            9,
-        );
-        assert_eq!(bracketed_short_circuit["failure_stage"], "classic_render");
+        assert_eq!(lifecycle_refused["first_failure_stage"], "frame_setup");
+        assert_eq!(lifecycle_refused["failure_stage"], "frame_setup");
     }
 
     /// The event cap bounds what is reported, not what is noticed. A frame that

@@ -613,10 +613,14 @@ fn worker_diagnostics(
         "render",
         // Per frame, unlike "render" which brackets the whole session. Without
         // these a classic session's frame errors carried no stage at all
-        // (issue #722); "classic_finalize" appears only when the host's own
-        // finalize changed the error the selector returned, so the two are
-        // told apart rather than merged.
+        // (issue #722). Only "classic_render" is the plug-in's own selector:
+        // "output_validation" is the host refusing the requested output resize
+        // before RENDER runs, and "classic_finalize" appears only when the
+        // host's own finalize changed the error the selector returned. Keeping
+        // three names is the point - a host-side refusal filed under the
+        // plug-in's selector is what this issue was about.
         "classic_render",
+        "output_validation",
         "classic_finalize",
         "smart_render",
         "smart_pre_render",

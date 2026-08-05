@@ -314,8 +314,30 @@ struct ClassicRenderDispatchOwner {
     static const aexcompat::worker_runtime::classic_execution::RenderHooks value{
         +[](void* opaque) { auto& h = *static_cast<ClassicRenderDispatchOwner*>(opaque);
           return dispatch_render_draw(h.entry, h.input, h.output, h.definitions); },
-        +[](void* opaque) { return static_cast<ClassicRenderDispatchOwner*>(opaque)->prepare_output(); },
-        +[](void* opaque) { return static_cast<ClassicRenderDispatchOwner*>(opaque)->dispatch_selector(); },
+        // The stage markers sit inside the hooks, not around
+        // classic_execution::dispatch_render, so each one brackets only what it
+        // actually names. dispatch_render short-circuits on a non-zero incoming
+        // error and runs prepare_output before the selector, so a bracket around
+        // the whole call would file a frame that never reached RENDER - or one
+        // the host itself refused - under the plug-in's selector (issue #722).
+        //
+        // prepare_output is entirely host-side: it validates the plug-in's
+        // requested resize and re-lays the output world. It never calls the
+        // plug-in, so its refusals get the same name the broker already gives
+        // them, and it emits no `_begin` because there is no foreign code inside
+        // it for a crash to be attributed to.
+        +[](void* opaque) {
+          const int32_t error = static_cast<ClassicRenderDispatchOwner*>(opaque)->prepare_output();
+          if (error != 0)
+            std::cerr << "stage:output_validation_end error=" << error << "\n" << std::flush;
+          return error; },
+        // The plug-in's RENDER. The unbalanced `_begin` left by a crash or hang
+        // in here is what lets active_stage name this frame's selector.
+        +[](void* opaque) {
+          std::cerr << "stage:classic_render_begin\n" << std::flush;
+          const int32_t error = static_cast<ClassicRenderDispatchOwner*>(opaque)->dispatch_selector();
+          std::cerr << "stage:classic_render_end error=" << error << "\n" << std::flush;
+          return error; },
         +[](void* opaque) { auto& h = *static_cast<ClassicRenderDispatchOwner*>(opaque);
           return !g_render_ui_context_active || close_render_ui_context(h.entry, h.input, h.output, h.definitions); }};
     return value;
@@ -553,23 +575,13 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         external_total_time, external_time_scale, case_id, requested, external_rgba,
         external_layers, external_width, external_height, *classic_context, logical_source,
         output_validation_failed};
-    // Per frame, not per session. The session-wide `stage:render_*` pair in
-    // worker_invocation_orchestration.cpp is emitted once, so a classic
-    // session's frame errors carried no stage at all and every one of them
-    // came back with `first_failure_stage: null` (issue #722). The name is
-    // distinct from `render` so the two do not nest under one label.
-    //
-    // Only bracket a dispatch that runs. classic_execution::dispatch_render
-    // short-circuits every step when the incoming error is already non-zero and
-    // hands it straight back, so a frame that failed in FRAME_SETUP would
-    // otherwise get `classic_render_end error=<setup error>` and be blamed on a
-    // RENDER the plug-in never saw.
-    const bool selector_runs = error == 0;
-    if (selector_runs)
-      std::cerr << "stage:classic_render_begin\n" << std::flush;
+    // The `stage:classic_render_*` and `stage:output_validation_end` markers are
+    // emitted per frame from inside RenderHooks (see ClassicRenderDispatchOwner)
+    // so each brackets only the step it names. The session-wide `stage:render_*`
+    // pair in worker_invocation_orchestration.cpp is emitted once, so before
+    // this a classic session's frame errors carried no stage at all and every
+    // one of them came back with `first_failure_stage: null` (issue #722).
     error = dispatch_owner.run(error);
-    if (selector_runs)
-      std::cerr << "stage:classic_render_end error=" << error << "\n" << std::flush;
     lifecycle.error = error;
     error = lifecycle_owner.finish(lifecycle);
   }
