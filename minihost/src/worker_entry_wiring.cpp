@@ -56,6 +56,7 @@
 #include "worker_parameter_selftest_routing.hpp"
 #include "worker_pf_color_selftests.hpp"
 #include "worker_parameter_execution.hpp"
+#include "worker_aefx_ace_suite.hpp"
 #include "worker_flt_blur_suite.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "pf_cache_on_load_suite.hpp"
@@ -593,7 +594,7 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_pf_batch_sampling_suite, &verify_pf_ae_channel_native_provider,
         &verify_aegp_layer_render_options_suite2,
         &verify_utils_handle_callbacks_wired,
-        &aexcompat::flt_blur::selftest}});
+        &aexcompat::flt_blur::selftest, &aexcompat::aefx_ace::selftest}});
   // Compatibility anchors for selftests whose command catalog now lives in
   // worker_fixed_selftest_routing.cpp.
   // --self-test-world-transform-affine

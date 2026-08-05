@@ -46,6 +46,7 @@ struct SimpleHooks {
   bool (*aegp_layer_render_options_suite2)(){};
   bool (*pf_utils_handle_callbacks)(){};
   bool (*flt_blur_suite1)(){};
+  bool (*aefx_ace_suite1)(){};
 };
 
 struct Hooks {

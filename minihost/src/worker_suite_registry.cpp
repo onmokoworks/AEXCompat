@@ -127,6 +127,7 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
       return {"AEGP Dynamic Stream Suite", 2};
     case UnsupportedSuiteId::pf_batch_sampling_1:
       return {"PF Batch Sampling Suite", 1};
+    case UnsupportedSuiteId::aefx_ace_1: return {"AEFX ACE Suite", 1};
   }
   return {};
 }

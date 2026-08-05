@@ -12,6 +12,7 @@
 #include "worker_pf_pixel_format_registry.hpp"
 #include "worker_render_report.hpp"
 #include "worker_smart_runtime.hpp"
+#include "worker_suite_call_slot_probe.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "worker_world_registry.hpp"
 
@@ -162,7 +163,9 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       {static_cast<int64_t>(suite_acquire_count()), static_cast<int64_t>(suite_release_count()), static_cast<int64_t>(live_suite_lease_count()),
        static_cast<int64_t>(live_suite_reference_count())},
       missing_suites_report_json() + unsupported_suite_calls_report_json() +
-          suite_timeline_report_json(), live_suite_lease_summary(),
+          suite_timeline_report_json() +
+          aexcompat::worker_runtime::suite_call_slot_probe::report_json(),
+      live_suite_lease_summary(),
       in.suite_fault_observed, worker_runtime::handles::handle_lifetimes_balanced(),
       {handle_stats.created, handle_stats.disposed},
       {arbitrary.copy_calls, arbitrary.dispose_calls, arbitrary.print_calls,

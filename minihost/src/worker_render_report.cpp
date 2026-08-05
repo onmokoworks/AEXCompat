@@ -9,6 +9,7 @@
 #include "worker_pf_path_runtime.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_suite_call_slot_probe.hpp"
 #include "worker_world_registry.hpp"
 
 #include <cstddef>
@@ -656,7 +657,8 @@ ClassicSubsystemDiagnostics capture_classic_subsystems() {
        i64(l2_detail::live_suite_reference_count())},
       l2_detail::missing_suites_report_json() +
           l2_detail::unsupported_suite_calls_report_json() +
-          l2_detail::suite_timeline_report_json(),
+          l2_detail::suite_timeline_report_json() +
+          worker_runtime::suite_call_slot_probe::report_json(),
       l2_detail::live_suite_lease_summary(),
       worker_runtime::handles::handle_lifetimes_balanced(),
       aexcompat::pf_path_runtime::lifetimes_balanced(),

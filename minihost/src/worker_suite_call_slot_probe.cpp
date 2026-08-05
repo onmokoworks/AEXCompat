@@ -23,6 +23,7 @@ inline constexpr std::size_t kCapturedArgumentCount = 8;
 enum class ProbeTarget : std::size_t {
   private_effect_3,
   private_effect_5,
+  aefx_ace_1,
   count,
 };
 
@@ -39,6 +40,7 @@ inline constexpr std::array<TargetDescriptor,
          kPrivateEffectSuiteVersion3},
         {kPrivateEffectSuiteName, L"PF AE Private Effect Suite@5",
          kPrivateEffectSuiteVersion5},
+        {kAefxAceSuiteName, L"AEFX ACE Suite@1", kAefxAceSuiteVersion1},
     }};
 
 struct ProbeConfiguration {
@@ -294,10 +296,22 @@ const void* provide_private_effect_probe5(void*) noexcept {
       ? probe_table<ProbeTarget::private_effect_5>().data() : nullptr;
 }
 
+bool aefx_ace_probe1_available(void*) noexcept {
+  return target_enabled(ProbeTarget::aefx_ace_1);
+}
+
+const void* provide_aefx_ace_probe1(void*) noexcept {
+  return aefx_ace_probe1_available(nullptr)
+      ? probe_table<ProbeTarget::aefx_ace_1>().data() : nullptr;
+}
+
 std::string report_json() {
   const ProbeConfiguration configuration = read_configuration();
-  const bool enabled = configuration.valid &&
-      (configuration.enabled[0] || configuration.enabled[1]);
+  bool enabled = false;
+  for (std::size_t target = 0; target < kTargets.size(); ++target) {
+    if (configuration.enabled[target]) enabled = true;
+  }
+  enabled = enabled && configuration.valid;
   std::ostringstream json;
   json << ",\"suite_call_slot_probe\":{"
        << "\"enabled\":" << (enabled ? "true" : "false")
