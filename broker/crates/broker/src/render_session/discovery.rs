@@ -86,6 +86,20 @@ pub struct DiscoverySessionOpenRequest<'a> {
     pub inspect_deadline: Duration,
 }
 
+/// In-place discovery open request (issue #751): the ordered cluster by real
+/// path plus the validated dependency search directories. No dependencies,
+/// no sealed resources — the loader resolves the closure and the plug-in's
+/// own directory holds its data files.
+pub struct InPlaceDiscoverySessionOpenRequest<'a> {
+    pub repository: &'a Path,
+    pub plugins: Vec<ApprovedImageArtifact>,
+    pub dependency_search_dirs: Vec<PathBuf>,
+    /// The bounded module-enumeration capacity of the recorded audit.
+    pub module_bound: u32,
+    /// Per-inspect watchdog deadline (design §7).
+    pub inspect_deadline: Duration,
+}
+
 /// The outcome of an `inspect_plugin` exchange (design §4.2).
 #[derive(Debug)]
 pub enum InspectOutcome {
@@ -120,6 +134,14 @@ struct InspectDone {
     error_kind: Option<String>,
 }
 
+/// How the session's close validates the worker's module audit: the sealed
+/// manifest declares an enforced-set model (design §5), the in-place manifest
+/// (issue #751) records the loaded-module set without a declared narrowing.
+enum ClusterAuditMode {
+    Declared(ClusterAuditDeclaration),
+    Recorded,
+}
+
 pub struct DiscoverySession {
     process: Option<SecureSessionProcess>,
     collected: Option<CollectedExit>,
@@ -133,7 +155,11 @@ pub struct DiscoverySession {
     inspects_ok: u32,
     inspects_errored: u32,
     opened: Instant,
-    audit: ClusterAuditDeclaration,
+    audit: ClusterAuditMode,
+    /// The in-place manifest transport (issue #751): the document the worker
+    /// read at launch, kept alive for the session. `None` on the sealed
+    /// route, whose manifest lives inside the sealed tree.
+    _in_place_transport: Option<crate::cluster_manifest::ClusterManifestTransport>,
 }
 
 impl DiscoverySession {
@@ -142,8 +168,42 @@ impl DiscoverySession {
     //  `cluster-manifest-v1` transport. No plugin rides argv; the first
     /// `inspect_plugin` loads plugins[N] in the worker (design §2.2).
     pub fn open(request: DiscoverySessionOpenRequest<'_>) -> io::Result<DiscoverySession> {
+        Self::open_impl(request, None)
+    }
+
+    /// In-place variant (issue #751): the cluster manifest (`cluster-manifest-v2`)
+    /// names each plug-in by its real path and carries the dependency search
+    /// directories; nothing is staged, no closure is walked, and the module
+    /// audit is recorded rather than validated against a declared set.
+    pub fn open_in_place(
+        request: InPlaceDiscoverySessionOpenRequest<'_>,
+    ) -> io::Result<DiscoverySession> {
+        Self::open_impl(
+            DiscoverySessionOpenRequest {
+                repository: request.repository,
+                plugins: request.plugins,
+                dependencies: Vec::new(),
+                sealed_resources: Vec::new(),
+                module_bound: request.module_bound,
+                inspect_deadline: request.inspect_deadline,
+            },
+            Some(request.dependency_search_dirs),
+        )
+    }
+
+    fn open_impl(
+        request: DiscoverySessionOpenRequest<'_>,
+        in_place_search_dirs: Option<Vec<PathBuf>>,
+    ) -> io::Result<DiscoverySession> {
         if request.inspect_deadline.is_zero() {
             return Err(invalid("discovery session inspect deadline is invalid"));
+        }
+        if in_place_search_dirs.is_some()
+            && (!request.dependencies.is_empty() || !request.sealed_resources.is_empty())
+        {
+            return Err(invalid(
+                "an in-place discovery session resolves dependencies by search directory, not by staged artifact",
+            ));
         }
         let (request_read, request_write) = inheritable_pipe(false)?;
         let (response_read, response_write) = inheritable_pipe(true)?;
@@ -174,51 +234,86 @@ impl DiscoverySession {
         };
         let args_before_plugin = vec!["--discovery-session-v1".to_owned()];
         let args_after_plugin: Vec<String> = Vec::new();
-        let dispatch = SecureClusterImageDispatch {
-            repository: request.repository,
-            worker_kind: WorkerKind::Render,
-            plugins: request.plugins,
-            dependencies: request.dependencies,
-            sealed_resources: request.sealed_resources,
-            positional_plugin: false,
-            // Discovery manifests carry no payloads (design §2.1).
-            swap_payloads: None,
-            module_bound: request.module_bound,
-            args_before_plugin: &args_before_plugin,
-            args_after_plugin: &args_after_plugin,
-        };
         let child_handles = SessionChildHandles {
             request_read: request_read.raw(),
             response_write: response_write.raw(),
             section: transport.section.raw(),
             layers: Vec::new(),
         };
-        let launch = dispatch_secure_cluster_image_session(dispatch, &child_handles)?;
+        let (process, plugin_count, audit, in_place_transport) = match in_place_search_dirs {
+            Some(dependency_search_dirs) => {
+                let dispatch = crate::secure_image_dispatch::SecureInPlaceClusterDispatch {
+                    repository: request.repository,
+                    worker_kind: WorkerKind::Render,
+                    plugins: request.plugins,
+                    dependency_search_dirs,
+                    positional_plugin: false,
+                    swap_payloads: None,
+                    module_bound: request.module_bound,
+                    args_before_plugin: &args_before_plugin,
+                    args_after_plugin: &args_after_plugin,
+                };
+                let launch =
+                    crate::secure_image_dispatch::dispatch_secure_in_place_cluster_session(
+                        dispatch,
+                        &child_handles,
+                    )?;
+                (
+                    launch.process,
+                    launch.manifest.plugin_count(),
+                    ClusterAuditMode::Recorded,
+                    Some(launch.transport),
+                )
+            }
+            None => {
+                let dispatch = SecureClusterImageDispatch {
+                    repository: request.repository,
+                    worker_kind: WorkerKind::Render,
+                    plugins: request.plugins,
+                    dependencies: request.dependencies,
+                    sealed_resources: request.sealed_resources,
+                    positional_plugin: false,
+                    // Discovery manifests carry no payloads (design §2.1).
+                    swap_payloads: None,
+                    module_bound: request.module_bound,
+                    args_before_plugin: &args_before_plugin,
+                    args_after_plugin: &args_after_plugin,
+                };
+                let launch = dispatch_secure_cluster_image_session(dispatch, &child_handles)?;
+                let audit = ClusterAuditDeclaration::new(
+                    launch.manifest.declared_basenames(),
+                    launch.manifest.plugin_count(),
+                    launch.manifest.module_bound() as usize,
+                )?;
+                (
+                    launch.process,
+                    launch.manifest.plugin_count(),
+                    ClusterAuditMode::Declared(audit),
+                    None,
+                )
+            }
+        };
         // The worker inherited its copies; dropping the broker's child-side
         // ends turns a worker exit into pipe EOF instead of a hang.
         drop(request_read);
         drop(response_write);
-        let audit = ClusterAuditDeclaration::new(
-            launch.manifest.declared_basenames(),
-            launch.manifest.plugin_count(),
-            launch.manifest.module_bound() as usize,
-        )?;
         let receiver =
-            spawn_session_observers(&launch.process, response_read, MAX_DISCOVERY_MESSAGE_BYTES)?;
+            spawn_session_observers(&process, response_read, MAX_DISCOVERY_MESSAGE_BYTES)?;
         Ok(DiscoverySession {
-            process: Some(launch.process),
+            process: Some(process),
             collected: None,
             transport,
             receiver,
             process_exit_observed: false,
             inspect_deadline: request.inspect_deadline,
             invalidation: None,
-            plugin_count: launch.manifest.plugin_count() as u32,
+            plugin_count: plugin_count as u32,
             next_request_index: 0,
             inspects_ok: 0,
             inspects_errored: 0,
             opened: Instant::now(),
             audit,
+            _in_place_transport: in_place_transport,
         })
     }
 
@@ -432,7 +527,18 @@ impl DiscoverySession {
             // along.
             "error" => {
                 let error_kind = match done.error_kind.as_deref() {
-                    Some(kind @ ("entrypoint_unresolved" | "selector_error")) => kind.to_owned(),
+                    // `identity_changed` (the bytes no longer match the
+                    // manifest, the #309 state transition), `load_failed`,
+                    // and `hash_unavailable` (the bytes could not be read at
+                    // all) are in-place additions (issue #751); a sealed
+                    // worker never emits them.
+                    Some(
+                        kind @ ("entrypoint_unresolved"
+                        | "selector_error"
+                        | "identity_changed"
+                        | "load_failed"
+                        | "hash_unavailable"),
+                    ) => kind.to_owned(),
                     _ => {
                         return Err(self.invalidate(
                             "malformed_inspect_done",
@@ -554,13 +660,24 @@ impl DiscoverySession {
             Some(CollectedExit {
                 result: Some(result),
                 ..
-            }) if result.classification == crate::ExitClassification::Ok => {
-                crate::worker_module_audit::observe_cluster_worker_audit(
-                    &result.stdout,
-                    result.stdout_truncated,
-                    &self.audit,
-                )
-            }
+            }) if result.classification == crate::ExitClassification::Ok => match &self.audit {
+                ClusterAuditMode::Declared(declaration) => {
+                    crate::worker_module_audit::observe_cluster_worker_audit(
+                        &result.stdout,
+                        result.stdout_truncated,
+                        declaration,
+                    )
+                }
+                // The in-place session (issue #751) records the loaded-module
+                // set; an absent or failed record rides the close report as a
+                // warning, never an invalidation.
+                ClusterAuditMode::Recorded => {
+                    crate::worker_module_audit::observe_in_place_cluster_audit(
+                        &result.stdout,
+                        result.stdout_truncated,
+                    )
+                }
+            },
             _ => None,
         };
         let session_clean = self.invalidation.is_none()

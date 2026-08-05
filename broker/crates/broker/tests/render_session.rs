@@ -16,8 +16,9 @@ mod windows_e2e {
     };
     use aexcompat_broker::render_session::{
         AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, ClusterRenderPlugins,
-        DiscoverySession, DiscoverySessionOpenRequest, FrameStatus, InspectOutcome, RenderSession,
-        SessionLayer, SessionOpenRequest, SwapOutcome, run_video_batch,
+        DiscoverySession, DiscoverySessionOpenRequest, FrameStatus,
+        InPlaceDiscoverySessionOpenRequest, InspectOutcome, RenderSession, SessionLayer,
+        SessionOpenRequest, SwapOutcome, run_video_batch,
     };
     use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
     use sha2::{Digest, Sha256};
@@ -3084,6 +3085,89 @@ mod windows_e2e {
             .expect("cluster audit carries epochs");
         assert_eq!(epochs.len(), 1, "close: {close}");
         assert_eq!(epochs[0]["plugin_index"], 0);
+    }
+
+    /// In-place discovery session (issue #751, cluster-manifest-v2): the
+    /// manifest names each plug-in by its real path and the search
+    /// directories ride the manifest instead of a pinned closure; the
+    /// exchanges and the close contract match the sealed session.
+    #[test]
+    fn in_place_discovery_session_inspects_by_real_path() {
+        if crate::common::skip_without_sealed_worker_launch(
+            "in_place_discovery_session_inspects_by_real_path",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let cluster = temp_cluster_repository();
+        let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
+            repository: &cluster.repository.0,
+            plugins: cluster
+                .plugins
+                .iter()
+                .map(|(path, _)| approved_artifact(path))
+                .collect(),
+            dependency_search_dirs: vec![cluster.repository.0.clone()],
+            module_bound: 64,
+            inspect_deadline: Duration::from_secs(30),
+        })
+        .expect("open in-place discovery session");
+
+        let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
+        let InspectOutcome::Inspected { report } = first else {
+            panic!("inspect plugins[0] errored: {first:?}");
+        };
+        assert_eq!(report["plugin"]["basename"], "alpha.plugin");
+        assert_eq!(report["plugin"]["sha256"], cluster.plugins[0].1);
+        let second = session.inspect_plugin(1, 1).expect("inspect plugins[1]");
+        let InspectOutcome::Inspected { report } = second else {
+            panic!("inspect plugins[1] errored: {second:?}");
+        };
+        assert_eq!(report["plugin"]["basename"], "beta.plugin");
+
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["inspects_ok"], 2, "close: {close}");
+        assert_eq!(close["invalidated"], false, "close: {close}");
+    }
+
+    /// An in-place identity mismatch (issue #751, the #309 state transition)
+    /// is plug-in-local: the structured `identity_changed` reaches the caller
+    /// and the session keeps serving other members.
+    #[test]
+    fn in_place_discovery_identity_change_is_plugin_local() {
+        if crate::common::skip_without_sealed_worker_launch(
+            "in_place_discovery_identity_change_is_plugin_local",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(Some("inspect_identity_changed_plugin_1"));
+        let cluster = temp_cluster_repository();
+        let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
+            repository: &cluster.repository.0,
+            plugins: cluster
+                .plugins
+                .iter()
+                .map(|(path, _)| approved_artifact(path))
+                .collect(),
+            dependency_search_dirs: vec![cluster.repository.0.clone()],
+            module_bound: 64,
+            inspect_deadline: Duration::from_secs(30),
+        })
+        .expect("open in-place discovery session");
+        let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
+        assert!(matches!(first, InspectOutcome::Inspected { .. }));
+        let second = session.inspect_plugin(1, 1).expect("inspect plugins[1]");
+        let InspectOutcome::InspectError { error_kind, .. } = second else {
+            panic!("plugins[1] must report the identity change: {second:?}");
+        };
+        assert_eq!(error_kind, "identity_changed");
+        // The session survives the mismatch and keeps serving.
+        let again = session.inspect_plugin(0, 2).expect("re-inspect plugins[0]");
+        assert!(matches!(again, InspectOutcome::Inspected { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["inspects_errored"], 1, "close: {close}");
     }
 
     #[test]

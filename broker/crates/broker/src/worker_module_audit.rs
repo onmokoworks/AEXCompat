@@ -83,6 +83,38 @@ pub fn observe_cluster_worker_audit(
         .map(|error| error.to_string())
 }
 
+/// In-place cluster-session observation (issue #751): the worker records the
+/// loaded-module set (search-root classification, no declared narrowing) and
+/// this checks only that the record exists, parses, and classified every
+/// module. Any shortfall rides the close report as a warning — record, never
+/// enforce.
+pub fn observe_in_place_cluster_audit(stdout: &str, stdout_truncated: bool) -> Option<String> {
+    let observe = || -> io::Result<()> {
+        if stdout_truncated {
+            return Err(invalid("secure worker report was truncated"));
+        }
+        let report = parse_report_prefix(stdout)?;
+        // The cluster shape: the base report plus optional per-swap epochs.
+        let audit: ClusterAuditReport = serde_json::from_value(
+            report
+                .get("module_audit")
+                .cloned()
+                .ok_or_else(|| invalid("secure worker module audit is missing"))?,
+        )
+        .map_err(|_| invalid("secure worker module audit schema is invalid"))?;
+        if audit.schema != 1 {
+            return Err(invalid("secure worker module audit schema is invalid"));
+        }
+        if audit.status != "passed" || audit.unknown_count != 0 {
+            return Err(invalid(
+                "the recorded in-place module audit left unclassified modules",
+            ));
+        }
+        Ok(())
+    };
+    observe().err().map(|error| error.to_string())
+}
+
 pub fn validate_required_worker_audit(stdout: &str, stdout_truncated: bool) -> io::Result<()> {
     if stdout_truncated {
         return Err(invalid("secure worker report was truncated"));
@@ -755,6 +787,27 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    /// The in-place observation (issue #751): a present, parsed, fully
+    /// classified record passes silently; anything less rides back as a
+    /// warning string — never an error the dispatch acts on.
+    #[test]
+    fn in_place_cluster_audit_observation_warns_without_enforcing() {
+        assert_eq!(
+            observe_in_place_cluster_audit(&valid_cluster_report(), false),
+            None
+        );
+        // Truncated stdout, a missing record, and unclassified modules all
+        // surface as warnings.
+        assert!(observe_in_place_cluster_audit(&valid_cluster_report(), true).is_some());
+        assert!(
+            observe_in_place_cluster_audit(&json!({"status": "ok"}).to_string(), false).is_some()
+        );
+        let mut failed: Value = serde_json::from_str(&valid_cluster_report()).unwrap();
+        failed["module_audit"]["status"] = json!("failed");
+        failed["module_audit"]["unknown_count"] = json!(2);
+        assert!(observe_in_place_cluster_audit(&failed.to_string(), false).is_some());
     }
 
     #[test]

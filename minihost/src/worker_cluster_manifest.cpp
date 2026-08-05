@@ -114,6 +114,81 @@ std::filesystem::path normalize_verbatim(const std::filesystem::path& path) {
   return path;
 }
 
+namespace {
+
+// The in-place manifest (`cluster-manifest-v2`, issue #751) names plug-ins by
+// their real absolute path and carries the dependency search directories
+// instead of a pinned closure. Paths arrive de-verbatimed from the broker.
+bool parse_in_place_manifest(const JsonValue::Object& object, Manifest& parsed) {
+  uint64_t module_bound = 0;
+  if (!json_exact_keys(object, {"schema", "plugins", "search_dirs", "module_bound"}) ||
+      !json_u64(object, "module_bound", module_bound) || module_bound == 0 ||
+      module_bound > kMaxModuleBound)
+    return false;
+  parsed.module_bound = static_cast<uint32_t>(module_bound);
+  parsed.in_place = true;
+  const auto* plugins_value = json_member(object, "plugins");
+  const auto* dirs_value = json_member(object, "search_dirs");
+  if (!plugins_value || !std::holds_alternative<JsonValue::Array>(plugins_value->value) ||
+      !dirs_value || !std::holds_alternative<JsonValue::Array>(dirs_value->value))
+    return false;
+  const auto& plugins = std::get<JsonValue::Array>(plugins_value->value);
+  const auto& dirs = std::get<JsonValue::Array>(dirs_value->value);
+  if (plugins.empty() || plugins.size() > kMaxPlugins || dirs.empty() ||
+      dirs.size() > kMaxSearchDirs)
+    return false;
+  std::set<std::wstring> plugin_paths;
+  for (const auto& plugin_value : plugins) {
+    if (!std::holds_alternative<JsonValue::Object>(plugin_value.value)) return false;
+    const auto& plugin_object = std::get<JsonValue::Object>(plugin_value.value);
+    PluginEntry entry;
+    const bool with_payload =
+        json_exact_keys(plugin_object, {"path", "sha256", "payload"});
+    if (!with_payload && !json_exact_keys(plugin_object, {"path", "sha256"}))
+      return false;
+    std::string path_text;
+    if (!json_string(plugin_object, "path", path_text) || path_text.empty() ||
+        !json_string(plugin_object, "sha256", entry.sha256) ||
+        !valid_sha256(entry.sha256))
+      return false;
+    entry.path = std::filesystem::u8path(path_text);
+    // Real paths, not sealed-root-relative names: absolute, with a
+    // Windows-safe basename, unique across the cluster case-insensitively.
+    // The basename is cut from the UTF-8 text itself: `path::string()` would
+    // narrow through the ACP and can throw on a name the ACP cannot
+    // represent, which the broker's UTF-8 validation legitimately admits.
+    const std::size_t separator = path_text.find_last_of("/\\");
+    entry.basename = separator == std::string::npos
+                         ? path_text
+                         : path_text.substr(separator + 1);
+    if (!entry.path.is_absolute() || !windows_safe_basename(entry.basename) ||
+        !plugin_paths.insert(lowercase(entry.path.wstring())).second)
+      return false;
+    if (with_payload) {
+      if (!json_string(plugin_object, "payload", entry.payload) ||
+          entry.payload.size() > kMaxPayloadBytes)
+        return false;
+      for (const unsigned char ch : entry.payload)
+        if (ch < 0x20 || ch > 0x7e) return false;
+      entry.has_payload = true;
+    }
+    parsed.plugins.push_back(std::move(entry));
+  }
+  std::set<std::wstring> seen_dirs;
+  for (const auto& dir_value : dirs) {
+    if (!std::holds_alternative<std::string>(dir_value.value)) return false;
+    const std::filesystem::path dir =
+        std::filesystem::u8path(std::get<std::string>(dir_value.value));
+    if (dir.empty() || !dir.is_absolute() ||
+        !seen_dirs.insert(lowercase(dir.wstring())).second)
+      return false;
+    parsed.search_dirs.push_back(dir);
+  }
+  return true;
+}
+
+}  // namespace
+
 bool load_manifest(const std::filesystem::path& path, Manifest& result) {
   if (path.empty() || !path.is_absolute()) return false;
   // The broker hands over the verbatim (\\?\-prefixed) canonical form of the
@@ -137,6 +212,18 @@ bool load_manifest(const std::filesystem::path& path, Manifest& result) {
     return false;
   const auto& object = std::get<JsonValue::Object>(root.value);
   std::string schema;
+  {
+    // Schema dispatch: v2 (in-place, issue #751) parses its own shape and
+    // needs no sealed root; v1 (sealed) continues below.
+    std::string probe;
+    if (json_string(object, "schema", probe) && probe == "cluster-manifest-v2") {
+      Manifest parsed;
+      if (!parse_in_place_manifest(object, parsed)) return false;
+      parsed.manifest_path = canonical;
+      result = std::move(parsed);
+      return true;
+    }
+  }
   uint64_t module_bound = 0;
   if (!json_exact_keys(object, {"schema", "plugins", "dependencies", "module_bound"}) ||
       !json_string(object, "schema", schema) || schema != "cluster-manifest-v1" ||
@@ -224,6 +311,9 @@ bool matches_launch_plugin(const Manifest& manifest,
 
 std::filesystem::path plugin_path(const Manifest& manifest, std::size_t index) {
   if (index >= manifest.plugins.size()) return {};
+  // In-place manifests (issue #751) name the real path; sealed manifests
+  // resolve `sealed_root / basename`.
+  if (manifest.in_place) return manifest.plugins[index].path;
   return manifest.sealed_root / std::filesystem::u8path(manifest.plugins[index].basename);
 }
 

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use aexcompat_broker::image_render::{
     InteractiveParameter, RenderGpuBackend, RenderPixelFormat, encode_interactive_payload,
-    inspect_experimental_with_approved_dependencies_and_resources,
+    inspect_experimental_in_place, inspect_experimental_with_approved_dependencies_and_resources,
 };
 use aexcompat_broker::plugin_dependency_closure::{
     DependencyClosureRequest, DependencyProvenance, ResolvedDependencyClosure,
@@ -35,7 +35,8 @@ use aexcompat_broker::plugin_dependency_closure::{
 };
 use aexcompat_broker::render_session::{
     ClusterRenderPlugins, DiscoverySession, DiscoverySessionOpenRequest, FrameStatus,
-    InspectOutcome, RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome,
+    InPlaceDiscoverySessionOpenRequest, InspectOutcome, RenderSession, SessionLayer,
+    SessionOpenRequest, SwapOutcome,
 };
 use aexcompat_broker::sealed_load_tree::SealedResourceEntry;
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;

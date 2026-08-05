@@ -255,6 +255,42 @@ mod worker {
         if !path.is_absolute() || !path.is_file() {
             return None;
         }
+        let bytes = std::fs::read(path).ok()?;
+        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
+            return None;
+        }
+        let document: Value = serde_json::from_slice(&bytes).ok()?;
+        // The in-place manifest (issue #751, cluster-manifest-v2) names each
+        // plug-in by real absolute path, carries search directories instead
+        // of a pinned closure, and does not live in a sealed root. The
+        // fixture mirrors the real loader's shape gates.
+        if document.get("schema").and_then(Value::as_str) == Some("cluster-manifest-v2") {
+            let mut plugins = Vec::new();
+            for plugin in document.get("plugins")?.as_array()? {
+                let path = plugin.get("path")?.as_str()?;
+                if !std::path::Path::new(path).is_absolute() {
+                    return None;
+                }
+                let basename = std::path::Path::new(path).file_name()?.to_str()?.to_owned();
+                let sha256 = plugin.get("sha256")?.as_str()?.to_owned();
+                plugins.push((basename, sha256));
+            }
+            let dirs = document.get("search_dirs")?.as_array()?;
+            if plugins.is_empty()
+                || dirs.is_empty()
+                || dirs.len() > 16
+                || !dirs.iter().all(|dir| {
+                    dir.as_str()
+                        .is_some_and(|dir| std::path::Path::new(dir).is_absolute())
+                })
+            {
+                return None;
+            }
+            return Some(ClusterManifest {
+                plugins,
+                dependencies: Vec::new(),
+            });
+        }
         let sealed_root = path
             .parent()
             .and_then(|parent| parent.canonicalize().ok())?;
@@ -265,11 +301,6 @@ mod worker {
         if !inside_sealed_root {
             return None;
         }
-        let bytes = std::fs::read(path).ok()?;
-        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
-            return None;
-        }
-        let document: Value = serde_json::from_slice(&bytes).ok()?;
         if document.get("schema").and_then(Value::as_str) != Some("cluster-manifest-v1") {
             return None;
         }
@@ -1180,6 +1211,20 @@ mod worker {
                     "request_index": request_index,
                     "status": "error",
                     "error_kind": "selector_error"
+                })
+                .to_string()
+            } else if behavior == "inspect_identity_changed_plugin_1" && new_index == 1 {
+                // In-place identity mismatch (issue #751): the bytes on disk
+                // no longer match the manifest — plug-in-local, the session
+                // continues (the #309 state transition, never a session
+                // failure).
+                json!({
+                    "v": 1,
+                    "type": "inspect_done",
+                    "plugin_index": plugin_index,
+                    "request_index": request_index,
+                    "status": "error",
+                    "error_kind": "identity_changed"
                 })
                 .to_string()
             } else {

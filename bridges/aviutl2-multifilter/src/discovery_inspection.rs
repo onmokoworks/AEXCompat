@@ -223,6 +223,161 @@ fn prepare_discovery(
     }
 }
 
+/// Diagnostics entry into the crate's real discovery pass (issue #751): the
+/// same `discover_all` the AviUtl2 registration runs, callable from the
+/// measurement examples so an in-place vs staged A/B exercises the code that
+/// ships instead of a reimplementation. Not part of the bridge API.
+#[doc(hidden)]
+pub fn discover_all_for_diagnostics(
+    repository: &Path,
+    paths: &[PathBuf],
+    dependency_dirs: Vec<PathBuf>,
+) -> Vec<(PathBuf, bool, Option<String>)> {
+    let dependency = DependencyConfig {
+        dirs: dependency_dirs,
+        module_limit: None,
+        byte_limit: None,
+    };
+    let build = build_fingerprint(repository, &dependency);
+    discover_all(repository, paths, &dependency, build)
+        .into_iter()
+        .map(|(path, entry)| (path, entry.ok, entry.failure_classification))
+        .collect()
+}
+
+/// Whether discovery loads plug-ins in place (issue #751, the default):
+/// no dependency-closure walk, no sealed staging — the loader resolves the
+/// closure through the search roots. The staged pipeline stays available for
+/// A/B measurement and as an escape hatch.
+fn in_place_discovery_enabled() -> bool {
+    !std::env::var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY").is_ok_and(|value| value == "1")
+}
+
+/// The in-place cluster key (issue #751): plug-ins sharing one search-root
+/// set (their own directory plus the configured dependency directories)
+/// share one discovery session. Replaces the closure identity, which needed
+/// the import walk this mode removes.
+fn in_place_identity(roots: &[PathBuf]) -> String {
+    let mut keys: Vec<String> = roots
+        .iter()
+        .map(|root| root.to_string_lossy().to_lowercase())
+        .collect();
+    keys.sort();
+    format!("in-place:{}", keys.join(";"))
+}
+
+/// The pre-inspect half of in-place discovery (issue #751): read + hash the
+/// plug-in and record the search roots. No closure walk, no extra sealed
+/// inputs — BIB resolves through the admitted search set inside the worker
+/// and data files sit beside the real plug-in already.
+///
+/// `closure_identity` stays `None` deliberately: the render cluster pool
+/// still keys on the staged closure identity until it migrates (issue #751
+/// step 3), so in-place-discovered effects render on single-plugin sessions.
+fn prepare_discovery_in_place(
+    plugin: &Path,
+    dependency: &DependencyConfig,
+    build: BuildFingerprint,
+) -> PreparedDiscovery {
+    let mut entry = negative_entry(plugin, build);
+    let Ok(bytes) = std::fs::read(plugin) else {
+        return PreparedDiscovery {
+            entry,
+            closure: None,
+            identity: None,
+            extra_dependencies: Vec::new(),
+            sealed_resources: Vec::new(),
+        };
+    };
+    entry.sha = hex_lower(&Sha256::digest(&bytes));
+    let roots = search_roots_for(plugin, &dependency.dirs);
+    entry.closure = CachedClosure {
+        roots: roots
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect(),
+        ..CachedClosure::default()
+    };
+    let identity = in_place_identity(&roots);
+    PreparedDiscovery {
+        entry,
+        closure: None,
+        identity: Some(identity),
+        extra_dependencies: Vec::new(),
+        sealed_resources: Vec::new(),
+    }
+}
+
+/// Records what the import graph wanted for a plug-in whose in-place
+/// discovery failed (issue #751): the survey pays the directory walk only on
+/// the failure path, and the recorded sealed/missing sets restore the
+/// cache's dependency-change re-discovery triggers — a user who later drops
+/// the missing DLL into a search root gets the plug-in re-discovered without
+/// touching it. Successful discoveries never walk.
+fn record_survey_for_failed_in_place(entry: &mut CacheEntry, plugin: &Path, roots: &[PathBuf]) {
+    let recorded_roots: Vec<String> = roots
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect();
+    entry.closure = match survey_dependency_closure(plugin, roots) {
+        Ok(survey) => {
+            let (sealed, vanished) = cached_dependencies(&survey.modules);
+            let mut missing = cached_missing(&survey.unresolved);
+            missing.extend(vanished);
+            missing.sort();
+            missing.dedup();
+            CachedClosure {
+                roots: recorded_roots,
+                sealed,
+                missing,
+                provenance: cached_provenance(&survey.provenance),
+            }
+        }
+        Err(_) => CachedClosure {
+            roots: recorded_roots,
+            ..CachedClosure::default()
+        },
+    };
+}
+
+/// The in-place per-plugin inspect (issue #751): the one-shot
+/// `inspect_experimental_in_place` dispatch, used for singletons and as the
+/// fail-closed fallback for in-place cluster members.
+fn finish_one_shot_in_place(
+    repository: &Path,
+    plugin: &Path,
+    prepared: PreparedDiscovery,
+    dependency: &DependencyConfig,
+) -> CacheEntry {
+    let mut entry = prepared.entry;
+    if entry.sha.is_empty() {
+        return entry;
+    }
+    let roots = search_roots_for(plugin, &dependency.dirs);
+    if roots.is_empty() {
+        return entry;
+    }
+    match inspect_experimental_in_place(repository, plugin, &entry.sha, roots.clone()) {
+        Ok((params, diagnostics)) => {
+            // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
+            entry.smart = diagnostics
+                .get("advertised_out_flags2")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0)
+                & (1 << 10)
+                != 0;
+            entry.params = params;
+            normalize_parameters_for_cache(&mut entry.params);
+            entry.ok = true;
+        }
+        Err(error) => {
+            entry.failure_classification = inspection_failure_classification(&error);
+            record_survey_for_failed_in_place(&mut entry, plugin, &roots);
+        }
+    }
+    entry
+}
+
 /// The per-plugin inspect: dispatches the one-shot worker for one prepared
 /// AEX and folds the outcome into its cache entry. This is the legacy
 /// discovery path, kept for singleton identities and as the fail-closed
@@ -514,6 +669,35 @@ fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
     tasks
 }
 
+/// Shards in-place cluster tasks across the worker budget (issue #751). The
+/// search-root identity groups an entire plug-in directory into one cluster,
+/// and a single session would sweep it serially; splitting it into up to
+/// `parallelism` chunks keeps the per-session amortization (one search-set
+/// admission, one Adobe runtime init per chunk) while restoring the parallel
+/// sweep the staged planner got from its many closure identities. Chunks
+/// that would shrink to one member become per-plugin tasks.
+fn shard_in_place_clusters(tasks: Vec<DiscoveryTask>, parallelism: usize) -> Vec<DiscoveryTask> {
+    let parallelism = parallelism.max(1);
+    let mut sharded = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        match task {
+            DiscoveryTask::Cluster(members) if members.len() > 2 => {
+                let chunk_count = parallelism.min(members.len() / 2).max(1);
+                let chunk_size = members.len().div_ceil(chunk_count);
+                for chunk in members.chunks(chunk_size) {
+                    if chunk.len() == 1 {
+                        sharded.push(DiscoveryTask::Single(chunk[0]));
+                    } else {
+                        sharded.push(DiscoveryTask::Cluster(chunk.to_vec()));
+                    }
+                }
+            }
+            other => sharded.push(other),
+        }
+    }
+    sharded
+}
+
 /// Decodes a 64-hex SHA-256 (as stored in `CacheEntry.sha`) into raw bytes
 /// for a launch-approved artifact.
 fn decode_sha256_hex(text: &str) -> Option<[u8; 32]> {
@@ -551,6 +735,185 @@ fn fallback_members(
             (path, entry)
         })
         .collect()
+}
+
+/// In-place counterpart of `fallback_members` (issue #751): re-inspects
+/// members through the in-place one-shot path after a session failure.
+fn fallback_members_in_place(
+    repository: &Path,
+    members: Vec<(PathBuf, PreparedDiscovery)>,
+    dependency: &DependencyConfig,
+    at_member: u32,
+    reason: &str,
+) -> Vec<(PathBuf, CacheEntry)> {
+    members
+        .into_iter()
+        .map(|(path, prepared)| {
+            let mut entry = finish_one_shot_in_place(repository, &path, prepared, dependency);
+            entry.cluster_fallback = Some(ClusterFallback {
+                at_member,
+                reason: reason.to_owned(),
+                resolution: "one_shot_fallback".to_owned(),
+            });
+            (path, entry)
+        })
+        .collect()
+}
+
+/// Discovers one same-search-root cluster through an in-place
+/// DiscoverySession (issue #751): no closure walk, no staging — the worker
+/// admits the search roots once and loads each member from its real path.
+/// Failure handling mirrors the sealed cluster path: an infeasible cluster,
+/// a failed open, or an invalidation mid-sweep falls the unprocessed members
+/// back to the in-place one-shot path with a structured `cluster_fallback`
+/// note.
+fn discover_cluster_in_place(
+    repository: &Path,
+    dependency: &DependencyConfig,
+    build: BuildFingerprint,
+    members: Vec<(PathBuf, PreparedDiscovery)>,
+) -> Vec<(PathBuf, CacheEntry)> {
+    let member_count = members.len();
+    // Every member shares one search-root set by construction (the in-place
+    // identity), so the first member's roots stand for the cluster.
+    let search_dirs = search_roots_for(&members[0].0, &dependency.dirs);
+    if search_dirs.is_empty() {
+        return fallback_members_in_place(
+            repository,
+            members,
+            dependency,
+            0,
+            "cluster search roots unavailable",
+        );
+    }
+    let mut plugins = Vec::with_capacity(member_count);
+    for (path, prepared) in &members {
+        let Some(expected_sha256) = decode_sha256_hex(&prepared.entry.sha) else {
+            return fallback_members_in_place(
+                repository,
+                members,
+                dependency,
+                0,
+                "member sha256 undecodable",
+            );
+        };
+        plugins.push(ApprovedImageArtifact {
+            path: path.clone(),
+            expected_sha256,
+            expected_size: prepared.entry.len,
+        });
+    }
+    if member_count > MAX_CLUSTER_PLUGINS {
+        return fallback_members_in_place(repository, members, dependency, 0, "cluster_infeasible");
+    }
+    let mut session = match DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
+        repository,
+        plugins,
+        dependency_search_dirs: search_dirs.clone(),
+        // The recorded audit's bounded enumeration capacity: real closures
+        // load in place and retired members stay mapped (deferred release),
+        // so the capacity is the manifest maximum rather than a declared set.
+        module_bound: MAX_CLUSTER_MODULE_BOUND as u32,
+        inspect_deadline: CLUSTER_INSPECT_DEADLINE,
+    }) {
+        Ok(session) => session,
+        Err(error) => {
+            return fallback_members_in_place(
+                repository,
+                members,
+                dependency,
+                0,
+                &format!("cluster session open failed: {error}"),
+            );
+        }
+    };
+
+    let mut results: Vec<(PathBuf, CacheEntry)> = Vec::with_capacity(member_count);
+    let mut invalidated: Option<(u32, String)> = None;
+    for (index, (path, prepared)) in members.into_iter().enumerate() {
+        if let Some((at_member, reason)) = &invalidated {
+            let (path, entry) = fallback_members_in_place(
+                repository,
+                vec![(path, prepared)],
+                dependency,
+                *at_member,
+                reason,
+            )
+            .into_iter()
+            .next()
+            .expect("one member yields one entry");
+            results.push((path, entry));
+            continue;
+        }
+        let request_index = index as u32;
+        match session.inspect_plugin(request_index, request_index) {
+            Ok(InspectOutcome::Inspected { report }) => {
+                let mut entry = prepared.entry;
+                fill_entry_from_inspect_report(&mut entry, &report);
+                results.push((path, entry));
+            }
+            Ok(InspectOutcome::InspectError { error_kind, .. }) => {
+                let mut entry = prepared.entry;
+                entry.failure_classification = match error_kind.as_str() {
+                    // Deterministic non-effects converge like the one-shot
+                    // exit-12 path.
+                    "entrypoint_unresolved" => Some("nonzero_exit".to_owned()),
+                    // The loader could not bring the plug-in up from its real
+                    // path (a missing dependency outside the search roots);
+                    // deterministic until the configuration changes, so the
+                    // survey records what the import graph wanted and the
+                    // cache re-discovers when it appears.
+                    "load_failed" => {
+                        record_survey_for_failed_in_place(&mut entry, &path, &search_dirs);
+                        Some("nonzero_exit".to_owned())
+                    }
+                    // The bytes changed after this sweep hashed them (#309
+                    // state transition), or could not be read at all: leave
+                    // unclassified so the next launch re-discovers.
+                    "identity_changed" | "hash_unavailable" => None,
+                    // PARAMS_SETUP rejected: retried like the one-shot path.
+                    _ => None,
+                };
+                results.push((path, entry));
+            }
+            Err(error) => {
+                let reason = format!("{error}");
+                let mut entry = prepared.entry;
+                entry.failure_classification = Some("cluster_session_invalidated".to_owned());
+                entry.cluster_fallback = Some(ClusterFallback {
+                    at_member: request_index,
+                    reason: reason.clone(),
+                    resolution: "invalidated".to_owned(),
+                });
+                results.push((path, entry));
+                invalidated = Some((request_index, reason));
+            }
+        }
+    }
+    let close = session.close();
+    if invalidated.is_none() && close.get("session_clean") != Some(&serde_json::Value::Bool(true)) {
+        // The exchanges completed but the close was not clean; in-place
+        // results are re-proved through the one-shot path with a fallback
+        // note, mirroring the sealed cluster contract.
+        let reason = close
+            .get("invalidated_reason")
+            .and_then(|invalidation| invalidation.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("session close not clean")
+            .to_owned();
+        let redo: Vec<(PathBuf, CacheEntry)> = std::mem::take(&mut results);
+        for (path, _) in redo {
+            let prepared = prepare_discovery_in_place(&path, dependency, build);
+            let mut entry = finish_one_shot_in_place(repository, &path, prepared, dependency);
+            entry.cluster_fallback = Some(ClusterFallback {
+                at_member: member_count as u32,
+                reason: reason.clone(),
+                resolution: "one_shot_fallback".to_owned(),
+            });
+            results.push((path, entry));
+        }
+    }
+    results
 }
 
 /// Discovers one same-closure cluster through a single DiscoverySession
@@ -784,6 +1147,9 @@ fn discover_all(
         .unwrap_or(1)
         .min(MAX_DISCOVERY_PARALLELISM)
         .min(paths.len().max(1));
+    // In-place discovery (issue #751) is the default; the staged pipeline
+    // stays selectable for A/B measurement.
+    let in_place = in_place_discovery_enabled();
 
     // Phase 1: prepare every plug-in (read + closure resolution) in parallel.
     let next = AtomicUsize::new(0);
@@ -803,7 +1169,11 @@ fn discover_all(
                     }
                     let plugin = &paths[index];
                     let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        prepare_discovery(plugin, dependency, build)
+                        if in_place {
+                            prepare_discovery_in_place(plugin, dependency, build)
+                        } else {
+                            prepare_discovery(plugin, dependency, build)
+                        }
                     }))
                     .unwrap_or_else(|_| PreparedDiscovery {
                         entry: negative_entry(plugin, build),
@@ -841,6 +1211,11 @@ fn discover_all(
         })
         .collect();
     let tasks = plan_tasks(&planned);
+    let tasks = if in_place {
+        shard_in_place_clusters(tasks, parallelism)
+    } else {
+        tasks
+    };
 
     // Phase 2: process tasks with the same worker budget. A cluster is one
     // unit of work: its members are inspected sequentially inside one
@@ -872,7 +1247,13 @@ fn discover_all(
                             };
                             let entry =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    finish_one_shot(repository, &plugin, prepared)
+                                    if in_place {
+                                        finish_one_shot_in_place(
+                                            repository, &plugin, prepared, dependency,
+                                        )
+                                    } else {
+                                        finish_one_shot(repository, &plugin, prepared)
+                                    }
                                 }))
                                 .unwrap_or_else(|_| negative_entry(&plugin, build));
                             if let Ok(mut results) = results.lock() {
@@ -901,7 +1282,13 @@ fn discover_all(
                                 let (plugin, prepared) = members.pop().expect("one member");
                                 let entry =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        finish_one_shot(repository, &plugin, prepared)
+                                        if in_place {
+                                            finish_one_shot_in_place(
+                                                repository, &plugin, prepared, dependency,
+                                            )
+                                        } else {
+                                            finish_one_shot(repository, &plugin, prepared)
+                                        }
                                     }))
                                     .unwrap_or_else(|_| negative_entry(&plugin, build));
                                 if let Ok(mut results) = results.lock() {
@@ -913,7 +1300,13 @@ fn discover_all(
                                 members.iter().map(|(path, _)| path.clone()).collect();
                             let cluster_results =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    discover_cluster(repository, dependency, build, members)
+                                    if in_place {
+                                        discover_cluster_in_place(
+                                            repository, dependency, build, members,
+                                        )
+                                    } else {
+                                        discover_cluster(repository, dependency, build, members)
+                                    }
                                 }))
                                 .unwrap_or_else(|_| {
                                     member_paths

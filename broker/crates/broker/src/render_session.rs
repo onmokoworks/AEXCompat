@@ -3425,7 +3425,10 @@ mod audio;
 mod discovery;
 
 pub use audio::{AudioRenderSession, AudioSessionOpenRequest, AudioSpanOutcome, AudioSpanStatus};
-pub use discovery::{DiscoverySession, DiscoverySessionOpenRequest, InspectOutcome};
+pub use discovery::{
+    DiscoverySession, DiscoverySessionOpenRequest, InPlaceDiscoverySessionOpenRequest,
+    InspectOutcome,
+};
 
 #[cfg(test)]
 mod tests;

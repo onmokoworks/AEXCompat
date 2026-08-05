@@ -438,7 +438,7 @@ void configure_module_audit_search_roots(
 void record_module_audit_epoch(uint32_t plugin_index,
                                ModuleAuditSnapshot pre_unload,
                                ModuleAuditSnapshot post_load) {
-  if (!g_module_audit.required) return;
+  if (!module_audit_observing()) return;
   g_module_audit.epochs.push_back(
       {plugin_index, std::move(pre_unload), std::move(post_load)});
 }
