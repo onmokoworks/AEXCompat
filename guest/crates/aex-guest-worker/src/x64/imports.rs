@@ -32,6 +32,7 @@ enum LegacyWin64Import {
     Pow,
     SinF,
     OmpGetMaxThreads,
+    VcompSetNumThreads,
     VcompFork,
     VcompForDynamicInit,
     VcompForDynamicNext,
@@ -249,6 +250,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         {
             LegacyWin64Import::ExplicitMsvcRuntimeZero
         }
+        ("vcomp140.dll", "_vcomp_set_num_threads") => LegacyWin64Import::VcompSetNumThreads,
+        (_, "_vcomp_set_num_threads") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         (_, symbol) => match symbol {
             "malloc" => LegacyWin64Import::Malloc,
             "calloc" => LegacyWin64Import::Calloc,
@@ -390,6 +395,18 @@ fn install_win64_import(
                 uc(
                     "install omp_get_max_threads import",
                     unicorn.mem_write(stub, &deterministic_i32_stub(value)),
+                )?;
+            }
+            LegacyWin64Import::VcompSetNumThreads => {
+                uc(
+                    "write _vcomp_set_num_threads return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install _vcomp_set_num_threads import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_vcomp_set_num_threads(unicorn);
+                    }),
                 )?;
             }
             LegacyWin64Import::VcompFork => {

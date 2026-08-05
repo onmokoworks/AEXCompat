@@ -99,6 +99,7 @@ struct GuestState {
     trace_watches: Vec<TraceWatchSpec>,
     pending_iterate: Option<PendingIterate>,
     vcomp_dynamic_loop: Option<VcompDynamicLoop>,
+    vcomp_requested_threads: Option<u32>,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
     crt_heap: CrtHeap,

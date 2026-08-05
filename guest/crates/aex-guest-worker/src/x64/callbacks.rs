@@ -148,6 +148,25 @@ fn write_vcomp_i32(
         .map_err(|error| format!("VCOMP memory write at {address:#x} failed: {error}"))
 }
 
+fn emulate_vcomp_set_num_threads(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let requested = read_vcomp_register(unicorn, RegisterX86::RCX)? as u32 as i32;
+        if !(1..=MAX_VCOMP_REQUESTED_THREADS).contains(&requested) {
+            return Err(format!(
+                "VCOMP requested thread count {requested} is outside 1..={MAX_VCOMP_REQUESTED_THREADS}"
+            ));
+        }
+        // Preserve the bounded request for diagnostics, but keep execution
+        // deterministic: outlined work still uses the serial VCOMP runtime.
+        unicorn.get_data_mut().vcomp_requested_threads = Some(requested as u32);
+        Ok(())
+    })();
+    if let Err(error) = result {
+        vcomp_callback_error(unicorn, error);
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+}
+
 fn emulate_vcomp_fork(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<(), String> {
         let worker_count = read_vcomp_register(unicorn, RegisterX86::RCX)?;
