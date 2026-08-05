@@ -150,6 +150,12 @@ struct MsvcpMutex {
     lock_count: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VcruntimeExceptionData {
+    what: u64,
+    do_free: bool,
+}
+
 #[derive(Clone, Debug)]
 struct PendingIterate {
     caller_rsp: u64,
