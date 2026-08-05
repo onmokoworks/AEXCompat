@@ -109,6 +109,7 @@ struct GuestState {
     windows_condition_variables: HashSet<u64>,
     windows_fls_slots: BTreeMap<u32, WindowsFlsSlot>,
     pending_fls_free: Option<PendingFlsFree>,
+    windows_last_error: u32,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
     crt_heap: CrtHeap,

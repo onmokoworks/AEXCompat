@@ -2365,6 +2365,80 @@
     }
 
     #[test]
+    fn windows_last_error_is_session_local_and_tracks_missing_environment() {
+        const GET_ENVIRONMENT: u64 = STUB_BASE + 0x540;
+        const GET_LAST_ERROR: u64 = STUB_BASE + 0x550;
+        const SET_LAST_ERROR: u64 = STUB_BASE + 0x560;
+        let mut engine = test_engine(&[0xc3]);
+        for (stub, symbol, implementation) in [
+            (
+                GET_ENVIRONMENT,
+                "GetEnvironmentVariableA",
+                LegacyWin64Import::GetEnvironmentVariableA,
+            ),
+            (
+                GET_LAST_ERROR,
+                "GetLastError",
+                LegacyWin64Import::GetLastError,
+            ),
+            (
+                SET_LAST_ERROR,
+                "SetLastError",
+                LegacyWin64Import::SetLastError,
+            ),
+        ] {
+            assert_eq!(
+                install_win64_import(&mut engine.unicorn, stub, "kernel32.dll", symbol).unwrap(),
+                Win64ImportDispatch::LegacyImplemented(implementation)
+            );
+            assert_eq!(
+                dispatch_win64_import("fixture.dll", symbol),
+                Win64ImportDispatch::UnsupportedLegacyImport
+            );
+        }
+
+        assert_eq!(engine.call_win64(GET_LAST_ERROR, [0; 6]).unwrap(), 0);
+        assert_eq!(
+            engine
+                .call_win64(SET_LAST_ERROR, [0x1234_5678, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.call_win64(GET_LAST_ERROR, [0; 6]).unwrap(),
+            0x1234_5678
+        );
+
+        let name = DATA_BASE + 0xd80;
+        engine.write(name, b"HOME\0").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(GET_ENVIRONMENT, [name, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.call_win64(GET_LAST_ERROR, [0; 6]).unwrap(),
+            u64::from(ERROR_ENVVAR_NOT_FOUND)
+        );
+
+        engine
+            .call_win64(SET_LAST_ERROR, [77, 0, 0, 0, 0, 0])
+            .unwrap();
+        engine.write(name, b"OPENCV_FOR_THREADS_NUM\0").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(GET_ENVIRONMENT, [name, 0, 0, 0, 0, 0])
+                .unwrap(),
+            2
+        );
+        assert_eq!(engine.call_win64(GET_LAST_ERROR, [0; 6]).unwrap(), 77);
+
+        let other = test_engine(&[0xc3]);
+        assert_eq!(other.unicorn.get_data().windows_last_error, 0);
+    }
+
+    #[test]
     fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
         let mut engine = test_engine(&[0xc3]);
         engine
