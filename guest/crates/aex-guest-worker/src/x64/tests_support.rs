@@ -1095,6 +1095,103 @@
     }
 
     #[test]
+    fn vcruntime_memchr_returns_first_unsigned_byte_match_or_null() {
+        const MEMCHR: u64 = STUB_BASE + 0x1a0;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                MEMCHR,
+                "VCRUNTIME140.DLL",
+                "memchr",
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::MemChr)
+        );
+        let source = DATA_BASE + 0x180;
+        engine
+            .unicorn
+            .mem_write(source, &[0x41, 0xff, 0x42, 0xff])
+            .unwrap();
+
+        assert_eq!(
+            engine
+                .call_win64(MEMCHR, [source, u64::MAX, 4, 0, 0, 0])
+                .unwrap(),
+            source + 1
+        );
+        assert_eq!(
+            engine
+                .call_win64(MEMCHR, [source, 0x43, 4, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn vcruntime_memchr_zero_length_accepts_unmapped_pointer() {
+        const MEMCHR: u64 = STUB_BASE + 0x1b0;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            MEMCHR,
+            "vcruntime140.dll",
+            "memchr",
+        )
+        .unwrap();
+
+        assert_eq!(
+            engine
+                .call_win64(MEMCHR, [0xdead_beef_dead_beef, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn vcruntime_memchr_is_bounded_library_qualified_and_fail_closed() {
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "memchr"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+
+        const MEMCHR: u64 = STUB_BASE + 0x1c0;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            MEMCHR,
+            "vcruntime140.dll",
+            "memchr",
+        )
+        .unwrap();
+        let error = engine
+            .call_win64(
+                MEMCHR,
+                [DATA_BASE, 0, MAX_CRT_MEMORY_COPY_BYTES + 1, 0, 0, 0],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("memchr length"), "{error}");
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        let error = engine
+            .call_win64(MEMCHR, [u64::MAX, 0, 2, 0, 0, 0])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("memchr source range overflow"),
+            "{error}"
+        );
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        let error = engine
+            .call_win64(MEMCHR, [0xdead_beef, 0, 1, 0, 0, 0])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("memchr source read"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
         let mut engine = test_engine(&[0xc3]);
         engine

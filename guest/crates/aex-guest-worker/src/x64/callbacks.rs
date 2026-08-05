@@ -722,6 +722,61 @@ fn emulate_crt_memory_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn emulate_crt_memchr(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| {
+        let source = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("memchr source: {error}"))?;
+        let needle = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("memchr value: {error}"))? as u8;
+        let length = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("memchr length: {error}"))?;
+        if length > MAX_CRT_MEMORY_COPY_BYTES {
+            return Err(format!(
+                "memchr length {length} exceeds {MAX_CRT_MEMORY_COPY_BYTES}"
+            ));
+        }
+        if length == 0 {
+            return Ok(0);
+        }
+        source
+            .checked_add(length)
+            .ok_or_else(|| "memchr source range overflow".to_string())?;
+
+        let mut scanned = 0u64;
+        while scanned < length {
+            let chunk = (length - scanned).min(CRT_MEMORY_COPY_CHUNK as u64);
+            let address = source
+                .checked_add(scanned)
+                .ok_or_else(|| "memchr source address overflow".to_string())?;
+            let mut bytes = vec![0u8; chunk as usize];
+            unicorn
+                .mem_read(address, &mut bytes)
+                .map_err(|error| format!("memchr source read: {error}"))?;
+            if let Some(offset) = bytes.iter().position(|byte| *byte == needle) {
+                return address
+                    .checked_add(offset as u64)
+                    .ok_or_else(|| "memchr result address overflow".to_string());
+            }
+            scanned += chunk;
+        }
+        Ok(0)
+    })();
+    match result {
+        Ok(address) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, address);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn emulate_strncpy(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let destination = unicorn

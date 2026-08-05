@@ -24,6 +24,7 @@ enum LegacyWin64Import {
     Strncpy,
     Memset,
     MemoryCopy,
+    MemChr,
     CxxThrowException,
     CosF,
     ExpF,
@@ -254,6 +255,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "_vcomp_set_num_threads") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("vcruntime140.dll", "memchr") => LegacyWin64Import::MemChr,
+        (_, "memchr") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         (_, symbol) => match symbol {
             "malloc" => LegacyWin64Import::Malloc,
             "calloc" => LegacyWin64Import::Calloc,
@@ -359,6 +364,15 @@ fn install_win64_import(
                     "install CRT memory-copy import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_memory_copy(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::MemChr => {
+                uc("write memchr return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install memchr import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_memchr(unicorn);
                     }),
                 )?;
             }
