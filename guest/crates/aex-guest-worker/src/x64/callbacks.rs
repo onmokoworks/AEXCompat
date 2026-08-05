@@ -2857,12 +2857,16 @@ fn emulate_checkout_layer_pixels(unicorn: &mut Unicorn<'_, GuestState>, _: u64, 
         // A legal empty PF_CheckoutResult describes pixel availability, not
         // the lifetime of the host-owned PF_EffectWorld. Some effects still
         // check the world out to inspect its descriptor before doing no work.
-        if checkout.checked_out || output == 0 {
+        if output == 0 {
             return Err(format!(
                 "invalid checkout-pixels id={checkout_id} index={} output={output:#x}",
                 checkout.index
             ));
         }
+        // A checkout id names one host-owned world, not one output variable.
+        // OLMRadialBlur obtains the same primary id into two local pointers and
+        // checks the id in once. Replaying a registered id is therefore
+        // idempotent; the mapped destination is still validated by mem_write.
         unicorn
             .mem_write(output, &checkout.world.to_le_bytes())
             .map_err(|error| format!("checkout-pixels world write: {error}"))?;

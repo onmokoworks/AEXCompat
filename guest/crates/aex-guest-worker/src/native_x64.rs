@@ -2030,7 +2030,9 @@ unsafe extern "win64" fn checkout_layer_pixels(
         // A legal empty PF_CheckoutResult describes pixel availability, not
         // the lifetime of the host-owned PF_EffectWorld. Some effects still
         // check the world out to inspect its descriptor before doing no work.
-        if checkout.checked_out || !native_guest_range_valid(state, output, 8) {
+        // Replaying a registered id is idempotent: it returns the same
+        // host-owned world and one checkin closes the token lifetime.
+        if !native_guest_range_valid(state, output, 8) {
             state.callback_error = Some(format!(
                 "invalid checkout-layer-pixels index={} id={checkout_id}",
                 checkout.index
