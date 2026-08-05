@@ -145,6 +145,7 @@
 #include "worker_pf_world_transform_runtime.hpp"
 #include "worker_pf_adv_time_suite.hpp"
 #include "worker_pf_ansi_runtime.hpp"
+#include "worker_pf_utility_callback_table.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_pf_effect_sequence_selftests.hpp"
 #include "worker_pf_state_runtime.hpp"
