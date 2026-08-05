@@ -3218,6 +3218,10 @@
             Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CeilF)
         );
         assert_eq!(
+            dispatch_win64_import("ucrtbase.dll", "ceilf"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CeilF)
+        );
+        assert_eq!(
             dispatch_win64_import("fixture.dll", "ceilf"),
             Win64ImportDispatch::UnsupportedLegacyImport
         );

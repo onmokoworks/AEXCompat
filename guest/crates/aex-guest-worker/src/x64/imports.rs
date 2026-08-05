@@ -344,7 +344,9 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "cos") => LegacyWin64Import::Cos,
         (_, "cos") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("api-ms-win-crt-math-l1-1-0.dll", "ceilf") => LegacyWin64Import::CeilF,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "ceilf") => {
+            LegacyWin64Import::CeilF
+        }
         (_, "ceilf") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "sin") => LegacyWin64Import::Sin,
         (_, "sin") => return Win64ImportDispatch::UnsupportedLegacyImport,
