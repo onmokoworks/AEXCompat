@@ -91,6 +91,12 @@ static SESSION_SERIAL: AtomicU64 = AtomicU64::new(0);
 /// the plugin-class narrowing to the declared set is the actual bound.
 const MAX_CLUSTER_PLUGINS: usize = 256;
 const MAX_CLUSTER_MODULE_BOUND: usize = 4096;
+/// Mirrors `cluster_manifest::MAX_CLUSTER_ADMITTED_DIRS`: an in-place cluster
+/// whose search dirs plus member parent directories exceed this cannot launch,
+/// so the pool degrades it to per-effect sessions instead of failing every
+/// open (issue #751).
+const MAX_CLUSTER_ADMITTED_DIRS: usize =
+    aexcompat_broker::cluster_manifest::MAX_CLUSTER_ADMITTED_DIRS;
 const CLUSTER_MODULE_HEADROOM: usize = 256;
 /// The one-shot module-audit cap (the broker's `MAX_AUDITED_MODULES`): total
 /// modules across every category in one snapshot. A singleton whose closure

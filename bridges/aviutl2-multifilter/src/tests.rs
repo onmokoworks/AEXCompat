@@ -2697,8 +2697,8 @@ mod tests {
 
         /// The in-place default (issue #751): the same two plug-ins cluster
         /// by their shared search-root set, sweep in one in-place session,
-        /// and record no closure identity (the render cluster pool stays on
-        /// the staged identity until it migrates).
+        /// and record the search-root identity the render cluster pool
+        /// groups on.
         #[test]
         fn in_place_cluster_discovery_sweeps_same_root_plugins_in_one_session() {
             let _guard = BEHAVIOR_LOCK
@@ -2719,8 +2719,11 @@ mod tests {
                 );
                 assert!(entry.cluster_fallback.is_none());
                 assert!(
-                    entry.closure_identity.is_none(),
-                    "in-place discovery records no closure identity (issue #751 step 3)"
+                    entry
+                        .closure_identity
+                        .as_deref()
+                        .is_some_and(|identity| identity.starts_with("in-place:")),
+                    "in-place discovery records the search-root identity"
                 );
                 assert!(
                     entry.closure.sealed.is_empty(),

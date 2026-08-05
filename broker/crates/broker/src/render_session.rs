@@ -762,6 +762,10 @@ pub struct RenderSession {
     /// opened with `open_cluster` and may swap plugins within the launch
     /// manifest.
     cluster: Option<ClusterSessionState>,
+    /// Keeps the in-place cluster manifest transport (issue #751) alive for
+    /// the whole session; the worker read it at launch, and the drop removes
+    /// the document from target/image-transport.
+    _in_place_transport: Option<crate::cluster_manifest::ClusterManifestTransport>,
     /// Keeps the animation sidecar alive for the whole session; the worker
     /// reads it once at launch, but leaving transport files behind on drop
     /// would leak into target/image-transport.
@@ -797,10 +801,18 @@ pub struct ClusterRenderPlugins {
     pub module_bound: u32,
 }
 
+/// How a cluster render session's close validates the worker's module audit
+/// (issue #751): the sealed manifest declares an enforced-set model (design
+/// §5), the in-place manifest records the loaded-module set.
+enum RenderClusterAuditMode {
+    Declared(ClusterAuditDeclaration),
+    Recorded,
+}
+
 struct ClusterSessionState {
     plugin_count: u32,
     current_plugin_index: u32,
-    audit: ClusterAuditDeclaration,
+    audit: RenderClusterAuditMode,
 }
 
 /// The outcome of a `swap_plugin` exchange (design §4.1).
@@ -1030,9 +1042,9 @@ impl RenderSession {
         // In-place load mode (issue #751): the closure is the loader's job, so
         // approved dependency artifacts cannot ride the same open. GPU runtime
         // authorization stages its AEXRMA1 manifest beside the plug-in, which
-        // an in-place launch has no staged directory for, and cluster sessions
-        // still pin against a sealed root; both fail closed here until they
-        // are migrated.
+        // an in-place launch has no staged directory for; it fails closed
+        // here until it is migrated. Cluster sessions ride the
+        // cluster-manifest-v2 dispatch below.
         if !request.dependency_search_dirs.is_empty() {
             if !request.dependencies.is_empty() {
                 return Err(invalid(
@@ -1042,11 +1054,6 @@ impl RenderSession {
             if gpu_attempt {
                 return Err(invalid(
                     "an in-place session does not support GPU runtime authorization yet",
-                ));
-            }
-            if cluster.is_some() {
-                return Err(invalid(
-                    "an in-place session does not support plugin clusters yet",
                 ));
             }
         }
@@ -1373,51 +1380,98 @@ impl RenderSession {
             layers: layer_handles.clone(),
         };
         let mut cluster_state = None;
+        let mut in_place_transport = None;
         let process = if let Some(cluster) = cluster {
-            // Cluster session (issue #405): the whole plugin cluster plus the
-            // shared closure are sealed into one tree and the launch carries
-            // the cluster-manifest-v1 transport; the positional argv contract
-            // (plugins[0]) is unchanged.
-            let cluster_dispatch = SecureClusterImageDispatch {
-                repository: request.repository,
-                worker_kind: if request.smart {
-                    WorkerKind::Smart
-                } else {
-                    WorkerKind::Render
-                },
-                plugins: cluster.plugins,
-                dependencies,
-                // Render cluster sessions carry no data resources yet (issue
-                // #362 scopes resources to discovery for now).
-                sealed_resources: Vec::new(),
-                positional_plugin: true,
-                swap_payloads: Some(&cluster.swap_payloads),
-                module_bound: cluster.module_bound,
-                args_before_plugin: &args_before_plugin,
-                args_after_plugin: &args_after_plugin,
-            };
-            let launch = match desktop_policy {
-                WorkerDesktopPolicy::Dedicated => {
-                    dispatch_secure_cluster_image_session(cluster_dispatch, &child_handles)?
-                }
-                WorkerDesktopPolicy::Current => {
-                    crate::secure_image_dispatch::dispatch_secure_cluster_image_session_on_current_desktop(
-                        cluster_dispatch,
-                        &child_handles,
-                    )?
-                }
-            };
-            let audit = ClusterAuditDeclaration::new(
-                launch.manifest.declared_basenames(),
-                launch.manifest.plugin_count(),
-                launch.manifest.module_bound() as usize,
-            )?;
-            cluster_state = Some(ClusterSessionState {
-                plugin_count: launch.manifest.plugin_count() as u32,
-                current_plugin_index: 0,
-                audit,
-            });
-            launch.process
+            if !request.dependency_search_dirs.is_empty() {
+                // In-place cluster session (issue #751): the v2 manifest
+                // names the cluster by real paths plus the search
+                // directories, nothing is staged, and the close-time module
+                // audit is recorded rather than validated against a declared
+                // set. The positional argv contract (plugins[0]) is
+                // unchanged.
+                let cluster_dispatch = crate::secure_image_dispatch::SecureInPlaceClusterDispatch {
+                    repository: request.repository,
+                    worker_kind: if request.smart {
+                        WorkerKind::Smart
+                    } else {
+                        WorkerKind::Render
+                    },
+                    plugins: cluster.plugins,
+                    dependency_search_dirs: request.dependency_search_dirs.clone(),
+                    positional_plugin: true,
+                    swap_payloads: Some(&cluster.swap_payloads),
+                    module_bound: cluster.module_bound,
+                    args_before_plugin: &args_before_plugin,
+                    args_after_plugin: &args_after_plugin,
+                };
+                let launch = match desktop_policy {
+                    WorkerDesktopPolicy::Dedicated => {
+                        crate::secure_image_dispatch::dispatch_secure_in_place_cluster_session(
+                            cluster_dispatch,
+                            &child_handles,
+                        )?
+                    }
+                    WorkerDesktopPolicy::Current => {
+                        crate::secure_image_dispatch::dispatch_secure_in_place_cluster_session_with_policy(
+                            cluster_dispatch,
+                            &child_handles,
+                            WorkerDesktopPolicy::Current,
+                        )?
+                    }
+                };
+                cluster_state = Some(ClusterSessionState {
+                    plugin_count: launch.manifest.plugin_count() as u32,
+                    current_plugin_index: 0,
+                    audit: RenderClusterAuditMode::Recorded,
+                });
+                in_place_transport = Some(launch.transport);
+                launch.process
+            } else {
+                // Sealed cluster session (issue #405): the whole plugin
+                // cluster plus the shared closure are sealed into one tree
+                // and the launch carries the cluster-manifest-v1 transport;
+                // the positional argv contract (plugins[0]) is unchanged.
+                let cluster_dispatch = SecureClusterImageDispatch {
+                    repository: request.repository,
+                    worker_kind: if request.smart {
+                        WorkerKind::Smart
+                    } else {
+                        WorkerKind::Render
+                    },
+                    plugins: cluster.plugins,
+                    dependencies,
+                    // Render cluster sessions carry no data resources yet
+                    // (issue #362 scopes resources to discovery for now).
+                    sealed_resources: Vec::new(),
+                    positional_plugin: true,
+                    swap_payloads: Some(&cluster.swap_payloads),
+                    module_bound: cluster.module_bound,
+                    args_before_plugin: &args_before_plugin,
+                    args_after_plugin: &args_after_plugin,
+                };
+                let launch = match desktop_policy {
+                    WorkerDesktopPolicy::Dedicated => {
+                        dispatch_secure_cluster_image_session(cluster_dispatch, &child_handles)?
+                    }
+                    WorkerDesktopPolicy::Current => {
+                        crate::secure_image_dispatch::dispatch_secure_cluster_image_session_on_current_desktop(
+                            cluster_dispatch,
+                            &child_handles,
+                        )?
+                    }
+                };
+                let audit = ClusterAuditDeclaration::new(
+                    launch.manifest.declared_basenames(),
+                    launch.manifest.plugin_count(),
+                    launch.manifest.module_bound() as usize,
+                )?;
+                cluster_state = Some(ClusterSessionState {
+                    plugin_count: launch.manifest.plugin_count() as u32,
+                    current_plugin_index: 0,
+                    audit: RenderClusterAuditMode::Declared(audit),
+                });
+                launch.process
+            }
         } else {
             let dispatch = SecureImageDispatch {
                 repository: request.repository,
@@ -1557,6 +1611,7 @@ impl RenderSession {
             plugin_sha256: request.plugin_sha256.to_ascii_lowercase(),
             smart: request.smart,
             cluster: cluster_state,
+            _in_place_transport: in_place_transport,
             _animation_sidecar: animation_sidecar,
             _layer_sidecars: layer_sidecars,
             dynamic_layers,
@@ -2762,13 +2817,24 @@ impl RenderSession {
                     result: Some(result),
                     ..
                 }),
-            ) if result.classification == crate::ExitClassification::Ok => {
-                crate::worker_module_audit::observe_cluster_worker_audit(
-                    &result.stdout,
-                    result.stdout_truncated,
-                    &cluster.audit,
-                )
-            }
+            ) if result.classification == crate::ExitClassification::Ok => match &cluster.audit {
+                RenderClusterAuditMode::Declared(declaration) => {
+                    crate::worker_module_audit::observe_cluster_worker_audit(
+                        &result.stdout,
+                        result.stdout_truncated,
+                        declaration,
+                    )
+                }
+                // The in-place session (issue #751) records the loaded-module
+                // set; an absent or failed record rides the close report as a
+                // warning, never an invalidation.
+                RenderClusterAuditMode::Recorded => {
+                    crate::worker_module_audit::observe_in_place_cluster_audit(
+                        &result.stdout,
+                        result.stdout_truncated,
+                    )
+                }
+            },
             _ => None,
         };
         let session_clean = self.invalidation.is_none()

@@ -203,6 +203,10 @@ bool WorkerSession::swap_release_module(uint32_t outgoing_index) noexcept {
   if (audit.required) {
     pre_unload = capture_module_audit();
     if (pre_unload.status != "passed" || !module_audit_passed()) return false;
+  } else if (audit.recorded) {
+    // Recorded, never enforced (issue #751): the epoch snapshot is taken and
+    // reported, and its status never turns the swap's verdict.
+    pre_unload = capture_module_audit();
   }
   // Deferred release (issue #474): the outgoing plug-in image is retired,
   // not freed — its logical teardown already happened (GLOBAL_SETDOWN), and
@@ -224,14 +228,16 @@ bool WorkerSession::swap_adopt_module(HMODULE module,
   if (!swap_pending_ || !module) return false;
   ModuleAuditReport& audit = module_audit_report();
   audit.plugin_path = plugin_path;
-  if (audit.required) {
+  if (audit.required || audit.recorded) {
     // Capture and judge before taking ownership: a rejected plug-in is
     // deferred to process exit like every other image (issue #474) and never
-    // enters the session's ownership state.
+    // enters the session's ownership state. A recorded (in-place, #751)
+    // audit takes the same epoch snapshots but never rejects.
     ModuleAuditSnapshot post_load = capture_module_audit();
     record_module_audit_epoch(swap_outgoing_index_, std::move(swap_pre_unload_),
                               post_load);
-    if (post_load.status != "passed" || !module_audit_passed()) {
+    if (audit.required &&
+        (post_load.status != "passed" || !module_audit_passed())) {
       retired_modules_.push_back(module);
       return false;
     }
