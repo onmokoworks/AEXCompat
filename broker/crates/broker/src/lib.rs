@@ -18,6 +18,7 @@ pub mod plugin_dependency_closure;
 pub mod pnp_opencl_runtime_collector;
 #[cfg(windows)]
 pub mod render;
+pub mod render_approval;
 #[cfg(windows)]
 pub mod render_request;
 #[cfg(windows)]

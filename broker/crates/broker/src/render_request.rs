@@ -10,6 +10,7 @@ use crate::host_core::parameter::{
     ParameterValue, PluginProfile, ValidatedAssignments, ValidationError, ValueKind,
     apply_defaults, encode_worker_payload, validate_assignments,
 };
+use crate::render_approval::{ApprovalIdentity, admit_launch};
 use crate::sealed_load_tree::SealedLoadTree;
 use crate::secure_launch::{SecureLaunchRequest, secure_launch};
 use serde::de::{MapAccess, Visitor};
@@ -689,11 +690,6 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         } else {
             repository.join(&approved.worker_path)
         };
-        if fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)? {
-            return Err(invalid(
-                "classic worker differs from approved trusted worker",
-            ));
-        }
         let plugin_basename = approved.main.relative_basename.clone();
         let fixture_sha256 = approved
             .main
@@ -717,18 +713,18 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         // identity across runs. The sealed manifest digest covers the main entry and
         // every dependency; the fixture digest alone would miss a swapped worker
         // build or dependency set (#312 review).
-        let identity = (
-            tree.manifest_digest(),
+        let identity = ApprovalIdentity {
+            sealed_manifest_sha256: tree.manifest_digest(),
             worker_sha256,
             worker_byte_size,
             timeout_ms,
-        );
-        if approved_identity
-            .as_ref()
-            .is_some_and(|approved| approved != &identity)
-        {
-            return Err(invalid("classic approval changed between determinism runs"));
-        }
+        };
+        let receipt_worker = admit_launch(
+            &worker,
+            &receipt_worker,
+            approved_identity.as_ref(),
+            &identity,
+        )?;
         approved_identity = Some(identity);
         let args_before_plugin = [worker_spec.request_mode.to_string()];
         let args_after_plugin = [fixture_sha256, payload.clone()];
@@ -923,11 +919,6 @@ pub fn execute_smart(
         } else {
             repository.join(&approved.worker_path)
         };
-        if fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)? {
-            return Err(invalid(
-                "SmartFX worker differs from approved trusted worker",
-            ));
-        }
         let plugin_basename = approved.main.relative_basename.clone();
         let fixture_sha256 = approved
             .main
@@ -951,20 +942,18 @@ pub fn execute_smart(
         // identity across runs. The sealed manifest digest covers the main entry and
         // every dependency; the fixture digest alone would miss a swapped worker
         // build or dependency set (#312 review).
-        let identity = (
-            tree.manifest_digest(),
+        let identity = ApprovalIdentity {
+            sealed_manifest_sha256: tree.manifest_digest(),
             worker_sha256,
             worker_byte_size,
             timeout_ms,
-        );
-        if approved_identity
-            .as_ref()
-            .is_some_and(|approved| approved != &identity)
-        {
-            return Err(invalid(
-                "SmartFX parameter-request approval changed between determinism runs",
-            ));
-        }
+        };
+        let receipt_worker = admit_launch(
+            &worker,
+            &receipt_worker,
+            approved_identity.as_ref(),
+            &identity,
+        )?;
         approved_identity = Some(identity);
         let sealed_manifest_sha256 = tree
             .manifest_digest()
@@ -1334,11 +1323,6 @@ pub fn execute_smart_suite_fault(
         } else {
             repository.join(&approved.worker_path)
         };
-        if fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)? {
-            return Err(invalid(
-                "SmartFX worker differs from approved trusted worker",
-            ));
-        }
         let plugin_basename = approved.main.relative_basename.clone();
         let fixture_sha256 = approved
             .main
@@ -1362,20 +1346,18 @@ pub fn execute_smart_suite_fault(
         // identity across runs. The sealed manifest digest covers the main entry and
         // every dependency; the fixture digest alone would miss a swapped worker
         // build or dependency set (#312 review).
-        let identity = (
-            tree.manifest_digest(),
+        let identity = ApprovalIdentity {
+            sealed_manifest_sha256: tree.manifest_digest(),
             worker_sha256,
             worker_byte_size,
             timeout_ms,
-        );
-        if approved_identity
-            .as_ref()
-            .is_some_and(|approved| approved != &identity)
-        {
-            return Err(invalid(
-                "SmartFX suite-fault approval changed between determinism runs",
-            ));
-        }
+        };
+        let receipt_worker = admit_launch(
+            &worker,
+            &receipt_worker,
+            approved_identity.as_ref(),
+            &identity,
+        )?;
         approved_identity = Some(identity);
         let args_before_plugin = [worker_mode.to_string()];
         let args_after_plugin = [fixture_sha256, payload.clone()];
@@ -1662,11 +1644,6 @@ pub fn execute_smart_mask_scene(
         } else {
             repository.join(&approved.worker_path)
         };
-        if fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)? {
-            return Err(invalid(
-                "SmartFX worker differs from approved trusted worker",
-            ));
-        }
         let plugin_basename = approved.main.relative_basename.clone();
         let fixture_sha256 = approved
             .main
@@ -1690,20 +1667,18 @@ pub fn execute_smart_mask_scene(
         // identity across runs. The sealed manifest digest covers the main entry and
         // every dependency; the fixture digest alone would miss a swapped worker
         // build or dependency set (#312 review).
-        let identity = (
-            tree.manifest_digest(),
+        let identity = ApprovalIdentity {
+            sealed_manifest_sha256: tree.manifest_digest(),
             worker_sha256,
             worker_byte_size,
             timeout_ms,
-        );
-        if approved_identity
-            .as_ref()
-            .is_some_and(|approved| approved != &identity)
-        {
-            return Err(invalid(
-                "SmartFX mask-scene approval changed between determinism runs",
-            ));
-        }
+        };
+        let receipt_worker = admit_launch(
+            &worker,
+            &receipt_worker,
+            approved_identity.as_ref(),
+            &identity,
+        )?;
         approved_identity = Some(identity);
         let args_before_plugin = ["--smart-mask-scene-request".to_string()];
         let args_after_plugin = [fixture_sha256, payload.clone(), scene_id.to_string()];
