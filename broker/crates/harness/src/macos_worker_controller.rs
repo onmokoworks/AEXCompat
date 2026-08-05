@@ -50,6 +50,12 @@ struct ProcessIdentity {
     start_time: u64,
 }
 
+#[derive(Debug)]
+struct DescendantSnapshot {
+    identities: Vec<ProcessIdentity>,
+    diagnostic: Option<String>,
+}
+
 #[link(name = "proc")]
 unsafe extern "C" {
     fn proc_pid_rusage(
@@ -499,35 +505,85 @@ pub(crate) fn terminate_process_group(child: &mut Child) -> Result<(), String> {
     // new process group/session, so group signaling alone is not a complete
     // lifecycle boundary. UUID/start-time checks prevent signaling a reused
     // PID after the snapshot.
-    let descendants = descendant_identities(pid)?;
-    signal_identities(&descendants, libc::SIGTERM)?;
-    signal_group(pid, libc::SIGTERM)?;
-    let leader_reaped = wait_for_exit(child, TERM_GRACE)?;
-    if leader_reaped && !process_group_exists(pid)? && !identities_exist(&descendants)? {
-        return Ok(());
+    let snapshot = descendant_identities(pid);
+    let descendants = snapshot.identities;
+    let mut errors = Vec::new();
+    if let Some(diagnostic) = snapshot.diagnostic {
+        errors.push(diagnostic);
     }
-    signal_identities(&descendants, libc::SIGKILL)?;
-    signal_group(pid, libc::SIGKILL)?;
+    if let Err(error) = signal_identities(&descendants, libc::SIGTERM) {
+        errors.push(error);
+    }
+    if let Err(error) = signal_group(pid, libc::SIGTERM) {
+        errors.push(error);
+    }
+    let leader_reaped = match wait_for_exit(child, TERM_GRACE) {
+        Ok(reaped) => reaped,
+        Err(error) => {
+            errors.push(error);
+            false
+        }
+    };
+    let group_exists = process_group_exists(pid).unwrap_or_else(|error| {
+        errors.push(error);
+        true
+    });
+    let descendant_exists = identities_exist(&descendants).unwrap_or_else(|error| {
+        errors.push(error);
+        true
+    });
+    if leader_reaped && !group_exists && !descendant_exists {
+        return if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        };
+    }
+    if let Err(error) = signal_identities(&descendants, libc::SIGKILL) {
+        errors.push(error);
+    }
+    if let Err(error) = signal_group(pid, libc::SIGKILL) {
+        errors.push(error);
+    }
     if !leader_reaped {
-        child.wait().map_err(|error| {
-            format!("macos_worker_residual_process: reap leader {pid}: {error}")
-        })?;
+        if let Err(error) = child.wait() {
+            errors.push(format!(
+                "macos_worker_residual_process: reap leader {pid}: {error}"
+            ));
+        }
     }
     let started = Instant::now();
-    while process_group_exists(pid)? || identities_exist(&descendants)? {
+    loop {
+        let group_exists = process_group_exists(pid).unwrap_or_else(|error| {
+            errors.push(error);
+            true
+        });
+        let descendant_exists = identities_exist(&descendants).unwrap_or_else(|error| {
+            errors.push(error);
+            true
+        });
+        if !group_exists && !descendant_exists {
+            break;
+        }
         if started.elapsed() >= Duration::from_secs(2) {
-            return Err(format!(
+            errors.push(format!(
                 "macos_worker_residual_process: process group {pid} or an observed descendant remains after SIGKILL"
             ));
+            break;
         }
         thread::sleep(Duration::from_millis(5));
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
-fn descendant_identities(root: libc::pid_t) -> Result<Vec<ProcessIdentity>, String> {
+fn descendant_identities(root: libc::pid_t) -> DescendantSnapshot {
     let mut pending = vec![root];
     let mut descendants = Vec::new();
+    let mut diagnostic = None;
     while let Some(parent) = pending.pop() {
         let mut children = [0 as libc::pid_t; MAX_TRACKED_DESCENDANTS];
         // SAFETY: children is a correctly sized writable pid_t array.
@@ -539,29 +595,43 @@ fn descendant_identities(root: libc::pid_t) -> Result<Vec<ProcessIdentity>, Stri
             )
         };
         if count < 0 {
-            return Err(format!(
-                "macos_worker_resource_accounting: proc_listchildpids({parent}): {}",
-                io::Error::last_os_error()
-            ));
+            diagnostic.get_or_insert_with(|| {
+                format!(
+                    "macos_worker_resource_accounting: proc_listchildpids({parent}): {}",
+                    io::Error::last_os_error()
+                )
+            });
+            continue;
         }
         if count as usize >= children.len() {
-            return Err(format!(
+            diagnostic.get_or_insert_with(|| format!(
                 "macos_worker_child_limit: pid {parent} has at least {count} children; tracking limit is {MAX_TRACKED_DESCENDANTS}"
             ));
         }
-        for &child in &children[..count as usize] {
+        let observed = (count as usize).min(children.len());
+        for &child in &children[..observed] {
             if descendants.len() >= MAX_TRACKED_DESCENDANTS {
-                return Err(format!(
+                diagnostic.get_or_insert_with(|| format!(
                     "macos_worker_child_limit: descendant tracking exceeded {MAX_TRACKED_DESCENDANTS} processes"
                 ));
+                break;
             }
-            if let Some(identity) = process_identity(child)? {
-                descendants.push(identity);
-                pending.push(child);
+            match process_identity(child) {
+                Ok(Some(identity)) => {
+                    descendants.push(identity);
+                    pending.push(child);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    diagnostic.get_or_insert(error);
+                }
             }
         }
     }
-    Ok(descendants)
+    DescendantSnapshot {
+        identities: descendants,
+        diagnostic,
+    }
 }
 
 fn process_identity(pid: libc::pid_t) -> Result<Option<ProcessIdentity>, String> {
@@ -874,6 +944,47 @@ mod tests {
             .unwrap();
         // SAFETY: signal 0 only probes the exact recorded fixture PID.
         assert_eq!(unsafe { libc::kill(child_pid, 0) }, -1);
+    }
+
+    #[test]
+    fn descendant_tracking_overflow_still_kills_group_and_observed_children() {
+        let session = WorkerSession::create().unwrap();
+        let shell = fixture_shell(&session);
+        let mut command = session.command(
+            &shell,
+            SecurityTier::NativeCarrierTrustedOnly,
+            ResourceLimits::default(),
+        );
+        let ready = session.root().join("children-ready");
+        let marker = session.root().join("child-pids");
+        command.arg("-c").arg(
+            "for i in $(jot 64); do sleep 30 & echo $! >> child-pids; done; echo ready > children-ready; wait",
+        );
+        let mut child = command.spawn().unwrap();
+        let leader_pid = child.id() as libc::pid_t;
+        let started = Instant::now();
+        while !ready.is_file() && started.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ready.is_file(), "fixture did not create all children");
+        let child_pids = fs::read_to_string(marker)
+            .unwrap()
+            .lines()
+            .map(|pid| pid.parse::<libc::pid_t>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(child_pids.len(), MAX_TRACKED_DESCENDANTS);
+
+        let error = terminate_process_group(&mut child).unwrap_err();
+        assert!(error.contains("macos_worker_child_limit"), "{error}");
+        // SAFETY: signal 0 only probes the exact recorded fixture PIDs.
+        assert_eq!(unsafe { libc::kill(leader_pid, 0) }, -1);
+        for child_pid in child_pids {
+            assert_eq!(
+                unsafe { libc::kill(child_pid, 0) },
+                -1,
+                "worker child {child_pid} still exists"
+            );
+        }
     }
 
     #[test]
