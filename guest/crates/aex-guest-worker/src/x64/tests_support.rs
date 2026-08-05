@@ -74,6 +74,7 @@
             HOST_ITERATE16,
             HOST_ITERATE16_CONTINUE,
             HOST_CRT_INITTERM_CONTINUE,
+            HOST_FLS_FREE_CONTINUE,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -192,6 +193,16 @@
                 HOST_CRT_INITTERM_CONTINUE,
                 HOST_CRT_INITTERM_CONTINUE,
                 continue_crt_initterm,
+            )
+            .unwrap();
+        unicorn
+            .mem_write(HOST_FLS_FREE_CONTINUE, &[0x41, 0xff, 0xe3])
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_FLS_FREE_CONTINUE,
+                HOST_FLS_FREE_CONTINUE,
+                continue_fls_free,
             )
             .unwrap();
         unicorn
@@ -2468,6 +2479,126 @@
                 .callback_error
                 .as_deref()
                 .is_some_and(|error| error.contains("output 0x1234 is not writable"))
+        );
+    }
+
+    #[test]
+    fn fls_lifecycle_is_bounded_reuses_indices_and_runs_free_callback() {
+        const ALLOC: u64 = STUB_BASE + 0x500;
+        const GET: u64 = STUB_BASE + 0x510;
+        const SET: u64 = STUB_BASE + 0x520;
+        const FREE: u64 = STUB_BASE + 0x530;
+        let mut engine = test_engine(&vec![0x90; 0x400]);
+        engine.unicorn.get_data_mut().image_executable_ranges =
+            vec![(TEST_CODE, TEST_CODE + PAGE_SIZE)];
+        for (stub, symbol) in [
+            (ALLOC, "FlsAlloc"),
+            (GET, "FlsGetValue"),
+            (SET, "FlsSetValue"),
+            (FREE, "FlsFree"),
+        ] {
+            assert!(matches!(
+                install_win64_import(&mut engine.unicorn, stub, "kernel32.dll", symbol).unwrap(),
+                Win64ImportDispatch::LegacyImplemented(_)
+            ));
+            assert_eq!(
+                dispatch_win64_import("fixture.dll", symbol),
+                Win64ImportDispatch::UnsupportedLegacyImport
+            );
+        }
+
+        let callback = TEST_CODE + 0x100;
+        let marker = DATA_BASE + 0x700;
+        let mut callback_code = vec![0x48, 0xb8]; // mov rax, marker
+        callback_code.extend_from_slice(&marker.to_le_bytes());
+        callback_code.extend_from_slice(&[0x48, 0x89, 0x08, 0xc3]); // mov [rax], rcx; ret
+        engine.write(callback, &callback_code).unwrap();
+
+        let index = engine.call_win64(ALLOC, [callback, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(index, 0);
+        assert_eq!(engine.call_win64(GET, [index, 0, 0, 0, 0, 0]).unwrap(), 0);
+        let value = 0x1234_5678_9abc_def0;
+        assert_eq!(engine.call_win64(SET, [index, value, 0, 0, 0, 0]).unwrap(), 1);
+        assert_eq!(engine.call_win64(GET, [index, 0, 0, 0, 0, 0]).unwrap(), value);
+        assert_eq!(engine.call_win64(FREE, [index, 0, 0, 0, 0, 0]).unwrap(), 1);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(marker, 8).unwrap(),
+            value.to_le_bytes()
+        );
+        assert!(engine.unicorn.get_data().windows_fls_slots.is_empty());
+        assert!(engine.unicorn.get_data().pending_fls_free.is_none());
+
+        assert_eq!(engine.call_win64(ALLOC, [0; 6]).unwrap(), 0);
+        assert_eq!(engine.call_win64(FREE, [0; 6]).unwrap(), 1);
+        let error = engine.call_win64(FREE, [0; 6]).unwrap_err();
+        assert!(error.to_string().contains("FlsFree index 0 is not allocated"), "{error}");
+    }
+
+    #[test]
+    fn fls_allocation_rejects_nonexecutable_callbacks_and_capacity_overflow() {
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.reg_write(RegisterX86::RCX, DATA_BASE).unwrap();
+        emulate_fls(&mut engine.unicorn, LegacyWin64Import::FlsAlloc);
+        assert_eq!(
+            engine.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+            u64::from(u32::MAX)
+        );
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains("outside the executable image"))
+        );
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+        for expected in 0..MAX_WINDOWS_FLS_SLOTS {
+            emulate_fls(&mut engine.unicorn, LegacyWin64Import::FlsAlloc);
+            assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::from(expected));
+        }
+        emulate_fls(&mut engine.unicorn, LegacyWin64Import::FlsAlloc);
+        assert_eq!(
+            engine.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+            u64::from(u32::MAX)
+        );
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains("slot count exceeds"))
+        );
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RCX, u64::from(MAX_WINDOWS_FLS_SLOTS))
+            .unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, 1).unwrap();
+        emulate_fls(&mut engine.unicorn, LegacyWin64Import::FlsSetValue);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains("FlsSetValue index 128 is not allocated"))
+        );
+
+        engine.unicorn.get_data_mut().callback_error = None;
+        emulate_fls(&mut engine.unicorn, LegacyWin64Import::FlsGetValue);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains("FlsGetValue index 128 is not allocated"))
         );
     }
 

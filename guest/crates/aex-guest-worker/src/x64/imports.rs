@@ -55,6 +55,10 @@ enum LegacyWin64Import {
     GetCurrentProcessId,
     QueryPerformanceCounter,
     QueryPerformanceFrequency,
+    FlsAlloc,
+    FlsGetValue,
+    FlsSetValue,
+    FlsFree,
     ExplicitMsvcRuntimeZero,
     CrtInitterm,
     CrtInittermE,
@@ -262,6 +266,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "QueryPerformanceFrequency") => {
             LegacyWin64Import::QueryPerformanceFrequency
         }
+        ("kernel32.dll", "FlsAlloc") => LegacyWin64Import::FlsAlloc,
+        ("kernel32.dll", "FlsGetValue") => LegacyWin64Import::FlsGetValue,
+        ("kernel32.dll", "FlsSetValue") => LegacyWin64Import::FlsSetValue,
+        ("kernel32.dll", "FlsFree") => LegacyWin64Import::FlsFree,
         ("kernel32.dll", "InitializeSListHead") => LegacyWin64Import::InitializeSListHead,
         ("kernel32.dll", "DisableThreadLibraryCalls") => {
             LegacyWin64Import::DisableThreadLibraryCalls
@@ -722,6 +730,29 @@ fn install_win64_import(
                     "install QueryPerformanceFrequency import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_query_performance_frequency(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::FlsAlloc
+            | LegacyWin64Import::FlsGetValue
+            | LegacyWin64Import::FlsSetValue => {
+                uc("write FLS import return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install FLS import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_fls(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::FlsFree => {
+                uc(
+                    "write FlsFree callback tail jump",
+                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                )?;
+                uc(
+                    "install FlsFree import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_fls_free(unicorn);
                     }),
                 )?;
             }
@@ -1537,6 +1568,183 @@ fn emulate_query_performance_value(
             unicorn.get_data_mut().callback_error = Some(error);
             let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         }
+    }
+}
+
+fn set_fls_error(unicorn: &mut Unicorn<'_, GuestState>, error: String, returned: u64) {
+    if unicorn.get_data().callback_error.is_none() {
+        unicorn.get_data_mut().callback_error = Some(error);
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+}
+
+fn fls_index_argument(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u32, String> {
+    Ok(read_win64_import_argument(unicorn, 0)? as u32)
+}
+
+fn emulate_fls(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    let result = (|| -> Result<u64, String> {
+        match operation {
+            LegacyWin64Import::FlsAlloc => {
+                let callback = read_win64_import_argument(unicorn, 0)?;
+                if callback != 0 && !image_executable_address(unicorn.get_data(), callback) {
+                    return Err(format!(
+                        "FlsAlloc callback {callback:#x} is outside the executable image"
+                    ));
+                }
+                let index = (0..MAX_WINDOWS_FLS_SLOTS)
+                    .find(|index| !unicorn.get_data().windows_fls_slots.contains_key(index))
+                    .ok_or_else(|| {
+                        format!("FLS slot count exceeds {MAX_WINDOWS_FLS_SLOTS}")
+                    })?;
+                unicorn
+                    .get_data_mut()
+                    .windows_fls_slots
+                    .insert(index, WindowsFlsSlot { callback, value: 0 });
+                Ok(u64::from(index))
+            }
+            LegacyWin64Import::FlsGetValue => {
+                let index = fls_index_argument(unicorn)?;
+                unicorn
+                    .get_data()
+                    .windows_fls_slots
+                    .get(&index)
+                    .map(|slot| slot.value)
+                    .ok_or_else(|| format!("FlsGetValue index {index} is not allocated"))
+            }
+            LegacyWin64Import::FlsSetValue => {
+                let index = fls_index_argument(unicorn)?;
+                let value = read_win64_import_argument(unicorn, 1)?;
+                let slot = unicorn
+                    .get_data_mut()
+                    .windows_fls_slots
+                    .get_mut(&index)
+                    .ok_or_else(|| format!("FlsSetValue index {index} is not allocated"))?;
+                slot.value = value;
+                Ok(1)
+            }
+            _ => Err("invalid FLS operation".into()),
+        }
+    })();
+    match result {
+        Ok(returned) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+        }
+        Err(error) => {
+            let returned = if operation == LegacyWin64Import::FlsAlloc {
+                u64::from(u32::MAX)
+            } else {
+                0
+            };
+            set_fls_error(unicorn, error, returned);
+        }
+    }
+}
+
+fn finish_fls_free(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    pending: PendingFlsFree,
+) -> Result<(), String> {
+    if unicorn
+        .get_data_mut()
+        .windows_fls_slots
+        .remove(&pending.index)
+        .is_none()
+    {
+        return Err(format!(
+            "FlsFree index {} disappeared during callback",
+            pending.index
+        ));
+    }
+    unicorn
+        .reg_write(RegisterX86::RSP, pending.continuation_rsp)
+        .map_err(|error| format!("FlsFree final stack write failed: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::R11, pending.return_address)
+        .map_err(|error| format!("FlsFree return target write failed: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::RAX, 1)
+        .map_err(|error| format!("FlsFree return value write failed: {error}"))
+}
+
+fn fail_fls_free(unicorn: &mut Unicorn<'_, GuestState>, error: String) {
+    unicorn.get_data_mut().pending_fls_free = None;
+    set_fls_error(unicorn, error, 0);
+    let _ = unicorn.emu_stop();
+}
+
+fn emulate_fls_free(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        if unicorn.get_data().pending_fls_free.is_some() {
+            return Err("nested FlsFree callback is unsupported".into());
+        }
+        let index = fls_index_argument(unicorn)?;
+        let slot = unicorn
+            .get_data()
+            .windows_fls_slots
+            .get(&index)
+            .copied()
+            .ok_or_else(|| format!("FlsFree index {index} is not allocated"))?;
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("FlsFree stack read failed: {error}"))?;
+        let return_address = read_vcomp_u64(unicorn, rsp)
+            .map_err(|error| format!("FlsFree return address read failed: {error}"))?;
+        if return_address != RETURN_ADDRESS
+            && !image_executable_address(unicorn.get_data(), return_address)
+        {
+            return Err(format!(
+                "FlsFree caller return {return_address:#x} is outside the executable image"
+            ));
+        }
+        let continuation_rsp = rsp
+            .checked_add(8)
+            .ok_or_else(|| "FlsFree continuation stack overflow".to_string())?;
+        let pending = PendingFlsFree {
+            index,
+            return_address,
+            continuation_rsp,
+        };
+        if slot.callback == 0 || slot.value == 0 {
+            return finish_fls_free(unicorn, pending);
+        }
+        unicorn
+            .mem_write(rsp, &HOST_FLS_FREE_CONTINUE.to_le_bytes())
+            .map_err(|error| format!("FlsFree callback continuation write failed: {error}"))?;
+        unicorn
+            .reg_write(RegisterX86::RCX, slot.value)
+            .map_err(|error| format!("FlsFree callback argument write failed: {error}"))?;
+        unicorn
+            .reg_write(RegisterX86::R11, slot.callback)
+            .map_err(|error| format!("FlsFree callback target write failed: {error}"))?;
+        unicorn.get_data_mut().pending_fls_free = Some(pending);
+        Ok(())
+    })();
+    if let Err(error) = result {
+        fail_fls_free(unicorn, error);
+    }
+}
+
+fn continue_fls_free(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| -> Result<(), String> {
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("FlsFree callback stack read failed: {error}"))?;
+        let pending = unicorn
+            .get_data_mut()
+            .pending_fls_free
+            .take()
+            .ok_or_else(|| "FlsFree continuation has no pending callback".to_string())?;
+        if rsp != pending.continuation_rsp {
+            return Err(format!(
+                "FlsFree callback stack {rsp:#x} does not match {:#x}",
+                pending.continuation_rsp
+            ));
+        }
+        finish_fls_free(unicorn, pending)
+    })();
+    if let Err(error) = result {
+        fail_fls_free(unicorn, error);
     }
 }
 
