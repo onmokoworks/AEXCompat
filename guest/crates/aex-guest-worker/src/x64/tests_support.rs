@@ -2292,6 +2292,14 @@
             Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CosF)
         );
         assert_eq!(
+            dispatch_win64_import(crt_math, "cos"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Cos)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "cos"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        assert_eq!(
             dispatch_win64_import(crt_math, "sinf"),
             Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::SinF)
         );
@@ -2400,6 +2408,49 @@
             .math_calls
             .iter()
             .any(|call| call.starts_with("sin(")));
+    }
+
+    #[test]
+    fn win64_crt_cos_uses_xmm0_f64_abi_preserves_upper_lane_and_bounds_trace() {
+        const COS_IMPORT: u64 = STUB_BASE + 0x1e0;
+        const UPPER_LANE: [u8; 8] = [0x5a; 8];
+
+        fn call_f64(engine: &mut GuestEngine<'static>, input: f64) -> f64 {
+            let mut xmm0 = [0u8; 16];
+            xmm0[..8].copy_from_slice(&input.to_le_bytes());
+            xmm0[8..].copy_from_slice(&UPPER_LANE);
+            engine
+                .unicorn
+                .reg_write_long(RegisterX86::XMM0, &xmm0)
+                .unwrap();
+            engine.call_win64(COS_IMPORT, [0; 6]).unwrap();
+            let xmm0 = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+            assert_eq!(&xmm0[8..], UPPER_LANE);
+            f64::from_le_bytes(xmm0[..8].try_into().unwrap())
+        }
+
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.mem_write(COS_IMPORT, &[0xc3]).unwrap();
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                COS_IMPORT,
+                "api-ms-win-crt-math-l1-1-0.dll",
+                "cos",
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Cos)
+        );
+        assert_eq!(call_f64(&mut engine, 0.0), 1.0);
+        assert_eq!(call_f64(&mut engine, -0.0), 1.0);
+        assert_eq!(call_f64(&mut engine, std::f64::consts::PI), -1.0);
+        assert!(call_f64(&mut engine, f64::NAN).is_nan());
+        for _ in 0..40 {
+            assert!(call_f64(&mut engine, 0.25).is_finite());
+        }
+        let math_calls = &engine.unicorn.get_data().math_calls;
+        assert_eq!(math_calls.len(), 32);
+        assert!(math_calls.iter().all(|call| call.starts_with("cos(")));
     }
 
     #[test]
