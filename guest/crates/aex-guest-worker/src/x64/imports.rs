@@ -26,6 +26,7 @@ enum LegacyWin64Import {
     Memset,
     MemoryCopy,
     MemChr,
+    MemCmp,
     StdioVsnprintfS,
     MsvcpMutexInit,
     MsvcpMutexLock,
@@ -353,6 +354,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "memchr") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("vcruntime140.dll", "memcmp") => LegacyWin64Import::MemCmp,
+        (_, "memcmp") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vsnprintf_s") => {
             LegacyWin64Import::StdioVsnprintfS
         }
@@ -514,6 +519,15 @@ fn install_win64_import(
                     "install memchr import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_memchr(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::MemCmp => {
+                uc("write memcmp return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install memcmp import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_memcmp(unicorn);
                     }),
                 )?;
             }

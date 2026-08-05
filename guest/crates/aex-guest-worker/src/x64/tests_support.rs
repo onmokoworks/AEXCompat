@@ -1276,6 +1276,131 @@
     }
 
     #[test]
+    fn vcruntime_memcmp_orders_unsigned_bytes_and_crosses_chunk_boundaries() {
+        const MEMCMP: u64 = STUB_BASE + 0x1d0;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                MEMCMP,
+                "VCRUNTIME140.DLL",
+                "memcmp",
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::MemCmp)
+        );
+        engine
+            .unicorn
+            .mem_map(
+                DATA_BASE + PAGE_SIZE,
+                0x30_000,
+                Prot::READ | Prot::WRITE,
+            )
+            .unwrap();
+        let left = DATA_BASE;
+        let right = DATA_BASE + 0x20_000;
+        let mut left_bytes = vec![0x41; CRT_MEMORY_COPY_CHUNK + 2];
+        let mut right_bytes = left_bytes.clone();
+        left_bytes[1] = 0;
+        right_bytes[1] = 0;
+        left_bytes[CRT_MEMORY_COPY_CHUNK] = 0xff;
+        right_bytes[CRT_MEMORY_COPY_CHUNK] = 1;
+        engine.unicorn.mem_write(left, &left_bytes).unwrap();
+        engine.unicorn.mem_write(right, &right_bytes).unwrap();
+
+        assert_eq!(
+            engine.call_win64(MEMCMP, [left, right, 1, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.call_win64(MEMCMP, [left, right, 2, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert!(
+            (engine
+                .call_win64(
+                    MEMCMP,
+                    [left, right, (CRT_MEMORY_COPY_CHUNK + 1) as u64, 0, 0, 0],
+                )
+                .unwrap() as u32 as i32)
+                > 0
+        );
+        assert!(
+            (engine
+                .call_win64(
+                    MEMCMP,
+                    [right, left, (CRT_MEMORY_COPY_CHUNK + 1) as u64, 0, 0, 0],
+                )
+                .unwrap() as u32 as i32)
+                < 0
+        );
+    }
+
+    #[test]
+    fn vcruntime_memcmp_is_bounded_library_qualified_and_fail_closed() {
+        assert_eq!(
+            dispatch_win64_import("vcruntime140.dll", "memcmp"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::MemCmp)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "memcmp"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+
+        const MEMCMP: u64 = STUB_BASE + 0x1e0;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            MEMCMP,
+            "vcruntime140.dll",
+            "memcmp",
+        )
+        .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    MEMCMP,
+                    [0xdead_beef, 0xfeed_face, 0, 0, 0, 0],
+                )
+                .unwrap(),
+            0
+        );
+        let error = engine
+            .call_win64(
+                MEMCMP,
+                [DATA_BASE, DATA_BASE, MAX_CRT_MEMORY_COPY_BYTES + 1, 0, 0, 0],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("memcmp length"), "{error}");
+
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            MEMCMP,
+            "vcruntime140.dll",
+            "memcmp",
+        )
+        .unwrap();
+        let error = engine
+            .call_win64(MEMCMP, [u64::MAX, DATA_BASE, 2, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("left range overflow"), "{error}");
+
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            MEMCMP,
+            "vcruntime140.dll",
+            "memcmp",
+        )
+        .unwrap();
+        let error = engine
+            .call_win64(MEMCMP, [DATA_BASE, 0xdead_beef, 1, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("memcmp right read"), "{error}");
+    }
+
+    #[test]
     fn stdio_vsnprintf_s_formats_observed_opencv_string_and_signed_integers() {
         const VSNPRINTF: u64 = STUB_BASE + 0x1d0;
         let mut engine = test_engine(&[0xc3]);
