@@ -65,7 +65,75 @@ fn seal_unicorn_image(
     Ok(())
 }
 
+fn initialize_static_tls_image(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    tls: Option<&StaticTlsImage>,
+) -> Result<u64, GuestError> {
+    let Some(tls) = tls else {
+        return Ok(DATA_BASE);
+    };
+    let block_size = tls.bytes.len().max(1);
+    let block_end = DATA_BASE
+        .checked_add(block_size as u64)
+        .ok_or(GuestError::DataCapacity)?;
+    let pointer_array = block_end
+        .checked_add(7)
+        .map(|value| value & !7)
+        .ok_or(GuestError::DataCapacity)?;
+    let next_data = pointer_array
+        .checked_add(8)
+        .ok_or(GuestError::DataCapacity)?;
+    if next_data > DATA_BASE + DATA_SIZE {
+        return Err(GuestError::DataCapacity);
+    }
+    if !tls.bytes.is_empty() {
+        uc(
+            "write static TLS template",
+            unicorn.mem_write(DATA_BASE, &tls.bytes),
+        )?;
+    }
+    uc(
+        "write static TLS pointer array",
+        unicorn.mem_write(pointer_array, &DATA_BASE.to_le_bytes()),
+    )?;
+    uc(
+        "write TEB TLS pointer",
+        unicorn.mem_write(0x58, &pointer_array.to_le_bytes()),
+    )?;
+    uc(
+        "write PE TLS module index",
+        unicorn.mem_write(tls.index_address, &0u32.to_le_bytes()),
+    )?;
+    Ok(next_data)
+}
+
 impl GuestEngine<'static> {
+    fn run_process_attach_addresses(
+        &mut self,
+        image_base: u64,
+        tls_callbacks: &[u64],
+        dll_entry: Option<u64>,
+    ) -> Result<(), GuestError> {
+        // The Windows loader invokes TLS callbacks in image order before
+        // DllMain for DLL_PROCESS_ATTACH.  Several MSVC runtimes use this
+        // phase to make later C++ static initialization safe.
+        for (index, address) in tls_callbacks.iter().copied().enumerate() {
+            self.call_win64(address, [image_base, 1, 0, 0, 0, 0])
+                .map_err(|error| GuestError::TlsProcessAttach {
+                    index: index + 1,
+                    address,
+                    detail: error.to_string(),
+                })?;
+        }
+        if let Some(entry) = dll_entry {
+            let attached = self.call_win64(entry, [image_base, 1, 0, 0, 0, 0])?;
+            if attached == 0 {
+                return Err(GuestError::DllProcessAttach);
+            }
+        }
+        Ok(())
+    }
+
     pub fn backend_name(&self) -> &'static str {
         "unicorn-x86_64"
     }
@@ -193,6 +261,7 @@ impl GuestEngine<'static> {
                 stub_index += 1;
             }
         }
+        let next_data = initialize_static_tls_image(&mut unicorn, image.static_tls())?;
         seal_unicorn_image(&mut unicorn, image, image_size)?;
         uc(
             "write return sentinel",
@@ -779,7 +848,7 @@ impl GuestEngine<'static> {
         )?;
         let mut engine = Self {
             unicorn,
-            next_data: DATA_BASE,
+            next_data,
             image_base: image.image_base(),
             image_end: image.image_base() + image_size,
             census_hook: None,
@@ -804,12 +873,11 @@ impl GuestEngine<'static> {
             state.extended_empty_string = empty;
             state.extended_string_table_valid = true;
         }
-        if let Some(entry) = image.dll_entry_address() {
-            let attached = engine.call_win64(entry, [image.image_base(), 1, 0, 0, 0, 0])?;
-            if attached == 0 {
-                return Err(GuestError::DllProcessAttach);
-            }
-        }
+        engine.run_process_attach_addresses(
+            image.image_base(),
+            image.tls_callbacks(),
+            image.dll_entry_address(),
+        )?;
         Ok(engine)
     }
 

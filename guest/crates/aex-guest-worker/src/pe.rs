@@ -11,6 +11,8 @@ const MAX_IMAGE_SIZE: usize = 256 * 1024 * 1024;
 const MAX_SECTIONS: usize = 96;
 const MAX_IMPORTS: usize = 4096;
 const MAX_EXPORTS: usize = 4096;
+const MAX_TLS_CALLBACKS: usize = 64;
+const MAX_STATIC_TLS_BYTES: usize = 1024 * 1024;
 const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
 const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
@@ -51,6 +53,18 @@ pub enum PeError {
     NonExecutableExport(String),
     #[error("DLL entry RVA {0:#x} does not point into an executable image section")]
     NonExecutableDllEntry(usize),
+    #[error("TLS callback count {0} exceeds {MAX_TLS_CALLBACKS}")]
+    TlsCallbackCount(usize),
+    #[error("TLS callback {index} VA {address:#x} is outside the image")]
+    TlsCallbackRange { index: usize, address: u64 },
+    #[error("TLS callback {index} RVA {rva:#x} does not point into an executable image section")]
+    NonExecutableTlsCallback { index: usize, rva: usize },
+    #[error("static TLS byte size {0} exceeds {MAX_STATIC_TLS_BYTES}")]
+    StaticTlsSize(usize),
+    #[error("static TLS raw-data range is present but could not be mapped")]
+    StaticTlsRawData,
+    #[error("static TLS index VA {0:#x} is outside writable image data")]
+    StaticTlsIndex(u64),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -95,6 +109,8 @@ pub struct PeImage {
     section_count: usize,
     imports: Vec<ImportLibrary>,
     has_tls: bool,
+    tls_callbacks: Vec<u64>,
+    static_tls: Option<StaticTlsImage>,
     has_exception_directory: bool,
     file_size: usize,
     section_protections: Vec<SectionProtection>,
@@ -107,6 +123,12 @@ pub struct SectionProtection {
     pub virtual_size: usize,
     pub executable: bool,
     pub writable: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct StaticTlsImage {
+    pub bytes: Vec<u8>,
+    pub index_address: u64,
 }
 
 impl PeImage {
@@ -204,6 +226,18 @@ impl PeImage {
         if dll_entry_rva != 0 && !rva_is_executable(&section_protections, dll_entry_rva) {
             return Err(PeError::NonExecutableDllEntry(dll_entry_rva));
         }
+        let tls_callbacks = validate_tls_callbacks(
+            pe.image_base,
+            pe.tls_data
+                .as_ref()
+                .map_or(&[][..], |tls| tls.callbacks.as_slice()),
+            &section_protections,
+        )?;
+        let static_tls = pe
+            .tls_data
+            .as_ref()
+            .map(|tls| validate_static_tls(pe.image_base, tls, &section_protections))
+            .transpose()?;
 
         let direct_candidates = ["EffectMain", "entryPointFunc", "entry_point"];
         let direct_entry = direct_candidates
@@ -250,6 +284,8 @@ impl PeImage {
             section_count: pe.sections.len(),
             imports,
             has_tls: pe.tls_data.is_some(),
+            tls_callbacks,
+            static_tls,
             has_exception_directory: pe.exception_data.is_some(),
             file_size: file.len(),
             section_protections,
@@ -294,6 +330,14 @@ impl PeImage {
         &self.imports
     }
 
+    pub fn tls_callbacks(&self) -> &[u64] {
+        &self.tls_callbacks
+    }
+
+    pub fn static_tls(&self) -> Option<&StaticTlsImage> {
+        self.static_tls.as_ref()
+    }
+
     pub fn section_protections(&self) -> &[SectionProtection] {
         &self.section_protections
     }
@@ -319,6 +363,84 @@ impl PeImage {
             has_exception_directory: self.has_exception_directory,
         }
     }
+}
+
+fn validate_static_tls(
+    image_base: u64,
+    tls: &goblin::pe::tls::TlsData<'_>,
+    sections: &[SectionProtection],
+) -> Result<StaticTlsImage, PeError> {
+    let directory = tls.image_tls_directory;
+    let declared_raw_size = directory
+        .end_address_of_raw_data
+        .checked_sub(directory.start_address_of_raw_data)
+        .and_then(|size| usize::try_from(size).ok())
+        .ok_or(PeError::StaticTlsRawData)?;
+    let raw = tls.raw_data.unwrap_or_default();
+    if raw.len() != declared_raw_size {
+        return Err(PeError::StaticTlsRawData);
+    }
+    let zero_fill = usize::try_from(directory.size_of_zero_fill)
+        .map_err(|_| PeError::StaticTlsSize(usize::MAX))?;
+    let total = raw
+        .len()
+        .checked_add(zero_fill)
+        .ok_or(PeError::StaticTlsSize(usize::MAX))?;
+    if total > MAX_STATIC_TLS_BYTES {
+        return Err(PeError::StaticTlsSize(total));
+    }
+    let index_rva = directory
+        .address_of_index
+        .checked_sub(image_base)
+        .and_then(|rva| usize::try_from(rva).ok())
+        .ok_or(PeError::StaticTlsIndex(directory.address_of_index))?;
+    let index_end = index_rva
+        .checked_add(4)
+        .ok_or(PeError::StaticTlsIndex(directory.address_of_index))?;
+    if !sections.iter().any(|section| {
+        section.writable
+            && index_rva >= section.virtual_address
+            && index_end <= section.virtual_address.saturating_add(section.virtual_size)
+    }) {
+        return Err(PeError::StaticTlsIndex(directory.address_of_index));
+    }
+    let mut bytes = Vec::with_capacity(total);
+    bytes.extend_from_slice(raw);
+    bytes.resize(total, 0);
+    Ok(StaticTlsImage {
+        bytes,
+        index_address: directory.address_of_index,
+    })
+}
+
+fn validate_tls_callbacks(
+    image_base: u64,
+    callbacks: &[u64],
+    sections: &[SectionProtection],
+) -> Result<Vec<u64>, PeError> {
+    if callbacks.len() > MAX_TLS_CALLBACKS {
+        return Err(PeError::TlsCallbackCount(callbacks.len()));
+    }
+    callbacks
+        .iter()
+        .enumerate()
+        .map(|(index, address)| {
+            let rva = address
+                .checked_sub(image_base)
+                .and_then(|rva| usize::try_from(rva).ok())
+                .ok_or(PeError::TlsCallbackRange {
+                    index: index + 1,
+                    address: *address,
+                })?;
+            if !rva_is_executable(sections, rva) {
+                return Err(PeError::NonExecutableTlsCallback {
+                    index: index + 1,
+                    rva,
+                });
+            }
+            Ok(*address)
+        })
+        .collect()
 }
 
 fn rva_is_executable(sections: &[SectionProtection], rva: usize) -> bool {
@@ -497,6 +619,73 @@ mod tests {
         assert!(rva_is_executable(&sections, 0x11ff));
         assert!(!rva_is_executable(&sections, 0x0fff));
         assert!(!rva_is_executable(&sections, 0x1200));
+    }
+
+    #[test]
+    fn tls_callbacks_are_bounded_inside_executable_sections() {
+        let sections = [SectionProtection {
+            virtual_address: 0x1000,
+            virtual_size: 0x200,
+            executable: true,
+            writable: false,
+        }];
+        assert_eq!(
+            validate_tls_callbacks(0x1800_0000_0, &[0x1800_0100_0, 0x1800_011f_f], &sections)
+                .unwrap(),
+            [0x1800_0100_0, 0x1800_011f_f]
+        );
+        assert!(matches!(
+            validate_tls_callbacks(0x1800_0000_0, &[0x1800_0120_0], &sections),
+            Err(PeError::NonExecutableTlsCallback { index: 1, .. })
+        ));
+        assert!(matches!(
+            validate_tls_callbacks(0x1800_0000_0, &[0x17ff_ffff_f], &sections),
+            Err(PeError::TlsCallbackRange { index: 1, .. })
+        ));
+        assert!(matches!(
+            validate_tls_callbacks(0x1800_0000_0, &vec![0x1800_0100_0; 65], &sections),
+            Err(PeError::TlsCallbackCount(65))
+        ));
+    }
+
+    #[test]
+    fn static_tls_template_is_bounded_and_requires_writable_index() {
+        let raw = [0x80, 0xff, 0xff, 0xff];
+        let image_base = 0x1800_0000_0;
+        let mut tls = goblin::pe::tls::TlsData {
+            image_tls_directory: goblin::pe::tls::ImageTlsDirectory {
+                start_address_of_raw_data: image_base + 0x2000,
+                end_address_of_raw_data: image_base + 0x2004,
+                address_of_index: image_base + 0x3000,
+                address_of_callbacks: 0,
+                size_of_zero_fill: 4,
+                characteristics: 0x30_0000,
+            },
+            raw_data: Some(&raw),
+            slot: Some(0),
+            callbacks: Vec::new(),
+        };
+        let writable = [SectionProtection {
+            virtual_address: 0x3000,
+            virtual_size: 0x100,
+            executable: false,
+            writable: true,
+        }];
+        let validated = validate_static_tls(image_base, &tls, &writable).unwrap();
+        assert_eq!(validated.bytes, [0x80, 0xff, 0xff, 0xff, 0, 0, 0, 0]);
+        assert_eq!(validated.index_address, image_base + 0x3000);
+
+        tls.image_tls_directory.address_of_index = image_base + 0x4000;
+        assert!(matches!(
+            validate_static_tls(image_base, &tls, &writable),
+            Err(PeError::StaticTlsIndex(_))
+        ));
+        tls.image_tls_directory.address_of_index = image_base + 0x3000;
+        tls.image_tls_directory.size_of_zero_fill = (MAX_STATIC_TLS_BYTES + 1) as u32;
+        assert!(matches!(
+            validate_static_tls(image_base, &tls, &writable),
+            Err(PeError::StaticTlsSize(_))
+        ));
     }
 
     #[test]

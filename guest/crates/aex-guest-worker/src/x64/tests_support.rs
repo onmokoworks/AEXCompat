@@ -1826,6 +1826,87 @@
     }
 
     #[test]
+    fn process_attach_runs_tls_callbacks_in_order_before_dll_entry() {
+        let mut engine = test_engine(&vec![0x90; 0x400]);
+        engine.unicorn.get_data_mut().image_executable_ranges =
+            vec![(TEST_CODE, TEST_CODE + PAGE_SIZE)];
+        let first = TEST_CODE + 0x100;
+        let second = TEST_CODE + 0x140;
+        let dll_entry = TEST_CODE + 0x180;
+        let marker = DATA_BASE + 0x700;
+        write_initializer_fixture(&mut engine, first, marker, 1, 0);
+        write_initializer_fixture(&mut engine, second, marker, 2, 0);
+        write_initializer_fixture(&mut engine, dll_entry, marker, 3, 1);
+
+        engine
+            .run_process_attach_addresses(
+                engine.image_base,
+                &[first, second],
+                Some(dll_entry),
+            )
+            .unwrap();
+
+        assert_eq!(engine.unicorn.mem_read_as_vec(marker, 1).unwrap(), [3]);
+    }
+
+    #[test]
+    fn static_tls_installs_template_index_and_teb_pointer_array() {
+        let mut engine = test_engine(&[0xc3]);
+        engine
+            .unicorn
+            .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let index_address = DATA_BASE + 0x800;
+        engine.write(index_address, &[0xff; 4]).unwrap();
+        let tls = StaticTlsImage {
+            bytes: vec![0x80, 0xff, 0xff, 0xff, 0, 0],
+            index_address,
+        };
+
+        let next = initialize_static_tls_image(&mut engine.unicorn, Some(&tls)).unwrap();
+
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(DATA_BASE, 6).unwrap(),
+            tls.bytes
+        );
+        let pointer_array = DATA_BASE + 8;
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(pointer_array, 8)
+                .unwrap(),
+            DATA_BASE.to_le_bytes()
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(0x58, 8).unwrap(),
+            pointer_array.to_le_bytes()
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(index_address, 4).unwrap(),
+            0u32.to_le_bytes()
+        );
+        assert_eq!(next, DATA_BASE + 16);
+    }
+
+    #[test]
+    fn process_attach_preserves_tls_callback_failure_context() {
+        let mut engine = test_engine(&[0xc3]);
+        let callback = DATA_BASE + 0x700;
+        let error = engine
+            .run_process_attach_addresses(engine.image_base, &[callback], None)
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            GuestError::TlsProcessAttach {
+                index: 1,
+                address,
+                ..
+            } if *address == callback
+        ));
+        assert_eq!(error.diagnostic_category(), "dllmain");
+    }
+
+    #[test]
     fn crt_initterm_e_stops_at_first_nonzero_initializer() {
         const INITTERM_E: u64 = STUB_BASE + 0x360;
         let mut engine = test_engine(&vec![0x90; 0x400]);
@@ -2108,6 +2189,23 @@
         engine
             .call_win64(wake, [condition, 0, 0, 0, 0, 0])
             .unwrap();
+        let static_condition = DATA_BASE + 0x9c0;
+        engine
+            .call_win64(wake, [static_condition, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .windows_condition_variables
+                .contains(&static_condition)
+        );
+        let malformed_condition = DATA_BASE + 0x9d0;
+        engine.write(malformed_condition, &[1; 8]).unwrap();
+        let error = engine
+            .call_win64(wake, [malformed_condition, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("zero-initialized"), "{error}");
         let error = engine
             .call_win64(
                 HOST_SLEEP_CONDITION_VARIABLE_CS,
