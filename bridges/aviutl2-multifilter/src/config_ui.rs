@@ -19,13 +19,14 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::UI::Controls::{
     ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_WIDTH, LVCOLUMNW,
-    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_GETITEMSTATE, LVM_INSERTCOLUMNW,
-    LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE, LVS_EX_CHECKBOXES,
+    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_GETITEMCOUNT, LVM_GETITEMSTATE,
+    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE,
+    LVS_EX_CHECKBOXES,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DialogBoxIndirectParamW, EndDialog, GetClientRect, GetDlgItem, GetWindowTextLengthW,
-    GetWindowTextW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW, SendMessageW,
-    SetDlgItemTextW, SetWindowLongPtrW, WM_COMMAND, WM_INITDIALOG,
+    DialogBoxIndirectParamW, EndDialog, GetClientRect, GetDlgItem, GetSystemMetrics,
+    GetWindowTextLengthW, GetWindowTextW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW,
+    SM_CXVSCROLL, SendMessageW, SetDlgItemTextW, SetWindowLongPtrW, WM_COMMAND, WM_INITDIALOG,
 };
 
 /// The values shown in (and read back from) the dialog, all as text. List
@@ -119,6 +120,10 @@ fn compose_ignore(checked: Vec<String>, manual: &str) -> Vec<String> {
 /// right now (ignored ones included — they are exactly what the list is for)
 /// plus everything the discovery cache remembers (an effect missing this
 /// launch can still be un-ignored).
+///
+/// Runs on the UI thread when the dialog opens. The walk is the same one
+/// `RegisterPlugin` already does on the load thread every launch, so a folder
+/// set slow enough to stall the dialog stalls every startup first.
 fn known_effects(config: &Config) -> Vec<PathBuf> {
     let (dirs, _) = resolve_scan_dirs(config);
     let mut known = collect_aex(&dirs, &[]).seen;
@@ -359,9 +364,9 @@ const IDC_OK: u16 = 1; // IDOK
 const IDC_CANCEL: u16 = 2; // IDCANCEL
 
 /// The dialog's per-window slot for application data. WinUser.h defines it as
-/// `DWLP_DLGPROC + sizeof(LONG_PTR)` where `DWLP_DLGPROC` is
-/// `DWLP_MSGRESULT + sizeof(LRESULT)`; windows-sys does not carry the derived
-/// constant.
+/// `DWLP_DLGPROC + sizeof(DLGPROC)` where `DWLP_DLGPROC` is
+/// `DWLP_MSGRESULT + sizeof(LRESULT)` — two pointer-sized slots in; windows-sys
+/// does not carry the derived constant.
 const DWLP_USER: i32 = 2 * std::mem::size_of::<isize>() as i32;
 
 /// What `WM_INITDIALOG` fills the controls from — and what the save reads the
@@ -505,11 +510,23 @@ fn dialog_init(dialog: WsHWND) -> Option<&'static DialogInit> {
 }
 
 /// Reads the controls back, validates, and saves. `false` keeps the dialog
-/// open (the message box already said why).
+/// open — after a message box saying why, except in the init-never-ran case,
+/// which cannot be reached by clicking OK on a dialog that never initialized.
 fn save_from_dialog(dialog: WsHWND) -> bool {
     let Some(init) = dialog_init(dialog) else {
         return false;
     };
+    // A checklist holding fewer rows than it was given (a failed insert; see
+    // `fill_ignore_list`) reads every shifted row as unchecked, which would
+    // save a silently un-ignored effect. Refuse instead.
+    if ignore_list_count(dialog) != Some(init.rows.len()) {
+        message_box(
+            dialog,
+            "無視リストの表示が壊れているため保存を中止しました。ダイアログを開き直してください。",
+            MB_ICONERROR,
+        );
+        return false;
+    }
     let checked: Vec<String> = init
         .rows
         .iter()
@@ -576,7 +593,11 @@ fn fill_ignore_list(dialog: WsHWND, rows: &[IgnoreRow]) {
             LVS_EX_CHECKBOXES as WPARAM,
             LVS_EX_CHECKBOXES as LPARAM,
         );
-        // One full-width column; the view is LVS_REPORT with no header.
+        // One full-width column; the view is LVS_REPORT with no header. The
+        // client rect is measured before any item exists, so leave room for
+        // the vertical scrollbar the (usually long) list will show — sizing to
+        // the bare width adds a useless horizontal scrollbar the moment the
+        // vertical one appears.
         let mut client = RECT {
             left: 0,
             top: 0,
@@ -586,7 +607,7 @@ fn fill_ignore_list(dialog: WsHWND, rows: &[IgnoreRow]) {
         GetClientRect(list, &mut client);
         let mut column: LVCOLUMNW = std::mem::zeroed();
         column.mask = LVCF_WIDTH;
-        column.cx = client.right - client.left;
+        column.cx = client.right - client.left - GetSystemMetrics(SM_CXVSCROLL);
         SendMessageW(list, LVM_INSERTCOLUMNW, 0, &column as *const LVCOLUMNW as LPARAM);
         for (index, row) in rows.iter().enumerate() {
             let mut name: Vec<u16> = row.name.encode_utf16().chain([0]).collect();
@@ -594,7 +615,21 @@ fn fill_ignore_list(dialog: WsHWND, rows: &[IgnoreRow]) {
             item.mask = LVIF_TEXT;
             item.iItem = index as i32;
             item.pszText = name.as_mut_ptr();
-            SendMessageW(list, LVM_INSERTITEMW, 0, &item as *const LVITEMW as LPARAM);
+            let at = SendMessageW(list, LVM_INSERTITEMW, 0, &item as *const LVITEMW as LPARAM);
+            // A failed insert would shift every later row off its index — the
+            // pairing the save reads check states back through — and an
+            // off-by-one read turns into a silently un-ignored effect. Stop
+            // filling instead: the save refuses a list whose count does not
+            // match its rows. Not expected outside comctl32 allocation
+            // failure.
+            if at != index as isize {
+                log_warn(&format!(
+                    "the ignore checklist could not be filled (insert of \"{}\" returned {at}); \
+                     saving from this dialog is disabled",
+                    row.name
+                ));
+                break;
+            }
             let mut state: LVITEMW = std::mem::zeroed();
             state.state = state_image(row.ignored);
             state.stateMask = LVIS_STATEIMAGEMASK;
@@ -605,6 +640,15 @@ fn fill_ignore_list(dialog: WsHWND, rows: &[IgnoreRow]) {
                 &state as *const LVITEMW as LPARAM,
             );
         }
+    }
+}
+
+/// How many rows the checklist actually holds, or `None` without the control.
+fn ignore_list_count(dialog: WsHWND) -> Option<usize> {
+    // SAFETY: `dialog` is the live dialog; the message carries no pointers.
+    unsafe {
+        let list = GetDlgItem(dialog, IDC_IGNORE_LIST as i32);
+        (!list.is_null()).then(|| SendMessageW(list, LVM_GETITEMCOUNT, 0, 0).max(0) as usize)
     }
 }
 
@@ -707,7 +751,7 @@ fn build_dialog_template() -> Vec<u32> {
     push_u32(&mut words, 0);
     let count_at = words.len();
     words.push(0);
-    for value in [0i16, 0, 340, 361] {
+    for value in [0i16, 0, 340, 333] {
         words.push(value as u16);
     }
     words.push(0);
@@ -733,18 +777,18 @@ fn build_dialog_template() -> Vec<u32> {
         ItemClass::Atom(ATOM_STATIC),
         "スキャンフォルダ (1行に1つ / 空欄なら After Effects と MediaCore の既定フォルダ)",
     );
-    item(multiline, [7, 17, 326, 46], IDC_DIRS, ItemClass::Atom(ATOM_EDIT), "");
+    item(multiline, [7, 17, 326, 38], IDC_DIRS, ItemClass::Atom(ATOM_EDIT), "");
 
     item(
         SS_NOPREFIX,
-        [7, 69, 326, 8],
+        [7, 61, 326, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "依存 DLL フォルダ (1行に1つ / 空欄なら After Effects の既定)",
     );
     item(
         multiline,
-        [7, 79, 326, 34],
+        [7, 71, 326, 28],
         IDC_DEPENDENCY_DIRS,
         ItemClass::Atom(ATOM_EDIT),
         "",
@@ -752,28 +796,28 @@ fn build_dialog_template() -> Vec<u32> {
 
     item(
         SS_NOPREFIX,
-        [7, 119, 326, 8],
+        [7, 105, 326, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "無視するエフェクト (チェック = 無視 / 一覧はスキャン結果と discovery キャッシュ)",
     );
     item(
         LVS_REPORT | LVS_SINGLESEL | LVS_NOCOLUMNHEADER | WS_BORDER | WS_TABSTOP,
-        [7, 129, 326, 64],
+        [7, 115, 326, 48],
         IDC_IGNORE_LIST,
         ItemClass::Named("SysListView32"),
         "",
     );
     item(
         SS_NOPREFIX,
-        [7, 197, 326, 8],
+        [7, 169, 326, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "一覧に無いエフェクトを手動指定 (1行に1つ / .aex 拡張子は省略可)",
     );
     item(
         multiline,
-        [7, 207, 326, 20],
+        [7, 179, 326, 16],
         IDC_IGNORE,
         ItemClass::Atom(ATOM_EDIT),
         "",
@@ -781,14 +825,14 @@ fn build_dialog_template() -> Vec<u32> {
 
     item(
         SS_NOPREFIX,
-        [7, 231, 326, 8],
+        [7, 201, 326, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "worker リポジトリ (通常は空欄: プラグインと同じフォルダの worker を使用)",
     );
     item(
         single,
-        [7, 241, 326, 13],
+        [7, 211, 326, 13],
         IDC_REPOSITORY,
         ItemClass::Atom(ATOM_EDIT),
         "",
@@ -796,28 +840,28 @@ fn build_dialog_template() -> Vec<u32> {
 
     item(
         SS_NOPREFIX,
-        [7, 260, 170, 8],
+        [7, 230, 170, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "依存 DLL 数の上限 (空欄 = 無制限)",
     );
     item(
         number,
-        [181, 258, 60, 13],
+        [181, 228, 60, 13],
         IDC_MODULE_LIMIT,
         ItemClass::Atom(ATOM_EDIT),
         "",
     );
     item(
         SS_NOPREFIX,
-        [7, 276, 170, 8],
+        [7, 246, 170, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "依存 DLL 合計バイト数の上限 (空欄 = 無制限)",
     );
     item(
         number,
-        [181, 274, 90, 13],
+        [181, 244, 90, 13],
         IDC_BYTE_LIMIT,
         ItemClass::Atom(ATOM_EDIT),
         "",
@@ -826,14 +870,14 @@ fn build_dialog_template() -> Vec<u32> {
     // Tall enough for every env-override line at once (four are possible).
     item(
         SS_NOPREFIX,
-        [7, 292, 326, 34],
+        [7, 262, 326, 34],
         IDC_ENV_NOTE,
         ItemClass::Atom(ATOM_STATIC),
         "",
     );
     item(
         SS_NOPREFIX,
-        [7, 328, 326, 8],
+        [7, 300, 326, 8],
         0xFFFF,
         ItemClass::Atom(ATOM_STATIC),
         "変更は AviUtl2 の再起動後に反映されます。",
@@ -841,14 +885,14 @@ fn build_dialog_template() -> Vec<u32> {
 
     item(
         BS_DEFPUSHBUTTON | WS_TABSTOP,
-        [222, 340, 50, 14],
+        [222, 312, 50, 14],
         IDC_OK,
         ItemClass::Atom(ATOM_BUTTON),
         "OK",
     );
     item(
         WS_TABSTOP,
-        [277, 340, 56, 14],
+        [277, 312, 56, 14],
         IDC_CANCEL,
         ItemClass::Atom(ATOM_BUTTON),
         "キャンセル",
