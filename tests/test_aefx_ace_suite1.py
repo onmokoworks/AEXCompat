@@ -3,9 +3,10 @@
 Issue #776: ``Photo Filter.aex`` refused every frame with error 516 ("Not able
 to acquire AEFX Suite") because the host published no such suite. Observation
 of its RENDER path (the worker's suite-call slot probe, then the caller's own
-disassembly) fixed a three-slot x64 table whose slot 0 widens packed 8-bit
-pixels into AE's 0..32768 16-bit range and whose slot 2 narrows them back;
-slot 1 is never called and stays a diagnosed unsupported slot.
+disassembly) identified slot 0, which widens packed 8-bit pixels into AE's
+0..32768 16-bit range, and slot 2, which narrows them back. Every other slot
+of the published table, slot 1 included, is a diagnosed unsupported stub,
+since the observation bounds the real table from below only.
 
 The quality argument is one byte: the caller writes it with ``sete dl`` and
 leaves the rest of the register alone, so a word-sized parameter would carry

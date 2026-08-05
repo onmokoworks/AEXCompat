@@ -31,8 +31,8 @@ inline constexpr int32_t kSuiteVersion1 = 1;
 // there before. Declaring it `int32_t` and validating against 0/1 rejects
 // every real call, which is how this was found.
 //
-// Slot 1 was never called, so its signature is unknown; it is published as a
-// diagnosed unsupported slot rather than guessed at.
+// Slot 1 sits between them and was never called, so its signature is unknown;
+// it is published as a diagnosed unsupported slot rather than guessed at.
 //
 // This host has no colour management, so both conversions are the range
 // mapping the rest of the worker already uses between 8-bit and 16-bit worlds
@@ -57,10 +57,11 @@ static_assert(sizeof(bool) == 1);
 using ConvertPixels = int32_t (__cdecl *)(int32_t, bool, const void*, void*);
 
 // Only slots 0 and 2 were observed, which bounds the table from below and not
-// from above. Every slot past the two implementations is a diagnosed
-// unsupported stub so that a caller reaching further produces a recorded
-// diagnostic instead of an indirect call through whatever follows the table.
-inline constexpr std::size_t kSlotCount = 16;
+// from above. Every other slot is a diagnosed unsupported stub, so a caller
+// reaching further produces a recorded diagnostic instead of an indirect call
+// through whatever follows the table. The count matches the slot probe's, so
+// a slot the probe can observe is a slot this table answers.
+inline constexpr std::size_t kSlotCount = 32;
 
 struct Suite1 {
   ConvertPixels to_working;
