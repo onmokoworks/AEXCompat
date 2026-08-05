@@ -319,96 +319,51 @@ int32_t __cdecl timeline_get_audio_data(
 }
 
 aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks() {
-  // Deduce the native table length from its initializers, then compare it with
-  // the generated ABI contract. std::array's ordinary aggregate initialization
-  // silently zero-fills a short list, which previously let new middle slots
-  // shift every callback that followed them.
-  const std::array utility_callbacks{
-    reinterpret_cast<void*>(&begin_sampling8), reinterpret_cast<void*>(&subpixel_sample8),
-    reinterpret_cast<void*>(&area_sample8), reinterpret_cast<void*>(&end_sampling8),
-    reinterpret_cast<void*>(&blend_world), reinterpret_cast<void*>(&convolve_world),
-    reinterpret_cast<void*>(&copy_world8), reinterpret_cast<void*>(&fill_world8),
-    reinterpret_cast<void*>(&premultiply_world8), reinterpret_cast<void*>(&premultiply_color8),
-    // The 16-bit sampling pair. Left unwired until issue #777: a deep-colour
-    // plug-in that sampled - AE's own Displacement does - called through a null
-    // slot and access-violated at address 0.
-    reinterpret_cast<void*>(&subpixel_sample16), reinterpret_cast<void*>(&area_sample16),
-    reinterpret_cast<void*>(&fill_world16), reinterpret_cast<void*>(&premultiply_color16),
-    reinterpret_cast<void*>(&iterate_world16), reinterpret_cast<void*>(&iterate_world8),
-    reinterpret_cast<void*>(&iterate_origin8),
-    reinterpret_cast<void*>(&legacy_new_world),
-    reinterpret_cast<void*>(&dispose_world), reinterpret_cast<void*>(&transfer_rect),
-    reinterpret_cast<void*>(&transform_world),
-    reinterpret_cast<void*>(&get_callback_addr),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_ceil),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_cos),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_hypot),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_pow),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sin),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sqrt),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_asin),
-    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_acos),
-    reinterpret_cast<void*>(&get_platform_data), reinterpret_cast<void*>(&get_pixel_data8),
-    reinterpret_cast<void*>(&get_pixel_data16),
-    // Handle callbacks in in_data->utils (issue #220): a conformant AE host
-    // provides host_new_handle/lock/unlock/dispose/get_size/resize through the
-    // utility block, not only through the PF Handle Suite.
-    reinterpret_cast<void*>(&new_handle), reinterpret_cast<void*>(&lock_handle),
-    reinterpret_cast<void*>(&unlock_handle), reinterpret_cast<void*>(&dispose_handle),
-    reinterpret_cast<void*>(&handle_size), reinterpret_cast<void*>(&resize_handle),
-    reinterpret_cast<void*>(&host_app_callback)};
-  static_assert(
-      utility_callbacks.size() ==
-          aexcompat::abi::x86_64_windows::UTILITY_CALLBACK_OFFSETS.size(),
-      "native utility hooks must match the generated ABI table one-to-one");
-  // The assert above is a count, not an ordering: transposing two entries in
-  // this list still builds, and every plug-in then gets the wrong callback
-  // through the right-looking slot. Nothing in the tree catches that for the
-  // other entries (issue #792). Pin the callbacks added by #777 and #793,
-  // especially the same-signature ANSI neighbours that could be swapped while
-  // every compile and shallow non-null check still succeeds.
-  {
-    const auto& offsets = aexcompat::abi::x86_64_windows::UTILITY_CALLBACK_OFFSETS;
-    const auto index_of = [&offsets](std::size_t offset) {
-      for (std::size_t index = 0; index < offsets.size(); ++index)
-        if (offsets[index] == offset) return index;
-      return offsets.size();
-    };
-    const std::array expected_wiring{
-        std::pair{aexcompat::abi::x86_64_windows::UTILS_SUBPIXEL_SAMPLE16_OFFSET,
-                  reinterpret_cast<void*>(&subpixel_sample16)},
-        std::pair{aexcompat::abi::x86_64_windows::UTILS_AREA_SAMPLE16_OFFSET,
-                  reinterpret_cast<void*>(&area_sample16)},
-        std::pair{aexcompat::abi::x86_64_windows::UTILS_GET_CALLBACK_ADDR_OFFSET,
-                  reinterpret_cast<void*>(&get_callback_addr)},
-        std::pair{aexcompat::abi::x86_64_windows::UTILS_ANSI_COS_OFFSET,
-                  reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_cos)},
-        std::pair{aexcompat::abi::x86_64_windows::UTILS_ANSI_SQRT_OFFSET,
-                  reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sqrt)},
-        std::pair{aexcompat::abi::x86_64_windows::UTILS_ANSI_ASIN_OFFSET,
-                  reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_asin)},
-        std::pair{aexcompat::abi::x86_64_windows::UTILS_ANSI_ACOS_OFFSET,
-                  reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_acos)},
-    };
-    const bool wiring_matches = std::all_of(
-        expected_wiring.begin(), expected_wiring.end(), [&](const auto& expected) {
-          const auto index = index_of(expected.first);
-          return index < utility_callbacks.size() &&
-              utility_callbacks[index] == expected.second;
-        });
-    if (!wiring_matches) {
-      // `_end error=` is the shape the broker's stage parser accepts; a bare
-      // marker is dropped, and the abort below would then read as an
-      // unattributed 0xC0000409 crash. The -5 is this host's generic internal
-      // failure code, used here because the condition is a host wiring bug with
-      // no PF error that describes it.
-      std::cerr << "stage:utility_table_mismatch_end error=-5\n" << std::flush;
-      std::abort();
-    }
-  }
+  aexcompat::pf_utility_callbacks::Sources sources{};
+  sources.begin_sampling = reinterpret_cast<void*>(&begin_sampling8);
+  sources.subpixel_sample = reinterpret_cast<void*>(&subpixel_sample8);
+  sources.area_sample = reinterpret_cast<void*>(&area_sample8);
+  sources.end_sampling = reinterpret_cast<void*>(&end_sampling8);
+  sources.blend = reinterpret_cast<void*>(&blend_world);
+  sources.convolve = reinterpret_cast<void*>(&convolve_world);
+  sources.copy = reinterpret_cast<void*>(&copy_world8);
+  sources.fill = reinterpret_cast<void*>(&fill_world8);
+  sources.premultiply = reinterpret_cast<void*>(&premultiply_world8);
+  sources.premultiply_color = reinterpret_cast<void*>(&premultiply_color8);
+  sources.subpixel_sample16 = reinterpret_cast<void*>(&subpixel_sample16);
+  sources.area_sample16 = reinterpret_cast<void*>(&area_sample16);
+  sources.fill16 = reinterpret_cast<void*>(&fill_world16);
+  sources.premultiply_color16 = reinterpret_cast<void*>(&premultiply_color16);
+  sources.iterate16 = reinterpret_cast<void*>(&iterate_world16);
+  sources.iterate = reinterpret_cast<void*>(&iterate_world8);
+  sources.iterate_origin = reinterpret_cast<void*>(&iterate_origin8);
+  sources.new_world = reinterpret_cast<void*>(&legacy_new_world);
+  sources.dispose_world = reinterpret_cast<void*>(&dispose_world);
+  sources.transfer_rect = reinterpret_cast<void*>(&transfer_rect);
+  sources.transform_world = reinterpret_cast<void*>(&transform_world);
+  sources.get_callback_addr = reinterpret_cast<void*>(&get_callback_addr);
+  sources.ansi_ceil = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_ceil);
+  sources.ansi_cos = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_cos);
+  sources.ansi_fabs = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs);
+  sources.ansi_hypot = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_hypot);
+  sources.ansi_pow = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_pow);
+  sources.ansi_sin = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sin);
+  sources.ansi_sqrt = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sqrt);
+  sources.ansi_sprintf = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf);
+  sources.ansi_strcpy = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy);
+  sources.ansi_asin = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_asin);
+  sources.ansi_acos = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_acos);
+  sources.get_platform_data = reinterpret_cast<void*>(&get_platform_data);
+  sources.get_pixel_data8 = reinterpret_cast<void*>(&get_pixel_data8);
+  sources.get_pixel_data16 = reinterpret_cast<void*>(&get_pixel_data16);
+  sources.host_new_handle = reinterpret_cast<void*>(&new_handle);
+  sources.host_lock_handle = reinterpret_cast<void*>(&lock_handle);
+  sources.host_unlock_handle = reinterpret_cast<void*>(&unlock_handle);
+  sources.host_dispose_handle = reinterpret_cast<void*>(&dispose_handle);
+  sources.host_get_handle_size = reinterpret_cast<void*>(&handle_size);
+  sources.host_resize_handle = reinterpret_cast<void*>(&resize_handle);
+  sources.app = reinterpret_cast<void*>(&host_app_callback);
+  const auto utility_callbacks = aexcompat::pf_utility_callbacks::build(sources);
 
   return {{reinterpret_cast<void*>(&timeline_checkout_param),
     reinterpret_cast<void*>(&timeline_checkin_param),

@@ -21,6 +21,7 @@
 #include "worker_effect_bootstrap.hpp"
 #include "worker_pf_sampling_runtime.hpp"
 #include "worker_pf_suites_internal.hpp"
+#include "worker_pf_utility_callback_table.hpp"
 #include "worker_suite_registry.hpp"
 
 #include <array>
@@ -245,12 +246,32 @@ void get_callback_addr_is_typed_bounded_and_clears_failures() {
         "get_callback_addr rejects a null output pointer");
 }
 
+void production_utility_builder_is_offset_indexed() {
+  aexcompat::pf_utility_callbacks::Sources sources{};
+  // Populate named sources in reverse binding order. The result must still
+  // follow the generated ABI offsets, proving construction is independent of
+  // initializer position (issue #792).
+  for (std::size_t reverse = aexcompat::pf_utility_callbacks::BINDINGS.size();
+       reverse > 0; --reverse) {
+    const auto& binding = aexcompat::pf_utility_callbacks::BINDINGS[reverse - 1];
+    sources.*(binding.source) = reinterpret_cast<void*>((reverse + 1) * sizeof(void*));
+  }
+  const auto callbacks = aexcompat::pf_utility_callbacks::build(sources);
+  for (const auto& binding : aexcompat::pf_utility_callbacks::BINDINGS) {
+    const auto index = aexcompat::pf_utility_callbacks::index_of(binding.offset);
+    check(index < callbacks.size(), "named utility binding belongs to generated contract");
+    check(callbacks[index] == sources.*(binding.source),
+          "named utility source is installed at its own generated offset");
+  }
+}
+
 }  // namespace
 
 int main() {
   a_null_effect_ref_still_samples();
   the_utility_table_is_wired_one_to_one();
   get_callback_addr_is_typed_bounded_and_clears_failures();
+  production_utility_builder_is_offset_indexed();
   if (failures == 0) std::printf("{\"pf_sampling_wiring_selftest\":\"passed\"}\n");
   return failures == 0 ? 0 : 1;
 }
