@@ -2152,9 +2152,9 @@ fn legacy_sample_arguments(
     unicorn: &Unicorn<'_, GuestState>,
     callback: &str,
 ) -> Result<Option<(i32, i32, u64, u64)>, String> {
-    let effect_ref = unicorn
-        .reg_read(RegisterX86::RCX)
-        .map_err(|error| format!("{callback} effect ref: {error}"))?;
+    // AE's legacy sampling callbacks accept a null effect_ref (Adobe's
+    // Displacement passes one), and neither sampling operation consumes it.
+    // Keep the pointers that are actually dereferenced fail-closed below.
     let fixed_x = unicorn
         .reg_read(RegisterX86::RDX)
         .map_err(|error| format!("{callback} x: {error}"))? as u32 as i32;
@@ -2165,14 +2165,12 @@ fn legacy_sample_arguments(
         .reg_read(RegisterX86::R9)
         .map_err(|error| format!("{callback} params: {error}"))?;
     let destination = aegp_stack_arg(unicorn, 0x28)?;
-    Ok(
-        (effect_ref != 0 && params != 0 && destination != 0).then_some((
-            fixed_x,
-            fixed_y,
-            params,
-            destination,
-        )),
-    )
+    Ok((params != 0 && destination != 0).then_some((
+        fixed_x,
+        fixed_y,
+        params,
+        destination,
+    )))
 }
 
 fn finish_legacy_sample(unicorn: &mut Unicorn<'_, GuestState>, result: Result<bool, String>) {

@@ -933,7 +933,7 @@
             engine
                 .call_win64(
                     HOST_SUBPIXEL_SAMPLE8,
-                    [1, 0x8000, 0x8000, params, destination, 0],
+                    [0, 0x8000, 0x8000, params, destination, 0],
                 )
                 .unwrap(),
             0
@@ -971,7 +971,7 @@
             engine
                 .call_win64(
                     HOST_AREA_SAMPLE8,
-                    [1, 0x8000, 0x8000, params, destination, 0],
+                    [0, 0x8000, 0x8000, params, destination, 0],
                 )
                 .unwrap(),
             0
@@ -996,6 +996,50 @@
             engine.unicorn.mem_read_as_vec(destination, 4).unwrap(),
             [7, 7, 7, 7]
         );
+    }
+
+    #[test]
+    fn legacy_sampling_accepts_null_effect_ref_but_rejects_dereferenced_nulls() {
+        let mut engine = test_engine(&[0xc3]);
+        let (params, destination, _) = argb8_sampling_fixture(&mut engine);
+        engine.write(params, &0x8000i32.to_le_bytes()).unwrap();
+        engine.write(params + 4, &0x8000i32.to_le_bytes()).unwrap();
+        engine
+            .write(params + 8, &0x1_0000i32.to_le_bytes())
+            .unwrap();
+
+        for callback in [HOST_SUBPIXEL_SAMPLE8, HOST_AREA_SAMPLE8] {
+            engine.write(destination, &[7, 7, 7, 7]).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(callback, [0, 0x8000, 0x8000, params, destination, 0])
+                    .unwrap(),
+                0,
+                "null effect_ref is an accepted, unused argument"
+            );
+
+            engine.write(destination, &[7, 7, 7, 7]).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(callback, [1, 0x8000, 0x8000, 0, destination, 0])
+                    .unwrap(),
+                4,
+                "null sampling params remain rejected"
+            );
+            assert_eq!(
+                engine.unicorn.mem_read_as_vec(destination, 4).unwrap(),
+                [7, 7, 7, 7],
+                "a rejected call must not write the destination"
+            );
+
+            assert_eq!(
+                engine
+                    .call_win64(callback, [1, 0x8000, 0x8000, params, 0, 0])
+                    .unwrap(),
+                4,
+                "null destination remains rejected"
+            );
+        }
     }
 
     #[test]
