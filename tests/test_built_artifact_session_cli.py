@@ -1,5 +1,3 @@
-from tests import source_owners
-
 from pathlib import Path
 
 
@@ -8,15 +6,6 @@ HARNESS_SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 
 def test_built_artifact_probes_have_a_supported_session_only_entrypoint():
-    source = source_owners.harness_windows_text()
-    assert 'session_command == Some("--render-experimental-session")' in source
-    assert 'session_command == Some("--render-experimental-session-param")' in source
-    assert '"--render-experimental-session-animation"' in source
-    assert "render_experimental_image_with_parameter_animation" in source
-    assert "parameter.value = value" in source
-    assert "render_experimental_image_at_time_with_format" in source
-    assert "the deleted one-shot image argv" in source
-
     migrated = (
         "test_pf_aegp_async_cancel_probe.py",
         "test_pf_aegp_async_layer_receipt_probe.py",

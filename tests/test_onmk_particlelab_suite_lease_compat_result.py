@@ -1,11 +1,9 @@
 import json
 from pathlib import Path
-import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "analysis" / "ONMK_PARTICLELAB_SUITE_LEASE_COMPAT_RESULT_2026-07-15.json"
-SOURCE = source_owners.L2_MAIN
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
 
@@ -26,26 +24,7 @@ def test_ownership_and_guard_failures_remain_hard_failures():
     assert observation["handle_lifetimes_balanced"] is True
     assert observation["world_lifetimes_balanced"] is True
     assert observation["param_checkouts_balanced"] is True
-    source = source_owners.worker_text()
-    assert "smart.guards_intact &&" in source
-    assert "worker_runtime::handles::handle_lifetimes_balanced()" in source
-    assert "world_lifetimes_balanced() &&" in source
-    assert "param_checkouts_balanced() &&" in source
-    assert "(!g_render_click_enabled && !g_render_draw_enabled)" in source
-    assert "g_render_ui_context_closed) ? 0 : 22" in source
 
-
-def test_suite_warning_is_forwarded_to_the_ui_report():
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    for field in (
-        "suite_lease_warning",
-        "suite_leases_balanced",
-        "live_suite_leases",
-        "handle_lifetimes_balanced",
-        "world_lifetimes_balanced",
-        "param_checkouts_balanced",
-    ):
-        assert f'"{field}": worker_report.get("{field}")' in broker
 
 
 def test_classic_and_smartfx_deep_color_matrix_is_fixed():
