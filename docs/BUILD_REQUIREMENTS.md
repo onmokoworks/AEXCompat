@@ -8,6 +8,7 @@
 
 | コンポーネント | 生成物 | 必要なもの |
 |---|---|---|
+| Apple Silicon correctness CLI (`guest/`) | arm64 worker / local ad-hoc DMG | Apple Silicon Mac + Rust/Cargo |
 | Rust broker / harness (`broker/`) | `aexcompat-harness.exe` (GUI) ほか | Rust + MSVC Build Tools + Windows SDK |
 | Python テスト (`tests/`) | - | uv (`pyproject.toml` + `uv.lock`、一部は下記 SDK / VS も) |
 | C++ worker (`minihost/`) | `aex_l2_worker.exe` / `aex_render_worker.exe` ほか | CMake + MSVC (After Effects SDK 不要) |
@@ -15,7 +16,33 @@
 | SDK sample fixture (v143 固定分: Grabba / Supervisor 等) | `Grabba.aex` ほか | v143 toolset + MSBuild + After Effects SDK (Supervisor は VS 2022 Build Tools 既定パス固定) |
 | AE oracle 取得 (`tools/*.jsx`) | 参照画像 / trace | After Effects 25.2 実機 |
 
-## 共通要件
+## Apple Silicon Mac単体の通常経路
+
+Windows x64 AEXをarm64 Unicorn correctness backendでbuild・署名・package・実行・診断する
+通常経路に必要なのは、Apple Silicon MacとRust/Cargoだけである。Windows実機、VM、Wine、
+Windowsでbuildしたworker、Rosetta、Visual Studio、After Effects SDK、Developer ID証明書、
+notarization credentialは必要ない。
+
+```sh
+tools/prepare-local-macos-aex-carriers.sh /tmp/aexcompat-local.dmg
+```
+
+このコマンドはarm64 Release build、ad-hoc Hardened Runtime署名、arm64-only DMG作成、
+read-only mount、manifest/hash/signature/architecture/launch検証を順番に行う。手元のAEXとPNGを
+使って、mountしたDMG内workerによるrenderとstructured diagnosticも検証できる。
+
+```sh
+AEXCOMPAT_SMOKE_AEX=/absolute/path/to/effect.aex \
+AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
+  tools/prepare-local-macos-aex-carriers.sh /tmp/aexcompat-local-smoke.dmg
+```
+
+smoke入力はpackageへ複製されない。どちらか一方だけの指定、render/cleanup失敗、不正JSON、
+unsupported suite evidence、欠落/不正PNGはfail-closedで非0終了する。
+`AEXCOMPAT_INCLUDE_NATIVE_CARRIER=1`はtrusted-only x86_64/Rosetta比較経路の明示opt-inであり、
+通常経路では設定しない。Developer ID/notarizationは第三者配布向けの任意tierである。
+
+## Windowsコンポーネントの共通要件
 
 - Windows 10 / 11 x64
 - Git

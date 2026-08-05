@@ -54,8 +54,8 @@ AEXCompatは、Adobe After EffectsのEffect AEXをAfter Effects本体の外で�
 
 | 項目 | 現在の対象 |
 |---|---|
-| Windows x64 | primary。Rust broker / harness + C++ / MSVC x64 worker |
-| macOS Apple Silicon | experimental。arm64 Unicorn backend、任意でRosetta x86_64 native carrier |
+| Windows x64 | Rust broker / harness + C++ / MSVC x64 worker |
+| macOS Apple Silicon | Mac単体で完結するarm64 Unicorn CLI。Rosetta native carrierは任意opt-in |
 | Windows ARM64 | 未対応 |
 | SDK | Adobe After Effects SDK 2025を基準に検証 |
 | UI / broker | Rust 2024 edition |
@@ -67,7 +67,33 @@ Apple Siliconではarm64 Unicorn workerがWindows x64 AEXをguestとして実行
 
 ### クイックスタート
 
-#### 必要なもの
+#### Apple Silicon Mac（Windows・Rosetta・証明書不要）
+
+Rust/Cargoを用意すると、arm64 workerのRelease build、ad-hoc Hardened Runtime署名、
+DMG package、mount後の署名・manifest・起動検証を一つのコマンドで実行できます。
+
+```sh
+git clone https://github.com/onmokoworks/AEXCompat.git
+cd AEXCompat
+tools/prepare-local-macos-aex-carriers.sh /tmp/aexcompat-local.dmg
+```
+
+手元のWindows x64 AEXとPNGで、DMG内のworkerそのものによるrenderとstructured
+diagnosticまで検証する場合は、次の2変数を同時に指定します。AEXや入力画像はpackageへ
+収録されません。
+
+```sh
+AEXCOMPAT_SMOKE_AEX=/absolute/path/to/effect.aex \
+AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
+  tools/prepare-local-macos-aex-carriers.sh /tmp/aexcompat-local-smoke.dmg
+```
+
+通常経路はarm64 Unicornだけをbuild・package・実行します。Developer IDとnotarizationは
+第三者配布向けの任意経路で、local ad-hoc packageの完了条件ではありません。
+`AEXCOMPAT_INCLUDE_NATIVE_CARRIER=1`を明示した場合だけ、trusted AEX向けx86_64/Rosetta
+carrierを追加します。
+
+#### Windows desktop harnessに必要なもの
 
 - Windows 10または11 x64
 - Rust toolchainとCargo
@@ -248,8 +274,8 @@ This project is experimental and pre-alpha. The optional Apple Silicon x86_64 na
 
 | Component | Current target |
 |---|---|
-| Windows x64 | Primary: Rust broker / harness and C++ / MSVC x64 worker |
-| macOS Apple Silicon | Experimental: arm64 Unicorn backend, optionally Rosetta x86_64 native carrier |
+| Windows x64 | Rust broker / harness and C++ / MSVC x64 worker |
+| macOS Apple Silicon | Mac-local arm64 Unicorn CLI; Rosetta native carrier is optional and opt-in |
 | Windows ARM64 | Unsupported |
 | SDK baseline | Adobe After Effects SDK 2025 |
 | UI / broker | Rust 2024 edition |
@@ -261,7 +287,33 @@ On Apple Silicon, the arm64 Unicorn worker executes Windows x64 AEX code as a gu
 
 ### Quick Start
 
-Requirements: Windows x64, Rust/Cargo, Visual Studio with the MSVC C++ toolchain (the required edition and toolset vary by component), CMake, and a local After Effects SDK when building probes or SDK fixtures (not needed for minihost worker builds). See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for per-component details, SDK generation, and toolset requirements.
+#### Apple Silicon Mac (no Windows, Rosetta, or certificate required)
+
+With Rust/Cargo installed, one command builds the arm64 Release worker, applies
+an ad-hoc Hardened Runtime signature, creates a DMG, mounts it, and verifies its
+closed manifest, signature, architecture, and launch:
+
+```sh
+git clone https://github.com/onmokoworks/AEXCompat.git
+cd AEXCompat
+tools/prepare-local-macos-aex-carriers.sh /tmp/aexcompat-local.dmg
+```
+
+To smoke-test a local Windows x64 AEX and PNG through the worker inside the
+mounted DMG, set both inputs. They are not copied into the package:
+
+```sh
+AEXCOMPAT_SMOKE_AEX=/absolute/path/to/effect.aex \
+AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
+  tools/prepare-local-macos-aex-carriers.sh /tmp/aexcompat-local-smoke.dmg
+```
+
+The normal path builds, packages, and runs only the arm64 Unicorn worker.
+Developer ID and notarization are optional publication steps, not local-package
+gates. The trusted-only x86_64/Rosetta carrier is included only when
+`AEXCOMPAT_INCLUDE_NATIVE_CARRIER=1` is explicitly set.
+
+Windows desktop harness requirements: Windows x64, Rust/Cargo, Visual Studio with the MSVC C++ toolchain (the required edition and toolset vary by component), CMake, and a local After Effects SDK when building probes or SDK fixtures (not needed for minihost worker builds). See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for per-component details, SDK generation, and toolset requirements.
 
 Before SDK-backed tests or builds, set the SDK root as a user environment variable and reopen PowerShell:
 
