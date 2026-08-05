@@ -943,6 +943,49 @@ fn is_msvc_i32_throw_info(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) ->
     unicorn.mem_read(type_name + 16, &mut name).is_ok() && name == *b".H\0"
 }
 
+fn msvc_throw_type_name(
+    unicorn: &Unicorn<'_, GuestState>,
+    throw_info: u64,
+) -> Option<String> {
+    const MAX_TYPE_NAME_BYTES: u64 = 128;
+
+    let (image_start, image_end) = unicorn.get_data().image_region?;
+    if throw_info < image_start || throw_info.checked_add(16)? > image_end {
+        return None;
+    }
+    let catchable_array_rva = read_guest_u32(unicorn, throw_info.checked_add(12)?)?;
+    let catchable_array = image_rva_address(unicorn, catchable_array_rva, 8)?;
+    let catchable_count = read_guest_u32(unicorn, catchable_array)?;
+    if catchable_count == 0 || catchable_count > 32 {
+        return None;
+    }
+    let catchable_type_rva = read_guest_u32(unicorn, catchable_array.checked_add(4)?)?;
+    let catchable_type = image_rva_address(unicorn, catchable_type_rva, 28)?;
+    let type_descriptor_rva = read_guest_u32(unicorn, catchable_type.checked_add(4)?)?;
+    let type_descriptor = image_rva_address(unicorn, type_descriptor_rva, 17)?;
+    let name_start = type_descriptor.checked_add(16)?;
+    let mut bytes = Vec::new();
+    for offset in 0..MAX_TYPE_NAME_BYTES {
+        let address = name_start.checked_add(offset)?;
+        if address >= image_end {
+            return None;
+        }
+        let byte = unicorn.mem_read_as_vec(address, 1).ok()?[0];
+        if byte == 0 {
+            return if bytes.is_empty() {
+                None
+            } else {
+                String::from_utf8(bytes).ok()
+            };
+        }
+        if !byte.is_ascii_graphic() {
+            return None;
+        }
+        bytes.push(byte);
+    }
+    None
+}
+
 fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
     if try_emulate_selector_abort(unicorn) {
         return;
@@ -953,9 +996,14 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
     // non-selector, stale, malformed, differently typed, and unrelated throws
     // fail-closed instead.
     if unicorn.get_data().callback_error.is_none() {
-        unicorn.get_data_mut().callback_error = Some(
-            "guest called _CxxThrowException outside the supported selector-abort contract".into(),
-        );
+        let throw_type = unicorn
+            .reg_read(RegisterX86::RDX)
+            .ok()
+            .and_then(|throw_info| msvc_throw_type_name(unicorn, throw_info))
+            .unwrap_or_else(|| "unavailable".into());
+        unicorn.get_data_mut().callback_error = Some(format!(
+            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type})"
+        ));
     }
     let _ = unicorn.emu_stop();
 }
