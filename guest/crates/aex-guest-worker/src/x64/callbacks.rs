@@ -870,6 +870,83 @@ fn emulate_crt_memchr(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn compare_crt_memory(
+    unicorn: &Unicorn<'_, GuestState>,
+    left: u64,
+    right: u64,
+    length: u64,
+) -> Result<i32, String> {
+    if length > MAX_CRT_MEMORY_COPY_BYTES {
+        return Err(format!(
+            "memcmp length {length} exceeds {MAX_CRT_MEMORY_COPY_BYTES}"
+        ));
+    }
+    if length == 0 {
+        return Ok(0);
+    }
+    left.checked_add(length)
+        .ok_or_else(|| "memcmp left range overflow".to_string())?;
+    right
+        .checked_add(length)
+        .ok_or_else(|| "memcmp right range overflow".to_string())?;
+
+    let mut compared = 0u64;
+    while compared < length {
+        let chunk = (length - compared).min(CRT_MEMORY_COPY_CHUNK as u64);
+        let left_address = left
+            .checked_add(compared)
+            .ok_or_else(|| "memcmp left address overflow".to_string())?;
+        let right_address = right
+            .checked_add(compared)
+            .ok_or_else(|| "memcmp right address overflow".to_string())?;
+        let mut left_bytes = vec![0u8; chunk as usize];
+        let mut right_bytes = vec![0u8; chunk as usize];
+        unicorn
+            .mem_read(left_address, &mut left_bytes)
+            .map_err(|error| format!("memcmp left read: {error}"))?;
+        unicorn
+            .mem_read(right_address, &mut right_bytes)
+            .map_err(|error| format!("memcmp right read: {error}"))?;
+        if let Some((left, right)) = left_bytes
+            .iter()
+            .zip(&right_bytes)
+            .find(|(left, right)| left != right)
+        {
+            return Ok(i32::from(*left) - i32::from(*right));
+        }
+        compared += chunk;
+    }
+    Ok(0)
+}
+
+fn emulate_crt_memcmp(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<i32, String> {
+        let left = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("memcmp left pointer: {error}"))?;
+        let right = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("memcmp right pointer: {error}"))?;
+        let length = unicorn
+            .reg_read(RegisterX86::R8)
+            .map_err(|error| format!("memcmp length: {error}"))?;
+        compare_crt_memory(unicorn, left, right, length)
+    })();
+    match result {
+        Ok(ordering) => {
+            // An x64 `int` return is written through EAX, which clears the
+            // upper half of RAX while preserving the signed 32-bit value.
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(ordering as u32));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn read_crt_stdio_c_string(
     unicorn: &Unicorn<'_, GuestState>,
     address: u64,
