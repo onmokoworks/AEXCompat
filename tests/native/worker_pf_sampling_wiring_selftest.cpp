@@ -30,6 +30,18 @@
 namespace contract = aexcompat::abi::x86_64_windows;
 namespace boot = aexcompat::worker_runtime::effect_bootstrap;
 
+#ifndef _WIN32
+// The macOS-local selftest links only the sampling and table owners. COPY's
+// behavior has its own tests; this stand-in supplies the same typed symbol so
+// get_callback_addr's address selection can be exercised without pulling in
+// the full render/world graph.
+namespace aexcompat::pf_world_transform {
+int32_t copy_world8(void*, void*, void*, const LegacyRect*, const LegacyRect*) {
+  return 4;
+}
+}  // namespace aexcompat::pf_world_transform
+#endif
+
 // The sampling TU reaches the suite registry only through the unsupported-slot
 // recorder for the batch sampling suite, which nothing here exercises. Stubbed
 // so this test links two translation units instead of the registry's whole
@@ -180,7 +192,7 @@ void the_utility_table_is_wired_one_to_one() {
     ++failures;
   }
 
-  // The two that were missing. The null checks below cannot catch a wiring
+  // The callbacks that were missing in #777 and #793. The null checks below cannot catch a wiring
   // regression on their own - this function filled every slot itself - so they
   // stand as a readable name for the offsets, and the literal offsets are what
   // actually pin the layout.
@@ -194,6 +206,43 @@ void the_utility_table_is_wired_one_to_one() {
   check(area16 != nullptr, "utils.area_sample16 is wired");
   check(contract::UTILS_SUBPIXEL_SAMPLE16_OFFSET == 472, "subpixel_sample16 sits at 472");
   check(contract::UTILS_AREA_SAMPLE16_OFFSET == 480, "area_sample16 sits at 480");
+  for (const auto [offset, name] : std::array{
+           std::pair{contract::UTILS_GET_CALLBACK_ADDR_OFFSET, "utils.get_callback_addr"},
+           std::pair{contract::UTILS_ANSI_COS_OFFSET, "utils.ansi_cos"},
+           std::pair{contract::UTILS_ANSI_SQRT_OFFSET, "utils.ansi_sqrt"},
+           std::pair{contract::UTILS_ANSI_ASIN_OFFSET, "utils.ansi_asin"},
+           std::pair{contract::UTILS_ANSI_ACOS_OFFSET, "utils.ansi_acos"}}) {
+    void* callback{};
+    std::memcpy(&callback, state.utils.data() + offset, sizeof(callback));
+    char message[96]{};
+    std::snprintf(message, sizeof(message), "%s is wired", name);
+    check(callback != nullptr, message);
+  }
+  check(contract::UTILS_GET_CALLBACK_ADDR_OFFSET == 192, "get_callback_addr sits at 192");
+  check(contract::UTILS_ANSI_COS_OFFSET == 232, "ansi.cos sits at 232");
+  check(contract::UTILS_ANSI_SQRT_OFFSET == 312, "ansi.sqrt sits at 312");
+  check(contract::UTILS_ANSI_ASIN_OFFSET == 344, "ansi.asin sits at 344");
+  check(contract::UTILS_ANSI_ACOS_OFFSET == 352, "ansi.acos sits at 352");
+}
+
+void get_callback_addr_is_typed_bounded_and_clears_failures() {
+  for (const auto [id, expected] : std::array{
+           std::pair{2, reinterpret_cast<void*>(&subpixel_sample8)},
+           std::pair{3, reinterpret_cast<void*>(&area_sample8)},
+           std::pair{9, reinterpret_cast<void*>(&copy_world8)},
+           std::pair{31, reinterpret_cast<void*>(&subpixel_sample16)},
+           std::pair{32, reinterpret_cast<void*>(&area_sample16)}}) {
+    void* callback = reinterpret_cast<void*>(1);
+    check(get_callback_addr(nullptr, 1, 0, id, &callback) == 0,
+          "get_callback_addr accepts a supported callback id");
+    check(callback == expected, "get_callback_addr returns the typed callback");
+  }
+  void* callback = reinterpret_cast<void*>(1);
+  check(get_callback_addr(nullptr, 1, 0, 999, &callback) == 4,
+        "get_callback_addr rejects an unknown callback id");
+  check(callback == nullptr, "get_callback_addr clears output on rejection");
+  check(get_callback_addr(nullptr, 1, 0, 9, nullptr) == 4,
+        "get_callback_addr rejects a null output pointer");
 }
 
 }  // namespace
@@ -201,6 +250,7 @@ void the_utility_table_is_wired_one_to_one() {
 int main() {
   a_null_effect_ref_still_samples();
   the_utility_table_is_wired_one_to_one();
+  get_callback_addr_is_typed_bounded_and_clears_failures();
   if (failures == 0) std::printf("{\"pf_sampling_wiring_selftest\":\"passed\"}\n");
   return failures == 0 ? 0 : 1;
 }

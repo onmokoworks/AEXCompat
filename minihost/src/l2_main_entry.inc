@@ -339,13 +339,18 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
     reinterpret_cast<void*>(&legacy_new_world),
     reinterpret_cast<void*>(&dispose_world), reinterpret_cast<void*>(&transfer_rect),
     reinterpret_cast<void*>(&transform_world),
+    reinterpret_cast<void*>(&get_callback_addr),
     reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_ceil),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_cos),
     reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fabs),
     reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_hypot),
     reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_pow),
     reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sin),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sqrt),
     reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sprintf),
     reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_asin),
+    reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_acos),
     reinterpret_cast<void*>(&get_platform_data), reinterpret_cast<void*>(&get_pixel_data8),
     reinterpret_cast<void*>(&get_pixel_data16),
     // Handle callbacks in in_data->utils (issue #220): a conformant AE host
@@ -362,8 +367,9 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
   // The assert above is a count, not an ordering: transposing two entries in
   // this list still builds, and every plug-in then gets the wrong callback
   // through the right-looking slot. Nothing in the tree catches that for the
-  // other 36 entries (issue #792). Pin at least the pair this file just added,
-  // since a same-signature neighbour is exactly what they could swap with.
+  // other entries (issue #792). Pin the callbacks added by #777 and #793,
+  // especially the same-signature ANSI neighbours that could be swapped while
+  // every compile and shallow non-null check still succeeds.
   {
     const auto& offsets = aexcompat::abi::x86_64_windows::UTILITY_CALLBACK_OFFSETS;
     const auto index_of = [&offsets](std::size_t offset) {
@@ -371,13 +377,29 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
         if (offsets[index] == offset) return index;
       return offsets.size();
     };
-    const auto subpixel16 =
-        index_of(aexcompat::abi::x86_64_windows::UTILS_SUBPIXEL_SAMPLE16_OFFSET);
-    const auto area16 =
-        index_of(aexcompat::abi::x86_64_windows::UTILS_AREA_SAMPLE16_OFFSET);
-    if (subpixel16 >= utility_callbacks.size() || area16 >= utility_callbacks.size() ||
-        utility_callbacks[subpixel16] != reinterpret_cast<void*>(&subpixel_sample16) ||
-        utility_callbacks[area16] != reinterpret_cast<void*>(&area_sample16)) {
+    const std::array expected_wiring{
+        std::pair{aexcompat::abi::x86_64_windows::UTILS_SUBPIXEL_SAMPLE16_OFFSET,
+                  reinterpret_cast<void*>(&subpixel_sample16)},
+        std::pair{aexcompat::abi::x86_64_windows::UTILS_AREA_SAMPLE16_OFFSET,
+                  reinterpret_cast<void*>(&area_sample16)},
+        std::pair{aexcompat::abi::x86_64_windows::UTILS_GET_CALLBACK_ADDR_OFFSET,
+                  reinterpret_cast<void*>(&get_callback_addr)},
+        std::pair{aexcompat::abi::x86_64_windows::UTILS_ANSI_COS_OFFSET,
+                  reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_cos)},
+        std::pair{aexcompat::abi::x86_64_windows::UTILS_ANSI_SQRT_OFFSET,
+                  reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_sqrt)},
+        std::pair{aexcompat::abi::x86_64_windows::UTILS_ANSI_ASIN_OFFSET,
+                  reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_asin)},
+        std::pair{aexcompat::abi::x86_64_windows::UTILS_ANSI_ACOS_OFFSET,
+                  reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_acos)},
+    };
+    const bool wiring_matches = std::all_of(
+        expected_wiring.begin(), expected_wiring.end(), [&](const auto& expected) {
+          const auto index = index_of(expected.first);
+          return index < utility_callbacks.size() &&
+              utility_callbacks[index] == expected.second;
+        });
+    if (!wiring_matches) {
       // `_end error=` is the shape the broker's stage parser accepts; a bare
       // marker is dropped, and the abort below would then read as an
       // unattributed 0xC0000409 crash. The -5 is this host's generic internal

@@ -1,7 +1,6 @@
 #include "worker_pf_sampling_runtime.hpp"
 #include "worker_pf_suites_internal.hpp"
 #include "worker_suite_registry.hpp"
-#include <windows.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -52,6 +51,24 @@ static_assert(offsetof(PfBatchSamplingSuite1, get_batch_func) == 2 * sizeof(void
 
 void configure_pf_sampling_runtime(const PfSamplingHostHooks& hooks) noexcept {
   g_hooks = hooks;
+}
+
+int32_t __cdecl get_callback_addr(void*, int32_t, uint32_t, int32_t callback_id,
+                                  void** callback) {
+  if (!callback) return kPfBadCallbackParam;
+  *callback = nullptr;
+  // PF_CallbackID values from AE_EffectCB.h. Only return callbacks this host
+  // actually implements; an unknown selector stays a structured PF error
+  // rather than a non-null poison function (issue #793).
+  switch (callback_id) {
+    case 2: *callback = reinterpret_cast<void*>(&subpixel_sample8); break;
+    case 3: *callback = reinterpret_cast<void*>(&area_sample8); break;
+    case 9: *callback = reinterpret_cast<void*>(&copy_world8); break;
+    case 31: *callback = reinterpret_cast<void*>(&subpixel_sample16); break;
+    case 32: *callback = reinterpret_cast<void*>(&area_sample16); break;
+    default: return kPfBadCallbackParam;
+  }
+  return 0;
 }
 
 // `effect_ref` is accepted and ignored. It used to be rejected when null, which
@@ -246,7 +263,7 @@ struct LegacySamplingSession {
   int32_t quality{};
   uint32_t mode_flags{};
   void* source_world{};
-  DWORD thread_id{};
+  std::thread::id thread_id{};
 };
 std::mutex g_legacy_sampling_mutex;
 std::unordered_map<void*, LegacySamplingSession> g_legacy_sampling_sessions;
@@ -265,7 +282,7 @@ int32_t __cdecl begin_sampling8(void* effect_ref, int32_t quality, uint32_t mode
   std::lock_guard<std::mutex> lock(g_legacy_sampling_mutex);
   const auto [_, inserted] = g_legacy_sampling_sessions.emplace(
       sampling_params, LegacySamplingSession{quality, mode_flags, source_world,
-                                             GetCurrentThreadId()});
+                                             std::this_thread::get_id()});
   return inserted ? 0 : kPfBadCallbackParam;
 }
 
@@ -276,7 +293,7 @@ int32_t __cdecl end_sampling8(void* effect_ref, int32_t quality, uint32_t mode_f
   const auto found = g_legacy_sampling_sessions.find(sampling_params);
   if (found == g_legacy_sampling_sessions.end() || found->second.quality != quality ||
       found->second.mode_flags != mode_flags ||
-      found->second.thread_id != GetCurrentThreadId()) return kPfBadCallbackParam;
+      found->second.thread_id != std::this_thread::get_id()) return kPfBadCallbackParam;
   g_legacy_sampling_sessions.erase(found);
   return 0;
 }
@@ -375,4 +392,3 @@ int32_t __cdecl subpixel_sample_float(void* effect_ref, int32_t x, int32_t y,
                                       const void* params, void* pixel) {
   return subpixel_sample_typed(16, effect_ref, x, y, params, pixel);
 }
-
