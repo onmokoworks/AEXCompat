@@ -13,8 +13,11 @@
 // with 4, and the plug-in returned that as PF_Err_OUT_OF_MEMORY. AviUtl2 renders
 // at the timeline cursor, so no smart effect worked anywhere but frame 0.
 //
-// These cases pin the gate itself, in both directions, so a future change that
-// stops configuring the ledger fails here rather than in a host months later.
+// These cases pin the gate itself, in both directions: what the ledger answers
+// once it is configured, and what a ledger left at its defaults answers. They do
+// not reach smart_render_runtime, so they cannot tell whether anything calls
+// configure_hosted_checkout_time - that is what
+// tests/test_smart_param_checkout_time_worker.py renders a real plug-in for.
 
 #include "render_subsystem.h"
 #include "worker_param_checkout_runtime.hpp"
@@ -109,12 +112,23 @@ void an_unconfigured_ledger_answers_only_time_zero() {
   check(checkout_at(1) == 0, "configuring the ledger makes t=1 answerable");
 }
 
-// A zero scale would collapse both sides of the comparison to 0 and admit any
-// time at all, turning the gate off instead of setting it.
-void a_zero_scale_does_not_disable_the_gate() {
+// A zero ledger scale reduces the comparison to `0 == current_time * time_scale`,
+// which is true for every requested time once the frame sits at 0 - so left alone
+// it turns the gate off exactly where it looks harmless. It must fail closed
+// instead, including for the frame's own time.
+void a_zero_scale_admits_nothing() {
+  seed_definition();
+  aexcompat::l2_detail::configure_hosted_checkout_time(0, 0, false);
+  check(checkout_at(5) == 4, "a zero scale at t=0 does not admit another time");
+  check(checkout_at(0) == 4, "a zero scale admits nothing, not even t=0");
   seed_definition();
   aexcompat::l2_detail::configure_hosted_checkout_time(34, 0, false);
-  check(checkout_at(35) == 4, "a zero scale does not admit another time");
+  check(checkout_at(35) == 4, "a zero scale away from t=0 refuses another time");
+  check(checkout_at(34) == 4, "a zero scale away from t=0 refuses its own time");
+  // Wide time still outranks the gate, as it does for any other refusal.
+  seed_definition();
+  aexcompat::l2_detail::configure_hosted_checkout_time(0, 0, true);
+  check(checkout_at(5) == 0, "wide time still admits a checkout under a zero scale");
 }
 
 }  // namespace
@@ -124,7 +138,7 @@ int main() {
   another_time_is_refused_without_wide_time();
   wide_time_admits_another_time();
   an_unconfigured_ledger_answers_only_time_zero();
-  a_zero_scale_does_not_disable_the_gate();
+  a_zero_scale_admits_nothing();
   if (failures == 0) std::printf("{\"param_checkout_time_selftest\":\"passed\"}\n");
   return failures == 0 ? 0 : 1;
 }

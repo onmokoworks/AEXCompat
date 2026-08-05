@@ -18,6 +18,10 @@ int32_t __cdecl checkin_param(void*, void* definition);
 // time_scale 1, so every SmartFX frame past t=0 had its parameter checkouts
 // refused with PF_Err_OUT_OF_MEMORY. The classic path has always configured the
 // equivalent state on its dispatch context (`classic::Context::configure_checkout_time`).
+// Call this before the frame's first selector reaches the plug-in, not just before
+// SMART_PRE_RENDER: QUERY_DYNAMIC_FLAGS is allowed to check parameters out too.
+// A zero `time_scale` leaves the gate admitting nothing rather than being taken as
+// a scale of 1.
 void configure_hosted_checkout_time(int32_t current_time, uint32_t time_scale,
                                     bool wide_time_allowed) noexcept;
 bool param_checkouts_balanced();

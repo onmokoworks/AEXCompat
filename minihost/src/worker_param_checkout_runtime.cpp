@@ -50,8 +50,14 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   if (classic_context && !classic_context->checkout_time_allowed(what_time, time_scale))
     return 4;
   if (!classic_context) {
-    const bool current_time = static_cast<int64_t>(what_time) * g_checkout_current_time_scale ==
-        static_cast<int64_t>(g_checkout_current_time) * time_scale;
+    // A zero ledger scale is not "no gate": it would reduce the comparison to
+    // 0 == current_time * time_scale, which admits every time when the frame is
+    // at 0 and refuses every time - including the frame's own - otherwise. Fail
+    // closed instead, the same way the classic context does
+    // (`Context::checkout_time_allowed`).
+    const bool current_time = g_checkout_current_time_scale != 0 &&
+        static_cast<int64_t>(what_time) * g_checkout_current_time_scale ==
+            static_cast<int64_t>(g_checkout_current_time) * time_scale;
     if (!current_time && !g_wide_time_checkout_allowed) {
       ++g_rejected_temporal_param_checkouts;
       return 4;
@@ -95,10 +101,13 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
 
 void configure_hosted_checkout_time(int32_t current_time, uint32_t time_scale,
                                     bool wide_time_allowed) noexcept {
+  // A zero scale is stored as given; `checkout_param` treats it as a gate that
+  // admits nothing rather than quietly substituting a scale the caller never
+  // meant. No shipped caller can reach that - `smart_setup::prepare` refuses a
+  // zero external time scale before the smart path gets here - so this only
+  // decides the direction a future caller bug fails in.
   g_checkout_current_time = current_time;
-  // A zero scale would make every comparison in checkout_param collapse to
-  // 0 == 0 and admit any time at all, which is the opposite of the gate.
-  g_checkout_current_time_scale = time_scale == 0 ? 1 : time_scale;
+  g_checkout_current_time_scale = time_scale;
   g_wide_time_checkout_allowed = wide_time_allowed;
 }
 

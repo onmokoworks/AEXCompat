@@ -32,6 +32,17 @@
 //!   `PF_OutFlag2_FLOAT_COLOR_AWARE` (out_flags2 1<<12, 32-bit) - which is what
 //!   lets the two deep depths open; 8-bit needs no flag. It answered 4 at 8 and 32 bits
 //!   while access-violating at 16: two different host defects (issue #777).
+//! * `AEXCOMPAT_DIAG_SIZE=WIDTHxHEIGHT` - open the session at that size instead
+//!   of the built-in one, so a refusal that only shows up at a real composition
+//!   size can be reproduced here.
+//! * `AEXCOMPAT_DIAG_TIME=N` - render at timeline position N instead of 0. This
+//!   is the switch that found issue #828: every SmartFX plug-in rendered at 0
+//!   and failed everywhere else, which a fixed-0 diagnostic could not see.
+//!   Note this is the timeline position, not the session-local frame index -
+//!   the multifilter counts frames from 0 upward regardless of where the
+//!   cursor is, so varying the index proves nothing about time.
+//! * `AEXCOMPAT_DIAG_DYNAMIC_LAYER=1` - mark the secondary layer as dynamic, the
+//!   way the multifilter opens it, rather than as a fixed one.
 //!
 //! `AEXCOMPAT_EXTENDED_DIAG=1` additionally turns on the worker's host-callback
 //! trace; it reaches stderr, which the session collects but does not report.
@@ -188,7 +199,10 @@ fn main() {
             // can follow a moving scene (issue #674); a static layer takes a
             // different transport, so a defect can live on one and not the
             // other.
-            dynamic: std::env::var("AEXCOMPAT_DIAG_DYNAMIC_LAYER").is_ok_and(|v| v == "1"),
+            // Presence-based like AEXCOMPAT_DIAG_NO_LAYER above: during a bisect
+            // the switches get set to whatever is at hand, and a value test would
+            // make `=true` silently do nothing.
+            dynamic: std::env::var("AEXCOMPAT_DIAG_DYNAMIC_LAYER").is_ok(),
         })
         .into_iter()
         .collect();
