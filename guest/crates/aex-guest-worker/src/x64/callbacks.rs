@@ -1052,16 +1052,43 @@ fn read_crt_stdio_c_string(
 }
 
 fn emulate_stdio_common_vsnprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    emulate_stdio_common_printf(unicorn, true);
+}
+
+fn emulate_stdio_common_vsprintf(unicorn: &mut Unicorn<'_, GuestState>) {
+    emulate_stdio_common_printf(unicorn, false);
+}
+
+fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bool) {
     let result = (|| -> Result<(u64, Vec<u8>, u64), String> {
         let options = read_win64_import_argument(unicorn, 0)?;
         let destination = read_win64_import_argument(unicorn, 1)?;
-        let buffer_count = read_win64_import_argument(unicorn, 2)?;
-        let max_count = read_win64_import_argument(unicorn, 3)?;
-        let format_address = read_win64_import_argument(unicorn, 4)?;
-        let locale = read_win64_import_argument(unicorn, 5)?;
-        let va_list = read_win64_import_argument(unicorn, 6)?;
+        let requested_buffer_count = read_win64_import_argument(unicorn, 2)?;
+        let (buffer_count, max_count, format_address, locale, va_list) = if secure {
+            (
+                requested_buffer_count,
+                read_win64_import_argument(unicorn, 3)?,
+                read_win64_import_argument(unicorn, 4)?,
+                read_win64_import_argument(unicorn, 5)?,
+                read_win64_import_argument(unicorn, 6)?,
+            )
+        } else {
+            let buffer_count = if requested_buffer_count == u64::MAX {
+                MAX_CRT_STDIO_BUFFER_BYTES + 1
+            } else {
+                requested_buffer_count
+            };
+            (
+                buffer_count,
+                buffer_count.saturating_sub(1),
+                read_win64_import_argument(unicorn, 3)?,
+                read_win64_import_argument(unicorn, 4)?,
+                read_win64_import_argument(unicorn, 5)?,
+            )
+        };
 
-        if options != 0x24 {
+        let expected_options = if secure { 0x24 } else { 0x25 };
+        if options != expected_options {
             return Err(format!("stdio unsupported formatting options {options:#x}"));
         }
         if locale != 0 {
@@ -1070,9 +1097,10 @@ fn emulate_stdio_common_vsnprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
         if destination == 0 || buffer_count == 0 {
             return Err("stdio destination and buffer count must be nonzero".to_string());
         }
-        if buffer_count > MAX_CRT_STDIO_BUFFER_BYTES {
+        let maximum_buffer_count = MAX_CRT_STDIO_BUFFER_BYTES + u64::from(!secure);
+        if buffer_count > maximum_buffer_count {
             return Err(format!(
-                "stdio buffer count {buffer_count} exceeds {MAX_CRT_STDIO_BUFFER_BYTES}"
+                "stdio buffer count {buffer_count} exceeds {maximum_buffer_count}"
             ));
         }
         if max_count != u64::MAX && max_count >= buffer_count {
