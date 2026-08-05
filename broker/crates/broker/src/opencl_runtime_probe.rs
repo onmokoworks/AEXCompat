@@ -1,6 +1,6 @@
+use crate::ExitClassification;
 use crate::sealed_load_tree::{LoadEntry, SealedLoadTree};
 use crate::secure_launch::{secure_launch, SecureLaunchRequest, SecureLaunchResult};
-use crate::ExitClassification;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;

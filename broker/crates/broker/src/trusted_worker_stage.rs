@@ -1,4 +1,3 @@
-use crate::restricted_worker_acl::{RestrictedWorkerSid, protect_sealed_load_tree};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, Write};
@@ -11,8 +10,9 @@ const WORKER_BASENAME: &str = "trusted-worker.exe";
 const CLEANUP_RETRY_COUNT: usize = 20;
 const CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(10);
 
-/// Owns an authenticated, read/execute-only copy of a trusted worker executable.
-/// Keep this value alive until the worker process has exited.
+/// Owns an authenticated copy of a trusted worker executable, staged into a
+/// broker-owned random root so the launched image is the bytes that were
+/// hashed. Keep this value alive until the worker process has exited.
 #[derive(Debug)]
 pub struct TrustedWorkerStage {
     root: PathBuf,
@@ -26,7 +26,6 @@ impl TrustedWorkerStage {
         source: &Path,
         expected_sha256: [u8; 32],
         expected_size: u64,
-        worker_sid: &RestrictedWorkerSid,
     ) -> io::Result<Self> {
         validate_exe(source)?;
         let temp_parent = fs::canonicalize(std::env::temp_dir())?;
@@ -38,7 +37,6 @@ impl TrustedWorkerStage {
             source,
             expected_sha256,
             expected_size,
-            worker_sid,
         );
         if result.is_err() {
             let _ = fs::remove_file(root.join(WORKER_BASENAME));
@@ -53,7 +51,6 @@ impl TrustedWorkerStage {
         source_path: &Path,
         expected_sha256: [u8; 32],
         expected_size: u64,
-        worker_sid: &RestrictedWorkerSid,
     ) -> io::Result<Self> {
         let mut source = open_source_no_reparse(source_path)?;
         validate_regular_no_reparse(&source)?;
@@ -76,7 +73,6 @@ impl TrustedWorkerStage {
 
         let root_handle = open_root_no_reparse(&root)?;
         drop(destination);
-        protect_sealed_load_tree(&root, &[WORKER_BASENAME], worker_sid)?;
         let staged_handle = open_staged_hold(&worker)?;
         Ok(Self {
             root,

@@ -2,7 +2,7 @@
 //! docs/RENDER_SESSION_PROTOCOL_2026-07-19.md).
 //!
 //! The broker opens one sealed worker process per session, keeps the trust
-//! artifacts (sealed tree, staged worker, restricted token) alive for the
+//! artifacts (sealed tree, staged worker) alive for the
 //! session's lifetime, and drives a frame loop over the inherited transport:
 //! two anonymous pipes carrying length-prefixed JSON control messages and one
 //! anonymous file mapping carrying copy-through pixel slots. The worker never

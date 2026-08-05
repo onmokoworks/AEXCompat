@@ -94,7 +94,7 @@ jobs:
       # Make the environment limitation visible in the run summary rather than
       # leaving it as a passing test count. Reports either way, so "no skips" is
       # an explicit statement instead of the absence of one.
-      - name: Report restricted-token skips
+      - name: Report sealed-worker skips
         shell: pwsh
         if: always()
         run: |
@@ -103,12 +103,12 @@ jobs:
             exit 0
           }
           $skips = Select-String -Path cargo-test-output.txt `
-            -Pattern 'cannot launch a restricted-token worker'
+            -Pattern 'cannot launch a sealed worker'
           if ($skips) {
-            Write-Host "::warning::$($skips.Count) Rust tests did not run: this runner cannot launch a restricted-token worker (issue #335)"
+            Write-Host "::warning::$($skips.Count) Rust tests did not run: this runner cannot launch a sealed worker (issue #335)"
             $skips | ForEach-Object { $_.Line }
           } else {
-            Write-Host 'Every worker-launching Rust test ran: no restricted-token skips.'
+            Write-Host 'Every worker-launching Rust test ran: no sealed-worker skips.'
           }
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest

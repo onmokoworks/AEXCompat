@@ -8,7 +8,7 @@ mod windows {
 
     #[test]
     fn restricted_worker_probe_is_bounded_and_never_claims_readiness() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "restricted_worker_probe_is_bounded_and_never_claims_readiness",
         ) {
             return;

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 $ErrorActionPreference = "Stop"
@@ -74,8 +74,8 @@ try {
             selectors_success = ($workerRuns | Where-Object { $_.pre_render_error -ne 0 -or $_.smart_render_error -ne 0 -or $_.result_rects_valid -ne $true }).Count -eq 0
             guards_intact = ($workerRuns | Where-Object { $_.guard_bytes_intact -ne $true }).Count -eq 0
             secure_route = $receipt.secure_launch_count -eq 2 -and $receipt.normal_token_fallback -eq $false -and
-                $receipt.secure_launch_1.launch_mode -eq "sealed_load_tree_restricted_token" -and
-                $receipt.secure_launch_2.launch_mode -eq "sealed_load_tree_restricted_token" -and
+                $receipt.secure_launch_1.launch_mode -eq "sealed_load_tree_staged_worker" -and
+                $receipt.secure_launch_2.launch_mode -eq "sealed_load_tree_staged_worker" -and
                 $receipt.secure_launch_1.worker_authenticated -eq $true -and
                 $receipt.secure_launch_2.worker_authenticated -eq $true -and
                 $receipt.secure_launch_1.module_audit_required -eq $true -and

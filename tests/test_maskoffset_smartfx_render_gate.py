@@ -30,7 +30,7 @@ def test_receipt_validation_covers_required_fields():
     script = SCRIPT.read_text(encoding="utf-8-sig")
     for marker in ("plugin_authenticated", "request_authenticated", "output_exact", "selectors_success", "guards_intact", "secure_route", "ownership_valid"):
         assert marker in script
-    assert "sealed_load_tree_restricted_token" in script
+    assert "sealed_load_tree_staged_worker" in script
     assert "normal_token_fallback" in script
     assert EXPECTED in script.lower()
 

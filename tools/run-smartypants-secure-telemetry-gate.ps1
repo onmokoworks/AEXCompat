@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
@@ -82,7 +82,7 @@ if ($checks.Values -contains $false) {
 $result = [ordered]@{
     schema_version = 1
     result = 'passed'
-    route = 'schema-v2 sealed load tree / restricted SmartFX worker'
+    route = 'schema-v2 sealed load tree / staged SmartFX worker'
     authenticated_artifacts = $identities
     module_audit = [ordered]@{
         required = $true

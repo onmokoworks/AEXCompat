@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 $ErrorActionPreference = "Stop"
@@ -243,7 +243,7 @@ try {
 }
 catch {
     $safeMessage = Get-SafeFailureMessage $_.Exception.Message
-    $externalBlocker = $safeMessage -match "restricted token|generated worker SID|hosted runner|Actions billing|After Effects"
+    $externalBlocker = $safeMessage -match "staged process launch|hosted runner|Actions billing|After Effects"
     $failureChecks = [ordered]@{
         session_gate_attempted = $failureStage -eq "session"
         session_exit_zero = $adapterExitCode -eq 0
@@ -258,7 +258,7 @@ catch {
         message = $safeMessage
         external_blocker = $externalBlocker
         restart_condition = if ($externalBlocker) {
-            "Provide a runner/token that can create the generated worker SID, then rerun this gate."
+            "Provide a runner that can launch a sealed worker, then rerun this gate."
         } else {
             "Fix the reported preflight, session, or validation condition, then rerun this gate."
         }

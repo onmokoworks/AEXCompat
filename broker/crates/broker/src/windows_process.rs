@@ -1,5 +1,3 @@
-use crate::restricted_worker_acl::RestrictedWorkerSid;
-use crate::restricted_worker_token::RestrictedWorkerToken;
 use crate::{ExitClassification, classify_exit, redact_windows_paths};
 use std::ffi::c_void;
 use std::io;
@@ -29,11 +27,10 @@ use windows_sys::Win32::System::StationsAndDesktops::{
 };
 use windows_sys::Win32::System::Threading::INFINITE;
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateEventW,
-    CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, GetCurrentThreadId, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
-    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentThreadId,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
@@ -62,16 +59,13 @@ pub enum WorkerDesktopPolicy {
 struct DesktopSecurityDescriptor(std::ptr::NonNull<std::ffi::c_void>);
 
 impl DesktopSecurityDescriptor {
-    fn new(worker_sid: Option<&RestrictedWorkerSid>) -> io::Result<Self> {
+    fn new() -> io::Result<Self> {
         // Keep the desktop private to the broker's window-station owner and
-        // SYSTEM. A restricted worker gets only the object-level rights needed
-        // to create and operate UI objects; it cannot mutate the desktop ACL.
-        // The protected DACL prevents the parent station ACL from being
-        // inherited into this boundary.
-        let worker_ace = worker_sid
-            .map(|sid| format!("(A;;0x000001ff;;;{})", sid.as_str()))
-            .unwrap_or_default();
-        let sddl = format!("D:P(A;;GA;;;SY)(A;;GA;;;OW){worker_ace}");
+        // SYSTEM. The worker runs under the same user token, so the owner ACE
+        // is what grants it the rights to create and operate UI objects. The
+        // protected DACL prevents the parent station ACL from being inherited
+        // into this boundary.
+        let sddl = "D:P(A;;GA;;;SY)(A;;GA;;;OW)".to_owned();
         let text: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
         let mut raw: PSECURITY_DESCRIPTOR = null_mut();
         if unsafe {
@@ -160,7 +154,7 @@ struct WorkerDesktop {
 }
 
 impl WorkerDesktop {
-    fn create(worker_sid: Option<&RestrictedWorkerSid>) -> io::Result<Self> {
+    fn create() -> io::Result<Self> {
         let station = current_window_station_name()?;
         let desktop_name = format!("AEXCompatWorkerDesktop-{:032x}", rand::random::<u128>());
         let desktop_text: Vec<u16> = desktop_name.encode_utf16().chain([0]).collect();
@@ -168,7 +162,7 @@ impl WorkerDesktop {
             .encode_utf16()
             .chain([0])
             .collect();
-        let descriptor = DesktopSecurityDescriptor::new(worker_sid)?;
+        let descriptor = DesktopSecurityDescriptor::new()?;
         let security = SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: descriptor.raw(),
@@ -527,18 +521,20 @@ pub fn run_isolated(
         args,
         timeout,
         None,
-        None,
         WorkerDesktopPolicy::Dedicated,
         None,
         PROCESS_MEMORY_LIMIT,
     )
 }
 
-pub fn run_isolated_with_restricted_token(
+/// Sealed-tree one-shot launch: the staged worker runs on a private desktop
+/// with a pinned current directory and the broker-created trace/minidump
+/// handles. Same user token as the broker (issue #731): containment is the
+/// Job Object and the desktop, not the token.
+pub fn run_isolated_staged(
     program: &Path,
     args: &[String],
     timeout: Option<Duration>,
-    token: &RestrictedWorkerToken,
     current_directory: &Path,
     repository: &Path,
 ) -> io::Result<ProcessResult> {
@@ -546,19 +542,17 @@ pub fn run_isolated_with_restricted_token(
         program,
         args,
         timeout,
-        Some((token.as_raw_handle(), current_directory)),
-        Some(token.worker_sid()),
+        Some(current_directory),
         WorkerDesktopPolicy::Dedicated,
         Some(repository),
         PROCESS_MEMORY_LIMIT,
     )
 }
 
-pub(crate) fn run_isolated_with_restricted_token_and_memory_limit(
+pub(crate) fn run_isolated_staged_with_memory_limit(
     program: &Path,
     args: &[String],
     timeout: Option<Duration>,
-    token: &RestrictedWorkerToken,
     current_directory: &Path,
     repository: &Path,
     process_memory_limit: usize,
@@ -573,8 +567,7 @@ pub(crate) fn run_isolated_with_restricted_token_and_memory_limit(
         program,
         args,
         timeout,
-        Some((token.as_raw_handle(), current_directory)),
-        Some(token.worker_sid()),
+        Some(current_directory),
         WorkerDesktopPolicy::Dedicated,
         Some(repository),
         process_memory_limit,
@@ -585,8 +578,7 @@ fn run_isolated_impl(
     program: &Path,
     args: &[String],
     timeout: Option<Duration>,
-    token: Option<(HANDLE, &Path)>,
-    worker_sid: Option<&RestrictedWorkerSid>,
+    current_directory: Option<&Path>,
     desktop_policy: WorkerDesktopPolicy,
     repository: Option<&Path>,
     process_memory_limit: usize,
@@ -594,9 +586,8 @@ fn run_isolated_impl(
     launch_isolated_impl(
         program,
         args,
-        token,
+        current_directory,
         None,
-        worker_sid,
         desktop_policy,
         repository,
         process_memory_limit,
@@ -815,8 +806,8 @@ impl LaunchedIsolatedProcess {
     }
 }
 
-/// Session launch: same isolation shape as `run_isolated_with_restricted_token`
-/// (restricted token, kill-on-close Job Object, memory cap, handle-list
+/// Session launch: same isolation shape as `run_isolated_staged`
+/// (kill-on-close Job Object, memory cap, private desktop, handle-list
 /// inheritance), plus the three session transport handles inherited and
 /// advertised via environment variables. The caller drives the frame loop and
 /// collects the exit through the returned `LaunchedIsolatedProcess`.
@@ -825,10 +816,9 @@ impl LaunchedIsolatedProcess {
 /// resident worker gets the same broker-created inherited dump pipe as the
 /// one-shot path, retained across the frame loop on the returned process and
 /// finalized when the caller collects it at close (`wait_and_collect`).
-pub fn launch_isolated_session_with_restricted_token(
+pub fn launch_isolated_session_staged(
     program: &Path,
     args: &[String],
-    token: &RestrictedWorkerToken,
     current_directory: &Path,
     session: &SessionChildHandles,
     repository: &Path,
@@ -836,7 +826,6 @@ pub fn launch_isolated_session_with_restricted_token(
     launch_isolated_session_with_desktop_policy(
         program,
         args,
-        token,
         current_directory,
         session,
         WorkerDesktopPolicy::Dedicated,
@@ -847,7 +836,6 @@ pub fn launch_isolated_session_with_restricted_token(
 pub(crate) fn launch_isolated_session_on_current_desktop(
     program: &Path,
     args: &[String],
-    token: &RestrictedWorkerToken,
     current_directory: &Path,
     session: &SessionChildHandles,
     repository: &Path,
@@ -855,7 +843,6 @@ pub(crate) fn launch_isolated_session_on_current_desktop(
     launch_isolated_session_with_desktop_policy(
         program,
         args,
-        token,
         current_directory,
         session,
         WorkerDesktopPolicy::Current,
@@ -866,7 +853,6 @@ pub(crate) fn launch_isolated_session_on_current_desktop(
 fn launch_isolated_session_with_desktop_policy(
     program: &Path,
     args: &[String],
-    token: &RestrictedWorkerToken,
     current_directory: &Path,
     session: &SessionChildHandles,
     desktop_policy: WorkerDesktopPolicy,
@@ -875,9 +861,8 @@ fn launch_isolated_session_with_desktop_policy(
     launch_isolated_impl(
         program,
         args,
-        Some((token.as_raw_handle(), current_directory)),
+        Some(current_directory),
         Some(session),
-        Some(token.worker_sid()),
         desktop_policy,
         Some(repository),
         PROCESS_MEMORY_LIMIT,
@@ -887,9 +872,8 @@ fn launch_isolated_session_with_desktop_policy(
 fn launch_isolated_impl(
     program: &Path,
     args: &[String],
-    token: Option<(HANDLE, &Path)>,
+    current_directory: Option<&Path>,
     session: Option<&SessionChildHandles>,
-    worker_sid: Option<&RestrictedWorkerSid>,
     desktop_policy: WorkerDesktopPolicy,
     repository: Option<&Path>,
     process_memory_limit: usize,
@@ -905,9 +889,8 @@ fn launch_isolated_impl(
     let trace_active = trace_file.is_some();
     let minidump_active = minidump_file.is_some();
     let session_active = session.is_some();
-    let restricted_token = token.is_some();
     let mut desktop = match desktop_policy {
-        WorkerDesktopPolicy::Dedicated => Some(WorkerDesktop::create(worker_sid)?),
+        WorkerDesktopPolicy::Dedicated => Some(WorkerDesktop::create()?),
         WorkerDesktopPolicy::Current => Some(WorkerDesktop::current()?),
     };
     let (stdout_read, stdout_write) = pipe()?;
@@ -1015,28 +998,26 @@ fn launch_isolated_impl(
         | CREATE_SUSPENDED
         | CREATE_NO_WINDOW
         | CREATE_UNICODE_ENVIRONMENT;
+    // A pinned current directory is what keeps the worker's relative transport
+    // access inside the broker-owned <repository>/target boundary; the sealed
+    // launch always supplies one, and `lpApplicationName` names the staged
+    // executable so the command line cannot redirect it.
+    let current_directory_wide: Option<Vec<u16>> = current_directory
+        .map(|directory| directory.as_os_str().encode_wide().chain(Some(0)).collect());
     let created = unsafe {
-        match token {
-            Some((token, current_directory)) => {
-                let current_directory_wide: Vec<u16> = current_directory
-                    .as_os_str()
-                    .encode_wide()
-                    .chain(Some(0))
-                    .collect();
-                CreateProcessAsUserW(
-                    token,
-                    application_wide.as_ptr(),
-                    command_wide.as_mut_ptr(),
-                    null(),
-                    null(),
-                    1,
-                    creation_flags,
-                    environment.as_mut_ptr().cast(),
-                    current_directory_wide.as_ptr(),
-                    &startup.StartupInfo,
-                    &mut process,
-                )
-            }
+        match &current_directory_wide {
+            Some(directory) => CreateProcessW(
+                application_wide.as_ptr(),
+                command_wide.as_mut_ptr(),
+                null(),
+                null(),
+                1,
+                creation_flags,
+                environment.as_mut_ptr().cast(),
+                directory.as_ptr(),
+                &startup.StartupInfo,
+                &mut process,
+            ),
             None => CreateProcessW(
                 null(),
                 command_wide.as_mut_ptr(),
@@ -1075,7 +1056,6 @@ fn launch_isolated_impl(
         trace_active,
         minidump_active,
         session_active,
-        restricted_token,
         "worker launched"
     );
     drop(thread_handle);

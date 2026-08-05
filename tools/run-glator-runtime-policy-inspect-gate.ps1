@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
@@ -103,7 +103,7 @@ try {
     $evidence = [ordered]@{
         schema_version = 1
         result = 'passed'
-        route = 'sealed restricted L2 worker / purpose-bound OpenGL runtime module authorization'
+        route = 'sealed staged L2 worker / purpose-bound OpenGL runtime module authorization'
         authenticated_artifacts = $authenticated
         authorized_runtime_modules = @($moduleSpecs | ForEach-Object {
             [ordered]@{ basename = $_.basename; size_bytes = [long]$_.size; sha256 = $_.sha256; version = $_.version; backend = 'opengl' }

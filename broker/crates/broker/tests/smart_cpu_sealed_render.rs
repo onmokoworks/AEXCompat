@@ -32,7 +32,7 @@ mod windows_e2e {
 
     #[test]
     fn sealed_smart_cpu_render_passes_the_module_audit() {
-        if crate::common::skip_without_restricted_token_launch(
+        if crate::common::skip_without_sealed_worker_launch(
             "sealed_smart_cpu_render_passes_the_module_audit",
         ) {
             return;

@@ -23,8 +23,6 @@ pub mod render;
 pub mod render_request;
 #[cfg(windows)]
 pub mod render_session;
-pub mod restricted_worker_acl;
-pub mod restricted_worker_token;
 pub mod runtime_module_authorization;
 pub mod runtime_module_identity;
 pub mod runtime_module_policy;
