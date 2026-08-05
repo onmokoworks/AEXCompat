@@ -18,6 +18,10 @@ if { [ -n "$smoke_aex" ] && [ -z "$smoke_input_png" ]; } || \
   echo "AEXCOMPAT_SMOKE_AEX and AEXCOMPAT_SMOKE_INPUT_PNG must be set together" >&2
   exit 2
 fi
+if [ -n "$smoke_aex" ] && { [ ! -f "$smoke_aex" ] || [ ! -f "$smoke_input_png" ]; }; then
+  echo "AEXCOMPAT_SMOKE_AEX or AEXCOMPAT_SMOKE_INPUT_PNG does not exist" >&2
+  exit 2
+fi
 
 "$root/tools/build-macos-aex-carriers.sh"
 AEXCOMPAT_CODESIGN_IDENTITY=- "$root/tools/sign-macos-aex-carriers.sh" \

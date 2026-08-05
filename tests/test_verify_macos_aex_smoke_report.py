@@ -303,3 +303,37 @@ def test_package_verifier_rejects_unpaired_smoke_inputs_before_mount(tmp_path):
     )
     assert result.returncode == 2
     assert "requires both" in result.stderr
+
+
+def test_local_prepare_rejects_missing_smoke_files_before_build(tmp_path):
+    shell = shutil.which("sh")
+    if shell is None:
+        pytest.skip("POSIX shell is unavailable")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    uname = fake_bin / "uname"
+    uname.write_text("#!/bin/sh\necho Darwin\n", encoding="utf-8")
+    uname.chmod(0o755)
+    output = tmp_path / "must-not-exist.dmg"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{fake_bin}:{environment.get('PATH', '')}",
+            "AEXCOMPAT_SMOKE_AEX": str(tmp_path / "missing.aex"),
+            "AEXCOMPAT_SMOKE_INPUT_PNG": str(tmp_path / "missing.png"),
+        }
+    )
+    result = subprocess.run(
+        [
+            shell,
+            str(ROOT / "tools" / "prepare-local-macos-aex-carriers.sh"),
+            str(output),
+        ],
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "does not exist" in result.stderr
+    assert not output.exists()
