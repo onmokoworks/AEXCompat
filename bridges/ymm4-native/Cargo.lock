@@ -12,6 +12,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "aexcompat-broker"
 version = "0.1.0"
 dependencies = [
+ "aexcompat-host-core",
  "image",
  "object",
  "rand",
@@ -22,6 +23,13 @@ dependencies = [
  "tracing-subscriber",
  "windows",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "aexcompat-host-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
