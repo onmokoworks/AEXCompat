@@ -171,11 +171,13 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         log_warn(&depth_cap_warning());
     }
 
-    // Discovery (an L2 worker per AEX) is slow — hundreds of AE effects take
-    // minutes — and can only ever populate the cache, since AviUtl2 freezes a
+    // Discovery can only ever populate the cache, since AviUtl2 freezes a
     // filter's config at load and cannot register a filter discovered later. So
-    // register from the cache immediately (never blocking startup) and discover
-    // the rest on a background thread whose results appear on the NEXT launch.
+    // register from the cache immediately and discover the rest on a background
+    // thread whose results appear on the NEXT launch — except a launch whose
+    // cache is completely empty, which blocks and discovers first (issue #838,
+    // below), because "register nothing and wait for the next launch" serves
+    // nobody and in-place discovery (#751) made the full scan tens of seconds.
     // The cache is keyed by AEX (path, mtime, len), but a discovery *result* also
     // depends on the compat host that produced it (the L2 worker and this DLL's
     // in-process broker), so an entry made by an older host is re-verified in the
@@ -208,6 +210,39 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         // rather than any of the failure paths below (issue #655).
         log_warn(&empty_scan_summary(&dirs, scan.seen.len(), limits));
         return;
+    }
+
+    // A first launch — no discovery cache file at all — would register nothing
+    // and defer every filter to the next launch. With in-place discovery
+    // (issue #751) a full After Effects install takes tens of seconds (the
+    // `AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY=1` escape hatch takes minutes),
+    // so that one launch blocks here, discovers everything, and the loop below
+    // registers the results immediately (issue #838). The block is unbounded
+    // in the worst case — discovery deliberately carries no deadline, and this
+    // very line can sit unseen in PENDING_LOG until a logger arrives — but
+    // [`claim_first_launch_sync_discovery`] stamps the cache file before
+    // anything runs, so a launch the user has to kill is the last one that blocks: from
+    // then on the file exists and every launch takes the never-blocking
+    // background flow below, as does any launch with cached entries, however
+    // stale. #307's "nothing is unregistered for a launch" rules are untouched
+    // either way.
+    if claim_first_launch_sync_discovery(&cache) {
+        log_info(&format!(
+            "no discovery cache yet: discovering {} plug-in(s) before \
+             registration; AviUtl2 keeps loading until this finishes",
+            plugins.len()
+        ));
+        run_discovery_pass(
+            &repository,
+            &dependency,
+            &scan.seen,
+            &dirs,
+            &mut cache,
+            &plugins,
+            build,
+            scan_complete,
+            DiscoveryPassKind::FirstLaunch,
+        );
     }
 
     // Register (host callback, main thread only) each AEX whose discovery already
@@ -811,6 +846,7 @@ fn spawn_background_discovery(
                     &pending,
                     build,
                     scan_complete,
+                    DiscoveryPassKind::Background,
                 )
             }));
             if outcome.is_err() {
@@ -850,6 +886,7 @@ fn run_discovery_pass(
     pending: &[PathBuf],
     build: BuildFingerprint,
     scan_complete: bool,
+    kind: DiscoveryPassKind,
 ) {
     // Prune stale entries (removed/renamed AEX) up front so an early shutdown
     // still leaves a pruned cache.
@@ -857,9 +894,10 @@ fn run_discovery_pass(
 
     // Discover in chunks and save the cache after each, so a restart or shutdown
     // mid-scan keeps the progress so far (effects appear across successive
-    // launches) instead of discarding a multi-minute scan. The full scan of
-    // hundreds of AE effects can only ever populate the cache — AviUtl2 freezes a
-    // filter's config at load — so the results show on the next launch.
+    // launches) instead of discarding a multi-minute scan. On the background
+    // pass the results show on the next launch (AviUtl2 freezes a filter's
+    // config at load); the synchronous first-launch pass (issue #838) runs
+    // before registration, so its results register immediately.
     // Each entry carries the build that produced it, so an interrupted pass
     // leaves the not-yet-redone entries on the old build and they are queued
     // again next launch (issue #307).
@@ -898,7 +936,51 @@ fn run_discovery_pass(
             break;
         }
     }
-    report_discovery(effects, rejected, interrupted, persisted);
+    report_discovery(effects, rejected, interrupted, persisted, kind);
+}
+
+/// Where a discovery pass runs, which is also when its results become visible:
+/// the background thread's results appear on the next launch, while the
+/// synchronous first-launch pass (issue #838) registers them in the very
+/// launch that ran it. The reporting differs accordingly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DiscoveryPassKind {
+    Background,
+    FirstLaunch,
+}
+
+/// Decides whether this launch runs the synchronous first-launch discovery
+/// (issue #838) — and, when it does, *claims* it by stamping an empty cache
+/// file (the write is the point, hence "claim", not a pure predicate). Three
+/// gates, each load-bearing:
+///
+/// - The loaded cache is completely empty — anything cached, however stale,
+///   registers now and re-verifies in the background as always.
+/// - The cache *file* is demonstrably absent. An empty map whose file exists —
+///   a schema bump, a file an AV scanner holds locked — takes the old
+///   register-nothing-and-queue flow instead: those states can recur on every
+///   launch, and a large healthy setup must not pay a surprise blocking scan
+///   for each of them (#307's spirit: a launch is never made worse by what a
+///   previous launch left behind).
+/// - Stamping an empty cache file succeeds *before* any discovery runs. The
+///   stamp is what bounds the worst case to a single launch: discovery has no
+///   deadline, so one plug-in whose inspect never returns blocks this launch
+///   until the user kills AviUtl2 — and the stamped file then steers every
+///   later launch into the background flow rather than repeating the freeze
+///   at the same plug-in. A path that cannot be stamped (%APPDATA% unset,
+///   directory unwritable) would re-block every launch with nothing kept to
+///   show for it, so it never blocks at all.
+fn claim_first_launch_sync_discovery(cache: &HashMap<String, CacheEntry>) -> bool {
+    if !cache.is_empty() {
+        return false;
+    }
+    let Some(path) = cache_path() else {
+        return false;
+    };
+    if path.exists() {
+        return false;
+    }
+    save_cache(&HashMap::new())
 }
 
 /// The folders to scan: the env override wins, else `dir` + `dirs` from the
@@ -2189,17 +2271,25 @@ fn registration_summary(
     )
 }
 
-/// Sends the background pass's outcome to the host log.
-fn report_discovery(effects: usize, rejected: usize, interrupted: bool, persisted: bool) {
-    let summary = discovery_summary(effects, rejected, interrupted);
+/// Sends a discovery pass's outcome to the host log.
+fn report_discovery(
+    effects: usize,
+    rejected: usize,
+    interrupted: bool,
+    persisted: bool,
+    kind: DiscoveryPassKind,
+) {
+    let summary = discovery_summary(effects, rejected, interrupted, kind);
     if discovery_is_alarming(effects, rejected) {
         log_warn(&summary);
     } else {
         log_info(&summary);
     }
-    // The whole point of the pass is what the *next* launch reads back. Without
-    // this, a pass that discovered hundreds of effects and could not write any of
-    // them still ends on "Restart AviUtl2 to pick them up".
+    // For the background pass, what the *next* launch reads back is the whole
+    // point; for the first-launch pass this launch already registered the
+    // results, but an unwritten cache still means the same full scan blocks the
+    // next launch too. Without this, a pass that discovered hundreds of effects
+    // and could not write any of them still ends on a success line.
     if !persisted {
         log_warn(
             "the discovery cache could not be written, so this pass will not \
@@ -2230,29 +2320,53 @@ fn discovery_is_alarming(effects: usize, rejected: usize) -> bool {
 /// re-check of a working entry is counted as rejected while the entry keeps
 /// registering (`keep_best` refuses to demote). The question this line answers is
 /// "is the worker producing results at all", so the attempt is the right unit.
-fn discovery_summary(effects: usize, rejected: usize, interrupted: bool) -> String {
-    let tail = if interrupted {
-        " (stopped early; the rest is retried next launch)"
-    } else {
-        ""
+fn discovery_summary(
+    effects: usize,
+    rejected: usize,
+    interrupted: bool,
+    kind: DiscoveryPassKind,
+) -> String {
+    let label = match kind {
+        DiscoveryPassKind::Background => "background discovery",
+        DiscoveryPassKind::FirstLaunch => "first-launch discovery",
+    };
+    let tail = match (interrupted, kind) {
+        (false, _) => "",
+        (true, DiscoveryPassKind::Background) => {
+            " (stopped early; the rest is retried next launch)"
+        }
+        // A cut-short sync pass's remainder is still uncached when the
+        // register loop runs, so it goes to THIS launch's background pass,
+        // not the next launch.
+        (true, DiscoveryPassKind::FirstLaunch) => {
+            " (stopped early; the rest continues in the background)"
+        }
     };
     if discovery_is_alarming(effects, rejected) {
         return format!(
-            "background discovery: 0 of {rejected} plug-in(s) yielded an \
+            "{label}: 0 of {rejected} plug-in(s) yielded an \
              effect{tail}. Every one was rejected, so the compat host worker is \
              likely failing rather than the plug-ins being unsupported."
         );
     }
     if effects == 0 {
-        return format!("background discovery: nothing was discovered{tail}");
+        return format!("{label}: nothing was discovered{tail}");
     }
     // "rejected", not "rejected as non-effect": a load failure or a per-plug-in
     // worker fault lands in the same bucket as a format/codec .aex, and this line
     // cannot tell them apart.
-    format!(
-        "background discovery: {effects} effect(s), {rejected} rejected{tail}. \
-         Restart AviUtl2 to pick them up."
-    )
+    match kind {
+        // The synchronous pass's effects register in this very launch, so the
+        // background wording's "Restart AviUtl2" would promise a step the user
+        // does not need.
+        DiscoveryPassKind::FirstLaunch => {
+            format!("{label}: {effects} effect(s), {rejected} rejected{tail}.")
+        }
+        DiscoveryPassKind::Background => format!(
+            "{label}: {effects} effect(s), {rejected} rejected{tail}. \
+             Restart AviUtl2 to pick them up."
+        ),
+    }
 }
 
 /// How [`resolve_worker_root`] arrived at its answer, so the plugin can say so

@@ -3508,7 +3508,7 @@ mod tests {
     /// hundreds of plug-ins that all happen to be codecs.
     #[test]
     fn discovery_calls_out_rejecting_everything() {
-        let summary = discovery_summary(0, 576, false);
+        let summary = discovery_summary(0, 576, false, DiscoveryPassKind::Background);
 
         assert!(summary.contains("576"), "{summary}");
         assert!(
@@ -3521,7 +3521,7 @@ mod tests {
     /// dressed up as a worker failure.
     #[test]
     fn some_rejections_alongside_effects_are_routine() {
-        let summary = discovery_summary(570, 6, false);
+        let summary = discovery_summary(570, 6, false, DiscoveryPassKind::Background);
 
         assert!(summary.contains("570"), "{summary}");
         assert!(summary.contains("6"), "{summary}");
@@ -3533,15 +3533,15 @@ mod tests {
     #[test]
     fn an_interrupted_pass_says_it_stopped_early() {
         assert!(
-            discovery_summary(12, 3, true).contains("stopped early"),
+            discovery_summary(12, 3, true, DiscoveryPassKind::Background).contains("stopped early"),
             "an interrupted pass has to admit it"
         );
         assert!(
-            !discovery_summary(12, 3, false).contains("stopped early"),
+            !discovery_summary(12, 3, false, DiscoveryPassKind::Background).contains("stopped early"),
             "a complete pass must not claim it"
         );
         assert!(
-            discovery_summary(0, 576, true).contains("stopped early"),
+            discovery_summary(0, 576, true, DiscoveryPassKind::Background).contains("stopped early"),
             "the all-rejected wording carries it too"
         );
     }
@@ -3551,7 +3551,7 @@ mod tests {
     /// restart AviUtl2 for either.
     #[test]
     fn an_empty_discovery_pass_is_not_reported_as_a_failure() {
-        let summary = discovery_summary(0, 0, false);
+        let summary = discovery_summary(0, 0, false, DiscoveryPassKind::Background);
 
         assert!(
             !summary.contains("worker is likely failing"),
@@ -3574,10 +3574,43 @@ mod tests {
         for (effects, rejected) in [(0usize, 576usize), (570, 6), (0, 0), (12, 0)] {
             assert_eq!(
                 discovery_is_alarming(effects, rejected),
-                discovery_summary(effects, rejected, false).contains("worker is likely failing"),
+                discovery_summary(effects, rejected, false, DiscoveryPassKind::Background).contains("worker is likely failing"),
                 "({effects}, {rejected})"
             );
         }
+    }
+
+    /// The synchronous first-launch pass (issue #838) registers its results in
+    /// the very launch that ran it, so its summary must not tell the user to
+    /// restart AviUtl2 — that instruction belongs to the background pass alone.
+    #[test]
+    fn the_first_launch_pass_does_not_ask_for_a_restart() {
+        let sync = discovery_summary(570, 6, false, DiscoveryPassKind::FirstLaunch);
+        assert!(!sync.contains("Restart"), "{sync}");
+        assert!(sync.contains("570"), "{sync}");
+        assert!(sync.contains("first-launch discovery"), "{sync}");
+
+        let background = discovery_summary(570, 6, false, DiscoveryPassKind::Background);
+        assert!(background.contains("Restart AviUtl2"), "{background}");
+
+        // The worker-failure signature (issue #651) reads the same either way:
+        // where the pass ran does not change what all-rejected means.
+        assert!(
+            discovery_summary(0, 576, false, DiscoveryPassKind::FirstLaunch)
+                .contains("worker is likely failing")
+        );
+
+        // A cut-short sync pass's remainder goes to THIS launch's background
+        // pass, so its stopped-early tail must not promise the next launch —
+        // that wording belongs to the background pass alone.
+        let sync_cut = discovery_summary(12, 3, true, DiscoveryPassKind::FirstLaunch);
+        assert!(sync_cut.contains("stopped early"), "{sync_cut}");
+        assert!(sync_cut.contains("continues in the background"), "{sync_cut}");
+        assert!(!sync_cut.contains("next launch"), "{sync_cut}");
+        assert!(
+            discovery_summary(12, 3, true, DiscoveryPassKind::Background)
+                .contains("retried next launch")
+        );
     }
 
     /// Lines captured by the fake sink below, newest last.
