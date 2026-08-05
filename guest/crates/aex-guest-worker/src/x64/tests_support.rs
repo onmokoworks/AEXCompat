@@ -2760,7 +2760,25 @@
             engine.call_selector_win64(TEST_CODE, [0; 6]),
             Err(GuestError::Callback(message))
                 if message.contains("_CxxThrowException")
+                    && message.contains("msvc_type=.?AVfailure@@")
         ));
+    }
+
+    #[test]
+    fn cxx_throw_type_diagnostic_is_image_bounded_nul_terminated_and_sanitized() {
+        let mut engine = test_engine(&vec![0u8; 0x1000]);
+        install_test_i32_throw_info(&mut engine);
+        assert_eq!(
+            msvc_throw_type_name(&engine.unicorn, TEST_THROW_INFO).as_deref(),
+            Some(".H")
+        );
+        assert_eq!(msvc_throw_type_name(&engine.unicorn, DATA_BASE), None);
+
+        let type_name = TEST_CODE + 0x850 + 16;
+        engine.write(type_name, &[b'A'; 128]).unwrap();
+        assert_eq!(msvc_throw_type_name(&engine.unicorn, TEST_THROW_INFO), None);
+        engine.write(type_name, b".?AVbad type@@\0").unwrap();
+        assert_eq!(msvc_throw_type_name(&engine.unicorn, TEST_THROW_INFO), None);
     }
 
     #[test]
