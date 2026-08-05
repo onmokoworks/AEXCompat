@@ -20,6 +20,7 @@ enum LegacyWin64Import {
     Malloc,
     Calloc,
     Free,
+    CrtStrdup,
     CallNewHandler,
     Strncpy,
     Memset,
@@ -358,6 +359,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "__stdio_common_vsnprintf_s") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "_strdup") => {
+            LegacyWin64Import::CrtStrdup
+        }
+        (_, "_strdup") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("msvcp140.dll", "_Mtx_init_in_situ") => LegacyWin64Import::MsvcpMutexInit,
         ("msvcp140.dll", "_Mtx_lock") => LegacyWin64Import::MsvcpMutexLock,
         ("msvcp140.dll", "_Mtx_unlock") => LegacyWin64Import::MsvcpMutexUnlock,
@@ -459,6 +464,15 @@ fn install_win64_import(
                     "install free import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_free(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CrtStrdup => {
+                uc("write _strdup return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install _strdup import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_strdup(unicorn);
                     }),
                 )?;
             }
