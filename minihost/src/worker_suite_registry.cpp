@@ -106,6 +106,7 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     case UnsupportedSuiteId::aegp_layer_15: return {"AEGP Layer Suite", 15};
     case UnsupportedSuiteId::aegp_layer_11: return {"AEGP Layer Suite", 11};
     case UnsupportedSuiteId::aegp_layer_14: return {"AEGP Layer Suite", 14};
+    case UnsupportedSuiteId::aegp_layer_5: return {"AEGP Layer Suite", 5};
     case UnsupportedSuiteId::aegp_collection_2: return {"AEGP Collection Suite", 2};
     case UnsupportedSuiteId::aegp_effect_4: return {"AEGP Effect Suite", 4};
     case UnsupportedSuiteId::aegp_effect_2: return {"AEGP Effect Suite", 2};

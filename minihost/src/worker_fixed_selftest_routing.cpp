@@ -165,9 +165,11 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 23> simple_commands{{
+  const std::array<selftest::SimpleCommand, 24> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
+      {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
+       hooks.simple.aegp_layer_suite1_slots},
       {L"--self-test-parameter-animation", "parameter_animation_transport",
        hooks.simple.parameter_animation},
       {L"--self-test-pf-param-utils-suite", "pf_param_utils_suite3",
