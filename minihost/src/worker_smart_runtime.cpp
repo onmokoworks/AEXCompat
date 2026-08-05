@@ -1,8 +1,11 @@
 #include "worker_smart_runtime.hpp"
+#include "worker_callback_diagnostics.hpp"
+#include "worker_extended_diag.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <iostream>
 #include <thread>
 
 namespace aexcompat::worker_runtime::smart {
@@ -12,6 +15,23 @@ constexpr std::size_t kCheckoutResultBytes = 76;
 constexpr std::size_t kMaxPixelCheckouts = 64;
 thread_local State g_default_state;
 thread_local State* g_active_state{};
+
+int32_t finish_callback(callback_diagnostics::Callback callback, int32_t result,
+                        callback_diagnostics::Reason reason =
+                            callback_diagnostics::Reason::None) {
+  callback_diagnostics::record(callback, result, reason);
+  if (aexcompat::l2_detail::extended_diag_enabled()) {
+    std::cerr << "extended_diag:"
+              << callback_diagnostics::CALLBACK_NAMES[static_cast<std::size_t>(callback)]
+              << " -> " << result;
+    if (result != 0)
+      std::cerr << " ("
+                << callback_diagnostics::REASON_NAMES[static_cast<std::size_t>(reason)]
+                << ')';
+    std::cerr << '\n' << std::flush;
+  }
+  return result;
+}
 
 bool same_rational_time(int32_t left, uint32_t left_scale,
                         int32_t right, uint32_t right_scale) {
@@ -159,14 +179,20 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
                                    void* result) {
   // PF does not provide a host refcon for these callback tables. A callback
   // made on a thread other than the selector thread cannot be bound safely.
-  if (!g_active_state || time_step <= 0 || time_scale == 0) return 4;
+  using callback_diagnostics::Callback;
+  using callback_diagnostics::Reason;
+  if (!g_active_state)
+    return finish_callback(Callback::PreCheckoutLayer, 4, Reason::NoActiveState);
+  if (time_step <= 0 || time_scale == 0)
+    return finish_callback(Callback::PreCheckoutLayer, 4, Reason::InvalidArguments);
   auto& runtime = *g_active_state;
   const bool current_time =
       static_cast<int64_t>(what_time) * runtime.current_time_scale ==
       static_cast<int64_t>(runtime.current_time) * time_scale;
   if (!current_time && !runtime.wide_time_checkout_allowed) {
     ++runtime.rejected_temporal_checkouts;
-    return 4;
+    return finish_callback(
+        Callback::PreCheckoutLayer, 4, Reason::TemporalCheckoutDenied);
   }
   auto hosted = std::find_if(runtime.hosted_layers.begin(),
       runtime.hosted_layers.end(), [index, what_time, time_scale](const auto& layer) {
@@ -183,7 +209,7 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   const CheckoutRequestState request_state = parse_checkout_request(request, request_rect);
   if (request_state == CheckoutRequestState::Malformed) {
     ++runtime.malformed_checkout_requests;
-    return 4;
+    return finish_callback(Callback::PreCheckoutLayer, 4, Reason::MalformedRequest);
   }
   const auto answer_rect = [&](int32_t width, int32_t height) {
     return request_state == CheckoutRequestState::Rect
@@ -195,9 +221,13 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   // its own registration below, so re-asking about the same layer cannot grow
   // into it.
   if (!checkout_id_registered(runtime, checkout_id) &&
-      runtime.pixel_checkouts.size() >= kMaxPixelCheckouts) return 4;
+      runtime.pixel_checkouts.size() >= kMaxPixelCheckouts)
+    return finish_callback(Callback::PreCheckoutLayer, 4, Reason::CapacityExceeded);
   if (hosted != runtime.hosted_layers.end()) {
-    if (!result || !hosted->world) return 4;
+    if (!result)
+      return finish_callback(Callback::PreCheckoutLayer, 4, Reason::InvalidArguments);
+    if (!hosted->world)
+      return finish_callback(Callback::PreCheckoutLayer, 4, Reason::MissingWorld);
     if (request)
       std::memcpy(runtime.map_checkout_request.data(), request,
                   sizeof(runtime.map_checkout_request));
@@ -210,9 +240,10 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
     forget_checkout(runtime, checkout_id);
     runtime.pixel_checkouts.push_back({checkout_id, hosted->world,
         hosted->view_world, hosted->checkout_rect, false});
-    return 0;
+    return finish_callback(Callback::PreCheckoutLayer, 0);
   }
-  if (timed_slot) return 4;
+  if (timed_slot)
+    return finish_callback(Callback::PreCheckoutLayer, 4, Reason::UnknownLayer);
   if (request && index == 0 && checkout_id == 0)
     std::memcpy(runtime.input_checkout_request.data(), request,
                 sizeof(runtime.input_checkout_request));
@@ -225,7 +256,8 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
     runtime.checkout_time_step = time_step;
     runtime.checkout_time_scale = time_scale;
   }
-  if (!result) return 4;
+  if (!result)
+    return finish_callback(Callback::PreCheckoutLayer, 4, Reason::InvalidArguments);
   if (index == 0 && checkout_id == 0) {
     // No `input_world` check: PreRender answers geometry, and a plug-in is
     // entitled to ask before any world exists to hand it. `checkout_pixels`
@@ -247,7 +279,7 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
     runtime.pixel_checkouts.push_back({checkout_id, runtime.input_world,
         runtime.input_checkout_view_world,
         runtime.input_checkout_result_rect, false});
-    return 0;
+    return finish_callback(Callback::PreCheckoutLayer, 0);
   }
   if (index == runtime.secondary_layer_slot && runtime.map_world) {
     runtime.map_checkout_result_rect = answer_rect(runtime.map_width, runtime.map_height);
@@ -261,42 +293,57 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
     runtime.pixel_checkouts.push_back({checkout_id, runtime.map_world,
         runtime.map_checkout_view_world, runtime.map_checkout_result_rect,
         false});
-    return 0;
+    return finish_callback(Callback::PreCheckoutLayer, 0);
   }
-  return 4;
+  return finish_callback(Callback::PreCheckoutLayer, 4, Reason::UnknownLayer);
 }
 
 int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
-  if (!world || !g_active_state) return 4;
+  using callback_diagnostics::Callback;
+  using callback_diagnostics::Reason;
+  if (!g_active_state)
+    return finish_callback(Callback::CheckoutPixels, 4, Reason::NoActiveState);
+  if (!world)
+    return finish_callback(Callback::CheckoutPixels, 4, Reason::InvalidArguments);
+  *world = nullptr;
   auto& runtime = *g_active_state;
   const bool use_views = !runtime.gpu_render_dispatched;
   auto checkout = std::find_if(runtime.pixel_checkouts.begin(),
       runtime.pixel_checkouts.end(), [checkout_id](const auto& candidate) {
         return candidate.id == checkout_id;
       });
-  if (checkout == runtime.pixel_checkouts.end() || !checkout->world ||
-      checkout->checked_out) return 4;
+  if (checkout == runtime.pixel_checkouts.end())
+    return finish_callback(Callback::CheckoutPixels, 4, Reason::UnknownCheckout);
+  if (!checkout->world)
+    return finish_callback(Callback::CheckoutPixels, 4, Reason::MissingWorld);
+  if (checkout->checked_out)
+    return finish_callback(Callback::CheckoutPixels, 4, Reason::AlreadyCheckedOut);
   if (checkout_promised_no_pixels(checkout->rect)) {
     ++runtime.empty_checkout_pixel_denials;
-    return 4;
+    return finish_callback(Callback::CheckoutPixels, 4, Reason::EmptyResult);
   }
   *world = use_views && checkout->view_world
       ? checkout->view_world : checkout->world;
   checkout->checked_out = true;
-  return 0;
+  return finish_callback(Callback::CheckoutPixels, 0);
 }
 
 int32_t __cdecl checkin_pixels(void*, int32_t checkout_id) {
-  if (!g_active_state) return 4;
+  using callback_diagnostics::Callback;
+  using callback_diagnostics::Reason;
+  if (!g_active_state)
+    return finish_callback(Callback::CheckinPixels, 4, Reason::NoActiveState);
   auto& runtime = *g_active_state;
   auto checkout = std::find_if(runtime.pixel_checkouts.begin(),
       runtime.pixel_checkouts.end(), [checkout_id](const auto& candidate) {
         return candidate.id == checkout_id;
       });
-  if (checkout == runtime.pixel_checkouts.end() || !checkout->checked_out)
-    return 4;
+  if (checkout == runtime.pixel_checkouts.end())
+    return finish_callback(Callback::CheckinPixels, 4, Reason::UnknownCheckout);
+  if (!checkout->checked_out)
+    return finish_callback(Callback::CheckinPixels, 4, Reason::NotCheckedOut);
   checkout->checked_out = false;
-  return 0;
+  return finish_callback(Callback::CheckinPixels, 0);
 }
 
 bool pixel_checkouts_balanced() {
@@ -308,11 +355,18 @@ bool pixel_checkouts_balanced() {
 }
 
 int32_t __cdecl checkout_output(void*, void** world) {
-  if (!world || !g_active_state) return 4;
+  using callback_diagnostics::Callback;
+  using callback_diagnostics::Reason;
+  if (!g_active_state)
+    return finish_callback(Callback::CheckoutOutput, 4, Reason::NoActiveState);
+  if (!world)
+    return finish_callback(Callback::CheckoutOutput, 4, Reason::InvalidArguments);
+  *world = nullptr;
   auto& runtime = *g_active_state;
-  if (!runtime.output_world) return 4;
+  if (!runtime.output_world)
+    return finish_callback(Callback::CheckoutOutput, 4, Reason::MissingWorld);
   *world = runtime.output_world;
-  return 0;
+  return finish_callback(Callback::CheckoutOutput, 0);
 }
 
 bool concurrency_self_test() {

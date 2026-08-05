@@ -1,4 +1,5 @@
 #include "worker_render_report.hpp"
+#include "worker_callback_diagnostics.hpp"
 
 #include "gpu_directx_backend.hpp"
 #include "gpu_memory_world_transport.hpp"
@@ -203,7 +204,8 @@ void append_classic_frame(ReportSnapshot& report, const ClassicReport::Frame& va
       << ",\"undefined_tail_bytes_per_row\":" << value.undefined_tail_bytes_per_row
       << ",\"input_sha256\":\"" << value.input_sha256 << "\",\"output_sha256\":\""
       << value.output_sha256 << "\",\"guard_bytes_intact\":"
-      << (value.guard_bytes_intact ? "true" : "false") << value.world_debug_json;
+      << (value.guard_bytes_intact ? "true" : "false")
+      << aexcompat::callback_diagnostics::report_field_json() << value.world_debug_json;
 }
 
 void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads& value) {
@@ -345,7 +347,8 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << ",\"undefined_tail_bytes_per_row\":0"
       << ",\"input_sha256\":\"" << v.input_sha256 << "\",\"output_sha256\":\""
       << v.output_sha256 << "\",\"result_rects_valid\":"
-      << (v.result_rects_valid ? "true" : "false") << v.world_debug_json;
+      << (v.result_rects_valid ? "true" : "false")
+      << aexcompat::callback_diagnostics::report_field_json() << v.world_debug_json;
 }
 
 void append_smart_context(ReportSnapshot& report, const SmartReport::Context& v) {

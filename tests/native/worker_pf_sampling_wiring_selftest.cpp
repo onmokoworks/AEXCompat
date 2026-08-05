@@ -18,6 +18,7 @@
 // has to be noticed rather than absorbed.
 
 #include "generated/aex_abi_contract.hpp"
+#include "worker_callback_diagnostics.hpp"
 #include "worker_effect_bootstrap.hpp"
 #include "worker_pf_sampling_runtime.hpp"
 #include "worker_pf_suites_internal.hpp"
@@ -27,6 +28,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <iostream>
 
 namespace contract = aexcompat::abi::x86_64_windows;
 namespace boot = aexcompat::worker_runtime::effect_bootstrap;
@@ -268,10 +270,13 @@ void production_utility_builder_is_offset_indexed() {
 }  // namespace
 
 int main() {
+  aexcompat::callback_diagnostics::reset();
   a_null_effect_ref_still_samples();
   the_utility_table_is_wired_one_to_one();
   get_callback_addr_is_typed_bounded_and_clears_failures();
   production_utility_builder_is_offset_indexed();
-  if (failures == 0) std::printf("{\"pf_sampling_wiring_selftest\":\"passed\"}\n");
+  if (failures == 0)
+    std::cout << "{\"pf_sampling_wiring_selftest\":\"passed\",\"callback_diagnostics\":"
+              << aexcompat::callback_diagnostics::snapshot_json() << "}\n";
   return failures == 0 ? 0 : 1;
 }

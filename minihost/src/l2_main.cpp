@@ -53,6 +53,7 @@
 #include "host_audio_runtime.hpp"
 #include "l2_cli_dispatch.h"
 #include "worker_extended_diag.hpp"
+#include "worker_callback_diagnostics.hpp"
 #include "aex_string_table.hpp"
 #include "l2_mode_execution.hpp"
 #include "parameter_animation_transport.hpp"

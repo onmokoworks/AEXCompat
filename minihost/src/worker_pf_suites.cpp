@@ -1,9 +1,13 @@
 #include "worker_pf_suites_internal.hpp"
+#include "worker_callback_diagnostics.hpp"
+#include "worker_extended_diag.hpp"
 #include "worker_pf_sampling_runtime.hpp"
 #include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -12,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <iostream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -43,6 +48,25 @@ constexpr std::size_t kUtilsPremultiplyColor16 = 496;
 
 PfHostContext g_pf_host{};
 bool g_pf_host_configured{};
+
+int32_t finish_callback(aexcompat::callback_diagnostics::Callback callback, int32_t result,
+                        aexcompat::callback_diagnostics::Reason reason =
+                            aexcompat::callback_diagnostics::Reason::None) {
+  aexcompat::callback_diagnostics::record(callback, result, reason);
+  if (aexcompat::l2_detail::extended_diag_enabled()) {
+    std::cerr << "extended_diag:"
+              << aexcompat::callback_diagnostics::CALLBACK_NAMES[
+                     static_cast<std::size_t>(callback)]
+              << " -> " << result;
+    if (result != 0)
+      std::cerr << " ("
+                << aexcompat::callback_diagnostics::REASON_NAMES[
+                       static_cast<std::size_t>(reason)]
+                << ')';
+    std::cerr << '\n' << std::flush;
+  }
+  return result;
+}
 
 bool resolve_world(void* world, int32_t pixel_bytes, unsigned char*& pixels,
                    int32_t& rowbytes, int32_t& width, int32_t& height) {
@@ -380,17 +404,23 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
   // otherwise bound the walk to the destination and alias each callback's input
   // pixel to the destination pixel it is processing.
   const bool has_source = source_world != nullptr;
-  if (!pixel_function ||
-      (has_source && !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
-                                    source_width, source_height)) ||
-      !resolve_world(destination_world, pixel_bytes, destination,
-                           destination_rowbytes, destination_width, destination_height)) return 4;
+  using aexcompat::callback_diagnostics::Callback;
+  using aexcompat::callback_diagnostics::Reason;
+  if (!pixel_function)
+    return finish_callback(Callback::Iterate, 4, Reason::InvalidArguments);
+  if (has_source && !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
+                                   source_width, source_height))
+    return finish_callback(Callback::Iterate, 4, Reason::MissingWorld);
+  if (!resolve_world(destination_world, pixel_bytes, destination,
+                     destination_rowbytes, destination_width, destination_height))
+    return finish_callback(Callback::Iterate, 4, Reason::MissingWorld);
   LegacyRect bounds{};
   const int32_t bound_width = has_source
       ? std::min(source_width, destination_width) : destination_width;
   const int32_t bound_height = has_source
       ? std::min(source_height, destination_height) : destination_height;
-  if (!normalize_legacy_rect(area, bound_width, bound_height, bounds)) return 4;
+  if (!normalize_legacy_rect(area, bound_width, bound_height, bounds))
+    return finish_callback(Callback::Iterate, 4, Reason::InvalidArea);
   IterateAbortCallback abort_callback{};
   IterateProgressCallback progress_callback{};
   void* effect_ref{};
@@ -413,14 +443,16 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
                 static_cast<std::size_t>(x) * pixel_bytes
           : destination_pixel;
       const int32_t error = pixel_function(refcon, x, y, source_pixel, destination_pixel);
-      if (error != 0) return error;
+      if (error != 0)
+        return finish_callback(Callback::Iterate, error, Reason::PixelCallback);
     }
     const int32_t completed_rows = y - bounds.top + 1;
     const bool reverse_progress = progress_final < progress_base;
     const int64_t progress_span = reverse_progress
         ? static_cast<int64_t>(progress_base) - progress_final
         : static_cast<int64_t>(progress_final) - progress_base;
-    if (progress_span > std::numeric_limits<int32_t>::max()) return 4;
+    if (progress_span > std::numeric_limits<int32_t>::max())
+      return finish_callback(Callback::Iterate, 4, Reason::InvalidArguments);
     const int32_t current = static_cast<int32_t>(reverse_progress
         ? progress_span * completed_rows / rows
         : static_cast<int64_t>(progress_base) + progress_span * completed_rows / rows);
@@ -429,14 +461,16 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
         : progress_final;
     if (progress_callback) {
       const int32_t error = progress_callback(effect_ref, current, callback_total);
-      if (error != 0) return error;
+      if (error != 0)
+        return finish_callback(Callback::Iterate, error, Reason::ProgressCallback);
     }
     if (completed_rows < rows && abort_callback) {
       const int32_t error = abort_callback(effect_ref);
-      if (error != 0) return error;
+      if (error != 0)
+        return finish_callback(Callback::Iterate, error, Reason::AbortCallback);
     }
   }
-  return 0;
+  return finish_callback(Callback::Iterate, 0);
 }
 
 int32_t __cdecl iterate_world8(void* in_data, int32_t progress_base, int32_t progress_final,
@@ -473,13 +507,19 @@ int32_t iterate_origin_typed(int32_t pixel_bytes, void* source_world, const Lega
   // to the zero source pixel for every location, matching how out-of-source
   // locations are already handled.
   const bool has_source = source_world != nullptr;
-  if (!origin || !pixel_function ||
-      (has_source && !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
-                                    source_width, source_height)) ||
-      !resolve_world(destination_world, pixel_bytes, destination, destination_rowbytes,
-                           destination_width, destination_height)) return 4;
+  using aexcompat::callback_diagnostics::Callback;
+  using aexcompat::callback_diagnostics::Reason;
+  if (!origin || !pixel_function)
+    return finish_callback(Callback::IterateOrigin, 4, Reason::InvalidArguments);
+  if (has_source && !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
+                                   source_width, source_height))
+    return finish_callback(Callback::IterateOrigin, 4, Reason::MissingWorld);
+  if (!resolve_world(destination_world, pixel_bytes, destination, destination_rowbytes,
+                     destination_width, destination_height))
+    return finish_callback(Callback::IterateOrigin, 4, Reason::MissingWorld);
   LegacyRect bounds{};
-  if (!normalize_legacy_rect(area, destination_width, destination_height, bounds)) return 4;
+  if (!normalize_legacy_rect(area, destination_width, destination_height, bounds))
+    return finish_callback(Callback::IterateOrigin, 4, Reason::InvalidArea);
   int16_t origin_x{}, origin_y{};
   std::memcpy(&origin_x, origin, sizeof(origin_x));
   std::memcpy(&origin_y, static_cast<const std::byte*>(origin) + 2, sizeof(origin_y));
@@ -493,10 +533,11 @@ int32_t iterate_origin_typed(int32_t pixel_bytes, void* source_world, const Lega
       void* output = destination + static_cast<std::size_t>(y) * destination_rowbytes +
           static_cast<std::size_t>(x) * pixel_bytes;
       const int32_t error = pixel_function(refcon, x + origin_x, y + origin_y, input, output);
-      if (error != 0) return error;
+      if (error != 0)
+        return finish_callback(Callback::IterateOrigin, error, Reason::PixelCallback);
     }
   }
-  return 0;
+  return finish_callback(Callback::IterateOrigin, 0);
 }
 
 int32_t __cdecl iterate_origin8(void*, int32_t, int32_t, void* source_world,

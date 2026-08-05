@@ -1,6 +1,7 @@
 #include "worker_param_checkout_runtime.hpp"
 
 #include "worker_classic_runtime.hpp"
+#include "worker_callback_diagnostics.hpp"
 #include "worker_extended_diag.hpp"
 #include "worker_parameter_runtime.hpp"
 
@@ -32,23 +33,45 @@ auto& g_last_param_checkout_index = g_parameter_runtime.checkout.last_index;
 auto& g_last_param_checkout_time = g_parameter_runtime.checkout.last_time;
 auto& g_last_param_checkout_time_step = g_parameter_runtime.checkout.last_time_step;
 auto& g_last_param_checkout_time_scale = g_parameter_runtime.checkout.last_time_scale;
+
+int32_t finish_param_callback(aexcompat::callback_diagnostics::Callback callback,
+                              int32_t result,
+                              aexcompat::callback_diagnostics::Reason reason =
+                                  aexcompat::callback_diagnostics::Reason::None) {
+  aexcompat::callback_diagnostics::record(callback, result, reason);
+  if (extended_diag_enabled()) {
+    std::cerr << "extended_diag:"
+              << aexcompat::callback_diagnostics::CALLBACK_NAMES[
+                     static_cast<std::size_t>(callback)]
+              << " -> " << result;
+    if (result != 0)
+      std::cerr << " ("
+                << aexcompat::callback_diagnostics::REASON_NAMES[
+                       static_cast<std::size_t>(reason)]
+                << ')';
+    std::cerr << '\n' << std::flush;
+  }
+  return result;
+}
 }  // namespace
 
 int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t time_step,
                                uint32_t time_scale, void* definition) {
+  using aexcompat::callback_diagnostics::Callback;
+  using aexcompat::callback_diagnostics::Reason;
   if (extended_diag_enabled())
     std::cerr << "extended_diag:checkout_param index=" << index
               << " time=" << what_time << "/" << time_scale << "\n"
               << std::flush;
   if (!definition || time_step <= 0 || time_scale == 0) {
-    if (extended_diag_enabled())
-      std::cerr << "extended_diag:checkout_param -> 4 (args)\n" << std::flush;
-    return 4;
+    return finish_param_callback(Callback::CheckoutParam, 4, Reason::InvalidArguments);
   }
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();
-  if (!classic_context && aexcompat::worker_runtime::classic::dispatch_active()) return 4;
+  if (!classic_context && aexcompat::worker_runtime::classic::dispatch_active())
+    return finish_param_callback(Callback::CheckoutParam, 4, Reason::NoActiveState);
   if (classic_context && !classic_context->checkout_time_allowed(what_time, time_scale))
-    return 4;
+    return finish_param_callback(
+        Callback::CheckoutParam, 4, Reason::TemporalCheckoutDenied);
   if (!classic_context) {
     // A zero ledger scale is not "no gate": it would reduce the comparison to
     // 0 == current_time * time_scale, which admits every time when the frame is
@@ -60,7 +83,8 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
             static_cast<int64_t>(g_checkout_current_time) * time_scale;
     if (!current_time && !g_wide_time_checkout_allowed) {
       ++g_rejected_temporal_param_checkouts;
-      return 4;
+      return finish_param_callback(
+          Callback::CheckoutParam, 4, Reason::TemporalCheckoutDenied);
     }
   }
   const auto record_checkout = [&] {
@@ -79,24 +103,25 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   if (classic_context && classic_context->copy_timed_layer(
           index, what_time, time_scale, definition, kParamSize)) {
     record_checkout();
-    return 0;
+    return finish_param_callback(Callback::CheckoutParam, 0);
   }
-  if (classic_context && classic_context->has_timed_slot(index)) return 4;
+  if (classic_context && classic_context->has_timed_slot(index))
+    return finish_param_callback(Callback::CheckoutParam, 4, Reason::UnknownLayer);
   if (classic_context) {
     if (classic_context->copy_definition(index, definition, kParamSize) ||
         classic_context->copy_fallback_definition(index, definition, kParamSize)) {
       record_checkout();
-      return 0;
+      return finish_param_callback(Callback::CheckoutParam, 0);
     }
-    return 4;
+    return finish_param_callback(Callback::CheckoutParam, 4, Reason::UnknownLayer);
   }
   const auto hosted = g_checkout_layer_definitions.find(index);
   if (hosted != g_checkout_layer_definitions.end()) {
     std::memcpy(definition, hosted->second.data(), hosted->second.size());
     record_checkout();
-    return 0;
+    return finish_param_callback(Callback::CheckoutParam, 0);
   }
-  return 4;
+  return finish_param_callback(Callback::CheckoutParam, 4, Reason::UnknownLayer);
 }
 
 void configure_hosted_checkout_time(int32_t current_time, uint32_t time_scale,
@@ -112,13 +137,19 @@ void configure_hosted_checkout_time(int32_t current_time, uint32_t time_scale,
 }
 
 int32_t __cdecl checkin_param(void*, void* definition) {
-  if (auto* context = aexcompat::worker_runtime::classic::active_context())
-    return context->checkin(definition);
-  if (aexcompat::worker_runtime::classic::dispatch_active()) return 4;
+  using aexcompat::callback_diagnostics::Callback;
+  using aexcompat::callback_diagnostics::Reason;
+  if (auto* context = aexcompat::worker_runtime::classic::active_context()) {
+    const int32_t result = context->checkin(definition);
+    return finish_param_callback(Callback::CheckinParam, result,
+        result == 0 ? Reason::None : Reason::NotCheckedOut);
+  }
+  if (aexcompat::worker_runtime::classic::dispatch_active())
+    return finish_param_callback(Callback::CheckinParam, 4, Reason::NoActiveState);
   std::lock_guard<std::mutex> lock(g_param_checkout_mutex);
   if (!definition || g_live_param_checkouts.empty()) {
     ++g_invalid_param_checkins;
-    return 4;
+    return finish_param_callback(Callback::CheckinParam, 4, Reason::NotCheckedOut);
   }
   auto found = g_live_param_checkouts.find(definition);
   // PF_ParamDef is a value type. Wrappers may move the checked-out value before
@@ -126,7 +157,7 @@ int32_t __cdecl checkin_param(void*, void* definition) {
   if (found == g_live_param_checkouts.end()) found = g_live_param_checkouts.begin();
   if (--found->second == 0) g_live_param_checkouts.erase(found);
   ++g_param_checkin_calls;
-  return 0;
+  return finish_param_callback(Callback::CheckinParam, 0);
 }
 
 bool param_checkouts_balanced() {

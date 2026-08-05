@@ -6,9 +6,12 @@
 // variable unset every helper collapses to a single cached environment
 // check.
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <cstddef>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -16,10 +19,15 @@ namespace aexcompat::l2_detail {
 
 inline bool extended_diag_enabled() {
   static const bool enabled = [] {
+#ifdef _WIN32
     wchar_t value[8]{};
     const DWORD length = GetEnvironmentVariableW(
         L"AEXCOMPAT_EXTENDED_DIAG", value, static_cast<DWORD>(std::size(value)));
     return length > 0 && value[0] == L'1';
+#else
+    const char* value = std::getenv("AEXCOMPAT_EXTENDED_DIAG");
+    return value && value[0] == '1';
+#endif
   }();
   return enabled;
 }
@@ -27,6 +35,7 @@ inline bool extended_diag_enabled() {
 inline void diag_probe_arg(const char* name, const void* arg) {
   std::cerr << " " << name << "=" << arg;
   if (!arg) return;
+#ifdef _WIN32
   MEMORY_BASIC_INFORMATION info{};
   if (VirtualQuery(arg, &info, sizeof(info)) == 0 || info.State != MEM_COMMIT ||
       (info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ |
@@ -47,6 +56,7 @@ inline void diag_probe_arg(const char* name, const void* arg) {
     text.push_back(static_cast<char>(byte));
   }
   if (!text.empty()) std::cerr << "(\"" << text << "\")";
+#endif
 }
 
 }  // namespace aexcompat::l2_detail
