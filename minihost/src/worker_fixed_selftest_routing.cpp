@@ -217,8 +217,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
        hooks.simple.pf_utils_handle_callbacks, 1,
        ",\"reached_via_in_data_utils\":true,\"offsets\":[160,168,176,184,440,464]"},
       {L"--self-test-flt-blur-suite1", "flt_blur_suite1",
-       hooks.simple.flt_blur_suite1, 1,
-       ",\"slots\":2,\"formats\":[\"argb8\",\"argb16\",\"argb32f\"],\"source_borrowed\":true,\"destination_borrowed\":true,\"fail_closed\":true"},
+       hooks.simple.flt_blur_suite1},
   }};
   if (const auto exit = selftest::dispatch_simple(
           request.argc, request.argv, simple_commands.data(), simple_commands.size()))

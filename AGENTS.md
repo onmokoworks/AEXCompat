@@ -37,7 +37,7 @@
 
 1. Issueの受入条件を先にファイル・テスト・実行コマンドへ落とす。
 2. 最小変更を実装する。
-3. focused pytest / source-contract testを実行する。
+3. focused pytest / behavioral self-test / compiled ABI assertionを実行する。製品ソースを文字列検索するだけの新規テストは追加しない。
 4. 影響するnative workerのRelease buildとself-testを実行する。
 5. 可能ならRust workspace test、Python全体、実AEX/SDK試験を実行する。実行できないものは理由と未検証範囲を記録する。
 6. 文字コードを環境任せにしない。UTF-8ソースを読むPython検証は、Windowsでは `PYTHONUTF8=1` を明示して再現性を確認する。
@@ -49,7 +49,8 @@
 2. latest headに対するCodex reviewとowner reviewを確認する。古いheadのcleanを新headのcleanとみなさない。
 3. ~~GitHub Actionsがgreenになるまでmergeしない。課金制限、usage limit、runner不調などの外部障害はコードの成功と混同せず、明示的にblockedとして報告する。~~ 現状 billing limit によりCIが回らないため、修正されるまでCIは確認しない。
 4. CI失敗を修正する場合は、まずログとannotationで根因を確認し、承認された小さな修正だけを行う。
-5. merge後に次のIssueへ進む。merge前の別Issue着手は禁止。
+5. 新規・更新テストが製品ソースを読み、特定の識別子・コメント・式のsubstringだけをassertしている場合は、behavioral evidenceとして受理しない。凍結evidence・schema・workflow自体のcontract検査を例外とする場合はPR本文で理由を明示する。self-testが固定のsuccess JSONを返し、外側がそれを照合するだけでは不十分で、具体的な出力・状態遷移・失敗条件または代表的mutationを検出できることを確認する。
+6. merge後に次のIssueへ進む。merge前の別Issue着手は禁止。
 
 ## 5. 定期的な棚卸し
 
