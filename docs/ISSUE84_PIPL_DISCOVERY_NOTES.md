@@ -180,3 +180,9 @@ CLAUDE.md の [[review-order-local-then-codex]] に従い、Codex より先に�
 - source-text テストは `tests/source_owners.py` 経由。l2_main.cpp から別 TU へ実装を移す場合は
   `WORKER_RUNTIME_OWNERS` 等に追記する (assert マーカーを緩めない)。
 ```
+
+## 追記 (2026-08-05, issue #732)
+
+- 本書が dispatch 統合ポイントとして参照していた `minihost/src/main.cpp`
+  (L1 worker の TU) は #732 で `l1` 経路ごと削除された。上記の結論
+  (main.cpp は #84 の scope 外) は変わらず、参照だけが過去のものになった。

@@ -222,3 +222,14 @@ worker isolation は、開発中・未知の AEX が**事故る**ことを前提
 守る床 (常時オン) と、観測が**どのバイトから出たか**を証明する evidence tier
 (opt-in) の 2 つであり、悪意あるバイナリを安全に実行するための sandbox は存在
 しないし、存在すると主張してはいけない (昇格基準未達)。
+
+## 訂正 (2026-08-05, issue #732)
+
+本書は 2026-08-04 時点の棚卸しであり、以下は #732 で過去のものになった:
+
+- §7 の `l1.rs` 行と「`l1` が最後のプラグインロード normal-token 経路」:
+  `l1` 経路・`aex_l1_worker`・schema-v1 selection loader は #732 で削除された。
+  プラグインをロードする normal-token 経路は現存しない。
+- §4 の残存デッドライン一覧のうち「`l1` の per-plug-in timeout」: 経路ごと消滅。
+  他の selection file の `timeout_ms` (l2 / render / smart / render_request) は
+  現行のまま。
