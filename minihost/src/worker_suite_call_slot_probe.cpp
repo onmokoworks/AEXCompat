@@ -40,7 +40,7 @@ inline constexpr std::array<TargetDescriptor,
          kPrivateEffectSuiteVersion3},
         {kPrivateEffectSuiteName, L"PF AE Private Effect Suite@5",
          kPrivateEffectSuiteVersion5},
-        {kAefxAceSuiteName, L"AEFX ACE Suite@1", kAefxAceSuiteVersion1},
+        {aefx_ace::kSuiteName, L"AEFX ACE Suite@1", kAefxAceSuiteVersion1},
     }};
 
 struct ProbeConfiguration {
@@ -296,12 +296,8 @@ const void* provide_private_effect_probe5(void*) noexcept {
       ? probe_table<ProbeTarget::private_effect_5>().data() : nullptr;
 }
 
-bool aefx_ace_probe1_available(void*) noexcept {
-  return target_enabled(ProbeTarget::aefx_ace_1);
-}
-
 const void* provide_aefx_ace_probe1(void*) noexcept {
-  return aefx_ace_probe1_available(nullptr)
+  return target_enabled(ProbeTarget::aefx_ace_1)
       ? probe_table<ProbeTarget::aefx_ace_1>().data() : nullptr;
 }
 

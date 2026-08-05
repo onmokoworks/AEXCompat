@@ -4,12 +4,17 @@
 
 #include <algorithm>
 #include <array>
-#include <cstring>
+#include <cstdint>
+#include <utility>
 
 namespace aexcompat::aefx_ace {
 namespace {
 
-constexpr int32_t kBadCallbackParam = 4;
+// What `record_unsupported_suite_call` already returns for a diagnosed slot,
+// so a refused conversion and a refused slot reach the plug-in as the same
+// error rather than two unrelated ones. This is not
+// PF_Err_BAD_CALLBACK_PARAM (516).
+constexpr int32_t kRefused = 4;
 constexpr uint32_t kMaxChannel8 = 255;
 constexpr uint32_t kMaxChannel16 = 32768;
 constexpr std::size_t kPixel8Bytes = 4;
@@ -35,10 +40,19 @@ unsigned char narrow(uint16_t value) noexcept {
 bool valid_request(int32_t pixels, const void* source, void* destination,
                    std::size_t source_bytes,
                    std::size_t destination_bytes) noexcept {
-  if (pixels <= 0 || pixels > kMaxPixelsPerCall) return false;
+  // Zero is a degenerate rect, not a malformed call: AE treats it as a
+  // no-op, so refusing it would fail a plug-in that guards an empty region
+  // this way. It converts nothing and still needs valid spans.
+  if (pixels < 0 || pixels > kMaxPixelsPerCall) return false;
   if (!source || !destination) return false;
-  const auto* source_begin = static_cast<const unsigned char*>(source);
-  const auto* destination_begin = static_cast<const unsigned char*>(destination);
+  // Compared as integers: relational comparison of pointers into unrelated
+  // objects is unspecified, and the spans here belong to different
+  // allocations by construction.
+  const auto source_begin = reinterpret_cast<uintptr_t>(source);
+  const auto destination_begin = reinterpret_cast<uintptr_t>(destination);
+  if (source_begin % alignof(uint16_t) != 0 ||
+      destination_begin % alignof(uint16_t) != 0)
+    return false;
   // Overlapping spans would make the result depend on iteration order, and no
   // observed caller converts in place.
   return source_begin + source_bytes <= destination_begin ||
@@ -54,7 +68,7 @@ int32_t __cdecl to_working(int32_t pixels, bool /*high_quality*/,
   const auto count = static_cast<std::size_t>(pixels > 0 ? pixels : 0);
   if (!valid_request(pixels, source, destination, count * kPixel8Bytes,
                      count * kPixel16Bytes))
-    return kBadCallbackParam;
+    return kRefused;
   const auto* input = static_cast<const unsigned char*>(source);
   auto* output = static_cast<uint16_t*>(destination);
   for (std::size_t pixel = 0; pixel < count; ++pixel) {
@@ -69,7 +83,7 @@ int32_t __cdecl from_working(int32_t pixels, bool /*high_quality*/,
   const auto count = static_cast<std::size_t>(pixels > 0 ? pixels : 0);
   if (!valid_request(pixels, source, destination, count * kPixel16Bytes,
                      count * kPixel8Bytes))
-    return kBadCallbackParam;
+    return kRefused;
   const auto* input = static_cast<const uint16_t*>(source);
   auto* output = static_cast<unsigned char*>(destination);
   for (std::size_t pixel = 0; pixel < count; ++pixel) {
@@ -79,13 +93,31 @@ int32_t __cdecl from_working(int32_t pixels, bool /*high_quality*/,
   return 0;
 }
 
+// Slot 1 and everything past slot 2 report their own slot number, so a
+// diagnostic names the slot the caller reached rather than only the suite.
+template <std::size_t... Offsets>
+std::array<void*, sizeof...(Offsets)> unsupported_tail(
+    std::index_sequence<Offsets...>) {
+  return {{reinterpret_cast<void*>(
+      &worker_runtime::unsupported_suite_slot<
+          worker_runtime::UnsupportedSuiteId::aefx_ace_1, Offsets + 3>)...}};
+}
+
 const Suite1& table() {
-  static const Suite1 suite{
-      &to_working,
-      reinterpret_cast<void*>(
-          &worker_runtime::unsupported_suite_slot<
-              worker_runtime::UnsupportedSuiteId::aefx_ace_1, 1>),
-      &from_working};
+  static const Suite1 suite = [] {
+    Suite1 built{
+        &to_working,
+        reinterpret_cast<void*>(
+            &worker_runtime::unsupported_suite_slot<
+                worker_runtime::UnsupportedSuiteId::aefx_ace_1, 1>),
+        &from_working,
+        {}};
+    const auto tail =
+        unsupported_tail(std::make_index_sequence<kSlotCount - 3>{});
+    for (std::size_t index = 0; index < tail.size(); ++index)
+      built.unsupported_tail[index] = tail[index];
+    return built;
+  }();
   return suite;
 }
 
@@ -95,9 +127,19 @@ const Suite1* suite1() noexcept { return &table(); }
 
 bool selftest() {
   const Suite1* suite = suite1();
-  if (!suite || !suite->to_working || !suite->from_working ||
-      !suite->unsupported_slot1)
-    return false;
+
+  // Every slot the observation did not identify answers with the diagnosed
+  // refusal instead of running, including when a caller invokes it with the
+  // four arguments the identified slots take.
+  const auto* slots = reinterpret_cast<void* const*>(suite);
+  unsigned char probe8[kPixel8Bytes]{};
+  uint16_t probe16[4]{};
+  for (std::size_t slot = 0; slot < kSlotCount; ++slot) {
+    if (slot == 0 || slot == 2) continue;
+    if (!slots[slot]) return false;
+    const auto stub = reinterpret_cast<ConvertPixels>(slots[slot]);
+    if (stub(1, true, probe8, probe16) != kRefused) return false;
+  }
 
   // A round trip must return every 8-bit value unchanged, or the caller's
   // scaling in the widened space would drift the image on its own.
@@ -129,6 +171,14 @@ bool selftest() {
       widened[3] != kMaxChannel16)
     return false;
 
+  // Interior values scale against 32768 too, which the endpoints alone would
+  // not show: 128 * 32768 / 255 rounds to 16448.
+  const unsigned char midpoint[kPixel8Bytes] = {128, 128, 128, 128};
+  uint16_t widened_midpoint[4]{};
+  if (suite->to_working(1, true, midpoint, widened_midpoint) != 0) return false;
+  for (uint16_t value : widened_midpoint)
+    if (value != 16448) return false;
+
   // A value above the 16-bit maximum is clamped rather than wrapped.
   const uint16_t above_range[4] = {65535, 65535, 65535, 65535};
   unsigned char clamped[kPixel8Bytes] = {0, 0, 0, 0};
@@ -140,31 +190,37 @@ bool selftest() {
   // spans are refused instead of read.
   unsigned char scratch[8 * kPixel8Bytes]{};
   uint16_t scratch16[8 * 4]{};
-  const int32_t refused_counts[] = {0, -1, kMaxPixelsPerCall + 1};
+
+  // Zero converts nothing and succeeds; the bound itself is accepted, one
+  // past it is not.
+  if (suite->to_working(0, true, scratch, scratch16) != 0) return false;
+  if (suite->from_working(0, true, scratch16, scratch) != 0) return false;
+
+  const int32_t refused_counts[] = {-1, kMaxPixelsPerCall + 1};
   for (int32_t count : refused_counts) {
-    if (suite->to_working(count, true, scratch, scratch16) != kBadCallbackParam)
+    if (suite->to_working(count, true, scratch, scratch16) != kRefused)
       return false;
     if (suite->from_working(count, true, scratch16, scratch) !=
-        kBadCallbackParam)
+        kRefused)
       return false;
   }
-  if (suite->to_working(1, true, nullptr, scratch16) != kBadCallbackParam)
+  if (suite->to_working(1, true, nullptr, scratch16) != kRefused)
     return false;
-  if (suite->to_working(1, true, scratch, nullptr) != kBadCallbackParam)
+  if (suite->to_working(1, true, scratch, nullptr) != kRefused)
     return false;
-  if (suite->from_working(1, true, nullptr, scratch) != kBadCallbackParam)
+  if (suite->from_working(1, true, nullptr, scratch) != kRefused)
     return false;
-  if (suite->from_working(1, true, scratch16, nullptr) != kBadCallbackParam)
+  if (suite->from_working(1, true, scratch16, nullptr) != kRefused)
     return false;
   // Both directions refuse an in-place conversion.
-  if (suite->to_working(2, true, scratch, scratch) != kBadCallbackParam)
+  if (suite->to_working(2, true, scratch, scratch) != kRefused)
     return false;
-  if (suite->from_working(2, true, scratch16, scratch16) != kBadCallbackParam)
+  if (suite->from_working(2, true, scratch16, scratch16) != kRefused)
     return false;
 
   // A refused call leaves the destination untouched.
   uint16_t untouched[4] = {7, 7, 7, 7};
-  if (suite->to_working(-1, true, scratch, untouched) != kBadCallbackParam)
+  if (suite->to_working(-1, true, scratch, untouched) != kRefused)
     return false;
   for (uint16_t value : untouched)
     if (value != 7) return false;

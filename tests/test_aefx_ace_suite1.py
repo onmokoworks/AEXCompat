@@ -32,8 +32,7 @@ def test_native_aefx_ace_suite1_passes_all_three_workers() -> None:
             cwd=ROOT,
             capture_output=True,
             text=True,
-            timeout=60,
-            check=False,
+            timeout=30,
         )
         assert completed.returncode == 0, completed.stderr or completed.stdout
         assert json.loads(completed.stdout) == expected

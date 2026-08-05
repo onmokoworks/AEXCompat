@@ -41,23 +41,39 @@ inline constexpr int32_t kSuiteVersion1 = 1;
 // a profile conversion will see AE-equivalence drift, which is recorded here
 // rather than hidden behind an approximation.
 
-// A single call converts at most one scanline. The bound is a transport
-// sanity check on a count the plug-in supplies; a caller that asks for more
-// gets PF_Err_BAD_CALLBACK_PARAM instead of an unbounded read.
+// The suite takes raw spans and a caller-supplied count, with no world or
+// effect identity to check them against, so the real length of either buffer
+// is unknowable here: this bounds how much a wrong count can touch, it does
+// not make the call safe. `from_working` writes into the caller's output
+// scanline, which is host-owned world memory, and containment for a plug-in
+// that lies about the count is the worker process and its Job Object. A call
+// past the bound is refused rather than clamped.
 inline constexpr int32_t kMaxPixelsPerCall = 1 << 20;
 
+// The caller emits `sete dl`, which writes one byte, so the parameter must be
+// one byte here too.
+static_assert(sizeof(bool) == 1);
+
 using ConvertPixels = int32_t (__cdecl *)(int32_t, bool, const void*, void*);
+
+// Only slots 0 and 2 were observed, which bounds the table from below and not
+// from above. Every slot past the two implementations is a diagnosed
+// unsupported stub so that a caller reaching further produces a recorded
+// diagnostic instead of an indirect call through whatever follows the table.
+inline constexpr std::size_t kSlotCount = 16;
 
 struct Suite1 {
   ConvertPixels to_working;
   void* unsupported_slot1;
   ConvertPixels from_working;
+  void* unsupported_tail[kSlotCount - 3];
 };
 
-static_assert(sizeof(Suite1) == 3 * sizeof(void*));
+static_assert(sizeof(Suite1) == kSlotCount * sizeof(void*));
 static_assert(offsetof(Suite1, to_working) == 0);
 static_assert(offsetof(Suite1, unsupported_slot1) == sizeof(void*));
 static_assert(offsetof(Suite1, from_working) == 2 * sizeof(void*));
+static_assert(offsetof(Suite1, unsupported_tail) == 3 * sizeof(void*));
 
 const Suite1* suite1() noexcept;
 bool selftest();
