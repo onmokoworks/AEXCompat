@@ -104,6 +104,7 @@ struct GuestState {
     msvcp_mutexes: HashMap<u64, MsvcpMutex>,
     pending_crt_initterm: Option<PendingCrtInitterm>,
     crt_onexit_tables: HashMap<u64, Vec<u64>>,
+    crt_terminate_handler: u64,
     windows_critical_sections: HashMap<u64, u32>,
     windows_condition_variables: HashSet<u64>,
     plugin_data_registry: EffectRegistry,
