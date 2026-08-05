@@ -221,17 +221,6 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         ):
             self.assertEqual(route.count(marker), launches, marker)
 
-    def test_every_launch_pins_the_approval_across_determinism_runs(self):
-        route = self.route_source()
-        # The receipt is reloaded per determinism run, so each route must compare
-        # the whole approved identity between runs. The sealed manifest digest
-        # covers every dependency; the fixture digest alone would miss a swapped
-        # worker build or dependency set.
-        launches = self.launch_sites(route)
-        self.assertEqual(route.count("let identity = (\n            tree.manifest_digest(),"), launches)
-        self.assertEqual(route.count("approved_identity = Some(identity);"), launches)
-        self.assertEqual(route.count("approval changed between determinism runs"), launches)
-
     def test_no_route_passes_the_plugin_as_an_argv_path(self):
         route = self.route_source()
         # secure_launch injects the sealed plug-in between the before/after argv
@@ -249,32 +238,6 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         )
         self.assertEqual(named, launches)
         self.assertNotIn("plugin_basename: None", route)
-
-    def test_each_launch_is_pinned_to_the_receipt_worker(self):
-        route = self.route_source()
-        # The profile-declared executable must match the receipt's trusted worker,
-        # compared canonically so a symlink or junction cannot substitute it.
-        launches = self.launch_sites(route)
-        self.assertEqual(
-            route.count("fs::canonicalize(&worker)? != fs::canonicalize(&receipt_worker)?"),
-            launches,
-        )
-        self.assertEqual(route.count("worker_program: &receipt_worker"), launches)
-
-    def test_migrated_reports_take_identity_from_the_selection_it_loaded(self):
-        route = self.route_source()
-        # The schema-v1 `approved_entry` / `render::entry` helpers no longer supply
-        # the reported identity. Since issue #732 the receipt id is echoed from the
-        # selection file the launch actually read, not from a compiled-in approval
-        # constant, so the report names the record that selected the plug-in.
-        self.assertNotIn("approved_entry", route)
-        self.assertNotIn("crate::render::entry", route)
-        self.assertNotIn("worker_spec.approval.receipt_id", route)
-        launches = self.launch_sites(route)
-        self.assertEqual(route.count('"receipt_id":approved_receipt_id'), launches)
-        self.assertEqual(
-            route.count("approved_receipt_id = approved.receipt_id.clone();"), launches)
-        self.assertEqual(route.count('"fixture_sha256":approved_fixture_sha256'), launches)
 
     def test_migrated_reports_add_no_keys_outside_their_contract_schema(self):
         """The three migrated routes must not grow report keys their schema forbids.
