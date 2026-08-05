@@ -46,6 +46,7 @@ enum LegacyWin64Import {
     CxxThrowException,
     Cos,
     CosF,
+    CeilF,
     ExpF,
     FloorF,
     PowF,
@@ -343,6 +344,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "cos") => LegacyWin64Import::Cos,
         (_, "cos") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "ceilf") => {
+            LegacyWin64Import::CeilF
+        }
+        (_, "ceilf") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "sin") => LegacyWin64Import::Sin,
         (_, "sin") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm") => LegacyWin64Import::CrtInitterm,
@@ -693,6 +698,9 @@ fn install_win64_import(
             }
             LegacyWin64Import::CosF => {
                 install_float_import(unicorn, stub, "cosf", f32::cos)?;
+            }
+            LegacyWin64Import::CeilF => {
+                install_float_import(unicorn, stub, "ceilf", f32::ceil)?;
             }
             LegacyWin64Import::ExpF => {
                 install_float_import(unicorn, stub, "expf", f32::exp)?;
