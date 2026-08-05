@@ -512,6 +512,25 @@ fn smart_checkout_rejects_other_times_and_tracks_pixel_balance() {
         ),
         world
     );
+    let repeated_output = arena_base + 2216;
+    assert_eq!(
+        unsafe { checkout_layer_pixels(0, 8, repeated_output, 0, 0, 0) },
+        0,
+        "a registered token can be replayed into another output slot"
+    );
+    assert_eq!(
+        u64::from_le_bytes(
+            arena[2216..2224]
+                .try_into()
+                .expect("repeated world is eight bytes")
+        ),
+        world
+    );
+    assert_eq!(
+        unsafe { checkout_layer_pixels(0, 8, arena_base + ARENA_SIZE as u64, 0, 0, 0) },
+        4,
+        "an invalid replay destination still fails closed"
+    );
     assert!(
         state
             .smart_checkout_ids

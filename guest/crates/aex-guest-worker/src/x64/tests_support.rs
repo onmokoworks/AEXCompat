@@ -4959,6 +4959,42 @@
         );
         assert_eq!(
             engine
+                .call_win64(
+                    HOST_CHECKOUT_LAYER_PIXELS,
+                    [1, 9999, checked_out_world, 0, 0, 0],
+                )
+                .unwrap(),
+            0,
+            "a repeated checkout of the same registered token is idempotent"
+        );
+        let different_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                HOST_CHECKOUT_LAYER_PIXELS,
+                [1, 9999, different_output, 0, 0, 0],
+            )
+                .unwrap(),
+            0,
+            "the token may be replayed into another mapped output slot"
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(different_output, 8).unwrap(),
+            input_world.to_le_bytes()
+        );
+        let invalid_output_error = engine
+            .call_win64(
+                HOST_CHECKOUT_LAYER_PIXELS,
+                [1, 9999, 0xdead_beef, 0, 0, 0],
+            )
+            .unwrap_err();
+        assert!(
+            invalid_output_error
+                .to_string()
+                .contains("checkout-pixels world write")
+        );
+        assert_eq!(
+            engine
                 .call_win64(HOST_CHECKIN_LAYER_PIXELS, [1, 9999, 0, 0, 0, 0])
                 .unwrap(),
             0
