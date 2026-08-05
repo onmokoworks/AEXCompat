@@ -192,6 +192,9 @@ const MAX_AVX_STATE_SYNC_POINTS: usize = 512 * 1_024;
 const MAX_VCOMP_REQUESTED_THREADS: i32 = 1_024;
 const MAX_CRT_MEMORY_COPY_BYTES: u64 = 128 * 1024 * 1024;
 const CRT_MEMORY_COPY_CHUNK: usize = 64 * 1024;
+const MAX_CRT_STDIO_BUFFER_BYTES: u64 = 1024 * 1024;
+const MAX_CRT_STDIO_FORMAT_BYTES: u64 = 4 * 1024;
+const MAX_CRT_STDIO_ARGUMENTS: usize = 32;
 
 pub(crate) fn utility_suite_layout(version: u32) -> Option<(usize, usize, usize)> {
     match version {
