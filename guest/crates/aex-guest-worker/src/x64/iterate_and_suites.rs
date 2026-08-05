@@ -986,6 +986,76 @@ fn msvc_throw_type_name(
     None
 }
 
+fn read_msvc_x64_string(
+    unicorn: &Unicorn<'_, GuestState>,
+    object: u64,
+) -> Option<String> {
+    const SSO_CAPACITY: u64 = 15;
+    const MAX_STRING_BYTES: u64 = 512;
+    const MAX_CAPACITY: u64 = 1 << 20;
+
+    let bytes = unicorn.mem_read_as_vec(object, 32).ok()?;
+    let size = u64::from_le_bytes(bytes[16..24].try_into().ok()?);
+    let capacity = u64::from_le_bytes(bytes[24..32].try_into().ok()?);
+    if size > MAX_STRING_BYTES || capacity < size || capacity > MAX_CAPACITY {
+        return None;
+    }
+    let data = if capacity == SSO_CAPACITY {
+        if size > SSO_CAPACITY {
+            return None;
+        }
+        object
+    } else {
+        if capacity < SSO_CAPACITY + 1 {
+            return None;
+        }
+        u64::from_le_bytes(bytes[..8].try_into().ok()?)
+    };
+    let byte_count = size.checked_add(1)?;
+    let text = unicorn.mem_read_as_vec(data, usize::try_from(byte_count).ok()?).ok()?;
+    if text.last() != Some(&0) {
+        return None;
+    }
+    let value = std::str::from_utf8(&text[..usize::try_from(size).ok()?]).ok()?;
+    let mut sanitized = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            if matches!(character, '\n' | '\r' | '\t') {
+                sanitized.push(' ');
+            } else {
+                return None;
+            }
+        } else {
+            sanitized.push(character);
+        }
+    }
+    Some(sanitized.trim().to_string())
+}
+
+fn cv_exception_message(
+    unicorn: &Unicorn<'_, GuestState>,
+    exception: u64,
+    throw_type: &str,
+) -> Option<String> {
+    const CV_EXCEPTION_TYPE: &str = ".?AVException@cv@@";
+    const OBJECT_PREFIX_BYTES: u64 = 256;
+    const STRING_ALIGNMENT: u64 = 8;
+
+    if throw_type != CV_EXCEPTION_TYPE || exception == 0 {
+        return None;
+    }
+    for offset in (0..OBJECT_PREFIX_BYTES).step_by(STRING_ALIGNMENT as usize) {
+        let object = exception.checked_add(offset)?;
+        let Some(candidate) = read_msvc_x64_string(unicorn, object) else {
+            continue;
+        };
+        if candidate.starts_with("OpenCV(") && candidate.contains("error:") {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
     if try_emulate_selector_abort(unicorn) {
         return;
@@ -1001,8 +1071,15 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
             .ok()
             .and_then(|throw_info| msvc_throw_type_name(unicorn, throw_info))
             .unwrap_or_else(|| "unavailable".into());
+        let cv_message = unicorn
+            .reg_read(RegisterX86::RCX)
+            .ok()
+            .and_then(|exception| cv_exception_message(unicorn, exception, &throw_type));
+        let message_suffix = cv_message
+            .map(|message| format!(", cv_message={message}"))
+            .unwrap_or_default();
         unicorn.get_data_mut().callback_error = Some(format!(
-            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type})"
+            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type}{message_suffix})"
         ));
     }
     let _ = unicorn.emu_stop();

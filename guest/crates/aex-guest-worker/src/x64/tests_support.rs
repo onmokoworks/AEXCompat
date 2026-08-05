@@ -2781,6 +2781,69 @@
         assert_eq!(msvc_throw_type_name(&engine.unicorn, TEST_THROW_INFO), None);
     }
 
+    fn write_msvc_x64_string(
+        engine: &mut GuestEngine<'static>,
+        object: u64,
+        heap: u64,
+        value: &[u8],
+    ) {
+        let mut bytes = [0u8; 32];
+        if value.len() <= 15 {
+            bytes[..value.len()].copy_from_slice(value);
+            bytes[value.len()] = 0;
+            bytes[24..32].copy_from_slice(&15u64.to_le_bytes());
+        } else {
+            engine.write(heap, value).unwrap();
+            engine.write(heap + value.len() as u64, &[0]).unwrap();
+            bytes[..8].copy_from_slice(&heap.to_le_bytes());
+            bytes[24..32].copy_from_slice(&(value.len() as u64).to_le_bytes());
+        }
+        bytes[16..24].copy_from_slice(&(value.len() as u64).to_le_bytes());
+        engine.write(object, &bytes).unwrap();
+    }
+
+    #[test]
+    fn cv_exception_message_requires_exact_type_valid_msvc_string_and_diagnostic_shape() {
+        let mut engine = test_engine(&[0xc3]);
+        let exception = DATA_BASE + 0x400;
+        let heap = DATA_BASE + 0x700;
+        let message = b"OpenCV(4.5.5) source.cpp:7: error: (-215) assertion in function 'f'\n";
+        write_msvc_x64_string(&mut engine, exception + 16, heap, message);
+
+        assert_eq!(
+            cv_exception_message(&engine.unicorn, exception, ".?AVException@cv@@").as_deref(),
+            Some("OpenCV(4.5.5) source.cpp:7: error: (-215) assertion in function 'f'")
+        );
+        assert_eq!(
+            cv_exception_message(&engine.unicorn, exception, ".?AVfailure@@"),
+            None
+        );
+
+        write_msvc_x64_string(&mut engine, exception + 16, heap, b"short");
+        assert_eq!(
+            read_msvc_x64_string(&engine.unicorn, exception + 16).as_deref(),
+            Some("short")
+        );
+        assert_eq!(
+            cv_exception_message(&engine.unicorn, exception, ".?AVException@cv@@"),
+            None
+        );
+
+        let malformed = exception + 16;
+        engine.write(malformed + 16, &513u64.to_le_bytes()).unwrap();
+        assert_eq!(read_msvc_x64_string(&engine.unicorn, malformed), None);
+        engine.write(malformed + 16, &4u64.to_le_bytes()).unwrap();
+        engine.write(malformed + 24, &3u64.to_le_bytes()).unwrap();
+        assert_eq!(read_msvc_x64_string(&engine.unicorn, malformed), None);
+        engine.write(malformed, &0xdead_beefu64.to_le_bytes()).unwrap();
+        engine.write(malformed + 16, &4u64.to_le_bytes()).unwrap();
+        engine.write(malformed + 24, &16u64.to_le_bytes()).unwrap();
+        assert_eq!(read_msvc_x64_string(&engine.unicorn, malformed), None);
+
+        write_msvc_x64_string(&mut engine, malformed, heap, b"bad\x01text");
+        assert_eq!(read_msvc_x64_string(&engine.unicorn, malformed), None);
+    }
+
     #[test]
     fn failed_suite_provenance_expires_and_distant_i32_throw_fails_closed() {
         let error_pointer = DATA_BASE + 0x300;
