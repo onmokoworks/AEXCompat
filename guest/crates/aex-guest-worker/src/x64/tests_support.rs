@@ -73,6 +73,7 @@
             HOST_CHECKIN_LAYER_PIXELS,
             HOST_ITERATE16,
             HOST_ITERATE16_CONTINUE,
+            HOST_CRT_INITTERM_CONTINUE,
         ] {
             unicorn.mem_write(address, &[0xc3]).unwrap();
         }
@@ -184,6 +185,16 @@
             )
             .unwrap();
         unicorn
+            .mem_write(HOST_CRT_INITTERM_CONTINUE, &[0x41, 0xff, 0xe3])
+            .unwrap();
+        unicorn
+            .add_code_hook(
+                HOST_CRT_INITTERM_CONTINUE,
+                HOST_CRT_INITTERM_CONTINUE,
+                continue_crt_initterm,
+            )
+            .unwrap();
+        unicorn
             .add_code_hook(
                 HOST_COLOR_PARAM_VALUE,
                 HOST_COLOR_PARAM_VALUE,
@@ -289,6 +300,7 @@
         install_iterate8_suites(&mut unicorn).unwrap();
         install_pf_ansi_suite_v2(&mut unicorn).unwrap();
         install_gpu_device_suite(&mut unicorn).unwrap();
+        install_windows_condition_variable_callbacks(&mut unicorn).unwrap();
         unicorn
             .mem_write(
                 HOST_COLOR_PARAM_SUITE,
@@ -1760,6 +1772,335 @@
                 .unwrap(),
             [0; VCRUNTIME_EXCEPTION_DATA_BYTES]
         );
+    }
+
+    fn write_initializer_fixture(
+        engine: &mut GuestEngine<'static>,
+        function: u64,
+        marker: u64,
+        value: u8,
+        returned: u32,
+    ) {
+        let mut code = vec![0x48, 0xb8]; // mov rax, marker
+        code.extend_from_slice(&marker.to_le_bytes());
+        code.extend_from_slice(&[0xc6, 0x00, value]); // mov byte ptr [rax], value
+        code.push(0xb8); // mov eax, returned
+        code.extend_from_slice(&returned.to_le_bytes());
+        code.push(0xc3);
+        engine.write(function, &code).unwrap();
+    }
+
+    #[test]
+    fn crt_initterm_executes_non_null_initializers_in_order() {
+        const INITTERM: u64 = STUB_BASE + 0x350;
+        let mut engine = test_engine(&vec![0x90; 0x400]);
+        engine.unicorn.get_data_mut().image_executable_ranges =
+            vec![(TEST_CODE, TEST_CODE + PAGE_SIZE)];
+        install_win64_import(
+            &mut engine.unicorn,
+            INITTERM,
+            "api-ms-win-crt-runtime-l1-1-0.dll",
+            "_initterm",
+        )
+        .unwrap();
+        let first = TEST_CODE + 0x100;
+        let second = TEST_CODE + 0x140;
+        let marker = DATA_BASE + 0x700;
+        write_initializer_fixture(&mut engine, first, marker, 1, 99);
+        write_initializer_fixture(&mut engine, second, marker, 2, 88);
+        let table = DATA_BASE + 0x600;
+        let mut entries = Vec::new();
+        for function in [first, 0, second] {
+            entries.extend_from_slice(&function.to_le_bytes());
+        }
+        engine.write(table, &entries).unwrap();
+
+        assert_eq!(
+            engine
+                .call_win64(INITTERM, [table, table + entries.len() as u64, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(marker, 1).unwrap(), [2]);
+        assert!(engine.unicorn.get_data().pending_crt_initterm.is_none());
+    }
+
+    #[test]
+    fn crt_initterm_e_stops_at_first_nonzero_initializer() {
+        const INITTERM_E: u64 = STUB_BASE + 0x360;
+        let mut engine = test_engine(&vec![0x90; 0x400]);
+        engine.unicorn.get_data_mut().image_executable_ranges =
+            vec![(TEST_CODE, TEST_CODE + PAGE_SIZE)];
+        install_win64_import(
+            &mut engine.unicorn,
+            INITTERM_E,
+            "api-ms-win-crt-runtime-l1-1-0.dll",
+            "_initterm_e",
+        )
+        .unwrap();
+        let first = TEST_CODE + 0x180;
+        let second = TEST_CODE + 0x1c0;
+        let first_marker = DATA_BASE + 0x710;
+        let second_marker = DATA_BASE + 0x711;
+        write_initializer_fixture(&mut engine, first, first_marker, 1, 7);
+        write_initializer_fixture(&mut engine, second, second_marker, 1, 0);
+        let table = DATA_BASE + 0x650;
+        let mut entries = Vec::new();
+        for function in [first, second] {
+            entries.extend_from_slice(&function.to_le_bytes());
+        }
+        engine.write(table, &entries).unwrap();
+
+        assert_eq!(
+            engine
+                .call_win64(
+                    INITTERM_E,
+                    [table, table + entries.len() as u64, 0, 0, 0, 0],
+                )
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(first_marker, 2).unwrap(),
+            [1, 0]
+        );
+        assert!(engine.unicorn.get_data().pending_crt_initterm.is_none());
+    }
+
+    #[test]
+    fn crt_initterm_is_library_qualified_bounded_and_fail_closed() {
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "_initterm"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "_initterm_e"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        const INITTERM: u64 = STUB_BASE + 0x370;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            INITTERM,
+            "api-ms-win-crt-runtime-l1-1-0.dll",
+            "_initterm",
+        )
+        .unwrap();
+        let table = DATA_BASE + 0x680;
+        engine
+            .write(table, &(DATA_BASE + 0x800).to_le_bytes())
+            .unwrap();
+        let error = engine
+            .call_win64(INITTERM, [table, table + 8, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("outside the executable image"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn crt_onexit_registers_and_executes_callbacks_in_reverse_order() {
+        const INITIALIZE: u64 = STUB_BASE + 0x380;
+        const REGISTER: u64 = STUB_BASE + 0x390;
+        const EXECUTE: u64 = STUB_BASE + 0x3a0;
+        let mut engine = test_engine(&vec![0x90; 0x400]);
+        engine.unicorn.get_data_mut().image_executable_ranges =
+            vec![(TEST_CODE, TEST_CODE + PAGE_SIZE)];
+        for (stub, symbol) in [
+            (INITIALIZE, "_initialize_onexit_table"),
+            (REGISTER, "_register_onexit_function"),
+            (EXECUTE, "_execute_onexit_table"),
+        ] {
+            install_win64_import(
+                &mut engine.unicorn,
+                stub,
+                "api-ms-win-crt-runtime-l1-1-0.dll",
+                symbol,
+            )
+            .unwrap();
+        }
+        let first = TEST_CODE + 0x240;
+        let second = TEST_CODE + 0x280;
+        let marker = DATA_BASE + 0x780;
+        let table = DATA_BASE + 0x7a0;
+        write_initializer_fixture(&mut engine, first, marker, 1, 0);
+        write_initializer_fixture(&mut engine, second, marker, 2, 0);
+
+        assert_eq!(
+            engine.call_win64(INITIALIZE, [table, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.call_win64(REGISTER, [table, first, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .call_win64(REGISTER, [table, second, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.call_win64(EXECUTE, [table, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(marker, 1).unwrap(), [1]);
+        assert!(engine.unicorn.get_data().crt_onexit_tables.is_empty());
+        let error = engine
+            .call_win64(EXECUTE, [table, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("not initialized"), "{error}");
+    }
+
+    #[test]
+    fn windows_critical_section_is_recursive_bounded_and_library_qualified() {
+        let operations = [
+            (STUB_BASE + 0x3b0, "InitializeCriticalSectionAndSpinCount"),
+            (STUB_BASE + 0x3c0, "EnterCriticalSection"),
+            (STUB_BASE + 0x3d0, "LeaveCriticalSection"),
+            (STUB_BASE + 0x3e0, "DeleteCriticalSection"),
+        ];
+        for (_, symbol) in operations {
+            assert_eq!(
+                dispatch_win64_import("fixture.dll", symbol),
+                Win64ImportDispatch::UnsupportedLegacyImport
+            );
+        }
+        let mut engine = test_engine(&[0xc3]);
+        for (stub, symbol) in operations {
+            install_win64_import(&mut engine.unicorn, stub, "kernel32.dll", symbol).unwrap();
+        }
+        let object = DATA_BASE + 0x800;
+        assert_eq!(
+            engine
+                .call_win64(operations[0].0, [object, 4000, 0, 0, 0, 0])
+                .unwrap(),
+            1
+        );
+        engine
+            .call_win64(operations[1].0, [object, 0, 0, 0, 0, 0])
+            .unwrap();
+        engine
+            .call_win64(operations[1].0, [object, 0, 0, 0, 0, 0])
+            .unwrap();
+        engine
+            .call_win64(operations[2].0, [object, 0, 0, 0, 0, 0])
+            .unwrap();
+        engine
+            .call_win64(operations[2].0, [object, 0, 0, 0, 0, 0])
+            .unwrap();
+        engine
+            .call_win64(operations[3].0, [object, 0, 0, 0, 0, 0])
+            .unwrap();
+        let error = engine
+            .call_win64(operations[2].0, [object, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("not initialized"), "{error}");
+    }
+
+    #[test]
+    fn dynamic_condition_variables_are_bounded_and_blocking_fails_closed() {
+        const GET_MODULE: u64 = STUB_BASE + 0x3f0;
+        const GET_PROC: u64 = STUB_BASE + 0x400;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_MODULE,
+            "kernel32.dll",
+            "GetModuleHandleW",
+        )
+        .unwrap();
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_PROC,
+            "kernel32.dll",
+            "GetProcAddress",
+        )
+        .unwrap();
+        let module_name = DATA_BASE + 0x880;
+        let mut wide = "kernel32.dll".encode_utf16().collect::<Vec<_>>();
+        wide.push(0);
+        let wide_bytes = wide
+            .iter()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect::<Vec<_>>();
+        engine.write(module_name, &wide_bytes).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(GET_MODULE, [module_name, 0, 0, 0, 0, 0])
+                .unwrap(),
+            WINDOWS_KERNEL32_MODULE_TOKEN
+        );
+
+        let name = DATA_BASE + 0x900;
+        engine
+            .write(name, b"InitializeConditionVariable\0")
+            .unwrap();
+        let initialize = engine
+            .call_win64(
+                GET_PROC,
+                [WINDOWS_KERNEL32_MODULE_TOKEN, name, 0, 0, 0, 0],
+            )
+            .unwrap();
+        assert_eq!(initialize, HOST_INITIALIZE_CONDITION_VARIABLE);
+        let condition = DATA_BASE + 0x980;
+        engine
+            .call_win64(initialize, [condition, 0, 0, 0, 0, 0])
+            .unwrap();
+
+        engine.write(name, b"WakeAllConditionVariable\0").unwrap();
+        let wake = engine
+            .call_win64(
+                GET_PROC,
+                [WINDOWS_KERNEL32_MODULE_TOKEN, name, 0, 0, 0, 0],
+            )
+            .unwrap();
+        engine
+            .call_win64(wake, [condition, 0, 0, 0, 0, 0])
+            .unwrap();
+        let error = engine
+            .call_win64(
+                HOST_SLEEP_CONDITION_VARIABLE_CS,
+                [condition, DATA_BASE + 0xa00, 0, 0, 0, 0],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("blocking"), "{error}");
+    }
+
+    #[test]
+    fn deterministic_getenv_and_openmp_dynamic_policy_are_bounded() {
+        const GETENV: u64 = STUB_BASE + 0x410;
+        const OMP_SET_DYNAMIC: u64 = STUB_BASE + 0x420;
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            GETENV,
+            "api-ms-win-crt-environment-l1-1-0.dll",
+            "getenv",
+        )
+        .unwrap();
+        install_win64_import(
+            &mut engine.unicorn,
+            OMP_SET_DYNAMIC,
+            "vcomp140.dll",
+            "omp_set_dynamic",
+        )
+        .unwrap();
+        let name = DATA_BASE + 0xa80;
+        engine.write(name, b"OPENCV_FOR_THREADS_NUM\0").unwrap();
+        assert_eq!(
+            engine.call_win64(GETENV, [name, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        engine
+            .call_win64(OMP_SET_DYNAMIC, [1, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_eq!(engine.unicorn.get_data().omp_dynamic_requested, Some(true));
+        let error = engine
+            .call_win64(OMP_SET_DYNAMIC, [2, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("expected 0 or 1"), "{error}");
     }
 
     #[test]

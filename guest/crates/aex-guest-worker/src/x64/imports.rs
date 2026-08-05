@@ -41,6 +41,7 @@ enum LegacyWin64Import {
     Pow,
     SinF,
     OmpGetMaxThreads,
+    OmpSetDynamic,
     VcompSetNumThreads,
     VcompFork,
     VcompForDynamicInit,
@@ -52,6 +53,19 @@ enum LegacyWin64Import {
     GetCurrentProcessId,
     QueryPerformanceCounter,
     ExplicitMsvcRuntimeZero,
+    CrtInitterm,
+    CrtInittermE,
+    CrtInitializeOnexitTable,
+    CrtRegisterOnexitFunction,
+    CrtExecuteOnexitTable,
+    CrtGetenv,
+    InitializeCriticalSection,
+    InitializeCriticalSectionAndSpinCount,
+    EnterCriticalSection,
+    LeaveCriticalSection,
+    DeleteCriticalSection,
+    GetModuleHandleW,
+    GetProcAddress,
     InitializeSListHead,
     DisableThreadLibraryCalls,
 }
@@ -245,21 +259,61 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "DisableThreadLibraryCalls") => {
             LegacyWin64Import::DisableThreadLibraryCalls
         }
+        ("kernel32.dll", "InitializeCriticalSection") => {
+            LegacyWin64Import::InitializeCriticalSection
+        }
+        ("kernel32.dll", "InitializeCriticalSectionAndSpinCount") => {
+            LegacyWin64Import::InitializeCriticalSectionAndSpinCount
+        }
+        ("kernel32.dll", "EnterCriticalSection") => LegacyWin64Import::EnterCriticalSection,
+        ("kernel32.dll", "LeaveCriticalSection") => LegacyWin64Import::LeaveCriticalSection,
+        ("kernel32.dll", "DeleteCriticalSection") => LegacyWin64Import::DeleteCriticalSection,
+        ("kernel32.dll", "GetModuleHandleW") => LegacyWin64Import::GetModuleHandleW,
+        ("kernel32.dll", "GetProcAddress") => LegacyWin64Import::GetProcAddress,
+        (
+            _,
+            "InitializeCriticalSection"
+            | "InitializeCriticalSectionAndSpinCount"
+            | "EnterCriticalSection"
+            | "LeaveCriticalSection"
+            | "DeleteCriticalSection",
+        ) => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("api-ms-win-crt-runtime-l1-1-0.dll", symbol)
             if matches!(
                 symbol,
-                "_execute_onexit_table"
-                    | "_initialize_onexit_table"
-                    | "_initialize_narrow_environment"
+                "_initialize_narrow_environment"
                     | "_configure_narrow_argv"
-                    | "_initterm_e"
-                    | "_initterm"
                     | "_cexit"
             ) =>
         {
             LegacyWin64Import::ExplicitMsvcRuntimeZero
         }
+        ("api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_onexit_table") => {
+            LegacyWin64Import::CrtInitializeOnexitTable
+        }
+        ("api-ms-win-crt-runtime-l1-1-0.dll", "_register_onexit_function") => {
+            LegacyWin64Import::CrtRegisterOnexitFunction
+        }
+        ("api-ms-win-crt-runtime-l1-1-0.dll", "_execute_onexit_table") => {
+            LegacyWin64Import::CrtExecuteOnexitTable
+        }
+        (_, "_initialize_onexit_table" | "_register_onexit_function" | "_execute_onexit_table") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("api-ms-win-crt-environment-l1-1-0.dll", "getenv") => LegacyWin64Import::CrtGetenv,
+        (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm") => LegacyWin64Import::CrtInitterm,
+        ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm_e") => {
+            LegacyWin64Import::CrtInittermE
+        }
+        (_, "_initterm" | "_initterm_e") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("vcomp140.dll", "_vcomp_set_num_threads") => LegacyWin64Import::VcompSetNumThreads,
+        ("vcomp140.dll", "omp_set_dynamic") => LegacyWin64Import::OmpSetDynamic,
+        (_, "omp_set_dynamic") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, "_vcomp_set_num_threads") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
@@ -522,6 +576,26 @@ fn install_win64_import(
                     unicorn.mem_write(stub, &deterministic_i32_stub(value)),
                 )?;
             }
+            LegacyWin64Import::OmpSetDynamic => {
+                uc("write omp_set_dynamic return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install omp_set_dynamic import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        let enabled = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX);
+                        if enabled > 1 {
+                            unicorn.get_data_mut().callback_error = Some(format!(
+                                "OpenMP dynamic scheduling request {enabled} is invalid; expected 0 or 1"
+                            ));
+                            let _ = unicorn.emu_stop();
+                        } else {
+                            // Record the guest policy while retaining the
+                            // deterministic single-worker execution model.
+                            unicorn.get_data_mut().omp_dynamic_requested = Some(enabled != 0);
+                        }
+                        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+                    }),
+                )?;
+            }
             LegacyWin64Import::VcompSetNumThreads => {
                 uc(
                     "write _vcomp_set_num_threads return",
@@ -623,6 +697,114 @@ fn install_win64_import(
                 // behavior for CRT startup/teardown only. Every other unknown
                 // import remains a typed trap.
             }
+            LegacyWin64Import::CrtInitterm | LegacyWin64Import::CrtInittermE => {
+                uc("write CRT initializer tail jump", unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]))?;
+                let stop_on_error = implementation == LegacyWin64Import::CrtInittermE;
+                uc(
+                    "install CRT initializer import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_crt_initterm(unicorn, stop_on_error);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CrtInitializeOnexitTable
+            | LegacyWin64Import::CrtRegisterOnexitFunction => {
+                uc("write CRT onexit return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install CRT onexit import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_crt_onexit(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CrtExecuteOnexitTable => {
+                uc("write CRT onexit tail jump", unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]))?;
+                uc(
+                    "install CRT onexit execution import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_crt_onexit(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CrtGetenv => {
+                uc("write deterministic getenv return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install deterministic getenv import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_getenv(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::InitializeCriticalSection
+            | LegacyWin64Import::InitializeCriticalSectionAndSpinCount
+            | LegacyWin64Import::EnterCriticalSection
+            | LegacyWin64Import::LeaveCriticalSection
+            | LegacyWin64Import::DeleteCriticalSection => {
+                uc("write critical-section return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install critical-section import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_windows_critical_section(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetModuleHandleW => {
+                uc("write GetModuleHandleW return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install GetModuleHandleW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_module_handle_w(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetProcAddress => {
+                uc("write GetProcAddress return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install GetProcAddress import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        let module = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+                        let pointer = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+                        let mut bytes = Vec::new();
+                        let mut terminated = false;
+                        for index in 0..128u64 {
+                            let Some(address) = pointer.checked_add(index) else {
+                                break;
+                            };
+                            let Ok(value) = unicorn.mem_read_as_vec(address, 1) else {
+                                break;
+                            };
+                            if value[0] == 0 {
+                                terminated = true;
+                                break;
+                            }
+                            bytes.push(value[0]);
+                        }
+                        let dynamic = match bytes.as_slice() {
+                            b"InitializeConditionVariable" => {
+                                Some(HOST_INITIALIZE_CONDITION_VARIABLE)
+                            }
+                            b"SleepConditionVariableCS" => Some(HOST_SLEEP_CONDITION_VARIABLE_CS),
+                            b"WakeConditionVariable" => Some(HOST_WAKE_CONDITION_VARIABLE),
+                            b"WakeAllConditionVariable" => Some(HOST_WAKE_ALL_CONDITION_VARIABLE),
+                            _ => None,
+                        };
+                        if module == WINDOWS_KERNEL32_MODULE_TOKEN
+                            && terminated
+                            && let Some(dynamic) = dynamic
+                        {
+                            let _ = unicorn.reg_write(RegisterX86::RAX, dynamic);
+                        } else {
+                            if unicorn.get_data().callback_error.is_none() {
+                                unicorn.get_data_mut().callback_error = Some(format!(
+                                    "GetProcAddress module={module:#x} name={:?} is unsupported",
+                                    String::from_utf8_lossy(&bytes)
+                                ));
+                            }
+                            let _ = unicorn.emu_stop();
+                        }
+                    }),
+                )?;
+            }
             LegacyWin64Import::InitializeSListHead => {
                 uc(
                     "write InitializeSListHead return",
@@ -661,6 +843,561 @@ fn install_win64_import(
         }
     }
     Ok(dispatch)
+}
+
+fn fail_crt_initterm(unicorn: &mut Unicorn<'_, GuestState>, error: String) {
+    unicorn.get_data_mut().pending_crt_initterm = None;
+    if unicorn.get_data().callback_error.is_none() {
+        unicorn.get_data_mut().callback_error = Some(error);
+    }
+    let _ = unicorn.emu_stop();
+}
+
+fn dispatch_crt_initializer(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    function: u64,
+    stack_pointer: u64,
+) -> Result<(), String> {
+    let call_rsp = stack_pointer
+        .checked_sub(8)
+        .ok_or_else(|| "CRT initializer stack underflow".to_string())?;
+    unicorn
+        .mem_write(call_rsp, &HOST_CRT_INITTERM_CONTINUE.to_le_bytes())
+        .map_err(|error| format!("CRT initializer continuation stack write failed: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::RSP, call_rsp)
+        .map_err(|error| format!("CRT initializer stack register write failed: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::R11, function)
+        .map_err(|error| format!("CRT initializer target register write failed: {error}"))
+}
+
+fn finish_crt_initterm(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    pending: PendingCrtInitterm,
+    returned: u64,
+) -> Result<(), String> {
+    unicorn
+        .reg_write(RegisterX86::RSP, pending.continuation_rsp)
+        .map_err(|error| format!("CRT initializer final stack write failed: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::R11, pending.return_address)
+        .map_err(|error| format!("CRT initializer return target write failed: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::RAX, returned)
+        .map_err(|error| format!("CRT initializer return value write failed: {error}"))
+}
+
+fn start_crt_function_sequence(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    functions: Vec<u64>,
+    stop_on_error: bool,
+) -> Result<(), String> {
+    if unicorn.get_data().pending_crt_initterm.is_some() {
+        return Err("nested CRT function sequence is unsupported".into());
+    }
+    let rsp = unicorn
+        .reg_read(RegisterX86::RSP)
+        .map_err(|error| format!("CRT function-sequence stack read failed: {error}"))?;
+    let return_address = read_vcomp_u64(unicorn, rsp)
+        .map_err(|error| format!("CRT function-sequence return address read failed: {error}"))?;
+    if return_address != RETURN_ADDRESS
+        && !image_executable_address(unicorn.get_data(), return_address)
+    {
+        return Err(format!(
+            "CRT function-sequence caller return {return_address:#x} is outside the executable image"
+        ));
+    }
+    let continuation_rsp = rsp
+        .checked_add(8)
+        .ok_or_else(|| "CRT function-sequence continuation stack overflow".to_string())?;
+    let mut pending = PendingCrtInitterm {
+        functions,
+        next: 0,
+        return_address,
+        continuation_rsp,
+        stop_on_error,
+    };
+    let Some(function) = pending.functions.first().copied() else {
+        return finish_crt_initterm(unicorn, pending, 0);
+    };
+    pending.next = 1;
+    unicorn.get_data_mut().pending_crt_initterm = Some(pending);
+    dispatch_crt_initializer(unicorn, function, continuation_rsp)
+}
+
+fn emulate_crt_initterm(unicorn: &mut Unicorn<'_, GuestState>, stop_on_error: bool) {
+    let result = (|| -> Result<(), String> {
+        let first = read_win64_import_argument(unicorn, 0)?;
+        let last = read_win64_import_argument(unicorn, 1)?;
+        if first % 8 != 0 || last % 8 != 0 {
+            return Err(format!(
+                "CRT initializer table bounds {first:#x}..{last:#x} are not pointer-aligned"
+            ));
+        }
+        let byte_count = last.checked_sub(first).ok_or_else(|| {
+            format!("CRT initializer table end {last:#x} precedes start {first:#x}")
+        })?;
+        if byte_count % 8 != 0 {
+            return Err("CRT initializer table byte count is not divisible by 8".into());
+        }
+        let entry_count = usize::try_from(byte_count / 8)
+            .map_err(|_| "CRT initializer count does not fit usize".to_string())?;
+        if entry_count > MAX_CRT_INITIALIZERS {
+            return Err(format!(
+                "CRT initializer count {entry_count} exceeds {MAX_CRT_INITIALIZERS}"
+            ));
+        }
+        let bytes = unicorn
+            .mem_read_as_vec(first, entry_count * 8)
+            .map_err(|error| format!("CRT initializer table read failed: {error}"))?;
+        let mut functions = Vec::with_capacity(entry_count);
+        for (index, chunk) in bytes.chunks_exact(8).enumerate() {
+            let function = u64::from_le_bytes(
+                chunk
+                    .try_into()
+                    .map_err(|_| "CRT initializer entry has wrong size".to_string())?,
+            );
+            if function == 0 {
+                continue;
+            }
+            if !image_executable_address(unicorn.get_data(), function) {
+                return Err(format!(
+                    "CRT initializer entry {} target {function:#x} is outside the executable image",
+                    index + 1
+                ));
+            }
+            functions.push(function);
+        }
+
+        start_crt_function_sequence(unicorn, functions, stop_on_error)
+    })();
+    if let Err(error) = result {
+        fail_crt_initterm(unicorn, error);
+    }
+}
+
+fn continue_crt_initterm(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| -> Result<(), String> {
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("CRT initializer continuation stack read failed: {error}"))?;
+        let returned = unicorn
+            .reg_read(RegisterX86::RAX)
+            .map_err(|error| format!("CRT initializer result read failed: {error}"))?;
+        let mut pending = unicorn
+            .get_data_mut()
+            .pending_crt_initterm
+            .take()
+            .ok_or_else(|| "CRT initializer continuation has no pending table".to_string())?;
+        if rsp != pending.continuation_rsp {
+            return Err(format!(
+                "CRT initializer continuation stack {rsp:#x} does not match {:#x}",
+                pending.continuation_rsp
+            ));
+        }
+        if pending.stop_on_error && returned as u32 != 0 {
+            return finish_crt_initterm(unicorn, pending, returned as u32 as u64);
+        }
+        if let Some(function) = pending.functions.get(pending.next).copied() {
+            pending.next += 1;
+            let continuation_rsp = pending.continuation_rsp;
+            unicorn.get_data_mut().pending_crt_initterm = Some(pending);
+            return dispatch_crt_initializer(unicorn, function, continuation_rsp);
+        }
+        finish_crt_initterm(unicorn, pending, 0)
+    })();
+    if let Err(error) = result {
+        fail_crt_initterm(unicorn, error);
+    }
+}
+
+fn emulate_crt_onexit(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    let result = (|| -> Result<(), String> {
+        let table = read_win64_import_argument(unicorn, 0)?;
+        if table == 0 {
+            return Err("CRT onexit table pointer is null".into());
+        }
+        match operation {
+            LegacyWin64Import::CrtInitializeOnexitTable => {
+                if unicorn.get_data().crt_onexit_tables.contains_key(&table) {
+                    return Err(format!("CRT onexit table {table:#x} is already initialized"));
+                }
+                if unicorn.get_data().crt_onexit_tables.len() >= MAX_CRT_ONEXIT_TABLES {
+                    return Err(format!(
+                        "CRT onexit table count exceeds {MAX_CRT_ONEXIT_TABLES}"
+                    ));
+                }
+                unicorn.mem_write(table, &[0; 24]).map_err(|error| {
+                    format!("CRT onexit table {table:#x} is not writable: {error}")
+                })?;
+                unicorn
+                    .get_data_mut()
+                    .crt_onexit_tables
+                    .insert(table, Vec::new());
+                unicorn
+                    .reg_write(RegisterX86::RAX, 0)
+                    .map_err(|error| format!("CRT onexit initialize result write failed: {error}"))
+            }
+            LegacyWin64Import::CrtRegisterOnexitFunction => {
+                let function = read_win64_import_argument(unicorn, 1)?;
+                if function == 0 || !image_executable_address(unicorn.get_data(), function) {
+                    return Err(format!(
+                        "CRT onexit function {function:#x} is outside the executable image"
+                    ));
+                }
+                let functions = unicorn
+                    .get_data_mut()
+                    .crt_onexit_tables
+                    .get_mut(&table)
+                    .ok_or_else(|| format!("CRT onexit table {table:#x} is not initialized"))?;
+                if functions.len() >= MAX_CRT_INITIALIZERS {
+                    return Err(format!(
+                        "CRT onexit function count exceeds {MAX_CRT_INITIALIZERS}"
+                    ));
+                }
+                functions.push(function);
+                unicorn
+                    .reg_write(RegisterX86::RAX, 0)
+                    .map_err(|error| format!("CRT onexit register result write failed: {error}"))
+            }
+            LegacyWin64Import::CrtExecuteOnexitTable => {
+                let mut functions = unicorn
+                    .get_data_mut()
+                    .crt_onexit_tables
+                    .remove(&table)
+                    .ok_or_else(|| format!("CRT onexit table {table:#x} is not initialized"))?;
+                functions.reverse();
+                start_crt_function_sequence(unicorn, functions, false)
+            }
+            _ => Err("invalid CRT onexit operation".into()),
+        }
+    })();
+    if let Err(error) = result {
+        fail_crt_initterm(unicorn, error);
+    }
+}
+
+fn emulate_crt_getenv(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        if pointer == 0 {
+            return Err("CRT getenv name pointer is null".into());
+        }
+        let mut terminated = false;
+        for index in 0..256u64 {
+            let address = pointer
+                .checked_add(index)
+                .ok_or_else(|| "CRT getenv name address overflow".to_string())?;
+            let byte = unicorn
+                .mem_read_as_vec(address, 1)
+                .map_err(|error| format!("CRT getenv name read failed: {error}"))?[0];
+            if byte == 0 {
+                terminated = true;
+                break;
+            }
+        }
+        if !terminated {
+            return Err("CRT getenv name exceeds 255 bytes".into());
+        }
+        // Do not leak the macOS host environment into the deterministic guest.
+        unicorn
+            .reg_write(RegisterX86::RAX, 0)
+            .map_err(|error| format!("CRT getenv return write failed: {error}"))
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
+    }
+}
+
+fn emulate_windows_critical_section(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
+    let result = (|| -> Result<u64, String> {
+        let address = read_win64_import_argument(unicorn, 0)?;
+        if address == 0 {
+            return Err("Windows critical-section pointer is null".into());
+        }
+        match operation {
+            LegacyWin64Import::InitializeCriticalSection
+            | LegacyWin64Import::InitializeCriticalSectionAndSpinCount => {
+                if unicorn
+                    .get_data()
+                    .windows_critical_sections
+                    .contains_key(&address)
+                {
+                    return Err(format!(
+                        "Windows critical section {address:#x} is already initialized"
+                    ));
+                }
+                if unicorn.get_data().windows_critical_sections.len()
+                    >= MAX_WINDOWS_CRITICAL_SECTIONS
+                {
+                    return Err(format!(
+                        "Windows critical-section count exceeds {MAX_WINDOWS_CRITICAL_SECTIONS}"
+                    ));
+                }
+                unicorn
+                    .mem_write(address, &[0; WINDOWS_CRITICAL_SECTION_BYTES])
+                    .map_err(|error| {
+                        format!("Windows critical-section object {address:#x} is not writable: {error}")
+                    })?;
+                unicorn
+                    .get_data_mut()
+                    .windows_critical_sections
+                    .insert(address, 0);
+                Ok(u64::from(matches!(
+                    operation,
+                    LegacyWin64Import::InitializeCriticalSectionAndSpinCount
+                )))
+            }
+            LegacyWin64Import::EnterCriticalSection => {
+                let lock_count = unicorn
+                    .get_data_mut()
+                    .windows_critical_sections
+                    .get_mut(&address)
+                    .ok_or_else(|| {
+                        format!("Windows critical section {address:#x} is not initialized")
+                    })?;
+                *lock_count = lock_count.checked_add(1).ok_or_else(|| {
+                    "Windows critical-section recursion overflow".to_string()
+                })?;
+                if *lock_count > MAX_WINDOWS_CRITICAL_SECTION_RECURSION {
+                    *lock_count -= 1;
+                    return Err(format!(
+                        "Windows critical-section recursion exceeds {MAX_WINDOWS_CRITICAL_SECTION_RECURSION}"
+                    ));
+                }
+                Ok(0)
+            }
+            LegacyWin64Import::LeaveCriticalSection => {
+                let lock_count = unicorn
+                    .get_data_mut()
+                    .windows_critical_sections
+                    .get_mut(&address)
+                    .ok_or_else(|| {
+                        format!("Windows critical section {address:#x} is not initialized")
+                    })?;
+                if *lock_count == 0 {
+                    return Err(format!(
+                        "Windows critical section {address:#x} has an unbalanced leave"
+                    ));
+                }
+                *lock_count -= 1;
+                Ok(0)
+            }
+            LegacyWin64Import::DeleteCriticalSection => {
+                let lock_count = unicorn
+                    .get_data()
+                    .windows_critical_sections
+                    .get(&address)
+                    .copied()
+                    .ok_or_else(|| {
+                        format!("Windows critical section {address:#x} is not initialized")
+                    })?;
+                if lock_count != 0 {
+                    return Err(format!(
+                        "Windows critical section {address:#x} is still locked {lock_count} times"
+                    ));
+                }
+                unicorn
+                    .get_data_mut()
+                    .windows_critical_sections
+                    .remove(&address);
+                Ok(0)
+            }
+            _ => Err("invalid Windows critical-section operation".into()),
+        }
+    })();
+    match result {
+        Ok(returned) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_get_module_handle_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        if pointer == 0 {
+            return Err("GetModuleHandleW(NULL) host-executable lookup is unsupported".into());
+        }
+        let mut units = Vec::new();
+        let mut terminated = false;
+        for index in 0..128u64 {
+            let address = pointer
+                .checked_add(index * 2)
+                .ok_or_else(|| "GetModuleHandleW name address overflow".to_string())?;
+            let bytes = unicorn
+                .mem_read_as_vec(address, 2)
+                .map_err(|error| format!("GetModuleHandleW name read failed: {error}"))?;
+            let unit = u16::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| "GetModuleHandleW name unit has wrong size".to_string())?,
+            );
+            if unit == 0 {
+                terminated = true;
+                break;
+            }
+            units.push(unit);
+        }
+        if !terminated {
+            return Err("GetModuleHandleW name exceeds 127 UTF-16 code units".into());
+        }
+        let name = String::from_utf16(&units)
+            .map_err(|_| "GetModuleHandleW name is not valid UTF-16".to_string())?;
+        let returned = if name.eq_ignore_ascii_case("api-ms-win-core-synch-l1-2-0.dll") {
+            // This API-set lookup is an optional capability probe. Expose it as
+            // unavailable so the guest takes its critical-section fallback.
+            0
+        } else if name.eq_ignore_ascii_case("kernel32.dll") {
+            WINDOWS_KERNEL32_MODULE_TOKEN
+        } else {
+            return Err(format!("GetModuleHandleW module {name:?} is unsupported"));
+        };
+        unicorn
+            .reg_write(RegisterX86::RAX, returned)
+            .map_err(|error| format!("GetModuleHandleW return write failed: {error}"))
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
+    }
+}
+
+fn install_windows_condition_variable_callbacks(
+    unicorn: &mut Unicorn<'static, GuestState>,
+) -> Result<(), GuestError> {
+    for address in [
+        HOST_INITIALIZE_CONDITION_VARIABLE,
+        HOST_SLEEP_CONDITION_VARIABLE_CS,
+        HOST_WAKE_CONDITION_VARIABLE,
+        HOST_WAKE_ALL_CONDITION_VARIABLE,
+    ] {
+        uc(
+            "write condition-variable callback return",
+            unicorn.mem_write(address, &[0xc3]),
+        )?;
+    }
+    uc(
+        "install InitializeConditionVariable callback",
+        unicorn.add_code_hook(
+            HOST_INITIALIZE_CONDITION_VARIABLE,
+            HOST_INITIALIZE_CONDITION_VARIABLE,
+            |unicorn, _, _| emulate_windows_condition_variable(unicorn, 0),
+        ),
+    )?;
+    uc(
+        "install SleepConditionVariableCS callback",
+        unicorn.add_code_hook(
+            HOST_SLEEP_CONDITION_VARIABLE_CS,
+            HOST_SLEEP_CONDITION_VARIABLE_CS,
+            |unicorn, _, _| emulate_windows_condition_variable(unicorn, 1),
+        ),
+    )?;
+    uc(
+        "install WakeConditionVariable callback",
+        unicorn.add_code_hook(
+            HOST_WAKE_CONDITION_VARIABLE,
+            HOST_WAKE_CONDITION_VARIABLE,
+            |unicorn, _, _| emulate_windows_condition_variable(unicorn, 2),
+        ),
+    )?;
+    uc(
+        "install WakeAllConditionVariable callback",
+        unicorn.add_code_hook(
+            HOST_WAKE_ALL_CONDITION_VARIABLE,
+            HOST_WAKE_ALL_CONDITION_VARIABLE,
+            |unicorn, _, _| emulate_windows_condition_variable(unicorn, 3),
+        ),
+    )?;
+    Ok(())
+}
+
+fn emulate_windows_condition_variable(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: u8,
+) {
+    let result = (|| -> Result<(), String> {
+        let address = read_win64_import_argument(unicorn, 0)?;
+        if address == 0 {
+            return Err("Windows condition-variable pointer is null".into());
+        }
+        match operation {
+            0 => {
+                if unicorn
+                    .get_data()
+                    .windows_condition_variables
+                    .contains(&address)
+                {
+                    return Err(format!(
+                        "Windows condition variable {address:#x} is already initialized"
+                    ));
+                }
+                if unicorn.get_data().windows_condition_variables.len()
+                    >= MAX_WINDOWS_CONDITION_VARIABLES
+                {
+                    return Err(format!(
+                        "Windows condition-variable count exceeds {MAX_WINDOWS_CONDITION_VARIABLES}"
+                    ));
+                }
+                unicorn.mem_write(address, &[0; 8]).map_err(|error| {
+                    format!("Windows condition variable {address:#x} is not writable: {error}")
+                })?;
+                unicorn
+                    .get_data_mut()
+                    .windows_condition_variables
+                    .insert(address);
+                let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+                Ok(())
+            }
+            1 => {
+                if !unicorn
+                    .get_data()
+                    .windows_condition_variables
+                    .contains(&address)
+                {
+                    return Err(format!(
+                        "Windows condition variable {address:#x} is not initialized"
+                    ));
+                }
+                Err("blocking SleepConditionVariableCS is unsupported in the serial backend".into())
+            }
+            2 | 3 => {
+                if !unicorn
+                    .get_data()
+                    .windows_condition_variables
+                    .contains(&address)
+                {
+                    return Err(format!(
+                        "Windows condition variable {address:#x} is not initialized"
+                    ));
+                }
+                let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+                Ok(())
+            }
+            _ => Err("invalid Windows condition-variable operation".into()),
+        }
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
+    }
 }
 
 fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {

@@ -199,6 +199,19 @@ impl GuestEngine<'static> {
             unicorn.mem_write(RETURN_ADDRESS, &[0xcc]),
         )?;
         uc(
+            "write CRT initializer continuation",
+            unicorn.mem_write(HOST_CRT_INITTERM_CONTINUE, &[0x41, 0xff, 0xe3]),
+        )?;
+        uc(
+            "install CRT initializer continuation",
+            unicorn.add_code_hook(
+                HOST_CRT_INITTERM_CONTINUE,
+                HOST_CRT_INITTERM_CONTINUE,
+                continue_crt_initterm,
+            ),
+        )?;
+        install_windows_condition_variable_callbacks(&mut unicorn)?;
+        uc(
             "write add_param callback",
             unicorn.mem_write(HOST_ADD_PARAM, &[0xc3]),
         )?;
@@ -719,6 +732,20 @@ impl GuestEngine<'static> {
             (HOST_TRANSFER_RECT8, "transfer_rect8"),
             (HOST_ITERATE16, "iterate16"),
             (HOST_ITERATE16_CONTINUE, "iterate16_continue"),
+            (HOST_CRT_INITTERM_CONTINUE, "crt_initterm_continue"),
+            (
+                HOST_INITIALIZE_CONDITION_VARIABLE,
+                "initialize_condition_variable",
+            ),
+            (
+                HOST_SLEEP_CONDITION_VARIABLE_CS,
+                "sleep_condition_variable_cs",
+            ),
+            (HOST_WAKE_CONDITION_VARIABLE, "wake_condition_variable"),
+            (
+                HOST_WAKE_ALL_CONDITION_VARIABLE,
+                "wake_all_condition_variable",
+            ),
             (HOST_GPU_GET_DEVICE_COUNT, "gpu_get_device_count"),
             (HOST_GPU_GET_DEVICE_INFO, "gpu_get_device_info"),
             (HOST_GPU_ACQUIRE_EXCLUSIVE, "gpu_acquire_exclusive"),
