@@ -2,11 +2,8 @@ import json
 import os
 import subprocess
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
 RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
 HEADER = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.hpp"
 ENTRY_WIRING = ROOT / "minihost" / "src" / "worker_entry_wiring.cpp"
@@ -14,7 +11,6 @@ RECEIPTS_HEADER = ROOT / "minihost" / "src" / "worker_render_receipts.hpp"
 RECEIPTS = ROOT / "minihost" / "src" / "worker_render_receipts.cpp"
 LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_layer_render_runtime.cpp"
 LAYER_HEADER = ROOT / "minihost" / "src" / "worker_aegp_layer_render_runtime.hpp"
-
 
 def _worker() -> Path | None:
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
@@ -24,17 +20,6 @@ def _worker() -> Path | None:
         ROOT / "target" / "minihost-build" / "aex_render_worker.exe",
     ]
     return next((path for path in candidates if path and path.is_file()), None)
-
-
-
-
-
-
-
-
-
-
-
 
 def test_native_item_stage_pixel_oracle():
     worker = _worker()

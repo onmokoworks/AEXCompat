@@ -1,11 +1,8 @@
 import json
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_TRANSFORMER_MULTI_INPUT_RESULT_2026-07-15.json"
-SOURCES = source_owners.contract_files("sdk_transformer_multi_input_result")
 def test_transformer_observes_multi_input_difference_render():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     default = result["default_render"]
@@ -28,5 +25,4 @@ def test_transformer_observes_multi_input_difference_render():
         assert default[ownership] is True
     assert external["rgba_oracle_exact"] is True
     assert external["checkout_time"] == external["current_time"]
-
 

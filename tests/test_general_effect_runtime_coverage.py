@@ -1,19 +1,14 @@
 import hashlib
 import json
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT = ROOT / "analysis" / "GENERAL_EFFECT_RUNTIME_COVERAGE_2026-07-16.json"
-SOURCE = source_owners.L2_MAIN
 WORLD_TRANSFORM = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
 ABI = ROOT / "target" / "pf-suite-abi-probe-build" / "pf-suite-abi.json"
 
-
 def load_report():
     return json.loads(REPORT.read_text(encoding="utf-8"))
-
 
 def test_schema_and_compiled_abi_are_grounded_in_probe_result():
     report = load_report()
@@ -33,17 +28,11 @@ def test_schema_and_compiled_abi_are_grounded_in_probe_result():
             "slots": abi["suites"][suite]["named_slot_count"],
         }
 
-
-
-
-
-
 def test_artifact_hashes_and_sizes_authenticate_current_files():
     for artifact in load_report()["evidence_artifacts"]:
         path = ROOT / artifact["path"]
         assert path.stat().st_size == artifact["size_bytes"]
         assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"]
-
 
 def test_current_artifact_snapshot_authenticates_worktree_and_production_tools():
     snapshot = load_report()["current_artifact_snapshot"]
@@ -54,7 +43,6 @@ def test_current_artifact_snapshot_authenticates_worktree_and_production_tools()
         assert path.stat().st_size == artifact["size_bytes"], name
         assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"], name
     assert "remain bound to their measured artifacts" in snapshot["note"]
-
 
 def test_latest_recaptured_evidence_is_hash_bound_to_current_files():
     report = load_report()
@@ -85,7 +73,6 @@ def test_latest_recaptured_evidence_is_hash_bound_to_current_files():
             assert authenticated["source"]["sha256"] == current["source"]["sha256"]
             assert authenticated["worker"]["sha256"] == current["render_worker"]["sha256"]
 
-
 def test_report_does_not_overclaim_real_ae_or_complete_compatibility():
     report = load_report()
     assert report["overall"]["real_ae_pixel_oracle"] == "not_run"
@@ -96,7 +83,6 @@ def test_report_does_not_overclaim_real_ae_or_complete_compatibility():
     )
     assert report["suites"]["PF_SamplingSuites1"]["real_ae_pixel_oracle"] == "pending"
     assert report["suites"]["PF_FillMatteSuite2"]["real_ae_pixel_oracle"] == "pending"
-
 
 def test_sampling_current_runtime_is_authenticated_and_history_is_separate():
     report = load_report()

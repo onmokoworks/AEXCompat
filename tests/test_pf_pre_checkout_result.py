@@ -5,11 +5,8 @@ import tempfile
 from pathlib import Path
 
 import pytest
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
 SMART_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_smart_runtime.cpp"
 SMART_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_smart_runtime.hpp"
 SMART_EXECUTION_HEADER = ROOT / "minihost" / "src" / "worker_smart_execution.hpp"
@@ -18,12 +15,10 @@ BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 
-
 def _sdk_headers() -> Path:
     if HEADERS is None or not HEADERS.is_dir():
         pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
     return HEADERS
-
 
 def test_sdk_frozen_checkout_result_abi_compiles() -> None:
     headers = _sdk_headers()
@@ -63,9 +58,6 @@ int main() { return 0; }
             encoding="ascii",
         )
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
-
-
-
 
 def test_native_self_test_passes_all_three_workers() -> None:
     expected = {"pf_pre_checkout_result": "passed"}

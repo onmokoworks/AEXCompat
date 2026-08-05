@@ -1,11 +1,8 @@
 import json
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_CHECKOUT_TEMPORAL_LAYER_RESULT_2026-07-15.json"
-SOURCE = source_owners.L2_MAIN
 def test_checkout_fixture_observes_temporal_layer_composition():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     render = result["render"]
@@ -23,5 +20,4 @@ def test_checkout_fixture_observes_temporal_layer_composition():
     assert render["bottom_half_is_input_top_half"] is True
     assert render["guard_bytes_intact"] is True
     assert render["suite_leases_balanced"] is True
-
 

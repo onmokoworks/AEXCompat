@@ -1,16 +1,12 @@
 import json
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "analysis" / "SDK_GPU_NEGOTIATION_BOUNDARY_RESULT_2026-07-15.json"
-SOURCE = source_owners.L2_SOURCE
 SMART_DISPATCH = ROOT / "minihost" / "src" / "worker_smart_dispatch.cpp"
 SMART_FINALIZE = ROOT / "minihost" / "src" / "worker_smart_finalize.cpp"
 TRANSPORT = ROOT / "minihost" / "src" / "gpu_memory_world_transport.cpp"
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-
 
 def test_gpu_negotiation_rejects_unwritten_output_without_setdown_fault():
     evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
@@ -31,7 +27,4 @@ def test_gpu_negotiation_rejects_unwritten_output_without_setdown_fault():
     assert fallback["gpu_attempt_failure_stage"] == "output_validation"
     assert fallback["cpu_fallback_passed"] is True
     assert fallback["output_created"] is True
-
-
-
 

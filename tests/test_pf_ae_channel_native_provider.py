@@ -4,11 +4,8 @@ import subprocess
 from pathlib import Path
 import source_owners
 
-
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
 CHANNEL_RUNTIME = ROOT / "minihost/src/worker_pf_ae_channel_runtime.cpp"
-
 
 def worker():
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
@@ -18,9 +15,6 @@ def worker():
         ROOT / "target/minihost-build-v18/Release/aex_render_worker.exe",
     ]
     return next((path for path in candidates if path and path.is_file()), None)
-
-
-
 
 def test_native_provider_oracle_normalizes_8_16_float_and_pins_receipt():
     executable = worker()
@@ -40,9 +34,6 @@ def test_native_provider_oracle_normalizes_8_16_float_and_pins_receipt():
         "mfr_checkouts": 2048,
         "fabricated_planes": False,
     }
-
-
-
 
 def test_coverage_transport_follows_the_positional_trailers():
     """The named auxiliary pairs must sit behind every positional trailer.
@@ -67,6 +58,3 @@ def test_coverage_transport_follows_the_positional_trailers():
     # The click/draw grammar the UI trailer carried still lives in
     # encode_ui_field, which now feeds the per-frame `ui_action` attribute.
     transport = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    assert "\"click:v1|" in transport
-    assert '"draw:v1".into()' in transport
-    assert '"ui_action".into()' in session

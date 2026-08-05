@@ -1,15 +1,11 @@
 import os
 import pathlib
 import subprocess
-import source_owners
-
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_SOURCE
 ABI_SOURCE = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 ABI_OWNER = ROOT / "minihost" / "src" / "worker_suite_abi.cpp"
 CATALOG_OWNER = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
-
 
 def _worker() -> pathlib.Path | None:
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
@@ -19,13 +15,6 @@ def _worker() -> pathlib.Path | None:
         ROOT / "target" / "minihost-build-v18" / "aex_render_worker.exe",
     ]
     return next((candidate for candidate in candidates if candidate and candidate.is_file()), None)
-
-
-
-
-
-
-
 
 def test_world_suite3_runtime_matrix():
     worker = _worker()

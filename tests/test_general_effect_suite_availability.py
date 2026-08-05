@@ -1,18 +1,14 @@
 import json
 import re
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
 WORLD_SAFETY_SOURCE = ROOT / "minihost" / "src" / "worker_world_safety.cpp"
 PF_SUITES_SOURCE = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
 PF_SAMPLING_SOURCE = ROOT / "minihost" / "src" / "worker_pf_sampling_runtime.cpp"
 PF_WORLD_TRANSFORM_SOURCE = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
 HOST_CATALOG_SOURCE = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
 RESULT = ROOT / "analysis" / "GENERAL_EFFECT_SUITE_AVAILABILITY_RESULT_2026-07-16.json"
-
 
 SUITES = {
     "PF Sampling16 Suite": (1, ("subpixel_sample16",)),
@@ -24,16 +20,10 @@ SUITES = {
     "PF Fill Matte Suite": (2, ("fill_world8", "fill_world16", "fill_world_float")),
 }
 
-
 def component_catalog_source(source: str) -> str:
     start = source.index("const StaticSuite component_suites[]")
     end = source.index("return configure_host_suite_catalog", start)
     return source[start:end]
-
-
-
-
-
 
 def test_result_is_truthful_source_contract_evidence():
     result = json.loads(RESULT.read_text(encoding="utf-8"))

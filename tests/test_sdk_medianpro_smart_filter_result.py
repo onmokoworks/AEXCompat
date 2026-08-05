@@ -1,13 +1,9 @@
 import json
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_MEDIANPRO_SMART_FILTER_RESULT_2026-07-15.json"
-SOURCE = source_owners.L2_MAIN
 PARAMETER_RUNTIME = ROOT / "minihost" / "src" / "worker_parameter_runtime.hpp"
-
 
 def test_medianpro_smart_cpu_image_io_contract():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -28,9 +24,6 @@ def test_medianpro_smart_cpu_image_io_contract():
         "parameter_checkouts_balanced",
     ):
         assert render[ownership] is True
-
-
-
 
 def test_gpu_is_not_emulated_without_a_real_backend():
     result = json.loads(RESULT.read_text(encoding="utf-8"))

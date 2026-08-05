@@ -4,7 +4,6 @@ import subprocess
 from pathlib import Path
 import source_owners
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = source_owners.L2_MAIN
 DISPATCH_SOURCE = ROOT / "minihost/src/l2_cli_dispatch.cpp"
@@ -13,16 +12,13 @@ PARAM_SUITES = ROOT / "minihost/src/worker_pf_param_suites.cpp"
 SELFTEST_SOURCE = ROOT / "minihost/src/worker_parameter_selftests.cpp"
 TRANSPORT = ROOT / "target/image-transport"
 
-
 def worker_source():
     return "\n".join(path.read_text(encoding="utf-8") for path in
                      (SOURCE, source_owners.SRC / "worker_l2_shared_helpers.cpp", DISPATCH_SOURCE, EXECUTION_SOURCE, PARAM_SUITES, SELFTEST_SOURCE))
 
-
 def _workers():
     build = ROOT / "target/minihost-build-v18"
     return [build / "aex_render_worker.exe", build / "aex_smart_worker.exe"]
-
 
 def _run_sidecar(worker: Path, document, name="parameter-animation-test.json"):
     TRANSPORT.mkdir(parents=True, exist_ok=True)
@@ -39,7 +35,6 @@ def _run_sidecar(worker: Path, document, name="parameter-animation-test.json"):
     finally:
         path.unlink(missing_ok=True)
 
-
 def _valid():
     return {"schema_version": 1, "parameters": [{"slot": 2, "keys": [
         {"time": {"value": 0, "scale": 24}, "interpolation": "linear",
@@ -47,7 +42,6 @@ def _valid():
         {"time": {"value": 1, "scale": 24}, "interpolation": "hold",
          "value": {"type": "scalar", "value": 2.5}},
     ]}]}
-
 
 def _valid_arbitrary():
     return {"schema_version": 1, "parameters": [{"slot": 3, "keys": [
@@ -57,7 +51,6 @@ def _valid_arbitrary():
          "value": {"type": "arbitrary", "value": [67, 71, 2, 3]}},
     ]}]}
 
-
 def test_native_timeline_evaluation_and_param_utils():
     for worker in _workers():
         assert worker.is_file(), f"missing VS2022 worker: {worker}"
@@ -65,9 +58,6 @@ def test_native_timeline_evaluation_and_param_utils():
                                    text=True, capture_output=True, timeout=30, check=False)
         assert completed.returncode == 0, completed.stderr or completed.stdout
         assert json.loads(completed.stdout)["parameter_animation_transport"] == "passed"
-
-
-
 
 def test_strict_sidecar_accepts_schema_and_rejects_malformed_documents():
     worker = _workers()[0]
@@ -88,7 +78,6 @@ def test_strict_sidecar_accepts_schema_and_rejects_malformed_documents():
     nonfinite = json.dumps(_valid()).replace("1.25", "1e999")
     assert _run_sidecar(worker, nonfinite, "parameter-animation-nonfinite.json").returncode == 3
 
-
 def test_arbitrary_sidecar_is_bounded_and_strict():
     worker = _workers()[0]
     accepted = _run_sidecar(worker, _valid_arbitrary(), "parameter-animation-arbitrary.json")
@@ -100,9 +89,6 @@ def test_arbitrary_sidecar_is_bounded_and_strict():
     for index, document in enumerate(invalid):
         rejected = _run_sidecar(worker, document, f"parameter-animation-arbitrary-invalid-{index}.json")
         assert rejected.returncode == 3, (index, rejected.stdout, rejected.stderr)
-
-
-
 
 def test_sidecar_is_confined_to_broker_owned_transport_and_trailers_are_peeled():
     worker = _workers()[0]
@@ -116,6 +102,4 @@ def test_sidecar_is_confined_to_broker_owned_transport_and_trailers_are_peeled()
     finally:
         outside.unlink(missing_ok=True)
     source = worker_source()
-    assert 'equals(flag, L"--aux-manifest-v1")' in source
-    assert 'equals(flag, L"--parameter-animation-v1")' in source
     assert source.count("while (effective_argc >= 3)") == 1

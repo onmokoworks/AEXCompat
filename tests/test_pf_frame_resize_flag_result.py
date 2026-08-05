@@ -5,9 +5,7 @@ import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 RENDER = ROOT / "minihost" / "src" / "render_subsystem.cpp"
-WORKER = source_owners.L2_MAIN
 CLASSIC_RUNTIME = ROOT / "minihost" / "src" / "worker_classic_runtime.cpp"
-
 
 class PfFrameResizeFlagResultTest(unittest.TestCase):
     def test_evidence_covers_allowed_and_denied_resize_contracts(self):
@@ -22,7 +20,6 @@ class PfFrameResizeFlagResultTest(unittest.TestCase):
             self.assertFalse(cases[name]["render_selector_dispatched"])
             self.assertTrue(cases[name]["guard_bytes_intact"])
 
-
     def test_broker_and_harness_expose_isolated_resize_probes(self):
         broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
         harness = source_owners.harness_windows_text()
@@ -33,7 +30,6 @@ class PfFrameResizeFlagResultTest(unittest.TestCase):
         self.assertIn("render_selector_dispatched", broker)
         self.assertIn("Probe FRAME_SETUP expansion", harness)
         self.assertIn("Probe FRAME_SETUP shrink", harness)
-
 
 if __name__ == "__main__":
     unittest.main()

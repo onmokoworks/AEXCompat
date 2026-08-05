@@ -1,15 +1,9 @@
 import json
 import subprocess
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = source_owners.contract_files("smartfx_geometry_flags")
 BUILD = ROOT / "target" / "minihost-build"
-
-
-
 
 def test_native_geometry_rect_self_test_passes_all_three_workers() -> None:
     expected = {"pf_smart_geometry_rects": "passed"}

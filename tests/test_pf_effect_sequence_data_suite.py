@@ -1,14 +1,10 @@
 import json
 import subprocess
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = source_owners.contract_files("pf_effect_sequence_data_suite")
 SCRIPT = ROOT / "tools" / "build-pf-effect-sequence-data-abi-probe.ps1"
 REPORT = ROOT / "target" / "pf-effect-sequence-data-abi-probe-build" / "pf-effect-sequence-data-abi.json"
-
 
 def test_sdk_abi_probe_compiles_and_confirms_frozen_single_slot_suite():
     subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT)],
@@ -20,9 +16,6 @@ def test_sdk_abi_probe_compiles_and_confirms_frozen_single_slot_suite():
     member = report["suite"]["members"]["PF_GetConstSequenceData"]
     assert member == {"offset": 0, "size": 8, "type_matches": True}
     assert report["types"]["PF_ConstHandle"] == 8
-
-
-
 
 def test_native_selftest_covers_pre_setup_foreign_null_and_stale_handles():
     worker = ROOT / "target" / "minihost-build" / "Release" / "aex_l2_worker.exe"

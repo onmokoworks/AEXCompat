@@ -2,18 +2,13 @@ import json
 import hashlib
 import math
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "PF_SAMPLING_FILL_RUNTIME_RESULT_2026-07-16.json"
-WORKER = source_owners.L2_MAIN
 WORLD_TRANSFORM = ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"
-
 
 def result():
     return json.loads(RESULT.read_text(encoding="utf-8"))
-
 
 def test_sampling_runtime_measurement_is_fixed():
     sampling = result()["sampling_probe"]
@@ -43,7 +38,6 @@ def test_sampling_runtime_measurement_is_fixed():
     assert report["last_seh_exception_address"] == sampling["last_seh_exception_address"]
     assert report["last_seh_exception_module"] == sampling["last_seh_exception_module"]
 
-
 def test_current_sampling_artifacts_are_authenticated():
     artifacts = result()["authenticated_current_sampling_artifacts"]
     for artifact in artifacts.values():
@@ -51,7 +45,6 @@ def test_current_sampling_artifacts_are_authenticated():
         assert path.is_file(), artifact["path"]
         assert path.stat().st_size == artifact["size_bytes"]
         assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"]
-
 
 def test_fill_premultiply_runtime_measurement_is_fixed():
     fill = result()["fill_premultiply_probe"]
@@ -79,7 +72,6 @@ def test_fill_premultiply_runtime_measurement_is_fixed():
     assert report["last_seh_exception_code"] == fill["last_seh_exception_code"]
     assert report["last_seh_exception_address"] == fill["last_seh_exception_address"]
     assert report["last_seh_exception_module"] == fill["last_seh_exception_module"]
-
 
 def _expected_fill_color_output(depth):
     maximum = {8: 255, 16: 32768, 32: 1.0}[depth]
@@ -111,7 +103,6 @@ def _expected_fill_color_output(depth):
                           for channel in (1, 2, 3, 0))
     return bytes(result)
 
-
 def test_fill_color_depth_matrix_has_independent_numeric_oracle():
     runs = result()["fill_color_depth_matrix"]["runs"]
     assert [run["depth"] for run in runs] == [8, 16, 32]
@@ -133,11 +124,6 @@ def test_fill_color_depth_matrix_has_independent_numeric_oracle():
         assert report["pixel_format"] == run["pixel_format"]
         assert report["input_sha256"] == run["input_sha256"]
         assert report["output_sha256"] == run["internal_output_sha256"]
-
-
-
-
-
 
 def test_evidence_is_runtime_success_with_ae_pixel_oracle_pending():
     scope = result()["scope"]

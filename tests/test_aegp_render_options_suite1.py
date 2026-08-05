@@ -4,17 +4,13 @@ import pathlib
 import subprocess
 
 import pytest
-import source_owners
-
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
 ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
 STAGED_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
 RENDER_SELFTESTS = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.cpp"
 ITEM_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_item_render_runtime.cpp"
-
 
 def _worker() -> pathlib.Path | None:
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
@@ -24,13 +20,6 @@ def _worker() -> pathlib.Path | None:
         ROOT / "target" / "minihost-build-v18" / "aex_render_worker.exe",
     ]
     return next((candidate for candidate in candidates if candidate and candidate.is_file()), None)
-
-
-
-
-
-
-
 
 def test_render_options_runtime_matrix(tmp_path):
     worker = _worker()

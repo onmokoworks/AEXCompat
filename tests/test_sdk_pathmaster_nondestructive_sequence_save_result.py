@@ -1,19 +1,14 @@
 import json
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_PATHMASTER_NONDESTRUCTIVE_SEQUENCE_SAVE_RESULT_2026-07-15.json"
-WORKER = source_owners.L2_MAIN
 BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
 
-
 def result():
     return json.loads(RESULT.read_text(encoding="utf-8"))
-
 
 def test_flat_copy_does_not_replace_the_running_sequence():
     save = result()["save_copy"]
@@ -24,7 +19,6 @@ def test_flat_copy_does_not_replace_the_running_sequence():
     assert save["flattened_copy_host_disposed"] is True
     assert save["render_with_original_after_save_error"] == 0
     assert save["sequence_setdown_error"] == 0
-
 
 def test_host_and_plugin_each_dispose_their_owned_handle_once():
     evidence = result()
@@ -38,5 +32,4 @@ def test_host_and_plugin_each_dispose_their_owned_handle_once():
     assert render["path_lifetimes_balanced"] is True
     assert render["invalid_path_operations"] == 0
     assert render["guard_bytes_intact"] is True
-
 

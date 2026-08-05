@@ -1,14 +1,10 @@
 import json
 from pathlib import Path
-import source_owners
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_PORTABLE_HOST_ITERATE_RESULT_2026-07-15.json"
-SOURCE = source_owners.L2_SOURCE
 PF_ANSI_RUNTIME = ROOT / "minihost" / "src" / "worker_pf_ansi_runtime.cpp"
 RENDER_REPORT = ROOT / "minihost" / "src" / "worker_render_report.cpp"
-
 
 def test_portable_observes_host_lifecycle_and_classic_iterate():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -36,5 +32,4 @@ def test_portable_observes_host_lifecycle_and_classic_iterate():
         "param_checkouts_balanced",
     ):
         assert render[ownership] is True
-
 
