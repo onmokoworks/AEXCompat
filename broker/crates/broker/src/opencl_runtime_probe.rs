@@ -1301,6 +1301,7 @@ mod tests {
             process_memory_limit_bytes: 512 * 1024 * 1024,
             memory_limit_reached: false,
             dismissed_windows: Vec::new(),
+            worker_freshness_warning: None,
         }
     }
 

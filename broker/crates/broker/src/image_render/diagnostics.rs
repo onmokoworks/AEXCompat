@@ -587,6 +587,13 @@ pub(crate) fn isolated_worker_diagnostics(
             json!(isolated.dismissed_windows),
         );
     }
+    // Recorded at admission when the local worker could not be confirmed
+    // current against its sources or build provenance (issue #729). A warning,
+    // not a gate: dispatch proceeded, and the observation is bound to the
+    // worker hash either way.
+    if let Some(reason) = isolated.worker_freshness_warning {
+        object.insert("worker_freshness_warning".into(), json!(reason));
+    }
     diagnostics
 }
 

@@ -25,6 +25,13 @@ pub struct SecureLaunchResult {
     /// empty; carried through so the observation reaches the render/inspection
     /// diagnostics rather than stopping at the launch boundary.
     pub dismissed_windows: Vec<crate::worker_dialog::DismissedWindow>,
+    /// Freshness observation from local worker admission (issue #729):
+    /// `Some(reason)` when the admitted worker could not be confirmed current
+    /// against `minihost/src` or its recorded build provenance. Recorded so
+    /// the observation reaches diagnostics; it never blocks dispatch.
+    /// Receipt-driven flows do not pass through local admission and stay
+    /// `None`.
+    pub worker_freshness_warning: Option<&'static str>,
 }
 
 pub struct SecureLaunchRequest<'a> {
@@ -192,6 +199,7 @@ fn secure_launch_impl(
         process_memory_limit_bytes: result.process_memory_limit_bytes,
         memory_limit_reached: result.memory_limit_reached,
         dismissed_windows: result.dismissed_windows,
+        worker_freshness_warning: None,
     })
 }
 
@@ -204,6 +212,9 @@ fn secure_launch_impl(
 pub struct SecureSessionProcess {
     launched: Option<crate::windows_process::LaunchedIsolatedProcess>,
     require_module_audit: bool,
+    /// See `SecureLaunchResult::worker_freshness_warning`; recorded by the
+    /// dispatch that admitted the worker and carried into `finish`'s result.
+    worker_freshness_warning: Option<&'static str>,
     _tree: SealedLoadTree,
     _stage: crate::trusted_worker_stage::TrustedWorkerStage,
     _token: crate::restricted_worker_token::RestrictedWorkerToken,
@@ -211,6 +222,12 @@ pub struct SecureSessionProcess {
 
 #[cfg(windows)]
 impl SecureSessionProcess {
+    /// Records the freshness observation from local worker admission so it
+    /// reaches the `finish` result (issue #729).
+    pub(crate) fn record_worker_freshness_warning(&mut self, warning: Option<&'static str>) {
+        self.worker_freshness_warning = warning;
+    }
+
     /// Terminates the whole job now (frame-deadline watchdog path). The
     /// collected result still comes from a later `finish` call.
     pub fn terminate_job(&self) -> io::Result<()> {
@@ -268,6 +285,7 @@ impl SecureSessionProcess {
             process_memory_limit_bytes: result.process_memory_limit_bytes,
             memory_limit_reached: result.memory_limit_reached,
             dismissed_windows: result.dismissed_windows,
+            worker_freshness_warning: self.worker_freshness_warning,
         })
     }
 }
@@ -369,6 +387,7 @@ fn secure_launch_session_with_desktop_policy(
     Ok(SecureSessionProcess {
         launched: Some(launched),
         require_module_audit: request.require_module_audit,
+        worker_freshness_warning: None,
         _tree: tree,
         _stage: worker_stage,
         _token: token,
