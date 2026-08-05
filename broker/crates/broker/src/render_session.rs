@@ -552,9 +552,9 @@ pub struct SessionOpenRequest<'a> {
     /// In-place load mode (issue #751): non-empty opens the session on the
     /// plug-in's real path with these directories admitted into the worker's
     /// DLL search set, instead of staging a sealed tree. Mutually exclusive
-    /// with `dependencies`, and unsupported (explicitly rejected) with GPU
-    /// runtime authorization for now (#815). Cluster sessions combine with
-    /// it since step 3 (#812): they ride the cluster-manifest-v2 dispatch.
+    /// with `dependencies`. GPU sessions carry their AEXRMA1 authorization
+    /// through the broker-owned image transport (#815). Cluster sessions
+    /// combine with it since step 3 (#812): they ride cluster-manifest-v2.
     pub dependency_search_dirs: Vec<PathBuf>,
     pub width: u32,
     pub height: u32,
@@ -767,6 +767,11 @@ pub struct RenderSession {
     /// the whole session; the worker read it at launch, and the drop removes
     /// the document from target/image-transport.
     _in_place_transport: Option<crate::cluster_manifest::ClusterManifestTransport>,
+    /// Keeps the AEXRMA1 document alive for the whole GPU session. Staged
+    /// launches copy it into the sealed tree; in-place launches read this
+    /// broker-owned absolute transport path before loading plug-in code.
+    _runtime_authorization:
+        Option<crate::runtime_module_authorization::RuntimeAuthorizationTransport>,
     /// Keeps the animation sidecar alive for the whole session; the worker
     /// reads it once at launch, but leaving transport files behind on drop
     /// would leak into target/image-transport.
@@ -1041,20 +1046,13 @@ impl RenderSession {
             ));
         }
         // In-place load mode (issue #751): the closure is the loader's job, so
-        // approved dependency artifacts cannot ride the same open. GPU runtime
-        // authorization stages its AEXRMA1 manifest beside the plug-in, which
-        // an in-place launch has no staged directory for; it fails closed
-        // here until it is migrated. Cluster sessions ride the
-        // cluster-manifest-v2 dispatch below.
+        // approved dependency artifacts cannot ride the same open. The GPU
+        // AEXRMA1 document uses an independent broker-owned transport (#815).
+        // Cluster sessions ride cluster-manifest-v2 below.
         if !request.dependency_search_dirs.is_empty() {
             if !request.dependencies.is_empty() {
                 return Err(invalid(
                     "an in-place session resolves dependencies by search directory, not by staged artifact",
-                ));
-            }
-            if gpu_attempt {
-                return Err(invalid(
-                    "an in-place session does not support GPU runtime authorization yet",
                 ));
             }
         }
@@ -1344,8 +1342,8 @@ impl RenderSession {
         // worker as an AEXRMA1 manifest (#300): the worker parses it so the GPU
         // runtime DLLs it loads classify as authorized `policy` in the required
         // module audit instead of `unknown` (which fails the audit and the GPU
-        // device setup). The transport lives until this `open` returns; the worker
-        // reads the sealed copy at admission, before that.
+        // device setup). The transport is retained by RenderSession so an
+        // in-place worker can read it during admission without a launch/drop race.
         let mut dependencies = request.dependencies;
         let _runtime_authorization = if gpu_attempt {
             let policy_input = request
@@ -1357,16 +1355,17 @@ impl RenderSession {
             // parses matches the identity the report was authenticated against
             // below, keeping the manifest/report/session binding intact
             // (#301 review).
-            let transport =
-                crate::image_render::prepare_runtime_authorization_transport_with_identity(
+            let transport = crate::runtime_module_authorization::prepare_runtime_authorization_transport_with_identity(
                     request.repository,
                     policy_input.policy,
                     backend,
                     policy_input.session_identity,
                 )?;
-            args_after_plugin.push("--runtime-module-authorization-v1".to_owned());
-            args_after_plugin.push(transport.basename().to_owned());
-            dependencies.push(transport.artifact());
+            transport.append_launch(
+                !request.dependency_search_dirs.is_empty(),
+                &mut args_after_plugin,
+                &mut dependencies,
+            );
             Some(transport)
         } else {
             None
@@ -1613,6 +1612,7 @@ impl RenderSession {
             smart: request.smart,
             cluster: cluster_state,
             _in_place_transport: in_place_transport,
+            _runtime_authorization,
             _animation_sidecar: animation_sidecar,
             _layer_sidecars: layer_sidecars,
             dynamic_layers,

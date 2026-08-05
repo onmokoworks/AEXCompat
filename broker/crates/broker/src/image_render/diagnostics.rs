@@ -1,8 +1,6 @@
 use crate::host_core::descriptor_manifest::load as load_manifest;
 use crate::host_core::parameter::{ValidatedAssignments, apply_defaults, encode_worker_payload};
-use crate::runtime_module_authorization::{
-    RuntimeModulePurpose, encode_runtime_module_authorization,
-};
+use crate::runtime_module_authorization::prepare_runtime_authorization_transport;
 use crate::runtime_module_policy::{
     ApprovedClassifiedModule, RuntimeBackend, RuntimeModulePolicy, WorkerModuleValidation,
     authenticate_gpu_worker_report,
@@ -139,97 +137,6 @@ fn dispatch_approved_image_with_dependencies(
         args_before_plugin,
         args_after_plugin,
         timeout,
-    })
-}
-
-pub(crate) struct RuntimeAuthorizationTransport {
-    path: PathBuf,
-    artifact: ApprovedImageArtifact,
-    basename: String,
-    /// The per-render session identity embedded in the manifest. The GPU
-    /// module-audit preflight (#290) needs it to bind the worker's report to the
-    /// same session the render dispatch authorizes; the params-inspect path
-    /// ignores it.
-    session_identity: [u8; 32],
-}
-
-impl RuntimeAuthorizationTransport {
-    /// The sealed manifest basename to pass as the worker's
-    /// `--runtime-module-authorization-v1` trailer.
-    pub(crate) fn basename(&self) -> &str {
-        &self.basename
-    }
-
-    /// The manifest as a sealed dependency for the worker's load tree.
-    pub(crate) fn artifact(&self) -> ApprovedImageArtifact {
-        self.artifact.clone()
-    }
-}
-
-impl Drop for RuntimeAuthorizationTransport {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-pub(crate) fn prepare_runtime_authorization_transport(
-    repository: &Path,
-    policy: &RuntimeModulePolicy,
-    backend: RuntimeBackend,
-) -> io::Result<RuntimeAuthorizationTransport> {
-    let mut session_identity = rand::random::<[u8; 32]>();
-    if session_identity.iter().all(|byte| *byte == 0) {
-        session_identity[0] = 1;
-    }
-    prepare_runtime_authorization_transport_with_identity(
-        repository,
-        policy,
-        backend,
-        session_identity,
-    )
-}
-
-/// Like [`prepare_runtime_authorization_transport`] but embeds a caller-supplied
-/// `session_identity` instead of a fresh random one. A GPU render reuses the
-/// preflight's session identity here so the render worker parses the same
-/// identity the [`PreparedGpuRuntimePolicy`] report was authenticated against,
-/// keeping the manifest/report/session binding intact (#301 review). The identity
-/// must be nonzero (the preflight's is, by construction and prior authentication).
-pub(crate) fn prepare_runtime_authorization_transport_with_identity(
-    repository: &Path,
-    policy: &RuntimeModulePolicy,
-    backend: RuntimeBackend,
-    session_identity: [u8; 32],
-) -> io::Result<RuntimeAuthorizationTransport> {
-    if session_identity.iter().all(|byte| *byte == 0) {
-        return Err(invalid("runtime module session identity must be nonzero"));
-    }
-    let manifest = encode_runtime_module_authorization(
-        policy,
-        RuntimeModulePurpose::PfParameterInspect,
-        backend,
-        session_identity,
-    )?;
-    let root = repository.join("target/runtime-module-authorization");
-    fs::create_dir_all(&root)?;
-    let basename = format!("authorization-{:032x}.bin", rand::random::<u128>());
-    let path = root.join(&basename);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
-    file.write_all(&manifest.bytes)?;
-    file.sync_all()?;
-    drop(file);
-    Ok(RuntimeAuthorizationTransport {
-        path: path.clone(),
-        artifact: ApprovedImageArtifact {
-            path,
-            expected_sha256: manifest.sha256,
-            expected_size: manifest.size,
-        },
-        basename,
-        session_identity,
     })
 }
 

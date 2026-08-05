@@ -1,7 +1,9 @@
 use crate::runtime_module_policy::{MAX_RUNTIME_MODULES, RuntimeBackend, RuntimeModulePolicy};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAGIC: &[u8; 8] = b"AEXRMA1\0";
@@ -18,6 +20,122 @@ pub struct RuntimeModuleAuthorizationManifest {
     pub bytes: Vec<u8>,
     pub sha256: [u8; 32],
     pub size: u64,
+}
+
+pub(crate) struct RuntimeAuthorizationTransport {
+    path: PathBuf,
+    hold: Option<File>,
+    pub(crate) artifact: crate::secure_image_dispatch::ApprovedImageArtifact,
+    pub(crate) basename: String,
+    pub(crate) session_identity: [u8; 32],
+}
+
+struct PartialTransport(PathBuf);
+
+impl Drop for PartialTransport {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+impl RuntimeAuthorizationTransport {
+    pub(crate) fn append_launch(
+        &self,
+        in_place: bool,
+        args_after_plugin: &mut Vec<String>,
+        dependencies: &mut Vec<crate::secure_image_dispatch::ApprovedImageArtifact>,
+    ) {
+        args_after_plugin.push("--runtime-module-authorization-v1".to_owned());
+        if in_place {
+            args_after_plugin.push(self.path.to_string_lossy().into_owned());
+        } else {
+            args_after_plugin.push(self.basename.clone());
+            dependencies.push(self.artifact.clone());
+        }
+    }
+}
+
+impl Drop for RuntimeAuthorizationTransport {
+    fn drop(&mut self) {
+        drop(self.hold.take());
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+pub(crate) fn prepare_runtime_authorization_transport(
+    repository: &Path,
+    policy: &RuntimeModulePolicy,
+    backend: RuntimeBackend,
+) -> io::Result<RuntimeAuthorizationTransport> {
+    let mut session_identity = rand::random::<[u8; 32]>();
+    if session_identity.iter().all(|byte| *byte == 0) {
+        session_identity[0] = 1;
+    }
+    prepare_runtime_authorization_transport_with_identity(
+        repository,
+        policy,
+        backend,
+        session_identity,
+    )
+}
+
+pub(crate) fn prepare_runtime_authorization_transport_with_identity(
+    repository: &Path,
+    policy: &RuntimeModulePolicy,
+    backend: RuntimeBackend,
+    session_identity: [u8; 32],
+) -> io::Result<RuntimeAuthorizationTransport> {
+    if session_identity.iter().all(|byte| *byte == 0) {
+        return Err(invalid("runtime module session identity must be nonzero"));
+    }
+    let manifest = encode_runtime_module_authorization(
+        policy,
+        RuntimeModulePurpose::PfParameterInspect,
+        backend,
+        session_identity,
+    )?;
+    let root = repository.join("target/image-transport");
+    fs::create_dir_all(&root)?;
+    let root = fs::canonicalize(root)?;
+    let basename = format!("runtime-authorization-{:032x}.bin", rand::random::<u128>());
+    let path = root.join(&basename);
+    let partial = PartialTransport(path.clone());
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(&manifest.bytes)?;
+    file.sync_all()?;
+    drop(file);
+    let hold = open_transport_hold(&path)?;
+    std::mem::forget(partial);
+    Ok(RuntimeAuthorizationTransport {
+        path: path.clone(),
+        hold: Some(hold),
+        artifact: crate::secure_image_dispatch::ApprovedImageArtifact {
+            path,
+            expected_sha256: manifest.sha256,
+            expected_size: manifest.size,
+        },
+        basename,
+        session_identity,
+    })
+}
+
+#[cfg(windows)]
+fn open_transport_hold(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_transport_hold(path: &Path) -> io::Result<File> {
+    File::open(path)
 }
 
 pub fn encode_runtime_module_authorization(
@@ -246,5 +364,62 @@ mod tests {
 
         drop(policy);
         fs::remove_dir_all(cleanup.last().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn in_place_transport_uses_an_absolute_argument_without_a_staged_dependency() {
+        let (policy, cleanup) = policy();
+        let repository = cleanup.last().unwrap();
+        let transport = prepare_runtime_authorization_transport_with_identity(
+            repository,
+            &policy,
+            RuntimeBackend::Cuda,
+            [9; 32],
+        )
+        .unwrap();
+        let path = transport.path.clone();
+        let mut args = Vec::new();
+        let mut dependencies = Vec::new();
+        transport.append_launch(true, &mut args, &mut dependencies);
+
+        assert_eq!(args[0], "--runtime-module-authorization-v1");
+        assert_eq!(PathBuf::from(&args[1]), path);
+        assert!(path.is_absolute());
+        let transport_root = fs::canonicalize(repository.join("target/image-transport")).unwrap();
+        assert_eq!(path.parent(), Some(transport_root.as_path()));
+        assert!(dependencies.is_empty());
+        assert!(path.is_file());
+
+        drop(transport);
+        assert!(!path.exists());
+        drop(policy);
+        fs::remove_dir_all(repository).unwrap();
+    }
+
+    #[test]
+    fn staged_transport_keeps_the_basename_and_authenticated_dependency() {
+        let (policy, cleanup) = policy();
+        let repository = cleanup.last().unwrap();
+        let transport = prepare_runtime_authorization_transport_with_identity(
+            repository,
+            &policy,
+            RuntimeBackend::Opencl,
+            [5; 32],
+        )
+        .unwrap();
+        let mut args = Vec::new();
+        let mut dependencies = Vec::new();
+        transport.append_launch(false, &mut args, &mut dependencies);
+
+        assert_eq!(
+            args,
+            ["--runtime-module-authorization-v1", &transport.basename]
+        );
+        assert_eq!(dependencies, [transport.artifact.clone()]);
+        assert_eq!(dependencies[0].path, transport.path);
+
+        drop(transport);
+        drop(policy);
+        fs::remove_dir_all(repository).unwrap();
     }
 }

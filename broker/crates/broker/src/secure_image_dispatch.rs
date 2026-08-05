@@ -71,13 +71,6 @@ pub fn dispatch_secure_gpu_image_session(
     if authorization.backend == RuntimeBackend::Cpu {
         return Err(invalid("GPU dispatch cannot use the CPU backend"));
     }
-    // The AEXRMA1 authorization manifest is staged beside the plug-in, which
-    // an in-place launch (issue #751) has no staged directory for.
-    if !input.dependency_search_dirs.is_empty() {
-        return Err(invalid(
-            "an in-place dispatch does not support GPU runtime authorization yet",
-        ));
-    }
     authorization
         .module_report
         .authorize_dispatch(&authorization.session_identity, authorization.backend)?;
@@ -92,13 +85,6 @@ pub(crate) fn dispatch_secure_gpu_image_session_on_current_desktop(
 ) -> io::Result<crate::secure_launch::SecureSessionProcess> {
     if authorization.backend == RuntimeBackend::Cpu {
         return Err(invalid("GPU dispatch cannot use the CPU backend"));
-    }
-    // The AEXRMA1 authorization manifest is staged beside the plug-in, which
-    // an in-place launch (issue #751) has no staged directory for.
-    if !input.dependency_search_dirs.is_empty() {
-        return Err(invalid(
-            "an in-place dispatch does not support GPU runtime authorization yet",
-        ));
     }
     authorization
         .module_report

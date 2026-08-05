@@ -139,6 +139,25 @@ def test_gpu_preflight_seals_the_same_dependencies_as_the_render():
     # The manifest must no longer be the only sealed artifact.
     assert "vec![authorization.artifact.clone()]" not in body
 
+def test_gpu_session_authorization_supports_in_place_transport():
+    """GPU sessions select absolute transport vs sealed dependency by load mode."""
+    session = source_owners.RENDER_SESSION_SOURCE.read_text(encoding="utf-8")
+    dispatch = (
+        ROOT / "broker/crates/broker/src/secure_image_dispatch.rs"
+    ).read_text(encoding="utf-8")
+
+    assert "an in-place session does not support GPU runtime authorization yet" not in session
+    assert "an in-place dispatch does not support GPU runtime authorization yet" not in dispatch
+    assert "transport.append_launch(" in session
+    assert "!request.dependency_search_dirs.is_empty()" in session
+    assert "_runtime_authorization," in session
+
+    audit = (ROOT / "minihost/src/runtime_module_audit.cpp").read_text(encoding="utf-8")
+    admission = (ROOT / "minihost/src/worker_runtime_admission.cpp").read_text(encoding="utf-8")
+    assert "manifest_name.is_absolute() != in_place_transport" in audit
+    assert "canonical_path(manifest_name, manifest_path)" in audit
+    assert "!request.dependency_search_dirs.empty()" in admission
+
 def test_a_policy_below_float32_or_on_classic_does_not_exclude_a_render():
     """An inert runtime module policy must not make `open` reject a render.
 

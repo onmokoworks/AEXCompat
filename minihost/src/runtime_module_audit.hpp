@@ -55,7 +55,8 @@ enum class LoadedModuleProvenance {
 
 void configure_runtime_module_hash(FileSha256 hash) noexcept;
 bool parse_runtime_module_authorization(const std::filesystem::path& plugin_path,
-                                        const std::filesystem::path& manifest_name);
+                                        const std::filesystem::path& manifest_name,
+                                        bool in_place_transport);
 bool has_prefixed_basename(const std::filesystem::path& path,
                            const wchar_t* prefix);
 ModuleAuditReport& module_audit_report() noexcept;
