@@ -1213,6 +1213,20 @@ mod worker {
                     "error_kind": "selector_error"
                 })
                 .to_string()
+            } else if behavior == "inspect_identity_changed_plugin_1" && new_index == 1 {
+                // In-place identity mismatch (issue #751): the bytes on disk
+                // no longer match the manifest — plug-in-local, the session
+                // continues (the #309 state transition, never a session
+                // failure).
+                json!({
+                    "v": 1,
+                    "type": "inspect_done",
+                    "plugin_index": plugin_index,
+                    "request_index": request_index,
+                    "status": "error",
+                    "error_kind": "identity_changed"
+                })
+                .to_string()
             } else {
                 let (basename, sha256) = &manifest.plugins[new_index];
                 json!({

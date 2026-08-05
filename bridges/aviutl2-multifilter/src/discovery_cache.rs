@@ -1953,6 +1953,12 @@ fn dependency_inputs_fingerprint(dependency: &DependencyConfig) -> u64 {
     hasher.update(b"limits\0");
     hasher.update(dependency.module_limit.unwrap_or(usize::MAX).to_le_bytes());
     hasher.update(dependency.byte_limit.unwrap_or(u64::MAX).to_le_bytes());
+    // The discovery pipeline (in-place vs staged, issue #751) decides an
+    // entry's outcome the same way the ceilings do: switching modes must
+    // re-verify entries the other pipeline produced, not reuse them
+    // (stale-reuse protection belongs in cache keys).
+    hasher.update(b"pipeline\0");
+    hasher.update([u8::from(in_place_discovery_enabled())]);
     let digest = hasher.finalize();
     u64::from_le_bytes(digest[..8].try_into().unwrap_or_default())
 }

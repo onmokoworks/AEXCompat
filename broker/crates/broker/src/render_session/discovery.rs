@@ -528,14 +528,16 @@ impl DiscoverySession {
             "error" => {
                 let error_kind = match done.error_kind.as_deref() {
                     // `identity_changed` (the bytes no longer match the
-                    // manifest, the #309 state transition) and `load_failed`
-                    // are in-place additions (issue #751); a sealed worker
-                    // never emits them.
+                    // manifest, the #309 state transition), `load_failed`,
+                    // and `hash_unavailable` (the bytes could not be read at
+                    // all) are in-place additions (issue #751); a sealed
+                    // worker never emits them.
                     Some(
                         kind @ ("entrypoint_unresolved"
                         | "selector_error"
                         | "identity_changed"
-                        | "load_failed"),
+                        | "load_failed"
+                        | "hash_unavailable"),
                     ) => kind.to_owned(),
                     _ => {
                         return Err(self.invalidate(

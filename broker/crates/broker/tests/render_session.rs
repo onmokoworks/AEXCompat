@@ -3131,6 +3131,45 @@ mod windows_e2e {
         assert_eq!(close["invalidated"], false, "close: {close}");
     }
 
+    /// An in-place identity mismatch (issue #751, the #309 state transition)
+    /// is plug-in-local: the structured `identity_changed` reaches the caller
+    /// and the session keeps serving other members.
+    #[test]
+    fn in_place_discovery_identity_change_is_plugin_local() {
+        if crate::common::skip_without_sealed_worker_launch(
+            "in_place_discovery_identity_change_is_plugin_local",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(Some("inspect_identity_changed_plugin_1"));
+        let cluster = temp_cluster_repository();
+        let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
+            repository: &cluster.repository.0,
+            plugins: cluster
+                .plugins
+                .iter()
+                .map(|(path, _)| approved_artifact(path))
+                .collect(),
+            dependency_search_dirs: vec![cluster.repository.0.clone()],
+            module_bound: 64,
+            inspect_deadline: Duration::from_secs(30),
+        })
+        .expect("open in-place discovery session");
+        let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
+        assert!(matches!(first, InspectOutcome::Inspected { .. }));
+        let second = session.inspect_plugin(1, 1).expect("inspect plugins[1]");
+        let InspectOutcome::InspectError { error_kind, .. } = second else {
+            panic!("plugins[1] must report the identity change: {second:?}");
+        };
+        assert_eq!(error_kind, "identity_changed");
+        // The session survives the mismatch and keeps serving.
+        let again = session.inspect_plugin(0, 2).expect("re-inspect plugins[0]");
+        assert!(matches!(again, InspectOutcome::Inspected { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["inspects_errored"], 1, "close: {close}");
+    }
+
     #[test]
     fn discovery_session_rejects_out_of_manifest_index_and_off_serial_requests() {
         if crate::common::skip_without_sealed_worker_launch(

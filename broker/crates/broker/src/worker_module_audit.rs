@@ -789,6 +789,27 @@ mod tests {
         .to_string()
     }
 
+    /// The in-place observation (issue #751): a present, parsed, fully
+    /// classified record passes silently; anything less rides back as a
+    /// warning string — never an error the dispatch acts on.
+    #[test]
+    fn in_place_cluster_audit_observation_warns_without_enforcing() {
+        assert_eq!(
+            observe_in_place_cluster_audit(&valid_cluster_report(), false),
+            None
+        );
+        // Truncated stdout, a missing record, and unclassified modules all
+        // surface as warnings.
+        assert!(observe_in_place_cluster_audit(&valid_cluster_report(), true).is_some());
+        assert!(
+            observe_in_place_cluster_audit(&json!({"status": "ok"}).to_string(), false).is_some()
+        );
+        let mut failed: Value = serde_json::from_str(&valid_cluster_report()).unwrap();
+        failed["module_audit"]["status"] = json!("failed");
+        failed["module_audit"]["unknown_count"] = json!(2);
+        assert!(observe_in_place_cluster_audit(&failed.to_string(), false).is_some());
+    }
+
     #[test]
     fn cluster_audit_accepts_epochs_within_the_declared_set() {
         validate_cluster_worker_audit(&valid_cluster_report(), false, &cluster_declaration())

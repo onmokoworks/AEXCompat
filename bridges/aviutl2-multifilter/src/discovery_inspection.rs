@@ -308,6 +308,38 @@ fn prepare_discovery_in_place(
     }
 }
 
+/// Records what the import graph wanted for a plug-in whose in-place
+/// discovery failed (issue #751): the survey pays the directory walk only on
+/// the failure path, and the recorded sealed/missing sets restore the
+/// cache's dependency-change re-discovery triggers — a user who later drops
+/// the missing DLL into a search root gets the plug-in re-discovered without
+/// touching it. Successful discoveries never walk.
+fn record_survey_for_failed_in_place(entry: &mut CacheEntry, plugin: &Path, roots: &[PathBuf]) {
+    let recorded_roots: Vec<String> = roots
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect();
+    entry.closure = match survey_dependency_closure(plugin, roots) {
+        Ok(survey) => {
+            let (sealed, vanished) = cached_dependencies(&survey.modules);
+            let mut missing = cached_missing(&survey.unresolved);
+            missing.extend(vanished);
+            missing.sort();
+            missing.dedup();
+            CachedClosure {
+                roots: recorded_roots,
+                sealed,
+                missing,
+                provenance: cached_provenance(&survey.provenance),
+            }
+        }
+        Err(_) => CachedClosure {
+            roots: recorded_roots,
+            ..CachedClosure::default()
+        },
+    };
+}
+
 /// The in-place per-plugin inspect (issue #751): the one-shot
 /// `inspect_experimental_in_place` dispatch, used for singletons and as the
 /// fail-closed fallback for in-place cluster members.
@@ -325,7 +357,7 @@ fn finish_one_shot_in_place(
     if roots.is_empty() {
         return entry;
     }
-    match inspect_experimental_in_place(repository, plugin, &entry.sha, roots) {
+    match inspect_experimental_in_place(repository, plugin, &entry.sha, roots.clone()) {
         Ok((params, diagnostics)) => {
             // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
             entry.smart = diagnostics
@@ -340,6 +372,7 @@ fn finish_one_shot_in_place(
         }
         Err(error) => {
             entry.failure_classification = inspection_failure_classification(&error);
+            record_survey_for_failed_in_place(&mut entry, plugin, &roots);
         }
     }
     entry
@@ -776,7 +809,7 @@ fn discover_cluster_in_place(
     let mut session = match DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
         repository,
         plugins,
-        dependency_search_dirs: search_dirs,
+        dependency_search_dirs: search_dirs.clone(),
         // The recorded audit's bounded enumeration capacity: real closures
         // load in place and retired members stay mapped (deferred release),
         // so the capacity is the manifest maximum rather than a declared set.
@@ -827,12 +860,17 @@ fn discover_cluster_in_place(
                     "entrypoint_unresolved" => Some("nonzero_exit".to_owned()),
                     // The loader could not bring the plug-in up from its real
                     // path (a missing dependency outside the search roots);
-                    // deterministic until the configuration changes.
-                    "load_failed" => Some("nonzero_exit".to_owned()),
+                    // deterministic until the configuration changes, so the
+                    // survey records what the import graph wanted and the
+                    // cache re-discovers when it appears.
+                    "load_failed" => {
+                        record_survey_for_failed_in_place(&mut entry, &path, &search_dirs);
+                        Some("nonzero_exit".to_owned())
+                    }
                     // The bytes changed after this sweep hashed them (#309
-                    // state transition): leave unclassified so the next
-                    // launch re-discovers the new bytes.
-                    "identity_changed" => None,
+                    // state transition), or could not be read at all: leave
+                    // unclassified so the next launch re-discovers.
+                    "identity_changed" | "hash_unavailable" => None,
                     // PARAMS_SETUP rejected: retried like the one-shot path.
                     _ => None,
                 };

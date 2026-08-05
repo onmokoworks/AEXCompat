@@ -654,6 +654,11 @@ int run_discovery_session(const std::wstring& manifest_argument,
   bool protocol_violation = false;
   bool swap_failure = false;
   bool bib_teardown_failed = false;
+  // Whether the session's baseline post_load snapshot was taken (the first
+  // successful load). An in-place load failure retires the previous plug-in
+  // without loading a successor, so without this latch the next successful
+  // load would overwrite the baseline with a later point in time.
+  bool session_post_load_recorded = false;
 
   // Terminal teardown shared by every exit path after the session loop. The
   // ownership order is explicit (owner review P1-1, amended by issue #474's
@@ -771,8 +776,14 @@ int run_discovery_session(const std::wstring& manifest_argument,
       const std::filesystem::path path =
           cluster::plugin_path(manifest, static_cast<std::size_t>(index));
       std::string actual_sha256;
-      if (!runtime_hooks.hash_file(path, actual_sha256) ||
-          !cluster::hash_equals(
+      if (!runtime_hooks.hash_file(path, actual_sha256)) {
+        // The bytes could not be read at all (a sharing violation, a vanished
+        // file): distinct from bytes that read but no longer match, so the
+        // record does not claim an identity change it never observed.
+        load_error_kind = "hash_unavailable";
+        return nullptr;
+      }
+      if (!cluster::hash_equals(
               actual_sha256,
               manifest.plugins[static_cast<std::size_t>(index)].sha256)) {
         load_error_kind = "identity_changed";
@@ -859,10 +870,18 @@ int run_discovery_session(const std::wstring& manifest_argument,
       if (!module) {
         if (manifest.in_place) {
           // Plug-in-local on the in-place path (issue #751): report the
-          // structured cause and keep the session serving other members.
+          // structured cause and keep the session serving other members. The
+          // retired predecessor's epoch is still recorded — its pre_unload
+          // was captured above, and the paired snapshot is the state after
+          // the failed load (nothing new mapped) — so the record keeps
+          // matching what actually ran.
           std::cerr << "stage:cluster_swap step=load_plugin index=" << plugin_index
                     << " kind=" << load_error_kind << " error=" << GetLastError()
                     << "\n" << std::flush;
+          if (outgoing_index >= 0)
+            wr::record_module_audit_epoch(static_cast<uint32_t>(outgoing_index),
+                                          std::move(pre_unload),
+                                          wr::capture_module_audit());
           error_kind = load_error_kind;
           std::string reply =
               "{\"v\":1,\"type\":\"inspect_done\",\"plugin_index\":" +
@@ -884,10 +903,13 @@ int run_discovery_session(const std::wstring& manifest_argument,
       if (outgoing_index >= 0)
         wr::record_module_audit_epoch(static_cast<uint32_t>(outgoing_index),
                                       std::move(pre_unload), post_load);
-      else
-        // First inspect: the launch never loaded a plug-in, so this load is
-        // the session's post_load (design §5 epoch model).
+      else if (!session_post_load_recorded)
+        // First successful load: the launch never loaded a plug-in, so this
+        // is the session's baseline post_load (design §5 epoch model). The
+        // latch keeps a later load after an in-place load failure from
+        // overwriting the baseline.
         audit.post_load = post_load;
+      session_post_load_recorded = true;
       if (!manifest.in_place &&
           (post_load.status != "passed" || !wr::module_audit_passed())) {
         std::cerr << "stage:cluster_swap step=post_load_audit status="

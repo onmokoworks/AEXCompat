@@ -154,7 +154,13 @@ bool parse_in_place_manifest(const JsonValue::Object& object, Manifest& parsed) 
     entry.path = std::filesystem::u8path(path_text);
     // Real paths, not sealed-root-relative names: absolute, with a
     // Windows-safe basename, unique across the cluster case-insensitively.
-    entry.basename = entry.path.filename().string();
+    // The basename is cut from the UTF-8 text itself: `path::string()` would
+    // narrow through the ACP and can throw on a name the ACP cannot
+    // represent, which the broker's UTF-8 validation legitimately admits.
+    const std::size_t separator = path_text.find_last_of("/\\");
+    entry.basename = separator == std::string::npos
+                         ? path_text
+                         : path_text.substr(separator + 1);
     if (!entry.path.is_absolute() || !windows_safe_basename(entry.basename) ||
         !plugin_paths.insert(lowercase(entry.path.wstring())).second)
       return false;

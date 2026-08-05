@@ -2735,40 +2735,85 @@ mod tests {
             let _guard = BEHAVIOR_LOCK
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            unsafe {
-                std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", "crash_on_inspect");
+            // Both discovery pipelines share the fallback contract (issue
+            // #751): the member the session died on is a structured failure,
+            // the rest re-inspect per-plugin with the note.
+            for staged in [true, false] {
+                unsafe {
+                    std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", "crash_on_inspect");
+                    if staged {
+                        std::env::set_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY", "1");
+                    } else {
+                        std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
+                    }
+                }
+                let (root, one, two) = cluster_repository();
+                let results =
+                    discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+                unsafe {
+                    std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+                    std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
+                }
+                assert_eq!(results.len(), 2, "every plug-in gets a result");
+                let first = results
+                    .iter()
+                    .find(|(path, _)| path == &one)
+                    .map(|(_, entry)| entry)
+                    .expect("the first member has an entry");
+                let second = results
+                    .iter()
+                    .find(|(path, _)| path == &two)
+                    .map(|(_, entry)| entry)
+                    .expect("the second member has an entry");
+                // The member the session died on is a structured failure...
+                assert_eq!(
+                    first.failure_classification.as_deref(),
+                    Some("cluster_session_invalidated"),
+                    "staged={staged}"
+                );
+                let fallback = first.cluster_fallback.as_ref().expect("fallback note");
+                assert_eq!(fallback.at_member, 0);
+                assert_eq!(fallback.resolution, "invalidated");
+                assert!(!first.ok, "a dead session is never rounded to success");
+                // ...and the remaining member was re-inspected per-plugin,
+                // which fails here (no L2 worker by design) but carries the
+                // note.
+                let fallback = second.cluster_fallback.as_ref().expect("fallback note");
+                assert_eq!(fallback.at_member, 0);
+                assert_eq!(fallback.resolution, "one_shot_fallback");
+                std::fs::remove_dir_all(&root).unwrap();
             }
-            let (root, one, two) = cluster_repository();
-            let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
-            unsafe {
-                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+        }
+
+        #[test]
+        fn in_place_cluster_sharding_keeps_membership_and_degrades_singletons() {
+            let cluster = |indices: &[usize]| DiscoveryTask::Cluster(indices.to_vec());
+            let members: Vec<usize> = (0..7).collect();
+            // parallelism 3 over 7 members: 3 chunks (3/3/1), the remainder
+            // degrading to a per-plugin task; membership is preserved.
+            let sharded = shard_in_place_clusters(vec![cluster(&members)], 3);
+            let mut seen = Vec::new();
+            let mut cluster_count = 0;
+            for task in &sharded {
+                match task {
+                    DiscoveryTask::Cluster(chunk) => {
+                        assert!(chunk.len() >= 2, "no one-member cluster chunks");
+                        cluster_count += 1;
+                        seen.extend(chunk.iter().copied());
+                    }
+                    DiscoveryTask::Single(index) => seen.push(*index),
+                }
             }
-            assert_eq!(results.len(), 2, "every plug-in gets a result");
-            let first = results
-                .iter()
-                .find(|(path, _)| path == &one)
-                .map(|(_, entry)| entry)
-                .expect("the first member has an entry");
-            let second = results
-                .iter()
-                .find(|(path, _)| path == &two)
-                .map(|(_, entry)| entry)
-                .expect("the second member has an entry");
-            // The member the session died on is a structured failure...
-            assert_eq!(
-                first.failure_classification.as_deref(),
-                Some("cluster_session_invalidated")
-            );
-            let fallback = first.cluster_fallback.as_ref().expect("fallback note");
-            assert_eq!(fallback.at_member, 0);
-            assert_eq!(fallback.resolution, "invalidated");
-            assert!(!first.ok, "a dead session is never rounded to success");
-            // ...and the remaining member was re-inspected per-plugin, which
-            // fails here (no L2 worker by design) but carries the note.
-            let fallback = second.cluster_fallback.as_ref().expect("fallback note");
-            assert_eq!(fallback.at_member, 0);
-            assert_eq!(fallback.resolution, "one_shot_fallback");
-            std::fs::remove_dir_all(&root).unwrap();
+            assert_eq!(seen, members, "sharding preserves order and membership");
+            assert_eq!(cluster_count, 2);
+            // Two-member clusters and singles pass through untouched.
+            let untouched = shard_in_place_clusters(vec![cluster(&[0, 1])], 8);
+            assert!(matches!(&untouched[0], DiscoveryTask::Cluster(chunk) if chunk.len() == 2));
+            // len == 3 with ample parallelism: chunk_count is bounded by
+            // len/2, so the cluster stays whole (never a one-member chunk).
+            let three = shard_in_place_clusters(vec![cluster(&[0, 1, 2])], 8);
+            assert_eq!(three.len(), 1);
+            assert!(matches!(&three[0], DiscoveryTask::Cluster(chunk) if chunk.len() == 3));
         }
 
         #[test]

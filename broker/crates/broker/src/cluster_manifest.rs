@@ -399,6 +399,11 @@ impl Drop for ClusterManifestTransport {
 pub const IN_PLACE_CLUSTER_MANIFEST_SCHEMA: &str = "cluster-manifest-v2";
 pub const IN_PLACE_CLUSTER_MANIFEST_BASENAME: &str = "cluster-manifest-v2.json";
 pub const MAX_CLUSTER_SEARCH_DIRS: usize = 16;
+/// The worker admits `search_dirs` plus every plug-in's parent directory
+/// (deduplicated case-insensitively) into its DLL search set and rejects a
+/// launch whose union exceeds this; validating the same bound here turns
+/// that opaque worker exit into a build-time error.
+pub const MAX_CLUSTER_ADMITTED_DIRS: usize = 64;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -509,7 +514,12 @@ impl ValidatedInPlaceClusterManifest {
             }
             let sha256 = decode_sha256("plugin", &plugin.sha256)?;
             if let Some(payload) = &plugin.payload {
-                if payload.len() > MAX_CLUSTER_PAYLOAD_BYTES || !payload.is_ascii() {
+                // Printable ASCII only, matching the worker's byte gate
+                // exactly (the sealed manifest's `is_ascii()` admits control
+                // bytes the worker then rejects as an opaque exit).
+                if payload.len() > MAX_CLUSTER_PAYLOAD_BYTES
+                    || payload.bytes().any(|byte| !(0x20..=0x7e).contains(&byte))
+                {
                     return Err(invalid("cluster plugin payload is invalid"));
                 }
             }
@@ -530,6 +540,20 @@ impl ValidatedInPlaceClusterManifest {
             if !seen_dirs.insert(dir.to_lowercase()) {
                 return Err(invalid("duplicate cluster search directory"));
             }
+        }
+        // Mirror the worker's admitted-directory bound (search dirs plus
+        // every plug-in's parent, deduplicated case-insensitively) so an
+        // over-scattered cluster fails here instead of as a worker exit.
+        let mut admitted = seen_dirs;
+        for plugin in &plugins {
+            if let Some(parent) = plugin.path.parent().and_then(|parent| parent.to_str()) {
+                admitted.insert(parent.to_lowercase());
+            }
+        }
+        if admitted.len() > MAX_CLUSTER_ADMITTED_DIRS {
+            return Err(invalid(
+                "cluster search and plugin directories exceed the admitted bound",
+            ));
         }
         Ok(Self {
             plugins,
@@ -864,6 +888,19 @@ mod tests {
         let mut wrong_schema = in_place_dto();
         wrong_schema.schema = CLUSTER_MANIFEST_SCHEMA.to_owned();
         assert!(ValidatedInPlaceClusterManifest::validate(wrong_schema).is_err());
+
+        // The union of search dirs and plugin parents mirrors the worker's
+        // admitted-directory bound; scattering plugins across 65 directories
+        // fails at build time instead of as an opaque worker exit.
+        let mut scattered = in_place_dto();
+        scattered.plugins = (0..65)
+            .map(|index| InPlaceClusterPluginDto {
+                path: format!(r"C:\scattered\dir-{index}\plugin.aex"),
+                sha256: "a".repeat(64),
+                payload: None,
+            })
+            .collect();
+        assert!(ValidatedInPlaceClusterManifest::validate(scattered).is_err());
     }
 
     #[test]
