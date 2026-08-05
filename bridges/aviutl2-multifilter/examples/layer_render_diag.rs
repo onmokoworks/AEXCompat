@@ -32,6 +32,18 @@
 //!   `PF_OutFlag2_FLOAT_COLOR_AWARE` (out_flags2 1<<12, 32-bit) - which is what
 //!   lets the two deep depths open; 8-bit needs no flag. It answered 4 at 8 and 32 bits
 //!   while access-violating at 16: two different host defects (issue #777).
+//! * `AEXCOMPAT_DIAG_SIZE=WIDTHxHEIGHT` - open the session at that size instead
+//!   of the built-in one, so a refusal that only shows up at a real composition
+//!   size can be reproduced here.
+//! * `AEXCOMPAT_DIAG_TIME=N` - render at timeline position N instead of 0. This
+//!   is the switch that found issue #828: every SmartFX plug-in rendered at 0
+//!   and failed everywhere else, which a fixed-0 diagnostic could not see.
+//!   Note this is the timeline position, not the session-local frame index -
+//!   the multifilter counts frames from 0 upward regardless of where the
+//!   cursor is, so varying the index proves nothing about time.
+//! * `AEXCOMPAT_DIAG_DYNAMIC_LAYER` - mark the secondary layer as dynamic, the
+//!   way the multifilter opens it, rather than as a fixed one. Set to anything,
+//!   including an empty value; only its presence is read.
 //!
 //! `AEXCOMPAT_EXTENDED_DIAG=1` additionally turns on the worker's host-callback
 //! trace; it reaches stderr, which the session collects but does not report.
@@ -51,10 +63,25 @@ use aexcompat_broker::render_session::{
 };
 use sha2::{Digest, Sha256};
 
-const WIDTH: u32 = 256;
-const HEIGHT: u32 = 144;
+// Overridable because a defect can be resolution-dependent: AviUtl2 renders at
+// the project size (1920x1080 in the reproduction project) while this example's
+// default is small enough to iterate on.
+fn frame_size() -> (u32, u32) {
+    match std::env::var("AEXCOMPAT_DIAG_SIZE").ok().as_deref() {
+        Some(value) => match value.split_once('x') {
+            Some((width, height)) => match (width.trim().parse(), height.trim().parse()) {
+                (Ok(width), Ok(height)) => (width, height),
+                _ => (256, 144),
+            },
+            None => (256, 144),
+        },
+        None => (256, 144),
+    }
+}
 
 fn main() {
+    let (width, height) = frame_size();
+    eprintln!("size: {width}x{height}");
     let mut args = std::env::args().skip(1);
     let plugin = PathBuf::from(
         args.next()
@@ -153,10 +180,10 @@ fn main() {
 
     // A map with structure, so an effect that samples it cannot answer
     // identically for every pixel by accident.
-    let layer_pixels: Vec<u8> = (0..WIDTH * HEIGHT)
+    let layer_pixels: Vec<u8> = (0..width * height)
         .flat_map(|index| {
-            let x = (index % WIDTH) as u8;
-            let y = (index / WIDTH) as u8;
+            let x = (index % width) as u8;
+            let y = (index / width) as u8;
             [x, y, x ^ y, 255]
         })
         .collect();
@@ -165,11 +192,18 @@ fn main() {
         .filter(|_| std::env::var("AEXCOMPAT_DIAG_NO_LAYER").is_err())
         .map(|&slot| SessionLayer {
             slot,
-            width: WIDTH,
-            height: HEIGHT,
+            width,
+            height,
             rgba: layer_pixels,
             timed: None,
-            dynamic: false,
+            // The multifilter opens the virtual-buffer layer dynamic so the map
+            // can follow a moving scene (issue #674); a static layer takes a
+            // different transport, so a defect can live on one and not the
+            // other.
+            // Presence-based like AEXCOMPAT_DIAG_NO_LAYER above: during a bisect
+            // the switches get set to whatever is at hand, and a value test would
+            // make `=true` silently do nothing.
+            dynamic: std::env::var("AEXCOMPAT_DIAG_DYNAMIC_LAYER").is_ok(),
         })
         .into_iter()
         .collect();
@@ -198,8 +232,8 @@ fn main() {
         layers: &layers,
         dependencies,
         dependency_search_dirs,
-        width: WIDTH,
-        height: HEIGHT,
+        width,
+        height,
         pixel_format,
         time_step: 1,
         total_time: 300,
@@ -212,10 +246,20 @@ fn main() {
     })
     .expect("open a render session with the secondary layer");
 
-    let input: Vec<u8> = (0..WIDTH * HEIGHT)
+    let input: Vec<u8> = (0..width * height)
         .flat_map(|_| [32u8, 64, 128, 255])
         .collect();
-    match session.render_frame(0, 0, &input) {
+    // `frame_index` is the session's own counter - the multifilter starts it at
+    // 0 and increments per frame - while `current_time` is the timeline
+    // position. AviUtl2 renders wherever the cursor is, so a session's first
+    // frame can carry a non-zero current_time, and the time-dependent host
+    // paths key on that, not on the counter.
+    let current_time: i32 = std::env::var("AEXCOMPAT_DIAG_TIME")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    eprintln!("current_time: {current_time}");
+    match session.render_frame(0, current_time, &input) {
         Ok(outcome) => match outcome.status {
             FrameStatus::Rendered { width, height, .. } => {
                 println!("frame rendered {width}x{height}")

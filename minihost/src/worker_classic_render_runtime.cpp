@@ -739,6 +739,30 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
        external_height, external_current_time, external_time_scale,
        external_pixel_bytes});
   if (!plan.valid) return result;
+  // The smart path serves parameter checkouts from the hosted ledger, not from a
+  // classic dispatch context, and that ledger kept its default current_time 0 /
+  // time_scale 1 because nothing ever set it. `checkout_param` refuses any other
+  // time, so every SmartFX frame past t=0 had its first checkout answered with
+  // PF_Err_OUT_OF_MEMORY and the plug-in gave up - AviUtl2 renders at the cursor,
+  // so no smart effect worked anywhere but frame 0 (issue #828).
+  //
+  // This runs before anything enters the plug-in. PF_Cmd_QUERY_DYNAMIC_FLAGS
+  // and PF_Cmd_FRAME_SETUP both reach the plug-in ahead of SMART_PRE_RENDER,
+  // and the SDK documents the first as a place to check parameters out
+  // (AE_Effect.h: "the effect may examine the values of its parameters at the
+  // current time (except layer parameters) by checking them out"), so
+  // configuring only next to the dynamic out-flags below would leave both
+  // answering against the previous frame's time.
+  //
+  // The wide-time rule used here is whatever `prepare` last read out of the
+  // out-flags in `command_output`. On the first frame that is the GLOBAL_SETUP
+  // advertisement; on later frames of a session the buffer still holds the
+  // previous frame's QUERY_DYNAMIC_FLAGS result, because nothing restores it
+  // between frames (issue #843). Either way it is only in force until the call
+  // below re-applies the rule from this frame's own dynamic flags.
+  aexcompat::l2_detail::configure_hosted_checkout_time(
+      external_current_time, external_time_scale,
+      smart_state().wide_time_checkout_allowed);
   const bool deep16 = plan.deep16;
   const bool fixture_gpu_negotiation = plan.fixture_gpu_negotiation;
   const bool opencl_gpu_negotiation = plan.opencl_gpu_negotiation;
@@ -855,6 +879,13 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       (dynamic_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0;
   smart_state().shutter_dependency_advertised =
       (dynamic_out_flags & kOutFlagIUseShutterAngle) != 0;
+  // Re-apply the frame time now that QUERY_DYNAMIC_FLAGS has had its say: only
+  // the wide-time rule can have changed, but it decides whether a checkout at
+  // another time is admitted for the rest of the frame (issue #828). The time
+  // itself was already published before the first selector, above.
+  aexcompat::l2_detail::configure_hosted_checkout_time(
+      external_current_time, external_time_scale,
+      smart_state().wide_time_checkout_allowed);
   const bool nop_render =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
   if (nop_render) {
