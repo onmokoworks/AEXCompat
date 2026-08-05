@@ -356,7 +356,7 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
 ```json
 {"v":1,"type":"frame_done","frame_index":0,"status":"ok",
  "output":{"width":1920,"height":1080,"rowbytes":7680,
-           "pixel_format":"argb8","checksum":"<sha256>",
+           "pixel_format":"argb8","packed_bytes":8294400,
            "guards_intact":true},
  "render_error":0,
  "generation":1}
@@ -367,7 +367,7 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
   継続可能で、続行判断は broker 側 (バッチ CLI は既定で中断)。
 - **空 SmartFX result (#278)**: PreRender が合法な空 result_rect を返し render
   selector をスキップした場合、`output` は `"width":0,"height":0,"rowbytes":0`
-  と **`"empty_result":true`** を含む `status:"ok"` を返す (checksum はゼロバイト
+  と **`"empty_result":true`** を含む `status:"ok"` を返す (`packed_bytes` は 0
   の sha256、one-shot の空出力と一致)。broker はこの明示フラグがあるときのみ
   ゼロ寸法を合法な空レンダーとして受理し (フラグ無しのゼロ寸法は次項の invariant
   失敗)、出力スロットは読まず空ピクセルの `Rendered` を返す。generation は通常
@@ -402,8 +402,8 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
 出力スロット容量を分離**する:
 
 - **shrink / スロット内 expand**: worker は実寸法で出力スロットに書き、
-  `frame_done.output.width/height` に実寸法を報告。`output.checksum` は
-  実寸法の packed バイト (`width*height*bpp`) を覆う。broker は実寸法バイト
+  `frame_done.output.width/height` に実寸法を報告。`output.packed_bytes` は
+  実際に転送したバイト数 (`width*height*bpp`)。broker は実寸法バイト
   だけ読む (スロット全体ではない)。
 - **スロット超過 expand (session 内 grow, #262)**: RENDER は worker private
   buffer に既に1回だけ完了している (共有スロットへのコピーは lifecycle 外)。
@@ -427,12 +427,20 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
   (grow 後は新容量)。grow は length-1 wrapper・multi-frame バッチ・ライブセッション
   すべてで機能する (render_frame が内部で処理し `resize_needed` は呼び出し元へ
   表出しない)。
-- `output` の各値は broker 側 per-frame 検証 (§7) の入力。`checksum` は
-  **出力スロットへ転送した RGBA バイト列 (broker が読むバイトそのもの) の
-  sha256**。one-shot の `output_hash` は内部 ARGB 論理バッファの hash
-  (`worker_classic_execution.cpp:43-58`) で定義が異なることに注意。最終
-  レポート (§4.4) の `output_hash` は従来定義のままとし、フレーム転送の
-  検証には `frame_done.output.checksum` を使う。
+- `output` の各値は broker 側 per-frame 検証 (§7) の入力。`packed_bytes` は
+  **出力スロットへ転送したバイト数**で、broker が報告寸法から計算する
+  `width*height*bpp` と一致しなければ `output_extent_mismatch` で
+  fail-closed する。両サイドのレイアウト合意の相互確認であり、内容の
+  ハッシュではない。
+
+  issue #690 まではここが転送バイト列の sha256 だった。ハッシュを計算する
+  のは worker 自身なので worker の正直さは証明できず、実際に検出できたのは
+  この「バイト数の食い違い」だけだった。1080p で毎フレーム 8 MiB を両サイドが
+  ハッシュする代償に見合わないため、整数比較に置き換えた。フレーム内容の
+  ハッシュが要る場面 (バッチレンダーの manifest、診断) は broker が手元の
+  バイト列から必要なときだけ計算する。one-shot の `output_hash` は内部 ARGB
+  論理バッファの hash (`worker_classic_execution.cpp:43-58`) で定義が異なる
+  ことに注意。最終レポート (§4.4) の `output_hash` は従来定義のまま。
 - プロセス死・ハングは frame_done が来ないことで broker が検出する。
   `type":"fatal"` のような臨終メッセージは設けない (クラッシュ時に送れる
   保証がなく、二重の死亡経路は診断を曖昧にする)。

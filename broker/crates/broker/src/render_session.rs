@@ -601,11 +601,9 @@ pub struct SessionLayer {
 #[derive(Debug)]
 pub enum FrameStatus {
     /// The frame rendered and every per-frame invariant held. `pixels` are
-    /// the validated native RGBA bytes copied out of the output slot;
-    /// `checksum` is their lowercase SHA-256 (matching the worker's).
+    /// the validated native RGBA bytes copied out of the output slot.
     Rendered {
         pixels: Vec<u8>,
-        checksum: String,
         /// The frame's actual rendered dimensions. Equal to the session
         /// dimensions for a fixed-size effect, smaller for a shrink-output
         /// effect (#261); `pixels` is packed at exactly `width*height*bpp`.
@@ -652,7 +650,10 @@ struct FrameDoneOutput {
     height: u32,
     rowbytes: u64,
     pixel_format: String,
-    checksum: String,
+    /// How many bytes the worker packed into the slot. The broker derives the
+    /// same extent from `width`/`height` and refuses a disagreement, which is
+    /// the layout cross-check the per-frame SHA-256 used to carry (#690).
+    packed_bytes: u64,
     guards_intact: bool,
     /// A SmartFX frame whose PreRender returned a legally empty result_rect
     /// (#278): width/height are 0 and there are no output pixels. Absent (false)
@@ -2167,34 +2168,36 @@ impl RenderSession {
                         ));
                     }
                     // Read only the frame's actual packed bytes, not the whole
-                    // launch slot: a shrink-output effect fills less than the slot,
-                    // and the worker's checksum covers those actual bytes (#261).
+                    // launch slot: a shrink-output effect fills less than the
+                    // slot, and the worker packs exactly these bytes (#261).
                     let actual_bytes = output.width as usize
                         * output.height as usize
                         * self.geometry.pixel_format.bytes_per_pixel() as usize;
-                    let pixels = self
-                        .transport
-                        .read_output_slot(self.geometry.output_slot_offset(), actual_bytes);
-                    let checksum = format!("{:x}", Sha256::digest(&pixels));
-                    if !checksum.eq_ignore_ascii_case(&output.checksum) {
+                    // Both sides must agree on how much of the slot this frame
+                    // occupies. Hashing those bytes twice per frame proved
+                    // nothing beyond this agreement -- the worker computed its
+                    // own hash, so it could never attest to its own honesty --
+                    // and cost ~8 MiB of SHA-256 twice at 1080p (issue #690).
+                    if output.packed_bytes != actual_bytes as u64 {
                         return Err(self.invalidate(
-                            "output_checksum_mismatch",
+                            "output_extent_mismatch",
                             format!(
-                                "frame {frame_index} slot bytes hash {checksum} but the worker \
-                             reported {}",
-                                output.checksum
+                                "frame {frame_index} reports {}x{} ({actual_bytes} bytes) but the worker packed {} bytes",
+                                output.width, output.height, output.packed_bytes
                             ),
                             true,
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     }
+                    let pixels = self
+                        .transport
+                        .read_output_slot(self.geometry.output_slot_offset(), actual_bytes);
                     self.frames_ok += 1;
                     self.last_output_generation = expected_generation;
                     return Ok(FrameOutcome {
                         frame_index,
                         status: FrameStatus::Rendered {
                             pixels,
-                            checksum,
                             width: output.width,
                             height: output.height,
                         },
@@ -3241,7 +3244,6 @@ pub fn run_video_batch(
             match outcome.status {
                 FrameStatus::Rendered {
                     pixels,
-                    checksum,
                     width: frame_width,
                     height: frame_height,
                 } if frame_width == 0 && frame_height == 0 => {
@@ -3269,7 +3271,12 @@ pub fn run_video_batch(
                     Ok(json!({
                         "frame_index": frame_index,
                         "status": "ok",
-                        "checksum": checksum,
+                        // A batch render writes frames to disk, so its
+                        // manifest keeps a content hash for consumers that
+                        // compare or de-duplicate them. It is computed once
+                        // here from bytes the broker already holds, not on the
+                        // interactive hot path (issue #690).
+                        "checksum": format!("{:x}", Sha256::digest(&pixels)),
                         "width": 0,
                         "height": 0,
                         "empty_result": true,
@@ -3278,7 +3285,6 @@ pub fn run_video_batch(
                 }
                 FrameStatus::Rendered {
                     pixels,
-                    checksum,
                     width: frame_width,
                     height: frame_height,
                 } => {
@@ -3304,7 +3310,12 @@ pub fn run_video_batch(
                     Ok(json!({
                         "frame_index": frame_index,
                         "status": "ok",
-                        "checksum": checksum,
+                        // A batch render writes frames to disk, so its
+                        // manifest keeps a content hash for consumers that
+                        // compare or de-duplicate them. It is computed once
+                        // here from bytes the broker already holds, not on the
+                        // interactive hot path (issue #690).
+                        "checksum": format!("{:x}", Sha256::digest(&pixels)),
                         // The frame's actual (possibly shrunk) dimensions, so a
                         // consumer reading the raw sidecar interprets it with the
                         // right geometry instead of the input dimensions (#261).

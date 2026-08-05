@@ -1097,7 +1097,6 @@ impl InteractiveRenderSession {
         match outcome.status {
             FrameStatus::Rendered {
                 pixels,
-                checksum,
                 width: frame_width,
                 height: frame_height,
             } => {
@@ -1146,9 +1145,6 @@ impl InteractiveRenderSession {
                     },
                     "output_png": output_path,
                     "output_raw": preserved,
-                    // The slot-transfer checksum (protocol §4.3), not the
-                    // one-shot internal-ARGB output_hash definition.
-                    "output_slot_sha256": checksum,
                     "current_time": current_time,
                     "time_step": self.time_step,
                     "total_time": self.total_time,

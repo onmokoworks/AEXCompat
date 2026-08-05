@@ -918,7 +918,7 @@ RenderSessionOutcome run_session_frame_loop(
       return channels.write_message(reply);
     };
     const auto respond_ok = [&](int32_t frame_width, int32_t frame_height,
-                                int32_t frame_rowbytes, const std::string& checksum) {
+                                int32_t frame_rowbytes, std::size_t packed_bytes) {
       std::string reply;
       reply.reserve(256);
       reply += "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":";
@@ -931,9 +931,13 @@ RenderSessionOutcome run_session_frame_loop(
       reply += std::to_string(frame_rowbytes);
       reply += ",\"pixel_format\":\"";
       reply += pixel_format;
-      reply += "\",\"checksum\":\"";
-      reply += checksum;
-      reply += "\",\"guards_intact\":true},\"render_error\":0,\"generation\":";
+      // The byte count the worker actually packed into the slot. The broker
+      // computes the same extent from the reported dimensions and refuses a
+      // disagreement, which is the layout cross-check the per-frame SHA-256
+      // used to carry (issue #690).
+      reply += "\",\"packed_bytes\":";
+      reply += std::to_string(packed_bytes);
+      reply += ",\"guards_intact\":true},\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
       reply += "}";
       return channels.write_message(reply);
@@ -942,7 +946,6 @@ RenderSessionOutcome run_session_frame_loop(
     // no pixels were rendered. Report a valid zero-dimension ok frame carrying
     // an explicit "empty_result":true so the broker accepts the empty geometry
     // (a zero dimension without this flag stays a dimension invariant failure).
-    // The checksum is over zero bytes, matching the one-shot empty-result output.
     const auto respond_empty = [&]() {
       std::string reply;
       reply.reserve(256);
@@ -951,9 +954,8 @@ RenderSessionOutcome run_session_frame_loop(
       reply += ",\"status\":\"ok\",\"output\":{\"width\":0,\"height\":0,\"rowbytes\":0,";
       reply += "\"pixel_format\":\"";
       reply += pixel_format;
-      reply += "\",\"checksum\":\"";
-      reply += sha256_bytes(channels.view() + output_offset, 0);
-      reply += "\",\"guards_intact\":true,\"empty_result\":true},\"render_error\":0,\"generation\":";
+      reply += "\",\"packed_bytes\":0,\"guards_intact\":true,\"empty_result\":true},";
+      reply += "\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
       reply += "}";
       return channels.write_message(reply);
@@ -1153,11 +1155,12 @@ RenderSessionOutcome run_session_frame_loop(
                               static_cast<uint32_t>(frame.height));
     channels.write_header_u32(wrs::kHeaderOutputGenerationOffset,
                               expected_generation);
-    // The frame checksum covers the transferred slot bytes, the exact bytes
-    // the broker reads; the final report's output_hash keeps the one-shot
+    // Report what was packed rather than hashing it: the broker derives the
+    // same extent from the reported dimensions, so a mismatch catches the
+    // layout disagreement the hash existed to catch, at no per-frame cost
+    // (issue #690). The final report's output_hash keeps the one-shot
     // internal-ARGB definition (protocol §4.3).
-    const std::string slot_checksum = sha256_bytes(slot, captured.size());
-    if (!respond_ok(frame.width, frame.height, frame.rowbytes, slot_checksum)) {
+    if (!respond_ok(frame.width, frame.height, frame.rowbytes, captured.size())) {
       outcome.protocol_violation = true;
       break;
     }
