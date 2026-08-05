@@ -31,7 +31,6 @@ using aexcompat::world_safety::bounded_argb8_world;
 
 namespace {
 
-constexpr int32_t kPfBadCallbackParam = 4;
 constexpr int32_t kPfErrBadCallbackParam = 516;
 constexpr int32_t kPixelFormatArgb32 = 1650946657;
 using aexcompat::world_registry::kPixelFormatArgb64;
@@ -90,15 +89,15 @@ bool set_pixel_format(const char* value) {
 }
 
 int32_t acquire_host_suite(const char* name, int32_t version, const void** suite) {
-  if (!suite) return kPfBadCallbackParam;
+  if (!suite) return kPfErrBadCallbackParam;
   *suite = nullptr;
   return g_pf_host_configured && g_pf_host.hooks.acquire_suite
-      ? g_pf_host.hooks.acquire_suite(name, version, suite) : kPfBadCallbackParam;
+      ? g_pf_host.hooks.acquire_suite(name, version, suite) : kPfErrBadCallbackParam;
 }
 
 int32_t release_host_suite(const char* name, int32_t version) {
   return g_pf_host_configured && g_pf_host.hooks.release_suite
-      ? g_pf_host.hooks.release_suite(name, version) : kPfBadCallbackParam;
+      ? g_pf_host.hooks.release_suite(name, version) : kPfErrBadCallbackParam;
 }
 
 bool normalize_legacy_rect(const LegacyRect* requested, int32_t width, int32_t height,
@@ -407,20 +406,24 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
   using aexcompat::callback_diagnostics::Callback;
   using aexcompat::callback_diagnostics::Reason;
   if (!pixel_function)
-    return finish_callback(Callback::Iterate, 4, Reason::InvalidArguments);
+    return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
+                           Reason::InvalidArguments);
   if (has_source && !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
                                    source_width, source_height))
-    return finish_callback(Callback::Iterate, 4, Reason::MissingWorld);
+    return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
+                           Reason::MissingWorld);
   if (!resolve_world(destination_world, pixel_bytes, destination,
                      destination_rowbytes, destination_width, destination_height))
-    return finish_callback(Callback::Iterate, 4, Reason::MissingWorld);
+    return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
+                           Reason::MissingWorld);
   LegacyRect bounds{};
   const int32_t bound_width = has_source
       ? std::min(source_width, destination_width) : destination_width;
   const int32_t bound_height = has_source
       ? std::min(source_height, destination_height) : destination_height;
   if (!normalize_legacy_rect(area, bound_width, bound_height, bounds))
-    return finish_callback(Callback::Iterate, 4, Reason::InvalidArea);
+    return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
+                           Reason::InvalidArea);
   IterateAbortCallback abort_callback{};
   IterateProgressCallback progress_callback{};
   void* effect_ref{};
@@ -452,7 +455,8 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
         ? static_cast<int64_t>(progress_base) - progress_final
         : static_cast<int64_t>(progress_final) - progress_base;
     if (progress_span > std::numeric_limits<int32_t>::max())
-      return finish_callback(Callback::Iterate, 4, Reason::InvalidArguments);
+      return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
+                             Reason::InvalidArguments);
     const int32_t current = static_cast<int32_t>(reverse_progress
         ? progress_span * completed_rows / rows
         : static_cast<int64_t>(progress_base) + progress_span * completed_rows / rows);
@@ -510,16 +514,20 @@ int32_t iterate_origin_typed(int32_t pixel_bytes, void* source_world, const Lega
   using aexcompat::callback_diagnostics::Callback;
   using aexcompat::callback_diagnostics::Reason;
   if (!origin || !pixel_function)
-    return finish_callback(Callback::IterateOrigin, 4, Reason::InvalidArguments);
+    return finish_callback(Callback::IterateOrigin, kPfErrBadCallbackParam,
+                           Reason::InvalidArguments);
   if (has_source && !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
                                    source_width, source_height))
-    return finish_callback(Callback::IterateOrigin, 4, Reason::MissingWorld);
+    return finish_callback(Callback::IterateOrigin, kPfErrBadCallbackParam,
+                           Reason::MissingWorld);
   if (!resolve_world(destination_world, pixel_bytes, destination, destination_rowbytes,
                      destination_width, destination_height))
-    return finish_callback(Callback::IterateOrigin, 4, Reason::MissingWorld);
+    return finish_callback(Callback::IterateOrigin, kPfErrBadCallbackParam,
+                           Reason::MissingWorld);
   LegacyRect bounds{};
   if (!normalize_legacy_rect(area, destination_width, destination_height, bounds))
-    return finish_callback(Callback::IterateOrigin, 4, Reason::InvalidArea);
+    return finish_callback(Callback::IterateOrigin, kPfErrBadCallbackParam,
+                           Reason::InvalidArea);
   int16_t origin_x{}, origin_y{};
   std::memcpy(&origin_x, origin, sizeof(origin_x));
   std::memcpy(&origin_y, static_cast<const std::byte*>(origin) + 2, sizeof(origin_y));
@@ -568,10 +576,11 @@ int32_t __cdecl iterate_lut8(void*, int32_t, int32_t, void* source_world,
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
   if (!bounded_argb8_world(source_world, source, source_rowbytes, source_width, source_height) ||
       !bounded_argb8_world(destination_world, destination, destination_rowbytes,
-                           destination_width, destination_height)) return 4;
+                           destination_width, destination_height)) return kPfErrBadCallbackParam;
   LegacyRect bounds{};
   if (!normalize_legacy_rect(area, std::min(source_width, destination_width),
-                             std::min(source_height, destination_height), bounds)) return 4;
+                             std::min(source_height, destination_height), bounds))
+    return kPfErrBadCallbackParam;
   unsigned char* tables[4]{alpha_lut, red_lut, green_lut, blue_lut};
   for (int32_t y = bounds.top; y < bounds.bottom; ++y) {
     const auto* source_row = source + static_cast<std::size_t>(y) * source_rowbytes;
@@ -619,7 +628,8 @@ int32_t __cdecl iterate_generic(int32_t iterations, void* refcon,
   constexpr int32_t kOncePerProcessor = -1;
   constexpr int32_t kMaxIterations = 16'777'216;
   if (!callback || (iterations != kOncePerProcessor &&
-                    (iterations <= 0 || iterations > kMaxIterations))) return 4;
+                    (iterations <= 0 || iterations > kMaxIterations)))
+    return kPfErrBadCallbackParam;
   const int32_t actual_iterations = iterations == kOncePerProcessor ? 1 : iterations;
   for (int32_t index = 0; index < actual_iterations; ++index) {
     const int32_t error = callback(refcon, 0, index, actual_iterations);
@@ -699,9 +709,9 @@ bool verify_iterate_suites() {
   };
   state.expected = 3;
   if (iterate_generic(3, &state, generic_callback) != 0 || state.calls != 3 ||
-      iterate_generic(0, &state, generic_callback) == 0 ||
-      iterate_generic(16'777'217, &state, generic_callback) == 0 ||
-      iterate_generic(1, &state, nullptr) == 0) return false;
+      iterate_generic(0, &state, generic_callback) != kPfErrBadCallbackParam ||
+      iterate_generic(16'777'217, &state, generic_callback) != kPfErrBadCallbackParam ||
+      iterate_generic(1, &state, nullptr) != kPfErrBadCallbackParam) return false;
   state = {};
   state.expected = 1;
   if (iterate_generic(-1, &state, generic_callback) != 0 || state.calls != 1) return false;

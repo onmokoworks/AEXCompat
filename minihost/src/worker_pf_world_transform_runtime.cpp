@@ -24,7 +24,6 @@ using world_safety::DispatchWorldFormat;
 using world_safety::DispatchWorldFormatScope;
 using world_safety::kEffectWorldSize;
 
-constexpr int32_t kPfBadCallbackParam = 4;
 constexpr int32_t kPfErrBadCallbackParam = 516;
 constexpr int32_t kPixelFormatArgb32 = 1650946657;
 using aexcompat::world_registry::kPixelFormatArgb64;
@@ -39,6 +38,7 @@ constexpr std::size_t kUtilsPremultiplyColor16 = 496;
 
 Context g_context{};
 bool g_configured{};
+std::atomic<bool> g_fail_next_allocation_for_self_test{};
 
 bool resolve_world(void* world, int32_t pixel_bytes, unsigned char*& pixels,
                    int32_t& rowbytes, int32_t& width, int32_t& height) {
@@ -107,11 +107,13 @@ int32_t fill_world_typed(int32_t pixel_bytes, const void* color,
                          const LegacyRect* requested, void* world) {
   unsigned char* pixels{};
   int32_t rowbytes{}, width{}, height{};
-  if (!resolve_world(world, pixel_bytes, pixels, rowbytes, width, height)) return 4;
+  if (!resolve_world(world, pixel_bytes, pixels, rowbytes, width, height))
+    return kPfErrBadCallbackParam;
   const std::array<unsigned char, 16> transparent_black{};
   if (!color) color = transparent_black.data();
   LegacyRect bounds{};
-  if (!normalize_legacy_rect(requested, width, height, bounds)) return 4;
+  if (!normalize_legacy_rect(requested, width, height, bounds))
+    return kPfErrBadCallbackParam;
   for (int32_t y = bounds.top; y < bounds.bottom; ++y)
     for (int32_t x = bounds.left; x < bounds.right; ++x)
       std::memcpy(pixels + static_cast<std::size_t>(y) * rowbytes +
@@ -146,7 +148,7 @@ int32_t __cdecl fill_world_float(void*, const void* color, const LegacyRect* are
 
 int32_t premultiply_color_typed(int32_t pixel_bytes, void* source_world, const void* matte,
                                 int32_t forward, void* destination_world) {
-  if (!source_world || !destination_world || !matte) return 4;
+  if (!source_world || !destination_world || !matte) return kPfErrBadCallbackParam;
   unsigned char *source{}, *destination{};
   int32_t source_rowbytes{}, source_width{}, source_height{};
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
@@ -154,14 +156,18 @@ int32_t premultiply_color_typed(int32_t pixel_bytes, void* source_world, const v
                            source_width, source_height) ||
       !resolve_world(destination_world, pixel_bytes, destination, destination_rowbytes,
                            destination_width, destination_height) ||
-      source_width != destination_width || source_height != destination_height) return 4;
+      source_width != destination_width || source_height != destination_height)
+    return kPfErrBadCallbackParam;
   const std::size_t packed_row = static_cast<std::size_t>(source_width) * pixel_bytes;
-  if (packed_row > SIZE_MAX / static_cast<std::size_t>(source_height)) return 4;
+  if (packed_row > SIZE_MAX / static_cast<std::size_t>(source_height))
+    return kPfErrBadCallbackParam;
   std::vector<unsigned char> snapshot;
   try {
     snapshot.resize(packed_row * static_cast<std::size_t>(source_height));
-  } catch (...) {
+  } catch (const std::bad_alloc&) {
     return 4;
+  } catch (...) {
+    return kPfErrBadCallbackParam;
   }
   for (int32_t y = 0; y < source_height; ++y)
     std::memcpy(snapshot.data() + static_cast<std::size_t>(y) * packed_row,
@@ -282,8 +288,10 @@ bool verify_legacy_fill_matte_callbacks() {
       std::memcmp(guarded8.data() + 8, color8.data(), color8.size()) == 0;
   const auto before_error = guarded8;
   LegacyRect invalid_rect{0, 0, 3, 1};
-  ok = ok && fill8(nullptr, color8.data(), &invalid_rect, &world8) == 4 &&
-      guarded8 == before_error && fill8(nullptr, color8.data(), nullptr, nullptr) == 4;
+  ok = ok && fill8(nullptr, color8.data(), &invalid_rect, &world8) ==
+          kPfErrBadCallbackParam &&
+      guarded8 == before_error &&
+      fill8(nullptr, color8.data(), nullptr, nullptr) == kPfErrBadCallbackParam;
 
   std::array<uint8_t, 32> guarded16{};
   guarded16.fill(0x5a);
@@ -302,8 +310,10 @@ bool verify_legacy_fill_matte_callbacks() {
       std::all_of(guarded16.end() - 8, guarded16.end(),
                   [](uint8_t value) { return value == 0x5a; });
   ok = ok && premultiply(nullptr, 1, &world8) == 0 &&
-      premultiply8(nullptr, nullptr, color8.data(), 1, &world8) == 4 &&
-      premultiply16(nullptr, &world16, nullptr, 1, &world16) == 4;
+      premultiply8(nullptr, nullptr, color8.data(), 1, &world8) ==
+          kPfErrBadCallbackParam &&
+      premultiply16(nullptr, &world16, nullptr, 1, &world16) ==
+          kPfErrBadCallbackParam;
   if (!set_pixel_format(saved_format.c_str())) return false;
   return ok;
 }
@@ -322,7 +332,7 @@ int32_t __cdecl convolve_world(void*, void* source_world, const LegacyRect* requ
   constexpr uint32_t kAlphaWeighted = 1u << 7;
   constexpr uint32_t kKnownFlags = (1u << 8) - 1;
   const char* active_format = pixel_format();
-  if (!active_format) return 4;
+  if (!active_format) return kPfErrBadCallbackParam;
   const int32_t pixel_bytes = std::strcmp(active_format, "argb32f") == 0 ? 16 :
       (std::strcmp(active_format, "argb16") == 0 ? 8 : 4);
   unsigned char *source{}, *destination{};
@@ -336,9 +346,11 @@ int32_t __cdecl convolve_world(void*, void* source_world, const LegacyRect* requ
                            source_width, source_height) ||
       !resolve_world(destination_world, pixel_bytes, destination,
                            destination_rowbytes, destination_width, destination_height) ||
-      source_width != destination_width || source_height != destination_height) return 4;
+      source_width != destination_width || source_height != destination_height)
+    return kPfErrBadCallbackParam;
   LegacyRect bounds{};
-  if (!normalize_legacy_rect(requested, source_width, source_height, bounds)) return 4;
+  if (!normalize_legacy_rect(requested, source_width, source_height, bounds))
+    return kPfErrBadCallbackParam;
   const auto kernels = std::array<const void*, 4>{
       alpha_kernel, red_kernel, green_kernel, blue_kernel};
   const bool one_dimensional = (flags & kOneDimensional) != 0;
@@ -356,15 +368,20 @@ int32_t __cdecl convolve_world(void*, void* source_world, const LegacyRect* requ
     double sum = 0.0;
     for (int index = 0; index < tap_count; ++index) sum += coefficient(channel, index);
     divisors[channel] = flags & kNormalized ? sum : coefficient_scale * tap_count;
-    if (std::abs(divisors[channel]) < 1e-12) return 4;
+    if (std::abs(divisors[channel]) < 1e-12) return kPfErrBadCallbackParam;
   }
   const uint64_t packed_rowbytes = static_cast<uint64_t>(source_width) * pixel_bytes;
   const uint64_t source_bytes = packed_rowbytes * source_height;
-  if (!source_bytes || source_bytes > kMaxAsyncReceiptBytes) return 4;
+  if (!source_bytes || source_bytes > kMaxAsyncReceiptBytes)
+    return kPfErrBadCallbackParam;
   std::vector<unsigned char> snapshot;
   try {
     snapshot.resize(static_cast<std::size_t>(source_bytes));
-  } catch (...) { return 4; }
+  } catch (const std::bad_alloc&) {
+    return 4;
+  } catch (...) {
+    return kPfErrBadCallbackParam;
+  }
   for (int32_t y = 0; y < source_height; ++y)
     std::memcpy(snapshot.data() + static_cast<std::size_t>(y) * packed_rowbytes,
                 source + static_cast<std::size_t>(y) * source_rowbytes,
@@ -433,7 +450,7 @@ int32_t __cdecl convolve_world(void*, void* source_world, const LegacyRect* requ
 
 int32_t __cdecl blend_world(void*, const void* source_world1, const void* source_world2,
                             int32_t ratio, void* destination_world) {
-  if (ratio < 0 || ratio > 65536) return 4;
+  if (ratio < 0 || ratio > 65536) return kPfErrBadCallbackParam;
   DispatchWorldFormat first_info{}, second_info{}, destination_info{};
   if (!resolve_dispatch_world_format(source_world1, first_info) ||
       !resolve_dispatch_world_format(source_world2, second_info) ||
@@ -442,20 +459,25 @@ int32_t __cdecl blend_world(void*, const void* source_world1, const void* source
       first_info.pixel_format != destination_info.pixel_format ||
       first_info.width != second_info.width || first_info.width != destination_info.width ||
       first_info.height != second_info.height || first_info.height != destination_info.height ||
-      first_info.width > 4096 || first_info.height > 4096) return 4;
+      first_info.width > 4096 || first_info.height > 4096)
+    return kPfErrBadCallbackParam;
   const int32_t pixel_bytes = first_info.pixel_format == kPixelFormatArgb32 ? 4 :
       (first_info.pixel_format == kPixelFormatArgb64 ? 8 :
        (first_info.pixel_format == kPixelFormatArgb128 ? 16 : 0));
   if (!pixel_bytes || first_info.rowbytes < static_cast<int64_t>(first_info.width) * pixel_bytes ||
       second_info.rowbytes < static_cast<int64_t>(second_info.width) * pixel_bytes ||
       destination_info.rowbytes < static_cast<int64_t>(destination_info.width) * pixel_bytes)
-    return 4;
+    return kPfErrBadCallbackParam;
   const std::size_t packed_row = static_cast<std::size_t>(first_info.width) * pixel_bytes;
   std::vector<unsigned char> first_copy, second_copy;
   try {
     first_copy.resize(packed_row * first_info.height);
     second_copy.resize(packed_row * first_info.height);
-  } catch (...) { return 4; }
+  } catch (const std::bad_alloc&) {
+    return 4;
+  } catch (...) {
+    return kPfErrBadCallbackParam;
+  }
   for (int32_t y = 0; y < first_info.height; ++y) {
     std::memcpy(first_copy.data() + static_cast<std::size_t>(y) * packed_row,
         static_cast<const unsigned char*>(first_info.data) +
@@ -533,7 +555,6 @@ int32_t __cdecl copy_world8(void*, void* source_world, void* destination_world,
                             const LegacyRect* source_rect, const LegacyRect* destination_rect) {
   DispatchWorldFormat source_info{}, destination_info{};
   if (!resolve_dispatch_world_format(source_world, source_info) ||
-
       !resolve_dispatch_world_format(destination_world, destination_info) ||
       source_info.pixel_format != destination_info.pixel_format)
     return kPfErrBadCallbackParam;
@@ -544,18 +565,24 @@ int32_t __cdecl copy_world8(void*, void* source_world, void* destination_world,
       destination_info.width > 4096 || destination_info.height > 4096 ||
       source_info.rowbytes < static_cast<int64_t>(source_info.width) * pixel_bytes ||
       destination_info.rowbytes < static_cast<int64_t>(destination_info.width) * pixel_bytes)
-    return 4;
+    return kPfErrBadCallbackParam;
   auto* source = static_cast<unsigned char*>(source_info.data);
   auto* destination = static_cast<unsigned char*>(destination_info.data);
   LegacyRect src{}, dst{};
   if (!normalize_legacy_rect(source_rect, source_info.width, source_info.height, src) ||
       !normalize_legacy_rect(destination_rect, destination_info.width, destination_info.height, dst))
-    return 4;
+    return kPfErrBadCallbackParam;
   const int32_t copy_width = std::min(src.right - src.left, dst.right - dst.left);
   const int32_t copy_height = std::min(src.bottom - src.top, dst.bottom - dst.top);
   if (copy_width <= 0 || copy_height <= 0) return 0;
   const std::size_t row_size = static_cast<std::size_t>(copy_width) * pixel_bytes;
-  std::vector<unsigned char> temporary(row_size * copy_height);
+  std::vector<unsigned char> temporary;
+  try {
+    if (g_fail_next_allocation_for_self_test.exchange(false)) throw std::bad_alloc();
+    temporary.resize(row_size * copy_height);
+  } catch (const std::bad_alloc&) {
+    return 4;
+  }
   for (int32_t row = 0; row < copy_height; ++row)
     std::memcpy(temporary.data() + static_cast<std::size_t>(row) * row_size,
                 source + static_cast<std::size_t>(src.top + row) * source_info.rowbytes +
@@ -568,6 +595,37 @@ int32_t __cdecl copy_world8(void*, void* source_world, void* destination_world,
   return 0;
 }
 
+bool verify_bad_callback_param_contract() {
+  if (fill_world8(nullptr, nullptr, nullptr, nullptr) != kPfErrBadCallbackParam ||
+      blend_world(nullptr, nullptr, nullptr, -1, nullptr) != kPfErrBadCallbackParam ||
+      transform_world(nullptr, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, 1, 0,
+                      nullptr, nullptr) != kPfErrBadCallbackParam ||
+      copy_world8(nullptr, nullptr, nullptr, nullptr, nullptr) != kPfErrBadCallbackParam)
+    return false;
+
+  DispatchWorldFormatScope formats;
+  std::array<uint8_t, 4> source_pixels{255, 1, 2, 3};
+  std::array<uint8_t, 4> destination_pixels{4, 5, 6, 7};
+  const auto destination_before = destination_pixels;
+  LocalEffectWorld source{}, destination{};
+  source.data = source_pixels.data();
+  source.rowbytes = 4;
+  source.width = 1;
+  source.height = 1;
+  destination.data = destination_pixels.data();
+  destination.rowbytes = 4;
+  destination.width = 1;
+  destination.height = 1;
+  if (!formats.register_world(&source, kPixelFormatArgb32) ||
+      !formats.register_world(&destination, kPixelFormatArgb32))
+    return false;
+  g_fail_next_allocation_for_self_test.store(true);
+  const int32_t allocation_result =
+      copy_world8(nullptr, &source, &destination, nullptr, nullptr);
+  g_fail_next_allocation_for_self_test.store(false);
+  return allocation_result == 4 && destination_pixels == destination_before;
+}
+
 int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode_flags,
                                 int32_t field,
                                 const void* source_world, const void* composite_mode,
@@ -576,7 +634,7 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
                                 const LegacyRect* destination_rect, void* destination_world) {
   if (!effect_ref || !source_world || !composite_mode || !matrices ||
       matrix_count != 1 || source_to_destination > 1 || quality < 0 || quality > 1 ||
-      mode_flags > 1 || field < 0 || field > 2) return 4;
+      mode_flags > 1 || field < 0 || field > 2) return kPfErrBadCallbackParam;
   int32_t transfer_mode{};
   uint8_t opacity{}, rgb_only{};
   uint16_t opacity16{};
@@ -584,15 +642,18 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
   std::memcpy(&opacity, static_cast<const std::byte*>(composite_mode) + 8, sizeof(opacity));
   std::memcpy(&rgb_only, static_cast<const std::byte*>(composite_mode) + 9, sizeof(rgb_only));
   std::memcpy(&opacity16, static_cast<const std::byte*>(composite_mode) + 10, sizeof(opacity16));
-  if (transfer_mode != 0 || rgb_only > 1 || opacity16 > 32768) return 4;
+  if (transfer_mode != 0 || rgb_only > 1 || opacity16 > 32768)
+    return kPfErrBadCallbackParam;
   std::array<double, 9> matrix{};
   std::memcpy(matrix.data(), matrices, sizeof(matrix));
   if (!std::all_of(matrix.begin(), matrix.end(),
-                   [](double value) { return std::isfinite(value); })) return 4;
+                   [](double value) { return std::isfinite(value); }))
+    return kPfErrBadCallbackParam;
   DispatchWorldFormat source_info{}, destination_info{};
   if (!resolve_dispatch_world_format(source_world, source_info) ||
       !resolve_dispatch_world_format(destination_world, destination_info) ||
-      source_info.pixel_format != destination_info.pixel_format) return 4;
+      source_info.pixel_format != destination_info.pixel_format)
+    return kPfErrBadCallbackParam;
   const int32_t pixel_bytes = source_info.pixel_format == kPixelFormatArgb32 ? 4 :
       (source_info.pixel_format == kPixelFormatArgb64 ? 8 :
        (source_info.pixel_format == kPixelFormatArgb128 ? 16 : 0));
@@ -600,11 +661,12 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
       destination_info.width > 4096 || destination_info.height > 4096 ||
       source_info.rowbytes < static_cast<int64_t>(source_info.width) * pixel_bytes ||
       destination_info.rowbytes < static_cast<int64_t>(destination_info.width) * pixel_bytes)
-    return 4;
+    return kPfErrBadCallbackParam;
   const double determinant = matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7]) -
       matrix[1] * (matrix[3] * matrix[8] - matrix[5] * matrix[6]) +
       matrix[2] * (matrix[3] * matrix[7] - matrix[4] * matrix[6]);
-  if (source_to_destination && std::abs(determinant) < 1e-12) return 4;
+  if (source_to_destination && std::abs(determinant) < 1e-12)
+    return kPfErrBadCallbackParam;
   std::array<double, 9> sampling_matrix = matrix;
   if (source_to_destination) {
     sampling_matrix = {{
@@ -631,7 +693,8 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
   };
   LegacyRect bounds{};
   if (!normalize_legacy_rect(destination_rect, destination_info.width,
-                             destination_info.height, bounds)) return 4;
+                             destination_info.height, bounds))
+    return kPfErrBadCallbackParam;
   const std::size_t packed_row = static_cast<std::size_t>(source_info.width) * pixel_bytes;
   std::vector<unsigned char> source_copy, mask_copy;
   int32_t mask_rowbytes{}, mask_width{}, mask_height{}, mask_offset_x{}, mask_offset_y{};
@@ -659,7 +722,7 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
                         static_cast<std::size_t>(y) * mask_rowbytes, mask_packed_row);
       mask_rowbytes = static_cast<int32_t>(mask_packed_row);
     }
-  } catch (...) { return kPfErrBadCallbackParam; }
+  } catch (const std::bad_alloc&) { return 4; }
   const auto* source = static_cast<const unsigned char*>(source_info.data);
   for (int32_t y = 0; y < source_info.height; ++y)
     std::memcpy(source_copy.data() + static_cast<std::size_t>(y) * packed_row,
@@ -1166,7 +1229,8 @@ int32_t __cdecl copy_world_hq(void* effect_ref, void* source_world, void* destin
                               const LegacyRect* destination_rect) {
   DispatchWorldFormat source_info{}, destination_info{};
   if (!resolve_dispatch_world_format(source_world, source_info) ||
-      !resolve_dispatch_world_format(destination_world, destination_info)) return 4;
+      !resolve_dispatch_world_format(destination_world, destination_info))
+    return kPfErrBadCallbackParam;
   LegacyRect source_bounds{}, destination_bounds{};
   if (!normalize_legacy_rect(source_rect, source_info.width, source_info.height, source_bounds) ||
       !normalize_legacy_rect(destination_rect, destination_info.width, destination_info.height,
@@ -1174,7 +1238,8 @@ int32_t __cdecl copy_world_hq(void* effect_ref, void* source_world, void* destin
       source_bounds.right - source_bounds.left !=
           destination_bounds.right - destination_bounds.left ||
       source_bounds.bottom - source_bounds.top !=
-          destination_bounds.bottom - destination_bounds.top) return 4;
+          destination_bounds.bottom - destination_bounds.top)
+    return kPfErrBadCallbackParam;
   return copy_world8(effect_ref, source_world, destination_world,
                      &source_bounds, &destination_bounds);
 }
@@ -1563,7 +1628,7 @@ int32_t composite_rect_float(void* effect_ref, LegacyRect* source_rect,
   const std::size_t width=static_cast<std::size_t>(cdr-cdl),height=static_cast<std::size_t>(cdb-cdt);
   if(width>SIZE_MAX/height||width*height>16'777'216) return kPfErrBadCallbackParam;
   using Pixel=std::array<float,4>; std::vector<Pixel> snapshot;
-  try{snapshot.resize(width*height);}catch(...){return kPfErrBadCallbackParam;}
+  try{snapshot.resize(width*height);}catch(const std::bad_alloc&){return 4;}
   const auto* source=static_cast<const unsigned char*>(source_info.data); auto* destination=static_cast<unsigned char*>(destination_info.data);
   for(std::size_t row=0;row<height;++row) std::memcpy(snapshot.data()+row*width,
       source+static_cast<std::size_t>(cst+row)*source_info.rowbytes+static_cast<std::size_t>(csl)*sizeof(Pixel),width*sizeof(Pixel));
