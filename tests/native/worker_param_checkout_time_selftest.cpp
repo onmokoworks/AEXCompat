@@ -114,13 +114,14 @@ void an_unconfigured_ledger_answers_only_time_zero() {
 
 // A zero ledger scale reduces the comparison to `0 == current_time * time_scale`,
 // which is true for every requested time once the frame sits at 0 - so left alone
-// it turns the gate off exactly where it looks harmless. It must fail closed
-// instead, including for the frame's own time.
-void a_zero_scale_admits_nothing() {
+// it turns the gate off exactly where it looks harmless. It must close the gate
+// instead, including for the frame's own time. Wide time still bypasses it, the
+// way it bypasses every other time refusal; that is the last case here.
+void a_zero_scale_closes_the_time_gate() {
   seed_definition();
   aexcompat::l2_detail::configure_hosted_checkout_time(0, 0, false);
   check(checkout_at(5) == 4, "a zero scale at t=0 does not admit another time");
-  check(checkout_at(0) == 4, "a zero scale admits nothing, not even t=0");
+  check(checkout_at(0) == 4, "a zero scale refuses even t=0");
   seed_definition();
   aexcompat::l2_detail::configure_hosted_checkout_time(34, 0, false);
   check(checkout_at(35) == 4, "a zero scale away from t=0 refuses another time");
@@ -138,7 +139,7 @@ int main() {
   another_time_is_refused_without_wide_time();
   wide_time_admits_another_time();
   an_unconfigured_ledger_answers_only_time_zero();
-  a_zero_scale_admits_nothing();
+  a_zero_scale_closes_the_time_gate();
   if (failures == 0) std::printf("{\"param_checkout_time_selftest\":\"passed\"}\n");
   return failures == 0 ? 0 : 1;
 }

@@ -746,15 +746,20 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   // PF_Err_OUT_OF_MEMORY and the plug-in gave up - AviUtl2 renders at the cursor,
   // so no smart effect worked anywhere but frame 0 (issue #828).
   //
-  // This runs before anything enters the plug-in. Several selectors ahead of
-  // SMART_PRE_RENDER may check parameters out - PF_Cmd_QUERY_DYNAMIC_FLAGS is
-  // documented to (AE_Effect.h: "the effect may examine the values of its
-  // parameters at the current time ... by checking them out"), and FRAME_SETUP
-  // and the arbitrary-value selectors reach the plug-in too - so configuring
-  // only next to the dynamic out-flags below would leave all of them answering
-  // against the previous frame's time. `prepare` has already published the
-  // statically advertised wide-time rule on the smart state; the call below
-  // re-applies it once QUERY_DYNAMIC_FLAGS has had its say.
+  // This runs before anything enters the plug-in. PF_Cmd_QUERY_DYNAMIC_FLAGS
+  // and PF_Cmd_FRAME_SETUP both reach the plug-in ahead of SMART_PRE_RENDER,
+  // and the SDK documents the first as a place to check parameters out
+  // (AE_Effect.h: "the effect may examine the values of its parameters at the
+  // current time (except layer parameters) by checking them out"), so
+  // configuring only next to the dynamic out-flags below would leave both
+  // answering against the previous frame's time.
+  //
+  // The wide-time rule used here is whatever `prepare` last read out of the
+  // out-flags in `command_output`. On the first frame that is the GLOBAL_SETUP
+  // advertisement; on later frames of a session the buffer still holds the
+  // previous frame's QUERY_DYNAMIC_FLAGS result, because nothing restores it
+  // between frames (issue #843). Either way it is only in force until the call
+  // below re-applies the rule from this frame's own dynamic flags.
   aexcompat::l2_detail::configure_hosted_checkout_time(
       external_current_time, external_time_scale,
       smart_state().wide_time_checkout_allowed);

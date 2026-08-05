@@ -41,8 +41,9 @@
 //!   Note this is the timeline position, not the session-local frame index -
 //!   the multifilter counts frames from 0 upward regardless of where the
 //!   cursor is, so varying the index proves nothing about time.
-//! * `AEXCOMPAT_DIAG_DYNAMIC_LAYER=1` - mark the secondary layer as dynamic, the
-//!   way the multifilter opens it, rather than as a fixed one.
+//! * `AEXCOMPAT_DIAG_DYNAMIC_LAYER` - mark the secondary layer as dynamic, the
+//!   way the multifilter opens it, rather than as a fixed one. Set to anything,
+//!   including an empty value; only its presence is read.
 //!
 //! `AEXCOMPAT_EXTENDED_DIAG=1` additionally turns on the worker's host-callback
 //! trace; it reaches stderr, which the session collects but does not report.

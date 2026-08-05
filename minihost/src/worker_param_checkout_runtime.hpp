@@ -20,8 +20,9 @@ int32_t __cdecl checkin_param(void*, void* definition);
 // equivalent state on its dispatch context (`classic::Context::configure_checkout_time`).
 // Call this before the frame's first selector reaches the plug-in, not just before
 // SMART_PRE_RENDER: QUERY_DYNAMIC_FLAGS is allowed to check parameters out too.
-// A zero `time_scale` leaves the gate admitting nothing rather than being taken as
-// a scale of 1.
+// A zero `time_scale` closes the time gate - no time compares equal, the frame's
+// own included - rather than being taken as a scale of 1. Wide time still
+// bypasses the gate, exactly as it bypasses any other time refusal.
 void configure_hosted_checkout_time(int32_t current_time, uint32_t time_scale,
                                     bool wide_time_allowed) noexcept;
 bool param_checkouts_balanced();

@@ -52,9 +52,9 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   if (!classic_context) {
     // A zero ledger scale is not "no gate": it would reduce the comparison to
     // 0 == current_time * time_scale, which admits every time when the frame is
-    // at 0 and refuses every time - including the frame's own - otherwise. Fail
-    // closed instead, the same way the classic context does
-    // (`Context::checkout_time_allowed`).
+    // at 0 and refuses every time - including the frame's own - otherwise. Close
+    // the gate instead, the same way the classic context does
+    // (`Context::checkout_time_allowed`). Wide time still bypasses it below.
     const bool current_time = g_checkout_current_time_scale != 0 &&
         static_cast<int64_t>(what_time) * g_checkout_current_time_scale ==
             static_cast<int64_t>(g_checkout_current_time) * time_scale;
@@ -101,11 +101,11 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
 
 void configure_hosted_checkout_time(int32_t current_time, uint32_t time_scale,
                                     bool wide_time_allowed) noexcept {
-  // A zero scale is stored as given; `checkout_param` treats it as a gate that
-  // admits nothing rather than quietly substituting a scale the caller never
-  // meant. No shipped caller can reach that - `smart_setup::prepare` refuses a
-  // zero external time scale before the smart path gets here - so this only
-  // decides the direction a future caller bug fails in.
+  // A zero scale is stored as given; `checkout_param` treats it as a closed time
+  // gate rather than quietly substituting a scale the caller never meant. No
+  // shipped caller can reach that - `smart_setup::prepare` refuses a zero
+  // external time scale before the smart path gets here - so this only decides
+  // the direction a future caller bug fails in.
   g_checkout_current_time = current_time;
   g_checkout_current_time_scale = time_scale;
   g_wide_time_checkout_allowed = wide_time_allowed;

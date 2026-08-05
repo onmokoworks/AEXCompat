@@ -74,10 +74,11 @@ def test_smart_frames_can_check_parameters_out_at_their_own_time():
             done = transport.receive()
             assert done is not None, "worker closed the response pipe early"
             assert done["type"] == "frame_done"
-            # Before #828 every frame past the first came back as an error:
-            # render_error 4 (the host's refusal, returned by the plug-in) once
-            # the checkout in SMART_PRE_RENDER was reached, or pre_error -5
-            # from the QUERY_DYNAMIC_FLAGS checkout that runs before it.
+            # Before #828 every frame past the first came back as an error. The
+            # session collapses the QUERY_DYNAMIC_FLAGS refusal (-5) and the
+            # SMART_PRE_RENDER / SMART_RENDER refusal (4, the host's own error
+            # returned by the plug-in) into this one render_error, so the frame
+            # reports "error" whichever of the three checkouts was reached first.
             assert done["status"] == "ok", (time_value, done)
             assert done["render_error"] == 0, (time_value, done)
         transport.send({"v": 1, "type": "close"})
@@ -87,8 +88,10 @@ def test_smart_frames_can_check_parameters_out_at_their_own_time():
         assert report["session_render_error"] == 0
         assert report["session_frames_attempted"] == len(FRAME_TIMES)
         assert report["session_invariant_failure"] is False
-        # Every checkout the probe made was checked back in: the fix opens the
-        # gate, it does not leak the definitions that pass through it.
+        # The last frame's three checkouts were all checked back in: the fix
+        # opens the gate, it does not leak the definitions that pass through it.
+        # The counters are per frame - prepare_parameters zeroes them at the top
+        # of every one - so this is the final frame's balance, not the session's.
         assert report["param_checkouts_balanced"] is True
     finally:
         if process.poll() is None:
