@@ -1,5 +1,7 @@
 #pragma once
 
+#include "worker_temporal_checkout_report.hpp"
+
 #include <iosfwd>
 #include <sstream>
 #include <array>
@@ -171,7 +173,7 @@ struct SmartReport {
     std::array<int64_t, 4> setup_flags{};
     std::array<bool, 4> advertised{};
     std::array<bool, 5> runtime_flags{};
-    uint64_t rejected_temporal_checkouts{};
+    TemporalCheckoutCounters temporal_checkout_counters{};
     std::array<int64_t, 9> host_context{};
     bool depth_supported{};
     std::array<int64_t, 6> selector_errors{};

@@ -339,6 +339,11 @@ add_executable(worker_report_json_selftest
 target_compile_features(worker_report_json_selftest PRIVATE cxx_std_17)
 target_include_directories(worker_report_json_selftest PRIVATE src)
 
+add_executable(worker_temporal_checkout_report_selftest
+    ../tests/native/worker_temporal_checkout_report_selftest.cpp)
+target_compile_features(worker_temporal_checkout_report_selftest PRIVATE cxx_std_17)
+target_include_directories(worker_temporal_checkout_report_selftest PRIVATE src)
+
 add_executable(aex_render_worker src/worker_render_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
 target_compile_features(aex_render_worker PRIVATE cxx_std_17)
 target_compile_definitions(aex_render_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

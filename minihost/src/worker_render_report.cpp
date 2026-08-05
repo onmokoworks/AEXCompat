@@ -275,8 +275,9 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << ",\"nop_render_advertised\":" << (v.advertised[2] ? "true" : "false")
       << ",\"input_write_advertised\":" << (v.advertised[3] ? "true" : "false")
       << ",\"input_buffer_writable\":" << (v.advertised[3] ? "true" : "false")
-      << ",\"wide_time_checkout_allowed\":" << (v.runtime_flags[0] ? "true" : "false")
-      << ",\"rejected_temporal_param_checkouts\":" << v.rejected_temporal_checkouts
+      << ",\"wide_time_checkout_allowed\":" << (v.runtime_flags[0] ? "true" : "false");
+  append_temporal_checkout_counters(report.stream(), v.temporal_checkout_counters);
+  report.stream()
       << ",\"shutter_dependency_advertised\":" << (v.runtime_flags[1] ? "true" : "false")
       << ",\"smart_pre_render_dispatched\":" << (v.runtime_flags[2] ? "true" : "false")
       << ",\"smart_render_selector_dispatched\":" << (v.runtime_flags[3] ? "true" : "false")
