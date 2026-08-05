@@ -39,6 +39,7 @@ enum LegacyWin64Import {
     FloorF,
     PowF,
     Pow,
+    Sin,
     SinF,
     OmpGetMaxThreads,
     OmpSetDynamic,
@@ -304,6 +305,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("api-ms-win-crt-environment-l1-1-0.dll", "getenv") => LegacyWin64Import::CrtGetenv,
         (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll", "sin") => LegacyWin64Import::Sin,
+        (_, "sin") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm") => LegacyWin64Import::CrtInitterm,
         ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm_e") => {
             LegacyWin64Import::CrtInittermE
@@ -564,6 +567,9 @@ fn install_win64_import(
             }
             LegacyWin64Import::Pow => {
                 install_double_binary_import(unicorn, stub, "pow", f64::powf)?;
+            }
+            LegacyWin64Import::Sin => {
+                install_double_import(unicorn, stub, "sin", f64::sin)?;
             }
             LegacyWin64Import::SinF => {
                 install_float_import(unicorn, stub, "sinf", f32::sin)?;

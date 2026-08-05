@@ -2296,6 +2296,14 @@
             Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::SinF)
         );
         assert_eq!(
+            dispatch_win64_import(crt_math, "sin"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Sin)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "sin"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        assert_eq!(
             dispatch_win64_import("OpenCL.DLL", "cosf"),
             Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
         );
@@ -2352,6 +2360,46 @@
         assert_eq!(math_calls.len(), 32);
         assert!(math_calls.iter().any(|call| call.starts_with("cosf(")));
         assert!(math_calls.iter().any(|call| call.starts_with("sinf(")));
+    }
+
+    #[test]
+    fn win64_crt_sin_uses_xmm0_f64_abi_and_preserves_special_values() {
+        const SIN_IMPORT: u64 = STUB_BASE + 0x1d0;
+
+        fn call_f64(engine: &mut GuestEngine<'static>, input: f64) -> f64 {
+            let mut xmm0 = [0u8; 16];
+            xmm0[..8].copy_from_slice(&input.to_le_bytes());
+            engine
+                .unicorn
+                .reg_write_long(RegisterX86::XMM0, &xmm0)
+                .unwrap();
+            engine.call_win64(SIN_IMPORT, [0; 6]).unwrap();
+            let xmm0 = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+            f64::from_le_bytes(xmm0[..8].try_into().unwrap())
+        }
+
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.mem_write(SIN_IMPORT, &[0xc3]).unwrap();
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                SIN_IMPORT,
+                "api-ms-win-crt-math-l1-1-0.dll",
+                "sin",
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Sin)
+        );
+        assert_eq!(call_f64(&mut engine, 0.0).to_bits(), 0.0f64.to_bits());
+        assert_eq!(call_f64(&mut engine, -0.0).to_bits(), (-0.0f64).to_bits());
+        assert_eq!(call_f64(&mut engine, std::f64::consts::FRAC_PI_2), 1.0);
+        assert!(call_f64(&mut engine, f64::NAN).is_nan());
+        assert!(engine
+            .unicorn
+            .get_data()
+            .math_calls
+            .iter()
+            .any(|call| call.starts_with("sin(")));
     }
 
     #[test]

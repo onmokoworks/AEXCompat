@@ -450,6 +450,32 @@ fn install_float_binary_import(
     .map(|_| ())
 }
 
+fn install_double_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+    name: &'static str,
+    operation: fn(f64) -> f64,
+) -> Result<(), GuestError> {
+    uc(
+        "install unary double import",
+        unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+            if let Ok(mut xmm0) = unicorn.reg_read_long(RegisterX86::XMM0) {
+                let value = f64::from_le_bytes(xmm0[..8].try_into().unwrap());
+                let output = operation(value);
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn
+                        .get_data_mut()
+                        .math_calls
+                        .push(format!("{name}({value})={output}"));
+                }
+                xmm0[..8].copy_from_slice(&output.to_le_bytes());
+                let _ = unicorn.reg_write_long(RegisterX86::XMM0, &xmm0);
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
 fn install_double_binary_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
