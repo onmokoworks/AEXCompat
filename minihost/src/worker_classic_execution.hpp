@@ -6,6 +6,10 @@
 namespace aexcompat::worker_runtime::classic_execution {
 struct LifecycleHooks {
   void* (*begin)(void* host);
+  // What the plug-in returned from its own SEQUENCE_SETUP / FRAME_SETUP. `begin`
+  // hands back an opaque lifecycle, so without this accessor begin_lifecycle
+  // cannot see a setup refusal and reports success (issue #725).
+  int32_t (*setup_error)(void* lifecycle);
   bool (*click)(void* host);
   bool (*interpolate)(void* host);
   bool (*roundtrip)(void* host);
