@@ -494,6 +494,14 @@ pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
         None
     };
     let mut args_after_plugin = input.args_after_plugin.to_vec();
+    // A render session (positional plugins[0]) goes through the normal
+    // runtime admission, which needs the search directories on argv before
+    // the manifest is parsed; discovery sessions load no plug-in at launch
+    // and take the directories from the manifest alone (their argv contract
+    // rejects the option).
+    if input.positional_plugin {
+        args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
+    }
     args_after_plugin.extend([
         "--cluster-manifest-v1".to_owned(),
         transport.path().to_string_lossy().into_owned(),

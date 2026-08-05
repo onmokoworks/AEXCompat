@@ -477,18 +477,39 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
     return result;
   }
   // Step 5: authenticate plugins[N] against the manifest, then load with the
-  // admission flags. A broker that staged the wrong bytes fails closed here.
+  // admission flags. On the sealed path a broker that staged the wrong bytes
+  // fails closed here; on the in-place path (issue #751) a hash mismatch or
+  // loader rejection is plug-in-local — the real bytes changed under the
+  // recorded identity (the #309 state transition) or the closure could not
+  // come up, the retired predecessor stays retired, and later frames get the
+  // continuation-impossible response while the broker owns the
+  // continue/stop decision (the unresolvable-entrypoint contract below).
+  const bool in_place = context.manifest->in_place;
+  const auto plugin_local_load_failure = [&]() {
+    // Close the pending swap so the session stays swappable for the other
+    // members; the epoch records the post-failure state.
+    context.session->swap_abandon();
+    *context.entry = nullptr;
+    context.current_plugin_index = plugin_index;
+    context.current_global_error = -1;
+    result.entry = nullptr;
+    result.global_setup_error = -1;
+    return result;
+  };
   const std::filesystem::path path = cluster::plugin_path(*context.manifest,
       static_cast<std::size_t>(plugin_index));
   std::string actual_sha256;
   if (!sha256(path, actual_sha256) ||
       !cluster::hash_equals(actual_sha256, plugin.sha256)) {
+    if (in_place) return plugin_local_load_failure();
     result.hard_failure = true;
     return result;
   }
   HMODULE module = LoadLibraryExW(path.c_str(), nullptr,
-      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32 |
+      (in_place ? LOAD_LIBRARY_SEARCH_USER_DIRS : 0));
   if (!module) {
+    if (in_place) return plugin_local_load_failure();
     result.hard_failure = true;
     return result;
   }
@@ -587,25 +608,11 @@ int run_discovery_session(const std::wstring& manifest_argument,
     // lifetime (deferred release, issue #474). There is no pinned closure —
     // dependencies load through each plug-in's imports and stay mapped
     // because nothing is freed mid-process.
-    std::set<std::wstring> admitted;
-    std::vector<std::filesystem::path> roots = manifest.search_dirs;
-    for (const auto& plugin : manifest.plugins)
-      roots.push_back(plugin.path.parent_path());
-    constexpr std::size_t kMaxAdmittedDirs = 64;
-    std::vector<std::filesystem::path> admitted_roots;
-    for (const auto& root : roots) {
-      if (root.empty()) return 3;
-      std::wstring key = root.wstring();
-      std::transform(key.begin(), key.end(), key.begin(), towlower);
-      if (!admitted.insert(std::move(key)).second) continue;
-      if (admitted.size() > kMaxAdmittedDirs) return 3;
-      if (!AddDllDirectory(root.c_str())) return 11;
-      admitted_roots.push_back(root);
-    }
+    if (!cluster::admit_in_place_manifest_dirs(manifest)) return 11;
     // Every admitted root classifies loaded modules in the recorded audit,
     // so a dependency resolved from a search directory (or a retired
     // plug-in's directory) records as `plugin` instead of `unknown`.
-    wr::configure_module_audit_search_roots(admitted_roots);
+    wr::configure_module_audit_search_roots(cluster::in_place_audit_roots(manifest));
   } else {
     sealed_cookie = AddDllDirectory(manifest.sealed_root.c_str());
     if (!sealed_cookie) return 11;
@@ -1410,9 +1417,6 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   aexcompat::worker_render_session::SwapPluginHook cluster_swap_hook;
   if (is_render_worker() && invocation.render_session_mode &&
       !invocation.cluster_manifest_path.empty()) {
-    std::error_code cluster_canonical_error;
-    const std::filesystem::path launch_plugin_root = std::filesystem::canonical(
-        session.plugin_path().parent_path(), cluster_canonical_error);
     if (!cluster::load_manifest(invocation.cluster_manifest_path, cluster_manifest))
       return session.finish(3);
     std::string argv_sha256;
@@ -1420,20 +1424,41 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       if (*character > 0x7f) return session.finish(3);
       argv_sha256.push_back(static_cast<char>(*character));
     }
-    if (cluster_canonical_error ||
-        cluster_manifest.sealed_root != launch_plugin_root ||
-        !cluster::matches_launch_plugin(cluster_manifest, session.plugin_path(),
-                                        argv_sha256))
-      return session.finish(3);
-    aexcompat::worker_runtime::configure_module_audit_cluster(
-        cluster_manifest.module_bound,
-        cluster::declared_basenames(cluster_manifest));
-    if (!cluster_pins.pin(cluster_manifest, runtime_hooks.hash_file))
-      return session.finish(11);
-    // Deferred release (issue #474): this cluster session never frees plug-in
-    // images or pins mid-process; everything unloads in one loader-ordered
-    // pass at process exit.
-    cluster_pins.suppress_release_on_destroy();
+    if (cluster_manifest.in_place) {
+      // In-place render cluster (issue #751): plugins[0] must be the file
+      // the admission loaded (full-path identity), the manifest's search
+      // union joins the USER_DIRS set the admission already opened from the
+      // argv dirs, and the recorded audit classifies against the union. No
+      // sealed root and no pins exist; the module audit stays recorded,
+      // never enforced.
+      if (!cluster::matches_launch_plugin(cluster_manifest, session.plugin_path(),
+                                          argv_sha256))
+        return session.finish(3);
+      if (!cluster::admit_in_place_manifest_dirs(cluster_manifest))
+        return session.finish(11);
+      aexcompat::worker_runtime::configure_module_audit_cluster(
+          cluster_manifest.module_bound, {});
+      aexcompat::worker_runtime::configure_module_audit_search_roots(
+          cluster::in_place_audit_roots(cluster_manifest));
+    } else {
+      std::error_code cluster_canonical_error;
+      const std::filesystem::path launch_plugin_root = std::filesystem::canonical(
+          session.plugin_path().parent_path(), cluster_canonical_error);
+      if (cluster_canonical_error ||
+          cluster_manifest.sealed_root != launch_plugin_root ||
+          !cluster::matches_launch_plugin(cluster_manifest, session.plugin_path(),
+                                          argv_sha256))
+        return session.finish(3);
+      aexcompat::worker_runtime::configure_module_audit_cluster(
+          cluster_manifest.module_bound,
+          cluster::declared_basenames(cluster_manifest));
+      if (!cluster_pins.pin(cluster_manifest, runtime_hooks.hash_file))
+        return session.finish(11);
+      // Deferred release (issue #474): this cluster session never frees
+      // plug-in images or pins mid-process; everything unloads in one
+      // loader-ordered pass at process exit.
+      cluster_pins.suppress_release_on_destroy();
+    }
     session.set_deferred_module_release();
     cluster_swap_context.session = &session;
     cluster_swap_context.entry = &entry;

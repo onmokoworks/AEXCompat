@@ -253,6 +253,14 @@ fn in_place_discovery_enabled() -> bool {
     !std::env::var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY").is_ok_and(|value| value == "1")
 }
 
+/// Whether render sessions load plug-ins in place (issue #751, the default):
+/// the session opens on the plug-in's real path with the search roots
+/// admitted, and pooled cluster sessions ride the v2 manifest. The staged
+/// pipeline (closure walk + sealed tree) stays selectable for A/B.
+fn in_place_render_enabled() -> bool {
+    !std::env::var("AEXCOMPAT_MULTIFILTER_STAGED_RENDER").is_ok_and(|value| value == "1")
+}
+
 /// The in-place cluster key (issue #751): plug-ins sharing one search-root
 /// set (their own directory plus the configured dependency directories)
 /// share one discovery session. Replaces the closure identity, which needed
@@ -271,9 +279,9 @@ fn in_place_identity(roots: &[PathBuf]) -> String {
 /// inputs — BIB resolves through the admitted search set inside the worker
 /// and data files sit beside the real plug-in already.
 ///
-/// `closure_identity` stays `None` deliberately: the render cluster pool
-/// still keys on the staged closure identity until it migrates (issue #751
-/// step 3), so in-place-discovered effects render on single-plugin sessions.
+/// `closure_identity` records the search-root identity: the render cluster
+/// pool groups effects by it and swaps them inside one in-place session
+/// (issue #751 step 3).
 fn prepare_discovery_in_place(
     plugin: &Path,
     dependency: &DependencyConfig,
@@ -299,6 +307,7 @@ fn prepare_discovery_in_place(
         ..CachedClosure::default()
     };
     let identity = in_place_identity(&roots);
+    entry.closure_identity = Some(identity.clone());
     PreparedDiscovery {
         entry,
         closure: None,

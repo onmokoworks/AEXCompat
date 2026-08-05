@@ -243,6 +243,10 @@ mod worker {
     struct ClusterManifest {
         plugins: Vec<(String, String)>,
         dependencies: Vec<String>,
+        /// `cluster-manifest-v2` (issue #751): plug-ins load from real paths
+        /// and no sealed root exists, so the render launch skips the
+        /// sealed-sibling check.
+        in_place: bool,
     }
 
     /// Loads and validates the manifest transport the way the real worker's
@@ -289,6 +293,7 @@ mod worker {
             return Some(ClusterManifest {
                 plugins,
                 dependencies: Vec::new(),
+                in_place: true,
             });
         }
         let sealed_root = path
@@ -320,6 +325,7 @@ mod worker {
         Some(ClusterManifest {
             plugins,
             dependencies,
+            in_place: false,
         })
     }
 
@@ -648,16 +654,19 @@ mod worker {
                 .file_name()
                 .and_then(|name| name.to_str())
                 == Some(manifest.plugins[0].0.as_str());
-            let same_sealed_root = cluster_manifest_path
-                .as_deref()
-                .is_some_and(|manifest_path| {
-                    let canonical_parent = |path: &str| {
-                        std::path::Path::new(path)
-                            .parent()
-                            .and_then(|parent| parent.canonicalize().ok())
-                    };
-                    canonical_parent(&args[2]) == canonical_parent(manifest_path)
-                });
+            // The in-place manifest (issue #751) has no sealed root; the
+            // positional plugin is matched by basename + sha alone.
+            let same_sealed_root = manifest.in_place
+                || cluster_manifest_path
+                    .as_deref()
+                    .is_some_and(|manifest_path| {
+                        let canonical_parent = |path: &str| {
+                            std::path::Path::new(path)
+                                .parent()
+                                .and_then(|parent| parent.canonicalize().ok())
+                        };
+                        canonical_parent(&args[2]) == canonical_parent(manifest_path)
+                    });
             if !basename_matches
                 || !args[3].eq_ignore_ascii_case(&manifest.plugins[0].1)
                 || !same_sealed_root

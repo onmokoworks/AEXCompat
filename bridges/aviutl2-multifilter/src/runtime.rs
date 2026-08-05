@@ -896,20 +896,28 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
             // the open request, and used by the frame loop below to tell "there
             // is no map to update" from "the map no longer fits".
             let dynamic_layer_open = config.layers.iter().any(|layer| layer.dynamic);
-            // Re-resolve the closure the discovery pass sealed, so the render
-            // session's sealed root carries the same dependency DLLs the
-            // parameter inspection loaded with (issue #304). Resolving here (on
-            // the session thread, once per session) keeps the hashing off both
-            // the AviUtl2 callback thread and plugin startup.
+            // In-place render (issue #751, the default): the worker resolves
+            // the closure through the search roots, so nothing is walked or
+            // staged here — the same route discovery inspected on. The
+            // staged pipeline re-resolves the closure the discovery pass
+            // sealed (issue #304) and stays selectable for A/B.
             let roots = search_roots_for(&config.plugin, &config.dependency.dirs);
-            let dependencies =
+            let in_place = in_place_render_enabled();
+            let (dependencies, dependency_search_dirs) = if in_place {
+                if roots.is_empty() {
+                    let _ = open_tx.send(Err("no dependency search roots resolved".to_owned()));
+                    return;
+                }
+                (Vec::new(), roots.clone())
+            } else {
                 match dependency_closure_for(&config.plugin, &config.dependency, &roots) {
-                    Ok(closure) => closure.into_dependencies(),
+                    Ok(closure) => (closure.into_dependencies(), Vec::new()),
                     Err(error) => {
                         let _ = open_tx.send(Err(error));
                         return;
                     }
-                };
+                }
+            };
             let dependency_count = dependencies.len();
             let request = SessionOpenRequest {
                 repository: &config.repository,
@@ -931,7 +939,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 conformance_render_settings: None,
                 layers: &config.layers,
                 dependencies,
-                dependency_search_dirs: Vec::new(),
+                dependency_search_dirs,
                 width: config.identity.width,
                 height: config.identity.height,
                 pixel_format: RenderPixelFormat::Argb8,
@@ -977,9 +985,18 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         });
                     }
                     let declared = plugins.len() + dependency_count;
-                    if plugins.len() > MAX_CLUSTER_PLUGINS
-                        || declared + CLUSTER_MODULE_HEADROOM > MAX_CLUSTER_MODULE_BOUND
-                    {
+                    // The in-place session (issue #751) declares no closure:
+                    // its module bound is the recorded audit's enumeration
+                    // capacity, and only the plugin count gates feasibility.
+                    let module_bound = if in_place {
+                        MAX_CLUSTER_MODULE_BOUND as u32
+                    } else {
+                        (declared + CLUSTER_MODULE_HEADROOM) as u32
+                    };
+                    let infeasible = plugins.len() > MAX_CLUSTER_PLUGINS
+                        || (!in_place
+                            && declared + CLUSTER_MODULE_HEADROOM > MAX_CLUSTER_MODULE_BOUND);
+                    if infeasible {
                         match RenderSession::open(request) {
                             Ok(session) => (session, 0),
                             Err(error) => {
@@ -994,7 +1011,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                             ClusterRenderPlugins {
                                 plugins,
                                 swap_payloads: cluster.swap_payloads.clone(),
-                                module_bound: (declared + CLUSTER_MODULE_HEADROOM) as u32,
+                                module_bound,
                             },
                         ) {
                             Ok(session) => (session, cluster.plugins.len() as u32),

@@ -302,11 +302,48 @@ bool matches_launch_plugin(const Manifest& manifest,
                            const std::string& plugin_sha256) {
   if (manifest.plugins.empty()) return false;
   const PluginEntry& first = manifest.plugins.front();
+  if (manifest.in_place) {
+    // In-place manifests (issue #751) name plugins[0] by its real path; the
+    // launch positional must canonicalize to the same file.
+    std::filesystem::path launch_canonical;
+    std::filesystem::path declared_canonical;
+    return canonical_of(normalize_verbatim(plugin_path), launch_canonical) &&
+        canonical_of(first.path, declared_canonical) &&
+        same_path(launch_canonical, declared_canonical) &&
+        hash_equals(plugin_sha256, first.sha256);
+  }
   const std::wstring basename = lowercase(plugin_path.filename().wstring());
   std::wstring declared;
   for (const unsigned char ch : first.basename) declared.push_back(ch);
   return basename == lowercase(declared) &&
       hash_equals(plugin_sha256, first.sha256);
+}
+
+bool admit_in_place_manifest_dirs(const Manifest& manifest) {
+  // Admit the validated search directories plus every plug-in's own
+  // directory into the process-wide USER_DIRS set (issue #751). Cookies stay
+  // for the process lifetime (deferred release, issue #474); the broker
+  // validated the deduplicated union against the same bound.
+  std::set<std::wstring> admitted;
+  std::vector<std::filesystem::path> roots = manifest.search_dirs;
+  for (const auto& plugin : manifest.plugins)
+    roots.push_back(plugin.path.parent_path());
+  constexpr std::size_t kMaxAdmittedDirs = 64;
+  for (const auto& root : roots) {
+    if (root.empty()) return false;
+    std::wstring key = lowercase(root.wstring());
+    if (!admitted.insert(std::move(key)).second) continue;
+    if (admitted.size() > kMaxAdmittedDirs) return false;
+    if (!AddDllDirectory(root.c_str())) return false;
+  }
+  return true;
+}
+
+std::vector<std::filesystem::path> in_place_audit_roots(const Manifest& manifest) {
+  std::vector<std::filesystem::path> roots = manifest.search_dirs;
+  for (const auto& plugin : manifest.plugins)
+    roots.push_back(plugin.path.parent_path());
+  return roots;
 }
 
 std::filesystem::path plugin_path(const Manifest& manifest, std::size_t index) {

@@ -160,6 +160,15 @@ sealed staging を行わない in-place モード用のマニフェスト。プ�
   warning 記録のみ) に置き換わる。
 - basename 一意性は要求しない (実パスが identity)。大小無視の
   **フルパス一意性**を要求する。
+- **render セッション (2026-08-05 step 3 追記)**: v2 manifest は render
+  cluster session でも使える。launch は通常 admission (positional 実パス +
+  `--dependency-dirs-v1`) を通り、plugins[0] は**フルパス identity** で
+  照合する (sealed root 等値チェックは v1 のみ)。swap のロード直前ハッシュ
+  不一致・ローダ拒否は **plugin-local** で、swap は entrypoint 未解決と
+  同じ「継続不可応答 + broker が続行判断」の形に落ち、session は他メンバー
+  を提供し続ける (`WorkerSession::swap_abandon` が pending swap を epoch
+  記録付きで閉じる)。v1 の hard failure (exit 25) は不変。close 時の audit
+  検証は discovery と同じく recorded observe。
 
 ## 3. closure のピン留め
 

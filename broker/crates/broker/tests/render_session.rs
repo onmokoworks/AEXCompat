@@ -2927,6 +2927,78 @@ mod windows_e2e {
         assert_eq!(epochs[0]["plugin_index"], 0);
     }
 
+    /// In-place cluster render session (issue #751): the v2 manifest names
+    /// the cluster by real paths, the launch admits the search directories,
+    /// and the swap selects members by index over the same transport as the
+    /// sealed session.
+    #[test]
+    fn in_place_cluster_render_session_swaps_plugins_and_closes_clean() {
+        if crate::common::skip_without_sealed_worker_launch(
+            "in_place_cluster_render_session_swaps_plugins_and_closes_clean",
+        ) {
+            return;
+        }
+        let _behavior = BehaviorGuard::set(None);
+        let cluster = temp_cluster_repository();
+        let mut session = RenderSession::open_cluster(
+            SessionOpenRequest {
+                repository: &cluster.repository.0,
+                plugin_path: &cluster.plugins[0].0,
+                plugin_sha256: &cluster.plugins[0].1,
+                parameters: None,
+                payload_override: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                dependency_search_dirs: vec![cluster.repository.0.clone()],
+                width: WIDTH,
+                height: HEIGHT,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                frame_deadline: Duration::from_secs(30),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+            },
+            ClusterRenderPlugins {
+                plugins: cluster
+                    .plugins
+                    .iter()
+                    .map(|(path, _)| approved_artifact(path))
+                    .collect(),
+                swap_payloads: vec![None, Some("v2|0=2.0".to_owned())],
+                module_bound: 4096,
+            },
+        )
+        .expect("open in-place cluster render session");
+
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(3))
+            .expect("frame 0 renders on plugins[0]");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let swap = session.swap_plugin(1).expect("swap to plugins[1]");
+        assert!(matches!(swap, SwapOutcome::Swapped));
+        let outcome = session
+            .render_frame(1, 1, &input_pattern(9))
+            .expect("frame 1 renders on plugins[1]");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["invalidated"], false, "close: {close}");
+        assert_eq!(close["frames_ok"], 2, "close: {close}");
+    }
+
     #[test]
     fn cluster_swap_rejects_out_of_manifest_and_current_index_as_caller_errors() {
         if crate::common::skip_without_sealed_worker_launch(

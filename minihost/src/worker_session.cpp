@@ -217,6 +217,17 @@ bool WorkerSession::swap_release_module(uint32_t outgoing_index) noexcept {
   return true;
 }
 
+void WorkerSession::swap_abandon() noexcept {
+  if (!swap_pending_) return;
+  // The pending epoch closes on the state after the failed load (nothing
+  // new mapped); capture/record are no-ops unless the audit is observing.
+  ModuleAuditSnapshot post_failure = capture_module_audit();
+  record_module_audit_epoch(swap_outgoing_index_, std::move(swap_pre_unload_),
+                            std::move(post_failure));
+  swap_pre_unload_ = {};
+  swap_pending_ = false;
+}
+
 bool WorkerSession::swap_adopt_module(HMODULE module,
                                       const std::filesystem::path& plugin_path,
                                       uint32_t incoming_index) noexcept {
