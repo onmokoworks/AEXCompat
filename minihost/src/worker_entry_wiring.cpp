@@ -56,6 +56,7 @@
 #include "worker_parameter_selftest_routing.hpp"
 #include "worker_pf_color_selftests.hpp"
 #include "worker_parameter_execution.hpp"
+#include "worker_flt_blur_suite.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
@@ -536,6 +537,12 @@ int configure_worker_entry_bootstrap() {
   bootstrap_hooks.audit_capture = &capture_module_audit_phase;
   bootstrap_hooks.audit_passed = &module_audit_passed;
   bootstrap_hooks.trace = &record_selector_dispatch;
+  if (!aexcompat::flt_blur::configure({
+          &g_effect,
+          [](const void* world, DispatchWorldFormat& result) -> bool {
+            return resolve_dispatch_world_format(world, result);
+          }}))
+    return 1;
   return aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
 }
 
@@ -583,7 +590,8 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         +[] { return verify_aegp_world_suite3() && verify_aegp_world_mfr_safety(); },
         &verify_pf_batch_sampling_suite, &verify_pf_ae_channel_native_provider,
         &verify_aegp_layer_render_options_suite2,
-        &verify_utils_handle_callbacks_wired}});
+        &verify_utils_handle_callbacks_wired,
+        &aexcompat::flt_blur::selftest}});
   // Compatibility anchors for selftests whose command catalog now lives in
   // worker_fixed_selftest_routing.cpp.
   // --self-test-world-transform-affine

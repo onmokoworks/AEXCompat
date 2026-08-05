@@ -141,6 +141,7 @@ CALLBACK_TABLES = {
         "utils.premultiply_color16",
         "utils.iterate16",
         "utils.iterate",
+        "utils.iterate_origin",
         "utils.new_world",
         "utils.dispose_world",
         "utils.transfer_rect",
