@@ -152,11 +152,11 @@ void a_null_effect_ref_still_samples() {
     // the effect_ref check must not have dropped these.
     std::snprintf(message, sizeof(message), "subpixel_sample%s rejects a null params block",
                   depth.name);
-    check(depth.subpixel(nullptr, half, half, nullptr, destination.data()) == 4, message);
+    check(depth.subpixel(nullptr, half, half, nullptr, destination.data()) == 516, message);
 
     std::snprintf(message, sizeof(message), "subpixel_sample%s rejects a null destination",
                   depth.name);
-    check(depth.subpixel(nullptr, half, half, params.data(), nullptr) == 4, message);
+    check(depth.subpixel(nullptr, half, half, params.data(), nullptr) == 516, message);
 
     // A world the resolver rejects is still refused. This stub keys on
     // pixel_bytes; the production resolver bounds-checks the struct instead
@@ -167,7 +167,7 @@ void a_null_effect_ref_still_samples() {
     auto foreign_params = sampling_params(&foreign);
     std::snprintf(message, sizeof(message), "subpixel_sample%s refuses an unresolvable world",
                   depth.name);
-    check(depth.subpixel(nullptr, half, half, foreign_params.data(), destination.data()) == 4,
+    check(depth.subpixel(nullptr, half, half, foreign_params.data(), destination.data()) == 516,
           message);
   }
 }
@@ -241,10 +241,10 @@ void get_callback_addr_is_typed_bounded_and_clears_failures() {
     check(callback == expected, "get_callback_addr returns the typed callback");
   }
   void* callback = reinterpret_cast<void*>(1);
-  check(get_callback_addr(nullptr, 1, 0, 999, &callback) == 4,
+  check(get_callback_addr(nullptr, 1, 0, 999, &callback) == 516,
         "get_callback_addr rejects an unknown callback id");
   check(callback == nullptr, "get_callback_addr clears output on rejection");
-  check(get_callback_addr(nullptr, 1, 0, 9, nullptr) == 4,
+  check(get_callback_addr(nullptr, 1, 0, 9, nullptr) == 516,
         "get_callback_addr rejects a null output pointer");
 }
 

@@ -15,7 +15,7 @@
 #include <unordered_map>
 
 namespace {
-constexpr int32_t kPfBadCallbackParam = 4;
+constexpr int32_t kPfBadCallbackParam = 516;
 PfSamplingHostHooks g_hooks{};
 int32_t finish_callback(aexcompat::callback_diagnostics::Callback callback, int32_t result,
                         aexcompat::callback_diagnostics::Reason reason =
@@ -119,14 +119,14 @@ int32_t subpixel_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fix
   using aexcompat::callback_diagnostics::Callback;
   using aexcompat::callback_diagnostics::Reason;
   if (!sampling_params || !destination_pixel)
-    return finish_callback(Callback::Sampling, 4, Reason::InvalidArguments);
+    return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::InvalidArguments);
   void* source_world{};
   std::memcpy(&source_world, static_cast<const std::byte*>(sampling_params) + 16,
               sizeof(source_world));
   unsigned char* source{};
   int32_t rowbytes{}, width{}, height{};
   if (!resolve_world(source_world, pixel_bytes, source, rowbytes, width, height))
-    return finish_callback(Callback::Sampling, 4, Reason::MissingWorld);
+    return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::MissingWorld);
   const double x = fixed_x / 65536.0;
   const double y = fixed_y / 65536.0;
   const int32_t x0 = static_cast<int32_t>(std::floor(x));
@@ -169,14 +169,14 @@ int32_t nearest_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixe
   using aexcompat::callback_diagnostics::Callback;
   using aexcompat::callback_diagnostics::Reason;
   if (!sampling_params || !destination_pixel)
-    return finish_callback(Callback::Sampling, 4, Reason::InvalidArguments);
+    return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::InvalidArguments);
   void* source_world{};
   std::memcpy(&source_world, static_cast<const std::byte*>(sampling_params) + 16,
               sizeof(source_world));
   unsigned char* source{};
   int32_t rowbytes{}, width{}, height{};
   if (!resolve_world(source_world, pixel_bytes, source, rowbytes, width, height))
-    return finish_callback(Callback::Sampling, 4, Reason::MissingWorld);
+    return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::MissingWorld);
   const int32_t x = static_cast<int32_t>(std::floor(fixed_x / 65536.0 + 0.5));
   const int32_t y = static_cast<int32_t>(std::floor(fixed_y / 65536.0 + 0.5));
   if (x < 0 || x >= width || y < 0 || y >= height) {
@@ -213,7 +213,7 @@ int32_t area_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x
   using aexcompat::callback_diagnostics::Callback;
   using aexcompat::callback_diagnostics::Reason;
   if (!sampling_params || !destination_pixel)
-    return finish_callback(Callback::Sampling, 4, Reason::InvalidArguments);
+    return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::InvalidArguments);
   int32_t fixed_radius_x{}, fixed_radius_y{}, fixed_area{};
   uint32_t edge_behavior{};
   void* source_world{};
@@ -227,11 +227,11 @@ int32_t area_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x
   const double radius_y = fixed_radius_y / 65536.0;
   if (fixed_area <= 0 || edge_behavior != 0 || radius_x <= 0.0 || radius_y <= 0.0 ||
       radius_x >= 128.0 || radius_y >= 128.0)
-    return finish_callback(Callback::Sampling, 4, Reason::InvalidArea);
+    return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::InvalidArea);
   unsigned char* source{};
   int32_t rowbytes{}, width{}, height{};
   if (!resolve_world(source_world, pixel_bytes, source, rowbytes, width, height))
-    return finish_callback(Callback::Sampling, 4, Reason::MissingWorld);
+    return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::MissingWorld);
   const double center_x = fixed_x / 65536.0;
   const double center_y = fixed_y / 65536.0;
   const double left = center_x - radius_x, right = center_x + radius_x;
