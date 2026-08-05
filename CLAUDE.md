@@ -93,14 +93,18 @@ and bounded image input/output are now the main implementation path.
 - Prefer machine-portable behavioral self-tests for new compatibility work, and
   update frozen evidence values in `analysis/` only through the
   `tools/refresh-*-evidence.ps1` scripts (`docs/EVIDENCE_POLICY_2026-07-18.md`).
-- Pure source-text grep tests (ソースを read_text して文字列 assert するだけの
-  テスト) は #691 で全廃した。新規追加も禁止のまま
-  (`docs/EVIDENCE_POLICY_2026-07-18.md` §5.3)。`tests/source_owners.py`
-  (issue #127) は、凍結 evidence とソースを突き合わせる残存テストのために
-  残っている。TU 抽出で実装が移動したら owner を `source_owners.py` に追記
-  する運用は変わらない。例外として残したのは `.rc`↔`.cpp` の意味的整合
+- ファイルを read_text して文字列 assert するだけのテストは禁止。対象が
+  ソースでも `docs/` / `analysis/` の文書でも同じで、理由も同じ: 振る舞いを
+  保つリファクタで壊れ、振る舞いを壊す変更で通る (`docs/EVIDENCE_POLICY_2026-07-18.md`
+  §5.3)。ソース側は #691 で全廃し、文書側 17 ファイルは #780 で削除した。
+  例外として残したのは `.rc`↔`.cpp` の意味的整合
   (`test_probe_pipl_contract.py`) と CI workflow 契約
   (`test_windows_clean_clone_workflow.py`) の 2 ファイル。
+  `tests/source_owners.py` (issue #127) は、凍結 evidence とソースを突き合わせる
+  テストの owner 解決のために残っている。TU 抽出で実装が移動したら owner を
+  追記する運用は変わらない。ただし #780 の棚卸しで、その傘の下に素の source
+  grep が約 67 本、死に import が 64 ファイル残っていることが判明しており、
+  再判定の対象になっている。
 - Image dispatch admits the locally built worker at dispatch time (no frozen
   trust constants; see the section 3 amendment and the 2026-08-05 amendment in
   `docs/EVIDENCE_POLICY_2026-07-18.md`). After any worker rebuild, run the
