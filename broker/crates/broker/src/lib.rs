@@ -13,6 +13,7 @@ pub mod observability;
 pub mod opencl_icd_adapter_binding;
 pub mod opencl_icd_collector;
 pub mod opencl_runtime_probe;
+pub mod parameter_animation;
 pub mod plugin_dependency_closure;
 pub mod pnp_opencl_runtime_collector;
 #[cfg(windows)]

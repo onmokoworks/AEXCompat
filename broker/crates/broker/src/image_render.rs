@@ -1,6 +1,11 @@
 // Keep the public image-rendering surface in one module while grouping the
 // implementation into bounded, reviewable source files. `include!` preserves
 // the original item scope and therefore does not change visibility or paths.
+pub use crate::parameter_animation::{
+    AnimationInterpolation, AnimationTime, AnimationValue, ParameterAnimation,
+    ParameterAnimationKey, parameter_animation_sidecar_json,
+};
+
 include!("image_render/diagnostics.rs");
 include!("image_render/types_and_transport.rs");
 include!("image_render/render_operations.rs");

@@ -1,6 +1,6 @@
 mod common;
 
-use aexcompat_broker::image_render::{
+use aexcompat_broker::parameter_animation::{
     AnimationInterpolation, AnimationTime, AnimationValue, ParameterAnimation,
     ParameterAnimationKey, parameter_animation_sidecar_json,
 };

@@ -1171,6 +1171,16 @@ mod tests {
         }
     }
 
+    fn native_machine() -> PeMachine {
+        match host_architecture() {
+            "x86_64" => PeMachine::Amd64,
+            "aarch64" => PeMachine::Arm64,
+            "x86" => PeMachine::I386,
+            "arm" => PeMachine::Arm,
+            _ => PeMachine::Unknown(0),
+        }
+    }
+
     fn raw(
         source_class: PnpOpenClSourceClass,
         architecture: PnpOpenClArchitecture,
@@ -1312,7 +1322,7 @@ mod tests {
     fn extra_multi_sz_elements_are_diagnostic_only_and_never_verified() {
         let path = r"C:\Vendor\extra.dll";
         let adapter = platform(7, 0xaa);
-        let observed = identity(path, PeMachine::Amd64, 1, Some(0xaa));
+        let observed = identity(path, native_machine(), 1, Some(0xaa));
         let fixture = FixtureIdentities {
             outcomes: BTreeMap::from([(path.to_ascii_lowercase(), Ok(observed))]),
         };
@@ -1349,7 +1359,7 @@ mod tests {
             outcomes: BTreeMap::from([
                 (
                     x64.to_ascii_lowercase(),
-                    Ok(identity(x64, PeMachine::Amd64, 1, Some(0xaa))),
+                    Ok(identity(x64, native_machine(), 1, Some(0xaa))),
                 ),
                 (
                     x86.to_ascii_lowercase(),
@@ -1453,7 +1463,7 @@ mod tests {
     fn exact_catalog_and_adapter_are_required_and_legacy_merge_is_strict() {
         let path = r"C:\Vendor\opencl64.dll";
         let adapter = platform(7, 0xaa);
-        let observed = identity(path, PeMachine::Amd64, 1, Some(0xaa));
+        let observed = identity(path, native_machine(), 1, Some(0xaa));
         let fixture = FixtureIdentities {
             outcomes: BTreeMap::from([(path.to_ascii_lowercase(), Ok(observed.clone()))]),
         };
@@ -1514,7 +1524,7 @@ mod tests {
         let mismatch_fixture = FixtureIdentities {
             outcomes: BTreeMap::from([(
                 path.to_ascii_lowercase(),
-                Ok(identity(path, PeMachine::Amd64, 1, Some(0xbb))),
+                Ok(identity(path, native_machine(), 1, Some(0xbb))),
             )]),
         };
         let mismatch = collect_with(
@@ -1539,7 +1549,7 @@ mod tests {
     fn report_is_privacy_bounded_and_never_claims_backend_readiness() {
         let path = r"C:\Private Vendor\opencl64.dll";
         let adapter = platform(7, 0xaa);
-        let observed = identity(path, PeMachine::Amd64, 1, Some(0xaa));
+        let observed = identity(path, native_machine(), 1, Some(0xaa));
         let fixture = FixtureIdentities {
             outcomes: BTreeMap::from([(path.to_ascii_lowercase(), Ok(observed.clone()))]),
         };
