@@ -16,7 +16,7 @@ pub(crate) fn secure_entry(repository: &Path, id: &str) -> io::Result<ApprovedLo
     let worker = profile
         .classic_worker
         .ok_or_else(|| invalid("classic render is not approved for profile"))?;
-    load_v2_load_tree(repository, id, worker.approval)
+    load_v2_load_tree(repository, id, worker.selection)
 }
 fn classification(value: &str) -> &str {
     match value {
@@ -86,10 +86,12 @@ pub fn run(
     let mut runs = Vec::new();
     let mut approved_identity = None;
     let mut fixture_sha256 = String::new();
+    let mut approved_receipt_id = String::new();
     for _ in 0..2 {
         // secure_launch consumes the tree, so rebuild it from the authenticated
         // receipt for each determinism run rather than reusing mutable state.
         let entry = secure_entry(repository, id)?;
+        approved_receipt_id = entry.receipt_id.clone();
         if entry.worker_path != worker {
             return Err(invalid(
                 "render worker differs from approved trusted worker",
@@ -217,7 +219,7 @@ pub fn run(
         });
     let passed = passed && layout_valid;
     let report = json!({"schema_version":1,"stage":"classic_render","plugin_id":id,
-        "receipt_id":crate::fixture_profiles::find(id).unwrap().classic_worker.unwrap().approval.receipt_id,
+        "receipt_id":approved_receipt_id,
         "fixture_sha256":fixture_sha256,
         "case_id":case_id,"pixel_format":"argb8","width":width,"height":height,"rowbytes":rowbytes,
         "input_sha256":input_hash,"run_1":runs[0],"run_2":runs[1],

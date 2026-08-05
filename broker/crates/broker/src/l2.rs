@@ -74,7 +74,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
     if !parent.canonicalize()?.starts_with(root.canonicalize()?) {
         return Err(invalid("output outside L2 result root"));
     }
-    let approved = load_v2_load_tree(repository, id, policy.approval)?;
+    let approved = load_v2_load_tree(repository, id, policy.selection)?;
     let plugin_basename = approved.main.relative_basename.clone();
     let plugin_sha256 = approved.main.expected_sha256;
     let tree = SealedLoadTree::create(approved.main, approved.dependencies)?;
@@ -104,7 +104,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
     });
     let passed = result.classification.as_str() == "ok" && worker_passed(&worker_report, policy);
     let report = json!({"schema_version":1,"stage":"L2","plugin_id":id,
-        "receipt_id":policy.approval.receipt_id,"expected_sha256":hex_sha256(plugin_sha256).to_ascii_uppercase(),
+        "receipt_id":approved.receipt_id,"expected_sha256":hex_sha256(plugin_sha256).to_ascii_uppercase(),
         "worker_exit":result.classification.as_str(),"worker_exit_code":result.exit_code,
         "stdout_truncated":result.stdout_truncated,"stderr_truncated":result.stderr_truncated,
         "stderr":result.stderr,
@@ -128,12 +128,8 @@ mod tests {
     use std::path::PathBuf;
 
     const POLICY: L2ObservationPolicy = L2ObservationPolicy {
-        approval: crate::host_core::approved_artifact::ApprovalPolicy {
+        selection: crate::host_core::approved_artifact::SelectionPolicy {
             allowlist_path: "unused",
-            stage: "L2",
-            receipt_id: "receipt",
-            expires: "expiry",
-            max_timeout_ms: 1,
         },
         about_substrings: &["Example", "v1"],
         out_flags: 4,
@@ -186,7 +182,7 @@ mod tests {
 
         let mut failed = Vec::new();
         for id in ["scattermap", "maskoffset"] {
-            let policy = find_observation(id).unwrap().l2.approval;
+            let policy = find_observation(id).unwrap().l2.selection;
             let approved = load_v2_load_tree(&repository, id, policy).unwrap();
             if !approved.main.source.is_file() {
                 continue;

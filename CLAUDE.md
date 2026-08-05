@@ -54,12 +54,15 @@ and bounded image input/output are now the main implementation path.
   own cache), not in dispatch gates.
 - Implementation gap: the code still contains the enforcement this policy
   removes. Approval receipts still gate the `l1`/`l2`/`render*`/`smart*`/
-  `render_request` CLI routes (#732), and interactive image dispatch still
-  enforces a per-session pre-selection hash match (`ApprovedImageArtifact`,
-  #739). The worker freshness gate (#729) and the module audit (#730) were
-  demoted to recorded warnings, and the restricted token, protected DACL, and
-  staged-tree deny ACEs were removed in #731 (staging now records which bytes
-  ran; the worker shares the broker's token). Until the rest lands,
+  `render_request` CLI routes read a selection file that still names the
+  plug-in, and `l1` still dispatches through normal-token `run_isolated` with
+  an argv path (#732). Interactive image dispatch still enforces a per-session
+  pre-selection hash match (`ApprovedImageArtifact`, #739). The worker
+  freshness gate (#729), the module audit (#730), and the selection file's
+  recorded identity (#732) were demoted to recorded warnings; the restricted
+  token, protected DACL, and staged-tree deny ACEs were removed in #731
+  (staging now records which bytes ran; the worker shares the broker's token).
+  Until the rest lands,
   do not treat the existing enforcement as policy, do not add new enforcement,
   and when touching one of these routes migrate it toward the floor rather
   than extending the gate. `l1` is the last plug-in-loading normal-token route

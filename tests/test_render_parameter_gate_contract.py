@@ -268,15 +268,19 @@ class RenderRequestSecureLaunchContractTests(unittest.TestCase):
         )
         self.assertEqual(route.count("worker_program: &receipt_worker"), launches)
 
-    def test_migrated_reports_take_identity_from_the_receipt(self):
+    def test_migrated_reports_take_identity_from_the_selection_it_loaded(self):
         route = self.route_source()
         # The schema-v1 `approved_entry` / `render::entry` helpers no longer supply
-        # the reported identity; it comes from the schema-v2 receipt and the
-        # approval policy, so the report names the same approval the launch used.
+        # the reported identity. Since issue #732 the receipt id is echoed from the
+        # selection file the launch actually read, not from a compiled-in approval
+        # constant, so the report names the record that selected the plug-in.
         self.assertNotIn("approved_entry", route)
         self.assertNotIn("crate::render::entry", route)
+        self.assertNotIn("worker_spec.approval.receipt_id", route)
         launches = self.launch_sites(route)
-        self.assertEqual(route.count('"receipt_id":worker_spec.approval.receipt_id'), launches)
+        self.assertEqual(route.count('"receipt_id":approved_receipt_id'), launches)
+        self.assertEqual(
+            route.count("approved_receipt_id = approved.receipt_id.clone();"), launches)
         self.assertEqual(route.count('"fixture_sha256":approved_fixture_sha256'), launches)
 
     def test_migrated_reports_add_no_keys_outside_their_contract_schema(self):
