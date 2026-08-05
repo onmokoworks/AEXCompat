@@ -1630,6 +1630,20 @@
             b"Threshold 7\0"
         );
 
+        engine.unicorn.mem_write(output, b"unchanged\0").unwrap();
+        let error = engine
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0x25, output, 8, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("finite vsprintf buffer count 8"), "{error}");
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 10).unwrap(),
+            b"unchanged\0"
+        );
+
         let error = engine
             .call_win64_with_timeout(
                 VSPRINTF,

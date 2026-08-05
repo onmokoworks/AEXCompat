@@ -1064,6 +1064,11 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
         let options = read_win64_import_argument(unicorn, 0)?;
         let destination = read_win64_import_argument(unicorn, 1)?;
         let requested_buffer_count = read_win64_import_argument(unicorn, 2)?;
+        if !secure && requested_buffer_count != u64::MAX {
+            return Err(format!(
+                "stdio finite vsprintf buffer count {requested_buffer_count} is unsupported"
+            ));
+        }
         let (buffer_count, max_count, format_address, locale, va_list) = if secure {
             (
                 requested_buffer_count,
