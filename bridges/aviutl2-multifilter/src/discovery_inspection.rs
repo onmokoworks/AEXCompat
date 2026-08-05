@@ -636,6 +636,35 @@ fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
     tasks
 }
 
+/// Shards in-place cluster tasks across the worker budget (issue #751). The
+/// search-root identity groups an entire plug-in directory into one cluster,
+/// and a single session would sweep it serially; splitting it into up to
+/// `parallelism` chunks keeps the per-session amortization (one search-set
+/// admission, one Adobe runtime init per chunk) while restoring the parallel
+/// sweep the staged planner got from its many closure identities. Chunks
+/// that would shrink to one member become per-plugin tasks.
+fn shard_in_place_clusters(tasks: Vec<DiscoveryTask>, parallelism: usize) -> Vec<DiscoveryTask> {
+    let parallelism = parallelism.max(1);
+    let mut sharded = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        match task {
+            DiscoveryTask::Cluster(members) if members.len() > 2 => {
+                let chunk_count = parallelism.min(members.len() / 2).max(1);
+                let chunk_size = members.len().div_ceil(chunk_count);
+                for chunk in members.chunks(chunk_size) {
+                    if chunk.len() == 1 {
+                        sharded.push(DiscoveryTask::Single(chunk[0]));
+                    } else {
+                        sharded.push(DiscoveryTask::Cluster(chunk.to_vec()));
+                    }
+                }
+            }
+            other => sharded.push(other),
+        }
+    }
+    sharded
+}
+
 /// Decodes a 64-hex SHA-256 (as stored in `CacheEntry.sha`) into raw bytes
 /// for a launch-approved artifact.
 fn decode_sha256_hex(text: &str) -> Option<[u8; 32]> {
@@ -1144,6 +1173,11 @@ fn discover_all(
         })
         .collect();
     let tasks = plan_tasks(&planned);
+    let tasks = if in_place {
+        shard_in_place_clusters(tasks, parallelism)
+    } else {
+        tasks
+    };
 
     // Phase 2: process tasks with the same worker budget. A cluster is one
     // unit of work: its members are inspected sequentially inside one
