@@ -2,8 +2,10 @@
 //
 // `register_config_menu` puts an entry in AviUtl2's settings menu; picking it
 // calls [`config_menu_entry`], which shows a modal Win32 dialog over the values
-// currently in `config.toml` and writes edits back through `toml_edit` (so
-// comments and unknown keys in a hand-written file survive a dialog save).
+// currently in `config.toml` and writes edits back through `toml_edit`, so
+// comments and unknown keys in a hand-written file survive a dialog save. (A
+// comment attached to a value the dialog rewrites goes with the value; what
+// survives is everything the dialog does not manage.)
 //
 // The dialog edits the FILE, not the running plug-in: the config is read once
 // at `RegisterPlugin` and AviUtl2 freezes every filter's config set at load, so
@@ -96,8 +98,13 @@ fn form_from_config(config: &Config) -> ConfigForm {
 fn parse_form(form: &ConfigForm) -> Result<ConfigEdit, String> {
     let module_limit = parse_limit::<usize>(&form.module_limit, "依存 DLL 数の上限")?;
     let byte_limit = parse_limit::<u64>(&form.byte_limit, "依存 DLL 合計バイト数の上限")?;
-    // TOML integers are i64; a larger u64 would fail to round-trip through the
-    // file this dialog is about to write.
+    // TOML integers are i64; a larger value would be written as a wrapped
+    // negative, and the next launch's `load_config` would then reject the
+    // whole file — a "saved" config that ignores every setting (issue #655's
+    // shape, created by the dialog itself).
+    if module_limit.is_some_and(|limit| limit as u64 > i64::MAX as u64) {
+        return Err(format!("依存 DLL 数の上限が大きすぎます ({} 以下)", i64::MAX));
+    }
     if byte_limit.is_some_and(|limit| limit > i64::MAX as u64) {
         return Err(format!(
             "依存 DLL 合計バイト数の上限が大きすぎます ({} 以下)",
@@ -188,11 +195,30 @@ fn merged_config_text(existing: &str, edit: &ConfigEdit) -> (String, bool) {
 
 /// Writes the edit to the config file ([`config_path`], so an
 /// `AEXCOMPAT_MULTIFILTER_CONFIG` override is honoured). Returns the path
-/// written and whether the previous file was backed up as unparseable.
-fn save_config_edit(edit: &ConfigEdit) -> Result<(PathBuf, bool), String> {
+/// written and the backup path when the previous file was unparseable.
+fn save_config_edit(edit: &ConfigEdit) -> Result<(PathBuf, Option<PathBuf>), String> {
     let path = config_path()
         .ok_or_else(|| "APPDATA が取得できないため、保存先を決定できません".to_owned())?;
-    let existing = match std::fs::read_to_string(&path) {
+    let backup = write_config_edit(&path, edit)?;
+    if let Some(backup) = &backup {
+        log_warn(&format!(
+            "{} could not be parsed; the settings dialog backed it up to {} before rewriting it",
+            path.display(),
+            backup.display()
+        ));
+    }
+    log_info(&format!(
+        "the settings dialog wrote {}; the changes apply on the next AviUtl2 launch",
+        path.display()
+    ));
+    Ok((path, backup))
+}
+
+/// The file half of a save, separated from [`config_path`] resolution and the
+/// host logging so the backup/staged-write behaviour is testable against a
+/// plain path (the log buffer is process-global state a test must not touch).
+fn write_config_edit(path: &Path, edit: &ConfigEdit) -> Result<Option<PathBuf>, String> {
+    let existing = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         // Refuse rather than overwrite content that could not even be read.
@@ -208,28 +234,19 @@ fn save_config_edit(edit: &ConfigEdit) -> Result<(PathBuf, bool), String> {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("{} を作成できません: {error}", parent.display()))?;
     }
-    if backed_up {
-        let backup = path.with_extension("toml.bak");
-        std::fs::copy(&path, &backup)
+    let backup = backed_up.then(|| path.with_extension("toml.bak"));
+    if let Some(backup) = &backup {
+        std::fs::copy(path, backup)
             .map_err(|error| format!("{} へ退避できません: {error}", backup.display()))?;
-        log_warn(&format!(
-            "{} could not be parsed; the settings dialog backed it up to {} before rewriting it",
-            path.display(),
-            backup.display()
-        ));
     }
     // Write-then-rename, so a crash mid-save cannot leave a half-written config
     // (std's rename replaces the destination on Windows).
     let staged = path.with_extension("toml.tmp");
     std::fs::write(&staged, &text)
         .map_err(|error| format!("{} に書き込めません: {error}", staged.display()))?;
-    std::fs::rename(&staged, &path)
+    std::fs::rename(&staged, path)
         .map_err(|error| format!("{} に書き込めません: {error}", path.display()))?;
-    log_info(&format!(
-        "the settings dialog wrote {}; the changes apply on the next AviUtl2 launch",
-        path.display()
-    ));
-    Ok((path, backed_up))
+    Ok(backup)
 }
 
 /// Lines describing env vars that will beat whatever the dialog saves, so a
@@ -299,14 +316,22 @@ fn show_config_dialog(parent: WsHWND, instance: WsHINSTANCE) {
     let template = build_dialog_template();
     // SAFETY: the template buffer and `init` outlive the call (the dialog is
     // modal); the dialog proc matches the DLGPROC contract.
-    unsafe {
+    let outcome = unsafe {
         DialogBoxIndirectParamW(
             instance,
             template.as_ptr().cast(),
             parent,
             Some(config_dialog_proc),
             &init as *const DialogInit as LPARAM,
-        );
+        )
+    };
+    // 1 = saved, 2 = cancelled (the EndDialog results below); 0/-1 mean the
+    // dialog never came up, which from the menu looks like a dead click — say
+    // so rather than joining the silent-failure modes issue #655 removed.
+    if outcome <= 0 {
+        log_warn(&format!(
+            "the settings dialog could not be created (DialogBoxIndirectParamW returned {outcome})"
+        ));
     }
 }
 
@@ -348,9 +373,11 @@ fn handle_dialog_message(dialog: WsHWND, message: u32, wparam: WPARAM, lparam: L
                 1
             }
             IDC_CANCEL => {
-                // Also delivered for ESC and the title-bar close button.
+                // Also delivered for ESC and the title-bar close button. 2,
+                // not 0: `DialogBoxIndirectParamW` returns 0/-1 for "the
+                // dialog never ran", and a cancel must not look like that.
                 // SAFETY: as above.
-                unsafe { EndDialog(dialog, 0) };
+                unsafe { EndDialog(dialog, 2) };
                 1
             }
             _ => 0,
@@ -378,15 +405,16 @@ fn save_from_dialog(dialog: WsHWND) -> bool {
         }
     };
     match save_config_edit(&edit) {
-        Ok((path, backed_up)) => {
+        Ok((path, backup)) => {
             let mut message = format!(
                 "保存しました: {}\r\n変更は AviUtl2 の再起動後に反映されます。",
                 path.display()
             );
-            if backed_up {
-                message.push_str(
-                    "\r\n元のファイルは解析できなかったため config.toml.bak に退避しました。",
-                );
+            if let Some(backup) = backup {
+                message.push_str(&format!(
+                    "\r\n元のファイルは解析できなかったため {} に退避しました。",
+                    backup.display()
+                ));
             }
             message_box(dialog, &message, MB_ICONINFORMATION);
             true
@@ -468,7 +496,7 @@ fn build_dialog_template() -> Vec<u32> {
     push_u32(&mut words, 0);
     let count_at = words.len();
     words.push(0);
-    for value in [0i16, 0, 340, 290] {
+    for value in [0i16, 0, 340, 299] {
         words.push(value as u16);
     }
     words.push(0);
@@ -540,10 +568,11 @@ fn build_dialog_template() -> Vec<u32> {
     );
     item(number, [181, 212, 90, 13], IDC_BYTE_LIMIT, ATOM_EDIT, "");
 
-    item(SS_NOPREFIX, [7, 230, 326, 26], IDC_ENV_NOTE, ATOM_STATIC, "");
+    // Tall enough for every env-override line at once (four are possible).
+    item(SS_NOPREFIX, [7, 230, 326, 34], IDC_ENV_NOTE, ATOM_STATIC, "");
     item(
         SS_NOPREFIX,
-        [7, 258, 326, 8],
+        [7, 266, 326, 8],
         0xFFFF,
         ATOM_STATIC,
         "変更は AviUtl2 の再起動後に反映されます。",
@@ -551,12 +580,12 @@ fn build_dialog_template() -> Vec<u32> {
 
     item(
         BS_DEFPUSHBUTTON | WS_TABSTOP,
-        [222, 270, 50, 14],
+        [222, 278, 50, 14],
         IDC_OK,
         ATOM_BUTTON,
         "OK",
     );
-    item(WS_TABSTOP, [277, 270, 56, 14], IDC_CANCEL, ATOM_BUTTON, "キャンセル");
+    item(WS_TABSTOP, [277, 278, 56, 14], IDC_CANCEL, ATOM_BUTTON, "キャンセル");
 
     words[count_at] = items;
 

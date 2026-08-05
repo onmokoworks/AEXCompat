@@ -3900,12 +3900,23 @@ mod tests {
         assert!(error.contains("many"), "{error}");
     }
 
-    /// TOML integers are i64: a byte limit beyond that would be written and
-    /// then fail to load, so it is rejected at the dialog instead.
+    /// TOML integers are i64: a limit beyond that would be written as a
+    /// wrapped negative that the next launch's `load_config` rejects — a
+    /// saved-then-ignored config — so it is rejected at the dialog instead.
     #[test]
     fn a_byte_limit_beyond_toml_range_is_rejected() {
         let form = ConfigForm {
             byte_limit: u64::MAX.to_string(),
+            ..ConfigForm::default()
+        };
+        parse_form(&form).expect_err("u64::MAX does not fit a TOML integer");
+    }
+
+    /// Same for the module count (usize is also 64-bit here).
+    #[test]
+    fn a_module_limit_beyond_toml_range_is_rejected() {
+        let form = ConfigForm {
+            module_limit: u64::MAX.to_string(),
             ..ConfigForm::default()
         };
         parse_form(&form).expect_err("u64::MAX does not fit a TOML integer");
@@ -3997,6 +4008,70 @@ mod tests {
         let form = form_from_config(&config);
         assert_eq!(form.dirs, "C:\\plugins\r\nD:\\more");
         assert_eq!(form.module_limit, "40");
+    }
+
+    fn save_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "aexcompat-multifilter-save-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A first save creates the folder and the file, leaves no staging file
+    /// behind, and reports no backup.
+    #[test]
+    fn a_save_creates_the_config_file() {
+        let dir = save_dir("fresh");
+        let path = dir.join("config.toml");
+        let edit = parse_form(&full_form()).expect("a fully valid form parses");
+        let backup = write_config_edit(&path, &edit).expect("saving into a new folder works");
+        assert_eq!(backup, None);
+        let config: Config =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).expect("the file loads");
+        assert_eq!(config.dependency_module_limit, Some(40));
+        assert!(
+            !path.with_extension("toml.tmp").exists(),
+            "the staging file was renamed away"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An unparseable existing file is preserved in the reported backup, and
+    /// the config itself is rewritten cleanly.
+    #[test]
+    fn a_save_over_a_broken_file_backs_it_up() {
+        let dir = save_dir("broken");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "not toml [").unwrap();
+        let edit = parse_form(&ConfigForm::default()).expect("an empty form is valid");
+        let backup = write_config_edit(&path, &edit)
+            .expect("a broken file is backed up, not a failure")
+            .expect("the broken file was flagged");
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            "not toml [",
+            "the original bytes survive in the backup"
+        );
+        toml::from_str::<Config>(&std::fs::read_to_string(&path).unwrap())
+            .expect("the rewritten file loads");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file that exists but cannot be read must not be overwritten: losing
+    /// unreadable content is worse than failing the save.
+    #[test]
+    fn an_unreadable_file_refuses_the_save() {
+        let dir = save_dir("unreadable");
+        // A directory at the config path reads as an error that is not
+        // NotFound, standing in for a locked/permission-broken file.
+        std::fs::create_dir_all(dir.join("config.toml")).unwrap();
+        let edit = parse_form(&ConfigForm::default()).expect("an empty form is valid");
+        write_config_edit(&dir.join("config.toml"), &edit)
+            .expect_err("an unreadable existing file blocks the save");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The template stream is what keeps the dialog alive at all; a malformed

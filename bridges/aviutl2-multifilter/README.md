@@ -152,7 +152,8 @@ dependency_dirs = ['C:\Program Files\Adobe\Adobe After Effects 2025\Support File
 TOML を手で書かなくても、AviUtl2 の設定メニュー内「AEXCompat multi-filter」から
 同じ項目を編集できる。保存先は上記の config.toml と同一 (`AEXCOMPAT_MULTIFILTER_CONFIG`
 も同様に効く) で、手書きした既存ファイルのコメント・未知キーは保存後も維持される
-(`toml_edit` によるマージ。単一フォルダ指定の `dir` だけは保存時に `dirs` へ畳まれる)。
+(`toml_edit` によるマージ。ただしダイアログが書き換えるキー自体に付けたコメントは
+値と一緒に消える。単一フォルダ指定の `dir` は保存時に `dirs` へ畳まれる)。
 既存ファイルが TOML として解析できない場合は `config.toml.bak` に退避してから書き直す。
 
 ダイアログが編集するのはファイルであってロード済みの状態ではない: config はロード時に
