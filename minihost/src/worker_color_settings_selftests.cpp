@@ -186,8 +186,30 @@ bool verify_pf_color_settings_suite6() {
   if (suite.xform_working_to_view(&g_aegp_item_view, world8, mismatch) == 0) return false;
   if (aegp_world_dispose(world8) != 0 || aegp_world_dispose(world16) != 0 ||
       aegp_world_dispose(world32) != 0 || aegp_world_dispose(dst8) != 0) return false;
-  return color_settings_profiles_balanced() && aegp_memory_balanced() &&
-      release_suite("PF Color Settings Suite", 7) == 0;
+  if (!color_settings_profiles_balanced() || !aegp_memory_balanced() ||
+      release_suite("PF Color Settings Suite", 7) != 0)
+    return false;
+
+  // Versions 4 and 6 are frozen prefixes of this table and are served from it,
+  // so a plug-in acquiring either gets the same pointer and reads only its own
+  // length (issue #716). What can be checked here is that all three resolve to
+  // one table rather than to separately maintained copies that could drift; the
+  // prefix relation itself is a property of the SDK headers.
+  //
+  // Each acquire is released on every path out, including the failing ones, so
+  // a regression here does not also leave a lease behind.
+  const void* acquired4 = nullptr;
+  if (acquire_suite("PF Color Settings Suite", 4, &acquired4) != 0) return false;
+  bool ok = acquired4 == &g_color_settings_suite6;
+  const void* acquired6 = nullptr;
+  if (acquire_suite("PF Color Settings Suite", 6, &acquired6) == 0) {
+    ok = ok && acquired6 == &g_color_settings_suite6;
+    ok = release_suite("PF Color Settings Suite", 6) == 0 && ok;
+  } else {
+    ok = false;
+  }
+  ok = release_suite("PF Color Settings Suite", 4) == 0 && ok;
+  return ok && color_settings_profiles_balanced() && aegp_memory_balanced();
 }
 #undef release_suite
 #undef acquire_suite
