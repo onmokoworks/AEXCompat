@@ -539,6 +539,22 @@ mod worker {
                         return 3;
                     }
                 }
+                // In-place dependency search directories (issue #751): the
+                // real worker's apply_dependency_search_dirs requires
+                // non-empty absolute directories joined by ';', bounded at
+                // 16. Mirror the shape gate so a malformed broker join fails
+                // these tests too.
+                "--dependency-dirs-v1" => {
+                    let dirs: Vec<&str> = value.split(';').collect();
+                    let shape_ok = !value.is_empty()
+                        && dirs.len() <= 16
+                        && dirs
+                            .iter()
+                            .all(|dir| !dir.is_empty() && std::path::Path::new(dir).is_absolute());
+                    if !shape_ok {
+                        return 3;
+                    }
+                }
                 "--output-checksum-detail-v1" => {
                     if value != "1" {
                         return 3;
