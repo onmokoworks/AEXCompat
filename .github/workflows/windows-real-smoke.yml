@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   smoke:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event.repository.private
     runs-on: [self-hosted, Windows, X64, windows-real]
     timeout-minutes: 45
     steps:

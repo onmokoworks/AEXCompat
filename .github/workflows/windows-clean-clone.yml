@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   source-reproducible:
-    runs-on: windows-latest
+    # Keep untrusted public-repository jobs off the physical workstation.
+    # Changing the repository visibility to public automatically restores the
+    # GitHub-hosted runner without requiring a follow-up workflow edit.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","Windows","X64","windows-real"]') || 'windows-latest' }}
     timeout-minutes: 45
     env:
       PYTHONUTF8: "1"
@@ -126,7 +129,9 @@ jobs:
   # プラットフォーム非依存の bash+jq で、プロセス起動が速い ubuntu で回す
   # 方が Windows 本体 job より数倍速い (#684)。
   dev-infra:
-    runs-on: ubuntu-latest
+    # This job used Ubuntu originally, so return to it automatically if the
+    # repository is made public. While private, Git Bash + jq run it locally.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","Windows","X64","windows-real"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
