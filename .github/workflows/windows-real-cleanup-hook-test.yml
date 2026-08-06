@@ -1,6 +1,6 @@
 name: Windows real cleanup hook test
 
-# Temporary integration test; removed after the runner hooks are verified.
+# Temporary integration test; retry after switching to contents-only cleanup.
 
 on:
   push:
