@@ -9,6 +9,7 @@ def test_windows_clean_clone_runs_canonical_source_reproducible_gates():
         encoding="utf-8"
     )
     assert "github.event.repository.private" in workflow
+    assert "vars.USE_SELF_HOSTED_RUNNER == 'true'" in workflow
     assert "fromJSON('[\"self-hosted\",\"Windows\",\"X64\",\"windows-real\"]')" in workflow
     assert "|| 'windows-latest'" in workflow
     assert "|| 'ubuntu-latest'" in workflow
