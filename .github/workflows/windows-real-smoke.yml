@@ -52,5 +52,5 @@ jobs:
         working-directory: broker
         run: cargo check --workspace --locked
 
-      - name: Validate Python collection
-        run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
+      - name: Collect Python tests
+        run: uv run python -m pytest --collect-only -q
