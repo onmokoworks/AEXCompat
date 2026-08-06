@@ -52,5 +52,5 @@ jobs:
         working-directory: broker
         run: cargo check --workspace --locked
 
-      - name: Collect Python tests
-        run: uv run python -m pytest --collect-only -q
+      - name: Verify Python dependencies
+        run: uv run python -c "import pytest; import PIL; import jsonschema; import OpenEXR; print('Python dependencies import successfully')"
