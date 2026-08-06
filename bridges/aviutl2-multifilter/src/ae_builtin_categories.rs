@@ -7,8 +7,11 @@
 // AE menu category. Display metadata only: it never identifies, gates, or
 // enforces anything, and a wrong row costs a cosmetic menu position.
 //
-// Rows marked "uncertain" are best-effort placements for files whose AE
-// menu entry is ambiguous; correct them freely.
+// Verified against a real AE 2026 install: an ExtendScript dump of
+// `app.effects` (displayName / matchName / category) was joined to these
+// stems by display name — 151 rows matched that oracle exactly and 10 were
+// corrected from it. Rows marked "uncertain" could not be joined (hidden or
+// ambiguously named entries) and stay best-effort; correct them freely.
 
 /// File stem (matched case-insensitively) → canonical English AE category.
 static AE_BUILTIN_CATEGORIES: &[(&str, &str)] = &[
@@ -42,7 +45,7 @@ static AE_BUILTIN_CATEGORIES: &[(&str, &str)] = &[
     ("Bilateral", "Blur & Sharpen"),
     ("Blend", "Channel"),
     ("Block_Dissolve", "Transition"),
-    ("Broadcast_Colors", "Video"),
+    ("Broadcast_Colors", "Color Correction"),
     ("Brush_Strokes", "Stylize"),
     ("Bulge", "Distort"),
     ("Calculations", "Channel"),
@@ -65,14 +68,14 @@ static AE_BUILTIN_CATEGORIES: &[(&str, &str)] = &[
     ("Color_Balance", "Color Correction"),
     ("Color_Diff", "Keying"),
     ("Color_Emboss", "Stylize"),
-    ("Color_HLS", "Obsolete"),
-    ("Color_Key", "Keying"),
+    ("Color_HLS", "Color Correction"),
+    ("Color_Key", "Obsolete"),
     ("Color_Range", "Keying"),
     ("Colorama", "Color Correction"),
     ("ColorsQuad", "Generate"),
     ("Compound_Blur", "Blur & Sharpen"),
     ("Contrast", "Color Correction"), // uncertain
-    ("Curl_Noise", "Simulation"),     // uncertain
+    ("Curl_Noise", "Noise & Grain"),
     ("Curves", "Color Correction"),
     ("Deflicker", "Utility"), // uncertain
     ("Depth_Field", "3D Channel"),
@@ -93,7 +96,7 @@ static AE_BUILTIN_CATEGORIES: &[(&str, &str)] = &[
     ("Flare", "Generate"),
     ("Foam", "Simulation"),
     ("Fog_3d", "3D Channel"),
-    ("Fractal", "Obsolete"),
+    ("Fractal", "Generate"),
     ("FractalNoise", "Noise & Grain"),
     ("Gaussian_Blur", "Blur & Sharpen"),
     ("Gaussian_Blur_MC", "Blur & Sharpen"),
@@ -113,7 +116,7 @@ static AE_BUILTIN_CATEGORIES: &[(&str, &str)] = &[
     ("Linear_CK", "Keying"),
     ("Linear_Wipe", "Transition"),
     ("Liquify", "Distort"),
-    ("Luma_Key", "Keying"),
+    ("Luma_Key", "Obsolete"),
     ("Lumetri", "Color Correction"),
     ("Magnify", "Distort"),
     ("MatchGrain", "Noise & Grain"),
@@ -126,10 +129,10 @@ static AE_BUILTIN_CATEGORIES: &[(&str, &str)] = &[
     ("NoiseHLS", "Noise & Grain"),
     ("NoiseHLSAuto", "Noise & Grain"),
     ("Numbers", "Text"),
-    ("OCIOCDLTransform", "Utility"),
-    ("OCIOColorSpaceTransform", "Utility"),
-    ("OCIODisplayTransform", "Utility"),
-    ("OCIOFileTransform", "Utility"),
+    ("OCIOCDLTransform", "Color Correction"),
+    ("OCIOColorSpaceTransform", "Color Correction"),
+    ("OCIODisplayTransform", "Color Correction"),
+    ("OCIOFileTransform", "Color Correction"),
     ("Offset", "Distort"),
     ("OpticsComp", "Distort"),
     ("PS_Arb_Map", "Obsolete"),
