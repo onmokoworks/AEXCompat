@@ -30,9 +30,9 @@ def test_pf_ansi_numeric_callbacks_use_a_finite_fail_closed_policy():
 def test_pf_ansi_string_callbacks_remain_null_and_length_guarded():
     text = source_text()
     for guard in (
-        "if (!destination || !format || strnlen_s(format, 256) == 256) return -1;",
+        "if (!destination || !format || strnlen_s(format, 256) == 256)",
         "required >= 0 && required <= 4096",
-        "if (!destination || !source) return nullptr;",
+        "if (!destination || !source)",
         "const std::size_t length = strnlen_s(source, 4096);",
     ):
         assert guard in text

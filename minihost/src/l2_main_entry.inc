@@ -349,7 +349,7 @@ int32_t __cdecl diag_blend_world(void* effect_ref, const void* source1,
           ? aexcompat::callback_diagnostics::Reason::InvalidArguments
           : aexcompat::callback_diagnostics::Reason::CallbackError);
 }
-int32_t __cdecl diag_convolve_world(void* effect_ref, void* source, const LegacyRect* area,
+int32_t __cdecl diag_convolve_world(void* effect_ref, void* source, const ::LegacyRect* area,
                                     uint32_t flags, int32_t kernel_size, void* alpha_kernel,
                                     void* red_kernel, void* green_kernel, void* blue_kernel,
                                     void* destination) {
@@ -361,8 +361,8 @@ int32_t __cdecl diag_convolve_world(void* effect_ref, void* source, const Legacy
           : aexcompat::callback_diagnostics::Reason::CallbackError);
 }
 int32_t __cdecl diag_copy_world(void* effect_ref, void* source, void* destination,
-                               const LegacyRect* source_rect,
-                               const LegacyRect* destination_rect) {
+                               const ::LegacyRect* source_rect,
+                               const ::LegacyRect* destination_rect) {
   return utility_callback_result(aexcompat::callback_diagnostics::Callback::Copy,
       copy_world8(effect_ref, source, destination, source_rect, destination_rect),
       !source || !destination
@@ -370,14 +370,14 @@ int32_t __cdecl diag_copy_world(void* effect_ref, void* source, void* destinatio
           : aexcompat::callback_diagnostics::Reason::CallbackError);
 }
 int32_t __cdecl diag_fill_world(void* effect_ref, const void* color,
-                               const LegacyRect* area, void* world) {
+                               const ::LegacyRect* area, void* world) {
   return utility_callback_result(aexcompat::callback_diagnostics::Callback::Fill,
       fill_world8(effect_ref, color, area, world),
       !world ? aexcompat::callback_diagnostics::Reason::MissingWorld
              : aexcompat::callback_diagnostics::Reason::CallbackError);
 }
 int32_t __cdecl diag_fill_world16(void* effect_ref, const void* color,
-                                 const LegacyRect* area, void* world) {
+                                 const ::LegacyRect* area, void* world) {
   return utility_callback_result(aexcompat::callback_diagnostics::Callback::Fill,
       fill_world16(effect_ref, color, area, world),
       !world ? aexcompat::callback_diagnostics::Reason::MissingWorld
@@ -420,7 +420,7 @@ int32_t __cdecl diag_dispose_world(void* effect_ref, void* world) {
              : aexcompat::callback_diagnostics::Reason::CallbackError);
 }
 int32_t __cdecl diag_transfer_rect(void* effect_ref, int32_t quality, uint32_t mode_flags,
-                                  int32_t field, const LegacyRect* source_rect,
+                                  int32_t field, const ::LegacyRect* source_rect,
                                   const void* source_world, const void* composite_mode,
                                   const void* mask_world, int32_t destination_x,
                                   int32_t destination_y, void* destination_world) {
@@ -437,7 +437,7 @@ int32_t __cdecl diag_transform_world(void* effect_ref, int32_t quality, uint32_t
                                      const void* composite_mode, const void* mask_world,
                                      const void* matrices, int32_t matrix_count,
                                      uint8_t source_to_destination,
-                                     const LegacyRect* destination_rect,
+                                     const ::LegacyRect* destination_rect,
                                      void* destination_world) {
   return utility_callback_result(aexcompat::callback_diagnostics::Callback::TransformWorld,
       transform_world(effect_ref, quality, mode_flags, field, source_world, composite_mode,
@@ -693,14 +693,11 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
     return result;
   }
   // Step 5: authenticate plugins[N] against the manifest, then load with the
-  // admission flags. A failure here fails the session closed on both
-  // manifest shapes: on the sealed path the broker staged the wrong bytes;
-  // on the in-place path (issue #751) the real bytes changed under the
-  // recorded identity (the #309 state transition) or the loader rejected
+  // in-place admission flags. A failure means the real bytes changed under
+  // the recorded identity (the #309 state transition) or the loader rejected
   // the closure. The broker's session-invalidation path reopens fresh
   // sessions and re-discovery converges on the new bytes, so the mismatch
   // stays a state transition rather than a launch gate.
-  const bool in_place = context.manifest->in_place;
   const std::filesystem::path path = cluster::plugin_path(*context.manifest,
       static_cast<std::size_t>(plugin_index));
   std::string actual_sha256;
@@ -711,7 +708,7 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   }
   HMODULE module = LoadLibraryExW(path.c_str(), nullptr,
       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32 |
-      (in_place ? LOAD_LIBRARY_SEARCH_USER_DIRS : 0));
+      LOAD_LIBRARY_SEARCH_USER_DIRS);
   if (!module) {
     result.hard_failure = true;
     return result;

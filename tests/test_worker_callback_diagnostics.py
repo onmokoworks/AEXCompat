@@ -4,13 +4,16 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_smartfx_callback_results_and_denial_reasons_are_reportable_on_mac(tmp_path):
     compiler = shutil.which("clang++") or shutil.which("c++")
-    assert compiler is not None, "a C++17 compiler is required"
+    if compiler is None:
+        pytest.skip("a portable C++17 compiler is unavailable")
     executable = tmp_path / "worker_callback_diagnostics_selftest"
     subprocess.run(
         [
