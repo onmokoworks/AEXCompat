@@ -223,12 +223,13 @@ fn pipl_category(bytes: &[u8]) -> Option<String> {
 }
 
 /// The menu label a filter registers with (issue #871): the effect's own AE
-/// category nested under "AEXCompat", or the bare "AEXCompat" without one.
-/// Initial value only — AviUtl2 persists a user-editable label per effect on
-/// first registration.
-fn filter_label(category: Option<&str>) -> String {
+/// category — localized per the configured category language (issue #876) —
+/// nested under "AEXCompat", or the bare "AEXCompat" without one. Initial
+/// value only — AviUtl2 persists a user-editable label per effect on first
+/// registration.
+fn filter_label(category: Option<&str>, japanese: bool) -> String {
     match category {
-        Some(category) => format!("AEXCompat\\{category}"),
+        Some(category) => format!("AEXCompat\\{}", localized_category(category, japanese)),
         None => "AEXCompat".to_owned(),
     }
 }

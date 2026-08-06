@@ -31,6 +31,11 @@ struct Config {
     /// `.aex`-extension-insensitive).
     #[serde(default)]
     ignore: Vec<String>,
+    /// Menu-category display language (issue #876): "en" shows the canonical
+    /// English AE category names; anything else (or absent) shows Adobe's
+    /// Japanese names for the standard categories. Applies to filters not yet
+    /// labelled in aviutl2.ini, like every other label initial value.
+    category_language: Option<String>,
 }
 
 /// The TOML config path: `AEXCOMPAT_MULTIFILTER_CONFIG` if set, else the Windows
@@ -306,6 +311,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         &remembered_names,
     );
     let secondary_names = plan_secondary_filter_names(&plugins, &filter_names, &resolved_entries);
+    let japanese_categories = config.category_language.as_deref() != Some("en");
     report_qualified_names(&plugins, &filter_names);
     let mut pending: Vec<PathBuf> = Vec::new();
     let mut registered: usize = 0;
@@ -365,6 +371,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
                     companions.clone(),
                     &view.name,
                     view.selector,
+                    japanese_categories,
                 );
                 registered += 1;
             }
