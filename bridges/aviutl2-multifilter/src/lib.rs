@@ -94,7 +94,6 @@ const MAX_CLUSTER_MODULE_BOUND: usize = 4096;
 /// open (issue #751).
 const MAX_CLUSTER_ADMITTED_DIRS: usize =
     aexcompat_broker::cluster_manifest::MAX_CLUSTER_ADMITTED_DIRS;
-const CLUSTER_MODULE_HEADROOM: usize = 256;
 /// The one-shot module-audit cap (the broker's `MAX_AUDITED_MODULES`): total
 /// modules across every category in one snapshot. A singleton whose closure
 /// cannot fit it is exactly the case the cluster session's declared-set

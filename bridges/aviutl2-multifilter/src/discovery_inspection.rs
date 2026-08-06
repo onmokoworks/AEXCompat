@@ -3,6 +3,20 @@ struct PreparedDiscovery {
     entry: CacheEntry,
     identity: Option<String>,
 }
+
+/// The in-place cluster key (issue #751): plug-ins sharing one search-root
+/// set (their own directory plus the configured dependency directories)
+/// share one discovery session, and the render pool groups on the same key.
+/// Removed with the staged paths in #870 while its callers stayed (issue
+/// #872); in-place-only still needs the key.
+fn in_place_identity(roots: &[PathBuf]) -> String {
+    let mut keys: Vec<String> = roots
+        .iter()
+        .map(|root| root.to_string_lossy().to_lowercase())
+        .collect();
+    keys.sort();
+    format!("in-place:{}", keys.join(";"))
+}
 fn prepare_discovery_in_place(
     plugin: &Path,
     dependency: &DependencyConfig,
@@ -604,6 +618,30 @@ fn normalize_parameters_for_cache(parameters: &mut [InteractiveParameter]) {
 ///    (design §8); singletons and failed resolutions keep the per-plugin
 ///    one-shot inspect.
 ///
+/// Diagnostics entry into the crate's real discovery pass: the same
+/// `discover_all` the AviUtl2 registration runs, callable from the
+/// measurement examples so a timing run exercises the code that ships
+/// instead of a reimplementation. Not part of the bridge API. (Removed with
+/// the staged paths in #870 while `discovery_ab_diag` kept calling it —
+/// issue #872.)
+#[doc(hidden)]
+pub fn discover_all_for_diagnostics(
+    repository: &Path,
+    paths: &[PathBuf],
+    dependency_dirs: Vec<PathBuf>,
+) -> Vec<(PathBuf, bool, Option<String>)> {
+    let dependency = DependencyConfig {
+        dirs: dependency_dirs,
+        module_limit: None,
+        byte_limit: None,
+    };
+    let build = build_fingerprint(repository, &dependency);
+    discover_all(repository, paths, &dependency, build)
+        .into_iter()
+        .map(|(path, entry)| (path, entry.ok, entry.failure_classification))
+        .collect()
+}
+
 /// A panic in any task (arbitrary third-party AEX) is caught and turned into
 /// negative entries, so one bad plug-in cannot abort the process by
 /// unwinding out of the scoped thread.
