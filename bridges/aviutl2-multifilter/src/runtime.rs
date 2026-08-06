@@ -910,7 +910,6 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
             }
             let dependencies = Vec::new();
             let dependency_search_dirs = roots.clone();
-            let dependency_count = dependencies.len();
             let request = SessionOpenRequest {
                 repository: &config.repository,
                 plugin_path: &config.plugin,
@@ -976,7 +975,6 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                             expected_size,
                         });
                     }
-                    let declared = plugins.len() + dependency_count;
                     // The in-place session (issue #751) declares no closure:
                     // its module bound is the recorded audit's enumeration
                     // capacity, and feasibility is the plugin count plus the
@@ -996,15 +994,9 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         }
                         dirs.len()
                     };
-                    let module_bound = if in_place {
-                        MAX_CLUSTER_MODULE_BOUND as u32
-                    } else {
-                        (declared + CLUSTER_MODULE_HEADROOM) as u32
-                    };
+                    let module_bound = MAX_CLUSTER_MODULE_BOUND as u32;
                     let infeasible = plugins.len() > MAX_CLUSTER_PLUGINS
-                        || (in_place && admitted_dirs > MAX_CLUSTER_ADMITTED_DIRS)
-                        || (!in_place
-                            && declared + CLUSTER_MODULE_HEADROOM > MAX_CLUSTER_MODULE_BOUND);
+                        || admitted_dirs > MAX_CLUSTER_ADMITTED_DIRS;
                     if infeasible {
                         match RenderSession::open(request) {
                             Ok(session) => (session, 0),
