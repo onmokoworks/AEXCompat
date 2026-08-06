@@ -166,7 +166,7 @@ static AE_BUILTIN_CATEGORIES: &[(&str, &str)] = &[
     ("Threshold", "Stylize"),
     ("Tile", "Stylize"),
     ("Time_Displace", "Time"),
-    ("Timecode", "Video"),
+    ("Timecode", "Text"),
     ("Tint", "Color Correction"),
     ("Transform", "Distort"),
     ("TurbulentDisplace", "Distort"),

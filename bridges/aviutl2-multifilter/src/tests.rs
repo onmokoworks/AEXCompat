@@ -5882,6 +5882,12 @@ mod tests {
         assert_eq!(form.module_limit, "7");
         assert_eq!(form.byte_limit, "");
         assert_eq!(form.ignore, "Noisy");
+        assert!(form.japanese_categories, "an absent key reads as 日本語");
+        let english = Config {
+            category_language: Some("en".into()),
+            ..config
+        };
+        assert!(!form_from_config(&english).japanese_categories);
     }
 
     /// A dialog save must not destroy what it does not manage: comments and
@@ -5912,8 +5918,8 @@ mod tests {
     /// default", and a lingering stale value would override it.
     #[test]
     fn a_cleared_field_removes_its_key() {
-        let existing =
-            "dirs = ['C:\\plugins']\nrepository = 'C:\\repo'\ndependency_byte_limit = 9\n";
+        let existing = "dirs = ['C:\\plugins']\nrepository = 'C:\\repo'\n\
+                        dependency_byte_limit = 9\ncategory_language = 'en'\n";
         let edit = parse_form(&ConfigForm::default()).expect("an empty form is valid");
         let (text, backed_up) = merged_config_text(existing, &edit);
         assert!(!backed_up);
