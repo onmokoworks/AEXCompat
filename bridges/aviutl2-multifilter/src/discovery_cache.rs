@@ -2458,17 +2458,31 @@ fn save_cache(entries: &HashMap<String, CacheEntry>) -> bool {
     let Some(path) = cache_path() else {
         return false;
     };
+    save_cache_at(&path, entries)
+}
+
+/// The file half of [`save_cache`], separated so the merge direction is
+/// pinned by a test against a real file: issue #840 was this call site
+/// passing the on-disk snapshot as the authoritative side, which no unit
+/// test of [`merge_cache_entries`] alone could see.
+fn save_cache_at(path: &Path, entries: &HashMap<String, CacheEntry>) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     // The lock is held across the disk read and the atomic replacement.  A
     // lock around only the final rename would still allow two launches to read
     // the same old cache and lose one another's newly discovered entries.
-    let Some(_lock) = acquire_cache_lock(&path) else {
+    let Some(_lock) = acquire_cache_lock(path) else {
         return false;
     };
-    let mut merged_entries = load_cache_at(&path);
-    merge_cache_entries(&mut merged_entries, entries);
+    // This launch's snapshot is the authoritative first argument (issue
+    // #840): an update to an existing key — a re-verified build, new
+    // parameters for replaced bytes, a negative for bytes that no longer
+    // discover — must reach the file. The on-disk side contributes disjoint
+    // keys from a concurrent launch, plus its same-meta known-good over a
+    // local transient negative.
+    let mut merged_entries = entries.clone();
+    merge_cache_entries(&mut merged_entries, &load_cache_at(path));
     let file = CacheFile {
         version: CACHE_VERSION,
         // An entry that cannot be serialized is dropped rather than failing the

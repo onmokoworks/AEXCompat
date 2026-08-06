@@ -478,6 +478,93 @@ mod tests {
         );
     }
 
+    /// The ok-over-negative arm is asymmetric on purpose and must not fire in
+    /// reverse: a local known-good survives an on-disk same-meta negative.
+    #[test]
+    fn a_concurrent_cache_save_keeps_a_local_known_good_over_a_disk_negative() {
+        let key = "same.aex";
+        let mut local = HashMap::from([(key.to_string(), discovered(5, 64, build(2)))]);
+        let on_disk = HashMap::from([(key.to_string(), failed(5, 64, build(1)))]);
+
+        merge_cache_entries(&mut local, &on_disk);
+
+        assert!(local[key].ok, "the local good entry stays authoritative");
+        assert_eq!(local[key].build, build(2), "and keeps its own provenance");
+    }
+
+    /// Issue #840, pinned against a real file: `save_cache` passed the
+    /// on-disk snapshot as the authoritative merge side, so an update to an
+    /// existing key — here a re-verification by a newer host — never
+    /// persisted, and no unit test of the merge function alone could see the
+    /// swapped call site.
+    #[test]
+    fn a_saved_update_to_an_existing_key_persists() {
+        let dir = std::env::temp_dir().join(format!(
+            "aexcompat-mf-savecache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("discovery-cache.json");
+        let key = "effect.aex".to_string();
+
+        let first = HashMap::from([(key.clone(), discovered(5, 64, build(1)))]);
+        assert!(save_cache_at(&path, &first), "the seed save reaches disk");
+
+        // The same bytes re-verified by a newer host: same meta, new build.
+        let updated = HashMap::from([(key.clone(), discovered(5, 64, build(2)))]);
+        assert!(save_cache_at(&path, &updated), "the update save reaches disk");
+
+        let reloaded = load_cache_at(&path);
+        assert_eq!(
+            reloaded[&key].build,
+            build(2),
+            "the existing key's update survived the on-disk merge"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The concurrent-launch half still holds through the file: disjoint
+    /// keys from an earlier save survive a later one, and an on-disk
+    /// same-meta known-good beats a later transient negative.
+    #[test]
+    fn a_save_unions_disjoint_keys_and_keeps_known_good_on_disk() {
+        let dir = std::env::temp_dir().join(format!(
+            "aexcompat-mf-savecache2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("discovery-cache.json");
+
+        let other_launch = HashMap::from([
+            ("other.aex".to_string(), discovered(3, 32, build(1))),
+            ("same.aex".to_string(), discovered(5, 64, build(1))),
+        ]);
+        assert!(save_cache_at(&path, &other_launch));
+
+        // This launch never saw other.aex and failed same.aex transiently.
+        let this_launch = HashMap::from([("same.aex".to_string(), failed(5, 64, build(1)))]);
+        assert!(save_cache_at(&path, &this_launch));
+
+        let reloaded = load_cache_at(&path);
+        assert!(
+            reloaded.contains_key("other.aex"),
+            "the other launch's disjoint discovery survived"
+        );
+        assert!(
+            reloaded["same.aex"].ok,
+            "the on-disk known-good beat the transient negative"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     // --- scan completeness ---------------------------------------------------
 
     #[test]
