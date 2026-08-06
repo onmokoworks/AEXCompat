@@ -2532,11 +2532,32 @@ mod tests {
     }
 
     /// The registered label nests the category under AEXCompat and falls
-    /// back to the bare brand without one.
+    /// back to the bare brand without one; the standard AE categories
+    /// localize per the configured language (issue #876), and a third-party
+    /// category passes through untranslated.
     #[test]
     fn filter_labels_nest_the_category_under_the_brand() {
-        assert_eq!(filter_label(Some("Stylize")), "AEXCompat\\Stylize");
-        assert_eq!(filter_label(None), "AEXCompat");
+        assert_eq!(filter_label(Some("Stylize"), false), "AEXCompat\\Stylize");
+        assert_eq!(
+            filter_label(Some("Stylize"), true),
+            "AEXCompat\\スタイライズ"
+        );
+        assert_eq!(
+            filter_label(Some("RG Universe Transitions"), true),
+            "AEXCompat\\RG Universe Transitions"
+        );
+        assert_eq!(filter_label(None, true), "AEXCompat");
+    }
+
+    /// The bundled-effect table fills the PiPL gap (issue #876): AE's own
+    /// Effects files carry no PiPL, so their stems resolve here, matched
+    /// case-insensitively; anything unknown stays uncategorized.
+    #[test]
+    fn ae_builtin_stems_resolve_to_their_menu_category() {
+        assert_eq!(ae_builtin_category("Gaussian_Blur"), Some("Blur & Sharpen"));
+        assert_eq!(ae_builtin_category("gaussian_blur"), Some("Blur & Sharpen"));
+        assert_eq!(ae_builtin_category("Card Dance"), Some("Simulation"));
+        assert_eq!(ae_builtin_category("TotallyUnknown"), None);
     }
 
     // --- cluster sessions (issue #405) ---
@@ -4004,6 +4025,7 @@ mod tests {
             repository: "  C:\\repo  ".into(),
             module_limit: " 40 ".into(),
             byte_limit: "1073741824".into(),
+            japanese_categories: false,
         }
     }
 
@@ -4076,6 +4098,7 @@ mod tests {
             dependency_module_limit: Some(7),
             dependency_byte_limit: None,
             ignore: vec!["Noisy".into()],
+            category_language: None,
         };
         let form = form_from_config(&config);
         assert_eq!(form.dirs, "C:\\single\r\nC:\\more");
@@ -4146,6 +4169,7 @@ mod tests {
         assert_eq!(config.repository, Some(PathBuf::from("C:\\repo")));
         assert_eq!(config.dependency_byte_limit, Some(1 << 30));
         assert_eq!(config.ignore, vec!["Noisy.aex", "Slow"]);
+        assert_eq!(config.category_language.as_deref(), Some("en"));
         // And the reload shows in the dialog what was typed (modulo trimming).
         let form = form_from_config(&config);
         assert_eq!(form.dirs, "C:\\plugins\r\nD:\\more");
