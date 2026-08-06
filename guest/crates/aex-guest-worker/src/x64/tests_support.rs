@@ -4,6 +4,20 @@ const TEST_CODE: u64 = 0x1000_0000;
 const TEST_CXX_THROW: u64 = STUB_BASE + 0x80460;
 const TEST_THROW_INFO: u64 = TEST_CODE + 0x800;
 
+/// RSP at guest entry for a `call_win64` with `argument_count` slots: the
+/// frame holds the return address, the 32-byte home space, and one slot per
+/// argument beyond the four register slots, padded so RSP % 16 == 8 (mirrors
+/// `call_win64_with_timeout`).
+fn win64_entry_rsp(argument_count: usize) -> u64 {
+    let frame_bytes = 8 + 0x20 + 8 * argument_count.saturating_sub(4) as u64;
+    let frame_bytes = if frame_bytes % 16 == 8 {
+        frame_bytes
+    } else {
+        frame_bytes + 8
+    };
+    STACK_BASE + STACK_SIZE - frame_bytes
+}
+
 fn test_engine(code: &[u8]) -> GuestEngine<'static> {
     let mut unicorn = Unicorn::new_with_data(
         Arch::X86,
@@ -9634,7 +9648,7 @@ fn rtl_capture_context_writes_the_win64_caller_context() {
     assert_eq!(qword(0xe8), 0xeeee);
     assert_eq!(qword(0xf0), 0xffff);
     assert_eq!(qword(0xf8), RETURN_ADDRESS);
-    assert_eq!(qword(0x98), ((STACK_BASE + STACK_SIZE - 0x108) | 8) + 8);
+    assert_eq!(qword(0x98), win64_entry_rsp(6) + 8);
     assert_eq!(&context[0x1a0..0x1b0], &xmm0);
     assert_eq!(&context[0x290..0x2a0], &xmm15);
     assert!(context[0x48..0x78].iter().all(|byte| *byte == 0));
@@ -11042,7 +11056,7 @@ fn issue1347_create_thread_runs_bounded_guest_callback_and_completes_handle() {
     );
     assert_eq!(
         engine.unicorn.reg_read(RegisterX86::RSP).unwrap(),
-        (((STACK_BASE + STACK_SIZE) - 0x108) | 8) + 8
+        win64_entry_rsp(6) + 8
     );
     assert_eq!(engine.unicorn.get_data().current_windows_thread_id, 1);
     assert_eq!(
