@@ -2640,10 +2640,10 @@ fn win64_call_rejects_execution_that_does_not_reach_return_sentinel() {
 }
 
 #[test]
-fn win64_call_passes_ten_and_fifteen_opaque_argument_slots() {
+fn win64_call_passes_ten_fifteen_and_sixteen_opaque_argument_slots() {
     const CODE: u64 = 0x1000_0000;
 
-    for argument_count in [10usize, 15] {
+    for argument_count in [10usize, 15, 16] {
         // Save the four register slots and every supplied stack slot to the
         // buffer in RCX, then save the entry RSP alignment nibble.
         let mut code = vec![
@@ -2653,27 +2653,26 @@ fn win64_call_passes_ten_and_fifteen_opaque_argument_slots() {
             0x4c, 0x89, 0x49, 0x18, // mov [rcx+24],r9
         ];
         for index in 4u8..u8::try_from(argument_count).unwrap() {
-            code.extend_from_slice(&[
-                0x48,
-                0x8b,
-                0x44,
-                0x24,
-                0x28 + (index - 4) * 8, // mov rax,[rsp+40+slot*8]
-                0x48,
-                0x89,
-                0x41,
-                index * 8, // mov [rcx+index*8],rax
-            ]);
+            let stack_offset = 0x28u32 + u32::from(index - 4) * 8;
+            if stack_offset <= 0x7f {
+                code.extend_from_slice(&[0x48, 0x8b, 0x44, 0x24, stack_offset as u8]);
+            } else {
+                code.extend_from_slice(&[0x48, 0x8b, 0x84, 0x24]);
+                code.extend_from_slice(&stack_offset.to_le_bytes());
+            }
+            // The sixteenth argument is still stored at +120, which fits
+            // the signed disp8 form used by this synthetic callee.
+            code.extend_from_slice(&[0x48, 0x89, 0x41, index * 8]);
         }
         code.extend_from_slice(&[
             0x48, 0x89, 0xe0, // mov rax,rsp
             0x83, 0xe0, 0x0f, // and eax,15
-            0x48, 0x89, 0x41, 0x78, // mov [rcx+120],rax
+            0x48, 0x89, 0x81, 0x80, 0, 0, 0, // mov [rcx+128],rax
             0x31, 0xc0, // xor eax,eax
             0xc3, // ret
         ]);
         let mut engine = test_engine(&code);
-        let output = engine.allocate(128, 8).unwrap();
+        let output = engine.allocate(136, 8).unwrap();
         let mut args = vec![
             output,
             0x1111_2222_3333_4444,
@@ -2690,12 +2689,13 @@ fn win64_call_passes_ten_and_fifteen_opaque_argument_slots() {
             0x3132_3334_3536_3738,
             0x4142_4344_4546_4748,
             0x0000_0000_7fc1_2345, // raw NaN f32 word
+            0x0000_0000_3f80_0000, // Kira full-caller raw gain f32 word
         ];
         args.truncate(argument_count);
 
         assert_eq!(engine.call_win64_args(CODE, &args).unwrap(), 0);
 
-        let mut observed = [0u8; 128];
+        let mut observed = [0u8; 136];
         engine.read(output, &mut observed).unwrap();
         for (index, expected) in args.iter().copied().enumerate() {
             assert_eq!(
@@ -2704,7 +2704,7 @@ fn win64_call_passes_ten_and_fifteen_opaque_argument_slots() {
                 "argument {index} of {argument_count}"
             );
         }
-        for index in argument_count..15 {
+        for index in argument_count..16 {
             assert_eq!(
                 u64::from_le_bytes(observed[index * 8..index * 8 + 8].try_into().unwrap()),
                 0,
@@ -2712,7 +2712,7 @@ fn win64_call_passes_ten_and_fifteen_opaque_argument_slots() {
             );
         }
         assert_eq!(
-            u64::from_le_bytes(observed[120..128].try_into().unwrap()),
+            u64::from_le_bytes(observed[128..136].try_into().unwrap()),
             8
         );
     }
