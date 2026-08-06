@@ -3199,6 +3199,10 @@ pub fn run_video_batch(
     );
 
     let plugin_path = PathBuf::from(&request.plugin);
+    let plugin_directory = plugin_path
+        .parent()
+        .ok_or_else(|| invalid("batch plugin path has no parent directory"))?
+        .to_path_buf();
     let plugin_bytes = fs::read(&plugin_path)?;
     if plugin_bytes.is_empty() {
         return Err(invalid("plugin file is empty"));
@@ -3233,7 +3237,7 @@ pub fn run_video_batch(
         conformance_render_settings: None,
         layers: &[],
         dependencies: Vec::new(),
-        dependency_search_dirs: Vec::new(),
+        dependency_search_dirs: vec![plugin_directory],
         width,
         height,
         pixel_format: request.pixel_format,
