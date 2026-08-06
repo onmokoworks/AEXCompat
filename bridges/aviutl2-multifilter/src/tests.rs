@@ -32,6 +32,7 @@ mod tests {
             alias_target: None,
             closure_identity: None,
             cluster_fallback: None,
+            category: None,
         }
     }
 
@@ -2356,6 +2357,186 @@ mod tests {
             vec!["AEX".to_owned(), "AEX [2]".to_owned()],
             "no parent folder to qualify with, so only the numeric pass separates them"
         );
+    }
+
+    // --- PiPL category → menu label (issue #871) --------------------------
+
+    /// A PiPL blob in the compiled layout: u32 version 1, u16 zero, u32
+    /// count, then per property "MIB8", the byte-swapped key, u32 zero, u32
+    /// data length, and the data padded to four bytes (writers store the
+    /// padded length, as the probe `.rc` fixtures do).
+    fn pipl_blob(properties: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut blob = Vec::new();
+        blob.extend(1u32.to_le_bytes());
+        blob.extend(0u16.to_le_bytes());
+        blob.extend((properties.len() as u32).to_le_bytes());
+        for (key, data) in properties {
+            let padded = data.len().next_multiple_of(4);
+            blob.extend(b"MIB8");
+            blob.extend(*key);
+            blob.extend(0u32.to_le_bytes());
+            blob.extend((padded as u32).to_le_bytes());
+            blob.extend(*data);
+            blob.resize(blob.len() + padded - data.len(), 0);
+        }
+        blob
+    }
+
+    /// The 'catg' Pascal string is found behind other properties, and the
+    /// padded storage length does not leak padding into the value.
+    #[test]
+    fn pipl_category_reads_the_catg_pascal_string() {
+        let blob = pipl_blob(&[
+            (b"dnik", b"TKFe"),
+            (b"gtac", b"\x07Stylize"),
+            (b"4668", b"EffectMain\0\0"),
+        ]);
+        assert_eq!(pipl_category_of_blob(&blob).as_deref(), Some("Stylize"));
+        let padded = pipl_blob(&[(b"gtac", b"\x10AEXCompat Probes")]);
+        assert_eq!(
+            pipl_category_of_blob(&padded).as_deref(),
+            Some("AEXCompat Probes")
+        );
+    }
+
+    /// A writer that stores the exact (unpadded) length still parses: the
+    /// walk advances by the length rounded up to four, and a non-UTF-8
+    /// category yields no label rather than replacement characters.
+    #[test]
+    fn pipl_category_handles_unpadded_lengths_and_bad_encodings() {
+        // "\x06Warp!!" is 7 bytes; store length 7 but pad the stream to 4.
+        let mut blob = Vec::new();
+        blob.extend(1u32.to_le_bytes());
+        blob.extend(0u16.to_le_bytes());
+        blob.extend(2u32.to_le_bytes());
+        blob.extend(b"MIB8dnik");
+        blob.extend(0u32.to_le_bytes());
+        blob.extend(7u32.to_le_bytes());
+        blob.extend(b"\x06Warp!!\0");
+        blob.extend(b"MIB8gtac");
+        blob.extend(0u32.to_le_bytes());
+        blob.extend(8u32.to_le_bytes());
+        blob.extend(b"\x07Stylize");
+        assert_eq!(pipl_category_of_blob(&blob).as_deref(), Some("Stylize"));
+
+        let shift_jis = pipl_blob(&[(b"gtac", b"\x04\x89\xE6\x91\x9C")]);
+        assert_eq!(pipl_category_of_blob(&shift_jis), None);
+    }
+
+    /// Adobe's own effects store the category as a ZString; the display name
+    /// after the last `=` is what the menu wants. A ZString without one has
+    /// no usable name and fails closed.
+    #[test]
+    fn pipl_category_unwraps_adobe_zstrings() {
+        let zstring =
+            pipl_blob(&[(b"gtac", b"\x3E$$$/MediaCore/FiltersAndEffects/Category/Simulation=Simulation")]);
+        assert_eq!(pipl_category_of_blob(&zstring).as_deref(), Some("Simulation"));
+        let nameless = pipl_blob(&[(b"gtac", b"\x08$$$/Abcd")]);
+        assert_eq!(pipl_category_of_blob(&nameless), None);
+    }
+
+    /// Malformed blobs yield no category, never a wrong one: a missing
+    /// 'catg', a foreign vendor code, a truncation mid-property, and an
+    /// overlong Pascal length all fail closed.
+    #[test]
+    fn pipl_category_fails_closed_on_malformed_blobs() {
+        assert_eq!(pipl_category_of_blob(&[]), None);
+        let no_catg = pipl_blob(&[(b"dnik", b"TKFe")]);
+        assert_eq!(pipl_category_of_blob(&no_catg), None);
+        let mut bad_vendor = pipl_blob(&[(b"gtac", b"\x07Stylize")]);
+        bad_vendor[10] = b'X';
+        assert_eq!(pipl_category_of_blob(&bad_vendor), None);
+        let mut truncated = pipl_blob(&[(b"gtac", b"\x07Stylize")]);
+        truncated.truncate(truncated.len() - 4);
+        assert_eq!(pipl_category_of_blob(&truncated), None);
+        // Pascal length claiming more than the property holds.
+        let overlong = pipl_blob(&[(b"gtac", b"\x40ab")]);
+        assert_eq!(pipl_category_of_blob(&overlong), None);
+    }
+
+    /// A minimal PE32+ image with one `.rsrc` section holding a named "PiPL"
+    /// resource (name dir → id dir → language dir → leaf), so the full
+    /// walk — headers, section mapping, named-entry match, three levels,
+    /// data entry — is pinned end to end.
+    fn synthetic_pe_with_pipl(blob: &[u8]) -> Vec<u8> {
+        const SECTION_RVA: u32 = 0x1000;
+        const SECTION_RAW: u32 = 0x200;
+        let mut pe = vec![0u8; SECTION_RAW as usize];
+        pe[0] = b'M';
+        pe[1] = b'Z';
+        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        // COFF: machine x64, one section, optional header size 240.
+        pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+        pe[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+        pe[0x94..0x96].copy_from_slice(&240u16.to_le_bytes());
+        // Optional header (PE32+): magic, then the resource data directory
+        // (index 2) at +112 pointing at the section RVA.
+        let optional = 0x98;
+        pe[optional..optional + 2].copy_from_slice(&0x20Bu16.to_le_bytes());
+        let resource_dir = optional + 112 + 2 * 8;
+        pe[resource_dir..resource_dir + 4].copy_from_slice(&SECTION_RVA.to_le_bytes());
+        pe[resource_dir + 4..resource_dir + 8].copy_from_slice(&0x1000u32.to_le_bytes());
+        // Section table: ".rsrc" mapping RVA 0x1000 to file offset 0x200.
+        let section = optional + 240;
+        pe[section..section + 5].copy_from_slice(b".rsrc");
+        pe[section + 8..section + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+        pe[section + 12..section + 16].copy_from_slice(&SECTION_RVA.to_le_bytes());
+        pe[section + 16..section + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+        pe[section + 20..section + 24].copy_from_slice(&SECTION_RAW.to_le_bytes());
+
+        // Resource section layout, offsets relative to the section start:
+        // root dir (24) → "PiPL" string (12) → id dir (24) → lang dir (24)
+        // → leaf (16) → blob.
+        let mut rsrc = Vec::new();
+        let (root, name_str, id_dir, lang_dir, leaf, data) = (0u32, 24u32, 36u32, 60u32, 84u32, 100u32);
+        let mut dir = |entries: &[(u32, u32)], named: u16| {
+            let mut out = vec![0u8; 12];
+            out.extend(named.to_le_bytes());
+            out.extend(((entries.len() as u16) - named).to_le_bytes());
+            for (name, data) in entries {
+                out.extend(name.to_le_bytes());
+                out.extend(data.to_le_bytes());
+            }
+            out
+        };
+        let _ = root;
+        rsrc.extend(dir(&[(0x8000_0000 | name_str, 0x8000_0000 | id_dir)], 1));
+        rsrc.extend(4u16.to_le_bytes());
+        for unit in "PiPL".encode_utf16() {
+            rsrc.extend(unit.to_le_bytes());
+        }
+        rsrc.extend([0, 0]); // pad to id_dir at 36
+        rsrc.extend(dir(&[(16000, 0x8000_0000 | lang_dir)], 0));
+        rsrc.extend(dir(&[(1033, leaf)], 0));
+        rsrc.extend((SECTION_RVA + data).to_le_bytes());
+        rsrc.extend((blob.len() as u32).to_le_bytes());
+        rsrc.extend([0u8; 8]);
+        assert_eq!(rsrc.len() as u32, data, "fixture layout drifted");
+        rsrc.extend_from_slice(blob);
+
+        pe.extend_from_slice(&rsrc);
+        pe
+    }
+
+    /// End to end over a synthetic PE: the category comes out of the image
+    /// bytes, and images without the resource fail closed.
+    #[test]
+    fn pipl_category_walks_a_pe_image() {
+        let blob = pipl_blob(&[(b"dnik", b"TKFe"), (b"gtac", b"\x07Distort")]);
+        let pe = synthetic_pe_with_pipl(&blob);
+        assert_eq!(pipl_category(&pe).as_deref(), Some("Distort"));
+        assert_eq!(pipl_category(b"not a pe"), None);
+        let truncated = &pe[..0x150];
+        assert_eq!(pipl_category(truncated), None);
+    }
+
+    /// The registered label nests the category under AEXCompat and falls
+    /// back to the bare brand without one.
+    #[test]
+    fn filter_labels_nest_the_category_under_the_brand() {
+        assert_eq!(filter_label(Some("Stylize")), "AEXCompat\\Stylize");
+        assert_eq!(filter_label(None), "AEXCompat");
     }
 
     // --- cluster sessions (issue #405) ---

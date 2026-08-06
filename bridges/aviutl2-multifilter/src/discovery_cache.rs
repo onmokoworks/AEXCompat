@@ -1748,6 +1748,13 @@ struct CacheEntry {
     /// cluster and always takes the per-plugin path).
     #[serde(default)]
     closure_identity: Option<String>,
+    /// The effect's own AE menu category, from its PiPL 'catg' property
+    /// (issue #871); the registered filter's initial menu label nests under
+    /// "AEXCompat" by it. Added additively: an entry written before this
+    /// field reads as `None` (bare "AEXCompat") until the host-fingerprint
+    /// change that ships the field re-verifies it in the background.
+    #[serde(default)]
+    category: Option<String>,
     /// Structured record of a cluster-session fallback (issue #405, design
     /// §6): present when this entry was produced after a cluster discovery
     /// session failed — never silently rounded into a plain success.
@@ -2589,6 +2596,12 @@ fn keep_best(
                 // self-healing: today one later success is enough. Converging
                 // safely needs the failure's classification, which is #328.
                 stale: old.stale,
+                // The menu category was parsed from the bytes before the
+                // inspect ran (issue #871), so even this failed attempt
+                // carries it; adopting it here is what lets an entry written
+                // before the field exist learn its category without a
+                // successful re-discovery.
+                category: discovered.category.clone().or_else(|| old.category.clone()),
                 ..old.clone()
             })
         }
@@ -2616,6 +2629,7 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         alias_target: None,
         closure_identity: None,
         cluster_fallback: None,
+        category: None,
     }
 }
 

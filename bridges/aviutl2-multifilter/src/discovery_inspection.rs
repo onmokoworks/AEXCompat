@@ -30,6 +30,10 @@ fn prepare_discovery_in_place(
         };
     };
     entry.sha = hex_lower(&Sha256::digest(&bytes));
+    // The menu category comes straight from the bytes (issue #871), before
+    // any inspect runs; `keep_best` carries it across a failed
+    // re-verification, so learning it does not need the inspect to succeed.
+    entry.category = pipl_category(&bytes);
     let roots = search_roots_for(plugin, &dependency.dirs);
     entry.closure = CachedClosure {
         roots: roots
@@ -974,7 +978,12 @@ fn register_discovered(
     let table = Box::leak(Box::new(FILTER_PLUGIN_TABLE {
         flag: 1 | 8, // FLAG_VIDEO | FLAG_FILTER
         name: wide_leak(&format!("AEX: {name}")),
-        label: std::ptr::null(),
+        // The INITIAL menu category (issue #871): hundreds of AE effects do
+        // not belong under the default 「加工」 among the built-ins, so they
+        // nest under "AEXCompat" by their own PiPL category. Initial only —
+        // once AviUtl2 has persisted an effect's label in aviutl2.ini, that
+        // (user-editable) value wins on every later launch.
+        label: wide_leak(&filter_label(entry.category.as_deref())),
         information: wide_leak(&format!("AEXCompat multi-filter: {name}")),
         items: items.as_ptr(),
         func_proc_video: Some(func_proc_video),
