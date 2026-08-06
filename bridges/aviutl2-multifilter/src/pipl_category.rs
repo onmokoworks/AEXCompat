@@ -9,8 +9,6 @@
 // bounds-checked and every count capped; any malformation yields `None`
 // (a filter without a category, never a wrong parse or a panic).
 
-/// Longest accepted category string; PiPL categories are short menu names.
-const MAX_CATEGORY_BYTES: usize = 256;
 /// Caps on resource-directory fan-out, far above any real plug-in.
 const MAX_DIR_ENTRIES: usize = 4096;
 const MAX_SECTIONS: usize = 96;
@@ -135,9 +133,10 @@ fn subdirectory(data_field: u32) -> Option<u32> {
 }
 
 /// The first "PiPL" resource's bytes. The name level is walked in entry
-/// order, so a multi-effect AEX (several PiPL ids) yields its first PiPL —
-/// the effect the entry point serves first, which is the one the bridge
-/// registers.
+/// order (ascending resource id), so a multi-effect AEX (several PiPL ids)
+/// yields its lowest-numbered PiPL — a heuristic: which PiPL belongs to the
+/// effect the shared entry point serves is not derivable from resource
+/// order, and a wrong pick costs only a cosmetic category.
 fn first_pipl_resource(bytes: &[u8]) -> Option<&[u8]> {
     let (resource_rva, sections) = resource_directory(bytes)?;
     let base = rva_to_offset(&sections, resource_rva)?;
@@ -147,7 +146,13 @@ fn first_pipl_resource(bytes: &[u8]) -> Option<&[u8]> {
         .find(|(name, _)| entry_name_matches(bytes, base, *name, "PiPL"))?;
     let names = directory_entries(bytes, base, subdirectory(pipl.1)?)?;
     let languages = directory_entries(bytes, base, subdirectory(names.first()?.1)?)?;
-    let leaf = base.checked_add((languages.first()?.1 & 0x7FFF_FFFF) as usize)?;
+    let leaf_field = languages.first()?.1;
+    // The language level must end in a leaf; a fourth directory level would
+    // make this read a directory header as a data entry.
+    if subdirectory(leaf_field).is_some() {
+        return None;
+    }
+    let leaf = base.checked_add(leaf_field as usize)?;
     let data_rva = u32_at(bytes, leaf)?;
     let size = u32_at(bytes, leaf + 4)? as usize;
     let offset = rva_to_offset(&sections, data_rva)?;
@@ -163,14 +168,24 @@ fn pipl_category_of_blob(blob: &[u8]) -> Option<String> {
     if u32_at(blob, 0)? != 1 {
         return None;
     }
-    let count = u32_at(blob, 6)?.min(MAX_PIPL_PROPERTIES);
+    // Over the caps is malformed and rejected outright: silently truncating
+    // a length would resume the walk at a wrong offset, and misaligned bytes
+    // that happen to spell a property must not parse.
+    let count = u32_at(blob, 6)?;
+    if count > MAX_PIPL_PROPERTIES {
+        return None;
+    }
     let mut at = 10usize;
     for _ in 0..count {
         if blob.get(at..at + 4)? != b"MIB8" {
             return None;
         }
         let key = blob.get(at + 4..at + 8)?;
-        let length = u32_at(blob, at + 12)?.min(MAX_PIPL_PROPERTY_BYTES) as usize;
+        let length = u32_at(blob, at + 12)?;
+        if length > MAX_PIPL_PROPERTY_BYTES {
+            return None;
+        }
+        let length = length as usize;
         let data = blob.get(at + 16..at.checked_add(16 + length)?)?;
         if key == b"gtac" {
             let pascal_length = *data.first()? as usize;
@@ -181,17 +196,16 @@ fn pipl_category_of_blob(blob: &[u8]) -> Option<String> {
     None
 }
 
-/// The category as a menu-safe string: control characters dropped (a `\` is
-/// kept — AviUtl2 reads it as menu nesting, which a category may well want),
-/// trimmed, bounded, empty folded to `None`. Adobe's own effects store the
-/// category as a ZString (`$$$/MediaCore/.../Simulation=Simulation`, measured
-/// across a real install); the default text after the last `=` is the
-/// display name.
+/// The category as a menu-safe string: strict UTF-8 (a legacy Shift-JIS or
+/// MacRoman category yields no label rather than one studded with
+/// replacement characters), control characters dropped (a `\` is kept —
+/// AviUtl2 reads it as menu nesting, which a category may well want),
+/// trimmed, empty folded to `None`. Adobe's own effects store the category
+/// as a ZString (`$$$/MediaCore/.../Simulation=Simulation`, measured across
+/// a real install); the default text after the last `=` is the display name.
 fn clean_category(raw: &[u8]) -> Option<String> {
-    if raw.len() > MAX_CATEGORY_BYTES {
-        return None;
-    }
-    let text: String = String::from_utf8_lossy(raw)
+    let text: String = std::str::from_utf8(raw)
+        .ok()?
         .chars()
         .filter(|c| !c.is_control())
         .collect();

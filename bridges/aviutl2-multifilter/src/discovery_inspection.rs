@@ -30,9 +30,9 @@ fn prepare_discovery_in_place(
         };
     };
     entry.sha = hex_lower(&Sha256::digest(&bytes));
-    // The menu category comes straight from the bytes (issue #871); recorded
-    // on the failure path too, so a later successful re-discovery is not the
-    // only way to learn it.
+    // The menu category comes straight from the bytes (issue #871), before
+    // any inspect runs; `keep_best` carries it across a failed
+    // re-verification, so learning it does not need the inspect to succeed.
     entry.category = pipl_category(&bytes);
     let roots = search_roots_for(plugin, &dependency.dirs);
     entry.closure = CachedClosure {

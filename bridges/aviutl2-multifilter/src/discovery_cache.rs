@@ -2596,6 +2596,12 @@ fn keep_best(
                 // self-healing: today one later success is enough. Converging
                 // safely needs the failure's classification, which is #328.
                 stale: old.stale,
+                // The menu category was parsed from the bytes before the
+                // inspect ran (issue #871), so even this failed attempt
+                // carries it; adopting it here is what lets an entry written
+                // before the field exist learn its category without a
+                // successful re-discovery.
+                category: discovered.category.clone().or_else(|| old.category.clone()),
                 ..old.clone()
             })
         }

@@ -2399,6 +2399,30 @@ mod tests {
         );
     }
 
+    /// A writer that stores the exact (unpadded) length still parses: the
+    /// walk advances by the length rounded up to four, and a non-UTF-8
+    /// category yields no label rather than replacement characters.
+    #[test]
+    fn pipl_category_handles_unpadded_lengths_and_bad_encodings() {
+        // "\x06Warp!!" is 7 bytes; store length 7 but pad the stream to 4.
+        let mut blob = Vec::new();
+        blob.extend(1u32.to_le_bytes());
+        blob.extend(0u16.to_le_bytes());
+        blob.extend(2u32.to_le_bytes());
+        blob.extend(b"MIB8dnik");
+        blob.extend(0u32.to_le_bytes());
+        blob.extend(7u32.to_le_bytes());
+        blob.extend(b"\x06Warp!!\0");
+        blob.extend(b"MIB8gtac");
+        blob.extend(0u32.to_le_bytes());
+        blob.extend(8u32.to_le_bytes());
+        blob.extend(b"\x07Stylize");
+        assert_eq!(pipl_category_of_blob(&blob).as_deref(), Some("Stylize"));
+
+        let shift_jis = pipl_blob(&[(b"gtac", b"\x04\x89\xE6\x91\x9C")]);
+        assert_eq!(pipl_category_of_blob(&shift_jis), None);
+    }
+
     /// Adobe's own effects store the category as a ZString; the display name
     /// after the last `=` is what the menu wants. A ZString without one has
     /// no usable name and fails closed.
