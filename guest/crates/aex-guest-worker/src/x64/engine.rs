@@ -1486,7 +1486,17 @@ impl GuestEngine<'static> {
     }
 
     pub fn call_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
-        self.call_win64_with_timeout(address, &args, TIMEOUT_MICROSECONDS)
+        self.call_win64_args(address, &args)
+    }
+
+    /// Calls a guest function using the Win64 ABI with an arbitrary number of
+    /// integer/pointer argument slots.
+    ///
+    /// Each value is copied as an opaque 64-bit payload. This is intentional:
+    /// callers that need to pass a raw `f32` word can place `value.to_bits()` in
+    /// the low 32 bits without a host-side numeric conversion.
+    pub fn call_win64_args(&mut self, address: u64, args: &[u64]) -> Result<u64, GuestError> {
+        self.call_win64_with_timeout(address, args, TIMEOUT_MICROSECONDS)
     }
 
     pub fn call_selector_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
@@ -1512,10 +1522,34 @@ impl GuestEngine<'static> {
         args: &[u64],
         timeout_microseconds: u64,
     ) -> Result<u64, GuestError> {
-        if args.len() < 4 || args.len() > 16 {
+        const WIN64_HOME_SPACE_BYTES: u64 = 0x20;
+        const RETURN_ADDRESS_BYTES: u64 = 8;
+        const MINIMUM_CALLEE_STACK_BYTES: u64 = PAGE_SIZE;
+
+        let stack_argument_count = args.len().saturating_sub(4);
+        let stack_argument_bytes = u64::try_from(stack_argument_count)
+            .ok()
+            .and_then(|count| count.checked_mul(8))
+            .ok_or_else(|| GuestError::Callback("Win64 argument list is too large".to_string()))?;
+        let unaligned_frame_bytes = RETURN_ADDRESS_BYTES
+            .checked_add(WIN64_HOME_SPACE_BYTES)
+            .and_then(|bytes| bytes.checked_add(stack_argument_bytes))
+            .ok_or_else(|| GuestError::Callback("Win64 argument frame is too large".to_string()))?;
+        // STACK_BASE + STACK_SIZE is 16-byte aligned. At function entry the
+        // Win64 ABI requires RSP % 16 == 8, so the bytes above RSP must also be
+        // congruent to 8 modulo 16.
+        let frame_bytes = if unaligned_frame_bytes % 16 == 8 {
+            unaligned_frame_bytes
+        } else {
+            unaligned_frame_bytes.checked_add(8).ok_or_else(|| {
+                GuestError::Callback("Win64 argument frame is too large".to_string())
+            })?
+        };
+        let available_frame_bytes = STACK_SIZE - MINIMUM_CALLEE_STACK_BYTES;
+        if frame_bytes > available_frame_bytes {
             return Err(GuestError::Callback(format!(
-                "Win64 call requires 4..=16 arguments, got {}",
-                args.len()
+                "Win64 argument frame requires {frame_bytes} bytes, but only \
+                 {available_frame_bytes} are available",
             )));
         }
         self.unicorn.get_data_mut().avx_fallback_instructions = 0;
@@ -1523,9 +1557,15 @@ impl GuestEngine<'static> {
         self.unicorn.get_data_mut().latest_runtime_target = None;
         self.unicorn.get_data_mut().unsupported_import = None;
         let stack_top = STACK_BASE + STACK_SIZE;
-        // Win64 function entry observes RSP % 16 == 8. Reserve a return
-        // address, 32-byte shadow space, bounded stack arguments, and scratch.
-        let rsp = (stack_top - 0x108) | 8;
+        // Reserve the return address, 32-byte home space, every stack argument,
+        // alignment padding, and at least one page below RSP for the callee.
+        let rsp = stack_top - frame_bytes;
+        debug_assert_eq!(rsp % 16, 8);
+        uc(
+            "clear Win64 argument frame",
+            self.unicorn
+                .mem_write(rsp, &vec![0; usize::try_from(frame_bytes).unwrap()]),
+        )?;
         uc(
             "write return address",
             self.unicorn.mem_write(rsp, &RETURN_ADDRESS.to_le_bytes()),
@@ -1539,10 +1579,10 @@ impl GuestEngine<'static> {
         }
         for (register, value) in [
             (RegisterX86::RSP, rsp),
-            (RegisterX86::RCX, args[0]),
-            (RegisterX86::RDX, args[1]),
-            (RegisterX86::R8, args[2]),
-            (RegisterX86::R9, args[3]),
+            (RegisterX86::RCX, args.first().copied().unwrap_or(0)),
+            (RegisterX86::RDX, args.get(1).copied().unwrap_or(0)),
+            (RegisterX86::R8, args.get(2).copied().unwrap_or(0)),
+            (RegisterX86::R9, args.get(3).copied().unwrap_or(0)),
         ] {
             uc(
                 "write argument register",

@@ -2636,6 +2636,82 @@
     }
 
     #[test]
+    fn win64_call_passes_ten_and_fifteen_opaque_argument_slots() {
+        const CODE: u64 = 0x1000_0000;
+
+        for argument_count in [10usize, 15] {
+            // Save the four register slots and every supplied stack slot to the
+            // buffer in RCX, then save the entry RSP alignment nibble.
+            let mut code = vec![
+                0x48, 0x89, 0x09, // mov [rcx],rcx
+                0x48, 0x89, 0x51, 0x08, // mov [rcx+8],rdx
+                0x4c, 0x89, 0x41, 0x10, // mov [rcx+16],r8
+                0x4c, 0x89, 0x49, 0x18, // mov [rcx+24],r9
+            ];
+            for index in 4u8..u8::try_from(argument_count).unwrap() {
+                code.extend_from_slice(&[
+                    0x48,
+                    0x8b,
+                    0x44,
+                    0x24,
+                    0x28 + (index - 4) * 8, // mov rax,[rsp+40+slot*8]
+                    0x48,
+                    0x89,
+                    0x41,
+                    index * 8, // mov [rcx+index*8],rax
+                ]);
+            }
+            code.extend_from_slice(&[
+                0x48, 0x89, 0xe0, // mov rax,rsp
+                0x83, 0xe0, 0x0f, // and eax,15
+                0x48, 0x89, 0x41, 0x78, // mov [rcx+120],rax
+                0x31, 0xc0, // xor eax,eax
+                0xc3, // ret
+            ]);
+            let mut engine = test_engine(&code);
+            let output = engine.allocate(128, 8).unwrap();
+            let mut args = vec![
+                output,
+                0x1111_2222_3333_4444,
+                0x5555_6666_7777_8888,
+                0x9999_aaaa_bbbb_cccc,
+                0xdddd_eeee_ffff_0001,
+                0x1234_5678_9abc_def0,
+                0xfedc_ba98_7654_3210,
+                0x0000_0000_8000_0000, // raw -0.0f32 word
+                0x0000_0000_3f80_0000, // raw 1.0f32 word
+                0x0102_0304_0506_0708,
+                0x1112_1314_1516_1718,
+                0x2122_2324_2526_2728,
+                0x3132_3334_3536_3738,
+                0x4142_4344_4546_4748,
+                0x0000_0000_7fc1_2345, // raw NaN f32 word
+            ];
+            args.truncate(argument_count);
+
+            assert_eq!(engine.call_win64_args(CODE, &args).unwrap(), 0);
+
+            let mut observed = [0u8; 128];
+            engine.read(output, &mut observed).unwrap();
+            for (index, expected) in args.iter().copied().enumerate() {
+                assert_eq!(
+                    u64::from_le_bytes(observed[index * 8..index * 8 + 8].try_into().unwrap()),
+                    expected,
+                    "argument {index} of {argument_count}"
+                );
+            }
+            for index in argument_count..15 {
+                assert_eq!(
+                    u64::from_le_bytes(observed[index * 8..index * 8 + 8].try_into().unwrap()),
+                    0,
+                    "unused argument slot {index} of {argument_count}"
+                );
+            }
+            assert_eq!(u64::from_le_bytes(observed[120..128].try_into().unwrap()), 8);
+        }
+    }
+
+    #[test]
     fn win64_call_timeout_still_fails_closed() {
         const CODE: u64 = 0x1000_0000;
         let mut engine = test_engine(&[0xeb, 0xfe]); // jmp $
