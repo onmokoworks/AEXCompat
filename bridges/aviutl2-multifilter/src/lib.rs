@@ -444,6 +444,7 @@ fn log_warn(message: &str) {
 }
 
 include!("config_ui.rs");
+include!("pipl_category.rs");
 include!("discovery_cache.rs");
 include!("discovery_inspection.rs");
 include!("runtime.rs");
