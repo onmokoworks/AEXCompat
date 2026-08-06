@@ -1,5 +1,7 @@
 name: Windows real cleanup hook test
 
+# Temporary integration test; removed after the runner hooks are verified.
+
 on:
   push:
     branches: [agent/windows-real-smoke]
