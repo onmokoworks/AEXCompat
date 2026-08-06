@@ -1,0 +1,26 @@
+name: Windows real cleanup hook test
+
+on:
+  push:
+    branches: [agent/windows-real-smoke]
+
+permissions:
+  contents: read
+
+jobs:
+  hook-test:
+    runs-on: [self-hosted, Windows, X64, windows-real]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create disposable workspace files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path target\cleanup-hook-test | Out-Null
+          Set-Content -LiteralPath target\cleanup-hook-test\marker.txt -Value 'delete me after this job'
+          if (-not (Test-Path -LiteralPath target\cleanup-hook-test\marker.txt)) {
+            throw 'Failed to create cleanup marker.'
+          }
+          Write-Host "Created cleanup marker under $env:GITHUB_WORKSPACE"
