@@ -493,7 +493,7 @@ const AegpEffectInstance* resolve_effect_instance(void* effect, int32_t owner,
   return &instance;
 }
 bool acquire_effect_lease(int32_t plugin_id, std::size_t instance_index, void** output) {
-  if (plugin_id <= 0 || !output || instance_index >= g_aegp_effect_instances.size() ||
+  if (plugin_id < 0 || !output || instance_index >= g_aegp_effect_instances.size() ||
       !g_aegp_effect_instances[instance_index].occupied ||
       !ensure_effect_identity(instance_index) ||
       g_aegp_effect_lease_generation == UINT32_MAX)
@@ -1279,7 +1279,7 @@ int32_t __cdecl aegp_get_layer_from_id(void* comp, int32_t id, void** layer) {
 int32_t __cdecl aegp_get_comp_selection(
     int32_t plugin_id, void* comp, void** collection) {
   ObjectSnapshot resolved{};
-  if (plugin_id <= 0 || !collection || g_aegp_selection.live ||
+  if (plugin_id < 0 || !collection || g_aegp_selection.live ||
       !resolve_scene_comp(comp, resolved) ||
       resolved.legacy_handle != &g_aegp_comp)
     return 4;
@@ -1400,7 +1400,7 @@ int32_t __cdecl aegp_get_layer_num_effects(void* layer, int32_t* count) {
 }
 int32_t __cdecl aegp_get_layer_effect_by_index(
     int32_t plugin_id, void* layer, int32_t index, void** effect) {
-  if (plugin_id <= 0 || aegp_layer_index(layer) < 0 || index < 0 || !effect) return 4;
+  if (plugin_id < 0 || aegp_layer_index(layer) < 0 || index < 0 || !effect) return 4;
   for (std::size_t slot = 0; slot < g_aegp_effect_instances.size(); ++slot) {
     const auto& instance = g_aegp_effect_instances[slot];
     if (!instance.occupied || instance.layer != layer) continue;
@@ -1504,7 +1504,7 @@ int32_t __cdecl aegp_apply_effect(
     int32_t plugin_id, void* layer, int32_t installed_key, void** effect) {
   aexcompat::scene_transaction::MutationLock mutation_lock;
   ObjectSnapshot layer_identity{};
-  if (plugin_id <= 0 || !resolve_scene_layer(layer, layer_identity) ||
+  if (plugin_id < 0 || !resolve_scene_layer(layer, layer_identity) ||
       layer_identity.identity.project_id != 1 ||
       !effect || !find_installed_effect(installed_key) ||
       g_aegp_effect_lease_generation == UINT32_MAX)
@@ -1701,7 +1701,15 @@ int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
   return committed ? 0 : 4;
 }
 int32_t __cdecl get_new_effect_for_effect(int32_t plugin_id, void* effect, void** effect_ref) {
-  if (plugin_id <= 0 || effect != &g_effect || !effect_ref || g_aegp_effect_live) return 4;
+  // A negative id is malformed; 0 is an unregistered caller, which is admitted
+  // for the same reason the colour settings suite admits it (issue #894): the
+  // id names the caller for AE's own accounting, and this host's ownership of
+  // the effect handle is tracked by `g_aegp_effect_live` rather than by the id.
+  // DeepGlow2 never calls AEGP_RegisterWithAEGP, so it reaches every AEGP entry
+  // point with 0, and refusing here ended its SmartRender before the matte path
+  // could even ask its question (issue #909).
+  if (plugin_id < 0 || effect != &g_effect || !effect_ref || g_aegp_effect_live)
+    return 4;
   g_aegp_effect_live = true;
   *effect_ref = &g_aegp_effect;
   ++g_aegp_effect_acquires;
@@ -1809,7 +1817,7 @@ bool publish_transform_stream(
     AegpTransformStream candidate, Identity owner, int32_t plugin_id,
     int32_t stream_type, bool keyframed, void** output) {
   const std::size_t child_count = keyframed ? 3 : 1;
-  if (!output || plugin_id <= 0 ||
+  if (!output || plugin_id < 0 ||
       !scene_registry().can_create_children(owner, child_count, 1))
     return false;
   void* handle = nullptr;
@@ -1882,7 +1890,7 @@ int32_t __cdecl aegp_get_new_layer_stream(
       resolve_scene_layer(layer, layer_identity) &&
       state().dynamic_camera_live &&
       layer_identity.identity == state().dynamic_camera_identity;
-  if (plugin_id <= 0 || !resolve_scene_layer(layer, layer_identity) || !stream ||
+  if (plugin_id < 0 || !resolve_scene_layer(layer, layer_identity) || !stream ||
       layer_identity.identity.project_id != 1 ||
       (!(dynamic_camera && selector == 11) &&
        !supported_transform_stream(selector)) ||
@@ -1905,7 +1913,7 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index(
     int32_t plugin_id, void* effect, int32_t index, void** stream) {
   std::size_t instance_index = 0;
   const auto* instance = resolve_effect_instance(effect, plugin_id, &instance_index);
-  if (plugin_id <= 0 || !instance ||
+  if (plugin_id < 0 || !instance ||
       index < 0 || index > 4 || !stream || g_aegp_transform_stream.live) return 4;
   ObjectSnapshot effect_identity{};
   if (!scene_registry().resolve_possessed(
@@ -2010,7 +2018,7 @@ int32_t __cdecl aegp_get_new_keyframe_value(
     return aexcompat::l2_detail::get_new_keyframe_value(
         plugin_id, stream, index,
         reinterpret_cast<aexcompat::l2_detail::StreamValue*>(value));
-  if (plugin_id <= 0 || !valid_amount_keyframe(stream, index) || !value ||
+  if (plugin_id < 0 || !valid_amount_keyframe(stream, index) || !value ||
       g_aegp_transform_stream.value_live) return 4;
   ObjectSnapshot stream_identity{};
   if (!resolve_transform_stream(stream, stream_identity, plugin_id) ||
@@ -2056,7 +2064,7 @@ int32_t __cdecl aegp_get_new_stream_value(
         reinterpret_cast<const aexcompat::l2_detail::HostTime*>(time), 0,
         reinterpret_cast<aexcompat::l2_detail::StreamValue*>(value));
   ObjectSnapshot stream_identity{};
-  if (plugin_id <= 0 ||
+  if (plugin_id < 0 ||
       !resolve_transform_stream(stream, stream_identity, plugin_id) ||
       g_aegp_transform_stream.value_live || !time ||
       time->scale == 0 || !value) return 4;
@@ -2114,7 +2122,7 @@ int32_t __cdecl aegp_get_new_stream_value(
 int32_t __cdecl aegp_get_stream_name(
     int32_t plugin_id, void* stream, uint8_t, void** name_handle) {
   ObjectSnapshot resolved{};
-  if (plugin_id <= 0 ||
+  if (plugin_id < 0 ||
       !resolve_transform_stream(stream, resolved, plugin_id) ||
       !g_aegp_transform_stream.effect_param || !name_handle)
     return 4;
@@ -2136,7 +2144,7 @@ int32_t __cdecl aegp_set_effect_stream_value(
     int32_t plugin_id, void* stream, AegpStreamValue* value) {
   aexcompat::scene_transaction::MutationLock mutation_lock;
   ObjectSnapshot stream_identity{};
-  if (plugin_id <= 0 ||
+  if (plugin_id < 0 ||
       !resolve_transform_stream(stream, stream_identity, plugin_id) || !value ||
       value->stream != stream || !g_aegp_transform_stream.value_live ||
       !g_aegp_transform_stream.effect_param) return 4;
@@ -2644,7 +2652,7 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   const auto* parameter = instance
       ? find_effect_parameter(instance->installed_key, index) : nullptr;
   ObjectSnapshot effect_identity{};
-  if (plugin_id <= 0 || !instance || !stream || !parameter ||
+  if (plugin_id < 0 || !instance || !stream || !parameter ||
       !scene_registry().resolve_possessed(
           effect, ObjectKind::effect, plugin_id, effect_identity) ||
       g_aegp_legacy_effect_stream_generation == UINT32_MAX)
@@ -2854,7 +2862,7 @@ int32_t __cdecl aegp_set_dynamic_stream_flag_v2(
 }
 int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
     int32_t plugin_id, void* effect, int32_t index, int32_t* type, void* param_union) {
-  if (plugin_id <= 0 || !resolve_effect_instance(effect, plugin_id) || !type ||
+  if (plugin_id < 0 || !resolve_effect_instance(effect, plugin_id) || !type ||
       !param_union || index < 0 || index >= 5) return 4;
   // AEGP effect inspection is independent of PF selector-local parameter
   // buffers. These are definition unions for the bounded synthetic scene,

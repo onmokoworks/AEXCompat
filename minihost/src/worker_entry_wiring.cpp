@@ -596,7 +596,8 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_aegp_layer_render_options_suite2,
         &verify_utils_handle_callbacks_wired,
         &aexcompat::flt_blur::selftest, &aexcompat::aefx_ace::selftest,
-        &aexcompat::worker_runtime::persistent_data::selftest}});
+        &aexcompat::worker_runtime::persistent_data::selftest,
+        &aexcompat::worker_runtime::selftest_native_stdout_routing}});
   // Compatibility anchors for selftests whose command catalog now lives in
   // worker_fixed_selftest_routing.cpp.
   // --self-test-world-transform-affine

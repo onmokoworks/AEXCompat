@@ -1771,7 +1771,7 @@ bool __cdecl validate_render_options_item(int32_t plugin_id, void* item) {
 bool __cdecl initialize_layer_render_options(
     int32_t plugin_id, void* source, AegpLayerEffectBoundary boundary,
     AegpLayerRenderOptionsValue* value) {
-  if (plugin_id <= 0 || !value) return false;
+  if (plugin_id < 0 || !value) return false;
   AegpLayerRenderOptionsValue initialized{};
   initialized.owner_plugin_id = plugin_id;
   initialized.effect_boundary = boundary;
