@@ -175,6 +175,7 @@ fn open_session(
         gpu_backend: RenderGpuBackend::Auto,
         gpu_runtime_policy: None,
         payload_override: None,
+        launch_environment: Default::default(),
     }) {
         Ok(session) => session,
         Err(error) => {
