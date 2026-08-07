@@ -1963,6 +1963,8 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   auto& records = aexcompat::worker_runtime::parameters::state().records;
   const auto saved_records = records;
   const auto saved_instances = scene_runtime_state().effect_instances;
+  const auto saved_streams = scene_runtime_state().legacy_effect_streams;
+  const auto saved_leases = scene_runtime_state().effect_leases;
   const bool saved_effect_live = scene_runtime_state().effect_live;
 
   records.clear();
@@ -2037,10 +2039,15 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   ok = g_hooks.dispose_stream_v2(amount) == 0 && ok;
   ok = g_hooks.dispose_stream_v2(input) == 0 && ok;
 
+  // Restored whether or not the checks passed: a failed run must not leave the
+  // scene holding this test's streams and leases, the way the mutation
+  // transaction test beside it restores the same three tables.
   records = saved_records;
   scene_runtime_state().effect_instances = saved_instances;
+  scene_runtime_state().legacy_effect_streams = saved_streams;
+  scene_runtime_state().effect_leases = saved_leases;
   scene_runtime_state().effect_live = saved_effect_live;
-  return ok;
+  return ok && compat_suite_leases_balanced();
 }
 
 bool verify_aegp_installed_effect_catalog_suite4() {

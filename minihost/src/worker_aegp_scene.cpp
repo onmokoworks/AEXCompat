@@ -446,8 +446,12 @@ std::array<AegpEffectLease, kAegpEffectLeaseCapacity>& g_aegp_effect_leases =
 uint32_t& g_aegp_effect_lease_generation = scene_runtime_state().effect_lease_generation;
 
 // The id a borrowed handle is recorded under when its caller has none of its
-// own. The registry refuses 0, and the memory suite already treats 1 as the
-// host's own id, so this is that same id rather than a new one.
+// own. The registry refuses 0, so an unregistered caller needs some id, and
+// this is the one `AEGP_RegisterWithAEGP` hands out: `register_with_aegp`
+// returns a constant 1, so a registered plug-in and an unregistered one
+// resolve to the same owner and neither can reach the other's handles - there
+// is only the one. Should registration ever start counting, that stops being
+// true and this has to become an id of its own that no plug-in is given.
 constexpr int32_t kHostPossessionId = 1;
 
 enum class AbiPossessionPolicy {
@@ -2940,6 +2944,21 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   auto& value = *free_slot;
   const std::size_t slot = static_cast<std::size_t>(
       std::distance(g_aegp_legacy_effect_streams.begin(), free_slot));
+  // Decide whether there is a stream to open before asking the registry to
+  // borrow one. A borrowed token is drawn from a fixed pool of 128 that
+  // nothing returns - `erase_tree` marks the lease dead but does not give the
+  // slot back - so borrowing and then refusing spent one per refusal. The
+  // ordinary walk over a real plug-in's parameters hits every group marker it
+  // declares, and DeepGlow2 declares enough of them that a single walk over
+  // its 159 would have drained the pool for the rest of the worker's life
+  // (#931).
+  aexcompat::scene_model::StreamState stream_state{};
+  stream_state.value_kind = stream_value_kind(parameter->type);
+  stream_state.dimensions = parameter->type == 6 ? 4 :
+      (parameter->type == 2 ? 3 : (parameter->type == 4 ? 2 : 1));
+  stream_state.temporal_dimensions = 1;
+  if (stream_state.value_kind == aexcompat::scene_model::StreamValueKind::none)
+    return 4;
   Identity identity{};
   void* published = nullptr;
   // A borrowed handle has to name an owner, and the registry refuses 0 for
@@ -2968,14 +2987,7 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   value.owner_plugin_id = owner_id;
   value.identity = identity;
   value.handle = published;
-  aexcompat::scene_model::StreamState stream_state{};
-  stream_state.value_kind = stream_value_kind(parameter->type);
-  stream_state.dimensions = parameter->type == 6 ? 4 :
-      (parameter->type == 2 ? 3 : (parameter->type == 4 ? 2 : 1));
-  stream_state.temporal_dimensions = 1;
-  if (stream_state.value_kind ==
-          aexcompat::scene_model::StreamValueKind::none ||
-      !scene_registry().initialize_stream_state(identity, stream_state)) {
+  if (!scene_registry().initialize_stream_state(identity, stream_state)) {
     scene_registry().erase_tree(identity);
     value = {};
     return 4;
@@ -3057,15 +3069,14 @@ int32_t __cdecl aegp_get_new_stream_value_v2(
   // comparison above this line dereferenced null for exactly the handles the
   // check exists to reject, turning a diagnostic into a crash.
   if (!value || !legacy_effect_stream_parent_live(*value)) return 4;
-  // The id only has to name the same caller the stream was opened for. An
-  // unregistered plug-in passes 0 here and may have passed something else
-  // when it opened the stream - DeepGlow2 does exactly that - and the stream
-  // it is reading is still its own: this worker hosts one plug-in, and the
-  // registry already refused any handle that is not this stream (issue #909).
-  // A negative id stays malformed, as at every other entry point here.
-  const bool owner_matches = plugin_id >= 0 &&
-      (plugin_id == value->owner_plugin_id || plugin_id == 0 ||
-       value->owner_plugin_id == 0);
+  // The id has to name the caller the stream was opened for, read through the
+  // same substitution the open used: an unregistered plug-in passes 0 and its
+  // streams were borrowed under the host's id, so 0 answers for that one and
+  // for nothing else. A negative id stays malformed, as at every other entry
+  // point here (issue #909).
+  const bool owner_matches =
+      plugin_id >= 0 &&
+      (plugin_id == 0 ? kHostPossessionId : plugin_id) == value->owner_plugin_id;
   if (!owner_matches || value->value_live || !time || time->scale == 0 ||
       !output)
     return 4;
@@ -3132,8 +3143,13 @@ int32_t __cdecl aegp_set_stream_value_v2(
     int32_t plugin_id, void* stream, AegpStreamValue* input) {
   aexcompat::scene_transaction::MutationLock mutation_lock;
   auto* value = legacy_effect_stream(stream);
-  if (!value || !legacy_effect_stream_parent_live(*value) ||
-      plugin_id != value->owner_plugin_id || !value->value_live || !input ||
+  // The same substitution the read side uses, and for the same reason: an
+  // unregistered caller's streams are recorded under the host's id, so
+  // comparing its 0 against that raw would have let it read a stream it may
+  // not write. This is still an exact match against what the open recorded.
+  if (!value || !legacy_effect_stream_parent_live(*value) || plugin_id < 0 ||
+      (plugin_id == 0 ? kHostPossessionId : plugin_id) != value->owner_plugin_id ||
+      !value->value_live || !input ||
       input->stream != stream || value->checked_out_value != input)
     return 4;
   const auto& current = g_aegp_effect_instances[value->effect_instance_index];
@@ -3208,8 +3224,18 @@ int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
   // is why it is not run through the AEGP translation the stream types use.
   if (instance->loaded_plugin) {
     const auto& records = aexcompat::worker_runtime::parameters::state().records;
-    // Index 0 is the input layer, which has no declaration of its own.
-    if (index < 1 || static_cast<std::size_t>(index) > records.size()) return 4;
+    if (static_cast<std::size_t>(index) > records.size()) return 4;
+    // Index 0 is the input layer, which has no declaration of its own. The
+    // fixture branch below answers it as PF_Param_LAYER with a zeroed union,
+    // and the SDK documents the range as `[0, num_param_streams)`, so
+    // refusing it here would have failed the documented walk on its first
+    // step - which is what the stream path did until it stopped.
+    if (index == 0) {
+      *type = 0;  // PF_Param_LAYER
+      std::memset(param_union, 0, kParamSize - 56);
+      ++g_aegp_effect_param_union_calls;
+      return 0;
+    }
     const auto& record = records[static_cast<std::size_t>(index - 1)];
     static_assert(aexcompat::worker_runtime::parameters::kDefinitionSize ==
                   kParamSize);
