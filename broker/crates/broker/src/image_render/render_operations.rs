@@ -139,7 +139,14 @@ fn render_audio_via_length_one_session(
         plugin_sha256: approved_sha256,
         parameters: Some(parameters),
         dependencies: Vec::new(),
-        dependency_search_dirs: Vec::new(),
+        dependency_search_dirs: match plugin_path.parent() {
+            Some(parent) => vec![parent.to_path_buf()],
+            None => {
+                return AudioWrapperOutcome::Fallback(
+                    "plugin path has no parent directory to search for dependencies".to_string(),
+                );
+            }
+        },
         max_samples: samples.len() as u32,
         channels: 1,
         time_scale: SAMPLE_RATE,
