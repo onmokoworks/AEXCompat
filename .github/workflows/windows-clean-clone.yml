@@ -88,9 +88,12 @@ jobs:
         # all. Only the two CI workflows set it (here and in ae-sdk-tests.yml for
         # the pytest side), so a regression in the restricted token -- which
         # produces the same 0xC0000142 the probe keys on -- fails loudly on a
-        # developer machine instead of skipping (issue #335).
+        # developer machine instead of skipping (issue #335). Hosted fallback の
+        # ときだけ許可する: windows-real は sealed worker を実起動できる (main の
+        # run で skip 0 件を実測) ので、そこでの skip は launch 経路の退行であり
+        # fail させる。値 "0" は probe ("1" 以外は不許可) への明示の拒否 (#721)。
         env:
-          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"
+          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: ${{ (github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true') && '0' || '1' }}
         run: |
           cargo test --workspace --locked -- --show-output 2>&1 |
             Tee-Object -FilePath "$env:GITHUB_WORKSPACE/cargo-test-output.txt"

@@ -3,7 +3,12 @@ name: AE SDK tests
 on:
   push:
     branches: [main]
-  pull_request:
+  schedule:
+    # 03:00 UTC = 12:00 JST。物理 runner がオフラインなら queue され、オンライン
+    # 復帰時に走る (24 時間で expire)。PR ごとには回さない: 物理マシンは 1 台で、
+    # この workflow が長時間占有すると PR ゲート (windows-clean-clone) が詰まる
+    # (#721)。PR ゲート側の minihost コンパイルは #884 が担当する。
+    - cron: '0 3 * * *'
   workflow_dispatch:
 
 permissions:
@@ -18,13 +23,15 @@ concurrency:
 jobs:
   sdk-backed:
     name: pytest with AE SDK (windows)
-    runs-on: windows-latest
-    # fork (untrusted) PR では実行しない: SDK asset は collaborator 限定であり、
-    # PR 側コードに asset へ届く token 付きで pytest を走らせない (fail-closed)。
-    # 現状 private repo で same-repo branch PR のみなので挙動は変わらない。
-    # A public repository/fork must never fetch the private SDK release asset.
-    # Public PRs still receive the source-only windows-clean-clone workflow.
-    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    # Keep untrusted public-repository jobs off the physical workstation
+    # (same routing as windows-clean-clone.yml): private repositories use it
+    # while USE_SELF_HOSTED_RUNNER=true, and disabling the variable falls back
+    # to the GitHub-hosted runner without a workflow edit.
+    runs-on: ${{ github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true' && fromJSON('["self-hosted","Windows","X64","windows-real"]') || 'windows-latest' }}
+    # A public repository must never fetch the private SDK release asset
+    # (fail-closed; the asset is collaborator-only). Trigger は main push /
+    # schedule / dispatch のみなので fork PR 条件は不要になった (#721)。
+    if: github.event.repository.private
     timeout-minutes: 120
     env:
       SDK_RELEASE_TAG: ci-sdk-ae25.2
@@ -171,8 +178,12 @@ jobs:
       - name: Run native parameter-animation Rust coverage
         working-directory: broker
         shell: pwsh
+        # Skip の opt-in は hosted fallback のときだけ。windows-real は sealed
+        # worker を実起動できる (clean-clone の main run で skip 0 件を実測) ので、
+        # そこでの skip は環境制限ではなく launch 経路の退行であり、fail させる
+        # (#335, #721)。値 "0" は probe ("1" 以外は不許可) に対する明示の拒否。
         env:
-          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"
+          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: ${{ (github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true') && '0' || '1' }}
         run: |
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
@@ -231,9 +242,10 @@ jobs:
       - name: Run pytest with SDK and built-artifact tests
         shell: cmd
         # See windows-clean-clone.yml: the skip is opt-in so a token regression
-        # cannot hide as an environment limitation off CI (issue #335).
+        # cannot hide as an environment limitation off CI (issue #335). Hosted
+        # fallback のみ許可し、windows-real では "0" で明示拒否する (#721)。
         env:
-          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"
+          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: ${{ (github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true') && '0' || '1' }}
           # 前段の Build minihost workers が同一 checkout からビルド済みの
           # worker を canonical_release_worker fixture に渡し、fixture 内での
           # 二重ビルドを避ける (#681)。
