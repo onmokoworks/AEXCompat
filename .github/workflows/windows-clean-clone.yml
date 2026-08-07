@@ -67,6 +67,26 @@ jobs:
         run: cargo check --manifest-path bridges/aviutl2/Cargo.toml --all-targets --locked
       - name: Check AviUtl2 multifilter bridge
         run: cargo check --manifest-path bridges/aviutl2-multifilter/Cargo.toml --all-targets --locked
+      # PR ゲートで minihost の C++ をコンパイルする (#884)。ae-sdk-tests の
+      # 手動無効化 (#721) 以降、minihost を触る PR はコンパイルすら検証されずに
+      # merge できた。minihost のビルドは AFTER_EFFECTS_SDK_ROOT を参照しない
+      # ので、SDK fetch を持たないこの workflow に置ける。probe AEX のビルドと
+      # SDK 付き pytest の復旧は ae-sdk-tests 側 (#721) が担当する。
+      - name: Build minihost workers (Ninja)
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          if not defined VSROOT exit /b 1
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake -S minihost -B target\minihost-build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
+          cmake --build target\minihost-build || exit /b 1
+          dir /b target\minihost-build\aex_*.exe
+      # ヘッダ依存が実際に記録されているかを確認する (#657)。cl の /showIncludes
+      # はローカライズされるため、configure 時と build 時で言語が食い違うと
+      # ninja は依存を 0 件記録し、以後ヘッダを変えても再ビルドされない (#651)。
+      - name: Verify minihost header dependency tracking
+        shell: pwsh
+        run: pwsh -File tools\verify-minihost-build-deps.ps1
       # Hosted runners execute as a service account whose restricted token cannot
       # initialize even a static Rust worker (0xC0000142). The tests that drive a
       # live worker detect that themselves now (broker/crates/broker/tests/common,

@@ -51,6 +51,24 @@ def test_windows_clean_clone_runs_canonical_source_reproducible_gates():
     assert "uv run python -m pytest --collect-only -q --validate-local-artifact-manifest" in workflow
     assert "uv run python -m pytest -q" in workflow
     assert "--run-local-artifact-tests" not in workflow
+    # The PR gate compiles the minihost C++ (#884): after ae-sdk-tests was
+    # manually disabled (#721) no CI compiled it at all, so a PR touching
+    # minihost could merge without even a build check. The build needs no
+    # AFTER_EFFECTS_SDK_ROOT, which is what lets it live in this SDK-free
+    # workflow.
+    assert "cmake -S minihost -B target\\minihost-build -G Ninja" in workflow
+    assert "cmake --build target\\minihost-build" in workflow
+    # #657: header dependency tracking must be verified wherever minihost is
+    # built, or a localized /showIncludes silently records zero deps (#651).
+    assert "verify-minihost-build-deps.ps1" in workflow
+
+
+def test_the_tool_presence_smoke_workflow_stays_deleted():
+    """#884 deleted windows-real-smoke.yml: once the PR gate builds minihost
+    for real, a workflow that only checks the tools exist is strictly weaker
+    than the build it duplicates. Reintroducing it needs the discussion in
+    #884, not a copy-paste revival."""
+    assert not (ROOT / ".github/workflows/windows-real-smoke.yml").exists()
 
 
 def test_pre_launch_rejection_tests_keep_running_on_a_launch_limited_host():
