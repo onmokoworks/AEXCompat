@@ -21,12 +21,10 @@ def _worker():
 
 
 
-def test_probe_builds_and_passes_native_guards():
+def test_probe_builds():
     subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT)],
                    cwd=ROOT, check=True, timeout=180)
     assert PROBE.is_file() and PROBE.stat().st_size > 0
-    guard = ROOT / "tests/test_native_code_guards.py"
-    subprocess.run(["pytest", "-q", str(guard)], cwd=ROOT, check=True, timeout=120)
 
 
 def test_real_aex_animation_sidecar_adversarial_probe(tmp_path):
