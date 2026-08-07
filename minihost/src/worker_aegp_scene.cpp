@@ -676,7 +676,8 @@ uint64_t staged_effect_identity_for_render_ref(
   return 0;
 }
 const AegpInstalledEffectRecord* find_installed_effect(int32_t key);
-const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index);
+const AegpEffectParameterRecord* find_effect_parameter(
+    const AegpEffectInstance& instance, int32_t index);
 void initialize_effect_parameter_values(AegpEffectInstance& instance);
 AegpTransformStream& g_aegp_transform_stream = scene_runtime_state().transform_stream;
 std::array<AegpLegacyEffectStream, kAegpLegacyEffectStreamCapacity>&
@@ -899,6 +900,21 @@ int32_t aegp_layer_index(void* layer) {
       resolved.identity == state().dynamic_camera_identity
       ? resolved.local_index : -1;
 }
+// The same index, refused when it is past the per-layer attribute tables.
+//
+// Those hold three entries, one per fixture layer, while `aegp_layer_index`
+// also answers for a camera the plug-in created at runtime - whose local index
+// is the comp's layer count, so 3. Every attribute below reads or writes one
+// of those tables at the index, so a camera handle reached the fourth element:
+// reads off the end for the getters, and writes off the end for
+// `AEGP_SetLayerFlag` and `AEGP_SetLayerInPointAndDuration`. Predates this
+// stack; the transform path avoided it by bounds-checking separately
+// (`build_layer_world_transform`).
+int32_t aegp_layer_attribute_index(void* layer) {
+  const int32_t index = aegp_layer_index(layer);
+  return static_cast<std::size_t>(index) < g_aegp_layer_in_points.size()
+      ? index : -1;
+}
 int32_t __cdecl aegp_get_layer_to_world_xform(
     void* layer, const AegpTime* comp_time, AegpMatrix4* transform) {
   const int32_t index = aegp_layer_index(layer);
@@ -1015,14 +1031,8 @@ bool add_rational_times(const AegpTime& left, const AegpTime& right,
 // the identity-stretch case rather than as the general one (issue #891).
 int32_t __cdecl aegp_convert_layer_to_comp_time(
     void* layer, const AegpTime* layer_time, AegpTime* comp_time) {
-  const int32_t index = aegp_layer_index(layer);
-  // A layer created at runtime (a camera added to the comp) indexes past the
-  // fixture's in-point table, which holds three. Refuse rather than read off
-  // the end, the way every other indexed layer attribute here does.
-  if (index < 0 ||
-      static_cast<std::size_t>(index) >= g_aegp_layer_in_points.size() ||
-      !layer_time || !comp_time || layer_time->scale == 0)
-    return 4;
+  const int32_t index = aegp_layer_attribute_index(layer);
+  if (index < 0 || !layer_time || !comp_time || layer_time->scale == 0) return 4;
   AegpTime converted{};
   if (!add_rational_times(*layer_time,
                           g_aegp_layer_in_points[static_cast<std::size_t>(index)],
@@ -1035,11 +1045,8 @@ int32_t __cdecl aegp_convert_layer_to_comp_time(
 
 int32_t __cdecl aegp_convert_comp_to_layer_time(
     void* layer, const AegpTime* comp_time, AegpTime* layer_time) {
-  const int32_t index = aegp_layer_index(layer);
-  if (index < 0 ||
-      static_cast<std::size_t>(index) >= g_aegp_layer_in_points.size() ||
-      !comp_time || !layer_time || comp_time->scale == 0)
-    return 4;
+  const int32_t index = aegp_layer_attribute_index(layer);
+  if (index < 0 || !comp_time || !layer_time || comp_time->scale == 0) return 4;
   const AegpTime& in_point = g_aegp_layer_in_points[static_cast<std::size_t>(index)];
   if (in_point.value == (std::numeric_limits<int32_t>::min)()) return 4;
   AegpTime converted{};
@@ -1349,14 +1356,14 @@ int32_t __cdecl aegp_get_layer_id(void* layer, int32_t* id) {
   return 0;
 }
 int32_t __cdecl aegp_get_layer_flags(void* layer, uint32_t* flags) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   if (index < 0 || !flags) return 4;
   *flags = g_aegp_layer_flags[static_cast<std::size_t>(index)];
   ++g_aegp_layer_attribute_calls;
   return 0;
 }
 int32_t __cdecl aegp_set_layer_flag(void* layer, uint32_t flag, uint8_t value) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   constexpr uint32_t kWritableFlags = 0x00000001u | 0x00000002u |
       0x00000020u | 0x00004000u;
   if (index < 0 || (flag & kWritableFlags) == 0 || (flag & (flag - 1)) != 0 || value > 1)
@@ -1384,14 +1391,14 @@ int32_t __cdecl aegp_get_layer_object_type(void* layer, int32_t* type) {
   return 0;
 }
 int32_t __cdecl aegp_get_layer_in_point(void* layer, int32_t time_mode, AegpTime* time) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   if (index < 0 || time_mode != 1 || !time) return 4;
   *time = g_aegp_layer_in_points[static_cast<std::size_t>(index)];
   ++g_aegp_layer_attribute_calls;
   return 0;
 }
 int32_t __cdecl aegp_get_layer_duration(void* layer, int32_t time_mode, AegpTime* time) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   if (index < 0 || time_mode != 1 || !time) return 4;
   *time = g_aegp_layer_durations[static_cast<std::size_t>(index)];
   ++g_aegp_layer_attribute_calls;
@@ -1399,7 +1406,7 @@ int32_t __cdecl aegp_get_layer_duration(void* layer, int32_t time_mode, AegpTime
 }
 int32_t __cdecl aegp_set_layer_in_point_and_duration(
     void* layer, int32_t time_mode, const AegpTime* in_point, const AegpTime* duration) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   if (index < 0 || time_mode != 1 || !in_point || !duration ||
       in_point->scale != 30 || duration->scale != 30 || in_point->value < 0 ||
       duration->value <= 0 || in_point->value + duration->value > 300) return 4;
@@ -1508,6 +1515,9 @@ int32_t __cdecl aegp_dispose_effect(void* effect) {
   if (effect == &g_aegp_effect) {
     if (!g_aegp_effect_live) return 4;
     g_aegp_effect_live = false;
+    // Slot 0 goes back to being whatever `installed_key` says it is. The flag
+    // lasts exactly as long as the handle that set it.
+    g_aegp_effect_instances[0].loaded_plugin = false;
     ++g_aegp_effect_disposes;
     return 0;
   }
@@ -1747,6 +1757,12 @@ int32_t __cdecl get_new_effect_for_effect(int32_t plugin_id, void* effect, void*
     instance.layer = &g_aegp_layers[0];
     ++instance.generation;
   }
+  // Whatever slot 0 held, from here it stands for the plug-in that just asked
+  // for its own effect handle. The scene runtime seeds it with the probe
+  // fixture's key at start, and this is the only place that fact stops being
+  // true: without saying so, every stream question about this handle is
+  // answered out of a five-parameter fixture table (issue #909).
+  instance.loaded_plugin = true;
   if (!ensure_effect_identity(0)) return 4;
   g_aegp_effect_live = true;
   // The handle stays `&g_aegp_effect`: `resolve_effect_instance` recognizes
@@ -1861,19 +1877,25 @@ const AegpEffectParameterRecord* loaded_effect_parameter(int32_t index) {
   published.writable = false;
   return &published;
 }
-const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index) {
+const AegpEffectParameterRecord* find_effect_parameter(
+    const AegpEffectInstance& instance, int32_t index) {
+  const int32_t key = instance.installed_key;
   if (aexcompat::l2_detail::extended_diag_enabled())
-    std::cerr << "extended_diag:find_param key=" << key << " index=" << index << "\n" << std::flush;
+    std::cerr << "extended_diag:find_param key=" << key << " index=" << index
+              << " loaded=" << instance.loaded_plugin << "\n" << std::flush;
+  // Whose parameters these are is a property of the instance, not of the key.
+  // Slot 0 is seeded with the probe's key at scene start and
+  // `AEGP_GetNewEffectForEffect` hands that same slot to the loaded plug-in,
+  // so a key check alone answers a 159-parameter effect out of a
+  // five-parameter fixture table (issue #909).
+  if (instance.loaded_plugin) return loaded_effect_parameter(index);
   const auto* effect = find_installed_effect(key);
-  // A key the compile-time table does not carry means the effect is a real
-  // loaded plug-in rather than one of this host's fixtures, which is the
-  // ordinary case outside the self-tests.
+  // A key the compile-time table does not carry is not a fixture either.
   if (!effect) return loaded_effect_parameter(index);
   // A fixture answers within its own declared parameter count and no further.
   // `aegp_get_effect_num_param_streams_v2` reports that count, and the arrays
-  // below are sized to it, so letting an index past it fall through to the
-  // loaded plug-in would both contradict the reported count and index those
-  // arrays out of range.
+  // below are sized to it, so letting an index past it fall through would both
+  // contradict the reported count and index those arrays out of range.
   if (index < 0 || index >= effect->parameter_count) return nullptr;
   if (key == kAegpInstalledEffects[0].key)
     return &kAegpProbeParameters[static_cast<std::size_t>(index)];
@@ -1886,7 +1908,7 @@ void initialize_effect_parameter_values(AegpEffectInstance& instance) {
   const auto* effect = find_installed_effect(instance.installed_key);
   if (!effect) return;
   for (int32_t index = 1; index < effect->parameter_count; ++index) {
-    const auto* parameter = find_effect_parameter(instance.installed_key, index);
+    const auto* parameter = find_effect_parameter(instance, index);
     if (parameter)
       instance.parameter_values[static_cast<std::size_t>(index - 1)] =
           parameter->default_value;
@@ -1939,18 +1961,22 @@ int32_t __cdecl aegp_get_effect_category(int32_t key, char* category) {
 int32_t __cdecl aegp_get_effect_num_param_streams_v2(void* effect, int32_t* count) {
   const auto* instance = resolve_effect_instance(effect);
   if (!instance || !count) return 4;
-  const auto* installed = find_installed_effect(instance->installed_key);
+  const auto* installed = instance->loaded_plugin
+      ? nullptr : find_installed_effect(instance->installed_key);
   if (installed) {
     *count = installed->parameter_count;
     return 0;
   }
-  // No fixture key means a real loaded plug-in, whose parameters are the ones
+  // A real loaded plug-in, whose parameters are the ones
   // `find_effect_parameter` answers from. Refusing here left the ordinary
   // walk - ask how many, then open each - stopping at its first call even
   // though every stream it would have asked for is now openable (issue #909).
   const auto& records = aexcompat::worker_runtime::parameters::state().records;
-  // Index 0 is the input layer and carries no record, matching the 1-based
-  // indexing `loaded_effect_parameter` uses.
+  // The count is `records.size() + 1` because AE counts the input layer, which
+  // has no record and sits at index 0. `loaded_effect_parameter` answers
+  // 1..records.size() and refuses 0, so a walk over `0..count-1` is one index
+  // wider than what opens; #919 covers closing that gap along with the group
+  // markers that have no stream either.
   *count = static_cast<int32_t>(records.size()) + 1;
   return 0;
 }
@@ -2830,7 +2856,7 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   std::size_t instance_index = 0;
   const auto* instance = resolve_effect_instance(effect, plugin_id, &instance_index);
   const auto* parameter = instance
-      ? find_effect_parameter(instance->installed_key, index) : nullptr;
+      ? find_effect_parameter(*instance, index) : nullptr;
   ObjectSnapshot effect_identity{};
   bool possessed = scene_registry().resolve_possessed(
       effect, ObjectKind::effect, plugin_id, effect_identity);
@@ -2922,7 +2948,7 @@ int32_t __cdecl aegp_get_stream_name_v2(void* stream, uint8_t, char* name) {
   auto* value = legacy_effect_stream(stream);
   if (!value || !legacy_effect_stream_parent_live(*value) || !name) return 4;
   const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  const auto* parameter = find_effect_parameter(instance, value->param_index);
   if (!parameter) return 4;
   // AEGP_MAX_STREAM_NAME_SIZE is PF_MAX_EFFECT_PARAM_NAME_LEN + 1 = 32, and
   // the caller's buffer is that size. A fixture name is a short literal, but a
@@ -2940,7 +2966,7 @@ int32_t __cdecl aegp_get_stream_type_v2(void* stream, int32_t* type) {
   auto* value = legacy_effect_stream(stream);
   if (!value || !legacy_effect_stream_parent_live(*value) || !type) return 4;
   const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  const auto* parameter = find_effect_parameter(instance, value->param_index);
   if (!parameter) return 4;
   *type = parameter->type;
   return 0;
@@ -2971,7 +2997,7 @@ int32_t __cdecl aegp_get_new_stream_value_v2(
       !output)
     return 4;
   const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  const auto* parameter = find_effect_parameter(instance, value->param_index);
   if (!parameter) return 4;
   output->stream = stream;
   output->value.fill(std::byte{});
@@ -3030,7 +3056,7 @@ int32_t __cdecl aegp_set_stream_value_v2(
       input->stream != stream || value->checked_out_value != input)
     return 4;
   const auto& current = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(current.installed_key, value->param_index);
+  const auto* parameter = find_effect_parameter(current, value->param_index);
   if (!parameter || value->param_index == 0 || !parameter->writable) return 4;
   std::array<double, 4> candidate{};
   std::memcpy(candidate.data(), input->value.data(), sizeof(candidate));

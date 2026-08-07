@@ -31,6 +31,13 @@ struct AegpEffectInstance {
   uint32_t flags{1};
   uint32_t generation{};
   bool occupied{};
+  // This instance stands for the plug-in this worker loaded, not for one of
+  // the fixtures `installed_key` names. Slot 0 is seeded with the probe's key
+  // at scene start and `AEGP_GetNewEffectForEffect` hands that same slot back,
+  // so the key alone cannot tell the two apart - and answering a real
+  // plug-in's stream questions out of a five-parameter fixture table is what
+  // kept a 159-parameter effect from reaching its own parameters (issue #909).
+  bool loaded_plugin{};
   void* render_ref{};
   std::array<std::array<double, 4>, kAegpEffectParameterCapacity> parameter_values{{
       {{42.5, 0.0, 0.0, 0.0}}, {{160.0, 90.0, 0.0, 0.0}},

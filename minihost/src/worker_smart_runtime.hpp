@@ -67,8 +67,10 @@ struct State {
   // PF_Err_NONE instead would invent a contract AE does not have - a plug-in
   // that reads `world->width` after a successful checkout would fault, and
   // that pattern is in the SDK samples. Owned by the state so its lifetime is
-  // the session's.
-  std::array<std::byte, 120> empty_layer_world{};
+  // the session's. Aligned like the worlds the render subsystem builds, whose
+  // buffers get natural alignment from where they live; a byte array beside
+  // two 32-bit members would not.
+  alignas(8) std::array<std::byte, 120> empty_layer_world{};
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
   int32_t pixel_aspect_numerator{1};

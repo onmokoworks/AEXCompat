@@ -537,9 +537,6 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
         .and_then(|&slot| read_virtual_buffer_rgba8(video).map(|(_, _, rgba)| (slot, rgba)));
     match render_on(&tx, plugin_index, current_time, rgba, parameters, layer) {
         FrameReply::Rendered(frame) => {
-            // Says so once when a filter that had been failing renders again;
-            // silent for one that never stopped.
-            report_frame_recovered(&ctx.plugin);
             // The frame is published at whatever size it came back as, which is
             // not always the object's. A SmartFX effect that grows its output -
             // a glow reaching past the layer - answers larger, and set_image_data
@@ -571,6 +568,14 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
                 );
                 return true;
             }
+            // Says so once when a filter that had been failing renders again;
+            // silent for one that never stopped. After the refusal above, not
+            // before it: a filter refused on every frame would otherwise clear
+            // its own trouble state each time, so the once-per-60 collapse
+            // never engaged and every frame printed both "rendering again" and
+            // the refusal - at preview frame rate, and the first of the two
+            // untrue.
+            report_frame_recovered(&ctx.plugin);
             unsafe {
                 ((*video).set_image_data)(out.as_ptr(), frame.width as i32, frame.height as i32)
             };
