@@ -137,6 +137,19 @@ struct AegpFloatPoint {
 };
 static_assert(sizeof(AegpFloatPoint) == 8);
 
+// `A_FloatRect` (`A.h`): four A_FpLong, in that order.
+struct AegpFloatRect {
+  double left{};
+  double top{};
+  double right{};
+  double bottom{};
+};
+static_assert(sizeof(AegpFloatRect) == 32);
+static_assert(offsetof(AegpFloatRect, left) == 0);
+static_assert(offsetof(AegpFloatRect, top) == 8);
+static_assert(offsetof(AegpFloatRect, right) == 16);
+static_assert(offsetof(AegpFloatRect, bottom) == 24);
+
 using AegpTime = aexcompat::suite_abi::AegpTime;
 using AegpLayerEffectBoundary = aexcompat::render_options::LayerEffectBoundary;
 using AegpLayerRenderOptionsValue = aexcompat::render_options::LayerValue;
@@ -209,6 +222,13 @@ int32_t __cdecl aegp_get_layer_stream_value_v2(void*, int32_t, int16_t,
 int32_t __cdecl aegp_get_active_layer(void** layer);
 int32_t __cdecl aegp_get_layer_index(void* layer, int32_t* index);
 int32_t __cdecl aegp_get_layer_source_item(void* layer, void** item);
+int32_t __cdecl aegp_get_layer_masked_bounds(
+    void* layer, int32_t time_mode, const AegpTime* time,
+    AegpFloatRect* bounds);
+int32_t __cdecl aegp_convert_comp_to_layer_time(
+    void* layer, const AegpTime* comp_time, AegpTime* layer_time);
+int32_t __cdecl aegp_convert_layer_to_comp_time(
+    void* layer, const AegpTime* layer_time, AegpTime* comp_time);
 int32_t __cdecl aegp_get_layer_parent_comp(void* layer, void** comp);
 int32_t __cdecl aegp_get_layer_name(int32_t, void*, void**, void**);
 int32_t __cdecl aegp_get_layer_parent(void* layer, void** parent);

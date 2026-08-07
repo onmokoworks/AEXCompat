@@ -2006,8 +2006,29 @@ bool dispatch_conditional_ui_selectors(EffectEntry entry,
                                         nullptr, nullptr);
     g_conditional_ui_selectors_dispatched = true;
   }
-  return (!g_update_params_ui_advertised || g_update_params_ui_error == 0) &&
-      (!g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0);
+  // Only QUERY_DYNAMIC_FLAGS decides whether the frame can proceed.
+  //
+  // The two selectors are not the same kind of precondition. QUERY_DYNAMIC_FLAGS
+  // rewrites out_flags/out_flags2, which the render path then reads for the
+  // wide-time and shutter rules and for NOP_RENDER, so a plug-in that fails it
+  // has left the host without the flags the rest of the frame is built on.
+  // UPDATE_PARAMS_UI only refreshes what the Effect Controls panel shows; AE
+  // sends it when that panel is up, not as a step of rendering, and a headless
+  // render in AE never sends it at all. Failing the frame on it made this host
+  // stricter than AE about a selector AE does not require to render (issue
+  // #883): DeepGlow2 answers it with error 4 and never reached SMART_PRE_RENDER
+  // here, while it renders in AE.
+  //
+  // The error is not swallowed - it stays in `update_params_ui_error` for the
+  // report and in the line below - it just no longer decides the frame.
+  if (extended_diag_enabled())
+    std::cerr << "extended_diag:conditional_ui update_advertised="
+              << g_update_params_ui_advertised
+              << " update_error=" << g_update_params_ui_error
+              << " query_advertised=" << g_query_dynamic_flags_advertised
+              << " query_error=" << g_query_dynamic_flags_error << "\n"
+              << std::flush;
+  return !g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0;
 }
 
 

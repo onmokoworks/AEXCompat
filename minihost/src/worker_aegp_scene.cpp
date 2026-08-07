@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <limits>
+#include <numeric>
 #include <utility>
 
 using aexcompat::scene_runtime::scene_runtime_state;
@@ -913,6 +915,111 @@ int32_t __cdecl aegp_get_item_dimensions(
       result_width > 32768 || result_height > 32768) return 4;
   *width = result_width;
   *height = result_height;
+  return 0;
+}
+
+// AEGP_GetLayerMaskedBounds: the layer's extent after its masks, in layer
+// coordinates.
+//
+// This host's scene model carries no per-layer masks. Masks reach an effect as
+// its own parameters and through the render request's mask trailer, which is
+// effect state, not something hanging off the layer this suite hands out. With
+// no mask on the layer the masked bounds are the layer's whole extent, which is
+// what this returns: origin at (0,0), the same dimensions
+// AEGP_GetItemDimensions reports for the composition.
+//
+// A layer whose extent differs from the composition, and the intersection AE
+// computes when a layer does carry masks (including how feather widens it), are
+// not derivable from what this host models. If either becomes observable, the
+// answer here has to come from an AE measurement rather than from an
+// approximation invented here (issue #891).
+int32_t __cdecl aegp_get_layer_masked_bounds(
+    void* layer, int32_t time_mode, const AegpTime* time,
+    AegpFloatRect* bounds) {
+  // AEGP_LTimeMode_LayerTime = 0, AEGP_LTimeMode_CompTime = 1.
+  constexpr int32_t kLayerTimeMode = 0;
+  constexpr int32_t kCompTimeMode = 1;
+  const int32_t index = aegp_layer_index(layer);
+  if (index < 0 || !time || !bounds ||
+      (time_mode != kLayerTimeMode && time_mode != kCompTimeMode))
+    return 4;
+  // Only the time base is checked, not the range: the bounds this host returns
+  // do not vary over time, and the layer-time mode measures from the layer's
+  // own start, so the composition-duration check the comp-time callbacks use
+  // would refuse valid layer times.
+  if (time->scale == 0) return 4;
+  const int32_t width = g_full_resolution_width > 0
+      ? g_full_resolution_width : g_smart_width;
+  const int32_t height = g_full_resolution_height > 0
+      ? g_full_resolution_height : g_smart_height;
+  if (width <= 0 || height <= 0 || width > 32768 || height > 32768) return 4;
+  *bounds = AegpFloatRect{0.0, 0.0, static_cast<double>(width),
+                          static_cast<double>(height)};
+  return 0;
+}
+
+// Adds two rational times, keeping the result exact. Same denominator adds the
+// numerators; different denominators go through their lcm. Anything that would
+// leave the A_Time range is refused rather than rounded, so a caller never
+// receives a time this host silently changed.
+bool add_rational_times(const AegpTime& left, const AegpTime& right,
+                        AegpTime& sum) {
+  if (left.scale == 0 || right.scale == 0) return false;
+  if (left.scale == right.scale) {
+    const int64_t total = static_cast<int64_t>(left.value) + right.value;
+    if (total < (std::numeric_limits<int32_t>::min)() ||
+        total > (std::numeric_limits<int32_t>::max)())
+      return false;
+    sum = AegpTime{static_cast<int32_t>(total), left.scale};
+    return true;
+  }
+  const uint64_t divisor = std::gcd<uint64_t, uint64_t>(left.scale, right.scale);
+  const uint64_t common = static_cast<uint64_t>(left.scale) / divisor * right.scale;
+  if (common > (std::numeric_limits<uint32_t>::max)()) return false;
+  const int64_t total =
+      static_cast<int64_t>(left.value) * static_cast<int64_t>(common / left.scale) +
+      static_cast<int64_t>(right.value) * static_cast<int64_t>(common / right.scale);
+  if (total < (std::numeric_limits<int32_t>::min)() ||
+      total > (std::numeric_limits<int32_t>::max)())
+    return false;
+  sum = AegpTime{static_cast<int32_t>(total), static_cast<uint32_t>(common)};
+  return true;
+}
+
+// AEGP_ConvertLayerToCompTime / AEGP_ConvertCompToLayerTime.
+//
+// A layer's time origin is its in point, so the two directions are an add and
+// a subtract of it. AE also scales by the layer's stretch; this host's scene
+// model has no stretch (nothing sets one and AEGP_SetLayerStretch is not
+// implemented), so the conversion is the unstretched one. A layer that did
+// carry a stretch would need the factor here, which is why this is written as
+// the identity-stretch case rather than as the general one (issue #891).
+int32_t __cdecl aegp_convert_layer_to_comp_time(
+    void* layer, const AegpTime* layer_time, AegpTime* comp_time) {
+  const int32_t index = aegp_layer_index(layer);
+  if (index < 0 || !layer_time || !comp_time || layer_time->scale == 0) return 4;
+  AegpTime converted{};
+  if (!add_rational_times(*layer_time,
+                          g_aegp_layer_in_points[static_cast<std::size_t>(index)],
+                          converted))
+    return 4;
+  *comp_time = converted;
+  ++g_aegp_layer_attribute_calls;
+  return 0;
+}
+
+int32_t __cdecl aegp_convert_comp_to_layer_time(
+    void* layer, const AegpTime* comp_time, AegpTime* layer_time) {
+  const int32_t index = aegp_layer_index(layer);
+  if (index < 0 || !comp_time || !layer_time || comp_time->scale == 0) return 4;
+  const AegpTime& in_point = g_aegp_layer_in_points[static_cast<std::size_t>(index)];
+  if (in_point.value == (std::numeric_limits<int32_t>::min)()) return 4;
+  AegpTime converted{};
+  if (!add_rational_times(*comp_time, AegpTime{-in_point.value, in_point.scale},
+                          converted))
+    return 4;
+  *layer_time = converted;
+  ++g_aegp_layer_attribute_calls;
   return 0;
 }
 
@@ -2102,6 +2209,12 @@ std::array<void*, 44> g_aegp_comp_suite12{};
 // two apart.
 std::array<void*, 39> g_aegp_layer_suite1{};
 std::array<void*, 46> g_aegp_layer_suite5{};
+// `AEGP_LayerSuite7` (acquired as version 13, frozen in AE 10.0 build 396) is
+// `AEGP_LayerSuite8` without its last two slots: version 14 appends
+// AEGP_GetLayerSamplingQuality and AEGP_SetLayerSamplingQuality and changes
+// nothing before them, so the two tables are filled the same way and only the
+// length differs (issue #890).
+std::array<void*, 48> g_aegp_layer_suite7{};
 std::array<void*, 50> g_aegp_layer_suite8{};
 std::array<void*, 53> g_aegp_layer_suite9{};
 std::array<void*, 17> g_aegp_effect_suite2{};
@@ -2116,6 +2229,7 @@ static_assert(sizeof(g_aegp_comp_suite4) == 28 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite11) == 352);
 static_assert(sizeof(g_aegp_comp_suite12) == 352);
 static_assert(sizeof(g_aegp_layer_suite5) == 368);
+static_assert(sizeof(g_aegp_layer_suite7) == 384);
 static_assert(sizeof(g_aegp_layer_suite8) == 400);
 static_assert(sizeof(g_aegp_layer_suite9) == 424);
 static_assert(sizeof(g_aegp_effect_suite4) == 176);
@@ -2226,7 +2340,10 @@ SceneSuiteAcquireResult scene_acquire_suite(
       g_aegp_layer_suite9[3] = reinterpret_cast<void*>(&aegp_get_layer_index);
       g_aegp_layer_suite9[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
       g_aegp_layer_suite9[6] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
-      g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
+      g_aegp_layer_suite9[27] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
+    g_aegp_layer_suite9[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
+    g_aegp_layer_suite9[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
+    g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
       if (!render_receipt) {
         g_aegp_layer_suite9[7] = reinterpret_cast<void*>(&aegp_get_layer_name);
         g_aegp_layer_suite9[15] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
@@ -2242,7 +2359,10 @@ SceneSuiteAcquireResult scene_acquire_suite(
             reinterpret_cast<void*>(&aegp_delete_layer);
         g_aegp_layer_suite9[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
       }
-      *suite = g_aegp_layer_suite9.data();
+      g_aegp_layer_suite9[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
+    g_aegp_layer_suite9[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
+    g_aegp_layer_suite9[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+    *suite = g_aegp_layer_suite9.data();
       return SceneSuiteAcquireResult::acquired;
     }
   }
@@ -2287,13 +2407,19 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_layer_suite1[16] =
         reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
     g_aegp_layer_suite1[21] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+    // Version 5 is the one table where this sits at 26, not 27: two functions
+    // were inserted ahead of it before version 11.
+    g_aegp_layer_suite1[26] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
     g_aegp_layer_suite1[27] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
+    // Version 5 publishes only the comp-to-layer direction; the layer-to-comp
+    // one arrived later, so there is nothing to wire for it here.
+    g_aegp_layer_suite1[33] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
     g_aegp_layer_suite1[35] = reinterpret_cast<void*>(&aegp_get_layer_id);
     g_aegp_layer_suite1[36] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
     *suite = g_aegp_layer_suite1.data();
     return SceneSuiteAcquireResult::acquired;
   }
-  if (named("AEGP Layer Suite") && version == 11 && state().comp_idle_roundtrip_mode) {
+  if (named("AEGP Layer Suite") && version == 11) {
     g_aegp_layer_suite5 =
         unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_11, 46>();
     g_aegp_layer_suite5[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
@@ -2310,9 +2436,46 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_layer_suite5[16] = reinterpret_cast<void*>(&aegp_get_layer_duration);
     g_aegp_layer_suite5[17] = reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
     g_aegp_layer_suite5[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
+    g_aegp_layer_suite5[27] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
+    g_aegp_layer_suite5[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
+    g_aegp_layer_suite5[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
     g_aegp_layer_suite5[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
     g_aegp_layer_suite5[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
+    g_aegp_layer_suite5[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
+    g_aegp_layer_suite5[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
+    g_aegp_layer_suite5[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+    g_aegp_layer_suite5[28] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
     *suite = g_aegp_layer_suite5.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
+  if (named("AEGP Layer Suite") && version == 13) {
+    // The same slots version 14 fills, in a table two entries shorter. Filled
+    // separately rather than copied from the version 14 table so each table
+    // carries its own version's diagnostic stubs: a plug-in that reaches an
+    // unimplemented slot is recorded against the version it acquired.
+    g_aegp_layer_suite7 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_13, 48>();
+    g_aegp_layer_suite7[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
+    g_aegp_layer_suite7[1] = reinterpret_cast<void*>(&aegp_get_comp_layer_by_index);
+    g_aegp_layer_suite7[2] = reinterpret_cast<void*>(&aegp_get_active_layer);
+    g_aegp_layer_suite7[3] = reinterpret_cast<void*>(&aegp_get_layer_index);
+    g_aegp_layer_suite7[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
+    g_aegp_layer_suite7[6] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
+    g_aegp_layer_suite7[7] = reinterpret_cast<void*>(&aegp_get_layer_name);
+    g_aegp_layer_suite7[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
+    g_aegp_layer_suite7[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
+    g_aegp_layer_suite7[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+    g_aegp_layer_suite7[27] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
+    g_aegp_layer_suite7[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
+    g_aegp_layer_suite7[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
+    g_aegp_layer_suite7[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
+    g_aegp_layer_suite7[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
+    g_aegp_layer_suite7[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
+    g_aegp_layer_suite7[15] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
+    g_aegp_layer_suite7[16] = reinterpret_cast<void*>(&aegp_get_layer_duration);
+    g_aegp_layer_suite7[17] = reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
+    g_aegp_layer_suite7[28] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
+    *suite = g_aegp_layer_suite7.data();
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Layer Suite") && version == 14) {
@@ -2328,9 +2491,16 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_layer_suite8[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
     g_aegp_layer_suite8[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
     g_aegp_layer_suite8[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+    g_aegp_layer_suite8[27] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
+    g_aegp_layer_suite8[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
+    g_aegp_layer_suite8[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
     g_aegp_layer_suite8[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
     g_aegp_layer_suite8[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
     g_aegp_layer_suite8[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
+    g_aegp_layer_suite8[15] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
+    g_aegp_layer_suite8[16] = reinterpret_cast<void*>(&aegp_get_layer_duration);
+    g_aegp_layer_suite8[17] = reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
+    g_aegp_layer_suite8[28] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
     *suite = g_aegp_layer_suite8.data();
     return SceneSuiteAcquireResult::acquired;
   }

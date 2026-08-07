@@ -211,7 +211,7 @@ bool verify_aegp_layer_suite1_slots() {
   const auto* slots = static_cast<void* const*>(raw);
   if (!slots || raw != g_aegp_layer_suite1.data()) return finish(false);
 
-  const std::array<std::pair<std::size_t, void*>, 15> wired{{
+  const std::array<std::pair<std::size_t, void*>, 17> wired{{
       {0, reinterpret_cast<void*>(&aegp_get_comp_num_layers)},
       {1, reinterpret_cast<void*>(&aegp_get_comp_layer_by_index)},
       {2, reinterpret_cast<void*>(&aegp_get_active_layer)},
@@ -224,7 +224,9 @@ bool verify_aegp_layer_suite1_slots() {
       {15, reinterpret_cast<void*>(&aegp_get_layer_duration)},
       {16, reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration)},
       {21, reinterpret_cast<void*>(&aegp_get_layer_transfer_mode)},
+      {26, reinterpret_cast<void*>(&aegp_get_layer_masked_bounds)},
       {27, reinterpret_cast<void*>(&aegp_get_layer_object_type)},
+      {33, reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time)},
       {35, reinterpret_cast<void*>(&aegp_get_layer_id)},
       {36, reinterpret_cast<void*>(&aegp_get_layer_to_world_xform)},
   }};
