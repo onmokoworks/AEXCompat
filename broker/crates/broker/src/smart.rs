@@ -117,6 +117,7 @@ pub fn run(
                 args_after_plugin: &args_after_plugin,
                 repository,
                 require_module_audit: true,
+                launch_environment: Default::default(),
             },
             Some(timeout),
             None,

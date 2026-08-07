@@ -1,5 +1,5 @@
 use crate::runtime_module_policy::{AuthenticatedGpuModuleReport, RuntimeBackend};
-use crate::secure_launch::{SecureLaunchRequest, SecureLaunchResult};
+use crate::secure_launch::{LaunchEnvironment, SecureLaunchRequest, SecureLaunchResult};
 use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -49,6 +49,9 @@ pub struct SecureImageDispatch<'a> {
     pub args_before_plugin: &'a [String],
     pub args_after_plugin: &'a [String],
     pub timeout: Option<Duration>,
+    /// Per-launch environment inputs (issue #910), forwarded verbatim to the
+    /// launch boundary. `Default` inherits the broker's environment.
+    pub launch_environment: LaunchEnvironment,
 }
 
 pub struct GpuRuntimeAuthorization<'a> {
@@ -143,6 +146,7 @@ fn dispatch_secure_image_session_with_policy(
         args_after_plugin: &args_after_plugin,
         repository: input.repository,
         require_module_audit: true,
+        launch_environment: input.launch_environment,
     };
     let mut process = crate::secure_launch::secure_launch_session_in_place(
         Some(&input.plugin.path),
@@ -187,6 +191,9 @@ pub struct SecureInPlaceClusterDispatch<'a> {
     pub module_bound: u32,
     pub args_before_plugin: &'a [String],
     pub args_after_plugin: &'a [String],
+    /// Per-launch environment inputs (issue #910); see
+    /// `SecureImageDispatch::launch_environment`.
+    pub launch_environment: LaunchEnvironment,
 }
 
 /// A launched in-place cluster session: the process, the validated manifest
@@ -275,6 +282,7 @@ pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
         // (`observe_in_place_cluster_audit`), not validated by the one-shot
         // validator at collection.
         require_module_audit: false,
+        launch_environment: input.launch_environment,
     };
     let mut process = crate::secure_launch::secure_launch_session_in_place(
         positional,
@@ -412,6 +420,7 @@ fn dispatch_secure_image_impl(
         // optional minidump file handle is created there for every dispatch.
         repository: input.repository,
         require_module_audit: true,
+        launch_environment: input.launch_environment,
     };
     let mut result = crate::secure_launch::secure_launch_in_place(
         &input.plugin.path,
@@ -718,6 +727,7 @@ mod tests {
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         })
         .unwrap_err();
         assert_eq!(
@@ -751,6 +761,7 @@ mod tests {
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         })
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -769,6 +780,7 @@ mod tests {
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         })
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -849,6 +861,7 @@ mod tests {
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         })
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -1173,6 +1186,7 @@ mod tests {
             args_before_plugin: &["--before".into()],
             args_after_plugin: &["--after".into()],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         })
         .unwrap_err();
 
@@ -1212,6 +1226,7 @@ mod tests {
             args_before_plugin: &[],
             args_after_plugin: &[],
             timeout: Some(Duration::from_secs(1)),
+            launch_environment: Default::default(),
         };
 
         let Err(cpu) = dispatch_secure_gpu_image_session(

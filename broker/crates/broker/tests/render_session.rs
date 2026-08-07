@@ -18,62 +18,30 @@ mod windows_e2e {
         RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome, run_video_batch,
     };
     use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
+    use aexcompat_broker::secure_launch::LaunchEnvironment;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
     use std::time::Duration;
 
     const WIDTH: u32 = 8;
     const HEIGHT: u32 = 4;
 
-    // The fixture behavior is selected through the inherited environment, so
-    // tests that configure it must not interleave.
-    static BEHAVIOR_LOCK: Mutex<()> = Mutex::new(());
-
-    struct BehaviorGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
-    impl BehaviorGuard {
-        fn set(behavior: Option<&str>) -> Self {
-            let guard = BEHAVIOR_LOCK
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            unsafe {
-                match behavior {
-                    Some(value) => std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", value),
-                    None => std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR"),
-                }
-            }
-            Self(guard)
-        }
-    }
-    impl Drop for BehaviorGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
-            }
-        }
+    /// Selects one of the fixture worker's misbehaviors for a single session.
+    ///
+    /// The selector rides that session's own launch (issue #910) instead of
+    /// the broker's process environment, which is what used to force every
+    /// test in this file behind one mutex: `std::env::set_var` is
+    /// process-global, so two concurrent sessions could not disagree about the
+    /// fixture behavior. Nothing here touches process state, so these tests run
+    /// concurrently.
+    fn behavior(value: &str) -> LaunchEnvironment {
+        LaunchEnvironment::default().with_child_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", value)
     }
 
     struct TempRepository(PathBuf);
     impl Drop for TempRepository {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// Sets the process-global opt-in minidump directory env for the duration
-    /// of a test and removes it on drop (panic-safe). Callers hold the behavior
-    /// lock, which serializes every session test that touches process-global
-    /// env, so the window cannot interleave with another behavior test.
-    struct MinidumpDirGuard;
-    impl MinidumpDirGuard {
-        fn set(value: &str) -> Self {
-            unsafe { std::env::set_var("AEXCOMPAT_MINIDUMP_DIR", value) };
-            Self
-        }
-    }
-    impl Drop for MinidumpDirGuard {
-        fn drop(&mut self) {
-            unsafe { std::env::remove_var("AEXCOMPAT_MINIDUMP_DIR") };
         }
     }
 
@@ -149,6 +117,7 @@ mod windows_e2e {
         plugin: &Path,
         sha: &str,
         frame_deadline: Duration,
+        launch_environment: LaunchEnvironment,
     ) -> RenderSession {
         RenderSession::open(SessionOpenRequest {
             repository,
@@ -179,6 +148,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment,
         })
         .expect("open render session")
     }
@@ -268,7 +238,6 @@ mod windows_e2e {
 
     #[test]
     fn audio_session_renders_spans_and_closes_clean() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_audio_repository();
         let mut session = AudioRenderSession::open(AudioSessionOpenRequest {
             repository: &repository.0,
@@ -281,6 +250,7 @@ mod windows_e2e {
             channels: 1,
             time_scale: 44100,
             frame_deadline: Duration::from_secs(30),
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open audio session");
 
@@ -330,7 +300,6 @@ mod windows_e2e {
     /// here instead of passing silently.
     #[test]
     fn audio_session_renders_in_place() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_audio_repository();
         let search_dir = repository.0.join("deps");
         std::fs::create_dir_all(&search_dir).unwrap();
@@ -345,6 +314,7 @@ mod windows_e2e {
             channels: 1,
             time_scale: 44100,
             frame_deadline: Duration::from_secs(30),
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open in-place audio session");
 
@@ -367,7 +337,6 @@ mod windows_e2e {
     /// host-protection invariant breach, not published as a valid span.
     #[test]
     fn audio_session_rejects_out_of_range_output_start() {
-        let _behavior = BehaviorGuard::set(Some("audio_out_of_range_start"));
         let (repository, plugin, sha) = temp_audio_repository();
         let mut session = AudioRenderSession::open(AudioSessionOpenRequest {
             repository: &repository.0,
@@ -380,6 +349,7 @@ mod windows_e2e {
             channels: 1,
             time_scale: 44100,
             frame_deadline: Duration::from_secs(30),
+            launch_environment: behavior("audio_out_of_range_start"),
         })
         .expect("open audio session");
 
@@ -396,7 +366,6 @@ mod windows_e2e {
 
     #[test]
     fn smart_session_dispatches_the_smart_worker_and_closes_clean() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let mut session = RenderSession::open(SessionOpenRequest {
             repository: &repository.0,
@@ -427,6 +396,7 @@ mod windows_e2e {
             smart: true,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open smart render session");
         let outcome = session
@@ -450,7 +420,6 @@ mod windows_e2e {
     /// clean over the same transport as a staged launch.
     #[test]
     fn in_place_session_renders_with_dependency_search_dirs() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let search_dir = plugin.parent().expect("plugin parent").to_path_buf();
         let mut session = RenderSession::open(SessionOpenRequest {
@@ -482,6 +451,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open in-place render session");
         let outcome = session
@@ -494,7 +464,6 @@ mod windows_e2e {
 
     #[test]
     fn smart_session_with_an_explicit_gpu_backend_requires_a_policy() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let error = RenderSession::open(SessionOpenRequest {
             repository: &repository.0,
@@ -525,6 +494,7 @@ mod windows_e2e {
             smart: true,
             gpu_backend: RenderGpuBackend::DirectX,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("an explicit GPU backend without a policy must fail closed");
@@ -536,7 +506,6 @@ mod windows_e2e {
 
     #[test]
     fn smart_auto_backend_without_a_policy_degrades_to_the_cpu_session() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Auto + no policy opens the CPU smart session command; the fixture
         // rejects every command word except the two CPU session commands, so
@@ -571,6 +540,7 @@ mod windows_e2e {
             smart: true,
             gpu_backend: RenderGpuBackend::Auto,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open smart render session with the auto backend");
         let outcome = session
@@ -626,7 +596,6 @@ mod windows_e2e {
 
     #[test]
     fn secondary_layers_reach_their_shared_slots() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Each layer's slot is filled with its slot number as a byte; the
         // fixture reads the first byte of each layer slot and rejects the
@@ -678,6 +647,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with secondary layers");
         let outcome = session
@@ -696,7 +666,6 @@ mod windows_e2e {
     /// layer at open, or an update that never reached the file, fails the frame.
     #[test]
     fn a_dynamic_layer_shows_each_frame_its_own_pixels() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         const SLOT: u32 = 3;
         let bytes = (WIDTH * HEIGHT * 4) as usize;
@@ -737,6 +706,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with a dynamic layer");
         // Frame 0 renders on the bytes the session opened with.
@@ -766,7 +736,6 @@ mod windows_e2e {
     /// or invent, and neither may take the session down with it.
     #[test]
     fn a_dynamic_layer_update_is_bounded_by_what_it_opened_with() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         const SLOT: u32 = 3;
         let bytes = (WIDTH * HEIGHT * 4) as usize;
@@ -807,6 +776,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with a dynamic layer");
         // Frame 0 first: the session numbers frames from zero, so starting at
@@ -837,7 +807,6 @@ mod windows_e2e {
 
     #[test]
     fn timed_layers_travel_the_session_trailer_into_their_slots() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Two timed entries share slot 5 at different rational times, plus a
         // static secondary in slot 9. Each physical slot is filled with its
@@ -899,6 +868,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with timed layers");
         let outcome = session
@@ -911,7 +881,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_two_timed_layers_at_the_same_slot_and_time() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Same slot, equal rational time (2/60 == 1/30): a per-frame collision
         // the worker parser would reject, so open must fail fast the same way.
@@ -962,6 +931,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("open must reject a same-slot same-time timed collision");
@@ -973,7 +943,6 @@ mod windows_e2e {
 
     #[test]
     fn open_admits_a_static_and_timed_layer_at_the_same_slot() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // A static entry and a timed entry share slot 4: the valid one-shot
         // representation of a layer parameter sampled at current_time (static)
@@ -1027,6 +996,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open must admit a same-slot static and timed mix");
         let outcome = session
@@ -1039,7 +1009,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_two_static_layers_at_the_same_slot() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Two static entries at one slot are ambiguous per frame; open must
         // fail closed, the same rule the one-shot parser applies.
@@ -1090,6 +1059,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("open must reject two static layers at one slot");
@@ -1101,7 +1071,6 @@ mod windows_e2e {
 
     #[test]
     fn alpha_as_coverage_params_travel_the_session_launch() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // The slots ride the `--alpha-as-coverage-v1` auxiliary option, which
         // the worker peels from argv's tail before the session contract; the
@@ -1136,6 +1105,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open with alpha-as-coverage slots");
         let outcome = session
@@ -1148,7 +1118,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_an_out_of_range_alpha_as_coverage_slot() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // Same bound the one-shot path enforces (slot <= 1024); open must fail
         // fast rather than launch a worker that rejects the option.
@@ -1181,6 +1150,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("open must reject an out-of-range alpha-as-coverage slot");
@@ -1192,7 +1162,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_layer_pixels_that_do_not_match_dimensions() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let layers = vec![SessionLayer {
             slot: 3,
@@ -1232,6 +1201,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("mismatched layer pixels fail fast at open");
@@ -1243,7 +1213,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_a_zero_layer_slot() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let layers = vec![SessionLayer {
             slot: 0,
@@ -1282,6 +1251,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("a zero layer slot fails fast at open");
@@ -1307,7 +1277,6 @@ mod windows_e2e {
     ///      silently re-encoded `parameters` would fail here.
     #[test]
     fn a_payload_override_reaches_the_worker_verbatim() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let parameters = [float_parameter(1)];
 
@@ -1341,6 +1310,7 @@ mod windows_e2e {
                 smart: false,
                 gpu_backend: RenderGpuBackend::Cpu,
                 gpu_runtime_policy: None,
+                launch_environment: LaunchEnvironment::default(),
             })
             .expect("open render session");
             let outcome = session
@@ -1372,7 +1342,6 @@ mod windows_e2e {
 
     #[test]
     fn animation_sidecar_rides_the_session_and_is_cleaned_up() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let parameters = [float_parameter(1)];
         let animations = [scalar_animation(1)];
@@ -1405,6 +1374,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with parameter animation");
         assert_eq!(
@@ -1427,7 +1397,6 @@ mod windows_e2e {
 
     #[test]
     fn arbitrary_data_parameters_accept_arbitrary_animation() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let parameters: [InteractiveParameter; 1] = [serde_json::from_value(serde_json::json!({
             "slot": 1, "name": "state", "kind": "arbitrary_data",
@@ -1475,6 +1444,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("arbitrary_data parameters bind arbitrary animation timelines");
         let outcome = session
@@ -1486,7 +1456,6 @@ mod windows_e2e {
 
     #[test]
     fn auxiliary_options_ride_the_session_argv_tail() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         // A manifest the real worker's loader would accept: one depth channel
         // whose f32le sidecar exists next to it with a matching hash. The
@@ -1561,6 +1530,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open render session with auxiliary options");
         let outcome = session
@@ -1572,7 +1542,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_a_non_empty_world_dump_directory() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let reused = repository.0.join("target/reused-dumps");
         std::fs::create_dir_all(&reused).unwrap();
@@ -1606,6 +1575,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("a reused dump directory fails fast at open");
@@ -1614,7 +1584,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_a_world_dump_directory_outside_the_target_tree() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let missing = repository.0.join("outside-dumps");
         let error = RenderSession::open(SessionOpenRequest {
@@ -1646,6 +1615,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("a dump directory outside the managed tree fails fast at open");
@@ -1654,7 +1624,6 @@ mod windows_e2e {
 
     #[test]
     fn open_rejects_animation_bound_to_an_unknown_slot() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let animations = [scalar_animation(2)];
         let error = RenderSession::open(SessionOpenRequest {
@@ -1686,6 +1655,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .map(|_| ())
         .expect_err("an animation without a matching parameter fails before launch");
@@ -1699,9 +1669,14 @@ mod windows_e2e {
 
     #[test]
     fn session_renders_frames_and_validates_slot_transfers() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            LaunchEnvironment::default(),
+        );
         let mut checksums = Vec::new();
         for (frame_index, seed) in [(0u32, 11u8), (1, 173)] {
             let input = input_pattern(seed);
@@ -1740,7 +1715,6 @@ mod windows_e2e {
         // A zero-duration render (total_time == 0) is valid and renders the
         // single current_time == 0 frame, matching the one-shot worker (#272).
         // It is no longer routed to the one-shot path.
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let mut session = RenderSession::open(SessionOpenRequest {
             repository: &repository.0,
@@ -1771,6 +1745,7 @@ mod windows_e2e {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("a zero-duration session opens");
         let input = input_pattern(19);
@@ -1798,9 +1773,14 @@ mod windows_e2e {
 
     #[test]
     fn per_frame_parameters_ride_the_v2_message_and_reach_the_worker() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            LaunchEnvironment::default(),
+        );
         let input = input_pattern(31);
         let inverted: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
 
@@ -1849,9 +1829,14 @@ mod windows_e2e {
     #[test]
     fn per_frame_ui_action_rides_the_v2_message_and_reaches_the_worker() {
         use aexcompat_broker::image_render::RenderUiAction;
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            LaunchEnvironment::default(),
+        );
         let input = input_pattern(29);
         let inverted: Vec<u8> = input.iter().map(|byte| 255 - byte).collect();
 
@@ -1933,7 +1918,6 @@ mod windows_e2e {
     #[test]
     fn interactive_session_renders_reports_and_previews_across_frames() {
         use aexcompat_broker::image_render::{InteractiveRenderSession, InteractiveSessionOpen};
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
         let parameters = [float_parameter(1)];
         let input = input_pattern(53);
@@ -2024,9 +2008,14 @@ mod windows_e2e {
 
     #[test]
     fn rejected_per_frame_parameters_leave_the_session_usable() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            LaunchEnvironment::default(),
+        );
         // Out-of-range value: the broker-side validation rejects the set
         // before anything reaches the transport, exactly like the launch
         // payload validation would.
@@ -2049,9 +2038,14 @@ mod windows_e2e {
 
     #[test]
     fn frame_local_error_keeps_the_session_usable() {
-        let _behavior = BehaviorGuard::set(Some("error_frame_0"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("error_frame_0"),
+        );
         let outcome = session
             .render_frame(0, 0, &input_pattern(1))
             .expect("frame-local errors do not invalidate the session");
@@ -2079,7 +2073,6 @@ mod windows_e2e {
         // (#278) reports a 0x0 ok frame with the explicit empty_result flag. The
         // session accepts it as a valid empty render (not a dimension invariant
         // failure) with no output pixels, and stays usable for later frames.
-        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
         let (repository, plugin, sha) = temp_repository();
         // Only a SmartFX session may report an empty result, so open a smart
         // session (the broker rejects an empty result on a classic session).
@@ -2112,6 +2105,7 @@ mod windows_e2e {
             smart: true,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: behavior("empty_result_frame_0"),
         })
         .expect("open a smart render session");
         let outcome = session
@@ -2140,9 +2134,14 @@ mod windows_e2e {
 
     #[test]
     fn frame_deadline_watchdog_terminates_the_job() {
-        let _behavior = BehaviorGuard::set(Some("hang_frame"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(2));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(2),
+            behavior("hang_frame"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(3))
             .expect_err("a hung frame must trip the watchdog");
@@ -2159,25 +2158,27 @@ mod windows_e2e {
 
     #[test]
     fn modal_ui_worker_uses_a_private_desktop_before_session_timeout() {
-        let _behavior = BehaviorGuard::set(Some("modal_frame"));
         let report_path = std::env::temp_dir().join(format!(
             "aexcompat-session-desktop-{:032x}.txt",
             rand::random::<u128>()
         ));
-        unsafe {
-            std::env::set_var("AEXCOMPAT_TEST_SESSION_DESKTOP_REPORT", &report_path);
-        }
+        // The report path rides this session's launch, so a concurrent test
+        // never sees it and the fixture writes to a path unique to this test.
         let parent_desktop = current_desktop_name();
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(2));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(2),
+            behavior("modal_frame")
+                .with_child_var("AEXCOMPAT_TEST_SESSION_DESKTOP_REPORT", &report_path),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(17))
             .expect_err("a modal worker must trip the session watchdog");
         assert!(error.to_string().contains("frame_deadline"), "{error}");
         let close = session.close();
-        unsafe {
-            std::env::remove_var("AEXCOMPAT_TEST_SESSION_DESKTOP_REPORT");
-        }
         let worker_desktop = std::fs::read_to_string(&report_path).unwrap();
         let _ = std::fs::remove_file(report_path);
         assert!(
@@ -2192,9 +2193,14 @@ mod windows_e2e {
 
     #[test]
     fn worker_crash_invalidates_the_session_with_diagnostics() {
-        let _behavior = BehaviorGuard::set(Some("crash_frame"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("crash_frame"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(5))
             .expect_err("a crashed worker must invalidate the session");
@@ -2207,18 +2213,25 @@ mod windows_e2e {
 
     #[test]
     fn a_crashing_resident_session_captures_an_opt_in_minidump() {
-        // Opt-in on: the broker creates one inherited dump pipe for the session
-        // launch (the same launch-boundary plumbing the one-shot path uses,
-        // issue #18/#224) because AEXCOMPAT_MINIDUMP_DIR resolves under the
-        // repository target tree. The fixture streams a marker-terminated image
+        // Opt-in on: this launch names a dump directory that resolves under the
+        // repository target tree (the same policy `AEXCOMPAT_MINIDUMP_DIR`
+        // goes through), so the broker creates one inherited dump pipe for the
+        // session launch — the same launch-boundary plumbing the one-shot path
+        // uses (issue #18/#224). The fixture streams a marker-terminated image
         // through that pipe from its crash frame, and the broker finalizes it
-        // into a .dmp when the session collects the exit at close.
-        let _behavior = BehaviorGuard::set(Some("crash_frame_minidump"));
+        // into a .dmp when the session collects the exit at close. Requesting
+        // the directory per launch (issue #910) keeps it out of the broker's
+        // process environment, where a concurrent test would also see it.
         let (repository, plugin, sha) = temp_repository();
-        let _minidump_dir = MinidumpDirGuard::set("target/crash-dumps");
         let dump_dir = repository.0.join("target").join("crash-dumps");
 
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("crash_frame_minidump").with_minidump_directory("target/crash-dumps"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(5))
             .expect_err("a crashed worker must invalidate the session");
@@ -2262,9 +2275,14 @@ mod windows_e2e {
 
     #[test]
     fn a_reserved_fatal_session_error_invalidates_instead_of_continuing() {
-        let _behavior = BehaviorGuard::set(Some("fatal_error_frame_0"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("fatal_error_frame_0"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(12))
             .expect_err("a reserved fatal error code must not read as frame-local");
@@ -2283,9 +2301,14 @@ mod windows_e2e {
 
     #[test]
     fn a_framing_violation_from_a_live_worker_invalidates_promptly() {
-        let _behavior = BehaviorGuard::set(Some("bad_framing_frame_0"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("bad_framing_frame_0"),
+        );
         let started = std::time::Instant::now();
         let error = session
             .render_frame(0, 0, &input_pattern(13))
@@ -2306,9 +2329,14 @@ mod windows_e2e {
 
     #[test]
     fn reused_frame_indices_are_rejected_without_killing_the_session() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            LaunchEnvironment::default(),
+        );
         let outcome = session
             .render_frame(0, 0, &input_pattern(14))
             .expect("frame 0 renders");
@@ -2331,9 +2359,14 @@ mod windows_e2e {
 
     #[test]
     fn error_response_with_a_mutated_header_is_fail_closed() {
-        let _behavior = BehaviorGuard::set(Some("error_mutates_header"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("error_mutates_header"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(10))
             .expect_err("a header mutation must not hide behind an error response");
@@ -2346,9 +2379,14 @@ mod windows_e2e {
 
     #[test]
     fn a_unilateral_worker_exit_breaks_the_close_handshake_contract() {
-        let _behavior = BehaviorGuard::set(Some("exit_after_frame_0"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("exit_after_frame_0"),
+        );
         let outcome = session
             .render_frame(0, 0, &input_pattern(11))
             .expect("the frame itself completes");
@@ -2368,9 +2406,14 @@ mod windows_e2e {
 
     #[test]
     fn process_death_is_seen_even_when_a_descendant_holds_the_pipe() {
-        let _behavior = BehaviorGuard::set(Some("exit_leaving_descendant"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("exit_leaving_descendant"),
+        );
         let started = std::time::Instant::now();
         let error = session
             .render_frame(0, 0, &input_pattern(9))
@@ -2392,9 +2435,14 @@ mod windows_e2e {
 
     #[test]
     fn stale_generation_and_missing_header_update_are_fail_closed() {
-        let _behavior = BehaviorGuard::set(Some("stale_generation"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("stale_generation"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(6))
             .expect_err("a stale generation must invalidate the session");
@@ -2407,9 +2455,14 @@ mod windows_e2e {
 
     #[test]
     fn mutated_static_header_is_fail_closed() {
-        let _behavior = BehaviorGuard::set(Some("mutate_header"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("mutate_header"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(7))
             .expect_err("a mutated broker-owned header must invalidate the session");
@@ -2422,9 +2475,14 @@ mod windows_e2e {
 
     #[test]
     fn output_extent_mismatch_is_fail_closed() {
-        let _behavior = BehaviorGuard::set(Some("bad_extent"));
         let (repository, plugin, sha) = temp_repository();
-        let mut session = open_session(&repository.0, &plugin, &sha, Duration::from_secs(30));
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("bad_extent"),
+        );
         let error = session
             .render_frame(0, 0, &input_pattern(8))
             .expect_err("an extent disagreement must invalidate the session");
@@ -2455,7 +2513,6 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_cli_renders_a_png_sequence_through_one_session() {
-        let _behavior = BehaviorGuard::set(None);
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 3);
         let output_directory = repository.0.join("batch-out");
@@ -2478,8 +2535,13 @@ mod windows_e2e {
         )
         .unwrap();
         let report_path = repository.0.join("report.json");
-        let passed =
-            run_video_batch(&repository.0, &request_path, &report_path).expect("batch render runs");
+        let passed = run_video_batch(
+            &repository.0,
+            &request_path,
+            &report_path,
+            &LaunchEnvironment::default(),
+        )
+        .expect("batch render runs");
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
         assert!(passed, "report: {report}");
@@ -2503,7 +2565,6 @@ mod windows_e2e {
         // no pixels, so there is no PNG or raw to write. The batch must report it
         // as a legal empty frame and keep going, not abort on a 0x0 image. The
         // fixture answers frame 0 empty; frames 1-2 render normally.
-        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 3);
         let output_directory = repository.0.join("empty-batch-out");
@@ -2522,8 +2583,13 @@ mod windows_e2e {
         )
         .unwrap();
         let report_path = repository.0.join("empty-report.json");
-        let passed =
-            run_video_batch(&repository.0, &request_path, &report_path).expect("batch render runs");
+        let passed = run_video_batch(
+            &repository.0,
+            &request_path,
+            &report_path,
+            &behavior("empty_result_frame_0"),
+        )
+        .expect("batch render runs");
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
         assert!(passed, "the empty frame must not abort the batch: {report}");
@@ -2558,7 +2624,6 @@ mod windows_e2e {
         // frame-*.png left in the output directory from a previous run would
         // otherwise keep old pixels on disk while the report claims the frame is
         // empty, so a directory glob would ingest the wrong frame. Reject it.
-        let _behavior = BehaviorGuard::set(Some("empty_result_frame_0"));
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 3);
         let output_directory = repository.0.join("stale-batch-out");
@@ -2579,8 +2644,13 @@ mod windows_e2e {
         )
         .unwrap();
         let report_path = repository.0.join("stale-report.json");
-        let passed = run_video_batch(&repository.0, &request_path, &report_path)
-            .expect("the batch runs and writes a report");
+        let passed = run_video_batch(
+            &repository.0,
+            &request_path,
+            &report_path,
+            &behavior("empty_result_frame_0"),
+        )
+        .expect("the batch runs and writes a report");
         // The stale PNG aborts the batch (a failed frame), so it does not pass
         // and the empty frame is recorded as failed rather than silently ok.
         assert!(
@@ -2595,7 +2665,6 @@ mod windows_e2e {
 
     #[test]
     fn video_batch_aborts_on_a_frame_error_by_default() {
-        let _behavior = BehaviorGuard::set(Some("error_frame_0"));
         let (repository, plugin, _sha) = temp_repository();
         let inputs = write_input_frames(&repository.0, 2);
         let request_path = repository.0.join("request.json");
@@ -2611,8 +2680,13 @@ mod windows_e2e {
         )
         .unwrap();
         let report_path = repository.0.join("report.json");
-        let passed =
-            run_video_batch(&repository.0, &request_path, &report_path).expect("batch render runs");
+        let passed = run_video_batch(
+            &repository.0,
+            &request_path,
+            &report_path,
+            &behavior("error_frame_0"),
+        )
+        .expect("batch render runs");
         assert!(!passed);
         let report: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
@@ -2678,7 +2752,10 @@ mod windows_e2e {
         }
     }
 
-    fn open_cluster_render_session(cluster: &TempCluster) -> RenderSession {
+    fn open_cluster_render_session(
+        cluster: &TempCluster,
+        launch_environment: LaunchEnvironment,
+    ) -> RenderSession {
         RenderSession::open_cluster(
             SessionOpenRequest {
                 repository: &cluster.repository.0,
@@ -2711,6 +2788,7 @@ mod windows_e2e {
                 smart: false,
                 gpu_backend: RenderGpuBackend::Cpu,
                 gpu_runtime_policy: None,
+                launch_environment,
             },
             ClusterRenderPlugins {
                 plugins: cluster
@@ -2725,7 +2803,10 @@ mod windows_e2e {
         .expect("open cluster render session")
     }
 
-    fn open_discovery_session(cluster: &TempCluster) -> DiscoverySession {
+    fn open_discovery_session(
+        cluster: &TempCluster,
+        launch_environment: LaunchEnvironment,
+    ) -> DiscoverySession {
         DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
             repository: &cluster.repository.0,
             plugins: cluster
@@ -2736,15 +2817,15 @@ mod windows_e2e {
             dependency_search_dirs: vec![cluster.dependency.parent().unwrap().to_path_buf()],
             module_bound: 64,
             inspect_deadline: Duration::from_secs(30),
+            launch_environment,
         })
         .expect("open discovery session")
     }
 
     #[test]
     fn cluster_render_session_swaps_plugins_and_closes_clean() {
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session = open_cluster_render_session(&cluster, LaunchEnvironment::default());
 
         let outcome = session
             .render_frame(0, 0, &input_pattern(3))
@@ -2779,7 +2860,6 @@ mod windows_e2e {
     /// sealed session.
     #[test]
     fn in_place_cluster_render_session_swaps_plugins_and_closes_clean() {
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
         let mut session = RenderSession::open_cluster(
             SessionOpenRequest {
@@ -2811,6 +2891,7 @@ mod windows_e2e {
                 smart: false,
                 gpu_backend: RenderGpuBackend::Cpu,
                 gpu_runtime_policy: None,
+                launch_environment: LaunchEnvironment::default(),
             },
             ClusterRenderPlugins {
                 plugins: cluster
@@ -2842,9 +2923,8 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_rejects_out_of_manifest_and_current_index_as_caller_errors() {
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session = open_cluster_render_session(&cluster, LaunchEnvironment::default());
 
         // An index outside the manifest, and the current index, are caller
         // errors rejected before anything is sent; the session stays usable.
@@ -2860,9 +2940,8 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_done_mismatch_invalidates_the_session() {
-        let _behavior = BehaviorGuard::set(Some("swap_done_wrong_index"));
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session = open_cluster_render_session(&cluster, behavior("swap_done_wrong_index"));
         session
             .render_frame(0, 0, &input_pattern(3))
             .expect("frame 0 renders");
@@ -2882,9 +2961,8 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_worker_death_is_detected_by_the_three_way_wait() {
-        let _behavior = BehaviorGuard::set(Some("crash_on_swap"));
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session = open_cluster_render_session(&cluster, behavior("crash_on_swap"));
         session
             .render_frame(0, 0, &input_pattern(3))
             .expect("frame 0 renders");
@@ -2898,9 +2976,9 @@ mod windows_e2e {
 
     #[test]
     fn cluster_swap_global_setup_error_is_plugin_local() {
-        let _behavior = BehaviorGuard::set(Some("swap_global_setup_error"));
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session =
+            open_cluster_render_session(&cluster, behavior("swap_global_setup_error"));
         let swap = session.swap_plugin(1).expect("the swap exchange completes");
         let SwapOutcome::PluginError { global_setup_error } = swap else {
             panic!("expected a plugin-local GLOBAL_SETUP error, got {swap:?}");
@@ -2914,9 +2992,9 @@ mod windows_e2e {
 
     #[test]
     fn cluster_close_records_all_classified_in_place_modules() {
-        let _behavior = BehaviorGuard::set(Some("audit_undeclared_module"));
         let cluster = temp_cluster_repository();
-        let mut session = open_cluster_render_session(&cluster);
+        let mut session =
+            open_cluster_render_session(&cluster, behavior("audit_undeclared_module"));
         session
             .render_frame(0, 0, &input_pattern(3))
             .expect("frame 0 renders");
@@ -2937,9 +3015,8 @@ mod windows_e2e {
 
     #[test]
     fn discovery_session_inspects_every_cluster_plugin() {
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
-        let mut session = open_discovery_session(&cluster);
+        let mut session = open_discovery_session(&cluster, LaunchEnvironment::default());
 
         let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
         let InspectOutcome::Inspected { report } = first else {
@@ -2975,7 +3052,6 @@ mod windows_e2e {
     /// exchanges and the close contract match the sealed session.
     #[test]
     fn in_place_discovery_session_inspects_by_real_path() {
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
         let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
             repository: &cluster.repository.0,
@@ -2987,6 +3063,7 @@ mod windows_e2e {
             dependency_search_dirs: vec![cluster.repository.0.clone()],
             module_bound: 64,
             inspect_deadline: Duration::from_secs(30),
+            launch_environment: LaunchEnvironment::default(),
         })
         .expect("open in-place discovery session");
 
@@ -3013,7 +3090,6 @@ mod windows_e2e {
     /// and the session keeps serving other members.
     #[test]
     fn in_place_discovery_identity_change_is_plugin_local() {
-        let _behavior = BehaviorGuard::set(Some("inspect_identity_changed_plugin_1"));
         let cluster = temp_cluster_repository();
         let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
             repository: &cluster.repository.0,
@@ -3025,6 +3101,7 @@ mod windows_e2e {
             dependency_search_dirs: vec![cluster.repository.0.clone()],
             module_bound: 64,
             inspect_deadline: Duration::from_secs(30),
+            launch_environment: behavior("inspect_identity_changed_plugin_1"),
         })
         .expect("open in-place discovery session");
         let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
@@ -3044,9 +3121,8 @@ mod windows_e2e {
 
     #[test]
     fn discovery_session_rejects_out_of_manifest_index_and_off_serial_requests() {
-        let _behavior = BehaviorGuard::set(None);
         let cluster = temp_cluster_repository();
-        let mut session = open_discovery_session(&cluster);
+        let mut session = open_discovery_session(&cluster, LaunchEnvironment::default());
 
         // Both are caller errors rejected before anything is sent; the
         // session stays usable.
@@ -3060,9 +3136,8 @@ mod windows_e2e {
 
     #[test]
     fn discovery_session_reports_parameter_local_error_and_continues() {
-        let _behavior = BehaviorGuard::set(Some("inspect_error_plugin_1"));
         let cluster = temp_cluster_repository();
-        let mut session = open_discovery_session(&cluster);
+        let mut session = open_discovery_session(&cluster, behavior("inspect_error_plugin_1"));
         let first = session.inspect_plugin(0, 0).expect("inspect plugins[0]");
         assert!(matches!(first, InspectOutcome::Inspected { .. }));
         let second = session
@@ -3081,9 +3156,8 @@ mod windows_e2e {
 
     #[test]
     fn discovery_session_worker_death_is_detected_by_the_three_way_wait() {
-        let _behavior = BehaviorGuard::set(Some("crash_on_inspect"));
         let cluster = temp_cluster_repository();
-        let mut session = open_discovery_session(&cluster);
+        let mut session = open_discovery_session(&cluster, behavior("crash_on_inspect"));
         let error = session
             .inspect_plugin(0, 0)
             .expect_err("a worker dying mid-inspect must fail the request");

@@ -144,6 +144,7 @@ fn render_audio_via_length_one_session(
         channels: 1,
         time_scale: SAMPLE_RATE,
         frame_deadline: Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS),
+        launch_environment: Default::default(),
     }) {
         Ok(session) => session,
         Err(error) => {

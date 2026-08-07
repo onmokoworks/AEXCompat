@@ -576,6 +576,11 @@ pub struct SessionOpenRequest<'a> {
     /// every GPU-backed launch, exactly like the one-shot GPU path. A policy is
     /// inert, but accepted, for classic/CPU sessions that never attempt GPU.
     pub gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
+    /// Per-launch environment inputs (issue #910): extra child environment
+    /// variables and the opt-in minidump directory, carried explicitly so a
+    /// caller never has to set them on the broker process (which every
+    /// concurrent session would then see).
+    pub launch_environment: crate::secure_launch::LaunchEnvironment,
 }
 
 /// A secondary layer whose RGBA8 pixels travel as an inherited per-layer file
@@ -1386,6 +1391,7 @@ impl RenderSession {
                 module_bound: cluster.module_bound,
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
+                launch_environment: request.launch_environment.clone(),
             };
             let launch = match desktop_policy {
                 WorkerDesktopPolicy::Dedicated => {
@@ -1422,6 +1428,7 @@ impl RenderSession {
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
                 timeout: Some(request.frame_deadline),
+                launch_environment: request.launch_environment.clone(),
             };
             if gpu_attempt {
                 let policy_input = request
@@ -3172,6 +3179,10 @@ pub fn run_video_batch(
     repository: &Path,
     request_path: &Path,
     output_path: &Path,
+    // Per-launch environment for the session this batch opens (issue #910).
+    // The CLI passes the default; a test drives the fixture worker through it
+    // without touching the broker process environment.
+    launch_environment: &crate::secure_launch::LaunchEnvironment,
 ) -> io::Result<bool> {
     let metadata = fs::metadata(request_path)?;
     if metadata.len() > MAX_REQUEST_BYTES {
@@ -3248,6 +3259,7 @@ pub fn run_video_batch(
         smart: request.smart,
         gpu_backend: request.gpu_backend,
         gpu_runtime_policy: None,
+        launch_environment: launch_environment.clone(),
     })?;
 
     let raw_extension = request.pixel_format.raw_extension();

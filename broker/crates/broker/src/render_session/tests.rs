@@ -629,6 +629,7 @@ fn open_rejects_timing_the_worker_could_never_render() {
             smart: false,
             gpu_backend: RenderGpuBackend::Cpu,
             gpu_runtime_policy: None,
+            launch_environment: Default::default(),
         });
         let Err(error) = result else {
             panic!("invalid timing must be rejected before launch");
@@ -674,6 +675,7 @@ fn open_rejects_in_place_search_dirs_combined_with_staged_dependencies() {
         smart: false,
         gpu_backend: RenderGpuBackend::Cpu,
         gpu_runtime_policy: None,
+        launch_environment: Default::default(),
     });
     let Err(error) = result else {
         panic!("in-place search dirs combined with staged dependencies must be rejected");

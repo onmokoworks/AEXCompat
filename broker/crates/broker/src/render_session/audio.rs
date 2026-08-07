@@ -50,6 +50,9 @@ pub struct AudioSessionOpenRequest<'a> {
     pub channels: u32,
     pub time_scale: u32,
     pub frame_deadline: Duration,
+    /// Per-launch environment inputs (issue #910), forwarded to the worker
+    /// launch instead of the broker mutating its own environment.
+    pub launch_environment: crate::secure_launch::LaunchEnvironment,
 }
 
 #[derive(Debug)]
@@ -198,6 +201,7 @@ impl AudioRenderSession {
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
             timeout: Some(request.frame_deadline),
+            launch_environment: request.launch_environment,
         };
         let child_handles = SessionChildHandles {
             request_read: request_read.raw(),

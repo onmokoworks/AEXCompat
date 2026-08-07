@@ -1,3 +1,4 @@
+use crate::secure_launch::LaunchEnvironment;
 use crate::{ExitClassification, classify_exit, redact_windows_paths};
 use std::ffi::c_void;
 use std::io;
@@ -348,24 +349,44 @@ pub struct SessionChildHandles {
     pub layers: Vec<HANDLE>,
 }
 
+/// Variables the broker owns at the launch boundary: the handle numbers it
+/// injects below, and the broker-side `*_DIR` knobs those handles come from
+/// (which are meaningless in the child and must not leak into it). An
+/// inherited value is stripped, and a caller-supplied override for one of
+/// these is ignored, so no caller can forge a handle number the worker would
+/// then treat as broker-created.
+fn is_broker_owned_variable(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "AEX_INSTRUMENT_TRACE_DIR"
+            | "AEX_INSTRUMENT_TRACE_HANDLE"
+            | "AEXCOMPAT_MINIDUMP_DIR"
+            | "AEXCOMPAT_MINIDUMP_HANDLE"
+            | "AEXCOMPAT_MINIDUMP_ACK_HANDLE"
+    ) || normalized == SESSION_REQUEST_HANDLE_VARIABLE
+        || normalized == SESSION_RESPONSE_HANDLE_VARIABLE
+        || normalized == SESSION_SECTION_HANDLE_VARIABLE
+}
+
+/// Builds the child's environment block: the broker's own environment, minus
+/// the broker-owned variables above, plus the handle numbers this launch
+/// created, plus the caller's per-launch overrides (issue #910).
+///
+/// The overrides are applied last so one wins over an inherited value of the
+/// same name; they cannot reach a broker-owned key (rejected above) and a
+/// malformed key (empty, or containing the `=` separator) is dropped rather
+/// than corrupting the block.
 fn child_environment(
     trace_handle: Option<HANDLE>,
     minidump_handle: Option<HANDLE>,
     minidump_ack_handle: Option<HANDLE>,
     session: Option<&SessionChildHandles>,
+    overrides: &[(std::ffi::OsString, std::ffi::OsString)],
 ) -> Vec<u16> {
     let mut entries: Vec<(String, std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
         .filter_map(|(key, value)| {
             let normalized = key.to_string_lossy().to_ascii_uppercase();
-            if normalized == "AEX_INSTRUMENT_TRACE_DIR"
-                || normalized == "AEX_INSTRUMENT_TRACE_HANDLE"
-                || normalized == "AEXCOMPAT_MINIDUMP_DIR"
-                || normalized == "AEXCOMPAT_MINIDUMP_HANDLE"
-                || normalized == "AEXCOMPAT_MINIDUMP_ACK_HANDLE"
-                || normalized == SESSION_REQUEST_HANDLE_VARIABLE
-                || normalized == SESSION_RESPONSE_HANDLE_VARIABLE
-                || normalized == SESSION_SECTION_HANDLE_VARIABLE
-            {
+            if is_broker_owned_variable(&normalized) {
                 None
             } else {
                 Some((normalized, key, value))
@@ -405,6 +426,20 @@ fn child_environment(
                 (handle as usize).to_string().into(),
             ));
         }
+    }
+    // Applied after the inherited copy and after handle injection: an override
+    // replaces whatever the same name already resolved to, and a broker-owned
+    // key is never reachable.
+    for (key, value) in overrides {
+        let normalized = key.to_string_lossy().to_ascii_uppercase();
+        if normalized.is_empty()
+            || normalized.contains('=')
+            || is_broker_owned_variable(&normalized)
+        {
+            continue;
+        }
+        entries.retain(|(existing, _, _)| *existing != normalized);
+        entries.push((normalized, key.clone(), value.clone()));
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut block = Vec::new();
@@ -523,6 +558,9 @@ pub fn run_isolated(
         None,
         WorkerDesktopPolicy::Dedicated,
         None,
+        // No repository, so no minidump handle, and the broker's own
+        // environment is the whole story for these probe workers.
+        &LaunchEnvironment::default(),
         PROCESS_MEMORY_LIMIT,
     )
 }
@@ -537,6 +575,7 @@ pub fn run_isolated_staged(
     timeout: Option<Duration>,
     current_directory: &Path,
     repository: &Path,
+    launch_environment: &LaunchEnvironment,
 ) -> io::Result<ProcessResult> {
     run_isolated_impl(
         program,
@@ -545,16 +584,19 @@ pub fn run_isolated_staged(
         Some(current_directory),
         WorkerDesktopPolicy::Dedicated,
         Some(repository),
+        launch_environment,
         PROCESS_MEMORY_LIMIT,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_isolated_staged_with_memory_limit(
     program: &Path,
     args: &[String],
     timeout: Option<Duration>,
     current_directory: &Path,
     repository: &Path,
+    launch_environment: &LaunchEnvironment,
     process_memory_limit: usize,
 ) -> io::Result<ProcessResult> {
     if !(PROCESS_MEMORY_LIMIT..=MAX_PROBE_PROCESS_MEMORY_LIMIT).contains(&process_memory_limit) {
@@ -570,10 +612,12 @@ pub(crate) fn run_isolated_staged_with_memory_limit(
         Some(current_directory),
         WorkerDesktopPolicy::Dedicated,
         Some(repository),
+        launch_environment,
         process_memory_limit,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_isolated_impl(
     program: &Path,
     args: &[String],
@@ -581,6 +625,7 @@ fn run_isolated_impl(
     current_directory: Option<&Path>,
     desktop_policy: WorkerDesktopPolicy,
     repository: Option<&Path>,
+    launch_environment: &LaunchEnvironment,
     process_memory_limit: usize,
 ) -> io::Result<ProcessResult> {
     launch_isolated_impl(
@@ -590,6 +635,7 @@ fn run_isolated_impl(
         None,
         desktop_policy,
         repository,
+        launch_environment,
         process_memory_limit,
     )?
     .wait_and_collect(timeout)
@@ -822,6 +868,7 @@ pub fn launch_isolated_session_staged(
     current_directory: &Path,
     session: &SessionChildHandles,
     repository: &Path,
+    launch_environment: &LaunchEnvironment,
 ) -> io::Result<LaunchedIsolatedProcess> {
     launch_isolated_session_with_desktop_policy(
         program,
@@ -830,6 +877,7 @@ pub fn launch_isolated_session_staged(
         session,
         WorkerDesktopPolicy::Dedicated,
         repository,
+        launch_environment,
     )
 }
 
@@ -839,6 +887,7 @@ pub(crate) fn launch_isolated_session_on_current_desktop(
     current_directory: &Path,
     session: &SessionChildHandles,
     repository: &Path,
+    launch_environment: &LaunchEnvironment,
 ) -> io::Result<LaunchedIsolatedProcess> {
     launch_isolated_session_with_desktop_policy(
         program,
@@ -847,9 +896,11 @@ pub(crate) fn launch_isolated_session_on_current_desktop(
         session,
         WorkerDesktopPolicy::Current,
         repository,
+        launch_environment,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn launch_isolated_session_with_desktop_policy(
     program: &Path,
     args: &[String],
@@ -857,6 +908,7 @@ fn launch_isolated_session_with_desktop_policy(
     session: &SessionChildHandles,
     desktop_policy: WorkerDesktopPolicy,
     repository: &Path,
+    launch_environment: &LaunchEnvironment,
 ) -> io::Result<LaunchedIsolatedProcess> {
     launch_isolated_impl(
         program,
@@ -865,10 +917,12 @@ fn launch_isolated_session_with_desktop_policy(
         Some(session),
         desktop_policy,
         Some(repository),
+        launch_environment,
         PROCESS_MEMORY_LIMIT,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn launch_isolated_impl(
     program: &Path,
     args: &[String],
@@ -876,11 +930,17 @@ fn launch_isolated_impl(
     session: Option<&SessionChildHandles>,
     desktop_policy: WorkerDesktopPolicy,
     repository: Option<&Path>,
+    launch_environment: &LaunchEnvironment,
     process_memory_limit: usize,
 ) -> io::Result<LaunchedIsolatedProcess> {
     let trace_file = crate::trace_policy::create_trace_file_for_launch()?;
     let mut minidump_file = repository
-        .map(crate::minidump_policy::create_minidump_file_for_launch)
+        .map(|repository| {
+            crate::minidump_policy::create_minidump_file_for_launch(
+                repository,
+                launch_environment.minidump_directory(),
+            )
+        })
         .transpose()?
         .flatten();
     // Capture the opt-in feature flags before the handles are dropped below so
@@ -982,6 +1042,7 @@ fn launch_isolated_impl(
         minidump_file.as_ref().map(|file| file.raw()),
         minidump_file.as_ref().map(|file| file.ack_raw()),
         session,
+        launch_environment.child_overrides(),
     );
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
@@ -1147,5 +1208,97 @@ mod tests {
 
         let error = terminate_job_and_wait(job.raw(), process.raw(), 0).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    /// Decodes the wide `KEY=VALUE\0...\0\0` block back into pairs.
+    fn decode(block: &[u16]) -> Vec<(String, String)> {
+        String::from_utf16(block)
+            .expect("environment block is UTF-16")
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                let (key, value) = entry.split_once('=').expect("KEY=VALUE");
+                (key.to_owned(), value.to_owned())
+            })
+            .collect()
+    }
+
+    fn value_of(block: &[u16], key: &str) -> Option<String> {
+        decode(block)
+            .into_iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value)
+    }
+
+    /// A caller's override replaces whatever the broker's own environment
+    /// resolved that name to, and it appears exactly once (issue #910). This
+    /// is what lets two concurrent launches disagree about a variable that
+    /// `std::env::set_var` could only have set process-wide.
+    #[test]
+    fn an_override_replaces_the_inherited_value_exactly_once() {
+        // PATH is present in every environment this runs in, so overriding it
+        // exercises the replace path rather than the append path.
+        let overrides = [
+            ("PATH".into(), "overridden".into()),
+            ("AEXCOMPAT_TEST_ONLY_NEW".into(), "added".into()),
+        ];
+        let block = child_environment(None, None, None, None, &overrides);
+        let decoded = decode(&block);
+        assert_eq!(
+            decoded
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+                .count(),
+            1,
+            "an override must replace, not duplicate: {decoded:?}"
+        );
+        assert_eq!(value_of(&block, "PATH").as_deref(), Some("overridden"));
+        assert_eq!(
+            value_of(&block, "AEXCOMPAT_TEST_ONLY_NEW").as_deref(),
+            Some("added")
+        );
+    }
+
+    /// The handle variables are the broker's, not the caller's: an override
+    /// naming one is dropped, so the worker still reads the handle number this
+    /// launch actually created. Without this a caller could point the worker at
+    /// an arbitrary handle value.
+    #[test]
+    fn an_override_cannot_forge_a_broker_owned_variable() {
+        let forged: Vec<(std::ffi::OsString, std::ffi::OsString)> = [
+            "AEXCOMPAT_MINIDUMP_HANDLE",
+            "AEXCOMPAT_MINIDUMP_ACK_HANDLE",
+            "AEX_INSTRUMENT_TRACE_HANDLE",
+            "AEXCOMPAT_MINIDUMP_DIR",
+            SESSION_REQUEST_HANDLE_VARIABLE,
+            SESSION_RESPONSE_HANDLE_VARIABLE,
+            SESSION_SECTION_HANDLE_VARIABLE,
+            // Malformed keys cannot corrupt the block either.
+            "",
+            "BROKEN=KEY",
+        ]
+        .iter()
+        .map(|key| ((*key).into(), "1234".into()))
+        .collect();
+
+        // No handles created for this launch: every broker-owned name must be
+        // absent rather than carrying the caller's value.
+        let block = child_environment(None, None, None, None, &forged);
+        for (key, _) in &forged {
+            let key = key.to_string_lossy();
+            assert_eq!(
+                value_of(&block, &key),
+                None,
+                "{key} must not be settable by a caller"
+            );
+        }
+
+        // With a handle injected, the injected value stands.
+        let handle = 0x2a as HANDLE;
+        let block = child_environment(Some(handle), None, None, None, &forged);
+        assert_eq!(
+            value_of(&block, "AEX_INSTRUMENT_TRACE_HANDLE").as_deref(),
+            Some("42")
+        );
     }
 }

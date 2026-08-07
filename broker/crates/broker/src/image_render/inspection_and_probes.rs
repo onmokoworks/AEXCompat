@@ -65,6 +65,7 @@ fn inspect_experimental_impl(
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
                 timeout: None,
+                launch_environment: Default::default(),
             },
         )?
     } else {

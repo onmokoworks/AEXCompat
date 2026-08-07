@@ -442,14 +442,25 @@ fn harden_directory_acl(_directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn configured_directory(repository: &Path) -> io::Result<Option<MinidumpDirectory>> {
-    env::var_os(MINIDUMP_DIR_ENV)
-        .map(|value| resolve_directory(repository, Path::new(value.as_os_str())))
+/// Resolves the opt-in dump directory for one launch. An explicitly requested
+/// directory (issue #910) wins over `AEXCOMPAT_MINIDUMP_DIR`, so a caller can
+/// select a directory for its own launch without setting a process-global
+/// variable every concurrent launch would also see. Either way the same
+/// repository-relative policy applies.
+fn configured_directory(
+    repository: &Path,
+    requested: Option<&Path>,
+) -> io::Result<Option<MinidumpDirectory>> {
+    let requested = requested
+        .map(PathBuf::from)
+        .or_else(|| env::var_os(MINIDUMP_DIR_ENV).map(PathBuf::from));
+    requested
+        .map(|value| resolve_directory(repository, &value))
         .transpose()
 }
 
 pub(crate) fn configured_directory_display(repository: &Path) -> io::Result<Option<String>> {
-    configured_directory(repository).map(|directory| directory.map(|value| value.display))
+    configured_directory(repository, None).map(|directory| directory.map(|value| value.display))
 }
 
 #[cfg(windows)]
@@ -1030,8 +1041,9 @@ fn remove_stale_reservations(directory: &DirectoryGuard) -> io::Result<()> {
 #[cfg(windows)]
 pub(crate) fn create_minidump_file_for_launch(
     repository: &Path,
+    requested_directory: Option<&Path>,
 ) -> io::Result<Option<MinidumpLaunchFile>> {
-    let Some(directory) = configured_directory(repository)? else {
+    let Some(directory) = configured_directory(repository, requested_directory)? else {
         return Ok(None);
     };
     create_minidump_file_in_directory(&directory).map(Some)

@@ -492,6 +492,7 @@ fn launch_approved_in_place(
             args_after_plugin: &tail,
             repository,
             require_module_audit: true,
+            launch_environment: Default::default(),
         },
         Some(Duration::from_millis(timeout_ms)),
         None,

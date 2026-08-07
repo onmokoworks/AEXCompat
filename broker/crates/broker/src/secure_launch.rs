@@ -1,7 +1,59 @@
 use crate::ExitClassification;
+use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Environment inputs one launch carries explicitly, instead of the broker
+/// mutating its own process environment (issue #910).
+///
+/// `std::env::set_var` is process-global. Before this existed, the only way a
+/// caller could influence a worker's environment — or point the broker's
+/// opt-in minidump capture at a directory — was to set a variable on the
+/// broker process, which every concurrent launch then saw. Both fields default
+/// to "whatever the broker process already has", so production callers that
+/// build a request without them are unchanged.
+#[derive(Clone, Debug, Default)]
+pub struct LaunchEnvironment {
+    child_overrides: Vec<(OsString, OsString)>,
+    minidump_directory: Option<PathBuf>,
+}
+
+impl LaunchEnvironment {
+    /// Sets one environment variable in the child, for this launch only.
+    ///
+    /// The override is applied after the inherited copy of the broker's
+    /// environment and after the broker injects its handle variables, so it
+    /// wins over an inherited value of the same name but can never forge a
+    /// handle variable: the keys the broker owns
+    /// (`AEXCOMPAT_MINIDUMP_HANDLE`, `AEXCOMPAT_MINIDUMP_ACK_HANDLE`,
+    /// `AEX_INSTRUMENT_TRACE_HANDLE`, the `SESSION_*_HANDLE_VARIABLE` names,
+    /// and the broker-side `*_DIR` knobs they come from) are ignored here, as
+    /// are malformed keys. See `windows_process::child_environment`.
+    pub fn with_child_var(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.child_overrides.push((key.into(), value.into()));
+        self
+    }
+
+    /// Directs this launch's opt-in crash minidump capture at `directory`
+    /// instead of reading `AEXCOMPAT_MINIDUMP_DIR` (issue #18). This is a
+    /// broker-side setting: the worker never receives the path, only the
+    /// inherited dump pipe the broker creates under it. The same
+    /// repository-relative policy applies (`minidump_policy`), so the
+    /// directory must still resolve under `<repository>/target`.
+    pub fn with_minidump_directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.minidump_directory = Some(directory.into());
+        self
+    }
+
+    pub(crate) fn child_overrides(&self) -> &[(OsString, OsString)] {
+        &self.child_overrides
+    }
+
+    pub(crate) fn minidump_directory(&self) -> Option<&Path> {
+        self.minidump_directory.as_deref()
+    }
+}
 
 #[derive(Debug)]
 pub struct SecureLaunchResult {
@@ -51,6 +103,10 @@ pub struct SecureLaunchRequest<'a> {
     /// worker never receives this path or a dump-file handle.
     pub repository: &'a Path,
     pub require_module_audit: bool,
+    /// Per-launch environment inputs (issue #910). `Default` inherits the
+    /// broker's own environment and reads the minidump directory from
+    /// `AEXCOMPAT_MINIDUMP_DIR`, which is what every production caller wants.
+    pub launch_environment: LaunchEnvironment,
 }
 
 /// In-place variant of `secure_launch` (issue #751): the plug-in loads from
@@ -71,6 +127,7 @@ pub fn secure_launch_in_place(
         &args,
         request.require_module_audit,
         request.repository,
+        &request.launch_environment,
         timeout,
         process_memory_limit,
     )
@@ -95,6 +152,7 @@ pub(crate) fn secure_launch_without_plugin(
         &args,
         request.require_module_audit,
         request.repository,
+        &request.launch_environment,
         timeout,
         process_memory_limit,
     )
@@ -128,6 +186,7 @@ fn build_in_place_launch_args(
 }
 
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
 fn secure_launch_impl(
     worker_program: &Path,
     worker_expected_sha256: [u8; 32],
@@ -135,6 +194,7 @@ fn secure_launch_impl(
     args: &[String],
     require_module_audit: bool,
     repository: &Path,
+    launch_environment: &LaunchEnvironment,
     timeout: Option<Duration>,
     process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
@@ -156,6 +216,7 @@ fn secure_launch_impl(
             timeout,
             &worker_cwd,
             repository,
+            launch_environment,
             limit,
         )
     } else {
@@ -166,6 +227,7 @@ fn secure_launch_impl(
             &worker_cwd,
             // Repository root for the launch-boundary minidump handle (issue #18).
             repository,
+            launch_environment,
         )
     }
     .map_err(|error| stage_error("staged process launch", error))?;
@@ -340,6 +402,7 @@ fn secure_launch_session_impl(
                 session,
                 // Repository root for the launch-boundary minidump handle (issue #18/#224).
                 request.repository,
+                &request.launch_environment,
             )
         }
         crate::windows_process::WorkerDesktopPolicy::Current => {
@@ -349,6 +412,7 @@ fn secure_launch_session_impl(
                 &worker_cwd,
                 session,
                 request.repository,
+                &request.launch_environment,
             )
         }
     }
@@ -367,6 +431,7 @@ fn stage_error(stage: &'static str, error: io::Error) -> io::Error {
 }
 
 #[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
 fn secure_launch_impl(
     _worker_program: &Path,
     _worker_expected_sha256: [u8; 32],
@@ -374,6 +439,7 @@ fn secure_launch_impl(
     _args: &[String],
     _require_module_audit: bool,
     _repository: &Path,
+    _launch_environment: &LaunchEnvironment,
     _timeout: Option<Duration>,
     _process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
@@ -397,6 +463,7 @@ mod tests {
             args_after_plugin: after,
             repository: Path::new("."),
             require_module_audit: false,
+            launch_environment: LaunchEnvironment::default(),
         }
     }
 
