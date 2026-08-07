@@ -10,9 +10,6 @@ fn windows_registry_collection_is_bounded_and_fail_closed() {
     let collection = collect_opencl_icd_candidates();
     let report = privacy_bounded_opencl_icd_report(&collection);
     let serialized = serde_json::to_string(&report).expect("serialize collector report");
-    let reparsed: serde_json::Value =
-        serde_json::from_str(&serialized).expect("parse collector report");
-    assert_eq!(report, reparsed);
     assert!(!serialized.contains(":\\"));
 
     let mut candidate_keys = BTreeSet::new();

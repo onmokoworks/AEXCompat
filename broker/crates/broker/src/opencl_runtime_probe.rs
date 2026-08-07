@@ -1125,18 +1125,6 @@ mod tests {
             CL_PLATFORM_EXTENSIONS,
             CL_PLATFORM_ICD_SUFFIX_KHR,
         ];
-        for parameter in platform_parameters {
-            for value in path_like_values {
-                let mut api = valid_mock();
-                api.platform_strings
-                    .insert((1, parameter), Ok(value.into()));
-                let observation = collect_with_api(&api);
-                assert_eq!(observation.status, AggregateStatus::Incomplete);
-                assert!(observation.platforms.is_empty());
-                assert_eq!(observation.diagnostics[0].kind, ProbeFailureKind::Malformed);
-            }
-        }
-
         let device_parameters = [
             CL_DEVICE_NAME,
             CL_DEVICE_VENDOR,
@@ -1145,15 +1133,34 @@ mod tests {
             CL_DEVICE_PROFILE,
             CL_DEVICE_EXTENSIONS,
         ];
+        let assert_rejected = |api: &MockApi| {
+            let observation = collect_with_api(api);
+            assert_eq!(observation.status, AggregateStatus::Incomplete);
+            assert!(observation.platforms.is_empty());
+            assert_eq!(observation.diagnostics[0].kind, ProbeFailureKind::Malformed);
+        };
+
+        // The rejection is decided per value, and the parameter decides only
+        // whether the value is inspected at all. Each shape is therefore
+        // checked once, and each inspected parameter once, rather than as a
+        // cross product that repeats the same decision.
+        for value in path_like_values {
+            let mut api = valid_mock();
+            api.platform_strings
+                .insert((1, CL_PLATFORM_NAME), Ok(value.into()));
+            assert_rejected(&api);
+        }
+        for parameter in platform_parameters {
+            let mut api = valid_mock();
+            api.platform_strings
+                .insert((1, parameter), Ok(r"C:\Users\name".into()));
+            assert_rejected(&api);
+        }
         for parameter in device_parameters {
-            for value in path_like_values {
-                let mut api = valid_mock();
-                api.device_strings.insert((11, parameter), Ok(value.into()));
-                let observation = collect_with_api(&api);
-                assert_eq!(observation.status, AggregateStatus::Incomplete);
-                assert!(observation.platforms.is_empty());
-                assert_eq!(observation.diagnostics[0].kind, ProbeFailureKind::Malformed);
-            }
+            let mut api = valid_mock();
+            api.device_strings
+                .insert((11, parameter), Ok(r"C:\Users\name".into()));
+            assert_rejected(&api);
         }
 
         let mut partial = valid_mock();

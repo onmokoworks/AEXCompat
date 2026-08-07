@@ -13,8 +13,6 @@
 //! Requires the real workers and the probe fixtures from this checkout; each
 //! test skips with a message when its fixture is not built.
 
-mod common;
-
 #[cfg(test)]
 #[cfg(windows)]
 mod windows_e2e {
@@ -201,11 +199,6 @@ mod windows_e2e {
     /// (docs/EVIDENCE_POLICY_2026-07-18.md, issue #361).
     #[test]
     fn smart_single_image_renders_deterministically_and_follows_its_input() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "smart_single_image_renders_deterministically_and_follows_its_input",
-        ) {
-            return;
-        }
         // Still takes the route lock: the tests that assert on exact deltas of
         // RENDER_SESSION_WRAPPER_RENDERS are perturbed by a concurrent session
         // render, and the two fail-closed diagnostics set a process-global
@@ -348,11 +341,6 @@ mod windows_e2e {
     /// preflight record (#361).
     #[test]
     fn smart_argb32f_auto_without_a_policy_folds_to_the_cpu_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "smart_argb32f_auto_without_a_policy_folds_to_the_cpu_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -460,11 +448,6 @@ mod windows_e2e {
     /// (#361).
     #[test]
     fn smart_timed_multilayer_reaches_the_plug_in_at_every_depth() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "smart_timed_multilayer_reaches_the_plug_in_at_every_depth",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -656,11 +639,6 @@ mod windows_e2e {
     /// short-circuiting somewhere that also returns Ok.
     #[test]
     fn host_context_shapes_stay_on_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "host_context_shapes_stay_on_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -852,11 +830,6 @@ mod windows_e2e {
     /// sensitivity assertion the geometry probe could not (#361).
     #[test]
     fn classic_render_is_healthy_deterministic_and_input_dependent() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "classic_render_is_healthy_deterministic_and_input_dependent",
-        ) {
-            return;
-        }
         // Still takes the route lock: the tests that assert on exact deltas of
         // RENDER_SESSION_WRAPPER_RENDERS are perturbed by a concurrent session
         // render, and the two fail-closed diagnostics set a process-global
@@ -972,11 +945,6 @@ mod windows_e2e {
     /// agree", which held even when a parameter was ignored on both (#361).
     #[test]
     fn layer_and_slider_reach_the_plug_in_through_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "layer_and_slider_reach_the_plug_in_through_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1091,11 +1059,6 @@ mod windows_e2e {
 
     #[test]
     fn parameter_animation_drives_the_render_through_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "parameter_animation_drives_the_render_through_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1230,11 +1193,6 @@ mod windows_e2e {
     }
     #[test]
     fn audio_render_goes_through_the_session_and_transforms_its_input() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "audio_render_goes_through_the_session_and_transforms_its_input",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1392,11 +1350,6 @@ mod windows_e2e {
     /// agreeing with the one-shot (#361).
     #[test]
     fn custom_ui_click_reaches_the_plug_in_and_changes_the_render() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "custom_ui_click_reaches_the_plug_in_and_changes_the_render",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1543,11 +1496,6 @@ mod windows_e2e {
     /// one-shot (#361).
     #[test]
     fn custom_ui_draw_reaches_the_plug_in_and_completes_its_lifecycle() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "custom_ui_draw_reaches_the_plug_in_and_completes_its_lifecycle",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1653,11 +1601,6 @@ mod windows_e2e {
     /// replay, not by agreeing with the one-shot (#361).
     #[test]
     fn expand_output_grows_in_place_without_replaying_the_lifecycle() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "expand_output_grows_in_place_without_replaying_the_lifecycle",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1813,11 +1756,6 @@ mod windows_e2e {
     /// Verified against that property, not against the one-shot (#361).
     #[test]
     fn oversized_layer_is_carried_at_its_own_dimensions() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "oversized_layer_is_carried_at_its_own_dimensions",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1939,11 +1877,6 @@ mod windows_e2e {
     /// rather than against the one-shot (#361).
     #[test]
     fn zero_duration_render_produces_the_single_frame_on_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "zero_duration_render_produces_the_single_frame_on_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2038,11 +1971,6 @@ mod windows_e2e {
     /// than by agreeing with the one-shot (#361).
     #[test]
     fn conformance_render_settings_change_the_render_and_do_not_leak() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "conformance_render_settings_change_the_render_and_do_not_leak",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2243,11 +2171,6 @@ mod windows_e2e {
     /// agreeing with the one-shot (#361).
     #[test]
     fn image_audio_sidecar_reaches_the_plug_in_through_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "image_audio_sidecar_reaches_the_plug_in_through_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2385,11 +2308,6 @@ mod windows_e2e {
     /// the former forced-one-shot assertion here has no transport left to name.
     #[test]
     fn image_audio_and_secondary_layer_are_jointly_consumed_by_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "image_audio_and_secondary_layer_are_jointly_consumed_by_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2524,11 +2442,6 @@ mod windows_e2e {
     /// fixture does advertise audio and passes the gate either way.
     #[test]
     fn an_unadvertised_plugin_with_a_sidecar_is_refused_by_the_session() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "an_unadvertised_plugin_with_a_sidecar_is_refused_by_the_session",
-        ) {
-            return;
-        }
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

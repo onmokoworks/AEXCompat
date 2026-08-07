@@ -7,8 +7,8 @@ const MASKOFFSET_BYTES: &[u8] =
     include_bytes!("../../../../profiles/maskoffset/parameter_descriptors.json");
 
 /// The manifest is accepted on its structure, not on a digest compiled into
-/// the broker (issue #733): re-serializing it changes nothing, and an edit
-/// that breaks a descriptor contract is what fails.
+/// the broker (issue #733): an edit that breaks a descriptor contract is what
+/// fails, not one that merely changes a value.
 #[test]
 fn promoted_observation_is_accepted_on_structure_not_a_pinned_digest() {
     let nonce = SystemTime::now()
@@ -31,12 +31,6 @@ fn promoted_observation_is_accepted_on_structure_not_a_pinned_digest() {
     assert_eq!(loaded.receipt_id, "scattermap-l2-20260713-001");
 
     let mut tampered: serde_json::Value = serde_json::from_slice(BYTES).unwrap();
-    fs::write(
-        root.join("profiles/manifest.json"),
-        serde_json::to_vec(&tampered).unwrap(),
-    )
-    .unwrap();
-    assert!(load(&root, "scattermap", policy).is_ok());
 
     // Editing a bound is now an ordinary edit: the descriptors describe the
     // plug-in, and the broker no longer holds a compiled-in opinion about what

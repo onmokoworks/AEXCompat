@@ -1,5 +1,4 @@
 pub mod cluster_manifest;
-pub mod conformance;
 pub mod cuda_compute_probe;
 pub mod fixture_profiles;
 pub mod gpu_platform_collector;
