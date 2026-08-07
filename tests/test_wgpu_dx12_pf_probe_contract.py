@@ -10,19 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = json.loads(
     (ROOT / "schemas/wgpu-dx12-pf-probe.schema.json").read_text(encoding="utf-8")
 )
-RUNTIME_CARGO = (
-    ROOT / "instruments/pf-wgpu-dx12-probe/runtime/Cargo.toml"
-).read_text(encoding="utf-8")
-RUNTIME = (
-    ROOT / "instruments/pf-wgpu-dx12-probe/runtime/src/lib.rs"
-).read_text(encoding="utf-8")
-AEX = (ROOT / "instruments/pf-wgpu-dx12-probe/pf_wgpu_dx12_probe.cpp").read_text(
-    encoding="utf-8"
-)
-BROKER = (ROOT / "broker/crates/broker/src/wgpu_dx12_pf_probe.rs").read_text(
-    encoding="utf-8"
-)
-BUILD = (ROOT / "tools/build-wgpu-dx12-pf-probe.ps1").read_text(encoding="utf-8")
 
 
 def artifact(path: str) -> dict:

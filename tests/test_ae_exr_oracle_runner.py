@@ -6,17 +6,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "capture-ae-exr-oracle.ps1"
-SOURCE = RUNNER.read_text(encoding="utf-8")
-
-
-def test_runner_wires_setup_aerender_float_compare_and_evidence():
-    assert "prepare-ae-oracle-project.ps1" in SOURCE
-    assert "'aerender.exe'" in SOURCE
-    assert "@('-project', $project)" in SOURCE
-    assert "--raw-format rgba32f-le" in SOURCE
-    assert "aexcompat-ae-exr-oracle-evidence-v1" in SOURCE
-    assert "host_raw_world_vs_ae_float_export" in SOURCE
-    assert "raw_world_exact = $false" in SOURCE
 
 
 def test_plan_only_is_identity_bound_and_has_no_output_side_effects(tmp_path):

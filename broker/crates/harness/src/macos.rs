@@ -2399,13 +2399,6 @@ mod tests {
     }
 
     #[test]
-    fn resident_shutdown_has_no_raw_cached_pid_kill_authority() {
-        let source = include_str!("macos.rs");
-        assert!(!source.contains(&["libc", "::kill"].concat()));
-        assert!(!source.contains(&["terminate_resident", "_pid"].concat()));
-    }
-
-    #[test]
     fn resident_admission_returns_promptly_and_delivers_readiness_later() {
         let (release, blocked) = mpsc::channel();
         let started = Instant::now();

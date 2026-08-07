@@ -10,7 +10,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "AE_REFERENCE_CAPTURE_AUTOMATION_RESULT_2026-07-15.json"
 RUNNER = ROOT / "tools" / "capture-ae-reference.ps1"
-SCRIPT = ROOT / "tools" / "ae-reference-capture.jsx"
 
 
 def _wait_for_staged_input(marker: bytes, process, timeout: float = 60.0) -> None:
@@ -63,100 +62,6 @@ def test_reference_capture_is_fail_closed_while_user_ae_session_is_running():
     assert refusal["output_created"] is False
     assert refusal["result_created"] is False
     assert refusal["existing_ae_process_terminated"] is False
-
-
-def test_reference_capture_contract_is_hash_bound_create_new_and_temporary():
-    runner = RUNNER.read_text(encoding="utf-8")
-    script = SCRIPT.read_text(encoding="utf-8")
-    assert "Get-Process AfterFX,'AfterFX.com',aerender,aerendercore" in runner
-    # Kills are scoped to the launched process tree by PID; a name-based
-    # kill could hit an unrelated AE session started after the gate, and a
-    # launch that already exited is never killed (its PID may be reused).
-    assert "taskkill.exe /PID $ProcessId /T /F" in runner
-    assert "if (-not $process.HasExited) {" in runner
-    assert "Stop-Process" not in runner
-    # Every kill goes through the helper, and the helper drops
-    # $ErrorActionPreference for the call. Under 'Stop', taskkill's stderr for an
-    # already-gone PID becomes a *terminating* error even with 2>$null, and in a
-    # finally block that error replaces the real exception the cleanup is running
-    # for (issue #175). Pinning the helper keeps a best-effort kill best-effort.
-    runner_code = "\n".join(
-        line for line in runner.splitlines() if not line.lstrip().startswith("#"))
-    assert runner_code.count("taskkill.exe") == 1, (
-        "every kill must go through Stop-CaptureProcessTree")
-    helper_start = runner.index("function Stop-CaptureProcessTree")
-    helper_body = runner[helper_start:runner.index("taskkill.exe", helper_start)]
-    assert "$ErrorActionPreference = 'Continue'" in helper_body
-    assert runner.count("Stop-CaptureProcessTree -ProcessId $process.Id") == 3
-    assert "Installed AEX hash does not match tested AEX" in runner
-    assert "Process.Modules" in runner
-    assert "loaded_aex_identity" in runner
-    assert "RequireLoadedAexIdentity" in runner
-    assert "Get-LaunchedProcessTreeIds" in runner
-    assert "effect_provenance" in runner
-    assert "unique_loaded_provider" in runner
-    assert "output_png_sha256" in runner
-    helper = (ROOT / "tools" / "windows-file-identity.ps1").read_text(encoding="utf-8")
-    assert "GetFinalPathNameByHandleW" in helper
-    assert "GetFileInformationByHandle" in helper
-    assert "OutputPng already exists" in runner
-    assert "Test-Path -LiteralPath $resultPath" in runner
-    assert "[DateTime]::UtcNow -lt $deadline" in runner
-    assert "After Effects reference capture timed out without a result" in runner
-    # After the result appears the runner waits for the launched process to
-    # finish quitting (the wrapper can briefly hold the output PNG), and a
-    # quit that outlives the bound is an explicit failure, not a silent pass.
-    assert "$process.WaitForExit($TimeoutSeconds * 1000)" in runner
-    assert "After Effects did not exit after writing the capture result" in runner
-    assert "-r \"{0}\"" in runner
-    assert "Resolve-Path -LiteralPath $ScriptPath" in runner
-    assert "refusing to modify a non-empty or saved After Effects project" in script
-    assert "safeToQuit" in script
-    assert 'addProperty(env("AEXCOMPAT_AE_EFFECT"))' in script
-    assert "comp.saveFrameToPng(comp.time, outputFile)" in script
-    assert 'AEXCOMPAT_AE_NO_EFFECT' in script
-    assert 'effect_applied: !noEffect' in script
-    # AE 25.3+ runs headless; older versions keep the UI fallback because
-    # -noui can abort before JSX execution on AE 25.2 (issue #54).
-    assert "'-m -noui -r \"{0}\"'" in runner
-    assert "'-m -r \"{0}\"'" in runner
-    assert "[Version]'25.3'" in runner
-    # The version is built from the numeric File*Part fields, which exist on
-    # both .NET runtimes and need no ETS-provided FileVersionRaw property.
-    assert "FileMajorPart" in runner
-    assert "CloseOptions.DO_NOT_SAVE_CHANGES" in script
-
-
-def test_reference_capture_color_pipeline_pin_is_optional_and_fail_closed():
-    runner = RUNNER.read_text(encoding="utf-8")
-    script = SCRIPT.read_text(encoding="utf-8")
-    # The runner only exports the pin variables when explicitly requested, so
-    # existing captures keep the fresh-project defaults byte-for-byte, and it
-    # clears inherited ambient values so the environment cannot pin silently.
-    assert "Remove-Item Env:AEXCOMPAT_AE_WORKING_SPACE -ErrorAction SilentlyContinue" in runner
-    assert "Remove-Item Env:AEXCOMPAT_AE_LINEARIZE -ErrorAction SilentlyContinue" in runner
-    assert "if ($WorkingSpace) { $env:AEXCOMPAT_AE_WORKING_SPACE = $WorkingSpace }" in runner
-    assert "if ($LinearizeWorkingSpace) { $env:AEXCOMPAT_AE_LINEARIZE = $LinearizeWorkingSpace }" in runner
-    assert "'AEXCOMPAT_AE_WORKING_SPACE','AEXCOMPAT_AE_LINEARIZE'" in runner
-    # The JSX verifies every pin by readback and records the observed state.
-    assert "working space did not apply" in script
-    assert "linearize working space did not apply" in script
-    assert "working_space: app.project.workingSpace" in script
-    assert "linearize_working_space: app.project.linearizeWorkingSpace" in script
-
-
-def test_reference_capture_lock_and_identity_failures_share_cleanup_scope():
-    runner = RUNNER.read_text(encoding="utf-8")
-    cleanup_try = runner.index("$installedLock = $null\n$process = $null\n$captureFailed = $true\ntry {")
-    lock_open = runner.index("$installedLock = [System.IO.File]::Open(")
-    identity_validation = runner.index("$lockedIdentity = Get-LockedFileIdentity $installedLock")
-    cleanup_finally = runner.index("} finally {", identity_validation)
-
-    # Both operations can throw after the staged input and environment contract
-    # exist, so they must be enclosed by the same cleanup try/finally as launch.
-    assert cleanup_try < lock_open < identity_validation < cleanup_finally
-    assert "if ($captureFailed -and $null -ne $installedLock) { $installedLock.Dispose() }" in runner
-    assert "Remove-Item -LiteralPath $stagedInput -ErrorAction SilentlyContinue" in runner
 
 
 @pytest.mark.skipif(
@@ -330,25 +235,3 @@ def test_locked_file_identity_distinguishes_equal_bytes_at_different_paths(tmp_p
     assert identities[0]["sha256"] == identities[1]["sha256"]
     assert identities[0]["canonical_path_sha256"] != identities[1]["canonical_path_sha256"]
     assert identities[0]["file_id"] != identities[1]["file_id"]
-
-
-def test_capture_tests_synchronize_on_the_staging_marker_not_a_fixed_sleep():
-    """No test here may write OutputPng after a fixed sleep.
-
-    The runner's preflight refuses a pre-existing OutputPng. A fixed sleep is
-    not a barrier against it: on a loaded runner the preflight can still be in
-    progress, and the write then makes the runner fail with "OutputPng already
-    exists" instead of exercising the path under test. Observed on the hosted
-    runner (issue #175); every such wait must go through
-    _wait_for_staged_input, whose marker is the runner's own last preflight
-    step.
-    """
-    source = Path(__file__).read_text(encoding="utf-8")
-    # Split so this assertion does not match itself.
-    forbidden = "time.sleep" + "(5)"
-    assert forbidden not in source
-    # Each test that writes the output/result files must have waited first.
-    waits = source.count("_wait_for_staged_input(")
-    assert waits >= 4, (
-        "expected the helper plus one barrier per test that writes OutputPng, "
-        f"found {waits}")

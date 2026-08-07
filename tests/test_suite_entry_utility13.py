@@ -10,12 +10,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
-UTILITY_HEADER = (ROOT / "minihost/src/worker_aegp_utility_suite.hpp").read_text(encoding="utf-8")
-UTILITY_SOURCE = (ROOT / "minihost/src/worker_aegp_utility_suite.cpp").read_text(encoding="utf-8")
-REGISTRY_HEADER = (ROOT / "minihost/src/worker_suite_registry.hpp").read_text(encoding="utf-8")
-REGISTRY_SOURCE = (ROOT / "minihost/src/worker_suite_registry.cpp").read_text(encoding="utf-8")
-
-
 
 
 def _msvc_vcvars() -> Path:

@@ -1,13 +1,9 @@
-from tests import source_owners
-
 import importlib.util
 import json
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HARNESS_SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
-BROKER_SOURCE = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "target" / "release" / "aexcompat-harness.exe"
 FIXTURE = ROOT / "target" / "sdk-fixtures" / "shifter" / "Shifter.aex"
 INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"
@@ -17,13 +13,6 @@ SPEC = importlib.util.spec_from_file_location("ae_png_depth_inspect", INSPECT)
 PNG = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(PNG)
-
-def test_deep16_png_routes_are_explicit_opt_ins():
-    harness = source_owners.harness_windows_text()
-
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    # The deep route is opt-in and refuses non-Argb16 formats fail-closed.
-    # Full-range expansion happens once, from the AE white point.
 
 def _decode(path: Path):
     header, pixels = PNG.decode_png(path)

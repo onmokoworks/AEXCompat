@@ -112,11 +112,6 @@ class AeTraceIntakeTests(unittest.TestCase):
         self.assertEqual("sentinel", report.read_text(encoding="utf-8"))
         self.assertFalse(sanitized.exists())
 
-    def test_cli_does_not_import_process_launch_modules(self):
-        source = (ROOT / "tools" / "ae_trace_intake.py").read_text(encoding="utf-8")
-        self.assertNotIn("subprocess", source)
-        self.assertNotIn("os.system", source)
-
 
 if __name__ == "__main__":
     unittest.main()

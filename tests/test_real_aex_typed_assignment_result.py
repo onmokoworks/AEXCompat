@@ -1,12 +1,8 @@
-from tests import source_owners
-
 import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_TYPED_ASSIGNMENT_RESULT_2026-07-15.json"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
-BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
 def test_particlelab_mixed_typed_assignment_reaches_classic_and_smartfx():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -64,8 +60,3 @@ def test_particlelab_mixed_typed_assignment_reaches_classic_and_smartfx():
         "duration_frames_range",
         "time_scale_range", "time_step_range",
     })
-
-def test_typed_assignment_surface_is_bounded_and_worker_observable():
-    harness = source_owners.harness_windows_text()
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-

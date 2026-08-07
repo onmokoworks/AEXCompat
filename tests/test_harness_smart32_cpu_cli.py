@@ -1,18 +1,13 @@
-from tests import source_owners
-
 import json
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 HARNESS = ROOT / "broker" / "target" / "release" / "aexcompat-harness.exe"
 FIXTURE = ROOT / "target" / "sdk-fixtures" / "shifter" / "Shifter.aex"
 INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"
 
 def test_smart32_cpu_cli_is_explicit_and_bypasses_gpu_authorization(tmp_path: Path) -> None:
-    source = source_owners.harness_windows_text()
-
     output = tmp_path / "shifter-smart32-cpu.png"
     completed = subprocess.run(
         [str(HARNESS), "--render-experimental-smart-32-cpu", str(FIXTURE),

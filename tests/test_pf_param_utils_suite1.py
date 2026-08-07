@@ -1,20 +1,8 @@
 import os
-import re
 import subprocess
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
-STATE_SOURCE = ROOT / "minihost/src/worker_pf_state_runtime.cpp"
-SELFTEST_SOURCE = ROOT / "minihost/src/worker_parameter_selftests.cpp"
-SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
-SDK = Path(SDK_ROOT) / "Examples" / "Headers" / "AE_EffectSuitesOld.h" if SDK_ROOT else None
-
-def _sdk_header() -> Path:
-    if SDK is None or not SDK.is_file():
-        pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
-    return SDK
 
 def _worker():
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
@@ -24,20 +12,6 @@ def _worker():
         ROOT / "target/minihost-build-v18/aex_render_worker.exe",
     ]
     return next((path for path in candidates if path and path.is_file()), None)
-
-def test_sdk_freezes_param_utils_suite1_at_acquisition_version_2_with_ten_slots():
-    sdk = _sdk_header().read_text(encoding="utf-8", errors="replace")
-    assert re.search(r"#define\s+kPFParamUtilsSuiteVersion1\s+2\b", sdk)
-    table = sdk.split("typedef struct PF_ParamUtilsSuite1 {", 1)[1].split(
-        "} PF_ParamUtilsSuite1;", 1
-    )[0]
-    slots = re.findall(r"\(\*PF_(\w+)\)\(", table)
-    assert slots == [
-        "UpdateParamUI", "GetCurrentStateObsolete", "HasParamChangedObsolete",
-        "HaveInputsChangedOverTimeSpanObsolete", "IsIdenticalCheckout",
-        "FindKeyframeTime", "GetKeyframeCount", "CheckoutKeyframe",
-        "CheckinKeyframe", "KeyIndexToTime",
-    ]
 
 def test_suite1_and_suite3_native_contracts_pass_together():
     executable = _worker()

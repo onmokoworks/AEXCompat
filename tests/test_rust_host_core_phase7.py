@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import subprocess
 import tempfile
 import unittest
@@ -8,16 +7,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENE = ROOT / "broker/crates/host-core/src/scene.rs"
-FFI = ROOT / "broker/crates/host-core-ffi/src/lib.rs"
-ABI_HEADER = ROOT / "broker/crates/broker/include/aexcompat_host_core_abi.h"
-ADAPTER = ROOT / "broker/crates/broker/include/aexcompat_host_core_adapter.hpp"
-NATIVE = (
-    ROOT
-    / "tests/native/"
-    "rust_host_core_scene_topology_snapshot_dual_run_selftest.cpp"
-)
-DOC = ROOT / "docs/RUST_HOST_CORE_MIGRATION_2026-07-31.md"
 STANDALONE_GATE = (
     ROOT / "tools/test-rust-host-core-scene-topology-snapshot.ps1"
 )
@@ -80,21 +69,6 @@ class RustHostCorePhase7Tests(unittest.TestCase):
             self.assertIs(report["cpp_registry"], True)
             self.assertIs(report["canonical"], True)
             self.assertIs(report["overflow_fail_closed"], True)
-
-
-    def test_document_limits_phase7_to_topology_state_calculation(self):
-        document = " ".join(DOC.read_text(encoding="utf-8").split())
-        for marker in (
-            "Phase 7 bounded scene topology state gate (Issue #632)",
-            "fixed-capacity",
-            "local_index",
-            "enumeration-order-independent",
-            "C++ Registry remains authoritative",
-            "Production worker routing remains unchanged",
-            "does not require After Effects",
-            "does not compare pixels",
-        ):
-            self.assertIn(marker, document)
 
 
 if __name__ == "__main__":

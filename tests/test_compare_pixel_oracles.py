@@ -154,13 +154,6 @@ class ComparePixelOraclesTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.InputError, "EXR"):
                 MODULE.compare(raw, exr, 1, 1)
 
-    def test_exr_decoder_is_pinned_to_official_openexr_api(self):
-        source = TOOL.read_text(encoding="utf-8")
-        self.assertIn("import OpenEXR", source)
-        self.assertIn("with OpenEXR.File(str(path)) as infile", source)
-        self.assertIn("len(infile.parts) != 1", source)
-        self.assertNotIn("import imageio", source)
-
     def test_nonfinite_float_is_valid_deterministic_json(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

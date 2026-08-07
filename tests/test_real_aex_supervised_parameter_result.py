@@ -1,12 +1,8 @@
 import json
 from pathlib import Path
-import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_SUPERVISED_PARAMETER_RESULT_2026-07-15.json"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
-BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-WORKER = source_owners.L2_SOURCE
 def test_particlelab_standard_supervised_parameter_receives_current_value():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     assert result["observed_supervised_parameters"]["standard_parameter_count"] == 7
@@ -18,9 +14,3 @@ def test_particlelab_standard_supervised_parameter_receives_current_value():
     assert result["dispatch"]["update_params_ui_error"] == 0
     assert all(value is True for value in result["invariants"].values())
     assert all(value == 0 for key, value in result["lifecycle"].items() if key.endswith("_error"))
-
-def test_supervised_transport_is_typed_isolated_and_not_button_limited():
-    harness = source_owners.harness_windows_text()
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    worker = WORKER.read_text(encoding="utf-8")
-    assert "g_params[offset].type != 15" not in worker

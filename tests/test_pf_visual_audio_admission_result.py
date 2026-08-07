@@ -1,14 +1,7 @@
 import json
 from pathlib import Path
-import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
-
-def worker_source():
-    return (source_owners.worker_text() + "\n" +
-            (ROOT / "minihost" / "src" / "l2_cli_dispatch.cpp").read_text(encoding="utf-8") + "\n" +
-            (ROOT / "minihost" / "src" / "host_audio_runtime.hpp").read_text(encoding="utf-8") + "\n" +
-            (ROOT / "minihost" / "src" / "host_audio_runtime.cpp").read_text(encoding="utf-8"))
 
 def test_visual_audio_admission_and_audio_only_exemption():
     data = json.loads((ROOT / "analysis" / "PF_VISUAL_AUDIO_ADMISSION_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
@@ -49,12 +42,6 @@ def test_audio_checkout_windows_are_bounded_owned_and_time_scaled():
     assert sdk["request"]["time_scale"] == 44100
     assert sdk["bitwise_exact_reverse"] is True
 
-    worker = worker_source()
-    # The 44100 literal was the one-shot audio mode's fixed rate (#365 deleted
-    # it). The session negotiates the rate at open and threads it through, so
-    # the span call takes it as a parameter.
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-
 def test_audio_checkout_converts_requested_sdk_formats():
     data = json.loads((ROOT / "analysis" / "PF_AUDIO_FORMAT_CONVERSION_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
     matrix = data["supported_request_matrix"]
@@ -68,7 +55,6 @@ def test_audio_checkout_converts_requested_sdk_formats():
     assert fixture["audio_lifetimes_balanced"] is True
     assert fixture["verified_requests"][1]["first_interleaved_samples"] == [0, 0, 4096, 4096]
     assert fixture["verified_requests"][2]["samples"] == [128, 143, 159, 175]
-    source = worker_source()
 
 def test_audio_handles_support_bounded_overlapping_lifetimes():
     data = json.loads((ROOT / "analysis" / "PF_AUDIO_MULTI_HANDLE_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
@@ -83,7 +69,6 @@ def test_audio_handles_support_bounded_overlapping_lifetimes():
     assert data["negative"]["callback_rejected"] is True
     assert data["negative"]["status"] == "render_failed"
     assert data["negative"]["worker_exit_code"] == 21
-    source = worker_source()
 
 def test_audio_data_includes_the_sdk_trailing_silent_frame():
     data = json.loads((ROOT / "analysis" / "PF_AUDIO_SENTINEL_FRAME_RESULT_2026-07-15.json").read_text(encoding="utf-8"))
@@ -94,4 +79,3 @@ def test_audio_data_includes_the_sdk_trailing_silent_frame():
     format_cases = [case for case in data["verified_cases"] if case["fixture"] == "pf_visual_audio_format_probe"]
     assert {case["format"] for case in format_cases} == {"unsigned_pcm8", "signed_pcm16_stereo"}
     assert data["sdk_backwards_regression"]["status"] == "render_completed"
-    source = worker_source()

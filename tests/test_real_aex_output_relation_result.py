@@ -1,11 +1,8 @@
-from tests import source_owners
-
 import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_OUTPUT_RELATION_RESULT_2026-07-15.json"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
 
 def test_real_effect_matrix_distinguishes_changed_and_passthrough_outputs():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -22,6 +19,3 @@ def test_real_effect_matrix_distinguishes_changed_and_passthrough_outputs():
         "differing_input_pixels": 0,
     }
     assert all(result["policy"].values())
-
-def test_output_relation_is_computed_and_exposed_without_redefining_pass():
-    source = source_owners.harness_windows_text()

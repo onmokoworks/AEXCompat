@@ -1,13 +1,8 @@
 import json
 from pathlib import Path
-import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_BACKWARDS_AUDIO_RESULT_2026-07-15.json"
-WORKER_SOURCES = source_owners.contract_files("sdk_backwards_audio_result")
-BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
-PROBE = ROOT / "instruments" / "abi-layout-probe" / "main.cpp"
 
 def test_sdk_backwards_audio_matches_the_bitwise_reverse_oracle():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -45,8 +40,6 @@ def test_audio_selector_and_checkout_lifetimes_are_balanced():
 def test_audio_only_effect_is_never_dispatched_through_an_image_selector():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
     gate = result["image_media_negotiation"]
-    worker = "\n".join(path.read_text(encoding="utf-8") for path in WORKER_SOURCES)
-    harness = source_owners.harness_windows_text()
 
     assert gate["advertisement_flag"] == "PF_OutFlag_AUDIO_EFFECT_ONLY"
     assert gate["advertisement_bit"] == 31

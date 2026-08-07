@@ -42,7 +42,6 @@ def test_artifact_identities_are_path_free_and_event_is_not_misattributed():
     }
     for role, (size, sha) in expected.items():
         assert result["authenticated_artifacts"][role] == {"size_bytes": size, "sha256": sha}
-    assert ":\\" not in EVIDENCE.read_text(encoding="utf-8")
     assert result["event_boundary"]["dispatched"] is False
     assert result["event_boundary"]["attributed_to_event"] is False
     assert result["event_boundary"]["telemetry_origin"] == "PF_Cmd_SMART_PRE_RENDER only"

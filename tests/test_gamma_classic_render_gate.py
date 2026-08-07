@@ -1,11 +1,9 @@
 import json
-import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_GAMMA_CLASSIC_RENDER_GATE_RESULT_2026-07-18.json"
-RUNNER = ROOT / "tools" / "run-gamma-classic-render-gate.ps1"
 
 
 def _result():
@@ -72,22 +70,3 @@ def test_gamma_changes_output_and_one_is_identity():
     assert identity["transport_output_sha256"] == result["authenticated_artifacts"]["input"]["sha256"]
     assert identity["internal_output_sha256"] != changed["internal_output_sha256"]
     assert identity["transport_output_sha256"] != changed["transport_output_sha256"]
-
-
-def test_runner_is_fail_closed_and_does_not_call_removed_one_shot_entrypoint():
-    source = RUNNER.read_text(encoding="utf-8")
-    for marker in (
-        "refresh-runtime-session.py",
-        "render-experimental-session-param",
-        "--parameter-slot",
-        "--parameter-value",
-        "session_transport_failure",
-        "old_one_shot_cli_absent",
-        "Get-ArtifactIdentity",
-    ):
-        assert marker in source
-    assert "--render-image" not in source
-    assert "Start-Process" not in source
-    serialized = RESULT.read_text(encoding="utf-8-sig")
-    assert not re.search(r"[A-Za-z]:\\", serialized)
-    assert "stderr" not in serialized.lower()

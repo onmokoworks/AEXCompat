@@ -1,12 +1,8 @@
 import json
 from pathlib import Path
-import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_PATHARRAY_MASK_CONTEXT_RESULT_2026-07-15.json"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
-BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
-REQUEST_PARSER = ROOT / "minihost" / "src" / "worker_request_parser.cpp"
 
 def test_patharray_mask_context_turns_smartfx_passthrough_into_effect_output():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -28,9 +24,3 @@ def test_generic_mask_transport_reuses_bounded_cleanroom_context():
     assert result["negative_control"]["closed_mask_with_two_vertices_rejected"] is True
     assert result["negative_control"]["output_created"] is False
     assert result["negative_control"]["native_worker_started"] is False
-    harness = source_owners.harness_windows_text()
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    worker = source_owners.worker_text() + REQUEST_PARSER.read_text(encoding="utf-8")
-    # The one-shot peeled the mask trailer at `trailer_argc - 1`; #365 deleted
-    # that arm and the session reads it at the index its own peel chain
-    # recorded.

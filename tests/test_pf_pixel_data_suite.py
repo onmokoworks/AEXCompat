@@ -1,18 +1,9 @@
 import os
-import re
 import subprocess
 from pathlib import Path
-import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def source_text():
-    # Suite structs, tables, and callbacks live in the worker-runtime owner
-    # set; the "not in" checks below are scoped to regex slices of specific
-    # functions, so the growable contract stays safe here.
-    return source_owners.worker_text()
 
 
 def worker():

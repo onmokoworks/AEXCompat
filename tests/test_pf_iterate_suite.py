@@ -1,16 +1,9 @@
 import os
-import re
 import subprocess
 from pathlib import Path
-import source_owners
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PF_SUITES = ROOT / "minihost" / "src" / "worker_pf_suites.cpp"
-PF_SUITES_ABI = ROOT / "minihost" / "src" / "worker_pf_suites_internal.hpp"
-SOURCE = source_owners.L2_MAIN
-def source_text():
-    return "\n".join(path.read_text(encoding="utf-8") for path in (SOURCE, source_owners.SRC / "worker_host_suite_wiring.cpp", PF_SUITES_ABI, PF_SUITES))
 
 
 def worker():

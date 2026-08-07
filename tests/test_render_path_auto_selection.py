@@ -1,27 +1,11 @@
-import source_owners
-
 import json
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HARNESS_SOURCE = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
-BROKER_SOURCE = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 HARNESS = ROOT / "broker" / "target" / "release" / "aexcompat-harness.exe"
 FIXTURE = ROOT / "target" / "sdk-fixtures" / "shifter" / "Shifter.aex"
 INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"
-
-def test_render_path_auto_selection_is_wired_and_explicit_flags_stay_explicit():
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-    # The declaration comes from the AEX itself: out_flags2 bit 10
-    # (PF_OutFlag2_SUPPORTS_SMART_RENDER) observed after GLOBAL_SETUP.
-
-    harness = source_owners.harness_windows_text()
-    # The GUI derives its default render path from the inspection diagnostics
-    # and keeps the toggle as a manual override (issue #105).
-    # The auto CLI route is a separate opt-in; the historical flags keep their
-    # explicit Classic/SmartFX semantics so frozen evidence commands do not
-    # silently change paths.
 
 def test_auto_route_follows_advertised_smart_render(tmp_path: Path) -> None:
     auto_output = tmp_path / "shifter-auto.png"

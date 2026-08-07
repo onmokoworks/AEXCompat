@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 def test_real_aex_parameter_count_contract_result():
@@ -18,4 +17,3 @@ def test_real_aex_parameter_count_contract_result():
         assert case["in_data_num_params"] == case["explicit_parameter_count"] + 1
     assert result["invariants"]["broker_matches_interactive_descriptor_count"]
     assert result["invariants"]["classic_and_smartfx_share_count_contract"]
-    worker = source_owners.worker_text()
