@@ -550,16 +550,30 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
             // cannot change the image size". Nothing checked that: the frame was
             // dropped and the object kept its old pixels, so DeepGlow2 rendered
             // correctly every frame and nothing reached the screen (#914).
+            // The bounds the input is held to apply to the output too, rather
+            // than being left to the broker's matching constants: what this
+            // hands `set_image_data` is this crate's invariant to keep.
             let out = bytes_to_pixels(&frame.pixels);
-            if out.len() == (frame.width as usize) * (frame.height as usize) {
-                unsafe {
-                    ((*video).set_image_data)(
-                        out.as_ptr(),
-                        frame.width as i32,
-                        frame.height as i32,
-                    )
-                };
+            let pixels = u64::from(frame.width) * u64::from(frame.height);
+            if frame.width == 0
+                || frame.height == 0
+                || frame.width > MAX_DIMENSION
+                || frame.height > MAX_DIMENSION
+                || pixels > MAX_PIXELS
+                || out.len() as u64 != pixels
+            {
+                // Unreachable while the broker validates the frame it sends,
+                // which is exactly why it must say something if it happens -
+                // dropping a frame in silence is how #914 stayed invisible.
+                report_frame_trouble(
+                    &ctx.plugin,
+                    FrameTrouble::Refused("the frame's size is outside this bridge's bounds"),
+                );
+                return true;
             }
+            unsafe {
+                ((*video).set_image_data)(out.as_ptr(), frame.width as i32, frame.height as i32)
+            };
             true
         }
         // Keep the session; leave this frame's pixels. Saying so matters: with
@@ -592,6 +606,9 @@ enum FrameTrouble<'a> {
     Error(i64, Option<&'a str>),
     /// The session is gone; the next frame opens a fresh one.
     SessionLost(&'a str),
+    /// The frame arrived but this bridge would not hand it to AviUtl2. The
+    /// session stays usable; the object keeps the pixels it had.
+    Refused(&'a str),
 }
 
 /// The `PF_Err` name for a code AE defines, so a reader does not have to look
@@ -645,7 +662,7 @@ fn frame_trouble_report(
     // exactly the burial FRAME_TROUBLE_REPORT_INTERVAL exists to prevent.
     let said = match trouble {
         FrameTrouble::Error(_, said) => said,
-        FrameTrouble::SessionLost(_) => None,
+        FrameTrouble::SessionLost(_) | FrameTrouble::Refused(_) => None,
     };
     let detail = said.map(|text| format!(": {text}")).unwrap_or_default();
     let summary = match trouble {
@@ -654,6 +671,7 @@ fn frame_trouble_report(
             None => format!("frame error {code}"),
         },
         FrameTrouble::SessionLost(reason) => format!("session lost: {reason}"),
+        FrameTrouble::Refused(reason) => format!("frame refused: {reason}"),
     };
     match states.get_mut(plugin) {
         Some(state) if state.summary == summary => {

@@ -1762,16 +1762,24 @@ const AegpInstalledEffectRecord* find_installed_effect(int32_t key) {
 // straight through made every stream read as StreamValueKind::none and the
 // stream refuse to open (issue #909).
 //
-// PF_Param values are from AE_Effect.h; AEGP_StreamType from AE_GeneralPlug.h.
-// Types with no stream (the group markers, NO_DATA) map to NO_DATA, which
-// `stream_value_kind` already answers as none.
-int32_t aegp_stream_type_for_param_type(int32_t param_type) noexcept {
+// PF_Param values are from AE_Effect.h; AEGP_StreamType from AE_GeneralPlug.h,
+// whose enumerators are unnumbered so the value is the ordinal: NO_DATA 0,
+// ThreeD_SPATIAL 1, ThreeD 2, TwoD_SPATIAL 3, TwoD 4, OneD 5, COLOR 6, ARB 7,
+// MARKER 8, LAYER_ID 9, MASK_ID 10, MASK 11, TEXT_DOCUMENT 12.
+//
+// A PF type this host models no stream for answers NO_DATA, which
+// `stream_value_kind` already answers as none. That covers more than the group
+// markers: PF_Param_PATH has no MASK-stream support here, and a group start,
+// group end, or button has no stream at all in this model, so an index landing
+// on one refuses to open. AE returns a stream reference for the group markers,
+// so a plug-in enumerating every parameter stops early here (issue #918).
+constexpr int32_t aegp_stream_type_for_param_type(int32_t param_type) noexcept {
   constexpr int32_t kAegpStreamNoData = 0;
   constexpr int32_t kAegpStreamThreeD = 2;
   constexpr int32_t kAegpStreamTwoD = 4;
   constexpr int32_t kAegpStreamOneD = 5;
   constexpr int32_t kAegpStreamColor = 6;
-  constexpr int32_t kAegpStreamArb = 10;
+  constexpr int32_t kAegpStreamArb = 7;
   constexpr int32_t kAegpStreamLayerId = 9;
   switch (param_type) {
     case 0: return kAegpStreamLayerId;   // PF_Param_LAYER
@@ -1785,9 +1793,33 @@ int32_t aegp_stream_type_for_param_type(int32_t param_type) noexcept {
     case 6: return kAegpStreamTwoD;      // PF_Param_POINT
     case 11: return kAegpStreamArb;      // PF_Param_ARBITRARY_DATA
     case 18: return kAegpStreamThreeD;   // PF_Param_POINT_3D
-    default: return kAegpStreamNoData;   // groups, buttons, NO_DATA
+    default: return kAegpStreamNoData;   // groups, buttons, path, NO_DATA
   }
 }
+// The whole table, checked at compile time. A pure function of an int is worth
+// no less coverage than a runtime self-test would give it, and this one cannot
+// be skipped or left unwired: ARB shipped as 10 (which is MASK_ID) because
+// nothing compared the mapping against the SDK enumeration.
+static_assert(aegp_stream_type_for_param_type(-1) == 0);   // PF_Param_RESERVED
+static_assert(aegp_stream_type_for_param_type(0) == 9);    // LAYER -> LAYER_ID
+static_assert(aegp_stream_type_for_param_type(1) == 5);    // SLIDER -> OneD
+static_assert(aegp_stream_type_for_param_type(2) == 5);    // FIX_SLIDER
+static_assert(aegp_stream_type_for_param_type(3) == 5);    // ANGLE
+static_assert(aegp_stream_type_for_param_type(4) == 5);    // CHECKBOX
+static_assert(aegp_stream_type_for_param_type(5) == 6);    // COLOR
+static_assert(aegp_stream_type_for_param_type(6) == 4);    // POINT -> TwoD
+static_assert(aegp_stream_type_for_param_type(7) == 5);    // POPUP
+static_assert(aegp_stream_type_for_param_type(8) == 0);    // CUSTOM (obsolete)
+static_assert(aegp_stream_type_for_param_type(9) == 0);    // NO_DATA
+static_assert(aegp_stream_type_for_param_type(10) == 5);   // FLOAT_SLIDER
+static_assert(aegp_stream_type_for_param_type(11) == 7);   // ARBITRARY_DATA
+static_assert(aegp_stream_type_for_param_type(12) == 0);   // PATH (no MASK yet)
+static_assert(aegp_stream_type_for_param_type(13) == 0);   // GROUP_START
+static_assert(aegp_stream_type_for_param_type(14) == 0);   // GROUP_END
+static_assert(aegp_stream_type_for_param_type(15) == 0);   // BUTTON
+static_assert(aegp_stream_type_for_param_type(16) == 0);   // RESERVED2
+static_assert(aegp_stream_type_for_param_type(17) == 0);   // RESERVED3
+static_assert(aegp_stream_type_for_param_type(18) == 2);   // POINT_3D -> ThreeD
 
 const AegpEffectParameterRecord* loaded_effect_parameter(int32_t index) {
   const auto& records = aexcompat::worker_runtime::parameters::state().records;
@@ -1819,12 +1851,12 @@ const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t inde
   // loaded plug-in rather than one of this host's fixtures, which is the
   // ordinary case outside the self-tests.
   if (!effect) return loaded_effect_parameter(index);
-  // Instance 0 carries a fixture key even when the effect that owns it is a
-  // real plug-in, so an index past the fixture's own parameters is not out of
-  // range - it is a parameter the fixture table cannot describe. The loaded
-  // plug-in's own parameters answer those (issue #909).
-  if (index < 0) return nullptr;
-  if (index >= effect->parameter_count) return loaded_effect_parameter(index);
+  // A fixture answers within its own declared parameter count and no further.
+  // `aegp_get_effect_num_param_streams_v2` reports that count, and the arrays
+  // below are sized to it, so letting an index past it fall through to the
+  // loaded plug-in would both contradict the reported count and index those
+  // arrays out of range.
+  if (index < 0 || index >= effect->parameter_count) return nullptr;
   if (key == kAegpInstalledEffects[0].key)
     return &kAegpProbeParameters[static_cast<std::size_t>(index)];
   if (key == kAegpInstalledEffects[1].key || key == kAegpInstalledEffects[2].key)
@@ -1888,9 +1920,20 @@ int32_t __cdecl aegp_get_effect_category(int32_t key, char* category) {
 }
 int32_t __cdecl aegp_get_effect_num_param_streams_v2(void* effect, int32_t* count) {
   const auto* instance = resolve_effect_instance(effect);
-  const auto* installed = instance ? find_installed_effect(instance->installed_key) : nullptr;
-  if (!installed || !count) return 4;
-  *count = installed->parameter_count;
+  if (!instance || !count) return 4;
+  const auto* installed = find_installed_effect(instance->installed_key);
+  if (installed) {
+    *count = installed->parameter_count;
+    return 0;
+  }
+  // No fixture key means a real loaded plug-in, whose parameters are the ones
+  // `find_effect_parameter` answers from. Refusing here left the ordinary
+  // walk - ask how many, then open each - stopping at its first call even
+  // though every stream it would have asked for is now openable (issue #909).
+  const auto& records = aexcompat::worker_runtime::parameters::state().records;
+  // Index 0 is the input layer and carries no record, matching the 1-based
+  // indexing `loaded_effect_parameter` uses.
+  *count = static_cast<int32_t>(records.size()) + 1;
   return 0;
 }
 bool supported_transform_stream(int32_t selector) {
@@ -1907,8 +1950,12 @@ aexcompat::scene_model::StreamValueKind stream_value_kind(
     case 4:
     case 5: return StreamValueKind::scalar;
     case 6: return StreamValueKind::color;
+    // ARB is 7, not 10 - 10 is MASK_ID, which this host does not model. The
+    // table read 10 for as long as no caller reached it: every fixture uses
+    // 2/4/5/6/9, so the mismatch only surfaced once a loaded plug-in's
+    // arbitrary-data parameter could be translated into a stream type.
+    case 7: return StreamValueKind::arbitrary;
     case 9: return StreamValueKind::layer;
-    case 10: return StreamValueKind::arbitrary;
     default: return StreamValueKind::none;
   }
 }
@@ -2846,7 +2893,16 @@ int32_t __cdecl aegp_get_stream_name_v2(void* stream, uint8_t, char* name) {
   const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
   const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
   if (!parameter) return 4;
-  std::strcpy(name, parameter->name);
+  // AEGP_MAX_STREAM_NAME_SIZE is PF_MAX_EFFECT_PARAM_NAME_LEN + 1 = 32, and
+  // the caller's buffer is that size. A fixture name is a short literal, but a
+  // loaded plug-in's is whatever `add_param` read out of its PF_ParamDef, and
+  // that is `strnlen_s(name, 32)` - a name field with no terminator yields 32
+  // characters, one more than `strcpy` may write here. Truncate instead.
+  constexpr std::size_t kAegpMaxStreamNameSize = 32;
+  const std::size_t length =
+      strnlen_s(parameter->name, kAegpMaxStreamNameSize - 1);
+  std::memcpy(name, parameter->name, length);
+  name[length] = '\0';
   return 0;
 }
 int32_t __cdecl aegp_get_stream_type_v2(void* stream, int32_t* type) {
@@ -2866,15 +2922,22 @@ int32_t __cdecl aegp_get_new_stream_value_v2(
               << " stream=" << stream << " time=" << (time != nullptr)
               << " output=" << (output != nullptr) << "\n" << std::flush;
   auto* value = legacy_effect_stream(stream);
+  // `value` is null for a stale, foreign, disposed, or malformed handle, so
+  // nothing may read through it before this refusal. Hoisting the id
+  // comparison above this line dereferenced null for exactly the handles the
+  // check exists to reject, turning a diagnostic into a crash.
+  if (!value || !legacy_effect_stream_parent_live(*value)) return 4;
   // The id only has to name the same caller the stream was opened for. An
   // unregistered plug-in passes 0 here and may have passed something else
   // when it opened the stream - DeepGlow2 does exactly that - and the stream
   // it is reading is still its own: this worker hosts one plug-in, and the
   // registry already refused any handle that is not this stream (issue #909).
-  const bool owner_matches = plugin_id == value->owner_plugin_id ||
-      plugin_id == 0 || value->owner_plugin_id == 0;
-  if (!value || !legacy_effect_stream_parent_live(*value) || !owner_matches ||
-      value->value_live || !time || time->scale == 0 || !output)
+  // A negative id stays malformed, as at every other entry point here.
+  const bool owner_matches = plugin_id >= 0 &&
+      (plugin_id == value->owner_plugin_id || plugin_id == 0 ||
+       value->owner_plugin_id == 0);
+  if (!owner_matches || value->value_live || !time || time->scale == 0 ||
+      !output)
     return 4;
   const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
   const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);

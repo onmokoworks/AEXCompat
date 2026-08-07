@@ -1285,9 +1285,15 @@ SmartRenderSessionOutcome run_smart_render_session(
         frame.height = frame_result.output_height;
         frame.rowbytes = frame_result.output_rowbytes;
         // result_rect's top-left is where these pixels sit relative to the
-        // layer origin; a grown output starts at a negative coordinate.
-        frame.origin_x = frame_result.result_rect[0];
-        frame.origin_y = frame_result.result_rect[1];
+        // layer origin; a grown output starts at a negative coordinate. Only
+        // once the rects passed validation: `result_rect` is copied out of the
+        // PreRender output before it is checked, so on a rejected geometry it
+        // still holds whatever the plug-in wrote, and a caller placing a frame
+        // by it would be placing it by an unvalidated number.
+        if (frame_result.rects_valid) {
+          frame.origin_x = frame_result.result_rect[0];
+          frame.origin_y = frame_result.result_rect[1];
+        }
         frame.input_hash = frame_result.input_hash;
         frame.output_hash = frame_result.output_hash;
         // A legally empty PreRender result_rect (#278): no pixels were rendered,
