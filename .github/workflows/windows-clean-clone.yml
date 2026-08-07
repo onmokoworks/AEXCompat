@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: windows-clean-clone-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   source-reproducible:
     # Keep untrusted public-repository jobs off the physical workstation.
