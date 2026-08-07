@@ -1944,6 +1944,105 @@ bool verify_aegp_scene_mutation_transactions() {
   return ok && suite_leases_balanced();
 }
 
+// The parameters a loaded plug-in's effect handle answers with (issue #909).
+//
+// Slot 0 of the effect instance table is seeded at scene start with the probe
+// fixture's key, and `AEGP_GetNewEffectForEffect` hands that same slot to the
+// plug-in this worker loaded. Deciding whose parameters to answer from that
+// key alone answered a real plug-in out of a five-entry fixture table; the
+// instance carries a mark instead. Everything below is a property that broke
+// at some point while getting there.
+bool verify_aegp_loaded_plugin_effect_streams() {
+  if (!g_hooks.get_new_effect_for_effect || !g_hooks.dispose_effect ||
+      !g_hooks.get_effect_num_param_streams_v2 || !g_hooks.get_new_effect_stream_v2 ||
+      !g_hooks.get_stream_name_v2 || !g_hooks.get_stream_type_v2 ||
+      !g_hooks.get_new_stream_value_v2 || !g_hooks.dispose_stream_value_v2 ||
+      !g_hooks.dispose_stream_v2 || !g_hooks.effect)
+    return false;
+  using aexcompat::worker_runtime::parameters::ParamRecord;
+  auto& records = aexcompat::worker_runtime::parameters::state().records;
+  const auto saved_records = records;
+  const auto saved_instances = scene_runtime_state().effect_instances;
+  const bool saved_effect_live = scene_runtime_state().effect_live;
+
+  records.clear();
+  ParamRecord slider{};
+  slider.index = 1;
+  slider.type = 10;  // PF_Param_FLOAT_SLIDER
+  slider.name = "Amount";
+  slider.default_value = 12.5;
+  records.push_back(slider);
+  ParamRecord matte{};
+  matte.index = 2;
+  matte.type = 0;  // PF_Param_LAYER
+  matte.name = "Matte";
+  records.push_back(matte);
+  scene_runtime_state().effect_live = false;
+
+  void* effect = nullptr;
+  bool ok = g_hooks.get_new_effect_for_effect(0, g_hooks.effect, &effect) == 0 &&
+      effect == &scene_runtime_state().effect;
+
+  // Counted the way AE counts: the input layer plus one per declared
+  // parameter. Keyed on the fixture instead, this answered 5.
+  int32_t count = -1;
+  ok = ok && g_hooks.get_effect_num_param_streams_v2(effect, &count) == 0 && count == 3;
+
+  // Index 0 is the input layer, which has no record of its own and still
+  // opens, as a layer stream.
+  void* input = nullptr;
+  char name[32]{};
+  int32_t type = -1;
+  ok = ok && g_hooks.get_new_effect_stream_v2(0, effect, 0, &input) == 0 && input &&
+      g_hooks.get_stream_name_v2(input, 1, name) == 0 && std::strcmp(name, "Input") == 0 &&
+      g_hooks.get_stream_type_v2(input, &type) == 0 && type == 9;
+
+  // The declared parameters, by their own names and with their PF types
+  // translated to AEGP stream types: FLOAT_SLIDER 10 -> OneD 5, LAYER 0 ->
+  // LAYER_ID 9. Handing the PF value straight through left every stream
+  // reading as no-data and refusing to open.
+  void* amount = nullptr;
+  ok = ok && g_hooks.get_new_effect_stream_v2(0, effect, 1, &amount) == 0 && amount &&
+      g_hooks.get_stream_name_v2(amount, 1, name) == 0 && std::strcmp(name, "Amount") == 0 &&
+      g_hooks.get_stream_type_v2(amount, &type) == 0 && type == 5;
+
+  // Past the declared parameters there is nothing to open.
+  void* past = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  ok = ok && g_hooks.get_new_effect_stream_v2(0, effect, 3, &past) != 0 &&
+      past == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+
+  // The value reads as zero: `parameter_values` holds the probe fixture's
+  // defaults, which are not this plug-in's (issue #929).
+  scene_runtime::AegpStreamValue value{};
+  suite_abi::AegpTime time{0, 30};
+  std::array<double, 4> scalars{-1.0, -1.0, -1.0, -1.0};
+  ok = ok && g_hooks.get_new_stream_value_v2(0, amount, 1, &time, 1, &value) == 0;
+  if (ok) std::memcpy(scalars.data(), value.value.data(), sizeof(scalars));
+  ok = ok && scalars[0] == 0.0;
+  ok = ok && g_hooks.dispose_stream_value_v2(&value) == 0;
+
+  // A null stream handle is refused, not dereferenced.
+  scene_runtime::AegpStreamValue unused{};
+  ok = ok && g_hooks.get_new_stream_value_v2(0, nullptr, 1, &time, 1, &unused) != 0;
+  // So is a negative caller id.
+  ok = ok && g_hooks.get_new_stream_value_v2(-1, amount, 1, &time, 1, &unused) != 0;
+
+  // Disposing the effect handle does not change what its streams answer:
+  // they outlive it, and the mark belongs to the instance.
+  ok = ok && g_hooks.dispose_effect(effect) == 0 &&
+      g_hooks.get_stream_name_v2(amount, 1, name) == 0 &&
+      std::strcmp(name, "Amount") == 0 &&
+      g_hooks.get_stream_type_v2(amount, &type) == 0 && type == 5;
+
+  ok = g_hooks.dispose_stream_v2(amount) == 0 && ok;
+  ok = g_hooks.dispose_stream_v2(input) == 0 && ok;
+
+  records = saved_records;
+  scene_runtime_state().effect_instances = saved_instances;
+  scene_runtime_state().effect_live = saved_effect_live;
+  return ok;
+}
+
 bool verify_aegp_installed_effect_catalog_suite4() {
   const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
   g_aegp_comp_idle_roundtrip_mode = true;

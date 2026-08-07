@@ -2086,7 +2086,9 @@ const bool g_aegp_compat_selftests_configured = [] {
        &aegp_get_layer_source_item, &aegp_get_item_type,
        &g_aegp_item_suite,
        &g_aegp_layer_source_item_calls, &g_aegp_item_type_calls,
-       &aegp_get_effect_param_union_by_index_v3});
+       &aegp_get_effect_param_union_by_index_v3,
+       &get_new_effect_for_effect, &aegp_dispose_effect,
+       &aegp_get_effect_num_param_streams_v2});
   return true;
 }();
 const bool g_aegp_scene_generation_invalidator_configured = [] {

@@ -82,6 +82,9 @@ struct AegpCompatSelftestHooks {
   uint32_t* item_type_calls{};
   int32_t (__cdecl* get_effect_param_union_v3)(int32_t, void*, int32_t,
                                                int32_t*, void*){};
+  int32_t (*get_new_effect_for_effect)(int32_t, void*, void**){};
+  int32_t (*dispose_effect)(void*){};
+  int32_t (*get_effect_num_param_streams_v2)(void*, int32_t*){};
 };
 void configure_aegp_compat_selftests(AegpCompatSelftestHooks hooks);
 bool verify_legacy_effect_compat_suites();
@@ -97,4 +100,5 @@ bool verify_aegp_scene_mutation_transactions();
 AegpSceneModelSelftestReport verify_aegp_scene_model();
 bool verify_aegp_effect_param_union_suite4();
 bool verify_aegp_installed_effect_catalog_suite4();
+bool verify_aegp_loaded_plugin_effect_streams();
 }
