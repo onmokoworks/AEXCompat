@@ -1468,7 +1468,7 @@ struct RenderedFrame {
     /// Carried but not yet applied: the frame is published whole, at the object's
     /// own origin. That is right for an effect growing symmetrically (DeepGlow2's
     /// radial glow) and wrong by these many pixels for one growing to one side.
-    /// Placing it correctly is #919; the worker is the only side that knows the
+    /// Placing it correctly is #920; the worker is the only side that knows the
     /// number, so it travels now rather than being recovered later.
     #[allow(dead_code)]
     origin_x: i32,

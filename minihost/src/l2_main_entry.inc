@@ -207,7 +207,7 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
       (!g_user_changed_param_requested || g_user_changed_param_error == 0);
   conditional_ui_ok = user_changed_ok && dispatch_conditional_ui_selectors(
       entry, input, output, lifecycle_params.data());
-  if (conditional_ui_ok) {
+  if (conditional_ui_ok && conditional_ui_definitions_usable()) {
     for (std::size_t i = 0; i < g_params.size(); ++i)
       g_params[i].raw = lifecycle_definitions[i + 1];
   }

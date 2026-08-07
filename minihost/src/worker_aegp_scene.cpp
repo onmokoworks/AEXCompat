@@ -409,7 +409,16 @@ bool scene_handle_is_composition(void* handle) noexcept {
   if (!handle) return false;
   if (handle == aexcompat::scene_runtime::composition_handle()) return true;
   ObjectSnapshot resolved{};
-  return resolve_scene_comp(handle, resolved);
+  // Resolving as a composition is not enough: the registry carries other
+  // comps, including one in a second project, and a plug-in can walk to any of
+  // them (project -> item -> AEGP_GetCompFromItem) and hold a borrowed handle
+  // to it. What this answers is "does this handle name *this worker's* comp",
+  // so the resolved object has to be the one whose legacy handle is that comp.
+  // Without the second half, a foreign comp's handle passed the caller checks
+  // that use this - the working colour space would have been rewritten
+  // through a handle belonging to another project (issue #894).
+  return resolve_scene_comp(handle, resolved) &&
+      resolved.legacy_handle == aexcompat::scene_runtime::composition_handle();
 }
 
 std::u16string scene_name(const ObjectSnapshot& snapshot) {
@@ -1007,7 +1016,13 @@ bool add_rational_times(const AegpTime& left, const AegpTime& right,
 int32_t __cdecl aegp_convert_layer_to_comp_time(
     void* layer, const AegpTime* layer_time, AegpTime* comp_time) {
   const int32_t index = aegp_layer_index(layer);
-  if (index < 0 || !layer_time || !comp_time || layer_time->scale == 0) return 4;
+  // A layer created at runtime (a camera added to the comp) indexes past the
+  // fixture's in-point table, which holds three. Refuse rather than read off
+  // the end, the way every other indexed layer attribute here does.
+  if (index < 0 ||
+      static_cast<std::size_t>(index) >= g_aegp_layer_in_points.size() ||
+      !layer_time || !comp_time || layer_time->scale == 0)
+    return 4;
   AegpTime converted{};
   if (!add_rational_times(*layer_time,
                           g_aegp_layer_in_points[static_cast<std::size_t>(index)],
@@ -1021,7 +1036,10 @@ int32_t __cdecl aegp_convert_layer_to_comp_time(
 int32_t __cdecl aegp_convert_comp_to_layer_time(
     void* layer, const AegpTime* comp_time, AegpTime* layer_time) {
   const int32_t index = aegp_layer_index(layer);
-  if (index < 0 || !comp_time || !layer_time || comp_time->scale == 0) return 4;
+  if (index < 0 ||
+      static_cast<std::size_t>(index) >= g_aegp_layer_in_points.size() ||
+      !comp_time || !layer_time || comp_time->scale == 0)
+    return 4;
   const AegpTime& in_point = g_aegp_layer_in_points[static_cast<std::size_t>(index)];
   if (in_point.value == (std::numeric_limits<int32_t>::min)()) return 4;
   AegpTime converted{};
@@ -1772,7 +1790,7 @@ const AegpInstalledEffectRecord* find_installed_effect(int32_t key) {
 // markers: PF_Param_PATH has no MASK-stream support here, and a group start,
 // group end, or button has no stream at all in this model, so an index landing
 // on one refuses to open. AE returns a stream reference for the group markers,
-// so a plug-in enumerating every parameter stops early here (issue #918).
+// so a plug-in enumerating every parameter stops early here (issue #919).
 constexpr int32_t aegp_stream_type_for_param_type(int32_t param_type) noexcept {
   constexpr int32_t kAegpStreamNoData = 0;
   constexpr int32_t kAegpStreamThreeD = 2;
@@ -2293,7 +2311,12 @@ int32_t __cdecl aegp_set_effect_stream_value(
     int32_t plugin_id, void* stream, AegpStreamValue* value) {
   aexcompat::scene_transaction::MutationLock mutation_lock;
   ObjectSnapshot stream_identity{};
-  if (plugin_id < 0 ||
+  // A write still names its caller. `resolve_transform_stream` drops to the
+  // borrowed-handle policy for id 0, which asks only that *somebody* possesses
+  // the handle - fine for the reads that admitting 0 was about (issue #909),
+  // not for a mutation, where it would let a caller write through a stream
+  // another id opened. Nothing observed needs an id-0 write.
+  if (plugin_id <= 0 ||
       !resolve_transform_stream(stream, stream_identity, plugin_id) || !value ||
       value->stream != stream || !g_aegp_transform_stream.value_live ||
       !g_aegp_transform_stream.effect_param) return 4;
@@ -2505,9 +2528,15 @@ SceneSuiteAcquireResult scene_acquire_suite(
       g_aegp_layer_suite9[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
       g_aegp_layer_suite9[6] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
       g_aegp_layer_suite9[27] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
-    g_aegp_layer_suite9[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
-    g_aegp_layer_suite9[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
-    g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
+      // These sit outside the receipt block because every other table wires
+      // them ungated - version 14 has had `AEGP_SetLayerFlag` there since
+      // before this gate existed. That is the honest state of the gate: it is
+      // not a boundary. A plug-in that wants what the block below withholds
+      // acquires version 13 or 14 instead and gets it, in-point included.
+      // Making it one, or dropping it, is #921.
+      g_aegp_layer_suite9[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
+      g_aegp_layer_suite9[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
+      g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
       if (!render_receipt) {
         g_aegp_layer_suite9[7] = reinterpret_cast<void*>(&aegp_get_layer_name);
         g_aegp_layer_suite9[15] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
@@ -2524,9 +2553,9 @@ SceneSuiteAcquireResult scene_acquire_suite(
         g_aegp_layer_suite9[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
       }
       g_aegp_layer_suite9[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
-    g_aegp_layer_suite9[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
-    g_aegp_layer_suite9[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
-    *suite = g_aegp_layer_suite9.data();
+      g_aegp_layer_suite9[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
+      g_aegp_layer_suite9[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+      *suite = g_aegp_layer_suite9.data();
       return SceneSuiteAcquireResult::acquired;
     }
   }
@@ -2571,8 +2600,10 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_layer_suite1[16] =
         reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
     g_aegp_layer_suite1[21] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
-    // Version 5 is the one table where this sits at 26, not 27: two functions
-    // were inserted ahead of it before version 11.
+    // Version 5 is the one table where this sits at 26, not 27: the single
+    // function version 11 inserted ahead of it (`AEGP_GetLayerSourceItemID`,
+    // at slot 5) accounts for the whole shift. The other insertion that table
+    // note describes lands at 35, behind this.
     g_aegp_layer_suite1[26] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
     g_aegp_layer_suite1[27] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
     // Version 5 publishes only the comp-to-layer direction; the layer-to-comp

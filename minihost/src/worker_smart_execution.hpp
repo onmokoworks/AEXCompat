@@ -57,6 +57,11 @@ struct Result {
   std::array<int32_t, 4> map_checkout_result_rect{-1, -1, -1, -1};
   uint32_t malformed_checkout_requests{};
   uint32_t empty_checkout_pixel_denials{};
+  // A layer parameter this host has no world for, answered with an empty rect
+  // at PreRender and with the empty world at checkout (issue #898). Separate
+  // from the denials above so a report reader can tell the two apart.
+  uint32_t empty_layer_param_checkouts{};
+  uint32_t empty_layer_param_pixel_checkouts{};
   int32_t output_width{};
   int32_t output_height{};
   int32_t output_rowbytes{};

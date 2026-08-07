@@ -1809,7 +1809,8 @@ bool isolated_aegp_read_cache_is_bounded() {
         (key.first == "AEGP Item Suite" && key.second == 14) ||
         (key.first == "AEGP Comp Suite" && (key.second == 25 || key.second == 26)) ||
         (key.first == "AEGP Layer Suite" &&
-         (key.second == 11 || key.second == 14 || key.second == 15)) ||
+         (key.second == 11 || key.second == 13 || key.second == 14 ||
+          key.second == 15)) ||
         (key.first == "AEGP Effect Suite" && key.second == 4) ||
         (key.first == "AEGP Collection Suite" && key.second == 2) ||
         (key.first == "AEGP Stream Suite" && key.second == 11) ||
@@ -2012,15 +2013,17 @@ bool dispatch_conditional_ui_selectors(EffectEntry entry,
   // rewrites out_flags/out_flags2, which the render path then reads for the
   // wide-time and shutter rules and for NOP_RENDER, so a plug-in that fails it
   // has left the host without the flags the rest of the frame is built on.
-  // UPDATE_PARAMS_UI only refreshes what the Effect Controls panel shows; AE
-  // sends it when that panel is up, not as a step of rendering, and a headless
-  // render in AE never sends it at all. Failing the frame on it made this host
-  // stricter than AE about a selector AE does not require to render (issue
-  // #883): DeepGlow2 answers it with error 4 and never reached SMART_PRE_RENDER
-  // here, while it renders in AE.
+  // UPDATE_PARAMS_UI only refreshes what the Effect Controls panel shows. The
+  // observation this rests on is that DeepGlow2 answers it with error 4 and
+  // renders in AE anyway, while here that error ended the frame before
+  // SMART_PRE_RENDER (issue #883); AE's own dispatch conditions are not
+  // measured, so "AE does not require it to render" is inference from that one
+  // plug-in, not something this host has checked.
   //
   // The error is not swallowed - it stays in `update_params_ui_error` for the
-  // report and in the line below - it just no longer decides the frame.
+  // report and in the line below - it just no longer decides the frame. It
+  // does still decide whether the definitions the selector rewrote are
+  // adopted; see `conditional_ui_definitions_usable`.
   if (extended_diag_enabled())
     std::cerr << "extended_diag:conditional_ui update_advertised="
               << g_update_params_ui_advertised
@@ -2029,6 +2032,16 @@ bool dispatch_conditional_ui_selectors(EffectEntry entry,
               << " query_error=" << g_query_dynamic_flags_error << "\n"
               << std::flush;
   return !g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0;
+}
+
+// Whether the parameter definitions the conditional-UI selectors left behind
+// may replace the host's own. A selector that reported an error stopped
+// somewhere it chose not to say, so what it wrote is partial by definition;
+// letting the frame proceed without it is the #883 fix, adopting its writes
+// anyway is not part of that.
+bool conditional_ui_definitions_usable() {
+  return (!g_update_params_ui_advertised || g_update_params_ui_error == 0) &&
+      (!g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0);
 }
 
 

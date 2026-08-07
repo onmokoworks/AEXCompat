@@ -138,6 +138,11 @@ void State::clear_transient() {
   malformed_checkout_requests = 0;
   empty_checkout_pixel_denials = 0;
   empty_layer_param_checkouts = 0;
+  empty_layer_param_pixel_checkouts = 0;
+  // Set fresh by every dispatch, but a session that ends before that would
+  // otherwise carry the previous one's declared count into the range
+  // `pre_checkout_layer` accepts.
+  param_count = 0;
   gpu_render_dispatched = false;
 }
 
@@ -169,6 +174,9 @@ Session::~Session() {
   snapshot_->map_checkout_result_rect = state_.map_checkout_result_rect;
   snapshot_->malformed_checkout_requests = state_.malformed_checkout_requests;
   snapshot_->empty_checkout_pixel_denials = state_.empty_checkout_pixel_denials;
+  snapshot_->empty_layer_param_checkouts = state_.empty_layer_param_checkouts;
+  snapshot_->empty_layer_param_pixel_checkouts =
+      state_.empty_layer_param_pixel_checkouts;
   snapshot_->pixel_checkouts_balanced = pixel_checkouts_balanced();
   state_.clear_transient();
   g_active_state = previous_;
@@ -307,9 +315,9 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   // when it asked about a layer parameter its project leaves unset (issue
   // #898).
   //
-  // The registration is left with no world, so a plug-in that checks pixels out
-  // of it still fails closed there - the empty rect says there are none to
-  // check out.
+  // The registration carries the state's own empty world, so a plug-in that
+  // checks pixels out of it gets a well-formed layer with nothing in it rather
+  // than either a fault or a null pointer behind a success code.
   if (index >= 1 && index <= runtime.param_count) {
     ++runtime.empty_layer_param_checkouts;
     const std::array<int32_t, 4> empty{0, 0, 0, 0};
@@ -342,14 +350,17 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
   // are no pixels here (an empty result_rect, which the SDK documents as a
   // real answer), and asking for them anyway is not a fault on either side: AE
   // hands an effect a layer parameter with no source as an empty layer, not as
-  // a failed call. The world is null and the rect is empty, which is what the
-  // plug-in was already told; refusing instead ended DeepGlow2's SmartRender
-  // (issue #898).
+  // a failed call. Refusing instead ended DeepGlow2's SmartRender (issue #898).
+  //
+  // What comes back is the state's own zeroed world, not null: PF_Err_NONE
+  // beside a null out-pointer is not a shape AE produces, and a plug-in that
+  // reads the world after a successful checkout would fault on it.
   if (checkout->empty_layer_param) {
     if (checkout->checked_out)
       return finish_callback(Callback::CheckoutPixels, 4, Reason::AlreadyCheckedOut);
-    ++runtime.empty_checkout_pixel_denials;
+    ++runtime.empty_layer_param_pixel_checkouts;
     checkout->checked_out = true;
+    *world = runtime.empty_layer_world.data();
     return finish_callback(Callback::CheckoutPixels, 0);
   }
   if (!checkout->world)
