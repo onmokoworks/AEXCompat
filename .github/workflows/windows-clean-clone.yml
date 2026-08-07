@@ -52,7 +52,6 @@ jobs:
             bridges/aviutl2
             bridges/aviutl2-multifilter
             bridges/ymm4-native
-            guest
       # Python 版は .python-version (3.12) に従う。
       # setup-uv は v8 から floating major tag (@v8) を出していないので full tag で pin する。
       - uses: astral-sh/setup-uv@v8.3.2
@@ -67,40 +66,13 @@ jobs:
         run: cargo check --manifest-path bridges/aviutl2/Cargo.toml --all-targets --locked
       - name: Check AviUtl2 multifilter bridge
         run: cargo check --manifest-path bridges/aviutl2-multifilter/Cargo.toml --all-targets --locked
-      # broker の外にある Cargo ルートは、これまで cargo check で型検査される
-      # だけでテストが 1 本も実行されていなかった (#899)。multifilter の 189 本は
-      # repo で 2 番目に大きいテスト本体、guest workspace は 275 本ある。
-      # 依存ツリーを broker ゲートから分ける設計 (docs/AVIUTL2_BRIDGE_2026-07-21.md)
-      # は保ったまま、実行だけを別ステップで足す。
+      # broker の外にある Cargo ルートは cargo check で型検査されるだけで、
+      # テストが 1 本も実行されていなかった (#899)。guest workspace は libclang を
+      # 必要とし runner に無いため #917 に分離した。
       - name: Test AviUtl2 multifilter bridge
         run: cargo test --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
       - name: Test YMM4 native bridge
         run: cargo test --manifest-path bridges/ymm4-native/Cargo.toml --locked
-      # unicorn-engine-sys の build script が bindgen を通すので libclang が要る。
-      # runner のサービスアカウントは開発者ユーザーと別で PATH を共有しないため、
-      # 場所を明示しないと "Unable to find libclang" で落ちる。
-      - name: Locate libclang for bindgen
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $candidates = @($env:LIBCLANG_PATH, (Join-Path $env:ProgramFiles 'LLVM\bin'))
-          if (Test-Path -LiteralPath $vswhere) {
-            foreach ($root in & $vswhere -products * -property installationPath) {
-              $candidates += Join-Path $root 'VC\Tools\Llvm\x64\bin'
-            }
-          }
-          $found = $candidates |
-            Where-Object { $_ } |
-            Where-Object { (Test-Path (Join-Path $_ 'libclang.dll')) -or (Test-Path (Join-Path $_ 'clang.dll')) } |
-            Select-Object -First 1
-          if (-not $found) {
-            throw "libclang was not found in: $($candidates -ne $null -join '; ')"
-          }
-          Write-Host "libclang: $found"
-          "LIBCLANG_PATH=$found" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Test guest workspace
-        run: cargo test --manifest-path guest/Cargo.toml --locked
       # PR ゲートで minihost の C++ をコンパイルする (#884)。ae-sdk-tests の
       # 手動無効化 (#721) 以降、minihost を触る PR はコンパイルすら検証されずに
       # merge できた。minihost のビルドは AFTER_EFFECTS_SDK_ROOT を参照しない
