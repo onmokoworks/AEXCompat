@@ -1,4 +1,6 @@
 import argparse
+import ctypes
+import errno
 import hashlib
 import importlib.util
 import json
@@ -25,6 +27,69 @@ SPEC.loader.exec_module(RUNNER)
 
 def _sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _process_has_exited(pid: int) -> bool:
+    if os.name == "nt":
+        synchronize = 0x00100000
+        wait_object_0 = 0
+        wait_timeout = 258
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+        kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.OpenProcess(synchronize, False, pid)
+        if not handle:
+            error = ctypes.get_last_error()
+            if error in (87, 1168):  # invalid parameter / not found
+                return True
+            raise OSError(error, f"OpenProcess({pid}) failed")
+        try:
+            result = kernel32.WaitForSingleObject(handle, 0)
+        finally:
+            kernel32.CloseHandle(handle)
+        if result == wait_object_0:
+            return True
+        if result == wait_timeout:
+            return False
+        raise OSError(ctypes.get_last_error(), f"WaitForSingleObject({pid}) failed")
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    except OSError as error:
+        if error.errno == errno.ESRCH:
+            return True
+        if error.errno == errno.EPERM:
+            return False
+        raise
+
+    # An orphaned descendant can remain as a zombie until PID 1 reaps it.
+    # It is no longer executing even though kill(pid, 0) still succeeds.
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        try:
+            state = proc_stat.read_text(encoding="ascii").rsplit(")", 1)[1].split()[0]
+        except (IndexError, OSError):
+            pass
+        else:
+            if state in {"Z", "X"}:
+                return True
+    return False
+
+
+def _wait_for_process_exit(pid: int, timeout_seconds: float = 5) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _process_has_exited(pid):
+            return True
+        time.sleep(0.05)
+    return _process_has_exited(pid)
 
 
 def _fixture(tmp_path):
@@ -217,25 +282,26 @@ def test_bounded_capture_enforces_combined_limit(monkeypatch):
 
 
 def test_bounded_capture_timeout_cleans_up_descendant(tmp_path):
-    marker = tmp_path / "descendant-survived"
+    child_pid_path = tmp_path / "descendant.pid"
     child_code = (
-        "import pathlib,time\n"
-        "time.sleep(1)\n"
-        f"pathlib.Path({str(marker)!r}).write_text('alive')\n"
+        "import time\n"
+        "time.sleep(30)\n"
     )
     parent_code = (
-        "import subprocess,sys,time\n"
-        f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        "import pathlib,subprocess,sys,time\n"
+        f"child=subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))\n"
         "time.sleep(30)\n"
     )
     completed, timed_out, reason = RUNNER._run_bounded_process(
-        [sys.executable, "-c", parent_code], 0.1
+        [sys.executable, "-c", parent_code], 2
     )
     assert timed_out
     assert reason == "timeout"
     assert completed.returncode is not None
-    time.sleep(1.1)
-    assert not marker.exists()
+    assert child_pid_path.exists(), "parent did not report the descendant PID"
+    child_pid = int(child_pid_path.read_text())
+    assert _wait_for_process_exit(child_pid), f"descendant PID {child_pid} survived"
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])

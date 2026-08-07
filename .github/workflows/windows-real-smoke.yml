@@ -52,3 +52,6 @@ jobs:
 
       - name: Verify Python dependencies
         run: uv run python -c "import pytest; import PIL; import jsonschema; import OpenEXR; print('Python dependencies import successfully')"
+
+      - name: Verify timeout descendant cleanup
+        run: uv run python -m pytest -q tests/test_run_targeted_aex_trace.py::test_bounded_capture_timeout_cleans_up_descendant
