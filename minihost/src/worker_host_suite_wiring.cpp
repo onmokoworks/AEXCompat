@@ -2,6 +2,7 @@
 #include "worker_host_suite_router.hpp"
 #include "worker_extended_diag.hpp"
 #include "worker_aefx_ace_suite.hpp"
+#include "worker_aegp_persistent_data_suite.hpp"
 #include "worker_flt_blur_suite.hpp"
 #include "worker_suite_call_slot_probe.hpp"
 #include "worker_suite_registry.hpp"
@@ -762,6 +763,9 @@ bool configure_component_suite_catalog() {
       {"PF Fill Matte Suite", 2, nullptr,
        &aexcompat::pf_world_transform::provide_fill_matte2},
       {"AEGP Dynamic Stream Suite", 2, nullptr, &provide_dynamic_stream2},
+      {aexcompat::worker_runtime::persistent_data::kSuiteName,
+       aexcompat::worker_runtime::persistent_data::kSuiteVersion3, nullptr,
+       &aexcompat::worker_runtime::persistent_data::provide_suite3},
   };
   return configure_host_suite_catalog(
       {component_suites, std::size(component_suites),
