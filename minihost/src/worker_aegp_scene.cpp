@@ -402,6 +402,13 @@ void* borrow_scene_object(Identity identity) noexcept {
   return scene_registry().borrow(identity);
 }
 
+bool scene_handle_is_composition(void* handle) noexcept {
+  if (!handle) return false;
+  if (handle == aexcompat::scene_runtime::composition_handle()) return true;
+  ObjectSnapshot resolved{};
+  return resolve_scene_comp(handle, resolved);
+}
+
 std::u16string scene_name(const ObjectSnapshot& snapshot) {
   const auto end = std::find(
       snapshot.name.begin(), snapshot.name.end(), char16_t{});

@@ -499,7 +499,8 @@ const void* provide_batch_sampling1(void*) {
   return &g_batch_sampling_suite1;
 }
 const void* provide_color_settings7(void*) {
-  configure_host_hooks({&composition_handle, &acquire_suite, &release_suite});
+  configure_host_hooks({&composition_handle, &scene_handle_is_composition,
+                        &acquire_suite, &release_suite});
   return aexcompat::color_settings::suite();
 }
 const void* provide_flt_blur1(void*) {

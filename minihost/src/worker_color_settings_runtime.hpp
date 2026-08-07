@@ -14,6 +14,11 @@ struct AegpItemViewToken { std::uint32_t tag{0x56494557}; };
 
 struct HostHooks {
   void* (*composition_handle)(){};
+  // Whether a caller-supplied handle names this worker's composition. A plug-in
+  // that walked from its layer to its comp holds a registry-borrowed handle,
+  // which is not the same pointer `composition_handle` returns, so identity
+  // against that one pointer is not the test (issue #894).
+  bool (*is_composition_handle)(void*){};
   int32_t (*acquire_suite)(const char*, int32_t, const void**){};
   int32_t (*release_suite)(const char*, int32_t){};
 };

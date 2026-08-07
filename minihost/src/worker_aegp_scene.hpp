@@ -221,6 +221,14 @@ int32_t __cdecl aegp_get_layer_stream_value_v2(void*, int32_t, int16_t,
     const AegpTime*, uint8_t, AegpLegacyStreamVal*, int32_t*);
 int32_t __cdecl aegp_get_active_layer(void** layer);
 int32_t __cdecl aegp_get_layer_index(void* layer, int32_t* index);
+// True when `handle` names this worker's composition, however the caller came
+// by it. AEGP_GetLayerParentComp and the other scene accessors hand out
+// registry-borrowed handles, which are not the same pointer as
+// `scene_runtime::composition_handle()`, so a caller that walked from its layer
+// to its comp holds one of those. Comparing against that one pointer refuses a
+// handle this host itself issued (issue #894).
+bool scene_handle_is_composition(void* handle) noexcept;
+
 int32_t __cdecl aegp_get_layer_source_item(void* layer, void** item);
 int32_t __cdecl aegp_get_layer_masked_bounds(
     void* layer, int32_t time_mode, const AegpTime* time,
