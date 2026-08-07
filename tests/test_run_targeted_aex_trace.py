@@ -68,6 +68,18 @@ def _process_has_exited(pid: int) -> bool:
         if error.errno == errno.EPERM:
             return False
         raise
+
+    # An orphaned descendant can remain as a zombie until PID 1 reaps it.
+    # It is no longer executing even though kill(pid, 0) still succeeds.
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        try:
+            state = proc_stat.read_text(encoding="ascii").rsplit(")", 1)[1].split()[0]
+        except (IndexError, OSError):
+            pass
+        else:
+            if state in {"Z", "X"}:
+                return True
     return False
 
 
