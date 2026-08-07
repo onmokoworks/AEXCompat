@@ -27,7 +27,8 @@ fn inspect_experimental_impl(
     // In-place inspection (issue #751): the loader resolves the closure, so
     // staged dependencies and resources cannot ride the same launch. Runtime
     // policy inspection remains outside #815's GPU render-session migration.
-    if !dependency_search_dirs.is_empty() && (!dependencies.is_empty() || runtime_policy.is_some()) {
+    if !dependency_search_dirs.is_empty() && (!dependencies.is_empty() || runtime_policy.is_some())
+    {
         return Err(invalid(
             "in-place inspection cannot combine approved dependencies or a runtime policy",
         ));
@@ -51,22 +52,21 @@ fn inspect_experimental_impl(
     // Containment stays — the job object kills the tree when the launch handle
     // drops, and the sealed root is still torn down.
     let isolated = if !dependencies.is_empty() || !dependency_search_dirs.is_empty() {
-        crate::secure_image_dispatch::dispatch_secure_image(
-            SecureImageDispatch {
-                repository,
-                worker_kind: WorkerKind::L2,
-                plugin: ApprovedImageArtifact {
-                    path: plugin_path.to_path_buf(),
-                    expected_sha256: decode_sha256_hex(approved_sha256)?,
-                    expected_size: fs::metadata(plugin_path)?.len(),
-                },
-                dependencies,
-                dependency_search_dirs,
-                args_before_plugin: &args_before_plugin,
-                args_after_plugin: &args_after_plugin,
-                timeout: None,
+        crate::secure_image_dispatch::dispatch_secure_image(SecureImageDispatch {
+            repository,
+            worker_kind: WorkerKind::L2,
+            plugin: ApprovedImageArtifact {
+                path: plugin_path.to_path_buf(),
+                expected_sha256: decode_sha256_hex(approved_sha256)?,
+                expected_size: fs::metadata(plugin_path)?.len(),
             },
-        )?
+            dependencies,
+            dependency_search_dirs,
+            args_before_plugin: &args_before_plugin,
+            args_after_plugin: &args_after_plugin,
+            timeout: None,
+            launch_environment: Default::default(),
+        })?
     } else {
         dispatch_approved_image(
             repository,

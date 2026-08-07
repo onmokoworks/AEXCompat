@@ -239,6 +239,7 @@ pub fn run_from_manifest(
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
             timeout: None,
+            launch_environment: Default::default(),
         },
         PROBE_PROCESS_MEMORY_LIMIT,
     )?;

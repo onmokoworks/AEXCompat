@@ -472,6 +472,7 @@ fn discover_cluster_in_place(
         // so the capacity is the manifest maximum rather than a declared set.
         module_bound: MAX_CLUSTER_MODULE_BOUND as u32,
         inspect_deadline: CLUSTER_INSPECT_DEADLINE,
+        launch_environment: Default::default(),
     }) {
         Ok(session) => session,
         Err(error) => {
@@ -740,13 +741,12 @@ fn discover_all(
                             let Some((plugin, prepared)) = taken else {
                                 continue;
                             };
-                            let entry = std::panic::catch_unwind(
-                                std::panic::AssertUnwindSafe(|| {
+                            let entry =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     finish_one_shot_in_place(
                                         repository, &plugin, prepared, dependency,
                                     )
-                                }),
-                            )
+                                }))
                                 .unwrap_or_else(|_| negative_entry(&plugin, build));
                             if let Ok(mut results) = results.lock() {
                                 results.push((plugin, entry));

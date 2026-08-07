@@ -784,6 +784,7 @@ pub fn launch_system_cuda_compute_probe(
         args_after_plugin: &[],
         repository,
         require_module_audit: false,
+        launch_environment: Default::default(),
     };
     let result = secure_launch_without_plugin(request, Some(timeout), None)?;
     Ok(report_from_launch(result))

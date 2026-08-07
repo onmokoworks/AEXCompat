@@ -111,6 +111,7 @@ fn dispatch_approved_image(
         args_before_plugin,
         args_after_plugin,
         timeout,
+        launch_environment: Default::default(),
     })
 }
 
@@ -137,6 +138,7 @@ fn dispatch_approved_image_with_dependencies(
         args_before_plugin,
         args_after_plugin,
         timeout,
+        launch_environment: Default::default(),
     })
 }
 

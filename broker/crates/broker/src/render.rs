@@ -139,6 +139,7 @@ pub fn run(
             args_after_plugin: &args_after_plugin,
             repository,
             require_module_audit: true,
+            launch_environment: Default::default(),
         };
         let start = Instant::now();
         let result = secure_launch_in_place(

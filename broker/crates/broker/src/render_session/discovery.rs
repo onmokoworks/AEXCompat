@@ -79,6 +79,9 @@ pub struct InPlaceDiscoverySessionOpenRequest<'a> {
     pub module_bound: u32,
     /// Per-inspect watchdog deadline (design §7).
     pub inspect_deadline: Duration,
+    /// Per-launch environment inputs (issue #910), forwarded to the worker
+    /// launch instead of the broker mutating its own environment.
+    pub launch_environment: crate::secure_launch::LaunchEnvironment,
 }
 
 /// The outcome of an `inspect_plugin` exchange (design §4.2).
@@ -196,6 +199,7 @@ impl DiscoverySession {
                 module_bound: request.module_bound,
                 args_before_plugin: &args_before_plugin,
                 args_after_plugin: &args_after_plugin,
+                launch_environment: request.launch_environment,
             };
             let launch = crate::secure_image_dispatch::dispatch_secure_in_place_cluster_session(
                 dispatch,

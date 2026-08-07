@@ -646,6 +646,7 @@ fn render_classic_via_length_one_session(
         // exactly like the one-shot GPU path. `None` keeps CPU/policy-less
         // renders on the CPU session command.
         gpu_runtime_policy: request.gpu_runtime_policy,
+        launch_environment: Default::default(),
     };
     // A custom UI action is the explicit interactive harness route (#107/#238)
     // and must retain the caller's desktop. Plain discovery/render workers stay
@@ -1031,6 +1032,7 @@ impl InteractiveRenderSession {
                 total_time: request.total_time,
                 time_scale: request.time_scale,
                 frame_deadline: Duration::from_millis(request.timeout_ms),
+                launch_environment: Default::default(),
             },
         )?;
         Ok(Self {

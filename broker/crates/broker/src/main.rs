@@ -34,6 +34,9 @@ fn main() {
             repository,
             &PathBuf::from(&args[2]),
             &PathBuf::from(&args[3]),
+            // The CLI inherits the broker's environment and reads the opt-in
+            // minidump directory from AEXCOMPAT_MINIDUMP_DIR as before.
+            &Default::default(),
         ) {
             Ok(passed) => passed,
             Err(_) => {
