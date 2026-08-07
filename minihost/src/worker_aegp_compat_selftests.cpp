@@ -1966,6 +1966,14 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   const auto saved_streams = scene_runtime_state().legacy_effect_streams;
   const auto saved_leases = scene_runtime_state().effect_leases;
   const bool saved_effect_live = scene_runtime_state().effect_live;
+  // Every stream and value this test opens has to be handed back. The suite
+  // lease balance says nothing about that - this test acquires no suite - so
+  // the counters the stream paths keep are what closes the loop, the way the
+  // Levels projector test beside it does it.
+  const uint32_t streams_before = g_aegp_stream_acquires;
+  const uint32_t stream_disposes_before = g_aegp_stream_disposes;
+  const uint32_t values_before = g_aegp_stream_value_acquires;
+  const uint32_t value_disposes_before = g_aegp_stream_value_disposes;
 
   records.clear();
   ParamRecord slider{};
@@ -2021,7 +2029,11 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   ok = ok && g_hooks.get_new_stream_value_v2(0, amount, 1, &time, 1, &value) == 0;
   if (ok) std::memcpy(scalars.data(), value.value.data(), sizeof(scalars));
   ok = ok && scalars[0] == 0.0;
-  ok = ok && g_hooks.dispose_stream_value_v2(&value) == 0;
+  // Non-short-circuiting, like the stream disposes below: the check that
+  // can fail just above it is the one that leaves a value checked out,
+  // and skipping the dispose there would leave the stream undisposable
+  // and its borrow spent.
+  ok = g_hooks.dispose_stream_value_v2(&value) == 0 && ok;
 
   // A null stream handle is refused, not dereferenced.
   scene_runtime::AegpStreamValue unused{};
@@ -2047,7 +2059,11 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   scene_runtime_state().legacy_effect_streams = saved_streams;
   scene_runtime_state().effect_leases = saved_leases;
   scene_runtime_state().effect_live = saved_effect_live;
-  return ok && compat_suite_leases_balanced();
+  return ok &&
+      g_aegp_stream_acquires - streams_before ==
+          g_aegp_stream_disposes - stream_disposes_before &&
+      g_aegp_stream_value_acquires - values_before ==
+          g_aegp_stream_value_disposes - value_disposes_before;
 }
 
 bool verify_aegp_installed_effect_catalog_suite4() {

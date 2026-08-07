@@ -446,7 +446,17 @@ std::array<AegpEffectLease, kAegpEffectLeaseCapacity>& g_aegp_effect_leases =
 uint32_t& g_aegp_effect_lease_generation = scene_runtime_state().effect_lease_generation;
 
 // The id a borrowed handle is recorded under when its caller has none of its
-// own. The registry refuses 0, so an unregistered caller needs some id, and
+// own.
+//
+// Only the version 2 legacy stream path substitutes it. The newer Stream
+// Suite entry points (`aegp_get_new_layer_stream`,
+// `aegp_get_new_effect_stream_by_index`) still hand the raw id to the
+// registry, so an unregistered plug-in is refused there. That is where #909's
+// evidence ends - DeepGlow2 reaches the version 2 path - and widening it
+// without a plug-in that needs it would be guessing at which entry points AE
+// admits an unregistered caller on.
+//
+// The registry refuses 0, so an unregistered caller needs some id, and
 // this is the one `AEGP_RegisterWithAEGP` hands out: `register_with_aegp`
 // returns a constant 1, so a registered plug-in and an unregistered one
 // resolve to the same owner and neither can reach the other's handles - there
@@ -2068,6 +2078,13 @@ bool publish_transform_stream(
           &g_aegp_transform_stream, u"Stream", plugin_id,
           candidate.identity, handle))
     return false;
+  // This still borrows before deciding whether the type has a stream, which
+  // spends a token per refusal in the pool #931 covers. Left alone because it
+  // cannot refuse: the two callers pass only stream types `stream_value_kind`
+  // answers (3 and 5 from the layer streams, 9/5/4/2/6 from the effect ones),
+  // and `g_aegp_transform_stream.live` holds this to one at a time either way.
+  // The effect-stream path had both of those the other way round, so it was
+  // reordered instead.
   aexcompat::scene_model::StreamState stream_state{};
   stream_state.value_kind = stream_value_kind(stream_type);
   stream_state.dimensions =
