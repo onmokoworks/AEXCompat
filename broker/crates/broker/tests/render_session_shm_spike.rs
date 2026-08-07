@@ -143,21 +143,47 @@ mod windows_e2e {
         block
     }
 
-    fn build_fixture() -> PathBuf {
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(manifest)
-            .args(["-p", "dummy-workers", "--bin", "session_shm_probe"])
-            .status()
-            .expect("run cargo build for session shm probe fixture");
-        assert!(status.success(), "session shm probe fixture build failed");
-        let deps = std::env::current_exe().unwrap();
-        deps.parent()
+    /// Resolve a dummy-workers fixture binary.
+    ///
+    /// The build directory already holds it when the workspace was built as a
+    /// whole, which is what CI does. Shelling out to `cargo build -p ...` from
+    /// inside a running test resolves features for that one package instead of
+    /// the workspace, so the differing fingerprint makes cargo rebuild crates
+    /// the outer `cargo test` had just built -- and the next test flips them
+    /// back, at roughly 50s a turn (#937). Build it here only when it is
+    /// missing, which is the local `cargo test --test ...` case.
+    fn fixture_binary(name: &str) -> PathBuf {
+        static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        let path = std::env::current_exe()
             .unwrap()
             .parent()
             .unwrap()
-            .join("session_shm_probe.exe")
+            .parent()
+            .unwrap()
+            .join(format!("{name}.exe"));
+        if path.is_file() {
+            return path;
+        }
+        BUILT.get_or_init(|| {
+            let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+            let status = std::process::Command::new(env!("CARGO"))
+                .args(["build", "--manifest-path"])
+                .arg(manifest)
+                .args(["-p", "dummy-workers", "--bins"])
+                .status()
+                .expect("run cargo build for the dummy-workers fixtures");
+            assert!(status.success(), "dummy-workers fixture build failed");
+        });
+        assert!(
+            path.is_file(),
+            "fixture binary was not produced: {}",
+            path.display()
+        );
+        path
+    }
+
+    fn build_fixture() -> PathBuf {
+        fixture_binary("session_shm_probe")
     }
 
     fn parent_private_commit() -> Option<u64> {
