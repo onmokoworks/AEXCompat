@@ -3,11 +3,9 @@ name: AE SDK tests
 on:
   push:
     branches: [main]
+  pull_request:
   schedule:
-    # 03:00 UTC = 12:00 JST。物理 runner がオフラインなら queue され、オンライン
-    # 復帰時に走る (24 時間で expire)。PR ごとには回さない: 物理マシンは 1 台で、
-    # この workflow が長時間占有すると PR ゲート (windows-clean-clone) が詰まる
-    # (#721)。PR ゲート側の minihost コンパイルは #884 が担当する。
+    # 03:00 UTC = 12:00 JST。
     - cron: '0 3 * * *'
   workflow_dispatch:
 
@@ -23,22 +21,31 @@ concurrency:
 jobs:
   sdk-backed:
     name: pytest with AE SDK (windows)
-    # Keep untrusted public-repository jobs off the physical workstation
-    # (same routing as windows-clean-clone.yml): private repositories use it
-    # while USE_SELF_HOSTED_RUNNER=true, and disabling the variable falls back
-    # to the GitHub-hosted runner without a workflow edit.
+    # Keep untrusted public-repository jobs off the physical workstation.
     runs-on: ${{ github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true' && fromJSON('["self-hosted","Windows","X64","windows-real"]') || 'windows-latest' }}
-    # A public repository must never fetch the private SDK release asset
-    # (fail-closed; the asset is collaborator-only). Trigger は main push /
-    # schedule / dispatch のみなので fork PR 条件は不要になった (#721)。
-    if: github.event.repository.private
+    # The SDK asset is collaborator-only, so a public repository or a fork PR
+    # must never reach it.
+    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     timeout-minutes: 120
     env:
       SDK_RELEASE_TAG: ci-sdk-ae25.2
       SDK_ASSET: AfterEffectsSDK-ae25.2-win.zip
-      SDK_SHA256: 23F724D6B9C3E8F66B6C1A449EDA1F4C0B73D5A1C2706734C258EBF00E461F21
+      SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: broker
 
       # Python 版は .python-version (3.12) に従う。3.14 は OpenEXR の
       # win_amd64 wheel が無く、毎回ソースビルドで約 2.5 分かかるため上げない。
