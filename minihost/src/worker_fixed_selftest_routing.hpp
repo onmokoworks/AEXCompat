@@ -47,6 +47,7 @@ struct SimpleHooks {
   bool (*pf_utils_handle_callbacks)(){};
   bool (*flt_blur_suite1)(){};
   bool (*aefx_ace_suite1)(){};
+  bool (*aegp_persistent_data_suite3)(){};
 };
 
 struct Hooks {
