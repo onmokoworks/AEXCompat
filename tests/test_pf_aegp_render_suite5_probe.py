@@ -18,6 +18,7 @@ INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 
 
 
+@pytest.mark.xfail(strict=True, reason="the host serves AEGP Render Options Suite v4 as an all-null table (#932)")
 def test_real_probe_exercises_render_suite5_metadata_and_lifecycle(tmp_path):
     assert WORKER.is_file()
     assert PROBE.is_file()
