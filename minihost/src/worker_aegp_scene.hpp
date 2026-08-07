@@ -225,6 +225,10 @@ int32_t __cdecl aegp_get_layer_source_item(void* layer, void** item);
 int32_t __cdecl aegp_get_layer_masked_bounds(
     void* layer, int32_t time_mode, const AegpTime* time,
     AegpFloatRect* bounds);
+int32_t __cdecl aegp_convert_comp_to_layer_time(
+    void* layer, const AegpTime* comp_time, AegpTime* layer_time);
+int32_t __cdecl aegp_convert_layer_to_comp_time(
+    void* layer, const AegpTime* layer_time, AegpTime* comp_time);
 int32_t __cdecl aegp_get_layer_parent_comp(void* layer, void** comp);
 int32_t __cdecl aegp_get_layer_name(int32_t, void*, void**, void**);
 int32_t __cdecl aegp_get_layer_parent(void* layer, void** parent);
