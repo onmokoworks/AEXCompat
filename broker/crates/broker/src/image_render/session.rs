@@ -1109,6 +1109,7 @@ impl InteractiveRenderSession {
                 pixels,
                 width: frame_width,
                 height: frame_height,
+            ..
             } => {
                 self.frame_serial += 1;
                 self.frames_ok += 1;

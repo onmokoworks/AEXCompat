@@ -461,6 +461,15 @@ struct SessionFrameOutput {
   int32_t width{0};
   int32_t height{0};
   int32_t rowbytes{0};
+  // Where the frame sits relative to the layer's own origin. A SmartFX
+  // effect that grows its output - a glow reaching past the layer - answers
+  // with a result_rect whose top-left is negative, and the pixels start
+  // there rather than at the layer's (0,0). A caller that has to place the
+  // frame back into a fixed-size image needs this to know which part of it
+  // covers the layer (issue #914). Classic frames leave it at zero, which is
+  // where their output already starts.
+  int32_t origin_x{0};
+  int32_t origin_y{0};
   std::string input_hash;
   std::string output_hash;
   bool guard_violation{false};
@@ -918,7 +927,8 @@ RenderSessionOutcome run_session_frame_loop(
       return channels.write_message(reply);
     };
     const auto respond_ok = [&](int32_t frame_width, int32_t frame_height,
-                                int32_t frame_rowbytes, std::size_t packed_bytes) {
+                                int32_t frame_rowbytes, std::size_t packed_bytes,
+                                int32_t frame_origin_x, int32_t frame_origin_y) {
       std::string reply;
       reply.reserve(256);
       reply += "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":";
@@ -937,6 +947,10 @@ RenderSessionOutcome run_session_frame_loop(
       // used to carry (issue #690).
       reply += "\",\"packed_bytes\":";
       reply += std::to_string(packed_bytes);
+      reply += ",\"origin_x\":";
+      reply += std::to_string(frame_origin_x);
+      reply += ",\"origin_y\":";
+      reply += std::to_string(frame_origin_y);
       reply += ",\"guards_intact\":true},\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
       reply += "}";
@@ -1160,7 +1174,8 @@ RenderSessionOutcome run_session_frame_loop(
     // layout disagreement the hash existed to catch, at no per-frame cost
     // (issue #690). The final report's output_hash keeps the one-shot
     // internal-ARGB definition (protocol §4.3).
-    if (!respond_ok(frame.width, frame.height, frame.rowbytes, captured.size())) {
+    if (!respond_ok(frame.width, frame.height, frame.rowbytes, captured.size(),
+                    frame.origin_x, frame.origin_y)) {
       outcome.protocol_violation = true;
       break;
     }
@@ -1269,6 +1284,10 @@ SmartRenderSessionOutcome run_smart_render_session(
         frame.width = frame_result.output_width;
         frame.height = frame_result.output_height;
         frame.rowbytes = frame_result.output_rowbytes;
+        // result_rect's top-left is where these pixels sit relative to the
+        // layer origin; a grown output starts at a negative coordinate.
+        frame.origin_x = frame_result.result_rect[0];
+        frame.origin_y = frame_result.result_rect[1];
         frame.input_hash = frame_result.input_hash;
         frame.output_hash = frame_result.output_hash;
         // A legally empty PreRender result_rect (#278): no pixels were rendered,

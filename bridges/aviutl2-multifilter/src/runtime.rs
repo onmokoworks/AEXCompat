@@ -540,13 +540,25 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
             // Says so once when a filter that had been failing renders again;
             // silent for one that never stopped.
             report_frame_recovered(&ctx.plugin);
-            // A filter object cannot change the image size; reject a resized frame.
-            if frame.width != width || frame.height != height {
-                return true;
-            }
+            // The frame is published at whatever size it came back as, which is
+            // not always the object's. A SmartFX effect that grows its output -
+            // a glow reaching past the layer - answers larger, and set_image_data
+            // takes the size as an argument ("width,height: 画像サイズ" in the
+            // filter2 API), so the grown frame goes through unchanged.
+            //
+            // This used to be refused on the stated grounds that "a filter object
+            // cannot change the image size". Nothing checked that: the frame was
+            // dropped and the object kept its old pixels, so DeepGlow2 rendered
+            // correctly every frame and nothing reached the screen (#914).
             let out = bytes_to_pixels(&frame.pixels);
-            if out.len() == count {
-                unsafe { ((*video).set_image_data)(out.as_ptr(), width as i32, height as i32) };
+            if out.len() == (frame.width as usize) * (frame.height as usize) {
+                unsafe {
+                    ((*video).set_image_data)(
+                        out.as_ptr(),
+                        frame.width as i32,
+                        frame.height as i32,
+                    )
+                };
             }
             true
         }
@@ -1110,11 +1122,14 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                             pixels,
                             width,
                             height,
-                            ..
+                            origin_x,
+                            origin_y,
                         } => FrameReply::Rendered(RenderedFrame {
                             pixels,
                             width,
                             height,
+                            origin_x,
+                            origin_y,
                         }),
                         FrameStatus::FrameError {
                             render_error,

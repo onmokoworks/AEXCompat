@@ -1462,6 +1462,10 @@ struct RenderedFrame {
     pixels: Vec<u8>,
     width: u32,
     height: u32,
+    /// The frame's top-left relative to the layer origin. A SmartFX effect that
+    /// grows its output past the layer answers with a negative one (#914).
+    origin_x: i32,
+    origin_y: i32,
 }
 
 /// The outcome of one frame, distinguishing a still-usable session from a lost

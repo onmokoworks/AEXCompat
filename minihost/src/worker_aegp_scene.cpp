@@ -2,6 +2,9 @@
 // Independent compiled implementation for the AEGP scene family.
 
 #include "worker_aegp_scene.hpp"
+#include "worker_parameter_runtime.hpp"
+#include "worker_extended_diag.hpp"
+#include <iostream>
 #include "worker_aegp_external_render_runtime.hpp"
 #include "worker_aegp_scene_model.hpp"
 #include "worker_aegp_scene_transaction.hpp"
@@ -1710,7 +1713,28 @@ int32_t __cdecl get_new_effect_for_effect(int32_t plugin_id, void* effect, void*
   // could even ask its question (issue #909).
   if (plugin_id < 0 || effect != &g_effect || !effect_ref || g_aegp_effect_live)
     return 4;
+  // Give the handle a scene identity before publishing it.
+  //
+  // This used to hand back `&g_aegp_effect`, a bare host object the scene
+  // registry knows nothing about. Every AEGP call that takes the handle and
+  // then checks possession - AEGP_GetNewEffectStreamByIndex among them -
+  // refused it, so a plug-in could acquire an effect handle and do nothing
+  // with it (issue #909). Registering instance 0 and borrowing from the
+  // registry makes the handle resolvable the same way every other scene
+  // object is.
+  auto& instance = g_aegp_effect_instances[0];
+  if (!instance.occupied) {
+    instance = AegpEffectInstance{};
+    instance.occupied = true;
+    instance.layer = &g_aegp_layers[0];
+    ++instance.generation;
+  }
+  if (!ensure_effect_identity(0)) return 4;
   g_aegp_effect_live = true;
+  // The handle stays `&g_aegp_effect`: `resolve_effect_instance` recognizes
+  // it directly, and the callers that take it back are matched to that.
+  // What changed is that instance 0 is now occupied and carries a registry
+  // identity, so a possession check on this handle has something to find.
   *effect_ref = &g_aegp_effect;
   ++g_aegp_effect_acquires;
   return 0;
@@ -1720,14 +1744,92 @@ const AegpInstalledEffectRecord* find_installed_effect(int32_t key) {
     if (effect.key == key) return &effect;
   return nullptr;
 }
+// The parameters of the plug-in this worker actually loaded.
+//
+// The installed-effect table below it is a compile-time list of the fixtures
+// this host was built against, which no real AEX appears in. A plug-in that
+// walks its own streams - DeepGlow2 asks what is plugged into its matte layer
+// parameter during SmartRender - was refused because its parameters were not
+// in that list (issue #909). PARAMS_SETUP already told the worker what they
+// are, so that is what answers here.
+//
+// Indices are 1-based, matching `records[index - 1]` everywhere else in the
+// worker; index 0 is the input layer and has no record.
+// PF parameter types and AEGP stream types are different enumerations, and
+// the records the worker keeps carry the PF one. The fixture table below was
+// written with AEGP values, so a loaded plug-in's parameter has to be
+// translated before it reaches `stream_value_kind` - handing the PF value
+// straight through made every stream read as StreamValueKind::none and the
+// stream refuse to open (issue #909).
+//
+// PF_Param values are from AE_Effect.h; AEGP_StreamType from AE_GeneralPlug.h.
+// Types with no stream (the group markers, NO_DATA) map to NO_DATA, which
+// `stream_value_kind` already answers as none.
+int32_t aegp_stream_type_for_param_type(int32_t param_type) noexcept {
+  constexpr int32_t kAegpStreamNoData = 0;
+  constexpr int32_t kAegpStreamThreeD = 2;
+  constexpr int32_t kAegpStreamTwoD = 4;
+  constexpr int32_t kAegpStreamOneD = 5;
+  constexpr int32_t kAegpStreamColor = 6;
+  constexpr int32_t kAegpStreamArb = 10;
+  constexpr int32_t kAegpStreamLayerId = 9;
+  switch (param_type) {
+    case 0: return kAegpStreamLayerId;   // PF_Param_LAYER
+    case 1:                              // PF_Param_SLIDER (obsolete)
+    case 2:                              // PF_Param_FIX_SLIDER (obsolete)
+    case 3:                              // PF_Param_ANGLE
+    case 4:                              // PF_Param_CHECKBOX
+    case 7:                              // PF_Param_POPUP
+    case 10: return kAegpStreamOneD;     // PF_Param_FLOAT_SLIDER
+    case 5: return kAegpStreamColor;     // PF_Param_COLOR
+    case 6: return kAegpStreamTwoD;      // PF_Param_POINT
+    case 11: return kAegpStreamArb;      // PF_Param_ARBITRARY_DATA
+    case 18: return kAegpStreamThreeD;   // PF_Param_POINT_3D
+    default: return kAegpStreamNoData;   // groups, buttons, NO_DATA
+  }
+}
+
+const AegpEffectParameterRecord* loaded_effect_parameter(int32_t index) {
+  const auto& records = aexcompat::worker_runtime::parameters::state().records;
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:loaded_param index=" << index
+              << " records=" << records.size() << "\n" << std::flush;
+  if (index < 1 || static_cast<std::size_t>(index) > records.size())
+    return nullptr;
+  const auto& record = records[static_cast<std::size_t>(index - 1)];
+  // Published through a static so the `const char*` outlives the call. One
+  // live answer at a time is enough: every caller reads what it asked for
+  // before asking again, and the storage is thread-local so two threads
+  // asking at once do not overwrite each other.
+  static thread_local std::string published_name;
+  static thread_local AegpEffectParameterRecord published{};
+  published_name = record.name;
+  published.name = published_name.c_str();
+  published.type = aegp_stream_type_for_param_type(record.type);
+  published.default_value = {record.default_value, 0.0, 0.0, 0.0};
+  // Writes go through the parameter runtime's own path, not this one.
+  published.writable = false;
+  return &published;
+}
 const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index) {
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:find_param key=" << key << " index=" << index << "\n" << std::flush;
   const auto* effect = find_installed_effect(key);
-  if (!effect || index < 0 || index >= effect->parameter_count) return nullptr;
+  // A key the compile-time table does not carry means the effect is a real
+  // loaded plug-in rather than one of this host's fixtures, which is the
+  // ordinary case outside the self-tests.
+  if (!effect) return loaded_effect_parameter(index);
+  // Instance 0 carries a fixture key even when the effect that owns it is a
+  // real plug-in, so an index past the fixture's own parameters is not out of
+  // range - it is a parameter the fixture table cannot describe. The loaded
+  // plug-in's own parameters answer those (issue #909).
+  if (index < 0) return nullptr;
+  if (index >= effect->parameter_count) return loaded_effect_parameter(index);
   if (key == kAegpInstalledEffects[0].key)
     return &kAegpProbeParameters[static_cast<std::size_t>(index)];
   if (key == kAegpInstalledEffects[1].key || key == kAegpInstalledEffects[2].key)
     return &kAegpLevelsParameters[static_cast<std::size_t>(index)];
-  return nullptr;
+  return loaded_effect_parameter(index);
 }
 void initialize_effect_parameter_values(AegpEffectInstance& instance) {
   instance.parameter_values = {};
@@ -2652,9 +2754,25 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   const auto* parameter = instance
       ? find_effect_parameter(instance->installed_key, index) : nullptr;
   ObjectSnapshot effect_identity{};
-  if (plugin_id < 0 || !instance || !stream || !parameter ||
-      !scene_registry().resolve_possessed(
-          effect, ObjectKind::effect, plugin_id, effect_identity) ||
+  bool possessed = scene_registry().resolve_possessed(
+      effect, ObjectKind::effect, plugin_id, effect_identity);
+  // The PF-interface handle is not a registry-borrowed one, so possession
+  // has to be read off the instance it names (issue #909).
+  if (!possessed && instance && effect == &g_aegp_effect && g_aegp_effect_live &&
+      ensure_effect_identity(instance_index)) {
+    effect_identity = ObjectSnapshot{};
+    if (scene_registry().snapshot(
+            g_aegp_effect_instances[instance_index].identity, effect_identity))
+      possessed = true;
+  }
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:effect_stream index=" << index
+              << " plugin_id=" << plugin_id
+              << " instance=" << (instance != nullptr)
+              << " stream=" << (stream != nullptr)
+              << " parameter=" << (parameter != nullptr)
+              << " possessed=" << possessed << "\n" << std::flush;
+  if (plugin_id < 0 || !instance || !stream || !parameter || !possessed ||
       g_aegp_legacy_effect_stream_generation == UINT32_MAX)
     return 4;
   const auto free_slot = std::find_if(g_aegp_legacy_effect_streams.begin(),
@@ -2743,23 +2861,40 @@ int32_t __cdecl aegp_get_stream_type_v2(void* stream, int32_t* type) {
 int32_t __cdecl aegp_get_new_stream_value_v2(
     int32_t plugin_id, void* stream, int32_t, const AegpTime* time,
     uint8_t, AegpStreamValue* output) {
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:stream_value plugin_id=" << plugin_id
+              << " stream=" << stream << " time=" << (time != nullptr)
+              << " output=" << (output != nullptr) << "\n" << std::flush;
   auto* value = legacy_effect_stream(stream);
-  if (!value || !legacy_effect_stream_parent_live(*value) ||
-      plugin_id != value->owner_plugin_id || value->value_live || !time ||
-      time->scale == 0 || !output)
+  // The id only has to name the same caller the stream was opened for. An
+  // unregistered plug-in passes 0 here and may have passed something else
+  // when it opened the stream - DeepGlow2 does exactly that - and the stream
+  // it is reading is still its own: this worker hosts one plug-in, and the
+  // registry already refused any handle that is not this stream (issue #909).
+  const bool owner_matches = plugin_id == value->owner_plugin_id ||
+      plugin_id == 0 || value->owner_plugin_id == 0;
+  if (!value || !legacy_effect_stream_parent_live(*value) || !owner_matches ||
+      value->value_live || !time || time->scale == 0 || !output)
     return 4;
   const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
   const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
   if (!parameter) return 4;
   output->stream = stream;
   output->value.fill(std::byte{});
+  const std::size_t fixture_slot =
+      static_cast<std::size_t>(value->param_index - 1);
   if (value->param_index == 0) {
     std::memcpy(output->value.data(), &instance.layer, sizeof(instance.layer));
-  } else {
+  } else if (fixture_slot < instance.parameter_values.size()) {
     std::memcpy(output->value.data(),
-                instance.parameter_values[static_cast<std::size_t>(value->param_index - 1)].data(),
+                instance.parameter_values[fixture_slot].data(),
                 sizeof(instance.parameter_values[0]));
   }
+  // Past the fixture's slots the value stays zero, which is what a stream
+  // this host does not model reads as: for a layer parameter that is "no
+  // layer", the answer DeepGlow2's matte path is asking for when its matte
+  // parameter is left unset. Reading `parameter_values` there would have been
+  // an out-of-bounds index - the array holds four.
   value->value_live = true;
   value->checked_out_value = output;
   if (!scene_registry().create_child(

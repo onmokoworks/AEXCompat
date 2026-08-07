@@ -619,6 +619,10 @@ pub enum FrameStatus {
         /// effect (#261); `pixels` is packed at exactly `width*height*bpp`.
         width: u32,
         height: u32,
+        /// The frame's top-left relative to the layer origin. Negative when a
+        /// SmartFX effect grew its output past the layer (#914).
+        origin_x: i32,
+        origin_y: i32,
     },
     /// A frame-local compatibility diagnostic (selector error, time scale
     /// mismatch). The session stays usable; continuing is the caller's call.
@@ -665,6 +669,16 @@ struct FrameDoneOutput {
     /// the layout cross-check the per-frame SHA-256 used to carry (#690).
     packed_bytes: u64,
     guards_intact: bool,
+    /// Where the frame sits relative to the layer origin. A SmartFX effect that
+    /// grows its output answers with a result_rect whose top-left is negative,
+    /// and these pixels start there rather than at the layer's (0,0). A caller
+    /// placing the frame back into a fixed-size image needs it to know which
+    /// part covers the layer (#914). Absent (0) on classic frames and on any
+    /// worker that predates it, which is where their output already starts.
+    #[serde(default)]
+    origin_x: i32,
+    #[serde(default)]
+    origin_y: i32,
     /// A SmartFX frame whose PreRender returned a legally empty result_rect
     /// (#278): width/height are 0 and there are no output pixels. Absent (false)
     /// for every normal frame, where a zero dimension stays an invariant
@@ -2226,6 +2240,8 @@ impl RenderSession {
                             pixels,
                             width: output.width,
                             height: output.height,
+                            origin_x: output.origin_x,
+                            origin_y: output.origin_y,
                         },
                     });
                 }
@@ -3282,6 +3298,7 @@ pub fn run_video_batch(
                     pixels,
                     width: frame_width,
                     height: frame_height,
+                    ..
                 } if frame_width == 0 && frame_height == 0 => {
                     // A legally empty SmartFX result (#278): the frame rendered
                     // no pixels, so there is no PNG or raw sidecar to write (a 0x0
@@ -3323,6 +3340,7 @@ pub fn run_video_batch(
                     pixels,
                     width: frame_width,
                     height: frame_height,
+                    ..
                 } => {
                     let output_png = output_directory.join(format!("frame-{frame_index:06}.png"));
                     let preview = native_rgba_to_preview(&pixels, request.pixel_format)?;
