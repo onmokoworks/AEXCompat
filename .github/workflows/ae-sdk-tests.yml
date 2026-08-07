@@ -36,7 +36,12 @@ jobs:
     env:
       SDK_RELEASE_TAG: ci-sdk-ae25.2
       SDK_ASSET: AfterEffectsSDK-ae25.2-win.zip
-      SDK_SHA256: 23F724D6B9C3E8F66B6C1A449EDA1F4C0B73D5A1C2706734C258EBF00E461F21
+      # tag ci-sdk-ae25.2 の asset は失われていて workflow が "release not found"
+      # で落ちていた (#903)。Adobe 配布 zip から AfterEffectsSDK ツリーを取り出し、
+      # top-level を AfterEffectsSDK/ に揃えて再パッケージし直したので、旧 asset
+      # とはバイト一致しない。この値は再アップロードした asset を
+      # gh release download で取り直して算出したもの。
+      SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
     steps:
       - uses: actions/checkout@v4
 
