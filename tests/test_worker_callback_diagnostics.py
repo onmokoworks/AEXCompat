@@ -20,6 +20,11 @@ def test_smartfx_callback_results_and_denial_reasons_are_reportable_on_mac(tmp_p
             compiler,
             "-std=c++17",
             "-D__cdecl=",
+            # Compiling on Windows pulls in minwindef.h, whose min/max macros
+            # break std::min in the runtime. minihost/CMakeLists.txt defines
+            # these for every target; this ad-hoc command has to as well.
+            "-DNOMINMAX",
+            "-DWIN32_LEAN_AND_MEAN",
             "-I",
             str(ROOT / "minihost" / "src"),
             str(ROOT / "tests" / "native" / "worker_callback_diagnostics_selftest.cpp"),
