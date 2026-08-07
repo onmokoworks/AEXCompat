@@ -392,9 +392,29 @@ bool color_settings_snapshot_profile(void* handle, ColorProfileRecord& record) {
   catch (...) { return false; }
   return true;
 }
+// AE's plug-in id names the caller for AE's own accounting. A plug-in that
+// never called AEGP_RegisterWithAEGP carries 0, which is what DeepGlow2 does
+// while acquiring and using AEGP suites from a normal render; refusing it made
+// this host stricter than AE about an identity AE does not appear to require
+// (issue #894). Nothing here decides ownership on this value: the profiles
+// this suite hands out are tracked by their own token, and the memory suite
+// tracks its handles under the host's own id, so admitting 0 does not loosen
+// any lifetime check.
+bool admissible_plugin_id(int32_t plugin_id) noexcept {
+  return plugin_id == 0 || plugin_id == 1;
+}
+
+// Whether the caller's comp handle names this worker's composition.
+bool caller_comp_matches(void* comp) noexcept {
+  return g_host_hooks.is_composition_handle
+      ? g_host_hooks.is_composition_handle(comp)
+      : comp == (g_host_hooks.composition_handle
+                     ? g_host_hooks.composition_handle() : nullptr);
+}
+
 int32_t color_settings_create_profile(int32_t plugin_id, ColorProfileKind kind,
                                       const std::vector<uint8_t>& icc, void** handle) {
-  if (plugin_id != 1 || !handle) return 4;
+  if (!admissible_plugin_id(plugin_id) || !handle) return 4;
   *handle = nullptr;
   if (icc.empty() || icc.size() > kMaxIccProfileBytes) return 4;
   uint64_t generation = 0;
@@ -558,7 +578,7 @@ int32_t __cdecl color_xform_working_to_view(void* view, void** src, void** dst) 
 }
 int32_t __cdecl color_get_new_working_space_profile(int32_t plugin_id, void* comp, void** profile) {
   if (profile) *profile = nullptr;
-  if (plugin_id != 1 || comp != (g_host_hooks.composition_handle ? g_host_hooks.composition_handle() : nullptr) || !profile) return 4;
+  if (!admissible_plugin_id(plugin_id) || !caller_comp_matches(comp) || !profile) return 4;
   ColorProfileKind kind{};
   std::vector<uint8_t> icc;
   try {
@@ -574,7 +594,7 @@ int32_t __cdecl color_get_new_working_space_profile(int32_t plugin_id, void* com
 int32_t __cdecl color_get_new_profile_from_icc(int32_t plugin_id, int32_t icc_size,
                                                const void* icc_data, void** profile) {
   if (profile) *profile = nullptr;
-  if (plugin_id != 1 || !profile || !icc_data || icc_size <= 0 ||
+  if (!admissible_plugin_id(plugin_id) || !profile || !icc_data || icc_size <= 0 ||
       static_cast<std::size_t>(icc_size) > kMaxIccProfileBytes) {
     ++g_invalid_color_profile_operations; return 4;
   }
@@ -588,7 +608,7 @@ int32_t __cdecl color_get_new_profile_from_icc(int32_t plugin_id, int32_t icc_si
 int32_t __cdecl color_get_new_icc_from_profile(int32_t plugin_id, void* profile, void** icc_handle) {
   if (icc_handle) *icc_handle = nullptr;
   ColorProfileRecord record{};
-  if (plugin_id != 1 || !icc_handle || !color_settings_snapshot_profile(profile, record)) {
+  if (!admissible_plugin_id(plugin_id) || !icc_handle || !color_settings_snapshot_profile(profile, record)) {
     ++g_invalid_color_profile_operations; return 4;
   }
   if (new_aegp_mem_handle(plugin_id, "color profile icc", static_cast<uint32_t>(record.icc_bytes.size()),
@@ -603,7 +623,7 @@ int32_t __cdecl color_get_new_icc_from_profile(int32_t plugin_id, void* profile,
 int32_t __cdecl color_get_new_profile_description(int32_t plugin_id, void* profile, void** desc_handle) {
   if (desc_handle) *desc_handle = nullptr;
   ColorProfileRecord record{};
-  if (plugin_id != 1 || !desc_handle || !color_settings_snapshot_profile(profile, record)) {
+  if (!admissible_plugin_id(plugin_id) || !desc_handle || !color_settings_snapshot_profile(profile, record)) {
     ++g_invalid_color_profile_operations; return 4;
   }
   return make_utf16_handle(color_settings_profile_description(record.kind),
@@ -640,7 +660,7 @@ int32_t __cdecl color_is_rgb_profile(void* profile, uint8_t* is_rgb) {
 }
 int32_t __cdecl color_set_working_color_space(int32_t plugin_id, void* comp, void* profile) {
   ColorProfileRecord record{};
-  if (plugin_id != 1 || comp != (g_host_hooks.composition_handle ? g_host_hooks.composition_handle() : nullptr) || !color_settings_snapshot_profile(profile, record))
+  if (!admissible_plugin_id(plugin_id) || !caller_comp_matches(comp) || !color_settings_snapshot_profile(profile, record))
     return 4;
   std::lock_guard<std::mutex> lock(g_color_settings_mutex);
   try {
@@ -689,25 +709,25 @@ int32_t __cdecl color_get_ocio_display_colorspace(int32_t plugin_id, void** disp
 int32_t __cdecl color_is_colorspace_aware_effects_enabled(int32_t plugin_id, uint8_t* enabled) {
   if (!enabled) return 4;
   *enabled = 0;
-  if (plugin_id != 1) return 4;
+  if (!admissible_plugin_id(plugin_id)) return 4;
   return 0;
 }
 int32_t __cdecl color_get_lut_interpolation_method(int32_t plugin_id, uint16_t* method) {
   if (!method) return 4;
   *method = 0;
-  if (plugin_id != 1) return 4;
+  if (!admissible_plugin_id(plugin_id)) return 4;
   return 0;
 }
 int32_t __cdecl color_get_graphics_white_luminance(int32_t plugin_id, uint16_t* luminance) {
   if (!luminance) return 4;
   *luminance = 0;
-  if (plugin_id != 1) return 4;
+  if (!admissible_plugin_id(plugin_id)) return 4;
   return 0;
 }
 int32_t __cdecl color_get_working_colorspace_id(int32_t plugin_id, AegpGuidValue* guid) {
   if (!guid) return 4;
   guid->bytes = {};
-  if (plugin_id != 1) return 4;
+  if (!admissible_plugin_id(plugin_id)) return 4;
   ColorProfileKind kind{};
   { std::lock_guard<std::mutex> lock(g_color_settings_mutex); kind = g_working_color_space_kind; }
   guid->bytes = kind == ColorProfileKind::LinearSrgb ? kWorkingLinearSrgbGuid : kWorkingSrgbGuid;

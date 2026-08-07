@@ -244,21 +244,21 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   }
   if (timed_slot)
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::UnknownLayer);
-  if (request && index == 0 && checkout_id == 0)
+  if (request && index == 0)
     std::memcpy(runtime.input_checkout_request.data(), request,
                 sizeof(runtime.input_checkout_request));
   if (request && index == runtime.secondary_layer_slot) {
     std::memcpy(runtime.map_checkout_request.data(), request,
                 sizeof(runtime.map_checkout_request));
   }
-  if (index == 0 && checkout_id == 0) {
+  if (index == 0) {
     runtime.checkout_time = what_time;
     runtime.checkout_time_step = time_step;
     runtime.checkout_time_scale = time_scale;
   }
   if (!result)
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::InvalidArguments);
-  if (index == 0 && checkout_id == 0) {
+  if (index == 0) {
     // No `input_world` check: PreRender answers geometry, and a plug-in is
     // entitled to ask before any world exists to hand it. `checkout_pixels`
     // fails closed on a registration with no world, which is where a missing
