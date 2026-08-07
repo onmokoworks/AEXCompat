@@ -76,6 +76,29 @@ jobs:
         run: cargo test --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
       - name: Test YMM4 native bridge
         run: cargo test --manifest-path bridges/ymm4-native/Cargo.toml --locked
+      # unicorn-engine-sys の build script が bindgen を通すので libclang が要る。
+      # runner のサービスアカウントは開発者ユーザーと別で PATH を共有しないため、
+      # 場所を明示しないと "Unable to find libclang" で落ちる。
+      - name: Locate libclang for bindgen
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $candidates = @($env:LIBCLANG_PATH, (Join-Path $env:ProgramFiles 'LLVM\bin'))
+          if (Test-Path -LiteralPath $vswhere) {
+            foreach ($root in & $vswhere -products * -property installationPath) {
+              $candidates += Join-Path $root 'VC\Tools\Llvm\x64\bin'
+            }
+          }
+          $found = $candidates |
+            Where-Object { $_ } |
+            Where-Object { (Test-Path (Join-Path $_ 'libclang.dll')) -or (Test-Path (Join-Path $_ 'clang.dll')) } |
+            Select-Object -First 1
+          if (-not $found) {
+            throw "libclang was not found in: $($candidates -ne $null -join '; ')"
+          }
+          Write-Host "libclang: $found"
+          "LIBCLANG_PATH=$found" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Test guest workspace
         run: cargo test --manifest-path guest/Cargo.toml --locked
       # PR ゲートで minihost の C++ をコンパイルする (#884)。ae-sdk-tests の
