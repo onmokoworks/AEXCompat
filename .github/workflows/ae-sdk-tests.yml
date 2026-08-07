@@ -185,12 +185,6 @@ jobs:
       - name: Run native parameter-animation Rust coverage
         working-directory: broker
         shell: pwsh
-        # Skip の opt-in は hosted fallback のときだけ。windows-real は sealed
-        # worker を実起動できる (clean-clone の main run で skip 0 件を実測) ので、
-        # そこでの skip は環境制限ではなく launch 経路の退行であり、fail させる
-        # (#335, #721)。値 "0" は probe ("1" 以外は不許可) に対する明示の拒否。
-        env:
-          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: ${{ (github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true') && '0' || '1' }}
         run: |
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
@@ -209,29 +203,7 @@ jobs:
           }
           $commit = git -C $root rev-parse HEAD
           Write-Host "coverage_source_commit=$commit"
-          cargo test -p aexcompat-broker --test parameter_animation --locked -- --show-output 2>&1 |
-            Tee-Object -FilePath (Join-Path $root 'parameter-animation-output.txt')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      # A hosted runner may be unable to create the sealed worker
-      # (#335).  Keep that limitation visible while retaining the exact target
-      # and prerequisite checks above.
-      - name: Report parameter-animation sealed-worker skips
-        shell: pwsh
-        if: always()
-        run: |
-          $log = Join-Path $env:GITHUB_WORKSPACE 'parameter-animation-output.txt'
-          if (-not (Test-Path -LiteralPath $log)) {
-            Write-Host 'parameter-animation produced no log; the coverage step did not start.'
-            exit 0
-          }
-          $skips = Select-String -Path $log -Pattern 'cannot launch a sealed worker'
-          if ($skips) {
-            Write-Host "::warning::$($skips.Count) parameter-animation tests did not run: this runner cannot launch a sealed worker (issue #335)"
-            $skips | ForEach-Object { $_.Line }
-          } else {
-            Write-Host 'Every parameter-animation integration test ran without a sealed-worker skip.'
-          }
+          cargo test -p aexcompat-broker --test parameter_animation --locked
 
       # built_artifact テスト (test_sdk_backwards_audio_worker) が参照する
       # SDK example fixture を事前ビルドする。pytest の収集順は
@@ -248,11 +220,7 @@ jobs:
       # Get-FileHash 等の組み込み cmdlet を解決できなくなる。
       - name: Run pytest with SDK and built-artifact tests
         shell: cmd
-        # See windows-clean-clone.yml: the skip is opt-in so a token regression
-        # cannot hide as an environment limitation off CI (issue #335). Hosted
-        # fallback のみ許可し、windows-real では "0" で明示拒否する (#721)。
         env:
-          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: ${{ (github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true') && '0' || '1' }}
           # 前段の Build minihost workers が同一 checkout からビルド済みの
           # worker を canonical_release_worker fixture に渡し、fixture 内での
           # 二重ビルドを避ける (#681)。
@@ -267,27 +235,6 @@ jobs:
       # AFTER_EFFECTS_SDK_ROOT が通っていれば SDK 由来の skip は 1 件も出ないはず。
       # 同様に、worker/probe をビルド済みなので built_artifact テストが成果物
       # 不在の inline skip ("... is not built" 等) で黙って skip されたら fail。
-      # The launch limitation reaches the Python side too: the video
-      # batch CLI drives a live worker. That skip is legitimate on a hosted
-      # runner, so the gate below must not fail on it, but it must not be
-      # invisible either -- report it the way the Rust side does (#335).
-      - name: Report sealed-worker skips
-        shell: pwsh
-        if: always()
-        run: |
-          if (-not (Test-Path pytest-output.txt)) {
-            Write-Host 'pytest produced no log; nothing to report.'
-            exit 0
-          }
-          $skips = Select-String -Path pytest-output.txt `
-            -Pattern 'cannot launch a sealed worker'
-          if ($skips) {
-            Write-Host "::warning::$($skips.Count) Python tests did not run: this runner cannot launch a sealed worker (issue #335)"
-            $skips | ForEach-Object { $_.Line }
-          } else {
-            Write-Host 'Every worker-launching Python test ran: no sealed-worker skips.'
-          }
-
       - name: Fail if SDK or built-artifact tests were skipped
         shell: pwsh
         run: |

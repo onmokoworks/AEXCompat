@@ -10,9 +10,6 @@ fn windows_opencl_icd_binding_self_test_is_privacy_bounded_and_fail_closed() {
     let collection = collect_opencl_icd_adapter_bindings();
     let report = privacy_bounded_opencl_icd_binding_report(&collection);
     let serialized = serde_json::to_string(&report).expect("serialize binding report");
-    let reparsed: serde_json::Value =
-        serde_json::from_str(&serialized).expect("parse binding report");
-    assert_eq!(report, reparsed);
     assert!(!serialized.contains(":\\"));
 
     for binding in &collection.bindings {

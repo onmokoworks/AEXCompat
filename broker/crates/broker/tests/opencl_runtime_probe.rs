@@ -1,5 +1,3 @@
-mod common;
-
 #[cfg(windows)]
 mod windows {
     use aexcompat_broker::opencl_runtime_probe::{ProbeLaunchStatus, launch_system_opencl_probe};
@@ -8,11 +6,6 @@ mod windows {
 
     #[test]
     fn restricted_worker_probe_is_bounded_and_never_claims_readiness() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "restricted_worker_probe_is_bounded_and_never_claims_readiness",
-        ) {
-            return;
-        }
         let worker = Path::new(env!("CARGO_BIN_EXE_opencl-runtime-probe-worker"));
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

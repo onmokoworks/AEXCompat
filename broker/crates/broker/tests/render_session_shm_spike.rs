@@ -18,8 +18,6 @@
 //! 起動する (証明対象は継承 handle と Job Object の課金であってトークンでは
 //! ない)。
 
-mod common;
-
 #[cfg(windows)]
 mod windows_e2e {
     use std::ffi::c_void;

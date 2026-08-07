@@ -1,5 +1,3 @@
-mod common;
-
 #[cfg(windows)]
 mod windows {
     use aexcompat_broker::cuda_compute_probe::{
@@ -10,11 +8,6 @@ mod windows {
 
     #[test]
     fn restricted_cuda_worker_is_bounded_fail_closed_and_cleans_up() {
-        if crate::common::skip_without_sealed_worker_launch(
-            "restricted_cuda_worker_is_bounded_fail_closed_and_cleans_up",
-        ) {
-            return;
-        }
         let worker = Path::new(env!("CARGO_BIN_EXE_cuda-compute-probe-worker"));
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

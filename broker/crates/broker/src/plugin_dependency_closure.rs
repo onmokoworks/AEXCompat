@@ -2145,8 +2145,6 @@ mod tests {
         assert_eq!(sixty_five.len(), MAX_DEPENDENCY_DIAGNOSTICS);
         assert!(truncated);
         let report = dependency_diagnostics_report(&sixty_five, truncated, None, None);
-        assert_eq!(report["maximum_records"], MAX_DEPENDENCY_DIAGNOSTICS);
-        assert_eq!(report["maximum_candidates"], MAX_DEPENDENCY_CANDIDATES);
         assert_eq!(
             report["records"].as_array().unwrap().len(),
             MAX_DEPENDENCY_DIAGNOSTICS

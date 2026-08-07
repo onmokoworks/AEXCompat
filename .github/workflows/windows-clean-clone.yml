@@ -87,56 +87,10 @@ jobs:
       - name: Verify minihost header dependency tracking
         shell: pwsh
         run: pwsh -File tools\verify-minihost-build-deps.ps1
-      # Hosted runners execute as a service account whose restricted token cannot
-      # initialize even a static Rust worker (0xC0000142). The tests that drive a
-      # live worker detect that themselves now (broker/crates/broker/tests/common,
-      # issue #335) and report a skip line instead of failing. Rejection tests that
-      # never start a process keep running: RenderSession::open validates every
-      # argument before it launches, and secure_launch fails trusted worker staging
-      # before it spawns, so those refusals are still covered here. The old --skip
-      # list is gone because it did not follow the tests added after it was
-      # written, which left main red with 32 failures.
-      #
-      # --show-output is required, not cosmetic: libtest captures stdout/stderr of
-      # passing tests, and a skipped test passes. Without it the skip lines are
-      # swallowed and a run that could not launch a single worker is
-      # indistinguishable from full coverage.
       - name: Test Rust workspace
         working-directory: broker
         shell: pwsh
-        # The opt-in is what lets the probe suppress a worker-launching test at
-        # all. Only the two CI workflows set it (here and in ae-sdk-tests.yml for
-        # the pytest side), so a regression in the restricted token -- which
-        # produces the same 0xC0000142 the probe keys on -- fails loudly on a
-        # developer machine instead of skipping (issue #335). Hosted fallback の
-        # ときだけ許可する: windows-real は sealed worker を実起動できる (main の
-        # run で skip 0 件を実測) ので、そこでの skip は launch 経路の退行であり
-        # fail させる。値 "0" は probe ("1" 以外は不許可) への明示の拒否 (#721)。
-        env:
-          AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: ${{ (github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true') && '0' || '1' }}
-        run: |
-          cargo test --workspace --locked -- --show-output 2>&1 |
-            Tee-Object -FilePath "$env:GITHUB_WORKSPACE/cargo-test-output.txt"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      # Make the environment limitation visible in the run summary rather than
-      # leaving it as a passing test count. Reports either way, so "no skips" is
-      # an explicit statement instead of the absence of one.
-      - name: Report sealed-worker skips
-        shell: pwsh
-        if: always()
-        run: |
-          if (-not (Test-Path cargo-test-output.txt)) {
-            Write-Host 'cargo test produced no log; nothing to report.'
-            exit 0
-          }
-          $skips = Select-String -Path cargo-test-output.txt `
-            -Pattern 'cannot launch a sealed worker'
-          if ($skips) {
-            Write-Host "::warning::$($skips.Count) Rust tests did not run: this runner cannot launch a sealed worker (issue #335)"
-            $skips | ForEach-Object { $_.Line }
-          } else {
-            Write-Host 'Every worker-launching Rust test ran: no sealed-worker skips.'
-          }
+        run: cargo test --workspace --locked
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
       # worksteal: ビルドでブロックした worker の積み残しを他の worker が
