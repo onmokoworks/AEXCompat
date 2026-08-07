@@ -611,7 +611,13 @@ int32_t __cdecl color_get_new_icc_from_profile(int32_t plugin_id, void* profile,
   if (!admissible_plugin_id(plugin_id) || !icc_handle || !color_settings_snapshot_profile(profile, record)) {
     ++g_invalid_color_profile_operations; return 4;
   }
-  if (new_aegp_mem_handle(plugin_id, "color profile icc", static_cast<uint32_t>(record.icc_bytes.size()),
+  // The host's own id, not the caller's: memory handles are tracked under 1
+  // here (`new_aegp_mem_handle` refuses anything else), which is what makes
+  // admitting an unregistered caller above safe to do. Forwarding the caller's
+  // id instead meant an id-0 caller passed this suite's own check and then
+  // failed inside the memory suite, charging the refusal to that suite's
+  // counters - the sibling `make_utf16_handle` path has always passed 1.
+  if (new_aegp_mem_handle(1, "color profile icc", static_cast<uint32_t>(record.icc_bytes.size()),
                           1, icc_handle) != 0) return 4;
   void* bytes = nullptr;
   if (lock_aegp_mem_handle(*icc_handle, &bytes) != 0 || !bytes) {

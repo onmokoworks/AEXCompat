@@ -207,7 +207,7 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
       (!g_user_changed_param_requested || g_user_changed_param_error == 0);
   conditional_ui_ok = user_changed_ok && dispatch_conditional_ui_selectors(
       entry, input, output, lifecycle_params.data());
-  if (conditional_ui_ok) {
+  if (conditional_ui_ok && conditional_ui_definitions_usable()) {
     for (std::size_t i = 0; i < g_params.size(); ++i)
       g_params[i].raw = lifecycle_definitions[i + 1];
   }
@@ -2086,7 +2086,9 @@ const bool g_aegp_compat_selftests_configured = [] {
        &aegp_get_layer_source_item, &aegp_get_item_type,
        &g_aegp_item_suite,
        &g_aegp_layer_source_item_calls, &g_aegp_item_type_calls,
-       &aegp_get_effect_param_union_by_index_v3});
+       &aegp_get_effect_param_union_by_index_v3,
+       &get_new_effect_for_effect, &aegp_dispose_effect,
+       &aegp_get_effect_num_param_streams_v2});
   return true;
 }();
 const bool g_aegp_scene_generation_invalidator_configured = [] {

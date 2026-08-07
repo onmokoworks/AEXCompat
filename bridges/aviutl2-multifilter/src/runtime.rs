@@ -537,17 +537,48 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
         .and_then(|&slot| read_virtual_buffer_rgba8(video).map(|(_, _, rgba)| (slot, rgba)));
     match render_on(&tx, plugin_index, current_time, rgba, parameters, layer) {
         FrameReply::Rendered(frame) => {
-            // Says so once when a filter that had been failing renders again;
-            // silent for one that never stopped.
-            report_frame_recovered(&ctx.plugin);
-            // A filter object cannot change the image size; reject a resized frame.
-            if frame.width != width || frame.height != height {
+            // The frame is published at whatever size it came back as, which is
+            // not always the object's. A SmartFX effect that grows its output -
+            // a glow reaching past the layer - answers larger, and set_image_data
+            // takes the size as an argument ("width,height: 画像サイズ" in the
+            // filter2 API), so the grown frame goes through unchanged.
+            //
+            // This used to be refused on the stated grounds that "a filter object
+            // cannot change the image size". Nothing checked that: the frame was
+            // dropped and the object kept its old pixels, so DeepGlow2 rendered
+            // correctly every frame and nothing reached the screen (#914).
+            // The bounds the input is held to apply to the output too, rather
+            // than being left to the broker's matching constants: what this
+            // hands `set_image_data` is this crate's invariant to keep.
+            let out = bytes_to_pixels(&frame.pixels);
+            let pixels = u64::from(frame.width) * u64::from(frame.height);
+            if frame.width == 0
+                || frame.height == 0
+                || frame.width > MAX_DIMENSION
+                || frame.height > MAX_DIMENSION
+                || pixels > MAX_PIXELS
+                || out.len() as u64 != pixels
+            {
+                // Unreachable while the broker validates the frame it sends,
+                // which is exactly why it must say something if it happens -
+                // dropping a frame in silence is how #914 stayed invisible.
+                report_frame_trouble(
+                    &ctx.plugin,
+                    FrameTrouble::Refused("the frame's size is outside this bridge's bounds"),
+                );
                 return true;
             }
-            let out = bytes_to_pixels(&frame.pixels);
-            if out.len() == count {
-                unsafe { ((*video).set_image_data)(out.as_ptr(), width as i32, height as i32) };
-            }
+            // Says so once when a filter that had been failing renders again;
+            // silent for one that never stopped. After the refusal above, not
+            // before it: a filter refused on every frame would otherwise clear
+            // its own trouble state each time, so the once-per-60 collapse
+            // never engaged and every frame printed both "rendering again" and
+            // the refusal - at preview frame rate, and the first of the two
+            // untrue.
+            report_frame_recovered(&ctx.plugin);
+            unsafe {
+                ((*video).set_image_data)(out.as_ptr(), frame.width as i32, frame.height as i32)
+            };
             true
         }
         // Keep the session; leave this frame's pixels. Saying so matters: with
@@ -580,6 +611,9 @@ enum FrameTrouble<'a> {
     Error(i64, Option<&'a str>),
     /// The session is gone; the next frame opens a fresh one.
     SessionLost(&'a str),
+    /// The frame arrived but this bridge would not hand it to AviUtl2. The
+    /// session stays usable; the object keeps the pixels it had.
+    Refused(&'a str),
 }
 
 /// The `PF_Err` name for a code AE defines, so a reader does not have to look
@@ -633,7 +667,7 @@ fn frame_trouble_report(
     // exactly the burial FRAME_TROUBLE_REPORT_INTERVAL exists to prevent.
     let said = match trouble {
         FrameTrouble::Error(_, said) => said,
-        FrameTrouble::SessionLost(_) => None,
+        FrameTrouble::SessionLost(_) | FrameTrouble::Refused(_) => None,
     };
     let detail = said.map(|text| format!(": {text}")).unwrap_or_default();
     let summary = match trouble {
@@ -642,6 +676,7 @@ fn frame_trouble_report(
             None => format!("frame error {code}"),
         },
         FrameTrouble::SessionLost(reason) => format!("session lost: {reason}"),
+        FrameTrouble::Refused(reason) => format!("frame refused: {reason}"),
     };
     match states.get_mut(plugin) {
         Some(state) if state.summary == summary => {
@@ -1110,11 +1145,14 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                             pixels,
                             width,
                             height,
-                            ..
+                            origin_x,
+                            origin_y,
                         } => FrameReply::Rendered(RenderedFrame {
                             pixels,
                             width,
                             height,
+                            origin_x,
+                            origin_y,
                         }),
                         FrameStatus::FrameError {
                             render_error,

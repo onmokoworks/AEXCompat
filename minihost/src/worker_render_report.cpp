@@ -317,6 +317,9 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << v.map_checkout_result[3] << ']'
       << ",\"malformed_checkout_request_count\":" << v.malformed_checkout_requests
       << ",\"empty_checkout_pixel_denial_count\":" << v.empty_checkout_pixel_denials
+      << ",\"empty_layer_param_checkout_count\":" << v.empty_layer_param_checkouts
+      << ",\"empty_layer_param_pixel_checkout_count\":"
+      << v.empty_layer_param_pixel_checkouts
       << ",\"returns_extra_pixels\":" << (v.returns_extra_pixels ? "true" : "false")
       << ",\"result_within_request\":" << (v.result_within_request ? "true" : "false")
       << ",\"extra_pixels_contract_violation\":"

@@ -386,6 +386,9 @@ bool dispatch(const Request& request, const Hooks& hooks,
   result.map_checkout_result_rect = runtime.map_checkout_result_rect;
   result.malformed_checkout_requests = runtime.malformed_checkout_requests;
   result.empty_checkout_pixel_denials = runtime.empty_checkout_pixel_denials;
+  result.empty_layer_param_checkouts = runtime.empty_layer_param_checkouts;
+  result.empty_layer_param_pixel_checkouts =
+      runtime.empty_layer_param_pixel_checkouts;
   return true;
 }
 

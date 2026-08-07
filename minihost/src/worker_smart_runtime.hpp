@@ -29,8 +29,8 @@ struct PixelCheckout {
   std::array<int32_t, 4> rect{-1, -1, -1, -1};
   bool checked_out{};
   // PreRender answered this one as an empty layer parameter, so it has no
-  // world by construction and `checkout_pixels` hands back null rather than
-  // treating the absent world as a fault (issue #898).
+  // pixels by construction and `checkout_pixels` hands back the host's own
+  // empty world rather than treating the absent world as a fault (issue #898).
   bool empty_layer_param{};
 };
 
@@ -61,6 +61,16 @@ struct State {
   // unknown layer.
   int32_t param_count{};
   uint32_t empty_layer_param_checkouts{};
+  // The world handed back for one of those. A PF_EffectWorld is 120 bytes and
+  // all-zero is exactly an empty layer: no flags, null data, zero rowbytes,
+  // zero width and height, and an empty extent. Handing back null with
+  // PF_Err_NONE instead would invent a contract AE does not have - a plug-in
+  // that reads `world->width` after a successful checkout would fault, and
+  // that pattern is in the SDK samples. Owned by the state so its lifetime is
+  // the session's. Aligned like the worlds the render subsystem builds, whose
+  // buffers get natural alignment from where they live; a byte array beside
+  // two 32-bit members would not.
+  alignas(8) std::array<std::byte, 120> empty_layer_world{};
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
   int32_t pixel_aspect_numerator{1};
@@ -75,6 +85,11 @@ struct State {
   std::array<int32_t, 4> map_checkout_result_rect{-1, -1, -1, -1};
   uint32_t malformed_checkout_requests{};
   uint32_t empty_checkout_pixel_denials{};
+  // Kept apart from the denials above: that counter means "the plug-in asked
+  // for pixels it was told did not exist and was refused", and folding the
+  // empty-layer-parameter checkouts into it would make a report reader unable
+  // to tell a refusal from the answer this host now gives.
+  uint32_t empty_layer_param_pixel_checkouts{};
   bool gpu_render_dispatched{};
 
   void clear_transient();
@@ -97,6 +112,8 @@ struct Snapshot {
   std::array<int32_t, 4> map_checkout_result_rect{-1, -1, -1, -1};
   uint32_t malformed_checkout_requests{};
   uint32_t empty_checkout_pixel_denials{};
+  uint32_t empty_layer_param_checkouts{};
+  uint32_t empty_layer_param_pixel_checkouts{};
   bool pixel_checkouts_balanced{true};
 };
 

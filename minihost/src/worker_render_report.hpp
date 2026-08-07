@@ -201,6 +201,11 @@ struct SmartReport {
     std::string output_sha256;
     bool result_rects_valid{};
     std::string world_debug_json;
+    // Appended rather than placed beside `empty_checkout_pixel_denials`: this
+    // struct is filled positionally, so a field inserted mid-way would shift
+    // every value after it.
+    uint32_t empty_layer_param_checkouts{};
+    uint32_t empty_layer_param_pixel_checkouts{};
   } head;
   struct Context {
     std::array<int32_t, 4> result_rect{};

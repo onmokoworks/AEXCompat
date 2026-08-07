@@ -199,8 +199,11 @@ uint64_t staged_effect_instance_identity(
 uint64_t staged_effect_identity_for_render_ref(
     void* render_ref) noexcept;
 const AegpInstalledEffectRecord* find_installed_effect(int32_t key);
-const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index);
+const AegpEffectParameterRecord* find_effect_parameter(
+    const AegpEffectInstance& instance, int32_t index);
 int32_t aegp_layer_index(void* layer);
+// `aegp_layer_index`, refused past the three-entry per-layer attribute tables.
+int32_t aegp_layer_attribute_index(void* layer);
 int32_t __cdecl aegp_get_active_item(void** item);
 int32_t __cdecl aegp_get_item_type(void* item, int16_t* item_type);
 int32_t __cdecl aegp_get_item_current_time(void* item, AegpTime* time);

@@ -2,6 +2,9 @@
 // Independent compiled implementation for the AEGP scene family.
 
 #include "worker_aegp_scene.hpp"
+#include "worker_parameter_runtime.hpp"
+#include "worker_extended_diag.hpp"
+#include <iostream>
 #include "worker_aegp_external_render_runtime.hpp"
 #include "worker_aegp_scene_model.hpp"
 #include "worker_aegp_scene_transaction.hpp"
@@ -406,7 +409,16 @@ bool scene_handle_is_composition(void* handle) noexcept {
   if (!handle) return false;
   if (handle == aexcompat::scene_runtime::composition_handle()) return true;
   ObjectSnapshot resolved{};
-  return resolve_scene_comp(handle, resolved);
+  // Resolving as a composition is not enough: the registry carries other
+  // comps, including one in a second project, and a plug-in can walk to any of
+  // them (project -> item -> AEGP_GetCompFromItem) and hold a borrowed handle
+  // to it. What this answers is "does this handle name *this worker's* comp",
+  // so the resolved object has to be the one whose legacy handle is that comp.
+  // Without the second half, a foreign comp's handle passed the caller checks
+  // that use this - the working colour space would have been rewritten
+  // through a handle belonging to another project (issue #894).
+  return resolve_scene_comp(handle, resolved) &&
+      resolved.legacy_handle == aexcompat::scene_runtime::composition_handle();
 }
 
 std::u16string scene_name(const ObjectSnapshot& snapshot) {
@@ -432,6 +444,25 @@ std::array<AegpEffectInstance, kAegpEffectInstanceCapacity>& g_aegp_effect_insta
 std::array<AegpEffectLease, kAegpEffectLeaseCapacity>& g_aegp_effect_leases =
     scene_runtime_state().effect_leases;
 uint32_t& g_aegp_effect_lease_generation = scene_runtime_state().effect_lease_generation;
+
+// The id a borrowed handle is recorded under when its caller has none of its
+// own.
+//
+// Only the version 2 legacy stream path substitutes it. The newer Stream
+// Suite entry points (`aegp_get_new_layer_stream`,
+// `aegp_get_new_effect_stream_by_index`) still hand the raw id to the
+// registry, so an unregistered plug-in is refused there. That is where #909's
+// evidence ends - DeepGlow2 reaches the version 2 path - and widening it
+// without a plug-in that needs it would be guessing at which entry points AE
+// admits an unregistered caller on.
+//
+// The registry refuses 0, so an unregistered caller needs some id, and
+// this is the one `AEGP_RegisterWithAEGP` hands out: `register_with_aegp`
+// returns a constant 1, so a registered plug-in and an unregistered one
+// resolve to the same owner and neither can reach the other's handles - there
+// is only the one. Should registration ever start counting, that stops being
+// true and this has to become an id of its own that no plug-in is given.
+constexpr int32_t kHostPossessionId = 1;
 
 enum class AbiPossessionPolicy {
   explicit_plugin_id,
@@ -664,7 +695,8 @@ uint64_t staged_effect_identity_for_render_ref(
   return 0;
 }
 const AegpInstalledEffectRecord* find_installed_effect(int32_t key);
-const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index);
+const AegpEffectParameterRecord* find_effect_parameter(
+    const AegpEffectInstance& instance, int32_t index);
 void initialize_effect_parameter_values(AegpEffectInstance& instance);
 AegpTransformStream& g_aegp_transform_stream = scene_runtime_state().transform_stream;
 std::array<AegpLegacyEffectStream, kAegpLegacyEffectStreamCapacity>&
@@ -887,6 +919,32 @@ int32_t aegp_layer_index(void* layer) {
       resolved.identity == state().dynamic_camera_identity
       ? resolved.local_index : -1;
 }
+// The same index, refused when it is past the per-layer attribute tables.
+//
+// Those hold three entries, one per fixture layer, while `aegp_layer_index`
+// also answers for a camera the plug-in created at runtime - whose local index
+// is the comp's layer count, so 3. Every attribute below reads or writes one
+// of those tables at the index, so a camera handle reached the fourth element:
+// reads off the end for the getters, and writes off the end for
+// `AEGP_SetLayerFlag` and `AEGP_SetLayerInPointAndDuration`. Predates this
+// stack; the transform path avoided it by bounds-checking separately
+// (`build_layer_world_transform`).
+int32_t aegp_layer_attribute_index(void* layer) {
+  // One bound for all three tables, which is only right while they are the
+  // same length.
+  static_assert(std::tuple_size_v<std::remove_reference_t<
+                    decltype(g_aegp_layer_durations)>> ==
+                std::tuple_size_v<std::remove_reference_t<
+                    decltype(g_aegp_layer_in_points)>>);
+  static_assert(std::tuple_size_v<std::remove_reference_t<
+                    decltype(g_aegp_layer_flags)>> ==
+                std::tuple_size_v<std::remove_reference_t<
+                    decltype(g_aegp_layer_in_points)>>);
+  const int32_t index = aegp_layer_index(layer);
+  // A negative index converts to a value past any size, so this rejects it.
+  return static_cast<std::size_t>(index) < g_aegp_layer_in_points.size()
+      ? index : -1;
+}
 int32_t __cdecl aegp_get_layer_to_world_xform(
     void* layer, const AegpTime* comp_time, AegpMatrix4* transform) {
   const int32_t index = aegp_layer_index(layer);
@@ -1003,7 +1061,7 @@ bool add_rational_times(const AegpTime& left, const AegpTime& right,
 // the identity-stretch case rather than as the general one (issue #891).
 int32_t __cdecl aegp_convert_layer_to_comp_time(
     void* layer, const AegpTime* layer_time, AegpTime* comp_time) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   if (index < 0 || !layer_time || !comp_time || layer_time->scale == 0) return 4;
   AegpTime converted{};
   if (!add_rational_times(*layer_time,
@@ -1017,7 +1075,7 @@ int32_t __cdecl aegp_convert_layer_to_comp_time(
 
 int32_t __cdecl aegp_convert_comp_to_layer_time(
     void* layer, const AegpTime* comp_time, AegpTime* layer_time) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   if (index < 0 || !comp_time || !layer_time || comp_time->scale == 0) return 4;
   const AegpTime& in_point = g_aegp_layer_in_points[static_cast<std::size_t>(index)];
   if (in_point.value == (std::numeric_limits<int32_t>::min)()) return 4;
@@ -1328,14 +1386,14 @@ int32_t __cdecl aegp_get_layer_id(void* layer, int32_t* id) {
   return 0;
 }
 int32_t __cdecl aegp_get_layer_flags(void* layer, uint32_t* flags) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   if (index < 0 || !flags) return 4;
   *flags = g_aegp_layer_flags[static_cast<std::size_t>(index)];
   ++g_aegp_layer_attribute_calls;
   return 0;
 }
 int32_t __cdecl aegp_set_layer_flag(void* layer, uint32_t flag, uint8_t value) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   constexpr uint32_t kWritableFlags = 0x00000001u | 0x00000002u |
       0x00000020u | 0x00004000u;
   if (index < 0 || (flag & kWritableFlags) == 0 || (flag & (flag - 1)) != 0 || value > 1)
@@ -1363,14 +1421,14 @@ int32_t __cdecl aegp_get_layer_object_type(void* layer, int32_t* type) {
   return 0;
 }
 int32_t __cdecl aegp_get_layer_in_point(void* layer, int32_t time_mode, AegpTime* time) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   if (index < 0 || time_mode != 1 || !time) return 4;
   *time = g_aegp_layer_in_points[static_cast<std::size_t>(index)];
   ++g_aegp_layer_attribute_calls;
   return 0;
 }
 int32_t __cdecl aegp_get_layer_duration(void* layer, int32_t time_mode, AegpTime* time) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   if (index < 0 || time_mode != 1 || !time) return 4;
   *time = g_aegp_layer_durations[static_cast<std::size_t>(index)];
   ++g_aegp_layer_attribute_calls;
@@ -1378,7 +1436,7 @@ int32_t __cdecl aegp_get_layer_duration(void* layer, int32_t time_mode, AegpTime
 }
 int32_t __cdecl aegp_set_layer_in_point_and_duration(
     void* layer, int32_t time_mode, const AegpTime* in_point, const AegpTime* duration) {
-  const int32_t index = aegp_layer_index(layer);
+  const int32_t index = aegp_layer_attribute_index(layer);
   if (index < 0 || time_mode != 1 || !in_point || !duration ||
       in_point->scale != 30 || duration->scale != 30 || in_point->value < 0 ||
       duration->value <= 0 || in_point->value + duration->value > 300) return 4;
@@ -1487,6 +1545,15 @@ int32_t __cdecl aegp_dispose_effect(void* effect) {
   if (effect == &g_aegp_effect) {
     if (!g_aegp_effect_live) return 4;
     g_aegp_effect_live = false;
+    // `loaded_plugin` is not cleared here. It describes the instance, and
+    // disposing the handle changes nothing about the instance: `occupied` and
+    // `generation` both stay, so the streams opened through that handle are
+    // still live - `legacy_effect_stream_parent_live` asks only those two -
+    // and they would go on being answered, out of the probe fixture's table
+    // instead of the plug-in's, if the flag went away with the handle. The
+    // paths that do reuse slot 0 (`aegp_apply_effect`,
+    // `aegp_delete_layer_effect`) assign a whole instance and clear it that
+    // way.
     ++g_aegp_effect_disposes;
     return 0;
   }
@@ -1661,6 +1728,10 @@ int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
   candidate = {const_cast<void*>(layer), installed_key, inserted_order,
                flags, generation, true};
   candidate.parameter_values = source->parameter_values;
+  // A duplicate is the same effect, so it answers out of the same parameter
+  // table as its source. Left at the aggregate's default it would have said
+  // "fixture" for a copy of the loaded plug-in's own instance.
+  candidate.loaded_plugin = source->loaded_plugin;
   const std::size_t lease_index = static_cast<std::size_t>(
       std::distance(g_aegp_effect_leases.begin(), lease_slot));
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
@@ -1710,7 +1781,34 @@ int32_t __cdecl get_new_effect_for_effect(int32_t plugin_id, void* effect, void*
   // could even ask its question (issue #909).
   if (plugin_id < 0 || effect != &g_effect || !effect_ref || g_aegp_effect_live)
     return 4;
+  // Give the handle a scene identity before publishing it.
+  //
+  // This used to hand back `&g_aegp_effect`, a bare host object the scene
+  // registry knows nothing about. Every AEGP call that takes the handle and
+  // then checks possession - AEGP_GetNewEffectStreamByIndex among them -
+  // refused it, so a plug-in could acquire an effect handle and do nothing
+  // with it (issue #909). Registering instance 0 and borrowing from the
+  // registry makes the handle resolvable the same way every other scene
+  // object is.
+  auto& instance = g_aegp_effect_instances[0];
+  if (!instance.occupied) {
+    instance = AegpEffectInstance{};
+    instance.occupied = true;
+    instance.layer = &g_aegp_layers[0];
+    ++instance.generation;
+  }
+  // Whatever slot 0 held, from here it stands for the plug-in that just asked
+  // for its own effect handle. The scene runtime seeds it with the probe
+  // fixture's key at start, and this is the only place that fact stops being
+  // true: without saying so, every stream question about this handle is
+  // answered out of a five-parameter fixture table (issue #909).
+  instance.loaded_plugin = true;
+  if (!ensure_effect_identity(0)) return 4;
   g_aegp_effect_live = true;
+  // The handle stays `&g_aegp_effect`: `resolve_effect_instance` recognizes
+  // it directly, and the callers that take it back are matched to that.
+  // What changed is that instance 0 is now occupied and carries a registry
+  // identity, so a possession check on this handle has something to find.
   *effect_ref = &g_aegp_effect;
   ++g_aegp_effect_acquires;
   return 0;
@@ -1720,21 +1818,156 @@ const AegpInstalledEffectRecord* find_installed_effect(int32_t key) {
     if (effect.key == key) return &effect;
   return nullptr;
 }
-const AegpEffectParameterRecord* find_effect_parameter(int32_t key, int32_t index) {
+// The parameters of the plug-in this worker actually loaded.
+//
+// The installed-effect table below it is a compile-time list of the fixtures
+// this host was built against, which no real AEX appears in. A plug-in that
+// walks its own streams - DeepGlow2 asks what is plugged into its matte layer
+// parameter during SmartRender - was refused because its parameters were not
+// in that list (issue #909). PARAMS_SETUP already told the worker what they
+// are, so that is what answers here.
+//
+// Indices are 1-based, matching `records[index - 1]` everywhere else in the
+// worker; index 0 is the input layer and has no record.
+// PF parameter types and AEGP stream types are different enumerations, and
+// the records the worker keeps carry the PF one. The fixture table below was
+// written with AEGP values, so a loaded plug-in's parameter has to be
+// translated before it reaches `stream_value_kind` - handing the PF value
+// straight through made every stream read as StreamValueKind::none and the
+// stream refuse to open (issue #909).
+//
+// PF_Param values are from AE_Effect.h; AEGP_StreamType from AE_GeneralPlug.h,
+// whose enumerators are unnumbered so the value is the ordinal: NO_DATA 0,
+// ThreeD_SPATIAL 1, ThreeD 2, TwoD_SPATIAL 3, TwoD 4, OneD 5, COLOR 6, ARB 7,
+// MARKER 8, LAYER_ID 9, MASK_ID 10, MASK 11, TEXT_DOCUMENT 12.
+//
+// A PF type this host models no stream for answers NO_DATA, which
+// `stream_value_kind` already answers as none. That covers more than the group
+// markers: PF_Param_PATH has no MASK-stream support here, and a group start,
+// group end, or button has no stream at all in this model, so an index landing
+// on one refuses to open. AE returns a stream reference for the group markers,
+// so a plug-in enumerating every parameter stops early here (issue #919).
+constexpr int32_t aegp_stream_type_for_param_type(int32_t param_type) noexcept {
+  constexpr int32_t kAegpStreamNoData = 0;
+  constexpr int32_t kAegpStreamThreeD = 2;
+  constexpr int32_t kAegpStreamTwoD = 4;
+  constexpr int32_t kAegpStreamOneD = 5;
+  constexpr int32_t kAegpStreamColor = 6;
+  constexpr int32_t kAegpStreamArb = 7;
+  constexpr int32_t kAegpStreamLayerId = 9;
+  switch (param_type) {
+    case 0: return kAegpStreamLayerId;   // PF_Param_LAYER
+    case 1:                              // PF_Param_SLIDER (obsolete)
+    case 2:                              // PF_Param_FIX_SLIDER (obsolete)
+    case 3:                              // PF_Param_ANGLE
+    case 4:                              // PF_Param_CHECKBOX
+    case 7:                              // PF_Param_POPUP
+    case 10: return kAegpStreamOneD;     // PF_Param_FLOAT_SLIDER
+    case 5: return kAegpStreamColor;     // PF_Param_COLOR
+    case 6: return kAegpStreamTwoD;      // PF_Param_POINT
+    case 11: return kAegpStreamArb;      // PF_Param_ARBITRARY_DATA
+    case 18: return kAegpStreamThreeD;   // PF_Param_POINT_3D
+    default: return kAegpStreamNoData;   // groups, buttons, path, NO_DATA
+  }
+}
+// The whole table, checked at compile time. A pure function of an int is worth
+// no less coverage than a runtime self-test would give it, and this one cannot
+// be skipped or left unwired: ARB shipped as 10 (which is MASK_ID) because
+// nothing compared the mapping against the SDK enumeration.
+static_assert(aegp_stream_type_for_param_type(-1) == 0);   // PF_Param_RESERVED
+static_assert(aegp_stream_type_for_param_type(0) == 9);    // LAYER -> LAYER_ID
+static_assert(aegp_stream_type_for_param_type(1) == 5);    // SLIDER -> OneD
+static_assert(aegp_stream_type_for_param_type(2) == 5);    // FIX_SLIDER
+static_assert(aegp_stream_type_for_param_type(3) == 5);    // ANGLE
+static_assert(aegp_stream_type_for_param_type(4) == 5);    // CHECKBOX
+static_assert(aegp_stream_type_for_param_type(5) == 6);    // COLOR
+static_assert(aegp_stream_type_for_param_type(6) == 4);    // POINT -> TwoD
+static_assert(aegp_stream_type_for_param_type(7) == 5);    // POPUP
+static_assert(aegp_stream_type_for_param_type(8) == 0);    // CUSTOM (obsolete)
+static_assert(aegp_stream_type_for_param_type(9) == 0);    // NO_DATA
+static_assert(aegp_stream_type_for_param_type(10) == 5);   // FLOAT_SLIDER
+static_assert(aegp_stream_type_for_param_type(11) == 7);   // ARBITRARY_DATA
+static_assert(aegp_stream_type_for_param_type(12) == 0);   // PATH (no MASK yet)
+static_assert(aegp_stream_type_for_param_type(13) == 0);   // GROUP_START
+static_assert(aegp_stream_type_for_param_type(14) == 0);   // GROUP_END
+static_assert(aegp_stream_type_for_param_type(15) == 0);   // BUTTON
+static_assert(aegp_stream_type_for_param_type(16) == 0);   // RESERVED2
+static_assert(aegp_stream_type_for_param_type(17) == 0);   // RESERVED3
+static_assert(aegp_stream_type_for_param_type(18) == 2);   // POINT_3D -> ThreeD
+
+const AegpEffectParameterRecord* loaded_effect_parameter(int32_t index) {
+  const auto& records = aexcompat::worker_runtime::parameters::state().records;
+  if (aexcompat::l2_detail::extended_diag_enabled()) {
+    const bool in_range =
+        index >= 1 && static_cast<std::size_t>(index) <= records.size();
+    std::cerr << "extended_diag:loaded_param index=" << index
+              << " records=" << records.size() << " pf_type="
+              << (in_range ? records[static_cast<std::size_t>(index - 1)].type : -1)
+              << "\n" << std::flush;
+  }
+  if (index < 0 || static_cast<std::size_t>(index) > records.size())
+    return nullptr;
+  // Published through a static so the `const char*` outlives the call. One
+  // live answer at a time is enough: every caller reads what it asked for
+  // before asking again, and the storage is thread-local so two threads
+  // asking at once do not overwrite each other.
+  static thread_local std::string published_name;
+  static thread_local AegpEffectParameterRecord published{};
+  // Index 0 is the input layer. It carries no PARAMS_SETUP record - the
+  // records are 1-based, which is why every other index reads `index - 1` -
+  // but AE counts it and a plug-in asking what is plugged into its input is
+  // an ordinary question. The fixture tables answer it the same way, with a
+  // LAYER_ID stream whose value `aegp_get_new_stream_value_v2` fills from the
+  // instance's layer.
+  if (index == 0) {
+    published_name = "Input";
+    published.name = published_name.c_str();
+    published.type = aegp_stream_type_for_param_type(0);  // PF_Param_LAYER
+    published.default_value = {};
+    published.writable = false;
+    return &published;
+  }
+  const auto& record = records[static_cast<std::size_t>(index - 1)];
+  published_name = record.name;
+  published.name = published_name.c_str();
+  published.type = aegp_stream_type_for_param_type(record.type);
+  published.default_value = {record.default_value, 0.0, 0.0, 0.0};
+  // Writes go through the parameter runtime's own path, not this one.
+  published.writable = false;
+  return &published;
+}
+const AegpEffectParameterRecord* find_effect_parameter(
+    const AegpEffectInstance& instance, int32_t index) {
+  const int32_t key = instance.installed_key;
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:find_param key=" << key << " index=" << index
+              << " loaded=" << instance.loaded_plugin << "\n" << std::flush;
+  // Whose parameters these are is a property of the instance, not of the key.
+  // Slot 0 is seeded with the probe's key at scene start and
+  // `AEGP_GetNewEffectForEffect` hands that same slot to the loaded plug-in,
+  // so a key check alone answers a 159-parameter effect out of a
+  // five-parameter fixture table (issue #909).
+  if (instance.loaded_plugin) return loaded_effect_parameter(index);
   const auto* effect = find_installed_effect(key);
-  if (!effect || index < 0 || index >= effect->parameter_count) return nullptr;
+  // A key the compile-time table does not carry is not a fixture either.
+  if (!effect) return loaded_effect_parameter(index);
+  // A fixture answers within its own declared parameter count and no further.
+  // `aegp_get_effect_num_param_streams_v2` reports that count, and the arrays
+  // below are sized to it, so letting an index past it fall through would both
+  // contradict the reported count and index those arrays out of range.
+  if (index < 0 || index >= effect->parameter_count) return nullptr;
   if (key == kAegpInstalledEffects[0].key)
     return &kAegpProbeParameters[static_cast<std::size_t>(index)];
   if (key == kAegpInstalledEffects[1].key || key == kAegpInstalledEffects[2].key)
     return &kAegpLevelsParameters[static_cast<std::size_t>(index)];
-  return nullptr;
+  return loaded_effect_parameter(index);
 }
 void initialize_effect_parameter_values(AegpEffectInstance& instance) {
   instance.parameter_values = {};
   const auto* effect = find_installed_effect(instance.installed_key);
   if (!effect) return;
   for (int32_t index = 1; index < effect->parameter_count; ++index) {
-    const auto* parameter = find_effect_parameter(instance.installed_key, index);
+    const auto* parameter = find_effect_parameter(instance, index);
     if (parameter)
       instance.parameter_values[static_cast<std::size_t>(index - 1)] =
           parameter->default_value;
@@ -1786,9 +2019,24 @@ int32_t __cdecl aegp_get_effect_category(int32_t key, char* category) {
 }
 int32_t __cdecl aegp_get_effect_num_param_streams_v2(void* effect, int32_t* count) {
   const auto* instance = resolve_effect_instance(effect);
-  const auto* installed = instance ? find_installed_effect(instance->installed_key) : nullptr;
-  if (!installed || !count) return 4;
-  *count = installed->parameter_count;
+  if (!instance || !count) return 4;
+  const auto* installed = instance->loaded_plugin
+      ? nullptr : find_installed_effect(instance->installed_key);
+  if (installed) {
+    *count = installed->parameter_count;
+    return 0;
+  }
+  // A real loaded plug-in, whose parameters are the ones
+  // `find_effect_parameter` answers from. Refusing here left the ordinary
+  // walk - ask how many, then open each - stopping at its first call even
+  // though every stream it would have asked for is now openable (issue #909).
+  const auto& records = aexcompat::worker_runtime::parameters::state().records;
+  // The count is `records.size() + 1` because AE counts the input layer, which
+  // has no record of its own and sits at index 0. `loaded_effect_parameter`
+  // answers that index too, so a walk over `0..count-1` matches what opens -
+  // except at a group marker or a path parameter, which have no stream in this
+  // host at all (#919).
+  *count = static_cast<int32_t>(records.size()) + 1;
   return 0;
 }
 bool supported_transform_stream(int32_t selector) {
@@ -1805,8 +2053,12 @@ aexcompat::scene_model::StreamValueKind stream_value_kind(
     case 4:
     case 5: return StreamValueKind::scalar;
     case 6: return StreamValueKind::color;
+    // ARB is 7, not 10 - 10 is MASK_ID, which this host does not model. The
+    // table read 10 for as long as no caller reached it: every fixture uses
+    // 2/4/5/6/9, so the mismatch only surfaced once a loaded plug-in's
+    // arbitrary-data parameter could be translated into a stream type.
+    case 7: return StreamValueKind::arbitrary;
     case 9: return StreamValueKind::layer;
-    case 10: return StreamValueKind::arbitrary;
     default: return StreamValueKind::none;
   }
 }
@@ -1826,6 +2078,13 @@ bool publish_transform_stream(
           &g_aegp_transform_stream, u"Stream", plugin_id,
           candidate.identity, handle))
     return false;
+  // This still borrows before deciding whether the type has a stream, which
+  // spends a token per refusal in the pool #931 covers. Left alone because it
+  // cannot refuse: the two callers pass only stream types `stream_value_kind`
+  // answers (3 and 5 from the layer streams, 9/5/4/2/6 from the effect ones),
+  // and `g_aegp_transform_stream.live` holds this to one at a time either way.
+  // The effect-stream path had both of those the other way round, so it was
+  // reordered instead.
   aexcompat::scene_model::StreamState stream_state{};
   stream_state.value_kind = stream_value_kind(stream_type);
   stream_state.dimensions =
@@ -1937,7 +2196,17 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index(
 }
 int32_t __cdecl aegp_get_effect_num_param_streams_v6(void* effect, int32_t* count) {
   const auto* instance = resolve_effect_instance(effect);
-  if (!instance || instance->installed_key != kAegpInstalledEffects[0].key || !count) return 4;
+  if (!instance || !count) return 4;
+  // Same answer as the version 2 entry point, for the same reason: keying on
+  // `installed_key` alone had this one saying 5 for the very handle the other
+  // said `records.size() + 1` for, because slot 0 keeps the probe's key after
+  // the loaded plug-in takes it (issue #909).
+  if (instance->loaded_plugin) {
+    *count = static_cast<int32_t>(
+                 aexcompat::worker_runtime::parameters::state().records.size()) + 1;
+    return 0;
+  }
+  if (instance->installed_key != kAegpInstalledEffects[0].key) return 4;
   *count = kAegpInstalledEffects[0].parameter_count;
   return 0;
 }
@@ -2144,7 +2413,12 @@ int32_t __cdecl aegp_set_effect_stream_value(
     int32_t plugin_id, void* stream, AegpStreamValue* value) {
   aexcompat::scene_transaction::MutationLock mutation_lock;
   ObjectSnapshot stream_identity{};
-  if (plugin_id < 0 ||
+  // A write still names its caller. `resolve_transform_stream` drops to the
+  // borrowed-handle policy for id 0, which asks only that *somebody* possesses
+  // the handle - fine for the reads that admitting 0 was about (issue #909),
+  // not for a mutation, where it would let a caller write through a stream
+  // another id opened. Nothing observed needs an id-0 write.
+  if (plugin_id <= 0 ||
       !resolve_transform_stream(stream, stream_identity, plugin_id) || !value ||
       value->stream != stream || !g_aegp_transform_stream.value_live ||
       !g_aegp_transform_stream.effect_param) return 4;
@@ -2356,9 +2630,15 @@ SceneSuiteAcquireResult scene_acquire_suite(
       g_aegp_layer_suite9[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
       g_aegp_layer_suite9[6] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
       g_aegp_layer_suite9[27] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
-    g_aegp_layer_suite9[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
-    g_aegp_layer_suite9[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
-    g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
+      // These sit outside the receipt block because every other table wires
+      // them ungated - version 14 has had `AEGP_SetLayerFlag` there since
+      // before this gate existed. That is the honest state of the gate: it is
+      // not a boundary. A plug-in that wants what the block below withholds
+      // acquires version 13 or 14 instead and gets it, in-point included.
+      // Making it one, or dropping it, is #921.
+      g_aegp_layer_suite9[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
+      g_aegp_layer_suite9[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
+      g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
       if (!render_receipt) {
         g_aegp_layer_suite9[7] = reinterpret_cast<void*>(&aegp_get_layer_name);
         g_aegp_layer_suite9[15] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
@@ -2375,9 +2655,9 @@ SceneSuiteAcquireResult scene_acquire_suite(
         g_aegp_layer_suite9[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
       }
       g_aegp_layer_suite9[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
-    g_aegp_layer_suite9[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
-    g_aegp_layer_suite9[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
-    *suite = g_aegp_layer_suite9.data();
+      g_aegp_layer_suite9[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
+      g_aegp_layer_suite9[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+      *suite = g_aegp_layer_suite9.data();
       return SceneSuiteAcquireResult::acquired;
     }
   }
@@ -2422,8 +2702,10 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_layer_suite1[16] =
         reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
     g_aegp_layer_suite1[21] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
-    // Version 5 is the one table where this sits at 26, not 27: two functions
-    // were inserted ahead of it before version 11.
+    // Version 5 is the one table where this sits at 26, not 27: the single
+    // function version 11 inserted ahead of it (`AEGP_GetLayerSourceItemID`,
+    // at slot 5) accounts for the whole shift. The other insertion that table
+    // note describes lands at 35, behind this.
     g_aegp_layer_suite1[26] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
     g_aegp_layer_suite1[27] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
     // Version 5 publishes only the comp-to-layer direction; the layer-to-comp
@@ -2650,11 +2932,27 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   std::size_t instance_index = 0;
   const auto* instance = resolve_effect_instance(effect, plugin_id, &instance_index);
   const auto* parameter = instance
-      ? find_effect_parameter(instance->installed_key, index) : nullptr;
+      ? find_effect_parameter(*instance, index) : nullptr;
   ObjectSnapshot effect_identity{};
-  if (plugin_id < 0 || !instance || !stream || !parameter ||
-      !scene_registry().resolve_possessed(
-          effect, ObjectKind::effect, plugin_id, effect_identity) ||
+  bool possessed = scene_registry().resolve_possessed(
+      effect, ObjectKind::effect, plugin_id, effect_identity);
+  // The PF-interface handle is not a registry-borrowed one, so possession
+  // has to be read off the instance it names (issue #909).
+  if (!possessed && instance && effect == &g_aegp_effect && g_aegp_effect_live &&
+      ensure_effect_identity(instance_index)) {
+    effect_identity = ObjectSnapshot{};
+    if (scene_registry().snapshot(
+            g_aegp_effect_instances[instance_index].identity, effect_identity))
+      possessed = true;
+  }
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:effect_stream index=" << index
+              << " plugin_id=" << plugin_id
+              << " instance=" << (instance != nullptr)
+              << " stream=" << (stream != nullptr)
+              << " parameter=" << (parameter != nullptr)
+              << " possessed=" << possessed << "\n" << std::flush;
+  if (plugin_id < 0 || !instance || !stream || !parameter || !possessed ||
       g_aegp_legacy_effect_stream_generation == UINT32_MAX)
     return 4;
   const auto free_slot = std::find_if(g_aegp_legacy_effect_streams.begin(),
@@ -2663,12 +2961,37 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   auto& value = *free_slot;
   const std::size_t slot = static_cast<std::size_t>(
       std::distance(g_aegp_legacy_effect_streams.begin(), free_slot));
+  // Decide whether there is a stream to open before asking the registry to
+  // borrow one. A borrowed token is drawn from a fixed pool of 128 that
+  // nothing returns - `erase_tree` marks the lease dead but does not give the
+  // slot back - so borrowing and then refusing spent one per refusal. The
+  // ordinary walk over a real plug-in's parameters hits every group marker it
+  // declares, and DeepGlow2 declares enough of them that a single walk over
+  // its 159 would have drained the pool for the rest of the worker's life
+  // (#931).
+  aexcompat::scene_model::StreamState stream_state{};
+  stream_state.value_kind = stream_value_kind(parameter->type);
+  stream_state.dimensions = parameter->type == 6 ? 4 :
+      (parameter->type == 2 ? 3 : (parameter->type == 4 ? 2 : 1));
+  stream_state.temporal_dimensions = 1;
+  if (stream_state.value_kind == aexcompat::scene_model::StreamValueKind::none)
+    return 4;
   Identity identity{};
   void* published = nullptr;
+  // A borrowed handle has to name an owner, and the registry refuses 0 for
+  // one: an object nobody possesses is exactly what its ownership checks
+  // exist to reject. An unregistered plug-in has no id of its own to give,
+  // so the host's stands in - this worker hosts one plug-in, so "possessed by
+  // the host" and "possessed by that plug-in" name the same thing, and every
+  // later check compares against what is recorded here rather than against
+  // what the caller says. Without this the whole walk #909 opened up ended at
+  // its last step, with `AEGP_GetNewEffectStreamByIndex` returning 4 for the
+  // one caller that needed it.
+  const int32_t owner_id = plugin_id == 0 ? kHostPossessionId : plugin_id;
   if (!scene_registry().create_child_borrowed(
           ObjectKind::stream, effect_identity.identity,
           static_cast<int32_t>(slot), &value, u"Effect Stream",
-          plugin_id, identity, published))
+          owner_id, identity, published))
     return 4;
   const uint32_t generation = ++g_aegp_legacy_effect_stream_generation;
   value.param_index = index;
@@ -2678,23 +3001,24 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   value.effect_instance_index = static_cast<uint32_t>(instance_index);
   value.effect_instance_generation = instance->generation;
   value.generation = generation;
-  value.owner_plugin_id = plugin_id;
+  value.owner_plugin_id = owner_id;
   value.identity = identity;
   value.handle = published;
-  aexcompat::scene_model::StreamState stream_state{};
-  stream_state.value_kind = stream_value_kind(parameter->type);
-  stream_state.dimensions = parameter->type == 6 ? 4 :
-      (parameter->type == 2 ? 3 : (parameter->type == 4 ? 2 : 1));
-  stream_state.temporal_dimensions = 1;
-  if (stream_state.value_kind ==
-          aexcompat::scene_model::StreamValueKind::none ||
-      !scene_registry().initialize_stream_state(identity, stream_state)) {
+  if (!scene_registry().initialize_stream_state(identity, stream_state)) {
     scene_registry().erase_tree(identity);
     value = {};
     return 4;
   }
   ++g_aegp_stream_acquires;
   *stream = published;
+  // The line above reports what was true before the registry was asked, so it
+  // says nothing about whether the stream opened. Saying so separately kept a
+  // refusal at the last step - the registry declining to borrow for an
+  // unregistered id - looking like a success for as long as nobody read past
+  // the first line.
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:effect_stream_opened index=" << index
+              << " owner=" << owner_id << "\n" << std::flush;
   return 0;
 }
 AegpLegacyEffectStream* legacy_effect_stream(void* stream) {
@@ -2726,16 +3050,25 @@ int32_t __cdecl aegp_get_stream_name_v2(void* stream, uint8_t, char* name) {
   auto* value = legacy_effect_stream(stream);
   if (!value || !legacy_effect_stream_parent_live(*value) || !name) return 4;
   const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  const auto* parameter = find_effect_parameter(instance, value->param_index);
   if (!parameter) return 4;
-  std::strcpy(name, parameter->name);
+  // AEGP_MAX_STREAM_NAME_SIZE is PF_MAX_EFFECT_PARAM_NAME_LEN + 1 = 32, and
+  // the caller's buffer is that size. A fixture name is a short literal, but a
+  // loaded plug-in's is whatever `add_param` read out of its PF_ParamDef, and
+  // that is `strnlen_s(name, 32)` - a name field with no terminator yields 32
+  // characters, one more than `strcpy` may write here. Truncate instead.
+  constexpr std::size_t kAegpMaxStreamNameSize = 32;
+  const std::size_t length =
+      strnlen_s(parameter->name, kAegpMaxStreamNameSize - 1);
+  std::memcpy(name, parameter->name, length);
+  name[length] = '\0';
   return 0;
 }
 int32_t __cdecl aegp_get_stream_type_v2(void* stream, int32_t* type) {
   auto* value = legacy_effect_stream(stream);
   if (!value || !legacy_effect_stream_parent_live(*value) || !type) return 4;
   const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  const auto* parameter = find_effect_parameter(instance, value->param_index);
   if (!parameter) return 4;
   *type = parameter->type;
   return 0;
@@ -2743,23 +3076,54 @@ int32_t __cdecl aegp_get_stream_type_v2(void* stream, int32_t* type) {
 int32_t __cdecl aegp_get_new_stream_value_v2(
     int32_t plugin_id, void* stream, int32_t, const AegpTime* time,
     uint8_t, AegpStreamValue* output) {
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:stream_value plugin_id=" << plugin_id
+              << " stream=" << stream << " time=" << (time != nullptr)
+              << " output=" << (output != nullptr) << "\n" << std::flush;
   auto* value = legacy_effect_stream(stream);
-  if (!value || !legacy_effect_stream_parent_live(*value) ||
-      plugin_id != value->owner_plugin_id || value->value_live || !time ||
-      time->scale == 0 || !output)
+  // `value` is null for a stale, foreign, disposed, or malformed handle, so
+  // nothing may read through it before this refusal. Hoisting the id
+  // comparison above this line dereferenced null for exactly the handles the
+  // check exists to reject, turning a diagnostic into a crash.
+  if (!value || !legacy_effect_stream_parent_live(*value)) return 4;
+  // The id has to name the caller the stream was opened for, read through the
+  // same substitution the open used: an unregistered plug-in passes 0 and its
+  // streams were borrowed under the host's id, so 0 answers for that one and
+  // for nothing else. A negative id stays malformed, as at every other entry
+  // point here (issue #909).
+  const bool owner_matches =
+      plugin_id >= 0 &&
+      (plugin_id == 0 ? kHostPossessionId : plugin_id) == value->owner_plugin_id;
+  if (!owner_matches || value->value_live || !time || time->scale == 0 ||
+      !output)
     return 4;
   const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(instance.installed_key, value->param_index);
+  const auto* parameter = find_effect_parameter(instance, value->param_index);
   if (!parameter) return 4;
   output->stream = stream;
   output->value.fill(std::byte{});
+  const std::size_t fixture_slot =
+      static_cast<std::size_t>(value->param_index - 1);
   if (value->param_index == 0) {
     std::memcpy(output->value.data(), &instance.layer, sizeof(instance.layer));
-  } else {
+  } else if (!instance.loaded_plugin &&
+             fixture_slot < instance.parameter_values.size()) {
     std::memcpy(output->value.data(),
-                instance.parameter_values[static_cast<std::size_t>(value->param_index - 1)].data(),
+                instance.parameter_values[fixture_slot].data(),
                 sizeof(instance.parameter_values[0]));
   }
+  // Anything else stays zero, which for a layer parameter is "no layer" - the
+  // answer DeepGlow2's matte path is asking for when its matte parameter is
+  // left unset.
+  //
+  // `parameter_values` has room for twelve but only the first four carry
+  // anything: the probe's defaults, seeded at scene start, plus whatever
+  // `initialize_effect_parameter_values` writes when an effect is applied. For
+  // the loaded plug-in none of that is its own, so reading it would have
+  // answered the plug-in's first four parameters with the probe's numbers
+  // under the plug-in's names and types. The records do carry each
+  // parameter's declared default, and for some types its current value; this
+  // path is not wired to them yet (#929).
   value->value_live = true;
   value->checked_out_value = output;
   if (!scene_registry().create_child(
@@ -2796,12 +3160,17 @@ int32_t __cdecl aegp_set_stream_value_v2(
     int32_t plugin_id, void* stream, AegpStreamValue* input) {
   aexcompat::scene_transaction::MutationLock mutation_lock;
   auto* value = legacy_effect_stream(stream);
-  if (!value || !legacy_effect_stream_parent_live(*value) ||
-      plugin_id != value->owner_plugin_id || !value->value_live || !input ||
+  // The same substitution the read side uses, and for the same reason: an
+  // unregistered caller's streams are recorded under the host's id, so
+  // comparing its 0 against that raw would have let it read a stream it may
+  // not write. This is still an exact match against what the open recorded.
+  if (!value || !legacy_effect_stream_parent_live(*value) || plugin_id < 0 ||
+      (plugin_id == 0 ? kHostPossessionId : plugin_id) != value->owner_plugin_id ||
+      !value->value_live || !input ||
       input->stream != stream || value->checked_out_value != input)
     return 4;
   const auto& current = g_aegp_effect_instances[value->effect_instance_index];
-  const auto* parameter = find_effect_parameter(current.installed_key, value->param_index);
+  const auto* parameter = find_effect_parameter(current, value->param_index);
   if (!parameter || value->param_index == 0 || !parameter->writable) return 4;
   std::array<double, 4> candidate{};
   std::memcpy(candidate.data(), input->value.data(), sizeof(candidate));
@@ -2862,8 +3231,37 @@ int32_t __cdecl aegp_set_dynamic_stream_flag_v2(
 }
 int32_t __cdecl aegp_get_effect_param_union_by_index_v3(
     int32_t plugin_id, void* effect, int32_t index, int32_t* type, void* param_union) {
-  if (plugin_id < 0 || !resolve_effect_instance(effect, plugin_id) || !type ||
-      !param_union || index < 0 || index >= 5) return 4;
+  const auto* instance = resolve_effect_instance(effect, plugin_id);
+  if (plugin_id < 0 || !instance || !type || !param_union || index < 0) return 4;
+  // The loaded plug-in's own definitions, not the synthetic five below. What
+  // this hands back is a PF_ParamDef's union - the definition, not a current
+  // value - and `add_param` kept the whole PF_ParamDef the plug-in declared,
+  // so the union is the part of it past the header. The type here is the
+  // PF one (`AEGP_GetEffectParamUnionByIndex` reports `PF_ParamType`), which
+  // is why it is not run through the AEGP translation the stream types use.
+  if (instance->loaded_plugin) {
+    const auto& records = aexcompat::worker_runtime::parameters::state().records;
+    if (static_cast<std::size_t>(index) > records.size()) return 4;
+    // Index 0 is the input layer, which has no declaration of its own. The
+    // fixture branch below answers it as PF_Param_LAYER with a zeroed union,
+    // and the SDK documents the range as `[0, num_param_streams)`, so
+    // refusing it here would have failed the documented walk on its first
+    // step - which is what the stream path did until it stopped.
+    if (index == 0) {
+      *type = 0;  // PF_Param_LAYER
+      std::memset(param_union, 0, kParamSize - 56);
+      ++g_aegp_effect_param_union_calls;
+      return 0;
+    }
+    const auto& record = records[static_cast<std::size_t>(index - 1)];
+    static_assert(aexcompat::worker_runtime::parameters::kDefinitionSize ==
+                  kParamSize);
+    *type = record.type;
+    std::memcpy(param_union, record.raw.data() + 56, kParamSize - 56);
+    ++g_aegp_effect_param_union_calls;
+    return 0;
+  }
+  if (index >= 5) return 4;
   // AEGP effect inspection is independent of PF selector-local parameter
   // buffers. These are definition unions for the bounded synthetic scene,
   // never current values (which belong to the Stream Suite).

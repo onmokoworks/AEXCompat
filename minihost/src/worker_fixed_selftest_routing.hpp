@@ -23,6 +23,7 @@ struct HostHooks {
 struct SimpleHooks {
   bool (*aegp_installed_effect_catalog)(){};
   bool (*aegp_layer_suite1_slots)(){};
+  bool (*aegp_loaded_plugin_effect_streams)(){};
   bool (*parameter_animation)(){};
   bool (*pf_param_utils)(){};
   bool (*pf_pre_checkout_result)(){};

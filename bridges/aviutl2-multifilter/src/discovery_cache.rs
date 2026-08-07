@@ -1462,6 +1462,18 @@ struct RenderedFrame {
     pixels: Vec<u8>,
     width: u32,
     height: u32,
+    /// The frame's top-left relative to the layer origin. A SmartFX effect that
+    /// grows its output past the layer answers with a negative one (#914).
+    ///
+    /// Carried but not yet applied: the frame is published whole, at the object's
+    /// own origin. That is right for an effect growing symmetrically (DeepGlow2's
+    /// radial glow) and wrong by these many pixels for one growing to one side.
+    /// Placing it correctly is #920; the worker is the only side that knows the
+    /// number, so it travels now rather than being recovered later.
+    #[allow(dead_code)]
+    origin_x: i32,
+    #[allow(dead_code)]
+    origin_y: i32,
 }
 
 /// The outcome of one frame, distinguishing a still-usable session from a lost

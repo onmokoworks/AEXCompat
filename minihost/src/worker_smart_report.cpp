@@ -130,7 +130,9 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       smart.runtime->pixel_format == "argb32f" ? 16 :
           (smart.runtime->pixel_format == "argb16" ? 8 : 4),
       smart.input_hash,
-      smart.output_hash, smart.rects_valid, world_debug_report_json()});
+      smart.output_hash, smart.rects_valid, world_debug_report_json(),
+      smart.empty_layer_param_checkouts,
+      smart.empty_layer_param_pixel_checkouts});
   if (in.session_mode)
     report::append_smart_session(report_snapshot, {
         in.session_frames_attempted, in.session_sequence_setup_error,
