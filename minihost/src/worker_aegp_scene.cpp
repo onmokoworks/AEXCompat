@@ -911,7 +911,18 @@ int32_t aegp_layer_index(void* layer) {
 // stack; the transform path avoided it by bounds-checking separately
 // (`build_layer_world_transform`).
 int32_t aegp_layer_attribute_index(void* layer) {
+  // One bound for all three tables, which is only right while they are the
+  // same length.
+  static_assert(std::tuple_size_v<std::remove_reference_t<
+                    decltype(g_aegp_layer_durations)>> ==
+                std::tuple_size_v<std::remove_reference_t<
+                    decltype(g_aegp_layer_in_points)>>);
+  static_assert(std::tuple_size_v<std::remove_reference_t<
+                    decltype(g_aegp_layer_flags)>> ==
+                std::tuple_size_v<std::remove_reference_t<
+                    decltype(g_aegp_layer_in_points)>>);
   const int32_t index = aegp_layer_index(layer);
+  // A negative index converts to a value past any size, so this rejects it.
   return static_cast<std::size_t>(index) < g_aegp_layer_in_points.size()
       ? index : -1;
 }
@@ -1515,9 +1526,15 @@ int32_t __cdecl aegp_dispose_effect(void* effect) {
   if (effect == &g_aegp_effect) {
     if (!g_aegp_effect_live) return 4;
     g_aegp_effect_live = false;
-    // Slot 0 goes back to being whatever `installed_key` says it is. The flag
-    // lasts exactly as long as the handle that set it.
-    g_aegp_effect_instances[0].loaded_plugin = false;
+    // `loaded_plugin` is not cleared here. It describes the instance, and
+    // disposing the handle changes nothing about the instance: `occupied` and
+    // `generation` both stay, so the streams opened through that handle are
+    // still live - `legacy_effect_stream_parent_live` asks only those two -
+    // and they would go on being answered, out of the probe fixture's table
+    // instead of the plug-in's, if the flag went away with the handle. The
+    // paths that do reuse slot 0 (`aegp_apply_effect`,
+    // `aegp_delete_layer_effect`) assign a whole instance and clear it that
+    // way.
     ++g_aegp_effect_disposes;
     return 0;
   }
@@ -1692,6 +1709,10 @@ int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
   candidate = {const_cast<void*>(layer), installed_key, inserted_order,
                flags, generation, true};
   candidate.parameter_values = source->parameter_values;
+  // A duplicate is the same effect, so it answers out of the same parameter
+  // table as its source. Left at the aggregate's default it would have said
+  // "fixture" for a copy of the loaded plug-in's own instance.
+  candidate.loaded_plugin = source->loaded_plugin;
   const std::size_t lease_index = static_cast<std::size_t>(
       std::distance(g_aegp_effect_leases.begin(), lease_slot));
   aexcompat::scene_transaction::AtomicSceneTransaction transaction(
@@ -1860,15 +1881,29 @@ const AegpEffectParameterRecord* loaded_effect_parameter(int32_t index) {
   if (aexcompat::l2_detail::extended_diag_enabled())
     std::cerr << "extended_diag:loaded_param index=" << index
               << " records=" << records.size() << "\n" << std::flush;
-  if (index < 1 || static_cast<std::size_t>(index) > records.size())
+  if (index < 0 || static_cast<std::size_t>(index) > records.size())
     return nullptr;
-  const auto& record = records[static_cast<std::size_t>(index - 1)];
   // Published through a static so the `const char*` outlives the call. One
   // live answer at a time is enough: every caller reads what it asked for
   // before asking again, and the storage is thread-local so two threads
   // asking at once do not overwrite each other.
   static thread_local std::string published_name;
   static thread_local AegpEffectParameterRecord published{};
+  // Index 0 is the input layer. It carries no PARAMS_SETUP record - the
+  // records are 1-based, which is why every other index reads `index - 1` -
+  // but AE counts it and a plug-in asking what is plugged into its input is
+  // an ordinary question. The fixture tables answer it the same way, with a
+  // LAYER_ID stream whose value `aegp_get_new_stream_value_v2` fills from the
+  // instance's layer.
+  if (index == 0) {
+    published_name = "Input";
+    published.name = published_name.c_str();
+    published.type = aegp_stream_type_for_param_type(0);  // PF_Param_LAYER
+    published.default_value = {};
+    published.writable = false;
+    return &published;
+  }
+  const auto& record = records[static_cast<std::size_t>(index - 1)];
   published_name = record.name;
   published.name = published_name.c_str();
   published.type = aegp_stream_type_for_param_type(record.type);
@@ -3005,11 +3040,20 @@ int32_t __cdecl aegp_get_new_stream_value_v2(
       static_cast<std::size_t>(value->param_index - 1);
   if (value->param_index == 0) {
     std::memcpy(output->value.data(), &instance.layer, sizeof(instance.layer));
-  } else if (fixture_slot < instance.parameter_values.size()) {
+  } else if (!instance.loaded_plugin &&
+             fixture_slot < instance.parameter_values.size()) {
     std::memcpy(output->value.data(),
                 instance.parameter_values[fixture_slot].data(),
                 sizeof(instance.parameter_values[0]));
   }
+  // `parameter_values` holds fixture defaults, seeded for the probe and
+  // written only by `initialize_effect_parameter_values` when an effect is
+  // applied. For the loaded plug-in they are not its values, and reading the
+  // first four of them would have answered its first four parameters with the
+  // probe's numbers while name and type came from the plug-in - worse than
+  // the zero every parameter past those four already reads as. This host does
+  // not model a loaded plug-in's current stream values; #929 is where that
+  // would be built.
   // Past the fixture's slots the value stays zero, which is what a stream
   // this host does not model reads as: for a layer parameter that is "no
   // layer", the answer DeepGlow2's matte path is asking for when its matte
