@@ -15,9 +15,7 @@ concurrency:
 jobs:
   source-reproducible:
     # Keep untrusted public-repository jobs off the physical workstation.
-    # Private repositories use it only while the repository variable remains
-    # explicitly enabled; setting USE_SELF_HOSTED_RUNNER=false (or deleting it)
-    # provides an emergency GitHub-hosted fallback without a workflow edit.
+    # Private repositories use it while USE_SELF_HOSTED_RUNNER stays enabled.
     runs-on: ${{ github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true' && fromJSON('["self-hosted","Windows","X64","windows-real"]') || 'windows-latest' }}
     timeout-minutes: 45
     env:
@@ -57,6 +55,7 @@ jobs:
             broker
             bridges/aviutl2
             bridges/aviutl2-multifilter
+            bridges/ymm4-native
       # Python 版は .python-version (3.12) に従う。
       # setup-uv は v8 から floating major tag (@v8) を出していないので full tag で pin する。
       - uses: astral-sh/setup-uv@v8.3.2
@@ -71,6 +70,13 @@ jobs:
         run: cargo check --manifest-path bridges/aviutl2/Cargo.toml --all-targets --locked
       - name: Check AviUtl2 multifilter bridge
         run: cargo check --manifest-path bridges/aviutl2-multifilter/Cargo.toml --all-targets --locked
+      # broker の外にある Cargo ルートは cargo check で型検査されるだけで、
+      # テストが 1 本も実行されていなかった (#899)。guest workspace は libclang を
+      # 必要とし runner に無いため #917 に分離した。
+      - name: Test AviUtl2 multifilter bridge
+        run: cargo test --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
+      - name: Test YMM4 native bridge
+        run: cargo test --manifest-path bridges/ymm4-native/Cargo.toml --locked
       # PR ゲートで minihost の C++ をコンパイルする (#884)。ae-sdk-tests の
       # 手動無効化 (#721) 以降、minihost を触る PR はコンパイルすら検証されずに
       # merge できた。minihost のビルドは AFTER_EFFECTS_SDK_ROOT を参照しない
@@ -111,8 +117,8 @@ jobs:
   # プラットフォーム非依存の bash+jq で、プロセス起動が速い ubuntu で回す
   # 方が Windows 本体 job より数倍速い (#684)。
   dev-infra:
-    # This job used Ubuntu originally, so return to it when the repository is
-    # public or the self-hosted runner variable is disabled.
+    # This job ran on Ubuntu before the self-hosted runner existed; the
+    # non-self-hosted arm keeps that path for a public repository.
     runs-on: ${{ github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true' && fromJSON('["self-hosted","Windows","X64","windows-real"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
