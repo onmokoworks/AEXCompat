@@ -211,6 +211,13 @@ jobs:
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-backwards.ps1 || exit /b 1
 
+      # Builds the dummy-workers fixtures with the same workspace feature
+      # resolution the test run uses, so no test has to shell out to
+      # `cargo build -p ...` and fight the outer build over fingerprints (#937).
+      - name: Build the workspace fixtures
+        working-directory: broker
+        run: cargo build --workspace --locked
+
       - name: Test Rust workspace
         working-directory: broker
         shell: pwsh

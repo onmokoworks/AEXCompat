@@ -45,22 +45,47 @@ mod windows_e2e {
         }
     }
 
+    /// Resolve a dummy-workers fixture binary.
+    ///
+    /// The build directory already holds it when the workspace was built as a
+    /// whole, which is what CI does. Shelling out to `cargo build -p ...` from
+    /// inside a running test resolves features for that one package instead of
+    /// the workspace, so the differing fingerprint makes cargo rebuild crates
+    /// the outer `cargo test` had just built -- and the next test flips them
+    /// back, at roughly 50s a turn (#937). Build it here only when it is
+    /// missing, which is the local `cargo test --test ...` case.
+    fn fixture_binary(name: &str) -> PathBuf {
+        static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        let path = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!("{name}.exe"));
+        if path.is_file() {
+            return path;
+        }
+        BUILT.get_or_init(|| {
+            let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+            let status = std::process::Command::new(env!("CARGO"))
+                .args(["build", "--manifest-path"])
+                .arg(manifest)
+                .args(["-p", "dummy-workers", "--bins"])
+                .status()
+                .expect("run cargo build for the dummy-workers fixtures");
+            assert!(status.success(), "dummy-workers fixture build failed");
+        });
+        assert!(
+            path.is_file(),
+            "fixture binary was not produced: {}",
+            path.display()
+        );
+        path
+    }
+
     fn build_fixture() -> PathBuf {
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(manifest)
-            .args(["-p", "dummy-workers", "--bin", "session_protocol_worker"])
-            .status()
-            .expect("run cargo build for the session protocol fixture");
-        assert!(status.success(), "session protocol fixture build failed");
-        std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("session_protocol_worker.exe")
+        fixture_binary("session_protocol_worker")
     }
 
     fn write_freshness_source_marker(root: &Path) {
@@ -159,6 +184,21 @@ mod windows_e2e {
             .collect()
     }
 
+    /// Reads a file a still-running worker writes on its own schedule, waiting
+    /// up to `budget` for it to appear. A fixed sleep would encode how fast
+    /// this machine happens to start processes; the whole suite runs in
+    /// parallel, so that number is not stable.
+    fn read_when_written(path: &std::path::Path, budget: Duration) -> Option<String> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match std::fs::read_to_string(path) {
+                Ok(contents) if !contents.is_empty() => return Some(contents),
+                _ if std::time::Instant::now() >= deadline => return None,
+                _ => std::thread::sleep(Duration::from_millis(25)),
+            }
+        }
+    }
+
     fn current_desktop_name() -> String {
         #[link(name = "kernel32")]
         unsafe extern "system" {
@@ -196,26 +236,7 @@ mod windows_e2e {
     }
 
     fn build_audio_fixture() -> PathBuf {
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(manifest)
-            .args([
-                "-p",
-                "dummy-workers",
-                "--bin",
-                "audio_session_protocol_worker",
-            ])
-            .status()
-            .expect("run cargo build for the audio session fixture");
-        assert!(status.success(), "audio session fixture build failed");
-        std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("audio_session_protocol_worker.exe")
+        fixture_binary("audio_session_protocol_worker")
     }
 
     fn temp_audio_repository() -> (TempRepository, PathBuf, String) {
@@ -2178,9 +2199,14 @@ mod windows_e2e {
             .render_frame(0, 0, &input_pattern(17))
             .expect_err("a modal worker must trip the session watchdog");
         assert!(error.to_string().contains("frame_deadline"), "{error}");
+        // The two-second deadline is short enough that it can expire while the
+        // worker is still starting up, so read the launch-time report before
+        // close() takes the job object down rather than assuming it landed.
+        let reported = read_when_written(&report_path, Duration::from_secs(20));
         let close = session.close();
-        let worker_desktop = std::fs::read_to_string(&report_path).unwrap();
         let _ = std::fs::remove_file(report_path);
+        let worker_desktop =
+            reported.unwrap_or_else(|| panic!("worker never reported its desktop; close: {close}"));
         assert!(
             worker_desktop.starts_with("AEXCompatWorkerDesktop-"),
             "worker desktop was not private: {worker_desktop:?}"

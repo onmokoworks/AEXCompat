@@ -146,6 +146,31 @@ const FRAME_HEIGHT_OFFSET: usize = 36;
 const MAX_BATCH_FRAMES: usize = 10_000;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 const CLOSE_COLLECT_TIMEOUT: Duration = Duration::from_millis(INTERACTIVE_RENDER_TIMEOUT_MS);
+
+/// How long a close-handshake write failure waits for the process object to
+/// catch up with the pipe. Windows closes a dying process's handles before it
+/// signals the process itself, so a worker that exits on its own leaves a
+/// window where the write already fails while `has_exited` still reports it
+/// running. Only a worker that is genuinely alive and unreachable pays this.
+const EXIT_SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Waits up to [`EXIT_SETTLE_TIMEOUT`] for `process` to report its exit.
+pub(crate) fn settled_as_exited(process: Option<&SecureSessionProcess>) -> bool {
+    let Some(process) = process else {
+        return false;
+    };
+    let deadline = Instant::now() + EXIT_SETTLE_TIMEOUT;
+    loop {
+        if process.has_exited() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// After a broker-initiated job termination the process is already gone;
 /// collection just drains readers and accounting.
 const POST_TERMINATION_COLLECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -2726,9 +2751,22 @@ impl RenderSession {
             if self.invalidation.is_none()
                 && !self.transport.send_message("{\"v\":1,\"type\":\"close\"}")
             {
-                self.invalidation = Some(SessionInvalidation {
-                    reason: "close_send_failed",
-                    detail: "the close message could not be delivered".into(),
+                // The liveness check above races the send: a worker that exits
+                // between the two breaks the pipe, and reporting the failed
+                // write would name the symptom instead of the exit that caused
+                // it. Re-check before deciding which of the two this was.
+                self.process_exit_observed =
+                    self.process_exit_observed || settled_as_exited(self.process.as_ref());
+                self.invalidation = Some(if self.process_exit_observed {
+                    SessionInvalidation {
+                        reason: "premature_exit",
+                        detail: "the worker exited before the close handshake".into(),
+                    }
+                } else {
+                    SessionInvalidation {
+                        reason: "close_send_failed",
+                        detail: "the close message could not be delivered".into(),
+                    }
                 });
             }
         }

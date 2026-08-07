@@ -610,9 +610,22 @@ impl AudioRenderSession {
             if self.invalidation.is_none()
                 && !self.transport.send_message("{\"v\":1,\"type\":\"close\"}")
             {
-                self.invalidation = Some(SessionInvalidation {
-                    reason: "close_send_failed",
-                    detail: "the close message could not be delivered".into(),
+                // The liveness check above races the send: a worker that exits
+                // between the two breaks the pipe, and reporting the failed
+                // write would name the symptom instead of the exit that caused
+                // it. Re-check before deciding which of the two this was.
+                self.process_exit_observed =
+                    self.process_exit_observed || super::settled_as_exited(self.process.as_ref());
+                self.invalidation = Some(if self.process_exit_observed {
+                    SessionInvalidation {
+                        reason: "premature_exit",
+                        detail: "the worker exited before the close handshake".into(),
+                    }
+                } else {
+                    SessionInvalidation {
+                        reason: "close_send_failed",
+                        detail: "the close message could not be delivered".into(),
+                    }
                 });
             }
         }

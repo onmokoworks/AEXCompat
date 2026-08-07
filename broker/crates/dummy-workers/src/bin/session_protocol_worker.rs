@@ -17,8 +17,9 @@
 //! - `bad_extent`: reports a packed byte count that disagrees with the
 //!   dimensions it reports alongside it.
 //! - `error_frame_0`: answers frame 0 with a frame-local error response.
-//! - `modal_frame`: reports its desktop, opens a MessageBox, and waits for the
-//!   broker watchdog (issue #351).
+//! - `modal_frame`: opens a MessageBox on its first frame and waits for the
+//!   broker watchdog (issue #351). The desktop report itself is written at
+//!   launch, independent of this behavior.
 //!
 //! Cluster session support (issue #405,
 //! docs/CLOSURE_SESSION_PROTOCOL_2026-07-23.md): when the launch argv carries
@@ -115,9 +116,10 @@ mod worker {
         let Some(path) = std::env::var_os("AEXCOMPAT_TEST_SESSION_DESKTOP_REPORT") else {
             return;
         };
-        let Some(name) = current_desktop_name() else {
-            return;
-        };
+        // Report the lookup failure too: a caller that sees no file at all
+        // cannot tell "never reached this point" from "ran with no readable
+        // desktop", and those want different fixes.
+        let name = current_desktop_name().unwrap_or_else(|| "<desktop-name-unavailable>".into());
         let _ = std::fs::write(path, name);
     }
 
@@ -614,6 +616,11 @@ mod worker {
             return 2;
         };
         let behavior = std::env::var("AEXCOMPAT_TEST_SESSION_BEHAVIOR").unwrap_or_default();
+        // The desktop is assigned at launch, so report it here rather than
+        // from the frame handler: a caller whose frame deadline expires before
+        // this process reaches the handler still gets to observe which desktop
+        // it ran on.
+        report_desktop_for_test();
         let (Some(request), Some(response), Some(section)) = (
             env_handle("AEXCOMPAT_RENDER_SESSION_REQUEST_HANDLE"),
             env_handle("AEXCOMPAT_RENDER_SESSION_RESPONSE_HANDLE"),
@@ -845,10 +852,7 @@ mod worker {
                 "hang_frame" => loop {
                     std::thread::sleep(std::time::Duration::from_secs(3600));
                 },
-                "modal_frame" => {
-                    report_desktop_for_test();
-                    show_modal_dialog_and_wait();
-                }
+                "modal_frame" => show_modal_dialog_and_wait(),
                 "crash_frame" => std::process::exit(0xC000_0005_u32 as i32),
                 "crash_frame_minidump" => {
                     // Same access-violation death as `crash_frame`, but first
