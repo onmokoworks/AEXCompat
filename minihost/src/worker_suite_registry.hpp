@@ -36,6 +36,7 @@ enum class UnsupportedSuiteId : uint8_t {
   aegp_layer_15,
   aegp_layer_11,
   aegp_layer_14,
+  aegp_layer_13,
   aegp_layer_5,
   aegp_collection_2,
   aegp_effect_4,

@@ -2102,6 +2102,12 @@ std::array<void*, 44> g_aegp_comp_suite12{};
 // two apart.
 std::array<void*, 39> g_aegp_layer_suite1{};
 std::array<void*, 46> g_aegp_layer_suite5{};
+// `AEGP_LayerSuite7` (acquired as version 13, frozen in AE 10.0 build 396) is
+// `AEGP_LayerSuite8` without its last two slots: version 14 appends
+// AEGP_GetLayerSamplingQuality and AEGP_SetLayerSamplingQuality and changes
+// nothing before them, so the two tables are filled the same way and only the
+// length differs (issue #890).
+std::array<void*, 48> g_aegp_layer_suite7{};
 std::array<void*, 50> g_aegp_layer_suite8{};
 std::array<void*, 53> g_aegp_layer_suite9{};
 std::array<void*, 17> g_aegp_effect_suite2{};
@@ -2116,6 +2122,7 @@ static_assert(sizeof(g_aegp_comp_suite4) == 28 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite11) == 352);
 static_assert(sizeof(g_aegp_comp_suite12) == 352);
 static_assert(sizeof(g_aegp_layer_suite5) == 368);
+static_assert(sizeof(g_aegp_layer_suite7) == 384);
 static_assert(sizeof(g_aegp_layer_suite8) == 400);
 static_assert(sizeof(g_aegp_layer_suite9) == 424);
 static_assert(sizeof(g_aegp_effect_suite4) == 176);
@@ -2313,6 +2320,29 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_layer_suite5[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
     g_aegp_layer_suite5[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
     *suite = g_aegp_layer_suite5.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
+  if (named("AEGP Layer Suite") && version == 13) {
+    // The same slots version 14 fills, in a table two entries shorter. Filled
+    // separately rather than copied from the version 14 table so each table
+    // carries its own version's diagnostic stubs: a plug-in that reaches an
+    // unimplemented slot is recorded against the version it acquired.
+    g_aegp_layer_suite7 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_13, 48>();
+    g_aegp_layer_suite7[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
+    g_aegp_layer_suite7[1] = reinterpret_cast<void*>(&aegp_get_comp_layer_by_index);
+    g_aegp_layer_suite7[2] = reinterpret_cast<void*>(&aegp_get_active_layer);
+    g_aegp_layer_suite7[3] = reinterpret_cast<void*>(&aegp_get_layer_index);
+    g_aegp_layer_suite7[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
+    g_aegp_layer_suite7[6] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
+    g_aegp_layer_suite7[7] = reinterpret_cast<void*>(&aegp_get_layer_name);
+    g_aegp_layer_suite7[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
+    g_aegp_layer_suite7[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
+    g_aegp_layer_suite7[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+    g_aegp_layer_suite7[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
+    g_aegp_layer_suite7[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
+    g_aegp_layer_suite7[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
+    *suite = g_aegp_layer_suite7.data();
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Layer Suite") && version == 14) {
