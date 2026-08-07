@@ -1,15 +1,20 @@
 #include "worker_aegp_persistent_data_suite.hpp"
 
+#include "worker_extended_diag.hpp"
 #include "worker_handle_runtime.hpp"
 
 #include <windows.h>
 
+#include <shlobj.h>
+
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 #include <cstring>
+#include <iostream>
+#include <iterator>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace aexcompat::worker_runtime::persistent_data {
@@ -76,15 +81,26 @@ bool copy_c_string_seh(const A_char* source, char* output, std::size_t bound,
   return false;
 }
 
-// Reads one plug-in-supplied, NUL-terminated string of at most `Bound` bytes.
+// The staging buffer the bounded copy above writes into. It is reused rather
+// than allocated per call: at `kMaxValueBytes` it is a megabyte, and a plug-in
+// may read a string value once per parameter per frame. Thread-local because
+// the suite is reachable from whatever thread the plug-in calls on, and this
+// buffer is held across the SEH copy without the blob mutex.
+std::vector<char>& read_staging(std::size_t bound) {
+  static thread_local std::vector<char> buffer;
+  if (buffer.size() < bound + 1) buffer.resize(bound + 1);
+  return buffer;
+}
+
+// Reads one plug-in-supplied, NUL-terminated string of at most `bound` bytes.
 // Returns false for an unreadable, unterminated or over-long one, which every
 // entry point turns into A_Err_PARAMETER.
-template <std::size_t Bound>
-bool read_c_string(const A_char* source, std::string& output) {
-  std::array<char, Bound + 1> buffer{};
+bool read_c_string(const A_char* source, std::size_t bound,
+                   std::string& output) {
   std::size_t length{};
-  if (!copy_c_string_seh(source, buffer.data(), Bound, length)) return false;
   try {
+    std::vector<char>& buffer = read_staging(bound);
+    if (!copy_c_string_seh(source, buffer.data(), bound, length)) return false;
     output.assign(buffer.data(), length);
     return true;
   } catch (...) {
@@ -132,7 +148,7 @@ bool write_bytes_seh(void* destination, const void* source,
 // key is refused - empty, over the bound (already handled by the copy), or
 // carrying a control byte that would make a recorded name unreadable.
 bool read_key(const A_char* source, std::string& output) {
-  if (!read_c_string<kMaxKeyBytes>(source, output)) return false;
+  if (!read_c_string(source, kMaxKeyBytes, output)) return false;
   if (output.empty()) return false;
   return std::none_of(output.begin(), output.end(), [](char character) {
     const auto value = static_cast<unsigned char>(character);
@@ -166,36 +182,74 @@ void recount(Blob& state) noexcept {
   state.telemetry.stored_bytes = state.stored_bytes;
 }
 
-// Writes one value, replacing whatever was there. Fails closed when the blob
-// would grow past a bound: a refused write leaves the previous value intact,
-// so a plug-in cannot empty an entry by overrunning the ceiling.
+// What one entry costs against `kMaxBlobBytes`: its own name plus its value.
+// Keys count because a plug-in chooses them too, and 262144 entries of
+// 255-byte keys is not a blob this host should hold just because every value
+// is empty.
+std::size_t entry_bytes(const Entry& entry) noexcept {
+  return entry.key.size() + entry.bytes.size();
+}
+
+// Writes one value, replacing whatever was there.
+//
+// Every bound is checked and every allocation that can throw is done before
+// anything in the blob is touched, so a refused or failed write leaves the
+// blob exactly as it was. Getting this wrong is not a lost write: a half-
+// applied store would leave an empty section that `AEGP_DeleteEntry` can never
+// reach (it only prunes a section it removed an entry from), or a
+// `stored_bytes` total above the real one, which would shrink the effective
+// ceiling for the rest of the process.
 A_Err store(Blob& state, const std::string& section_key,
             const std::string& value_key, ValueKind kind,
             const unsigned char* bytes, std::size_t size) {
   if (size > kMaxValueBytes) return kErrAlloc;
+  Section* section = find_section(state, section_key);
+  Entry* const entry = section ? find_entry(*section, value_key) : nullptr;
+  const std::size_t previous = entry ? entry_bytes(*entry) : 0;
+  const std::size_t added = value_key.size() + size +
+      (section ? 0 : section_key.size());
+  if (!section && state.sections.size() >= kMaxSections) return kErrAlloc;
+  if (!entry && section && section->entries.size() >= kMaxKeysPerSection)
+    return kErrAlloc;
+  if (added > kMaxBlobBytes ||
+      state.stored_bytes - previous > kMaxBlobBytes - added)
+    return kErrAlloc;
+
+  std::vector<unsigned char> value;
   try {
-    Section* section = find_section(state, section_key);
-    if (!section) {
-      if (state.sections.size() >= kMaxSections) return kErrAlloc;
-      state.sections.push_back(Section{section_key, {}});
-      section = &state.sections.back();
-    }
-    Entry* entry = find_entry(*section, value_key);
-    const std::size_t previous = entry ? entry->bytes.size() : 0;
-    if (state.stored_bytes - previous > kMaxBlobBytes - size) return kErrAlloc;
-    if (!entry) {
-      if (section->entries.size() >= kMaxKeysPerSection) return kErrAlloc;
-      section->entries.push_back(Entry{value_key, kind, {}});
-      entry = &section->entries.back();
-    }
-    entry->kind = kind;
-    entry->bytes.assign(bytes, bytes + size);
-    state.stored_bytes = state.stored_bytes - previous + size;
-    recount(state);
-    return kErrNone;
+    value.assign(bytes, bytes + size);
   } catch (...) {
     return kErrAlloc;
   }
+
+  if (entry) {
+    // Existing entry: every step from here is noexcept.
+    entry->kind = kind;
+    entry->bytes = std::move(value);
+    state.stored_bytes = state.stored_bytes - previous + added;
+    recount(state);
+    return kErrNone;
+  }
+  const bool created_section = section == nullptr;
+  try {
+    if (created_section) {
+      state.sections.push_back(Section{section_key, {}});
+      section = &state.sections.back();
+    }
+    try {
+      section->entries.push_back(Entry{value_key, kind, std::move(value)});
+    } catch (...) {
+      // `push_back` leaves the vector unchanged when the element throws, so
+      // undoing the section this call added is the whole rollback.
+      if (created_section) state.sections.pop_back();
+      throw;
+    }
+  } catch (...) {
+    return kErrAlloc;
+  }
+  state.stored_bytes += added;
+  recount(state);
+  return kErrNone;
 }
 
 // The SDK's documented getter contract: a key that is not found gets the
@@ -212,48 +266,84 @@ Lookup lookup(Blob& state, const std::string& section_key,
   if (!entry) return Lookup::absent;
   if (entry->kind != kind) {
     ++state.telemetry.kind_mismatches;
+    if (aexcompat::l2_detail::extended_diag_enabled())
+      std::cerr << "extended_diag:persistent_data kind_mismatch stored="
+                << static_cast<int>(entry->kind)
+                << " requested=" << static_cast<int>(kind) << "\n"
+                << std::flush;
     return Lookup::kind_mismatch;
   }
   *found = entry;
   return Lookup::hit;
 }
 
-std::u16string prefs_directory() {
-  // AE answers with its preferences folder. This host is not AE and must not
-  // hand a plug-in AE's own preferences tree, where a write would land next to
-  // (or on top of) the application's real settings. It answers with a
-  // directory of its own instead, created on demand so the path a plug-in
-  // receives is one it can actually write to.
-  wchar_t* base = nullptr;
-  std::size_t length = 0;
-  if (_wdupenv_s(&base, &length, L"APPDATA") != 0 || !base || length == 0) {
-    std::free(base);
-    // Documented as valid: "empty string if no file".
-    return std::u16string();
+// The directory a plug-in is handed for its own preference files.
+//
+// AE answers with its preferences folder. This host is not AE and must not
+// hand a plug-in AE's own preferences tree, where a write would land next to
+// (or on top of) the application's real settings, so it answers with a
+// directory of its own, created on demand so the path is one the caller can
+// actually write to.
+//
+// Resolved through SHGetKnownFolderPath rather than %APPDATA%: the plug-in
+// shares this process, so it can rewrite that environment variable and choose
+// where the host creates a directory. The known-folder API reads the user's
+// profile instead of a value the plug-in can reach.
+//
+// Whether the trailing separator belongs in the answer is unverified. AE's own
+// callers are assumed to append a leaf to what they get back, which is why it
+// is included, but no observation of AE confirms it and the SDK header says
+// only "empty string if no file". Tracked as an AE-oracle question rather than
+// stated as fact (issue #886).
+std::wstring resolve_prefs_directory() {
+  PWSTR roaming = nullptr;
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE,
+                                  nullptr, &roaming)) ||
+      !roaming) {
+    if (roaming) CoTaskMemFree(roaming);
+    return std::wstring();
   }
-  std::wstring path(base);
-  std::free(base);
+  std::wstring path;
+  try {
+    path.assign(roaming);
+  } catch (...) {
+    CoTaskMemFree(roaming);
+    return std::wstring();
+  }
+  CoTaskMemFree(roaming);
   while (!path.empty() && (path.back() == L'\\' || path.back() == L'/'))
     path.pop_back();
-  if (path.empty()) return std::u16string();
-  path += L"\\AEXCompat";
-  if (!CreateDirectoryW(path.c_str(), nullptr) &&
-      GetLastError() != ERROR_ALREADY_EXISTS)
-    return std::u16string();
-  path += L"\\Preferences";
-  if (!CreateDirectoryW(path.c_str(), nullptr) &&
-      GetLastError() != ERROR_ALREADY_EXISTS)
-    return std::u16string();
-  // AE's callers append a leaf to what they get back, so the separator is part
-  // of the answer.
-  path += L'\\';
-  static_assert(sizeof(wchar_t) == sizeof(char16_t));
-  return std::u16string(reinterpret_cast<const char16_t*>(path.c_str()),
-                        path.size());
+  if (path.empty()) return std::wstring();
+  try {
+    path += L"\\AEXCompat";
+    if (!CreateDirectoryW(path.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS)
+      return std::wstring();
+    path += L"\\Preferences";
+    if (!CreateDirectoryW(path.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS)
+      return std::wstring();
+    path += L'\\';
+  } catch (...) {
+    return std::wstring();
+  }
+  return path;
+}
+
+// Resolved once. The directory does not move for the life of the worker, and
+// this keeps the filesystem calls out of the blob mutex and off the per-call
+// path. An empty result is cached too: a profile this host cannot resolve or
+// create under will not start working later in the same process.
+const std::wstring& prefs_directory() {
+  static const std::wstring path = resolve_prefs_directory();
+  return path;
 }
 
 A_Err reject(Blob& state, A_Err error) noexcept {
   ++state.telemetry.rejected_calls;
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:persistent_data rejected error=" << error << "\n"
+              << std::flush;
   return error;
 }
 
@@ -438,10 +528,14 @@ A_Err __cdecl get_data(AEGP_PersistentBlobH handle, const A_char* section_key,
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string key;
-  if (!valid_blob(handle) || !buffer || data_size == 0 ||
-      data_size > kMaxValueBytes || !read_key(section_key, section) ||
+  // A zero-length read is admitted, not refused: AEGP_SetData accepts a
+  // zero-length write, so refusing the matching read would make a value this
+  // suite can store one it cannot hand back. It writes nothing and still needs
+  // a valid buffer.
+  if (!valid_blob(handle) || !buffer || !read_key(section_key, section) ||
       !read_key(value_key, key))
     return reject(state, kErrParameter);
+  if (data_size > kMaxValueBytes) return reject(state, kErrAlloc);
   ++state.telemetry.get_calls;
 
   std::vector<unsigned char> bytes;
@@ -488,7 +582,7 @@ A_Err __cdecl get_string(AEGP_PersistentBlobH handle,
   // Documented: a NULL default means '\0'. A default that is unreadable or
   // past the string bound is a refused call, not a truncated one.
   std::string text;
-  if (default_value && !read_c_string<kMaxStringBytes>(default_value, text))
+  if (default_value && !read_c_string(default_value, kMaxValueBytes, text))
     return reject(state, kErrParameter);
 
   const Entry* entry = nullptr;
@@ -615,10 +709,12 @@ A_Err __cdecl set_data(AEGP_PersistentBlobH handle, const A_char* section_key,
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string key;
-  if (!valid_blob(handle) || data_size > kMaxValueBytes ||
-      (data_size != 0 && !data) || !read_key(section_key, section) ||
-      !read_key(value_key, key))
+  if (!valid_blob(handle) || (data_size != 0 && !data) ||
+      !read_key(section_key, section) || !read_key(value_key, key))
     return reject(state, kErrParameter);
+  // Over the value ceiling is A_Err_ALLOC, the same answer the handle form and
+  // `store` give: it is a size this host will not hold, not a malformed call.
+  if (data_size > kMaxValueBytes) return reject(state, kErrAlloc);
   ++state.telemetry.set_calls;
 
   std::vector<unsigned char> bytes;
@@ -647,7 +743,7 @@ A_Err __cdecl set_string(AEGP_PersistentBlobH handle,
     return reject(state, kErrParameter);
   // A NULL string is an empty value, which is what the getter's NULL default
   // writes too.
-  if (text && !read_c_string<kMaxStringBytes>(text, value))
+  if (text && !read_c_string(text, kMaxValueBytes, value))
     return reject(state, kErrParameter);
   ++state.telemetry.set_calls;
   const A_Err stored =
@@ -722,16 +818,28 @@ A_Err __cdecl delete_entry(AEGP_PersistentBlobH handle,
 }
 
 A_Err __cdecl get_prefs_directory(AEGP_MemHandle* path) {
+  // Resolved outside the blob mutex; the first call does the filesystem work
+  // and every later one reads the cached result.
+  const std::wstring& directory = prefs_directory();
+  std::u16string text;
+  bool converted = true;
+  try {
+    static_assert(sizeof(wchar_t) == sizeof(char16_t));
+    text.assign(reinterpret_cast<const char16_t*>(directory.c_str()),
+                directory.size());
+  } catch (...) {
+    converted = false;
+  }
+
   Blob& state = blob();
   std::lock_guard<std::mutex> lock(state.mutex);
   if (!path) return reject(state, kErrParameter);
   ++state.telemetry.prefs_directory_calls;
-  std::u16string text;
-  try {
-    text = prefs_directory();
-  } catch (...) {
-    return reject(state, kErrAlloc);
-  }
+  if (!converted) return reject(state, kErrAlloc);
+  // An empty answer is what the SDK documents for "no file", so it is not a
+  // refusal - but it means a plug-in got nowhere to write, which is worth a
+  // count of its own rather than looking like a normal call.
+  if (text.empty()) ++state.telemetry.prefs_directory_unavailable;
   void* handle = nullptr;
   if (handles::make_utf16_handle(text, "persistent data prefs directory",
                                  &handle) != 0)
@@ -752,8 +860,6 @@ const Suite3 g_suite3{
     &set_fp_long,          &delete_entry,          &get_prefs_directory};
 
 }  // namespace
-
-const Suite3* suite3() noexcept { return &g_suite3; }
 
 const void* provide_suite3(void*) noexcept { return &g_suite3; }
 
@@ -886,6 +992,78 @@ bool selftest() {
       empty_handle != nullptr)
     return false;
 
+  // A default handle is read and copied, never adopted: it is still the
+  // caller's to lock and free after the call, and what lands in the blob is a
+  // copy of its bytes.
+  const unsigned char default_payload[3] = {7, 8, 9};
+  void* default_handle = nullptr;
+  if (handles::new_aegp_mem_handle(1, "selftest default",
+                                   sizeof(default_payload), 1,
+                                   &default_handle) != 0 ||
+      !default_handle)
+    return false;
+  {
+    void* default_data = nullptr;
+    if (handles::lock_aegp_mem_handle(default_handle, &default_data) != 0 ||
+        !default_data)
+      return false;
+    std::memcpy(default_data, default_payload, sizeof(default_payload));
+    handles::unlock_aegp_mem_handle(default_handle);
+  }
+  void* defaulted = nullptr;
+  if (suite.AEGP_GetDataHandle(1, handle, "sec", "from-default",
+                               default_handle, &defaulted) != kErrNone ||
+      !defaulted || defaulted == default_handle)
+    return false;
+  {
+    uint32_t size = 0;
+    void* data = nullptr;
+    const bool matches =
+        handles::get_aegp_mem_handle_size(defaulted, &size) == 0 &&
+        size == sizeof(default_payload) &&
+        handles::lock_aegp_mem_handle(defaulted, &data) == 0 && data &&
+        std::memcmp(data, default_payload, sizeof(default_payload)) == 0;
+    handles::unlock_aegp_mem_handle(defaulted);
+    handles::free_aegp_mem_handle(defaulted);
+    if (!matches) return false;
+  }
+  // Not adopted: the caller's handle is still live and still holds its bytes.
+  {
+    uint32_t size = 0;
+    void* data = nullptr;
+    const bool still_owned =
+        handles::get_aegp_mem_handle_size(default_handle, &size) == 0 &&
+        size == sizeof(default_payload) &&
+        handles::lock_aegp_mem_handle(default_handle, &data) == 0 && data &&
+        std::memcmp(data, default_payload, sizeof(default_payload)) == 0;
+    handles::unlock_aegp_mem_handle(default_handle);
+    if (!still_owned) return false;
+  }
+  // The handle setter takes the same route: bytes copied out, caller keeps its
+  // handle.
+  if (suite.AEGP_SetDataHandle(handle, "sec", "set-handle", default_handle) !=
+      kErrNone)
+    return false;
+  {
+    unsigned char echoed[3] = {};
+    if (suite.AEGP_GetData(handle, "sec", "set-handle", sizeof(echoed), nullptr,
+                           echoed) != kErrNone ||
+        std::memcmp(echoed, default_payload, sizeof(default_payload)) != 0)
+      return false;
+  }
+  if (handles::free_aegp_mem_handle(default_handle) != 0) return false;
+  // A handle this host's memory suite never issued is refused, not read.
+  if (suite.AEGP_SetDataHandle(handle, "sec", "foreign",
+                               static_cast<void*>(&foreign)) != kErrParameter)
+    return false;
+  {
+    void* rejected = nullptr;
+    if (suite.AEGP_GetDataHandle(1, handle, "sec", "foreign-default",
+                                 static_cast<void*>(&foreign),
+                                 &rejected) != kErrParameter)
+      return false;
+  }
+
   // Enumeration walks what was written, in write order.
   if (suite.AEGP_GetNumSections(handle, &count) != kErrNone || count != 1)
     return false;
@@ -901,46 +1079,199 @@ bool selftest() {
   if (suite.AEGP_GetSectionKeyByIndex(handle, 1, sizeof(name), name) !=
       kErrParameter)
     return false;
+  static constexpr const char* kWrittenKeys[] = {
+      "num", "real", "text", "bytes", "empty", "from-default", "set-handle"};
+  static constexpr A_long kWrittenKeyCount =
+      static_cast<A_long>(std::size(kWrittenKeys));
   A_long keys = 0;
-  if (suite.AEGP_GetNumKeys(handle, "sec", &keys) != kErrNone || keys != 5)
+  if (suite.AEGP_GetNumKeys(handle, "sec", &keys) != kErrNone ||
+      keys != kWrittenKeyCount)
     return false;
   if (suite.AEGP_GetNumKeys(handle, "absent", &keys) != kErrNone || keys != 0)
     return false;
-  if (suite.AEGP_GetValueKeyByIndex(handle, "sec", 0, sizeof(name), name) !=
-          kErrNone ||
-      std::strcmp(name, "num") != 0)
+  char key_name[16] = {};
+  for (A_long index = 0; index < kWrittenKeyCount; ++index)
+    if (suite.AEGP_GetValueKeyByIndex(handle, "sec", index, sizeof(key_name),
+                                      key_name) != kErrNone ||
+        std::strcmp(key_name, kWrittenKeys[index]) != 0)
+      return false;
+  if (suite.AEGP_GetValueKeyByIndex(handle, "sec", kWrittenKeyCount,
+                                    sizeof(key_name), key_name) != kErrParameter)
     return false;
-  if (suite.AEGP_GetValueKeyByIndex(handle, "sec", 5, sizeof(name), name) !=
-      kErrParameter)
+
+  // Sections enumerate in write order too, which one section could not show.
+  if (suite.AEGP_SetLong(handle, "later", "n", 1) != kErrNone) return false;
+  if (suite.AEGP_GetNumSections(handle, &count) != kErrNone || count != 2)
+    return false;
+  char second[8] = {};
+  if (suite.AEGP_GetSectionKeyByIndex(handle, 1, sizeof(second), second) !=
+          kErrNone ||
+      std::strcmp(second, "later") != 0)
+    return false;
+  if (suite.AEGP_DeleteEntry(handle, "later", "n") != kErrNone) return false;
+  if (suite.AEGP_GetNumSections(handle, &count) != kErrNone || count != 1)
     return false;
 
   // Deleting is not an error when the entry is absent, and a section that
   // loses its last key stops being enumerable.
   if (suite.AEGP_DeleteEntry(handle, "sec", "absent") != kErrNone) return false;
   if (suite.AEGP_DeleteEntry(handle, "absent", "num") != kErrNone) return false;
-  for (const char* key : {"num", "real", "text", "bytes", "empty"})
+  for (const char* key : kWrittenKeys)
     if (suite.AEGP_DeleteEntry(handle, "sec", key) != kErrNone) return false;
   if (suite.AEGP_GetNumSections(handle, &count) != kErrNone || count != 0)
     return false;
 
-  // Malformed keys are refused before anything is stored.
+  // Malformed keys are refused before anything is stored: empty, absent, over
+  // the length bound, or carrying a control byte.
   if (suite.AEGP_SetLong(handle, "", "num", 1) != kErrParameter) return false;
   if (suite.AEGP_SetLong(handle, "sec", nullptr, 1) != kErrParameter)
     return false;
+  if (suite.AEGP_SetLong(handle, "se\tc", "num", 1) != kErrParameter)
+    return false;
+  {
+    std::string over_long(kMaxKeyBytes + 1, 'k');
+    if (suite.AEGP_SetLong(handle, over_long.c_str(), "num", 1) != kErrParameter)
+      return false;
+    std::string at_bound(kMaxKeyBytes, 'k');
+    if (suite.AEGP_SetLong(handle, at_bound.c_str(), "num", 1) != kErrNone)
+      return false;
+    if (suite.AEGP_DeleteEntry(handle, at_bound.c_str(), "num") != kErrNone)
+      return false;
+  }
+  if (suite.AEGP_GetNumSections(handle, &count) != kErrNone || count != 0)
+    return false;
+
+  // An unreadable pointer is a refused call, not an access violation. The
+  // guard page is never written to, only handed to the suite.
+  {
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    auto* const guard = static_cast<char*>(
+        VirtualAlloc(nullptr, info.dwPageSize, MEM_COMMIT | MEM_RESERVE,
+                     PAGE_NOACCESS));
+    if (!guard) return false;
+    const bool refused =
+        suite.AEGP_SetLong(handle, guard, "num", 1) == kErrParameter &&
+        suite.AEGP_SetString(handle, "sec", "text", guard) == kErrParameter &&
+        suite.AEGP_SetData(handle, "sec", "bytes", 4, guard) == kErrParameter &&
+        suite.AEGP_GetLong(handle, "sec", "num", 1,
+                           reinterpret_cast<A_long*>(guard)) == kErrParameter;
+    VirtualFree(guard, 0, MEM_RELEASE);
+    if (!refused) return false;
+    // The unwritable-output case above still wrote the default through first,
+    // which is the documented getter contract, so it leaves an entry behind.
+    if (suite.AEGP_DeleteEntry(handle, "sec", "num") != kErrNone) return false;
+    if (suite.AEGP_GetNumSections(handle, &count) != kErrNone || count != 0)
+      return false;
+  }
+
+  // Bounds. Over the value ceiling is refused, and a refused write leaves the
+  // blob exactly as it was - no empty section, no inflated byte total.
+  {
+    std::vector<unsigned char> over(kMaxValueBytes + 1, 0xab);
+    if (suite.AEGP_SetData(handle, "big", "value",
+                           static_cast<A_u_long>(over.size()),
+                           over.data()) != kErrAlloc)
+      return false;
+    if (suite.AEGP_GetNumSections(handle, &count) != kErrNone || count != 0)
+      return false;
+  }
+  {
+    // Fill the blob to its ceiling one maximum-sized value at a time, then
+    // check that the write which does not fit is refused and changes nothing.
+    const std::vector<unsigned char> block(kMaxValueBytes, 0xcd);
+    bool refused_once = false;
+    for (std::size_t index = 0; index < kMaxBlobBytes / kMaxValueBytes + 1;
+         ++index) {
+      const std::string key = "v" + std::to_string(index);
+      const A_Err error = suite.AEGP_SetData(
+          handle, "fill", key.c_str(), static_cast<A_u_long>(block.size()),
+          block.data());
+      if (error == kErrAlloc) {
+        refused_once = true;
+        A_long filled = 0;
+        if (suite.AEGP_GetNumKeys(handle, "fill", &filled) != kErrNone ||
+            filled != static_cast<A_long>(index))
+          return false;
+        break;
+      }
+      if (error != kErrNone) return false;
+    }
+    if (!refused_once) return false;
+    A_long filled = 0;
+    if (suite.AEGP_GetNumKeys(handle, "fill", &filled) != kErrNone) return false;
+    for (A_long index = 0; index < filled; ++index)
+      if (suite.AEGP_DeleteEntry(handle, "fill",
+                                 ("v" + std::to_string(index)).c_str()) !=
+          kErrNone)
+        return false;
+    if (suite.AEGP_GetNumSections(handle, &count) != kErrNone || count != 0)
+      return false;
+  }
+  {
+    // The per-section key ceiling, and a section ceiling reached one section at
+    // a time. Both refuse without leaving a half-written section behind.
+    for (std::size_t index = 0; index < kMaxKeysPerSection; ++index)
+      if (suite.AEGP_SetLong(handle, "keys", ("k" + std::to_string(index)).c_str(),
+                             1) != kErrNone)
+        return false;
+    if (suite.AEGP_SetLong(handle, "keys", "overflow", 1) != kErrAlloc)
+      return false;
+    A_long stored_keys = 0;
+    if (suite.AEGP_GetNumKeys(handle, "keys", &stored_keys) != kErrNone ||
+        stored_keys != static_cast<A_long>(kMaxKeysPerSection))
+      return false;
+    // "keys" is already one section, so the ceiling is reached after
+    // kMaxSections - 1 more.
+    for (std::size_t index = 0; index + 1 < kMaxSections; ++index)
+      if (suite.AEGP_SetLong(handle, ("s" + std::to_string(index)).c_str(), "n",
+                             1) != kErrNone)
+        return false;
+    if (suite.AEGP_SetLong(handle, "overflow", "n", 1) != kErrAlloc) return false;
+    if (suite.AEGP_GetNumSections(handle, &count) != kErrNone ||
+        count != static_cast<A_long>(kMaxSections))
+      return false;
+    // A refused section leaves no empty section behind, which enumeration
+    // would otherwise show as a section with no keys.
+    for (A_long index = 0; index < count; ++index) {
+      char section_name[kMaxKeyBytes + 1] = {};
+      A_long section_keys = 0;
+      if (suite.AEGP_GetSectionKeyByIndex(handle, index, sizeof(section_name),
+                                          section_name) != kErrNone ||
+          suite.AEGP_GetNumKeys(handle, section_name, &section_keys) !=
+              kErrNone ||
+          section_keys == 0)
+        return false;
+    }
+  }
+
+  // The two counters that record where this host can answer differently from
+  // AE, checked before the reset clears them: the type mismatch above, and the
+  // defaults the getters wrote through.
+  {
+    const Telemetry before_reset = telemetry();
+    if (before_reset.kind_mismatches == 0 ||
+        before_reset.defaults_written == 0 || before_reset.get_calls == 0 ||
+        before_reset.set_calls == 0 || before_reset.delete_calls == 0)
+      return false;
+  }
+  reset_for_selftest();
   if (suite.AEGP_GetNumSections(handle, &count) != kErrNone || count != 0)
     return false;
 
   void* prefs = nullptr;
   if (suite.AEGP_GetPrefsDirectory(&prefs) != kErrNone || !prefs) return false;
-  handles::free_aegp_mem_handle(prefs);
+  if (handles::free_aegp_mem_handle(prefs) != 0) return false;
   if (suite.AEGP_GetPrefsDirectory(nullptr) != kErrParameter) return false;
 
   const Telemetry counters = telemetry();
-  if (counters.kind_mismatches == 0 || counters.defaults_written == 0 ||
-      counters.rejected_calls == 0 || counters.prefs_directory_calls != 1 ||
+  if (counters.rejected_calls == 0 || counters.prefs_directory_calls != 1 ||
       counters.sections != 0 || counters.keys != 0 ||
       counters.stored_bytes != 0)
     return false;
+  // Every handle this run created was freed by it: the suite hands out
+  // caller-owned handles and must not keep one alive behind the caller's back.
+  if (!handles::aegp_memory_balanced()) return false;
 
   reset_for_selftest();
   return true;

@@ -53,14 +53,21 @@ inline constexpr int32_t kSuiteVersion3 = 3;
 // turns a runaway or malformed caller into a refused call with a diagnostic
 // instead of unbounded host allocation. The values are generous next to what
 // a preferences blob holds and small next to the worker's memory limit.
+//
+// A string value gets the same ceiling as an opaque one: a plug-in serializes
+// state into either, and refusing at a lower bound on the string side would be
+// a host-only limit AE does not have. Only keys are held to a shorter bound,
+// because a key is a name.
 inline constexpr std::size_t kMaxKeyBytes = 255;
-// String values are not keys: a plug-in stores serialized state in them, so
-// they get their own, larger ceiling. It stays small enough that a bounded
-// read of one fits on the stack.
-inline constexpr std::size_t kMaxStringBytes = 8192;
 inline constexpr std::size_t kMaxSections = 256;
 inline constexpr std::size_t kMaxKeysPerSection = 1024;
 inline constexpr std::size_t kMaxValueBytes = 1u << 20;
+// Counts the stored key and value bytes, not the containers holding them: the
+// per-entry `std::string`/`std::vector` overhead and the allocator's own are
+// outside it. With every other bound at its ceiling those add tens of MB on
+// top, which the worker's Job Object memory limit is what actually contains.
+// This bound exists to stop one plug-in filling the blob, not to be an
+// accounting of the process's footprint.
 inline constexpr std::size_t kMaxBlobBytes = 16u << 20;
 
 // How a value was written. AE stores its blob as text, so its Get/Set pairs
@@ -152,12 +159,14 @@ static_assert(offsetof(Suite3, AEGP_SetFpLong) == 15 * sizeof(void*));
 static_assert(offsetof(Suite3, AEGP_DeleteEntry) == 16 * sizeof(void*));
 static_assert(offsetof(Suite3, AEGP_GetPrefsDirectory) == 17 * sizeof(void*));
 
-const Suite3* suite3() noexcept;
 const void* provide_suite3(void*) noexcept;
 
-// Diagnostics for the worker report: how the blob was driven, and every
-// refusal, so a plug-in whose preferences round-trip differently from AE
-// leaves an observation behind instead of only a wrong pixel.
+// How the blob was driven, and every refusal. A kind mismatch and a refused
+// call are the two ways this host can answer a plug-in differently from AE, so
+// each is counted here and, when AEXCOMPAT_EXTENDED_DIAG is set, written to
+// stderr as it happens. The counters are not in the worker report: nothing
+// downstream decides anything on them, and the per-call stderr line is what
+// makes a diverging preferences round-trip reproducible.
 struct Telemetry {
   uint32_t get_calls{};
   uint32_t set_calls{};
@@ -166,8 +175,10 @@ struct Telemetry {
   uint32_t kind_mismatches{};
   uint32_t rejected_calls{};
   uint32_t prefs_directory_calls{};
+  uint32_t prefs_directory_unavailable{};
   uint32_t sections{};
   uint32_t keys{};
+  // Key plus value bytes, matching what `kMaxBlobBytes` bounds.
   uint64_t stored_bytes{};
 };
 
