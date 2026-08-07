@@ -6,11 +6,6 @@ import subprocess
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
-REGISTRY = ROOT / "minihost" / "src" / "worker_aegp_render_options.cpp"
-STAGED_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
-RENDER_SELFTESTS = ROOT / "minihost" / "src" / "worker_aegp_render_selftests.cpp"
-ITEM_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_item_render_runtime.cpp"
 
 def _worker() -> pathlib.Path | None:
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")

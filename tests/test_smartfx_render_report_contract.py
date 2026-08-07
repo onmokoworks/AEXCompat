@@ -9,7 +9,6 @@ from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "contracts/aex/smartfx_render_report.schema.json"
-SMART_SOURCE = ROOT / "broker/crates/broker/src/smart.rs"
 
 
 def _run(classification, output_sha256, smart_render_error, guard_bytes_intact, rect):

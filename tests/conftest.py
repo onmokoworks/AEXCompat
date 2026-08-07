@@ -22,12 +22,6 @@ TEST_CLASSES = (
         "requires AFTER_EFFECTS_SDK_ROOT and a native build toolchain",
     ),
     (
-        ROOT / "tests" / "prebuilt_required_tests.txt",
-        "prebuilt_required",
-        "--run-prebuilt-tests",
-        "requires a named native build artifact produced before pytest",
-    ),
-    (
         ROOT / "tests" / "built_artifact_tests.txt",
         "built_artifact",
         "--run-built-artifact-tests",
@@ -214,12 +208,6 @@ def pytest_addoption(parser):
         action="store_true",
         default=False,
         help="run tests requiring the installed After Effects SDK",
-    )
-    parser.addoption(
-        "--run-prebuilt-tests",
-        action="store_true",
-        default=False,
-        help="run tests requiring prebuilt native artifacts",
     )
     parser.addoption(
         "--run-built-artifact-tests",

@@ -4,8 +4,6 @@ import pathlib
 import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-RECEIPTS = ROOT / "minihost" / "src" / "worker_render_receipts.cpp"
-WORLD_SELFTESTS = ROOT / "minihost" / "src" / "worker_aegp_world_selftests.cpp"
 
 def _worker() -> pathlib.Path | None:
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")

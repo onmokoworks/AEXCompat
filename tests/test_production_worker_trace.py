@@ -10,7 +10,6 @@ from tools.trace_contract_validator import EVENT_KINDS, validate_event
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MINIHOST = ROOT / "minihost"
 TRACE_SELFTEST = ROOT / "target" / "instruments-build" / "trace_writer_selftest.exe"
 if not TRACE_SELFTEST.exists():
     TRACE_SELFTEST = next(ROOT.glob("target/**/trace_writer_selftest.exe"), TRACE_SELFTEST)

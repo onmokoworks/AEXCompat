@@ -1,1 +1,0 @@
-# Tests that execute a native artifact produced by a separate, documented build step.

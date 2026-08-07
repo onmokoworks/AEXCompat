@@ -4,13 +4,6 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.cpp"
-HEADER = ROOT / "minihost" / "src" / "worker_aegp_staged_item_runtime.hpp"
-ENTRY_WIRING = ROOT / "minihost" / "src" / "worker_entry_wiring.cpp"
-RECEIPTS_HEADER = ROOT / "minihost" / "src" / "worker_render_receipts.hpp"
-RECEIPTS = ROOT / "minihost" / "src" / "worker_render_receipts.cpp"
-LAYER_RUNTIME = ROOT / "minihost" / "src" / "worker_aegp_layer_render_runtime.cpp"
-LAYER_HEADER = ROOT / "minihost" / "src" / "worker_aegp_layer_render_runtime.hpp"
 
 def _worker() -> Path | None:
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")

@@ -3,9 +3,6 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DISPATCH = ROOT / "minihost" / "src" / "worker_selector_dispatch.cpp"
-SMART_FINALIZE = ROOT / "minihost" / "src" / "worker_smart_finalize.cpp"
-PIXEL_BUFFER = ROOT / "minihost" / "src" / "render_pixel_buffer.cpp"
 WORKERS = [
     ROOT / "target" / "minihost-build" / "aex_l2_worker.exe",
     ROOT / "target" / "minihost-build" / "aex_render_worker.exe",

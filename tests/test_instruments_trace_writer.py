@@ -11,7 +11,6 @@ from tools.trace_contract_validator import validate_event
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTRUMENTS = ROOT / "instruments"
 SELFTEST = ROOT / "target" / "instruments-build" / "trace_writer_selftest.exe"
 
 

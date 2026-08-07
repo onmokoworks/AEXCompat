@@ -3,8 +3,6 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PARAM_SUITES = ROOT / "minihost" / "src" / "worker_pf_param_suites.cpp"
-SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_pf_color_selftests.cpp"
 
 def _worker():
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")

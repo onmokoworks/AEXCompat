@@ -16,8 +16,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-BROKER_SOURCE = ROOT / "broker" / "crates" / "broker" / "src" / "render_session.rs"
-BROKER_MAIN = ROOT / "broker" / "crates" / "broker" / "src" / "main.rs"
 BROKER = ROOT / "broker" / "target" / "release" / "broker.exe"
 WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
 AEX = ROOT / "target" / "pf-sampling-probe-build" / "Release" / "pf_sampling_probe.aex"

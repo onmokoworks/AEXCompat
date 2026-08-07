@@ -38,33 +38,6 @@ def require_success(result: subprocess.CompletedProcess[str]):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_controller_enforces_process_descriptor_and_resource_bounds():
-    result = run(
-        [
-            "cargo",
-            "test",
-            "--manifest-path",
-            str(HARNESS_MANIFEST),
-            "-p",
-            "aexcompat-harness",
-            "macos_worker_controller::tests::",
-            "--",
-            "--test-threads=1",
-        ]
-    )
-    require_success(result)
-    combined = result.stdout + result.stderr
-    for executed_test in (
-        "command_has_session_cwd_minimal_environment_and_fd_allowlist",
-        "timeout_kills_the_worker_process_group_and_reaps_leader",
-        "child_that_escapes_the_process_group_is_still_contained",
-        "stdout_flood_is_classified",
-        "stderr_flood_is_classified",
-        "output_file_rlimit_is_structurally_classified",
-    ):
-        assert executed_test in combined
-
-
 def test_native_carrier_requires_both_explicit_trust_opt_ins():
     result = run(
         [

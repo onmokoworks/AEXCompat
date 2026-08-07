@@ -6,7 +6,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "build-aegp-world-suite3-probe.ps1"
 RESULT = ROOT / "target" / "aegp-world-suite3-probe-build" / "aegp-world-suite3-result.json"
-SOURCE = ROOT / "instruments" / "aegp-world-suite3-probe" / "main.cpp"
 
 
 def test_aegp_world_suite3_probe_builds_and_exercises_read_slots():

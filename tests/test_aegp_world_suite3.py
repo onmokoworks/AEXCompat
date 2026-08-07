@@ -3,9 +3,6 @@ import pathlib
 import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-ABI_SOURCE = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
-ABI_OWNER = ROOT / "minihost" / "src" / "worker_suite_abi.cpp"
-CATALOG_OWNER = ROOT / "minihost" / "src" / "worker_host_suite_catalog.cpp"
 
 def _worker() -> pathlib.Path | None:
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
