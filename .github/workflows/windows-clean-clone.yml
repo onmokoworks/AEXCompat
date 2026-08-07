@@ -194,6 +194,8 @@ jobs:
             build-pf-custom-ui-probe
             build-pf-frame-resize-probe
             build-pf-visual-audio-probe
+            build-pf-color-settings-abi-probe
+            build-pf-transform-multimatrix-oracle
           ) do (
             powershell -NoProfile -ExecutionPolicy Bypass -File tools\%%s.ps1 || exit /b 1
           )
