@@ -15,7 +15,12 @@ SPEC.loader.exec_module(public_export)
 
 def git(repository: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", *args], cwd=repository, check=True, capture_output=True, text=True
+        ["git", *args],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
     ).stdout.strip()
 
 
@@ -779,5 +784,4 @@ def test_tag_identity_collection_discards_oversized_messages(tmp_path):
     assert public_export.reachable_tag_identities(repository) == [
         ("Test", "tagger@workstation.local")
     ]
-
 

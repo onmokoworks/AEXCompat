@@ -137,6 +137,15 @@ mod windows_e2e {
         (TempRepository(root), plugin, sha)
     }
 
+    fn fixture_dependency_search_dirs(plugin: &Path) -> Vec<PathBuf> {
+        vec![
+            plugin
+                .parent()
+                .expect("fixture plugin has a parent directory")
+                .to_path_buf(),
+        ]
+    }
+
     fn open_session(
         repository: &Path,
         plugin: &Path,
@@ -161,7 +170,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -274,7 +283,7 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: None,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             max_samples: 1024,
             channels: 1,
             time_scale: 44100,
@@ -381,7 +390,7 @@ mod windows_e2e {
             plugin_sha256: &sha,
             parameters: None,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             max_samples: 1024,
             channels: 1,
             time_scale: 44100,
@@ -427,7 +436,7 @@ mod windows_e2e {
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -530,7 +539,7 @@ mod windows_e2e {
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb32f,
@@ -581,7 +590,7 @@ mod windows_e2e {
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -693,7 +702,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -757,7 +766,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -832,7 +841,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -929,7 +938,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -992,7 +1001,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1062,7 +1071,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1125,7 +1134,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1176,7 +1185,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1221,7 +1230,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1272,7 +1281,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1322,7 +1331,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &layers,
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1386,7 +1395,7 @@ mod windows_e2e {
                 conformance_render_settings: None,
                 layers: &[],
                 dependencies: Vec::new(),
-                dependency_search_dirs: Vec::new(),
+                dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
                 width: WIDTH,
                 height: HEIGHT,
                 pixel_format: RenderPixelFormat::Argb8,
@@ -1455,7 +1464,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1530,7 +1539,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1621,7 +1630,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1666,7 +1675,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1706,7 +1715,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1746,7 +1755,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -1841,7 +1850,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -2212,7 +2221,7 @@ mod windows_e2e {
             conformance_render_settings: None,
             layers: &[],
             dependencies: Vec::new(),
-            dependency_search_dirs: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
             width: WIDTH,
             height: HEIGHT,
             pixel_format: RenderPixelFormat::Argb8,
@@ -2891,9 +2900,10 @@ mod windows_e2e {
                 alpha_as_coverage_params: &[],
                 conformance_render_settings: None,
                 layers: &[],
-                // The shared closure rides the base request's dependencies.
-                dependencies: vec![approved_artifact(&cluster.dependency)],
-                dependency_search_dirs: Vec::new(),
+                // Resident cluster sessions resolve their shared closure from
+                // the admitted in-place repository root (issue #816).
+                dependencies: Vec::new(),
+                dependency_search_dirs: vec![cluster.repository.0.clone()],
                 width: WIDTH,
                 height: HEIGHT,
                 pixel_format: RenderPixelFormat::Argb8,
@@ -3136,9 +3146,9 @@ mod windows_e2e {
     }
 
     #[test]
-    fn cluster_close_records_an_audit_module_outside_the_declared_set() {
+    fn cluster_close_records_all_classified_in_place_modules() {
         if crate::common::skip_without_sealed_worker_launch(
-            "cluster_close_records_an_audit_module_outside_the_declared_set",
+            "cluster_close_records_all_classified_in_place_modules",
         ) {
             return;
         }
@@ -3150,17 +3160,16 @@ mod windows_e2e {
             .expect("frame 0 renders");
         session.swap_plugin(1).expect("swap to plugins[1]");
         let close = session.close();
-        // The observed union carried a module the manifest never declared.
-        // Since issue #730 that is a recorded observation on the close report,
-        // not an invalidation: the module list explains the frames, it does
-        // not decide whether they were valid.
+        // In-place sessions classify the observed module union without
+        // narrowing it to a staged manifest declaration. The extra module is
+        // retained as evidence and does not produce a warning.
         assert_eq!(close["invalidated"], false, "close: {close}");
         assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["module_audit_warning"], serde_json::Value::Null);
         assert!(
-            close["module_audit_warning"]
-                .as_str()
-                .is_some_and(|warning| !warning.is_empty()),
-            "close: {close}"
+            close["final_report"]["module_audit"]["observed_union"]["plugin"]
+                .as_array()
+                .is_some_and(|modules| modules.iter().any(|module| module == "evil.dll"))
         );
     }
 

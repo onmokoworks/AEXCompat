@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import sys
 import zlib
 
 import pytest
@@ -192,6 +193,8 @@ def test_rejects_report_larger_than_the_trace_envelope(tmp_path):
 
 
 def test_package_verifier_executes_mounted_arm64_worker_and_propagates_inputs(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("the package verifier requires macOS shell semantics")
     shell = shutil.which("sh")
     if shell is None:
         pytest.skip("POSIX shell is unavailable")
@@ -290,6 +293,8 @@ exit 2
 
 
 def test_package_verifier_rejects_unpaired_smoke_inputs_before_mount(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("the package verifier requires macOS shell semantics")
     shell = shutil.which("sh")
     if shell is None:
         pytest.skip("POSIX shell is unavailable")
@@ -325,6 +330,8 @@ def test_package_verifier_rejects_unpaired_smoke_inputs_before_mount(tmp_path):
 
 
 def test_local_prepare_rejects_missing_smoke_files_before_build(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("the package builder requires macOS shell semantics")
     shell = shutil.which("sh")
     if shell is None:
         pytest.skip("POSIX shell is unavailable")

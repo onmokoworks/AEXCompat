@@ -5,13 +5,16 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_world_transform_distinguishes_bad_arguments_from_allocation_failure(tmp_path):
     compiler = shutil.which("clang++") or shutil.which("c++")
-    assert compiler is not None, "a C++17 compiler is required for the portable self-test"
+    if compiler is None:
+        pytest.skip("a portable C++17 compiler is unavailable")
     output = tmp_path / "worker_pf_bad_callback_param_selftest"
     subprocess.run(
         [

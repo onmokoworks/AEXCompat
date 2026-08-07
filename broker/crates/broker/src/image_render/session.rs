@@ -1017,7 +1017,13 @@ impl InteractiveRenderSession {
                 gpu_backend: RenderGpuBackend::Auto,
                 gpu_runtime_policy: None,
                 dependencies: request.dependencies,
-                dependency_search_dirs: Vec::new(),
+                dependency_search_dirs: vec![
+                    request
+                        .plugin_path
+                        .parent()
+                        .ok_or_else(|| invalid("interactive plugin path has no parent directory"))?
+                        .to_path_buf(),
+                ],
                 width: request.width,
                 height: request.height,
                 pixel_format: request.pixel_format,
