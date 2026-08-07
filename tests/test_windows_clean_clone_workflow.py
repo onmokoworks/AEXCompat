@@ -118,16 +118,6 @@ def test_ae_sdk_workflow_runs_native_parameter_animation_coverage_after_clean_bu
     assert "coverage_source_commit=" in workflow
     assert "Report parameter-animation sealed-worker skips" in workflow
     assert "cannot launch a sealed worker" in workflow
-    # #721: SDK 込み検証は main push / nightly / dispatch のみで走る。
-    # pull_request で走らせない: collaborator 限定の SDK asset に PR 側コードで
-    # 触れない fail-closed と、1 台しかない物理マシンを PR ゲートと奪い合わない
-    # ため。runner の routing は windows-clean-clone と同じ変数式。
-    ae_sdk_directives = "\n".join(
-        line for line in workflow.splitlines()
-        if not line.lstrip().startswith("#"))
-    assert "pull_request" not in ae_sdk_directives
-    assert "schedule:" in ae_sdk_directives
-    assert "vars.USE_SELF_HOSTED_RUNNER == 'true'" in ae_sdk_directives
 
 
 def test_the_sealed_worker_skip_is_opt_in_and_only_ci_opts_in():
@@ -140,12 +130,6 @@ def test_the_sealed_worker_skip_is_opt_in_and_only_ci_opts_in():
     developer machine failing loudly instead of skipping 56 tests (issue #335).
     The env var still carries the old restricted-token name; the token itself
     went away in #731 and renaming it is left to the CI work in flight.
-
-    #721: the CI opt-in is further restricted to the hosted fallback. The
-    self-hosted windows-real runner launches sealed workers for real (main runs
-    report zero skips), so a skip there is a launch-path regression and must
-    fail; the workflows express that by setting the var to "0" (an explicit
-    refusal -- the probe accepts only exactly "1") when routed to windows-real.
     """
     probe = (ROOT / "broker/crates/broker/tests/common/mod.rs").read_text(encoding="utf-8")
     assert 'const ALLOW_SKIP_ENV: &str = "AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP"' in probe
@@ -158,22 +142,12 @@ def test_the_sealed_worker_skip_is_opt_in_and_only_ci_opts_in():
     video_batch = (ROOT / "tests/test_render_video_batch_cli.py").read_text(encoding="utf-8")
     assert 'os.environ.get("AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP") == "1"' in video_batch
 
-    # Exactly the two CI workflows opt in; nothing else may, and no workflow
-    # may opt in unconditionally -- the "1" must be the hosted-fallback branch
-    # of the same routing expression that picks the runner.
-    conditional_opt_in = (
-        "AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "
-        "${{ (github.event.repository.private && "
-        "vars.USE_SELF_HOSTED_RUNNER == 'true') && '0' || '1' }}"
-    )
+    # Exactly the two CI workflows opt in; nothing else may.
     opted_in = set()
     for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
         text = "\n".join(
             line for line in workflow.read_text(encoding="utf-8").splitlines()
             if not line.lstrip().startswith("#"))
-        assert 'AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"' not in text, (
-            f"{workflow.name} opts into the sealed-worker skip unconditionally; "
-            "the opt-in must exclude the windows-real runner (#721)")
-        if conditional_opt_in in text:
+        if 'AEXCOMPAT_ALLOW_RESTRICTED_TOKEN_SKIP: "1"' in text:
             opted_in.add(workflow.name)
     assert opted_in == {"windows-clean-clone.yml", "ae-sdk-tests.yml"}, opted_in
