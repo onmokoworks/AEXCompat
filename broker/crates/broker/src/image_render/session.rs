@@ -630,7 +630,16 @@ fn render_classic_via_length_one_session(
         alpha_as_coverage_params: request.alpha_as_coverage_params,
         conformance_render_settings: request.conformance_render_settings,
         dependencies: request.dependencies.to_vec(),
-        dependency_search_dirs: Vec::new(),
+        // #816 made a non-empty search root set part of the in-place protocol,
+        // so an empty one fails session open for every route that reaches here.
+        dependency_search_dirs: match request.plugin_path.parent() {
+            Some(parent) => vec![parent.to_path_buf()],
+            None => {
+                return SessionWrapperOutcome::Failure(invalid(
+                    "plugin path has no parent directory to search for dependencies",
+                ));
+            }
+        },
         width: request.width,
         height: request.height,
         pixel_format: request.pixel_format,
