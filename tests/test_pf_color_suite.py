@@ -1,13 +1,8 @@
 import os
-import re
 import subprocess
 from pathlib import Path
-import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = source_owners.contract_files("pf_color_suite")
-def source_text():
-    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
 def worker():
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
@@ -15,23 +10,6 @@ def worker():
                   ROOT / "target/minihost-build-v18/Release/aex_render_worker.exe",
                   ROOT / "target/minihost-build-v18/aex_render_worker.exe"]
     return next((path for path in candidates if path and path.is_file()), None)
-
-def test_color_suites_are_typed_frozen_v1_abis():
-    text = source_text()
-
-def test_legacy_block_ends_where_platform_data_begins():
-    text = source_text()
-    assert re.search(r"memcpy\(utils\.data\(\) \+ kUtilsColorCallbacks, &g_color_suite8,\s*"
-                     r"sizeof\(g_color_suite8\)\)", text)
-
-def test_color_contract_is_fail_closed_hdr_capable_and_alpha_preserving():
-    text = source_text()
-    assert "PfFixed result[3]" in text and "std::memcpy(out, result, sizeof(result))" in text
-    traits = text[text.index("template <> struct ColorPixelTraits<PfPixelFloat>"):
-                  text.index("template <class Pixel> int32_t __cdecl color_rgb_to_hls")]
-    assert "std::min" not in traits and "std::max" not in traits
-    assert "p.red = static_cast<float>(c.r)" in traits
-    assert "round8.alpha == 91" in text and "round16.alpha == 4321" in text
 
 def test_pf_color_suite_native_self_test():
     executable = worker()

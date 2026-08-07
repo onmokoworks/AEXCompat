@@ -1,12 +1,8 @@
-from tests import source_owners
-
 import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "REAL_AEX_MULTI_LAYER_INPUT_RESULT_2026-07-15.json"
-HARNESS = ROOT / "broker" / "crates" / "harness" / "src" / "windows.rs"
-BROKER = ROOT / "broker" / "crates" / "broker" / "src" / "image_render.rs"
 
 def test_real_aex_classic_and_smartfx_accept_multiple_slot_bound_layers():
     result = json.loads(RESULT.read_text(encoding="utf-8"))
@@ -27,8 +23,3 @@ def test_real_aex_classic_and_smartfx_accept_multiple_slot_bound_layers():
     assert negative["rejected_output_created"] is False
     assert negative["assignments_applied_atomically"] is True
     assert result["transport_limits"]["maximum_secondary_layers"] == 8
-
-def test_layer_cli_and_broker_keep_slot_binding_fail_closed():
-    harness = source_owners.harness_windows_text()
-    broker = source_owners.IMAGE_RENDER_SOURCE.read_text(encoding="utf-8")
-

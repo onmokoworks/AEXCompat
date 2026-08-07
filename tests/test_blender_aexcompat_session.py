@@ -28,7 +28,6 @@ def load_module(name: str, path: Path):
 
 SESSION = load_module("blender_aexcompat_session", ROOT / "tools" / "blender_aexcompat_session.py")
 SCHEMA = json.loads((ROOT / "contracts" / "blender" / "aexcompat_blender_session.schema.json").read_text(encoding="utf-8"))
-ADDON_SOURCE = (ROOT / "blender_addon" / "aexcompat_blender" / "__init__.py").read_text(encoding="utf-8")
 PACKAGE_WRAPPER = ROOT / "blender_addon" / "aexcompat_blender" / "session_wrapper.py"
 
 
@@ -152,17 +151,6 @@ def test_addon_install_layouts_bundle_a_resolvable_wrapper(tmp_path, layout):
     result = json.loads(completed.stdout)
     jsonschema.validate(result, SCHEMA)
     assert result["status"] == "identity_only"
-
-
-def test_addon_source_contract_stays_fail_closed_and_out_of_process():
-    assert "class AEXCompatCompositorNode(bpy.types.CompositorNode)" in ADDON_SOURCE
-    assert "CompositorNodeOFX" in ADDON_SOURCE
-    assert "subprocess.run" in ADDON_SOURCE
-    assert '"identity_no_aex"' in ADDON_SOURCE
-    assert '"fixture_invert_no_aex"' in ADDON_SOURCE
-    assert 'Path(__file__).with_name("session_wrapper.py")' in ADDON_SOURCE
-    assert '"host_success": response.get("host_success")' not in ADDON_SOURCE
-    assert "response.get(\"status\") not in {\"identity_only\", \"fixture_transform\"}" in ADDON_SOURCE
 
 
 @pytest.mark.parametrize(

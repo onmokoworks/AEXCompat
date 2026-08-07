@@ -6,13 +6,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
-COLOR_HEADER = ROOT / "minihost" / "src" / "worker_color_settings_runtime.hpp"
-COLOR_SOURCE = ROOT / "minihost" / "src" / "worker_color_settings_runtime.cpp"
-COLOR_SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_color_settings_selftests.cpp"
 MEMBERS = [
     "get_blending_tables", "does_view_have_xform", "xform_working_to_view",
     "get_new_working_space_profile", "get_new_profile_from_icc",
@@ -23,13 +18,6 @@ MEMBERS = [
     "is_colorspace_aware_effects_enabled", "get_lut_interpolation_method",
     "get_graphics_white_luminance", "get_working_colorspace_id",
 ]
-
-
-def source_text():
-    return "\n".join(path.read_text(encoding="utf-8") for path in
-                     (SOURCE, source_owners.SRC / "worker_host_suite_wiring.cpp", COLOR_HEADER, COLOR_SOURCE, COLOR_SELFTEST_SOURCE))
-
-
 
 
 def worker(name):

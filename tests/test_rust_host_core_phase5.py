@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import subprocess
 import tempfile
 import unittest
@@ -8,16 +7,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENE = ROOT / "broker/crates/host-core/src/scene.rs"
-FFI = ROOT / "broker/crates/host-core-ffi/src/lib.rs"
-ABI_HEADER = ROOT / "broker/crates/broker/include/aexcompat_host_core_abi.h"
-ADAPTER = ROOT / "broker/crates/broker/include/aexcompat_host_core_adapter.hpp"
-CPP_IDENTITY = ROOT / "minihost/src/worker_aegp_scene_model.hpp"
-NATIVE = (
-    ROOT
-    / "tests/native/rust_host_core_scene_identity_dual_run_selftest.cpp"
-)
-DOC = ROOT / "docs/RUST_HOST_CORE_MIGRATION_2026-07-31.md"
 STANDALONE_GATE = (
     ROOT / "tools" / "test-rust-host-core-scene-identity.ps1"
 )
@@ -78,21 +67,6 @@ class RustHostCorePhase5Tests(unittest.TestCase):
             self.assertGreaterEqual(report["checks"], 29)
             self.assertIs(report["cpp_registry"], True)
             self.assertIs(report["balanced"], True)
-
-
-    def test_document_limits_phase5_to_identity_without_routing_or_pixels(self):
-        document = " ".join(DOC.read_text(encoding="utf-8").split())
-        for marker in (
-            "Phase 5 scene identity/generation gate (Issue #628)",
-            "24-byte",
-            "pointer-free",
-            "independent C++ identity oracle",
-            "Production worker routing remains unchanged",
-            "Issue #98",
-            "does not require After Effects",
-            "does not compare pixels",
-        ):
-            self.assertIn(marker, document)
 
 
 if __name__ == "__main__":

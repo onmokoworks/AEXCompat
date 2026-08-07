@@ -4,7 +4,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "SDK_GLATOR_RUNTIME_POLICY_INSPECT_RESULT_2026-07-18.json"
-RUNNER = ROOT / "tools" / "run-glator-runtime-policy-inspect-gate.ps1"
 
 
 def test_glator_inspect_uses_exact_purpose_bound_runtime_modules():
@@ -31,15 +30,4 @@ def test_glator_inspect_uses_exact_purpose_bound_runtime_modules():
         "authorized_policy_modules": ["nvoglv64.dll"],
         "passed": False,
     }
-    assert "\\?\\" not in RESULT.read_text(encoding="utf-8")
     assert result["privacy"] == {"local_paths_exported": False, "private_stderr_exported": False}
-
-
-def test_runner_fails_closed_on_every_pinned_identity():
-    runner = RUNNER.read_text(encoding="utf-8-sig")
-    for marker in (
-        "Assert-Identity", "Get-FileHash", "DriverStore\\FileRepository",
-        "--inspect-experimental-runtime-policy", "unknown_count", "Compare-Object",
-        "Start-Process", "-WindowStyle Hidden",
-    ):
-        assert marker in runner

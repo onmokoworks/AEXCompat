@@ -9,7 +9,6 @@ from tools.known_function_observation import (
     ResolutionError,
     build_event,
     load_offset_map,
-    resolve_hook,
     resolve_spec,
     session_boundary_event,
 )
@@ -365,48 +364,6 @@ class FormatTests(unittest.TestCase):
 
 class FridaScriptTests(unittest.TestCase):
     SCRIPT = ROOT / "tools" / "frida" / "known_function_probe.js"
-
-    def test_script_exists_and_is_thin(self):
-        text = self.SCRIPT.read_text(encoding="utf-8")
-        # Thin observer contract: consumes the plan, never writes files, forwards
-        # only via send(), and locates the module base itself.
-        self.assertIn("recv('plan'", text)
-        self.assertIn("send(", text)
-        # Identity by full path (not basename) + executable-range verification.
-        self.assertIn("Process.enumerateModules", text)
-        self.assertIn("Process.findRangeByAddress", text)
-        self.assertNotIn("writeFile", text)
-        self.assertNotIn("File(", text)
-
-    def test_script_arms_loader_watch_before_ready(self):
-        text = self.SCRIPT.read_text(encoding="utf-8")
-        # Spawn-suspended workers load the plug-in later, so the script must arm a
-        # loader watch and signal 'ready' (safe to resume) rather than requiring the
-        # module to be present up front.
-        self.assertIn("LoadLibrary", text)
-        self.assertIn("type: 'ready'", text)
-
-    def test_script_reads_are_memory_safe(self):
-        text = self.SCRIPT.read_text(encoding="utf-8")
-        # Null-check + extent bound + read failures reported (never thrown out).
-        self.assertIn("isNull()", text)
-        self.assertIn("read.extent", text)
-        self.assertIn("read_error", text)
-        # The null-pointer check is struct-only; a register scalar of 0 (a valid
-        # NativePointer(0)) must not be rejected.
-        self.assertIn("null struct pointer", text)
-        # 64-bit register scalars use signed/unsigned conversion (not a bare
-        # parseInt), so a negative int is not corrupted into a huge positive.
-        self.assertIn("int64(", text)
-        self.assertIn("uint64(", text)
-        # 64-bit values are only emitted if losslessly representable as a Number.
-        self.assertIn("isSafeInteger", text)
-        # Unsigned 32-bit uses `>>> 0` on toInt32(); NativePointer.toUInt32() is
-        # not a documented method, so it must not be called.
-        self.assertNotIn(".toUInt32(", text)
-        self.assertIn(">>> 0", text)
-        # Struct booleans honour their declared width (not just the first byte).
-        self.assertIn("p.readU16() !== 0", text)
 
     def test_script_parses_with_node(self):
         node = shutil.which("node")

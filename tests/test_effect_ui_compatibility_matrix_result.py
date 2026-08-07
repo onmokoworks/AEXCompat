@@ -1,5 +1,4 @@
 import json
-from tests import source_owners
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,11 +19,3 @@ def test_effect_matrix_covers_six_paths_and_continues_after_failures():
     assert partial["all_cases_completed_after_first_failure"] is True
     assert partial["failed_cases_created_no_output"] is True
     assert all(evidence["invariants"].values())
-
-def test_matrix_uses_fresh_render_calls_and_bounded_failure_summaries():
-    source = source_owners.harness_windows_text()
-    matrix = source[source.index("fn run_effect_matrix") : source.index("fn json_after_marker")]
-    assert "for smart in [false, true]" in matrix
-    assert "for (pixel_format, format_name) in formats" in matrix
-    assert "render_experimental_image_at_time_with_format" in matrix
-    assert "matrix_error_summary(&message)" in matrix

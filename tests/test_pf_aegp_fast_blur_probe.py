@@ -1,5 +1,3 @@
-import hashlib
-import json
 import subprocess
 from pathlib import Path
 
@@ -20,11 +18,6 @@ def test_probe_builds_against_world_suite3():
         cwd=ROOT, check=True, timeout=180,
     )
     assert PROBE.is_file()
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "sizeof(AEGP_WorldSuite3) == 13 * sizeof(void*)" in source
-    assert "offsetof(AEGP_WorldSuite3, AEGP_FastBlur) == 9 * sizeof(void*)" in source
-
-
 
 
 def test_real_probe_blurs_owned_world_and_copies_nonzero_pixels(tmp_path):

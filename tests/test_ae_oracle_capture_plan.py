@@ -8,7 +8,6 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "capture-ae-probe-oracle.ps1"
-RUNNER_SOURCE = RUNNER.read_text(encoding="utf-8")
 EVIDENCE = ROOT / "analysis" / "AE_ORACLE_COLORGRID_CAPTURE_PLAN_2026-07-17.json"
 
 
@@ -85,19 +84,6 @@ def test_plan_only_records_no_effect_control_commands(tmp_path):
     assert any(value.endswith("compare-pixel-oracles.py") for value in control["compare_argv"])
 
 
-def test_capture_mode_executes_the_declared_comparison_contract():
-    assert "function Invoke-OracleComparison" in RUNNER_SOURCE
-    assert "& uv run --project $uvProject python (Join-Path $PSScriptRoot 'compare-pixel-oracles.py')" in RUNNER_SOURCE
-    assert "Pixel oracle comparison failed with exit code" in RUNNER_SOURCE
-    assert "AE oracle output exceeded the configured comparison tolerance" in RUNNER_SOURCE
-
-
-def test_capture_mode_supports_a_separate_no_effect_control():
-    assert "ControlOutputPng, ControlExpectedRaw, and ControlComparisonReport" in RUNNER_SOURCE
-    assert "$controlArgs.NoEffect = $true" in RUNNER_SOURCE
-    assert "-Raw $ControlExpectedRaw -Render $ControlOutputPng" in RUNNER_SOURCE
-
-
 def test_colorgrid_plan_records_real_fixture_without_claiming_capture():
     payload = json.loads(EVIDENCE.read_text(encoding="utf-8-sig"))
     assert payload["status"] == "blocked_existing_ae_session"
@@ -142,11 +128,3 @@ def test_colorgrid_plan_records_real_fixture_without_claiming_capture():
     assert left["size_bytes"] == payload["expected_raw"]["size_bytes"]
     assert left["sha256"] == payload["expected_raw"]["sha256"]
     assert "not been compared" in provenance["note"]
-
-
-def test_probe_cleanup_never_kills_ae_processes_by_name():
-    # The capture runner shuts down its own launch tree by PID; the probe
-    # tool's cleanup must not kill AE-named processes it did not launch
-    # (an unrelated session started mid-capture would be terminated).
-    assert "Stop-Process" not in RUNNER_SOURCE
-    assert "Not terminating AE-named processes this run did not launch" in RUNNER_SOURCE

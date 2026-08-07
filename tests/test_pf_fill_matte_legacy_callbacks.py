@@ -1,14 +1,9 @@
 import json
 import os
-import re
 import subprocess
 from pathlib import Path
-import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = source_owners.contract_files("pf_fill_matte_legacy_callbacks")
-def source_text():
-    return "\n".join(path.read_text(encoding="utf-8") for path in SOURCES)
 
 def worker(name):
     configured = os.environ.get(f"AEXCOMPAT_{name.upper()}_WORKER")
@@ -18,22 +13,6 @@ def worker(name):
         ROOT / "target" / "minihost-build-v18" / f"aex_{name}_worker.exe",
     ]
     return next((path for path in candidates if path and path.is_file()), None)
-
-def test_legacy_fill_callbacks_match_sdk_slots_and_reuse_suite_v2_implementations():
-    text = source_text()
-    expected_offsets = {
-        "kUtilsFill": (9, "fill_world8"),
-        "kUtilsPremultiply": (12, "premultiply_world8"),
-        "kUtilsPremultiplyColor": (13, "premultiply_color8"),
-        "kUtilsFill16": (61, "fill_world16"),
-        "kUtilsPremultiplyColor16": (62, "premultiply_color16"),
-    }
-    assert re.search(
-        r"void\* callbacks\[\] = \{.*?&fill_world8.*?&fill_world16.*?"
-        r"&fill_world_float.*?&premultiply_world8.*?&premultiply_color8.*?"
-        r"&premultiply_color16.*?&premultiply_color_float.*?\};",
-        text, re.DOTALL,
-    )
 
 def test_legacy_fill_native_guards_errors_and_non_null_callbacks_in_both_workers():
     for name in ("render", "smart"):

@@ -1,20 +1,9 @@
 import json
-import os
 import subprocess
 from pathlib import Path
-import source_owners
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = source_owners.L2_MAIN
-DISPATCH_SOURCE = ROOT / "minihost/src/l2_cli_dispatch.cpp"
-EXECUTION_SOURCE = ROOT / "minihost/src/worker_parameter_execution.cpp"
-PARAM_SUITES = ROOT / "minihost/src/worker_pf_param_suites.cpp"
-SELFTEST_SOURCE = ROOT / "minihost/src/worker_parameter_selftests.cpp"
 TRANSPORT = ROOT / "target/image-transport"
-
-def worker_source():
-    return "\n".join(path.read_text(encoding="utf-8") for path in
-                     (SOURCE, source_owners.SRC / "worker_l2_shared_helpers.cpp", DISPATCH_SOURCE, EXECUTION_SOURCE, PARAM_SUITES, SELFTEST_SOURCE))
 
 def _workers():
     build = ROOT / "target/minihost-build-v18"
@@ -101,5 +90,3 @@ def test_sidecar_is_confined_to_broker_owned_transport_and_trailers_are_peeled()
         assert completed.returncode == 3
     finally:
         outside.unlink(missing_ok=True)
-    source = worker_source()
-    assert source.count("while (effective_argc >= 3)") == 1

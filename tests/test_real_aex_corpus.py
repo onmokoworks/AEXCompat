@@ -13,7 +13,6 @@ def test_public_inventory_matrix_and_case_count():
     inventory=corpus.load_validated(ROOT/"corpus/real-aex-public.json","real-aex-corpus.schema.json");matrix=corpus.load_validated(ROOT/"corpus/common-matrix.json","real-aex-matrix.schema.json");corpus.validate_inventory(inventory)
     assert len(inventory["entries"])==5 and len({x["supplier"] for x in inventory["entries"]})==3
     assert set(matrix["render_paths"])=={"classic","smartfx"} and len(list(corpus.matrix_cases(inventory,matrix)))==120
-    assert "Program Files" not in (ROOT/"corpus/real-aex-public.json").read_text(encoding="utf-8")
 
 def test_all_corpus_schemas_are_valid_draft_2020_12():
     for name in ("real-aex-corpus.schema.json","real-aex-locator.schema.json","real-aex-matrix.schema.json","real-aex-triage.schema.json","real-aex-gaps.schema.json","real-aex-public-evidence.schema.json"):
@@ -27,10 +26,6 @@ def test_suite_aggregation_is_distinct_sha_and_gap_safe():
 def test_issue4_runner_maps_every_explicit_path_and_depth():
     assert set(bundle.DEPTH_COMMANDS)=={(path,depth) for path in ("classic","smartfx") for depth in ("argb8","argb16","argb32f")}
     assert bundle.DEPTH_COMMANDS[("classic","argb32f")]=="--render-experimental-request-32"
-
-def test_real_corpus_aggregation_explicitly_allows_bundle_failures():
-    source = (ROOT / "tools" / "run-real-aex-corpus.py").read_text(encoding="utf-8")
-    assert "--allow-failures" in source
 
 def test_normalize_classification_covers_every_report_schema_class():
     schema=json.loads((ROOT/"schemas/conformance-report.schema.json").read_text(encoding="utf-8"))

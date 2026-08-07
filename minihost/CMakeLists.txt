@@ -454,6 +454,11 @@ target_include_directories(worker_param_checkout_time_selftest PRIVATE src)
 add_executable(worker_pf_sampling_wiring_selftest
   ../tests/native/worker_pf_sampling_wiring_selftest.cpp
   src/worker_pf_sampling_runtime.cpp
+  # worker_pf_sampling_runtime calls pf_world_transform::copy_world8, defined in
+  # worker_pf_world_transform_runtime, which in turn needs world_safety's
+  # DispatchWorldFormatScope. Without both TUs the target fails to link (#892).
+  src/worker_pf_world_transform_runtime.cpp
+  src/worker_world_safety.cpp
   src/worker_effect_bootstrap.cpp
 )
 target_compile_features(worker_pf_sampling_wiring_selftest PRIVATE cxx_std_17)

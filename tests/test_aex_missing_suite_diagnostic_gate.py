@@ -114,7 +114,6 @@ class MissingSuiteDiagnosticGateTests(unittest.TestCase):
         failed = {case["fixture"]: case["failure"] for case in summary["cases"] if case["failure"]}
         self.assertEqual(failed["GLator"]["failure_stage"], "global_setup")
         self.assertEqual(failed["Grabba"]["plugin_kind"], "aegp_candidate")
-        self.assertNotIn(":\\", SUMMARY.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

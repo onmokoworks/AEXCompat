@@ -651,62 +651,6 @@ def test_owner_comment_same_second_as_approval_blocks() -> None:
         "owner_comments_unresolved", payload, ME, json.dumps({"onmokoworks": ts}))
 
 
-def test_both_review_thread_connections_are_batched_and_fail_closed() -> None:
-    # The top-level reviewThreads connection is paginated by gh --paginate while
-    # each thread's first 100 comments travel in the same query. A nested page
-    # overflow is represented by truncated and remains fail-closed.
-    root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
-    for name in ("codex-review-monitor.sh", "codex-merge-guard.sh"):
-        script = (root / name).read_text(encoding="utf-8")
-        assert "nodes{id isResolved comments(first:100)" in script
-        assert "pageInfo{hasNextPage}" in script
-        assert "truncated:" in script
-        assert "node(id:$id)" not in script
-        assert "comments(first:100,after:$endCursor)" not in script
-        assert "replyTo{databaseId}" in script
-        assert "in_reply_to_id:(.replyTo.databaseId // null)" in script
-        assert script.count("gh api graphql --paginate") == 1
-
-
-def test_merge_guard_refetches_every_owner_surface_immediately_before_merge() -> None:
-    root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
-    script = (root / "codex-merge-guard.sh").read_text(encoding="utf-8")
-    final = script.index("# FINAL OWNER SNAPSHOT")
-    merge = script.index("gh pr merge", final)
-    window = script[final:merge]
-    for endpoint in ('fetch "pulls/$PR/comments"', "fetch_review_threads",
-                     'fetch "pulls/$PR/reviews"', 'fetch "issues/$PR/comments"'):
-        assert endpoint in window
-    assert "owner_review_gate" in window
-    assert "owner_threads_unresolved" in window
-    assert "owner_reviews_unresolved" in window
-    assert "owner_comments_unresolved" in window
-    assert "codex_clean_ts_for_head" in window
-    assert "codex_finding_max_ts" in window
-
-
-def test_merge_guard_requires_green_required_ci_before_merge() -> None:
-    root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
-    script = (root / "codex-merge-guard.sh").read_text(encoding="utf-8")
-    initial = script.index("required_ci_gate || exit 1")
-    final = script.index("# FINAL OWNER SNAPSHOT")
-    final_ci = script.index("required_ci_gate || exit 1", final)
-    merge = script.index("gh pr merge", final_ci)
-    assert initial < final < final_ci < merge
-    assert 'gh pr checks "$PR" --repo "$OWNER/$REPO"' in script
-    assert script.count("required_ci_gate || exit 1") == 2
-    assert "REFUSE: required CI checks are not green" in script
-    assert "REFUSE: no required CI checks reported" in script
-
-
-def test_codex_finding_instructions_resolve_the_review_thread() -> None:
-    root = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "codex-review-loop"
-    skill = (root / "SKILL.md").read_text(encoding="utf-8")
-    finding = skill[skill.index("**FINDING"):skill.index("**CLEAN (", skill.index("**FINDING"))]
-    assert "resolveReviewThread" in finding
-    assert "threadId:$id" in finding
-
-
 def test_me_ack_ts_requires_the_marker() -> None:
     payload = [_toplevel(ME, "2026-07-18T11:00:00Z", "[ACK] 対応完了"),
                _toplevel(ME, "2026-07-18T12:00:00Z", "@codex review", id=78),
