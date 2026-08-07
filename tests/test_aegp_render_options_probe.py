@@ -6,7 +6,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "build-aegp-render-options-probe.ps1"
 RESULT = ROOT / "target" / "aegp-render-options-probe-build" / "aegp-render-options-result.json"
-SOURCE = ROOT / "instruments" / "aegp-render-options-probe" / "main.cpp"
 
 def test_fixture_builds_and_exercises_lifecycle():
     tmp = ROOT / "target" / "tmp"

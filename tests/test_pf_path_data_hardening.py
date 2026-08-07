@@ -3,10 +3,6 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_runtime.cpp"
-SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_selftests.cpp"
-CALLBACK_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
-CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 def _worker() -> Path:
     candidates = (

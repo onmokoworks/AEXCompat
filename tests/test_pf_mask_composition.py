@@ -5,13 +5,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_runtime.cpp"
-RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_pf_path_runtime.hpp"
-SELFTEST_SOURCE = ROOT / "minihost" / "src" / "worker_pf_path_selftests.cpp"
-SELFTEST_HEADER = ROOT / "minihost" / "src" / "worker_pf_path_selftests.hpp"
-CALLBACK_SOURCE = ROOT / "minihost" / "src" / "worker_mask_runtime_callbacks.cpp"
-ROUTING_SOURCE = ROOT / "minihost" / "src" / "worker_custom_selftest_routing.cpp"
-CMAKE = ROOT / "minihost" / "CMakeLists.txt"
 
 
 def _worker() -> Path | None:

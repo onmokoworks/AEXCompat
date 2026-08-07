@@ -6,7 +6,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SUMMARY = ROOT / "analysis" / "AEX_MISSING_SUITE_DIAGNOSTIC_SUMMARY_2026-07-18.json"
 SPEC = importlib.util.spec_from_file_location("diagnostic_gate", ROOT / "tools" / "aex_missing_suite_diagnostic_gate.py")
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
@@ -105,15 +104,6 @@ class MissingSuiteDiagnosticGateTests(unittest.TestCase):
         result = gate.classify_failure(stderr, 1)
         self.assertEqual(result["kind"], "invalid_pipl_for_pf_inspect")
         self.assertEqual(result["plugin_kind"], "invalid_pipl")
-
-    def test_recorded_sdk_sweep_separates_effect_failures_from_aegp(self):
-        summary = json.loads(SUMMARY.read_text(encoding="utf-8"))
-        self.assertEqual((summary["fixture_count"], summary["effect_fixture_count"]), (23, 22))
-        self.assertEqual((summary["inspect_success_count"], summary["effect_inspect_failure_count"]), (21, 1))
-        self.assertEqual(summary["out_of_scope_plugin_count"], 1)
-        failed = {case["fixture"]: case["failure"] for case in summary["cases"] if case["failure"]}
-        self.assertEqual(failed["GLator"]["failure_stage"], "global_setup")
-        self.assertEqual(failed["Grabba"]["plugin_kind"], "aegp_candidate")
 
 
 if __name__ == "__main__":

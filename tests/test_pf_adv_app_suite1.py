@@ -9,7 +9,6 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PF_SUITES_ABI = ROOT / "minihost" / "src" / "worker_l2_suite_abi.hpp"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 WORKER = ROOT / "target" / "minihost-build-v18" / "Release" / "aex_render_worker.exe"

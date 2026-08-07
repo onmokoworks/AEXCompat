@@ -6,7 +6,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "build-pf-color-settings-abi-probe.ps1"
 RESULT = ROOT / "target" / "pf-color-settings-abi-probe-build" / "pf-color-settings-abi.json"
-SOURCE = ROOT / "instruments" / "pf-color-settings-abi-probe" / "main.cpp"
 
 MEMBERS = [
     "AEGP_GetBlendingTables", "AEGP_DoesViewHaveColorSpaceXform",

@@ -7,10 +7,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SMART_RUNTIME_SOURCE = ROOT / "minihost" / "src" / "worker_smart_runtime.cpp"
-SMART_RUNTIME_HEADER = ROOT / "minihost" / "src" / "worker_smart_runtime.hpp"
-SMART_EXECUTION_HEADER = ROOT / "minihost" / "src" / "worker_smart_execution.hpp"
-FIXED_SELFTEST_ROUTING_SOURCE = ROOT / "minihost" / "src" / "worker_fixed_selftest_routing.cpp"
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None

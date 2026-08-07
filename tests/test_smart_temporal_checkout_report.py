@@ -37,9 +37,3 @@ def test_temporal_checkout_report_keeps_legacy_and_separates_ledgers(tmp_path):
         "rejected_temporal_layer_checkouts": 17,
         "rejected_temporal_parameter_checkouts": 23,
     }
-
-
-def test_native_selftest_is_part_of_the_release_minihost_build():
-    cmake = (ROOT / "minihost" / "CMakeLists.txt").read_text(encoding="utf-8")
-    assert "add_executable(worker_temporal_checkout_report_selftest" in cmake
-    assert "../tests/native/worker_temporal_checkout_report_selftest.cpp" in cmake

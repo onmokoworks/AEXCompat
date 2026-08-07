@@ -5,7 +5,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "build-pf-suite-abi-probe.ps1"
 RESULT = ROOT / "target" / "pf-suite-abi-probe-build" / "pf-suite-abi.json"
-SUITE_ABI = ROOT / "minihost" / "src" / "worker_suite_abi.hpp"
 
 def test_pf_suite_abi_probe_builds_and_records_sdk_layouts():
     subprocess.run(
