@@ -163,7 +163,7 @@ fn open_session(
         conformance_render_settings: None,
         layers: &[],
         dependencies: Vec::new(),
-        dependency_search_dirs: Vec::new(),
+        dependency_search_dirs: search_root(&plugin),
         width,
         height,
         pixel_format: RenderPixelFormat::Argb8,
@@ -576,4 +576,13 @@ mod tests {
         assert_eq!(decoded.len(), exposed.len());
         assert_eq!(decoded[2].choices, vec!["A", "B"]);
     }
+}
+
+// #816 made a non-empty search root set part of the in-place protocol; the
+// loader resolves the closure from the plug-in's own directory.
+fn search_root(plugin: &std::path::Path) -> Vec<std::path::PathBuf> {
+    plugin
+        .parent()
+        .map(|parent| vec![parent.to_path_buf()])
+        .unwrap_or_default()
 }

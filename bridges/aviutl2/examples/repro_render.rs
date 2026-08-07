@@ -97,7 +97,7 @@ fn main() {
         conformance_render_settings: None,
         layers: &[],
         dependencies: Vec::new(),
-        dependency_search_dirs: Vec::new(),
+        dependency_search_dirs: search_root(&plugin),
         width,
         height,
         pixel_format: RenderPixelFormat::Argb8,
@@ -152,4 +152,13 @@ fn main() {
     render_red(&mut session, 0, Some(lo));
     render_red(&mut session, 1, Some(hi));
     let _ = session.close();
+}
+
+// #816 made a non-empty search root set part of the in-place protocol; the
+// loader resolves the closure from the plug-in's own directory.
+fn search_root(plugin: &std::path::Path) -> Vec<std::path::PathBuf> {
+    plugin
+        .parent()
+        .map(|parent| vec![parent.to_path_buf()])
+        .unwrap_or_default()
 }

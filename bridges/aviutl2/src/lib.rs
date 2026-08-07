@@ -200,7 +200,7 @@ impl BridgeSession {
                     conformance_render_settings: None,
                     layers: &[],
                     dependencies: Vec::new(),
-                    dependency_search_dirs: Vec::new(),
+                    dependency_search_dirs: search_root(&config.plugin),
                     width: config.width,
                     height: config.height,
                     pixel_format: RenderPixelFormat::Argb8,
@@ -1156,3 +1156,12 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 aviutl2::register_filter_plugin!(AexBridgeFilter);
+
+// #816 made a non-empty search root set part of the in-place protocol; the
+// loader resolves the closure from the plug-in's own directory.
+fn search_root(plugin: &std::path::Path) -> Vec<std::path::PathBuf> {
+    plugin
+        .parent()
+        .map(|parent| vec![parent.to_path_buf()])
+        .unwrap_or_default()
+}

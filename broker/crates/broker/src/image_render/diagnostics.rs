@@ -88,6 +88,15 @@ pub fn smart_render_advertised(out_flags2: u64) -> bool {
     out_flags2 & PF_OUTFLAG2_SUPPORTS_SMART_RENDER != 0
 }
 
+// #816 made a non-empty search root set part of the in-place protocol, and the
+// loader resolves the closure from the plug-in's own directory.
+fn search_root(plugin_path: &Path) -> io::Result<Vec<std::path::PathBuf>> {
+    let parent = plugin_path
+        .parent()
+        .ok_or_else(|| invalid("plugin path has no parent directory to search for dependencies"))?;
+    Ok(vec![parent.to_path_buf()])
+}
+
 fn dispatch_approved_image(
     repository: &Path,
     worker_kind: WorkerKind,
@@ -107,7 +116,7 @@ fn dispatch_approved_image(
         },
         // Session approval currently covers only the selected plugin image.
         dependencies: vec![],
-        dependency_search_dirs: Vec::new(),
+        dependency_search_dirs: search_root(plugin_path)?,
         args_before_plugin,
         args_after_plugin,
         timeout,
@@ -134,7 +143,7 @@ fn dispatch_approved_image_with_dependencies(
             expected_size: fs::metadata(plugin_path)?.len(),
         },
         dependencies,
-        dependency_search_dirs: Vec::new(),
+        dependency_search_dirs: search_root(plugin_path)?,
         args_before_plugin,
         args_after_plugin,
         timeout,
