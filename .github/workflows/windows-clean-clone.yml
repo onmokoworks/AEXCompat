@@ -4,6 +4,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # 03:00 UTC = 12:00 JST。
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,15 +19,17 @@ concurrency:
 jobs:
   source-reproducible:
     # Keep untrusted public-repository jobs off the physical workstation.
-    # Private repositories use it while USE_SELF_HOSTED_RUNNER stays enabled.
     runs-on: ${{ github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true' && fromJSON('["self-hosted","Windows","X64","windows-real"]') || 'windows-latest' }}
-    timeout-minutes: 45
+    timeout-minutes: 120
     env:
       PYTHONUTF8: "1"
       # clean clone は mtime が毎回新しく、rust-cache だけでは workspace
       # クレートが常に再コンパイルされる。sccache が内容ハッシュで吸収する (#664)。
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
+      SDK_RELEASE_TAG: ci-sdk-ae25.2
+      SDK_ASSET: AfterEffectsSDK-ae25.2-win.zip
+      SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,6 +69,29 @@ jobs:
           enable-cache: true
       - name: Install Python test dependencies
         run: uv sync --locked
+
+      # SDK asset は collaborator 限定なので、public repository と fork PR は
+      # ここから下の SDK 依存ステップに到達してはならない。job ごと落とすのでは
+      # なく個々のステップを条件付けし、source-only の検証は fork でも走らせる。
+      - name: Fetch After Effects SDK
+        id: sdk
+        if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP $env:SDK_ASSET
+          gh release download $env:SDK_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:SDK_ASSET --output $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash
+          if ($hash -ne $env:SDK_SHA256) { throw "SDK asset hash mismatch: expected $env:SDK_SHA256, got $hash" }
+          $dest = Join-Path $env:RUNNER_TEMP 'aesdk'
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $root = Join-Path $dest 'AfterEffectsSDK'
+          if (-not (Test-Path (Join-Path $root 'Examples\Headers\AE_Effect.h'))) {
+            throw 'extracted SDK is missing Examples\Headers\AE_Effect.h'
+          }
+          "AFTER_EFFECTS_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Check Rust workspace
         working-directory: broker
         run: cargo check --workspace --locked
@@ -77,11 +106,17 @@ jobs:
         run: cargo test --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
       - name: Test YMM4 native bridge
         run: cargo test --manifest-path bridges/ymm4-native/Cargo.toml --locked
-      # PR ゲートで minihost の C++ をコンパイルする (#884)。ae-sdk-tests の
-      # 手動無効化 (#721) 以降、minihost を触る PR はコンパイルすら検証されずに
-      # merge できた。minihost のビルドは AFTER_EFFECTS_SDK_ROOT を参照しない
-      # ので、SDK fetch を持たないこの workflow に置ける。probe AEX のビルドと
-      # SDK 付き pytest の復旧は ae-sdk-tests 側 (#721) が担当する。
+
+      # built_artifact テストは broker CLI と harness の両方を release で参照する。
+      # harness が無いと assert_artifact_fresh が 27 件落ちる (#925)。
+      - name: Build the broker CLI and harness (release)
+        working-directory: broker
+        run: |
+          cargo build --release --locked -p aexcompat-broker --bin broker
+          cargo build --release --locked -p aexcompat-harness
+
+      # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
+      # フラット配置する (single-config)。
       - name: Build minihost workers (Ninja)
         shell: cmd
         run: |
@@ -97,18 +132,153 @@ jobs:
       - name: Verify minihost header dependency tracking
         shell: pwsh
         run: pwsh -File tools\verify-minihost-build-deps.ps1
+
+      # trace writer の動的テスト (test_production_worker_trace.py /
+      # test_instruments_trace_writer.py の handle ベース検証) を実走させる (#250)。
+      # この target は trace_writer.cpp + windows.h のみで SDK 不要。
+      - name: Build trace writer selftest (Ninja)
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          if not defined VSROOT exit /b 1
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake -S instruments -B target\instruments-build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
+          cmake --build target\instruments-build --target trace_writer_selftest || exit /b 1
+          dir /b target\instruments-build\trace_writer_selftest.exe
+
+      # 一部の built_artifact テストは worker を multi-config 時代の固定パス
+      # から探すため、同一バイナリを複製して満たす。これらのテストは frozen hash を
+      # 照合しないので複製で問題ない。
+      - name: Mirror workers into expected build layouts
+        shell: cmd
+        run: |
+          for %%d in ("target\minihost-build-v18" "target\minihost-build-v18\Release" "target\minihost-build\Release" "target\minihost-timed-layers\Release") do (
+            mkdir %%d 2>nul
+            copy /y target\minihost-build\aex_*.exe %%d\ >nul || exit /b 1
+          )
+
+      # probe テストの入力 fixture (37x23 raw RGBA)。内容は決定論的に生成され、
+      # built_artifact テストは期待値を実行時に自己計算するため内容非依存。
+      - name: Generate probe input fixture
+        shell: cmd
+        run: |
+          mkdir target\gpu-effects 2>nul
+          uv run python tools\generate-oracle-rgba-input.py --width 37 --height 23 --alpha-mode opaque --out target\gpu-effects\opencl-input.png || exit /b 1
+          uv run python tools\png-to-rgba-raw.py --png target\gpu-effects\opencl-input.png --out target\gpu-effects\opencl-input.rgba || exit /b 1
+
+      - name: Build probe AEX set
+        if: steps.sdk.outcome == 'success'
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          for %%s in (
+            build-pf-sampling-probe
+            build-pf-aegp-async-layer-receipt-probe
+            build-pf-aegp-external-cache-roundtrip-probe
+            build-pf-aegp-fast-blur-probe
+            build-pf-aegp-layer-options-probe
+            build-pf-aegp-layer-receipt-probe
+            build-pf-aegp-owned-world-probe
+            build-pf-aegp-platform-world-probe
+            build-pf-aegp-render-options4-tail-probe
+            build-pf-aegp-render-suite5-probe
+            build-pf-convolve-depth-probe
+            build-pf-parameter-echo-probe
+            build-pf-layer-param-probe
+            build-pf-param-utils-animation-probe
+            build-pf-smart-geometry-probe
+            build-pf-smart-param-time-probe
+            build-pf-transfer-mask-probe
+            build-pf-transfer-rect-probe
+            build-pf-transform-affine-probe
+            build-pf-custom-ui-probe
+            build-pf-frame-resize-probe
+            build-pf-visual-audio-probe
+            build-pf-color-settings-abi-probe
+            build-pf-transform-multimatrix-oracle
+          ) do (
+            powershell -NoProfile -ExecutionPolicy Bypass -File tools\%%s.ps1 || exit /b 1
+          )
+
+      # built_artifact テスト (test_sdk_backwards_audio_worker) が参照する
+      # SDK example fixture。pytest の収集順に依存しないよう事前にビルドする。
+      - name: Build SDK example fixtures (built-artifact deps)
+        if: steps.sdk.outcome == 'success'
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-backwards.ps1 || exit /b 1
+
       - name: Test Rust workspace
         working-directory: broker
         shell: pwsh
         run: cargo test --workspace --locked
+
+      # #356: parameter-animation の統合テストは native worker と AEX fixture を
+      # これらの正確なパスから探す。成果物の不在をカバレッジと取り違えないよう、
+      # 事前チェックを fail-closed にする。
+      - name: Run native parameter-animation Rust coverage
+        if: steps.sdk.outcome == 'success'
+        working-directory: broker
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $required = @(
+            (Join-Path $root 'target\minihost-build\aex_render_worker.exe'),
+            (Join-Path $root 'target\pf-layer-param-probe-build\Release\pf_layer_param_probe.aex'),
+            (Join-Path $root 'target\pf-param-utils-animation-probe-build\Release\pf_param_utils_animation_probe.aex')
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "#356 native coverage prerequisite is missing: $path"
+            }
+            $file = Get-Item -LiteralPath $path
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host "coverage_artifact=$($file.FullName) size=$($file.Length) sha256=$hash"
+          }
+          $commit = git -C $root rev-parse HEAD
+          Write-Host "coverage_source_commit=$commit"
+          cargo test -p aexcompat-broker --test parameter_animation --locked
+
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
-      # worksteal: ビルドでブロックした worker の積み残しを他の worker が
-      # 引き取る。time_ns ファイル名の worker 間衝突は stamp への pid 付与で
-      # 解消済みなので、モジュール直列化 (loadscope) はもう要らない (#668)。
-      # dev_infra (レビュー運用スキルのテスト) は下の dev-infra job が担当 (#684)。
-      - name: Run source-reproducible Python tests
-        run: uv run python -m pytest -q -n auto --dist worksteal --durations=25 -m "not dev_infra"
+
+      # SDK と built artifact を揃えた 1 回の実行で全部を賄う。分かれていた頃は
+      # ae-sdk-tests が source-only 集合をそのまま再実行していた (#681)。
+      # cmd で実行する: pwsh の step から spawn すると、テストが起動する
+      # powershell.exe (5.1) が pwsh 用の PSModulePath を継承してしまい、
+      # Get-FileHash 等の組み込み cmdlet を解決できなくなる。
+      - name: Run Python tests
+        shell: cmd
+        env:
+          # 前段の Build minihost workers がビルド済みの worker を
+          # canonical_release_worker fixture に渡し、二重ビルドを避ける (#681)。
+          AEXCOMPAT_CANONICAL_WORKER: ${{ github.workspace }}\target\minihost-build\aex_render_worker.exe
+          SDK_READY: ${{ steps.sdk.outcome }}
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          set "SDK_FLAGS="
+          if "%SDK_READY%"=="success" set "SDK_FLAGS=--run-sdk-tests --run-built-artifact-tests"
+          uv run python -m pytest -q -rs -n auto --dist worksteal --durations=25 -m "not dev_infra" %SDK_FLAGS% --validate-local-artifact-manifest > pytest-output.txt 2>&1
+          set PYTEST_EXIT=%ERRORLEVEL%
+          type pytest-output.txt
+          exit /b %PYTEST_EXIT%
+
+      # AFTER_EFFECTS_SDK_ROOT が通っていれば SDK 由来の skip は 1 件も出ないはず。
+      # 同様に、worker/probe をビルド済みなので built_artifact テストが成果物
+      # 不在の inline skip で黙って skip されたら fail。
+      - name: Fail if SDK or built-artifact tests were skipped
+        if: steps.sdk.outcome == 'success'
+        shell: pwsh
+        run: |
+          $leaks = Select-String -Path pytest-output.txt -Pattern 'SKIPPED' |
+            Where-Object { $_.Line -match 'set AFTER_EFFECTS_SDK_ROOT|is not built|are not present' }
+          if ($leaks) {
+            $leaks | ForEach-Object { $_.Line }
+            throw 'SDK or built-artifact tests were skipped even though their prerequisites are provisioned'
+          }
+
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats

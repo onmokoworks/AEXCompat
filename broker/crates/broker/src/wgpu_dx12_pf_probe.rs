@@ -227,6 +227,14 @@ pub fn run_from_manifest(
         "instruments/pf-wgpu-dx12-probe/runtime/Cargo.lock",
     )?;
 
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+    for path in [aex.as_path(), runtime.as_path()] {
+        if let Some(parent) = path.parent() {
+            if !search_dirs.iter().any(|seen| seen == parent) {
+                search_dirs.push(parent.to_path_buf());
+            }
+        }
+    }
     let args_before_plugin = vec!["--l2-params-only".to_owned()];
     let args_after_plugin = vec![manifest.artifacts.aex.sha256.clone()];
     let launch = dispatch_secure_image_with_process_memory_limit(
@@ -234,8 +242,10 @@ pub fn run_from_manifest(
             repository,
             worker_kind: WorkerKind::L2,
             plugin: approved(aex, &manifest.artifacts.aex)?,
-            dependencies: vec![approved(runtime, &manifest.artifacts.runtime)?],
-            dependency_search_dirs: Vec::new(),
+            // #816: the runtime rides a search directory rather than a staged
+            // artifact, and dispatch rejects the staged form outright.
+            dependencies: Vec::new(),
+            dependency_search_dirs: search_dirs,
             args_before_plugin: &args_before_plugin,
             args_after_plugin: &args_after_plugin,
             timeout: None,

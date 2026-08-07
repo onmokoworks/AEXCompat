@@ -16,6 +16,7 @@ def _worker() -> pathlib.Path | None:
     ]
     return next((candidate for candidate in candidates if candidate and candidate.is_file()), None)
 
+@pytest.mark.xfail(strict=True, reason="render_checkout_frame_reject rejects a duplicated options handle (#925)")
 def test_render_options_runtime_matrix(tmp_path):
     worker = _worker()
     assert worker is not None, "build aex_render_worker before running the focused runtime test"

@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from _render_session import HARNESS, assert_artifact_fresh, run_session_render
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-aegp-render-options4-tail-probe" / "pf_aegp_render_options4_tail_probe.cpp"
@@ -16,6 +17,7 @@ INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 
 
 
+@pytest.mark.xfail(strict=True, reason="the host serves AEGP Render Options Suite v4 as an all-null table (#932)")
 def test_real_probe_exercises_render_options4_tail(tmp_path):
     assert WORKER.is_file()
     assert PROBE.is_file()

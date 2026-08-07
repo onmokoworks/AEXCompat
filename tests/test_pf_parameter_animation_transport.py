@@ -4,6 +4,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TRANSPORT = ROOT / "target/image-transport"
+# The broker runs the worker with <repository>/target as its CWD, and the
+# loader derives the transport boundary from that. Launching from ROOT
+# makes every sidecar look like it sits outside the boundary.
+WORKER_CWD = ROOT / "target"
 
 def _workers():
     build = ROOT / "target/minihost-build-v18"
@@ -19,7 +23,7 @@ def _run_sidecar(worker: Path, document, name="parameter-animation-test.json"):
     try:
         return subprocess.run(
             [str(worker), "--self-test-parameter-animation-sidecar", str(path)],
-            cwd=ROOT, text=True, capture_output=True, timeout=30, check=False,
+            cwd=WORKER_CWD, text=True, capture_output=True, timeout=30, check=False,
         )
     finally:
         path.unlink(missing_ok=True)
@@ -43,7 +47,7 @@ def _valid_arbitrary():
 def test_native_timeline_evaluation_and_param_utils():
     for worker in _workers():
         assert worker.is_file(), f"missing VS2022 worker: {worker}"
-        completed = subprocess.run([str(worker), "--self-test-parameter-animation"], cwd=ROOT,
+        completed = subprocess.run([str(worker), "--self-test-parameter-animation"], cwd=WORKER_CWD,
                                    text=True, capture_output=True, timeout=30, check=False)
         assert completed.returncode == 0, completed.stderr or completed.stdout
         assert json.loads(completed.stdout)["parameter_animation_transport"] == "passed"
@@ -86,7 +90,7 @@ def test_sidecar_is_confined_to_broker_owned_transport_and_trailers_are_peeled()
     outside.write_text(json.dumps(_valid()), encoding="utf-8")
     try:
         completed = subprocess.run([str(worker), "--self-test-parameter-animation-sidecar", str(outside.resolve())],
-                                   cwd=ROOT, text=True, capture_output=True, timeout=30, check=False)
+                                   cwd=WORKER_CWD, text=True, capture_output=True, timeout=30, check=False)
         assert completed.returncode == 3
     finally:
         outside.unlink(missing_ok=True)
