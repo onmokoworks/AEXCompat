@@ -3,11 +3,14 @@ name: AE SDK tests
 on:
   push:
     branches: [main]
+  # SDK 込み検証を PR でも回す。merge 後にしか走らないと、この workflow 自身を
+  # 直す PR (#903 がその例) を検証する手段が dispatch しか無くなる。物理 runner は
+  # 1 台なので PR ゲートとは直列になるが、concurrency の cancel-in-progress で
+  # 同一 ref の古い run は畳まれる。
+  pull_request:
   schedule:
     # 03:00 UTC = 12:00 JST。物理 runner がオフラインなら queue され、オンライン
-    # 復帰時に走る (24 時間で expire)。PR ごとには回さない: 物理マシンは 1 台で、
-    # この workflow が長時間占有すると PR ゲート (windows-clean-clone) が詰まる
-    # (#721)。PR ゲート側の minihost コンパイルは #884 が担当する。
+    # 復帰時に走る (24 時間で expire)。
     - cron: '0 3 * * *'
   workflow_dispatch:
 
@@ -42,8 +45,26 @@ jobs:
       # とはバイト一致しない。この値は再アップロードした asset を
       # gh release download で取り直して算出したもの。
       SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
+    env:
+      # clean clone は mtime が毎回新しく、rust-cache だけでは workspace クレートが
+      # 常に再コンパイルされる。sccache が内容ハッシュで吸収する (#664)。
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
+
+      # self-hosted runner のサービスアカウントには rustup が入っていないので、
+      # cargo は toolchain action が入れるまで PATH に無い。hosted runner には
+      # 最初から入っており、この workflow が hosted 専用だった間は露見しなかった。
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: broker
 
       # Python 版は .python-version (3.12) に従う。3.14 は OpenEXR の
       # win_amd64 wheel が無く、毎回ソースビルドで約 2.5 分かかるため上げない。
