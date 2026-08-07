@@ -96,13 +96,20 @@ jobs:
           }
           "AFTER_EFFECTS_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Check Rust workspace
+      # `cargo check` は後続の build/test と型検査が丸ごと重なる: check が出す
+      # rmeta は codegen に使い回されないので、同じコードを二度検査していた
+      # だけだった (#940)。代わりに fixture の build をここまで前倒しして、
+      # コンパイルエラーが SDK 取得や probe ビルドより前に出る位置を保つ。
+      #
+      # dummy-workers の fixture をテスト実行と同じ feature 解決でビルドして
+      # おくことで、テスト側が `cargo build -p ...` を起動して外側のビルドと
+      # fingerprint を奪い合わずに済む (#937)。
+      - name: Build the workspace fixtures
         working-directory: broker
-        run: cargo check --workspace --locked
-      - name: Check AviUtl2 multifilter bridge
-        run: cargo check --manifest-path bridges/aviutl2-multifilter/Cargo.toml --all-targets --locked
-      # broker の外にある Cargo ルートは cargo check で型検査されるだけで、
-      # テストが 1 本も実行されていなかった (#899)。guest workspace は libclang を
+        run: cargo build --workspace --locked
+
+      # broker の外にある Cargo ルートは長らく型検査されるだけで、テストが
+      # 1 本も実行されていなかった (#899)。guest workspace は libclang を
       # 必要とし runner に無いため #917 に分離した。
       - name: Test AviUtl2 multifilter bridge
         run: cargo test --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
@@ -111,11 +118,13 @@ jobs:
 
       # built_artifact テストは broker CLI と harness の両方を release で参照する。
       # harness が無いと assert_artifact_fresh が 27 件落ちる (#925)。
+      # 1 回の呼び出しで両方を選ぶ: パッケージ選択を分けると feature 解決が
+      # 変わり、2 本目が 1 本目のビルドした aexcompat-broker と host-core を
+      # 丸ごと作り直していた (#940)。bin 名はワークスペース内で一意なので
+      # --bin を並べれば -p なしで両方に届く。
       - name: Build the broker CLI and harness (release)
         working-directory: broker
-        run: |
-          cargo build --release --locked -p aexcompat-broker --bin broker
-          cargo build --release --locked -p aexcompat-harness
+        run: cargo build --release --locked --bin broker --bin aexcompat-harness
 
       # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
       # フラット配置する (single-config)。
@@ -168,39 +177,63 @@ jobs:
           uv run python tools\generate-oracle-rgba-input.py --width 37 --height 23 --alpha-mode opaque --out target\gpu-effects\opencl-input.png || exit /b 1
           uv run python tools\png-to-rgba-raw.py --png target\gpu-effects\opencl-input.png --out target\gpu-effects\opencl-input.rgba || exit /b 1
 
+      # 各 probe は自分だけの source (instruments\pf-*-probe) と build
+      # ディレクトリ (target\pf-*-probe-build) を持ち、出力を共有しないので
+      # 同時に走らせられる。直列だと 1 本あたり約 3.4 秒 x 24 本で 86 秒
+      # かかっていた (#940)。並列だと出力が混ざって読めないので probe ごとに
+      # 捕まえ、落ちたものだけまとめて出す。cmd の for ループと違い最初の
+      # 失敗で打ち切らないため、1 回の実行で全滅か 1 本かが分かる。
       - name: Build probe AEX set
         if: steps.sdk.outcome == 'success'
-        shell: cmd
+        shell: pwsh
         run: |
-          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
-          for %%s in (
-            build-pf-sampling-probe
-            build-pf-aegp-async-layer-receipt-probe
-            build-pf-aegp-external-cache-roundtrip-probe
-            build-pf-aegp-fast-blur-probe
-            build-pf-aegp-layer-options-probe
-            build-pf-aegp-layer-receipt-probe
-            build-pf-aegp-owned-world-probe
-            build-pf-aegp-platform-world-probe
-            build-pf-aegp-render-options4-tail-probe
-            build-pf-aegp-render-suite5-probe
-            build-pf-convolve-depth-probe
-            build-pf-parameter-echo-probe
-            build-pf-layer-param-probe
-            build-pf-param-utils-animation-probe
-            build-pf-smart-geometry-probe
-            build-pf-smart-param-time-probe
-            build-pf-transfer-mask-probe
-            build-pf-transfer-rect-probe
-            build-pf-transform-affine-probe
-            build-pf-custom-ui-probe
-            build-pf-frame-resize-probe
-            build-pf-visual-audio-probe
-            build-pf-color-settings-abi-probe
-            build-pf-transform-multimatrix-oracle
-          ) do (
-            powershell -NoProfile -ExecutionPolicy Bypass -File tools\%%s.ps1 || exit /b 1
+          $repository = $PWD.Path
+          # pwsh の PSModulePath のままだと子の Windows PowerShell 5.1 が
+          # 自分のモジュールを見つけられない。cmd 版が先頭に足していたのと
+          # 同じ 2 つを入れる (プロセス環境なので子プロセスに継承される)。
+          $env:PSModulePath = "$env:ProgramFiles\WindowsPowerShell\Modules;$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules;$env:PSModulePath"
+          $probes = @(
+            'build-pf-sampling-probe'
+            'build-pf-aegp-async-layer-receipt-probe'
+            'build-pf-aegp-external-cache-roundtrip-probe'
+            'build-pf-aegp-fast-blur-probe'
+            'build-pf-aegp-layer-options-probe'
+            'build-pf-aegp-layer-receipt-probe'
+            'build-pf-aegp-owned-world-probe'
+            'build-pf-aegp-platform-world-probe'
+            'build-pf-aegp-render-options4-tail-probe'
+            'build-pf-aegp-render-suite5-probe'
+            'build-pf-convolve-depth-probe'
+            'build-pf-parameter-echo-probe'
+            'build-pf-layer-param-probe'
+            'build-pf-param-utils-animation-probe'
+            'build-pf-smart-geometry-probe'
+            'build-pf-smart-param-time-probe'
+            'build-pf-transfer-mask-probe'
+            'build-pf-transfer-rect-probe'
+            'build-pf-transform-affine-probe'
+            'build-pf-custom-ui-probe'
+            'build-pf-frame-resize-probe'
+            'build-pf-visual-audio-probe'
+            'build-pf-color-settings-abi-probe'
+            'build-pf-transform-multimatrix-oracle'
           )
+          $throttle = [Math]::Min([Environment]::ProcessorCount, $probes.Count)
+          Write-Host "building $($probes.Count) probes with throttle $throttle"
+          $results = $probes | ForEach-Object -Parallel {
+            $script = Join-Path $using:repository "tools\$_.ps1"
+            $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $script 2>&1 | Out-String
+            [pscustomobject]@{ Probe = $_; ExitCode = $LASTEXITCODE; Output = $output }
+          } -ThrottleLimit $throttle
+          $failed = @($results | Where-Object { $_.ExitCode -ne 0 })
+          foreach ($failure in $failed) {
+            Write-Host "::group::probe build failed: $($failure.Probe) (exit $($failure.ExitCode))"
+            Write-Host $failure.Output
+            Write-Host "::endgroup::"
+          }
+          if ($failed.Count -gt 0) {
+            throw "probe builds failed: $(($failed.Probe) -join ', ')"
+          }
 
       # built_artifact テスト (test_sdk_backwards_audio_worker) が参照する
       # SDK example fixture。pytest の収集順に依存しないよう事前にビルドする。
@@ -210,13 +243,6 @@ jobs:
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-backwards.ps1 || exit /b 1
-
-      # Builds the dummy-workers fixtures with the same workspace feature
-      # resolution the test run uses, so no test has to shell out to
-      # `cargo build -p ...` and fight the outer build over fingerprints (#937).
-      - name: Build the workspace fixtures
-        working-directory: broker
-        run: cargo build --workspace --locked
 
       - name: Test Rust workspace
         working-directory: broker
