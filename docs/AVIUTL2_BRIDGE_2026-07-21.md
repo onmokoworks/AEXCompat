@@ -515,3 +515,19 @@ libffi (成熟クレート、実行可能メモリ管理込み) で AEX を捕�
 → 「1 DLL から複数フィルタ登録 + 各フィルタ独立キーフレーム」を AviUtl2 が honor することを
 立証。段階5 の土台が成立。**未検証: libffi closure 生成の fn ポインタが func_proc_video として
 機能するか** (スパイクは compile-time 型で、libffi 経路は次に別スパイクで確認する)。
+
+## 2026-08-07 (観察・決定): `bridges/aviutl2` を削除
+
+本ノートが設計した単一フィルタ効果ブリッジ (`bridges/aviutl2`、`src/lib.rs` 1,167 行) を
+削除した (#933、owner 判断)。`bridges/aviutl2-multifilter` が同じ用途を覆っており、
+両者に相互依存は無い。
+
+削除時点の観察:
+
+- `bridges/aviutl2` のテストは 0 本。multifilter は 189 本を持ち、#899 で CI 実行を開始した
+- repo 内の参照は workflow の 2 行 (`Check AviUtl2 bridge` と rust-cache のエントリ) と
+  本ノートを含む docs 2 本のみ
+- multifilter の `Cargo.toml` は `aexcompat-aviutl2-bridge` に依存していない
+
+本ノートの以前の記述 (段階 1〜4 の設計、AEX 差し替え等) は当時の観察・決定として
+そのまま残す。実装の所在だけが multifilter に移った。

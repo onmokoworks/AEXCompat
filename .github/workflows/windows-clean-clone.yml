@@ -59,7 +59,6 @@ jobs:
         with:
           workspaces: |
             broker
-            bridges/aviutl2
             bridges/aviutl2-multifilter
             bridges/ymm4-native
       # Python 版は .python-version (3.12) に従う。
@@ -95,8 +94,6 @@ jobs:
       - name: Check Rust workspace
         working-directory: broker
         run: cargo check --workspace --locked
-      - name: Check AviUtl2 bridge
-        run: cargo check --manifest-path bridges/aviutl2/Cargo.toml --all-targets --locked
       - name: Check AviUtl2 multifilter bridge
         run: cargo check --manifest-path bridges/aviutl2-multifilter/Cargo.toml --all-targets --locked
       # broker の外にある Cargo ルートは cargo check で型検査されるだけで、
