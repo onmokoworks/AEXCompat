@@ -190,6 +190,10 @@ bool dispatch(const Request& request, const Hooks& hooks,
   runtime.width = plan.width;
   runtime.height = plan.height;
   runtime.rowbytes = plan.rowbytes;
+  // `params` holds the input plus one entry per declared parameter, matching
+  // the SDK's "0 = input, 1..n = param" indexing for checkout_layer.
+  runtime.param_count = params.empty()
+      ? 0 : static_cast<int32_t>(params.size() - 1);
   runtime.pixel_format = plan.float32 ? "argb32f" : (plan.deep16 ? "argb16" : "argb8");
   // Before the selector, not after it: PreRender is where a SmartFX plug-in
   // checks its input out, and the registration that checkout leaves behind is

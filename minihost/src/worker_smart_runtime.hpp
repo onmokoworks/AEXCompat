@@ -28,6 +28,10 @@ struct PixelCheckout {
   void* view_world{};
   std::array<int32_t, 4> rect{-1, -1, -1, -1};
   bool checked_out{};
+  // PreRender answered this one as an empty layer parameter, so it has no
+  // world by construction and `checkout_pixels` hands back null rather than
+  // treating the absent world as a fault (issue #898).
+  bool empty_layer_param{};
 };
 
 struct State {
@@ -50,6 +54,13 @@ struct State {
   uint32_t current_time_scale{1};
   uint32_t rejected_temporal_checkouts{};
   int32_t secondary_layer_slot{6};
+  // How many parameters the plug-in declared, which bounds what
+  // `checkout_layer` may name: the SDK defines its index as "0 = input, 1..n =
+  // param". A parameter inside that range that this host has no world for is
+  // answered with an empty rect (issue #898); anything outside it is still an
+  // unknown layer.
+  int32_t param_count{};
+  uint32_t empty_layer_param_checkouts{};
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
   int32_t pixel_aspect_numerator{1};

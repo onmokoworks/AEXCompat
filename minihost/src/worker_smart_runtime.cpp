@@ -137,6 +137,7 @@ void State::clear_transient() {
   map_checkout_result_rect.fill(-1);
   malformed_checkout_requests = 0;
   empty_checkout_pixel_denials = 0;
+  empty_layer_param_checkouts = 0;
   gpu_render_dispatched = false;
 }
 
@@ -295,6 +296,29 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
         false});
     return finish_callback(Callback::PreCheckoutLayer, 0);
   }
+  // A layer parameter this host has no world for.
+  //
+  // The SDK admits this answer directly: PF_CheckoutResult::result_rect is
+  // documented as "the rectangle actually available from this request (can be
+  // empty)", and checkout_layer's index is "0 = input, 1..n = param", so
+  // asking about a parameter is expected and an empty answer is a real one. A
+  // plug-in reads the empty rect as "no layer here" and carries on; refusing
+  // the call instead ends its PreRender, which is what happened to DeepGlow2
+  // when it asked about a layer parameter its project leaves unset (issue
+  // #898).
+  //
+  // The registration is left with no world, so a plug-in that checks pixels out
+  // of it still fails closed there - the empty rect says there are none to
+  // check out.
+  if (index >= 1 && index <= runtime.param_count) {
+    ++runtime.empty_layer_param_checkouts;
+    const std::array<int32_t, 4> empty{0, 0, 0, 0};
+    write_checkout_result(result, empty, empty, runtime.width, runtime.height);
+    forget_checkout(runtime, checkout_id);
+    runtime.pixel_checkouts.push_back(
+        {checkout_id, nullptr, nullptr, empty, false, true});
+    return finish_callback(Callback::PreCheckoutLayer, 0);
+  }
   return finish_callback(Callback::PreCheckoutLayer, 4, Reason::UnknownLayer);
 }
 
@@ -314,6 +338,20 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
       });
   if (checkout == runtime.pixel_checkouts.end())
     return finish_callback(Callback::CheckoutPixels, 4, Reason::UnknownCheckout);
+  // A checkout PreRender already answered as empty. The plug-in was told there
+  // are no pixels here (an empty result_rect, which the SDK documents as a
+  // real answer), and asking for them anyway is not a fault on either side: AE
+  // hands an effect a layer parameter with no source as an empty layer, not as
+  // a failed call. The world is null and the rect is empty, which is what the
+  // plug-in was already told; refusing instead ended DeepGlow2's SmartRender
+  // (issue #898).
+  if (checkout->empty_layer_param) {
+    if (checkout->checked_out)
+      return finish_callback(Callback::CheckoutPixels, 4, Reason::AlreadyCheckedOut);
+    ++runtime.empty_checkout_pixel_denials;
+    checkout->checked_out = true;
+    return finish_callback(Callback::CheckoutPixels, 0);
+  }
   if (!checkout->world)
     return finish_callback(Callback::CheckoutPixels, 4, Reason::MissingWorld);
   if (checkout->checked_out)
