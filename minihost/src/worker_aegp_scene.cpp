@@ -1701,7 +1701,16 @@ int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
   return committed ? 0 : 4;
 }
 int32_t __cdecl get_new_effect_for_effect(int32_t plugin_id, void* effect, void** effect_ref) {
-  if (plugin_id <= 0 || effect != &g_effect || !effect_ref || g_aegp_effect_live) return 4;
+  // A negative id is malformed; 0 is an unregistered caller, which is admitted
+  // for the same reason the colour settings suite admits it (issue #894): the
+  // id names the caller for AE's own accounting, and this host's ownership of
+  // the effect handle is tracked by `g_aegp_effect_live` rather than by the id.
+  // DeepGlow2 never calls AEGP_RegisterWithAEGP, so it reaches every AEGP entry
+  // point with 0, and refusing here ended its SmartRender: the matte path walks
+  // from this handle to its layer parameter's stream, and got 4 before it
+  // started (issue #903).
+  if (plugin_id < 0 || effect != &g_effect || !effect_ref || g_aegp_effect_live)
+    return 4;
   g_aegp_effect_live = true;
   *effect_ref = &g_aegp_effect;
   ++g_aegp_effect_acquires;

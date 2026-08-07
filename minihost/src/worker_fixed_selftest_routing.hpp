@@ -48,6 +48,7 @@ struct SimpleHooks {
   bool (*flt_blur_suite1)(){};
   bool (*aefx_ace_suite1)(){};
   bool (*aegp_persistent_data_suite3)(){};
+  bool (*native_stdout_routing)(){};
 };
 
 struct Hooks {
