@@ -244,17 +244,19 @@ jobs:
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-backwards.ps1 || exit /b 1
 
-      - name: Test Rust workspace
-        working-directory: broker
-        shell: pwsh
-        run: cargo test --workspace --locked
-
       # #356: parameter-animation の統合テストは native worker と AEX fixture を
-      # これらの正確なパスから探す。成果物の不在をカバレッジと取り違えないよう、
-      # 事前チェックを fail-closed にする。
-      - name: Run native parameter-animation Rust coverage
+      # これらの正確なパスから探し、無ければ黙って return する。成果物の不在を
+      # カバレッジと取り違えないよう、fail-closed に検査してから workspace の
+      # テストに入る。
+      #
+      # 以前はここで `cargo test -p aexcompat-broker --test parameter_animation`
+      # も走らせていたが、この test target は `cargo test --workspace` にも
+      # 含まれており同じ 2 件を二度実行していた。しかも `-p` の狭い選択は
+      # `--workspace` と feature 解決が違うので aexcompat-broker と
+      # aexcompat-host-core を作り直していた (#948)。検査をテストより前に
+      # 置けば「workspace 実行の時点で成果物があった」と順序で言い切れる。
+      - name: Check native parameter-animation coverage inputs
         if: steps.sdk.outcome == 'success'
-        working-directory: broker
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -274,7 +276,11 @@ jobs:
           }
           $commit = git -C $root rev-parse HEAD
           Write-Host "coverage_source_commit=$commit"
-          cargo test -p aexcompat-broker --test parameter_animation --locked
+
+      - name: Test Rust workspace
+        working-directory: broker
+        shell: pwsh
+        run: cargo test --workspace --locked
 
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
