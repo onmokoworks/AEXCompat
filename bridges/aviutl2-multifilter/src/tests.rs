@@ -3251,6 +3251,54 @@ mod tests {
         assert!(layer_slots_of(&survivors).is_empty());
     }
 
+    #[test]
+    fn exposed_defaults_match_the_values_the_ui_can_send() {
+        let parameter = InteractiveParameter {
+            slot: 1,
+            name: "Amount".into(),
+            kind: "float".into(),
+            minimum: 0.0,
+            maximum: 1.0,
+            value: 5.0,
+            choices: Vec::new(),
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        };
+        let (_, _, sent) = build_item(&parameter, "Amount").expect("float is exposed");
+        assert_eq!(sent.value, 1.0);
+        assert_eq!(
+            aexcompat_broker::image_render::encode_interactive_payload(&[sent])
+                .expect("the exposed value is sendable"),
+            "v2|param_1@1:f64=1"
+        );
+
+        let popup = InteractiveParameter {
+            slot: 2,
+            name: "Mode".into(),
+            kind: "integer".into(),
+            minimum: 0.0,
+            maximum: 3.0,
+            value: 0.5,
+            choices: vec!["One".into(), "Two".into(), "Three".into()],
+            ..parameter
+        };
+        let (_, _, sent) = build_item(&popup, "Mode").expect("popup is exposed");
+        assert_eq!(sent.value, 1.0);
+        assert_eq!(
+            aexcompat_broker::image_render::encode_interactive_payload(&[sent])
+                .expect("the selected popup value is sendable"),
+            "v2|param_2@2:i32=1"
+        );
+    }
+
     // --- worker root resolution (issue #650) ---------------------------------
 
     /// Lays out `<root>/target/minihost-build/aex_l2_worker.exe`.

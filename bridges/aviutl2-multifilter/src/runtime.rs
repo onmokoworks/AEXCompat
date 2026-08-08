@@ -218,6 +218,8 @@ fn build_item(
         "float" => {
             let (min, max) = bounded_range(parameter)?;
             let ptr = leak_track(item_name, parameter.value, min, max, track_step(max - min));
+            let mut sent = parameter.clone();
+            sent.value = sent.value.clamp(min, max);
             Some((
                 ptr as *const c_void,
                 ItemReader::Track {
@@ -225,22 +227,19 @@ fn build_item(
                     slot: parameter.slot,
                     integer: false,
                 },
-                parameter.clone(),
+                sent,
             ))
         }
         "integer" => {
             if !parameter.choices.is_empty() {
                 // Popup -> dropdown (AE popups are 1-based).
                 let count = parameter.choices.len() as i32;
-                let ptr = leak_select(
-                    item_name,
-                    (parameter.value as i32).clamp(1, count),
-                    &parameter.choices,
-                );
+                let selected = (parameter.value as i32).clamp(1, count);
+                let ptr = leak_select(item_name, selected, &parameter.choices);
                 let mut sent = parameter.clone();
                 sent.minimum = 1.0;
                 sent.maximum = count as f64;
-                sent.value = sent.value.clamp(1.0, count as f64);
+                sent.value = f64::from(selected);
                 return Some((
                     ptr as *const c_void,
                     ItemReader::Select {
@@ -253,16 +252,20 @@ fn build_item(
             let (min, max) = bounded_range(parameter)?;
             if min == 0.0 && max == 1.0 {
                 let ptr = leak_checkbox(item_name, parameter.value != 0.0);
+                let mut sent = parameter.clone();
+                sent.value = f64::from(parameter.value != 0.0);
                 Some((
                     ptr as *const c_void,
                     ItemReader::Checkbox {
                         ptr,
                         slot: parameter.slot,
                     },
-                    parameter.clone(),
+                    sent,
                 ))
             } else {
                 let ptr = leak_track(item_name, parameter.value.round(), min, max, 1.0);
+                let mut sent = parameter.clone();
+                sent.value = sent.value.round().clamp(min, max);
                 Some((
                     ptr as *const c_void,
                     ItemReader::Track {
@@ -270,7 +273,7 @@ fn build_item(
                         slot: parameter.slot,
                         integer: true,
                     },
-                    parameter.clone(),
+                    sent,
                 ))
             }
         }
@@ -846,7 +849,7 @@ fn pool_open_route(
             if index == 0 || member.defaults.is_empty() {
                 None
             } else {
-                encode_interactive_payload(&member.defaults).ok()
+                encode_default_interactive_payload(&member.defaults).ok()
             }
         })
         .collect();

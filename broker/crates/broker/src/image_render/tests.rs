@@ -892,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_payload_is_slot_bound_and_range_checked() {
+    fn default_interactive_payload_is_slot_bound_and_range_normalized() {
         let parameters = vec![InteractiveParameter {
             slot: 2,
             name: "Direction".into(),
@@ -918,7 +918,14 @@ mod tests {
         );
         let mut invalid = parameters;
         invalid[0].value = 4.0;
-        assert!(encode_interactive_payload(&invalid).is_err());
+        assert_eq!(
+            encode_default_interactive_payload(&invalid).unwrap(),
+            "v2|param_2@2:i32=3"
+        );
+        let mut malformed = invalid;
+        malformed[0].minimum = 4.0;
+        malformed[0].maximum = 1.0;
+        assert!(encode_interactive_payload(&malformed).is_err());
     }
 
     #[test]
@@ -957,6 +964,35 @@ mod tests {
         let mut too_long = parameter;
         too_long.debug_summary = Some("x".repeat(4097));
         assert!(encode_interactive_payload(&[too_long]).is_err());
+    }
+
+    #[test]
+    fn arbitrary_without_printable_text_keeps_the_plugin_default() {
+        let parameter = InteractiveParameter {
+            slot: 1,
+            name: "Grid".into(),
+            kind: "arbitrary_data".into(),
+            // Scalar bounds do not describe an arbitrary-data value. Real
+            // descriptors may leave these union bytes as unrelated data.
+            minimum: 10.0,
+            maximum: -10.0,
+            value: f64::NAN,
+            choices: vec![],
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        };
+        assert_eq!(
+            encode_default_interactive_payload(&[parameter]).unwrap(),
+            "v2|"
+        );
     }
 
     #[test]

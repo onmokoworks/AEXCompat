@@ -427,8 +427,13 @@ fn sweep_one(
     // open-time baseline would drive a path the bridge never drives (a frame
     // with no `parameters` attribute takes different worker handling - issue
     // #883's UPDATE_PARAMS_UI among it). The sweep has no host config to read,
-    // so it sends the discovered values unchanged.
-    let parameters = (!options.plugin_defaults).then_some(&record.parameters[..]);
+    // so it sends the discovered defaults after the same transport
+    // normalization used at session open.
+    let normalized_parameters =
+        aexcompat_broker::image_render::normalize_default_interactive_parameters(
+            &record.parameters,
+        );
+    let parameters = (!options.plugin_defaults).then_some(&normalized_parameters[..]);
 
     let session = RenderSession::open(SessionOpenRequest {
         repository,

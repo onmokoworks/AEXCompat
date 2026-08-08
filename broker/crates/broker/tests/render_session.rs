@@ -1292,14 +1292,25 @@ mod windows_e2e {
     ///
     /// Two claims, and the first is what makes the second non-vacuous:
     ///   1. with no override, the slot carries exactly what
-    ///      `encode_interactive_payload` produces for `parameters`;
+    ///      the default payload encoder produces for `parameters`;
     ///   2. with an override, the slot carries the override verbatim -- an id
     ///      shape the encoder in (1) can never emit, so a passthrough that
     ///      silently re-encoded `parameters` would fail here.
     #[test]
-    fn a_payload_override_reaches_the_worker_verbatim() {
+    fn normalized_defaults_open_a_session_and_payload_overrides_remain_verbatim() {
         let (repository, plugin, sha) = temp_repository();
-        let parameters = [float_parameter(1)];
+        let mut numeric = float_parameter(1);
+        numeric.value = 150.0;
+        let mut arbitrary = float_parameter(2);
+        arbitrary.name = "state".into();
+        arbitrary.kind = "arbitrary_data".into();
+        arbitrary.minimum = 10.0;
+        arbitrary.maximum = -10.0;
+        arbitrary.value = f64::NAN;
+        arbitrary.debug_summary = None;
+        let parameters = [numeric, arbitrary];
+        let normalized =
+            aexcompat_broker::image_render::normalize_default_interactive_parameters(&parameters);
 
         let launch_payload = |override_payload: Option<&str>| -> String {
             let mut session = RenderSession::open(SessionOpenRequest {
@@ -1335,7 +1346,7 @@ mod windows_e2e {
             })
             .expect("open render session");
             let outcome = session
-                .render_frame(0, 0, &input_pattern(3))
+                .render_frame_with_parameters(0, 0, &input_pattern(3), Some(&normalized))
                 .expect("frame");
             assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
             let close = session.close();
@@ -1349,9 +1360,10 @@ mod windows_e2e {
         // (1) No override: the encoder's own output reaches the worker. This
         // also pins the encoding the fixture route has to be distinguishable
         // from.
-        let encoded = aexcompat_broker::image_render::encode_interactive_payload(&parameters)
-            .expect("encode the parameter payload");
-        assert_eq!(encoded, "v2|param_1@1:f64=1");
+        let encoded =
+            aexcompat_broker::image_render::encode_default_interactive_payload(&parameters)
+                .expect("encode the parameter payload");
+        assert_eq!(encoded, "v2|param_1@1:f64=100");
         assert_eq!(launch_payload(None), encoded);
 
         // (2) An override in the fixture route's shape: a descriptor id that is

@@ -15,9 +15,9 @@
 use crate::image_render::{
     GpuRuntimePolicyInput, INTERACTIVE_RENDER_TIMEOUT_MS, InteractiveParameter, MAX_DIMENSION,
     MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES, ParameterAnimation, RenderGpuBackend, RenderPixelFormat,
-    RenderUiAction, decode_bounded_image, decode_sha256_hex, encode_interactive_payload,
-    isolated_worker_diagnostics, native_rgba_to_preview, parameter_animation_sidecar_json,
-    runtime_backend, validate_animation_bindings,
+    RenderUiAction, decode_bounded_image, decode_sha256_hex, encode_default_interactive_payload,
+    encode_interactive_payload, isolated_worker_diagnostics, native_rgba_to_preview,
+    parameter_animation_sidecar_json, runtime_backend, validate_animation_bindings,
 };
 use crate::runtime_module_policy::{WorkerModuleValidation, authenticate_gpu_worker_report};
 use crate::secure_image_dispatch::{
@@ -1100,7 +1100,7 @@ impl RenderSession {
             ));
         }
         let command = session_command(request.pixel_format, request.smart, effective_backend)?;
-        // A pre-encoded payload is bounded here the way `encode_interactive_payload`
+        // A pre-encoded payload is bounded here the way the default encoder
         // bounds the one it builds, so no caller can widen the launch argv past
         // the limit the worker's parser is written against.
         let payload = match request.payload_override {
@@ -1110,7 +1110,7 @@ impl RenderSession {
                 }
                 payload.to_owned()
             }
-            None => encode_interactive_payload(request.parameters.unwrap_or_default())?,
+            None => encode_default_interactive_payload(request.parameters.unwrap_or_default())?,
         };
         // The sidecar mirrors the one-shot transport: validated bindings,
         // JSON under <repository>/target/image-transport (the only directory
