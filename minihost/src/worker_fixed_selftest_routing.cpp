@@ -83,6 +83,8 @@ int selftest_suite_entry_utility13(int, wchar_t**) {
   std::cout << "{\"suite_entry_utility13\":\"" << (result.passed ? "passed" : "failed")
             << "\",\"utility_v7_acquired\":"
             << (result.utility_v7_acquired ? "true" : "false")
+            << ",\"utility_v5_acquired\":"
+            << (result.utility_v5_acquired ? "true" : "false")
             << ",\"unsupported_slots_diagnosed\":"
             << (result.unsupported_slots_diagnosed ? "true" : "false")
             << ",\"normal_effect_available\":true"

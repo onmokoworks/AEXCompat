@@ -644,6 +644,7 @@ bool configure_component_suite_catalog() {
        aexcompat::worker_runtime::pf_adv_time::suite(4)},
       {"AEGP Memory Suite", 1, &g_aegp_memory_suite},
       {"AEGP Utility Suite", 3, &g_utility_suite1},
+      {"AEGP Utility Suite", 5, &g_utility_suite2},
       {"AEGP Utility Suite", 7, &g_utility_suite3},
       {"AEGP Utility Suite", 11, &g_utility_suite5},
       {"AEGP Utility Suite", 13, &g_utility_suite},
