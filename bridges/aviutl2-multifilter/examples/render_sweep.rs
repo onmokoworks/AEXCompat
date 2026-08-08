@@ -596,6 +596,23 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
                 .unwrap_or(Value::Null),
         );
     }
+    // These are bounded structured fields from the worker's final report, not
+    // the unbounded stderr trace. Keep them in every sweep record so fatal
+    // session failures (which do not yield a FrameStatus) still say whether a
+    // selector crashed without requiring the private --close-report payload.
+    for key in [
+        "last_seh_selector",
+        "last_seh_error",
+        "last_seh_exception_code",
+    ] {
+        worker.insert(
+            key.to_owned(),
+            close
+                .pointer(&format!("/final_report/{key}"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+    }
     outcome.detail.insert("worker".to_owned(), worker.into());
     outcome
         .detail
@@ -642,11 +659,13 @@ fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
                 render_error,
                 missing_dependency,
                 return_message,
+                selector_crash,
             } => {
                 let name = pf_error_name(render_error);
                 detail.insert("render_error".to_owned(), json!(render_error));
                 detail.insert("render_error_name".to_owned(), json!(name));
                 detail.insert("missing_dependency".to_owned(), json!(missing_dependency));
+                detail.insert("selector_crash".to_owned(), json!(selector_crash));
                 // What the plug-in itself said while failing (#707): often the
                 // whole diagnosis, and what #704 went looking for.
                 detail.insert(
@@ -658,9 +677,12 @@ fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
                         "display_requested": message.display_requested,
                     }))),
                 );
-                match name {
-                    Some(name) => format!("frame_error:{render_error}:{name}"),
-                    None => format!("frame_error:{render_error}"),
+                match selector_crash {
+                    Some(crash) => format!("frame_crashed:{}", crash.selector),
+                    None => match name {
+                        Some(name) => format!("frame_error:{render_error}:{name}"),
+                        None => format!("frame_error:{render_error}"),
+                    },
                 }
             }
         },
@@ -842,5 +864,75 @@ mod tests {
             discovery_failure_bucket(Some(&diagnostics), Some("nonzero_exit")),
             "exit_11_load_library"
         );
+    }
+
+    #[test]
+    fn selector_crash_has_its_own_frame_bucket() {
+        let outcome = frame_outcome(Ok(FrameOutcome {
+            frame_index: 0,
+            status: FrameStatus::FrameError {
+                render_error: 512,
+                missing_dependency: None,
+                return_message: None,
+                selector_crash: Some(aexcompat_broker::render_session::SelectorCrash {
+                    selector: "SMART_PRE_RENDER".to_owned(),
+                    exception_code: 0xC0000005,
+                }),
+            },
+        }));
+        assert_eq!(outcome.bucket, "frame_crashed:SMART_PRE_RENDER");
+        assert_eq!(
+            outcome.detail["selector_crash"]["exception_code"],
+            json!(0xC0000005u32)
+        );
+    }
+
+    #[test]
+    fn plugin_returning_512_stays_a_frame_error() {
+        let outcome = frame_outcome(Ok(FrameOutcome {
+            frame_index: 0,
+            status: FrameStatus::FrameError {
+                render_error: 512,
+                missing_dependency: None,
+                return_message: None,
+                selector_crash: None,
+            },
+        }));
+        assert_eq!(
+            outcome.bucket,
+            "frame_error:512:PF_Err_INTERNAL_STRUCT_DAMAGED"
+        );
+        assert!(outcome.detail["selector_crash"].is_null());
+    }
+
+    #[test]
+    fn pruned_close_keeps_bounded_seh_diagnostics() {
+        let mut outcome = Outcome {
+            bucket: "render_frame_failed".to_owned(),
+            detail: Map::new(),
+        };
+        attach_close(
+            &mut outcome,
+            json!({
+                "worker": {"classification": "nonzero_exit", "exit_code": 24},
+                "final_report": {
+                    "last_seh_selector": "SEQUENCE_SETUP",
+                    "last_seh_error": 512,
+                    "last_seh_exception_code": 0xC0000005u32
+                },
+                "session_clean": false,
+                "invalidated_reason": "worker_invariant_failure"
+            }),
+            false,
+        );
+        assert_eq!(
+            outcome.detail["worker"]["last_seh_selector"],
+            "SEQUENCE_SETUP"
+        );
+        assert_eq!(
+            outcome.detail["worker"]["last_seh_exception_code"],
+            json!(0xC0000005u32)
+        );
+        assert!(outcome.detail.get("close_report").is_none());
     }
 }

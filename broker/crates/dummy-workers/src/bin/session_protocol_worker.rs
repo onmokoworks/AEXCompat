@@ -17,6 +17,8 @@
 //! - `bad_extent`: reports a packed byte count that disagrees with the
 //!   dimensions it reports alongside it.
 //! - `error_frame_0`: answers frame 0 with a frame-local error response.
+//! - `selector_crash_frame_0`: answers frame 0 with a structured guarded-SEH
+//!   diagnostic whose numeric render error collides with PF error 512.
 //! - `modal_frame`: opens a MessageBox on its first frame and waits for the
 //!   broker watchdog (issue #351). The desktop report itself is written at
 //!   launch, independent of this behavior.
@@ -893,6 +895,17 @@ mod worker {
                 let reply = format!(
                     "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
                      \"status\":\"error\",\"render_error\":-40}}"
+                );
+                if !write_message(response, &reply) {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                continue;
+            }
+            if behavior == "selector_crash_frame_0" && frame_index == 0 {
+                let reply = format!(
+                    "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                     \"status\":\"error\",\"render_error\":512,\
+                     \"selector_crash\":{{\"selector\":\"SMART_RENDER\",\"exception_code\":3221225477}}}}"
                 );
                 if !write_message(response, &reply) {
                     return EXIT_PROTOCOL_VIOLATION;

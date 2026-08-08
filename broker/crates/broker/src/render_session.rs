@@ -116,6 +116,14 @@ fn admissible_return_message(message: &FrameReturnMessage) -> bool {
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
+fn admissible_selector_name(selector: &str) -> bool {
+    !selector.is_empty()
+        && selector.len() <= 64
+        && selector
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 fn valid_dependency_basename(name: &str) -> bool {
     name.len() >= 5
         && name.len() <= 260
@@ -659,6 +667,11 @@ pub enum FrameStatus {
         /// there, and plug-ins write their own reason, so this is often the
         /// whole diagnosis (issue #707). Absent when the plug-in said nothing.
         return_message: Option<FrameReturnMessage>,
+        /// The frame failed because a selector raised an SEH exception, rather
+        /// than because the plug-in returned `render_error` normally. This is
+        /// essential when the worker's fail-closed substitute (512) collides
+        /// with a real PF_Err value (issue #983).
+        selector_crash: Option<SelectorCrash>,
     },
     // An expand-output effect that overruns the launch slot no longer surfaces to
     // the caller: `render_frame` grows the shared section in place and waits for
@@ -727,6 +740,13 @@ pub struct FrameReturnMessage {
     pub display_requested: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SelectorCrash {
+    pub selector: String,
+    pub exception_code: u32,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FrameDone {
@@ -742,6 +762,8 @@ struct FrameDone {
     missing_dependency: Option<String>,
     #[serde(default)]
     return_message: Option<FrameReturnMessage>,
+    #[serde(default)]
+    selector_crash: Option<SelectorCrash>,
     #[serde(default)]
     generation: Option<u32>,
     /// Present only on a "resize_needed" status (#262): the dimensions the
@@ -2128,6 +2150,16 @@ impl RenderSession {
             {
                 done.return_message = None;
             }
+            if done.selector_crash.as_ref().is_some_and(|crash| {
+                crash.exception_code == 0 || !admissible_selector_name(&crash.selector)
+            }) {
+                return Err(self.invalidate(
+                    "malformed_selector_crash",
+                    format!("frame {frame_index} carried an invalid selector crash diagnostic"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
             match done.status.as_str() {
                 "error" => {
                     if done.output.is_some()
@@ -2199,6 +2231,7 @@ impl RenderSession {
                             render_error: done.render_error,
                             missing_dependency: done.missing_dependency,
                             return_message: done.return_message,
+                            selector_crash: done.selector_crash,
                         },
                     });
                 }
@@ -2211,7 +2244,10 @@ impl RenderSession {
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     };
-                    if carries_resize_fields || done.missing_dependency.is_some() {
+                    if carries_resize_fields
+                        || done.missing_dependency.is_some()
+                        || done.selector_crash.is_some()
+                    {
                         return Err(self.invalidate(
                             "malformed_ok_response",
                             format!("frame {frame_index} ok response carried resize fields"),
@@ -2276,7 +2312,10 @@ impl RenderSession {
                     // carries only width/height. Bound the requested size so a
                     // misbehaving worker cannot force an unbounded re-open, and
                     // require it to actually exceed the current slot.
-                    if done.output.is_some() || done.generation.is_some() || done.render_error != 0
+                    if done.output.is_some()
+                        || done.generation.is_some()
+                        || done.render_error != 0
+                        || done.selector_crash.is_some()
                     {
                         return Err(self.invalidate(
                             "malformed_resize_response",
@@ -3420,12 +3459,14 @@ pub fn run_video_batch(
                     render_error,
                     missing_dependency,
                     return_message,
+                    selector_crash,
                 } => Ok(json!({
                     "frame_index": frame_index,
                     "status": "error",
                     "render_error": render_error,
                     "missing_dependency": missing_dependency,
                     "return_message": return_message,
+                    "selector_crash": selector_crash,
                 })),
             }
         })();

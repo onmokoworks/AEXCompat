@@ -848,6 +848,8 @@ RenderSessionOutcome run_session_frame_loop(
     // Each frame starts with no message: what the plug-in said about a previous
     // frame is not this frame's diagnosis (issue #707).
     aexcompat::worker_runtime::reset_selector_return_message();
+    const uint64_t seh_sequence_at_frame_start =
+        aexcompat::worker_runtime::selector_dispatch_telemetry().seh_sequence;
     const auto& time_object = std::get<JsonValue::Object>(time_value->value);
     int32_t current_time{};
     int32_t current_scale{};
@@ -912,6 +914,16 @@ RenderSessionOutcome run_session_frame_loop(
           aexcompat::worker_runtime::selector_dispatch_telemetry();
       const auto& missing = telemetry.missing_dependency;
       if (!missing.empty()) reply += ",\"missing_dependency\":\"" + missing + "\"";
+      // A selector SEH used to be flattened into kAuditFailure == 512, which
+      // collides with PF_Err_INTERNAL_STRUCT_DAMAGED. Carry a frame-local,
+      // structured discriminator instead. The sequence comparison prevents a
+      // crash from startup or a previous frame being attached to this error.
+      if (telemetry.seh_sequence != seh_sequence_at_frame_start &&
+          telemetry.seh_code != 0 && !telemetry.selector.empty()) {
+        reply += ",\"selector_crash\":{\"selector\":\"" +
+            escape(telemetry.selector) + "\",\"exception_code\":" +
+            std::to_string(telemetry.seh_code) + "}";
+      }
       // What the plug-in itself said about the failure. The SDK writes
       // "Couldn't load suite." here when a suite is missing, and plug-ins write
       // their own reason, so this is often the whole diagnosis (issue #707).

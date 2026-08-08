@@ -184,6 +184,10 @@ struct SelectorReturnMessage {
 
 struct SelectorDispatchTelemetry {
   uint32_t seh_code{};
+  /// Monotonic within one worker process. A session frame snapshots this
+  /// before invoking any selectors so an old startup/UI exception cannot be
+  /// attributed to a later frame error.
+  uint64_t seh_sequence{};
   uint64_t seh_address{};
   std::string seh_module;
   std::string selector;

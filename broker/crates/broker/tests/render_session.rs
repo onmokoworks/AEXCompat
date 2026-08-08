@@ -2088,6 +2088,7 @@ mod windows_e2e {
                 render_error: -40,
                 missing_dependency: None,
                 return_message: None,
+                selector_crash: None,
             }
         ));
         let outcome = session
@@ -2097,6 +2098,40 @@ mod windows_e2e {
         let close = session.close();
         assert_eq!(close["frames_ok"], 1);
         assert_eq!(close["frames_errored"], 1);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn selector_crash_is_distinct_from_a_plugin_returning_512() {
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            Duration::from_secs(30),
+            behavior("selector_crash_frame_0"),
+        );
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(1))
+            .expect("a guarded selector crash remains a frame diagnostic");
+        let FrameStatus::FrameError {
+            render_error,
+            selector_crash: Some(crash),
+            ..
+        } = outcome.status
+        else {
+            panic!("expected a structured selector crash");
+        };
+        assert_eq!(render_error, 512);
+        assert_eq!(crash.selector, "SMART_RENDER");
+        assert_eq!(crash.exception_code, 0xC0000005);
+        let next = session
+            .render_frame(1, 1, &input_pattern(2))
+            .expect("a later frame is not contaminated by the prior crash");
+        assert!(matches!(next.status, FrameStatus::Rendered { .. }));
+        let close = session.close();
+        assert_eq!(close["frames_errored"], 1);
+        assert_eq!(close["frames_ok"], 1);
         assert_eq!(close["session_clean"], true, "close: {close}");
     }
 
