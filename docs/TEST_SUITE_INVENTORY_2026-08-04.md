@@ -79,6 +79,22 @@ negative guard も含まれる。例外として残したのは test_probe_pipl_
 (~50 call site) は evidence 側の検証なので残置し、source_owners.py も
 それらのために残る。
 
+## 追記 (2026-08-08, #944: レビュー運用の前提変更)
+
+owner 指示でレビュー運用を変更した: レビューは PR を開く前のローカル
+エージェントレビューループで完結させ、PR に bot レビュー (`@codex review`) は
+投げない。merge のゲートは CI green と owner レビューのみ。これに伴い
+
+- `.claude/skills/codex-review-loop/` (SKILL.md + bash 3 本)
+- `tests/test_codex_review_loop_monitor.py` (上表の 87 テスト)
+- `windows-clean-clone.yml` の `dev-infra` job と `-m "not dev_infra"` フィルタ
+- `pytest.ini` の `dev_infra` marker
+
+を削除した。#684 (2026-08-04 完了、dev-infra job への分離) が作った job も
+テスト本体ごと消えたことになる。上表の「codex-review-loop monitor」行の判定
+(「内容は実事故由来で本物」) はテストの中身についての評価としては訂正しないが、
+そのテストが守っていた運用自体が無くなったため、行ごと退役として扱う。
+
 ## 仮説 (未検証)
 
 - CI pytest の下限は canonical worker ビルド (~225 秒) で決まっており、#681-684
