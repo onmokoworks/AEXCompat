@@ -38,6 +38,7 @@ struct OwnedCatalog {
   std::array<void*, 21> ansi2{};
   std::array<void*, 14> dynamic_stream2{};
   std::array<void*, 13> aegp_world{};
+  std::array<void*, 12> aegp_world2{};
   std::array<void*, 14> layer_render_options1{};
   std::array<void*, 15> layer_render_options2{};
   std::array<void*, 17> render_options1{};
@@ -115,6 +116,15 @@ const void* provide_ansi2(void*) {
 }
 const void* provide_dynamic_stream2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::aegp_dynamic_stream_2>(c.dynamic_stream2); c.dynamic_stream2[5]=c.assembly.dynamic_stream_set_flag; return c.dynamic_stream2.data(); }
 const void* provide_aegp_world_suite3(void*) { auto& c=state(); c.aegp_world=c.assembly.aegp_world; return c.aegp_world.data(); }
+const void* provide_aegp_world_suite2(void*) {
+  auto& c = state();
+  // Suite2 predates the 32-bit-float base-address slot. Its first seven
+  // entries match Suite3 and its remaining five follow Suite3 slot 7.
+  std::copy_n(c.assembly.aegp_world.begin(), 7, c.aegp_world2.begin());
+  std::copy(c.assembly.aegp_world.begin() + 8, c.assembly.aegp_world.end(),
+            c.aegp_world2.begin() + 7);
+  return c.aegp_world2.data();
+}
 const void* provide_layer_render_options1(void*) { auto& c=state(); c.layer_render_options1=c.assembly.layer_render_options1; return c.layer_render_options1.data(); }
 const void* provide_layer_render_options2(void*) { auto& c=state(); c.layer_render_options2=c.assembly.layer_render_options2; return c.layer_render_options2.data(); }
 const void* provide_render_options1(void*) { auto& c=state(); c.render_options1=c.assembly.render_options1; return c.render_options1.data(); }

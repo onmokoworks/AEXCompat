@@ -170,6 +170,7 @@ extern std::array<int32_t, 3>& g_aegp_layer_parent_indices;
 
 extern AegpItemSuite g_aegp_item_suite;
 extern AegpLegacyItemSuite6 g_aegp_legacy_item_suite6;
+extern std::array<void*, 20> g_aegp_item_suite1;
 extern AegpCollectionSuite g_aegp_collection_suite;
 extern std::array<void*, 14> g_aegp_project_suite6;
 extern std::array<void*, 41> g_aegp_comp_suite10;

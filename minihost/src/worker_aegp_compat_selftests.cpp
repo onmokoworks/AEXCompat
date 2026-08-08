@@ -1056,6 +1056,7 @@ bool verify_aegp_resizer_3d_chain() {
   const void* comp_suite = nullptr;
   const void* comp_suite1 = nullptr;
   const void* item_suite = nullptr;
+  const void* item_suite1 = nullptr;
   const int32_t saved_camera_index = g_aegp_active_camera_layer_index;
   int32_t saved_width = 0, saved_height = 0;
   g_hooks.get_dimensions(&saved_width, &saved_height);
@@ -1090,7 +1091,16 @@ bool verify_aegp_resizer_3d_chain() {
       acquire_suite("AEGP Item Suite", 10, &item_suite) == 0 &&
       item_suite == &g_aegp_legacy_item_suite6 &&
       reinterpret_cast<void**>(&g_aegp_legacy_item_suite6)[16] ==
-          reinterpret_cast<void*>(&aegp_get_item_dimensions);
+          reinterpret_cast<void*>(&aegp_get_item_dimensions) &&
+      acquire_suite("AEGP Item Suite", 3, &item_suite1) == 0 &&
+      item_suite1 == g_aegp_item_suite1.data() &&
+      g_aegp_item_suite1[1] == reinterpret_cast<void*>(&aegp_get_active_item) &&
+      g_aegp_item_suite1[4] == reinterpret_cast<void*>(&aegp_get_item_type) &&
+      g_aegp_item_suite1[7] == reinterpret_cast<void*>(&aegp_get_item_id) &&
+      g_aegp_item_suite1[11] == reinterpret_cast<void*>(&aegp_get_item_duration) &&
+      g_aegp_item_suite1[12] == reinterpret_cast<void*>(&aegp_get_item_current_time) &&
+      g_aegp_item_suite1[13] == reinterpret_cast<void*>(&aegp_get_item_dimensions) &&
+      g_aegp_item_suite1[18] == reinterpret_cast<void*>(&aegp_set_item_current_time);
   AegpMatrix4 matrix{};
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0;
   for (std::size_t row = 0; row < 4; ++row) {
@@ -1252,6 +1262,15 @@ bool verify_aegp_resizer_3d_chain() {
     if (slot != 0 && slot != 1 && slot != 3 && slot != 5)
       ok = ok && g_aegp_comp_suite1[slot] == comp_suite1_stubs[slot];
   }
+  const auto& item_suite1_stubs =
+      aexcompat::worker_runtime::unsupported_suite_slots<
+          aexcompat::worker_runtime::UnsupportedSuiteId::aegp_item_3, 20>();
+  for (std::size_t slot = 0; slot < item_suite1_stubs.size(); ++slot) {
+    if (slot != 1 && slot != 4 && slot != 7 && slot != 11 && slot != 12 &&
+        slot != 13 && slot != 18)
+      ok = ok && g_aegp_item_suite1[slot] == item_suite1_stubs[slot];
+  }
+  ok = release_suite("AEGP Item Suite", 3) == 0 && ok;
   ok = release_suite("AEGP Item Suite", 10) == 0 && ok;
   ok = release_suite("AEGP Comp Suite", 4) == 0 && ok;
   ok = release_suite("AEGP Comp Suite", 9) == 0 && ok;
