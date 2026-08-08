@@ -797,6 +797,8 @@ int32_t __cdecl aegp_get_item_type(void* item, int16_t* item_type) {
   return 0;
 }
 AegpLegacyItemSuite6 g_aegp_legacy_item_suite6{};
+std::array<void*, 20> g_aegp_item_suite1{};
+static_assert(sizeof(g_aegp_item_suite1) == 20 * sizeof(void*));
 
 std::array<AegpTime, 3>& g_aegp_layer_in_points = state().layer_in_points;
 std::array<AegpTime, 3>& g_aegp_layer_durations = state().layer_durations;
@@ -2585,6 +2587,22 @@ SceneSuiteAcquireResult scene_acquire_suite(
           reinterpret_cast<void*>(&aegp_get_item_dimensions);
     }
     *suite = &g_aegp_legacy_item_suite6;
+    return SceneSuiteAcquireResult::acquired;
+  }
+  // Acquisition version 3 is the public, frozen AE 5.0 `AEGP_ItemSuite1`
+  // shape. Legacy fixed-buffer naming and differently-shaped traversal slots
+  // remain diagnostic stubs; only signature-compatible callbacks are exposed.
+  if (named("AEGP Item Suite") && version == 3) {
+    g_aegp_item_suite1 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_item_3, 20>();
+    g_aegp_item_suite1[1] = reinterpret_cast<void*>(&aegp_get_active_item);
+    g_aegp_item_suite1[4] = reinterpret_cast<void*>(&aegp_get_item_type);
+    g_aegp_item_suite1[7] = reinterpret_cast<void*>(&aegp_get_item_id);
+    g_aegp_item_suite1[11] = reinterpret_cast<void*>(&aegp_get_item_duration);
+    g_aegp_item_suite1[12] = reinterpret_cast<void*>(&aegp_get_item_current_time);
+    g_aegp_item_suite1[13] = reinterpret_cast<void*>(&aegp_get_item_dimensions);
+    g_aegp_item_suite1[18] = reinterpret_cast<void*>(&aegp_set_item_current_time);
+    *suite = g_aegp_item_suite1.data();
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Comp Suite") && version == 25 && state().comp_idle_roundtrip_mode) {

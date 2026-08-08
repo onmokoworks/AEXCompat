@@ -660,6 +660,7 @@ bool configure_component_suite_catalog() {
       {"PF Param Utils Suite", 3, &g_param_utils_suite},
       {"AEGP PF Interface Suite", 1, &g_pf_interface_suite},
       {"AEGP World Suite", 3, nullptr, &provide_aegp_world_suite3},
+      {"AEGP World Suite", 2, nullptr, &provide_aegp_world_suite2},
       {"AEGP Layer Render Options Suite", 1, nullptr,
        &provide_layer_render_options1},
       {"AEGP Layer Render Options Suite", 2, nullptr,

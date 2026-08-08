@@ -69,6 +69,7 @@ const void* provide_ansi1(void*);
 const void* provide_ansi2(void*);
 const void* provide_dynamic_stream2(void*);
 const void* provide_aegp_world_suite3(void*);
+const void* provide_aegp_world_suite2(void*);
 const void* provide_layer_render_options1(void*);
 const void* provide_layer_render_options2(void*);
 const void* provide_render_options1(void*);
