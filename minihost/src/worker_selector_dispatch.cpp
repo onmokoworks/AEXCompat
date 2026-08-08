@@ -537,6 +537,7 @@ bool capture_delay_load_basename(EXCEPTION_POINTERS* information,
 
 int capture_seh_exception(EXCEPTION_POINTERS* information) {
   ++g_telemetry.substituted_selector_failures;
+  ++g_telemetry.seh_sequence;
   minidump::classify_seh_exception(
       information, {g_telemetry.seh_code, g_telemetry.seh_address,
                     g_telemetry.seh_module});

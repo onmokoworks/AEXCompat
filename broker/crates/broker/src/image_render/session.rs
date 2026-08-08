@@ -1333,6 +1333,7 @@ impl InteractiveRenderSession {
                 render_error,
                 missing_dependency,
                 return_message,
+                selector_crash,
             } => {
                 self.frames_errored += 1;
                 let mut report = json!({
@@ -1351,6 +1352,7 @@ impl InteractiveRenderSession {
                     "missing_dependency": missing_dependency,
                     // The plug-in's own account of the failure (issue #707).
                     "return_message": return_message,
+                    "selector_crash": selector_crash,
                     "passed": false,
                 });
                 annotate_interactive_selection(&mut report, self.selection);
