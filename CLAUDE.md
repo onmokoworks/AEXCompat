@@ -144,14 +144,53 @@ and bounded image input/output are now the main implementation path.
 - Once the local loop is clean, open the PR. Do not request a bot review on it,
   and do not reinstate a merge guard that gates on a bot verdict: no "@codex
   review" comment, no review-loop skill. What that guard also carried (the
-  head-bound merge and the owner re-check below) stays. The PR-side gates are
-  CI and owner review.
+  head-bound merge and the owner re-check below) stays. Nothing on the PR waits
+  for a bot verdict; the PR-side gates are CI and owner review.
+- Everything on the PR head has to have been through that loop, not just the
+  diff you opened the PR with; opening the PR does not end it. A CI fix, an
+  answer to owner feedback and further implementation all count, and nothing
+  merges while unreviewed changes sit on the head.
+- Record where "reviewed" ends: commit what the loop cleared, note that HEAD
+  SHA in the PR body next to the rejected findings, and update it every time
+  you leave the loop. The first round runs before the PR exists, so its SHA
+  goes in the body when you open the PR. A SHA kept only in the session
+  context is gone the moment the context is, and the owner cannot check the
+  boundary against the head either. The next round reviews
+  `git diff <the noted SHA>`, working tree included, rather than one commit at
+  a time, since a later commit undoing an earlier fix shows up in neither
+  commit's diff alone.
+- Run the loop before you move the head yourself (push, force-push). Pulling
+  the base branch in takes two passes: once before the operation, and once
+  right after on the conflict resolution it produced, which is new code nobody
+  has read and does not exist until the operation runs. What the pull
+  inherited from the base branch is not yours to review, so the second pass
+  looks at the resolution alone, and you re-note the resulting HEAD (the merge
+  commit, when you merged) as the reviewed SHA afterwards. Leave it un-updated
+  and the inherited work rides along in every later diff.
+- Prefer merge over rebase for that pull. A merge commit's combined diff
+  (`git show <the merge commit>`) marks with `++` the lines neither parent had,
+  which isolates a resolution you wrote; add `--stat` and the isolation is lost.
+  A resolution that took one side verbatim (`--theirs` and friends) prints
+  nothing at all, because `--cc` drops those hunks, so pair it with
+  `git show --remerge-diff <the merge commit>` to see what got discarded. After
+  a rebase, `git diff <the noted SHA>` also carries everything inherited from
+  the base branch, so note the conflicted paths and read those instead.
+- When the head moves without you, as when a suggestion is applied in the
+  GitHub UI, fast-forward it into your branch
+  (`git pull --ff-only origin <branch>`) and run the loop as soon as you
+  notice. `git fetch` alone only moves the remote-tracking ref, so the change
+  never reaches the diff you review. If the fast-forward aborts you have local
+  commits of your own: take it with `git merge origin/<branch>` and treat it
+  like any other base-branch pull, in two passes. Miss the abort and the diff
+  looks clean while the change is still not in your tree. Do not proceed to
+  merge until it has been through.
 - Merge when CI is green on the PR head and no owner comment is unresolved. A
   green run on an older head does not count; re-check after every push, and
   merge with
   `gh pr merge <PR> --merge --delete-branch --match-head-commit <the SHA CI went green on>`
   so a push that lands between the check and the merge call fails the merge
-  instead of slipping in unverified. External failures (billing/usage limits,
+  instead of slipping in unverified. If the merge call refuses, the head
+  moved: go back through the loop. External failures (billing/usage limits,
   runner outages) are not success: report them as blocked instead of merging.
 - Repo-owner review comments (`onmokoworks`, `naari3`) still outrank
   everything. Never merge while an owner comment on the PR is unresolved, even
