@@ -114,6 +114,7 @@ fn finish_one_shot_in_place(
         }
         Err(error) => {
             entry.failure_classification = inspection_failure_classification(&error);
+            entry.failure_diagnostics = inspection_failure_diagnostics(&error);
             record_survey_for_failed_in_place(&mut entry, plugin, &roots);
         }
     }
@@ -510,8 +511,14 @@ fn discover_cluster_in_place(
                 fill_entry_from_inspect_report(&mut entry, &report);
                 results.push((path, entry));
             }
-            Ok(InspectOutcome::InspectError { error_kind, .. }) => {
+            Ok(InspectOutcome::InspectError { error_kind, report }) => {
                 let mut entry = prepared.entry;
+                let exit_code = match error_kind.as_str() {
+                    "load_failed" => Some(11),
+                    "entrypoint_unresolved" => Some(12),
+                    "selector_error" => Some(20),
+                    _ => None,
+                };
                 entry.failure_classification = match error_kind.as_str() {
                     // Deterministic non-effects converge like the one-shot
                     // exit-12 path.
@@ -532,6 +539,28 @@ fn discover_cluster_in_place(
                     // PARAMS_SETUP rejected: retried like the one-shot path.
                     _ => None,
                 };
+                let plugin_kind = report
+                    .as_ref()
+                    .and_then(|report| report.get("plugin_kind"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|kind| {
+                        matches!(
+                            *kind,
+                            "aegp_candidate" | "invalid_pipl" | "unknown_no_effect_entrypoint"
+                        )
+                    });
+                entry.failure_diagnostics = entry.failure_classification.as_ref().map(|classification| {
+                    let mut diagnostics = serde_json::Map::new();
+                    diagnostics.insert("classification".to_owned(), classification.clone().into());
+                    diagnostics.insert("cluster_error_kind".to_owned(), error_kind.clone().into());
+                    if let Some(exit_code) = exit_code {
+                        diagnostics.insert("exit_code".to_owned(), exit_code.into());
+                    }
+                    if let Some(plugin_kind) = plugin_kind {
+                        diagnostics.insert("plugin_kind".to_owned(), plugin_kind.into());
+                    }
+                    serde_json::Value::Object(diagnostics)
+                });
                 results.push((path, entry));
             }
             Err(error) => {
@@ -644,6 +673,7 @@ pub struct DiagnosticDiscovery {
     /// The in-place DLL search roots, in resolution order.
     pub search_roots: Vec<PathBuf>,
     pub failure_classification: Option<String>,
+    pub failure_diagnostics: Option<serde_json::Value>,
     /// `reason/resolution` of a cluster-session fallback, when this entry came
     /// out of one (issue #405).
     pub cluster_fallback: Option<String>,
@@ -681,6 +711,7 @@ pub fn discover_records_for_diagnostics(
             parameters: entry.params,
             search_roots: entry.closure.roots.iter().map(PathBuf::from).collect(),
             failure_classification: entry.failure_classification,
+            failure_diagnostics: entry.failure_diagnostics,
             cluster_fallback: entry
                 .cluster_fallback
                 .map(|fallback| format!("{}/{}", fallback.reason, fallback.resolution)),
