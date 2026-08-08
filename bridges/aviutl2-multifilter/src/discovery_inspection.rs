@@ -549,18 +549,21 @@ fn discover_cluster_in_place(
                             "aegp_candidate" | "invalid_pipl" | "unknown_no_effect_entrypoint"
                         )
                     });
-                entry.failure_diagnostics = entry.failure_classification.as_ref().map(|classification| {
-                    let mut diagnostics = serde_json::Map::new();
-                    diagnostics.insert("classification".to_owned(), classification.clone().into());
-                    diagnostics.insert("cluster_error_kind".to_owned(), error_kind.clone().into());
-                    if let Some(exit_code) = exit_code {
-                        diagnostics.insert("exit_code".to_owned(), exit_code.into());
-                    }
-                    if let Some(plugin_kind) = plugin_kind {
-                        diagnostics.insert("plugin_kind".to_owned(), plugin_kind.into());
-                    }
-                    serde_json::Value::Object(diagnostics)
-                });
+                entry.failure_diagnostics =
+                    entry.failure_classification.as_ref().map(|classification| {
+                        let mut diagnostics = serde_json::Map::new();
+                        diagnostics
+                            .insert("classification".to_owned(), classification.clone().into());
+                        diagnostics
+                            .insert("cluster_error_kind".to_owned(), error_kind.clone().into());
+                        if let Some(exit_code) = exit_code {
+                            diagnostics.insert("exit_code".to_owned(), exit_code.into());
+                        }
+                        if let Some(plugin_kind) = plugin_kind {
+                            diagnostics.insert("plugin_kind".to_owned(), plugin_kind.into());
+                        }
+                        serde_json::Value::Object(diagnostics)
+                    });
                 results.push((path, entry));
             }
             Err(error) => {

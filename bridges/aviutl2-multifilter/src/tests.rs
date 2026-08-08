@@ -1855,8 +1855,10 @@ mod tests {
             Some("crashed")
         );
         assert_eq!(
-            inspection_failure_diagnostics(&error)
-                .and_then(|value| value.get("exit_code").and_then(serde_json::Value::as_u64).map(|code| code as u32)),
+            inspection_failure_diagnostics(&error).and_then(|value| value
+                .get("exit_code")
+                .and_then(serde_json::Value::as_u64)
+                .map(|code| code as u32)),
             Some(3_221_225_477)
         );
     }
