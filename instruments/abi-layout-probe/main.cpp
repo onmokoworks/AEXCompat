@@ -140,7 +140,10 @@ static_assert(offsetof(PF_UtilCallbacks, host_new_handle) == 160);
 static_assert(offsetof(PF_UtilCallbacks, host_lock_handle) == 168);
 static_assert(offsetof(PF_UtilCallbacks, host_unlock_handle) == 176);
 static_assert(offsetof(PF_UtilCallbacks, host_dispose_handle) == 184);
+static_assert(offsetof(PF_UtilCallbacks, app) == 200);
 static_assert(offsetof(PF_UtilCallbacks, host_get_handle_size) == 440);
+static_assert(offsetof(PF_UtilCallbacks, iterate_origin_non_clip_src) == 448);
+static_assert(offsetof(PF_UtilCallbacks, iterate_generic) == 456);
 static_assert(offsetof(PF_UtilCallbacks, host_resize_handle) == 464);
 static_assert(offsetof(PF_UtilCallbacks, subpixel_sample16) == 472);
 static_assert(offsetof(PF_UtilCallbacks, area_sample16) == 480);
@@ -287,6 +290,8 @@ int main() {
   field<decltype(PF_UtilCallbacks::host_unlock_handle)>("utils.host_unlock_handle", offsetof(PF_UtilCallbacks, host_unlock_handle), first);
   field<decltype(PF_UtilCallbacks::host_dispose_handle)>("utils.host_dispose_handle", offsetof(PF_UtilCallbacks, host_dispose_handle), first);
   field<decltype(PF_UtilCallbacks::host_get_handle_size)>("utils.host_get_handle_size", offsetof(PF_UtilCallbacks, host_get_handle_size), first);
+  field<decltype(PF_UtilCallbacks::iterate_origin_non_clip_src)>("utils.iterate_origin_non_clip_src", offsetof(PF_UtilCallbacks, iterate_origin_non_clip_src), first);
+  field<decltype(PF_UtilCallbacks::iterate_generic)>("utils.iterate_generic", offsetof(PF_UtilCallbacks, iterate_generic), first);
   field<decltype(PF_UtilCallbacks::host_resize_handle)>("utils.host_resize_handle", offsetof(PF_UtilCallbacks, host_resize_handle), first);
   field<decltype(PF_ANSICallbacks::sin)>("utils.ansi_sin",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, sin), first);
@@ -321,6 +326,7 @@ int main() {
   field<decltype(PF_UtilCallbacks::iterate16)>("utils.iterate16", offsetof(PF_UtilCallbacks, iterate16), first);
   field<decltype(PF_UtilCallbacks::iterate_origin)>("utils.iterate_origin", offsetof(PF_UtilCallbacks, iterate_origin), first);
   field<decltype(PF_UtilCallbacks::get_callback_addr)>("utils.get_callback_addr", offsetof(PF_UtilCallbacks, get_callback_addr), first);
+  field<decltype(PF_UtilCallbacks::app)>("utils.app", offsetof(PF_UtilCallbacks, app), first);
   field<decltype(PF_UtilCallbacks::new_world)>("utils.new_world", offsetof(PF_UtilCallbacks, new_world), first);
   field<decltype(PF_UtilCallbacks::dispose_world)>("utils.dispose_world", offsetof(PF_UtilCallbacks, dispose_world), first);
   field<decltype(PF_UtilCallbacks::transfer_rect)>("utils.transfer_rect", offsetof(PF_UtilCallbacks, transfer_rect), first);

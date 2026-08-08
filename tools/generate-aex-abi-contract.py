@@ -168,6 +168,8 @@ CALLBACK_TABLES = {
         "utils.host_unlock_handle",
         "utils.host_dispose_handle",
         "utils.host_get_handle_size",
+        "utils.iterate_origin_non_clip_src",
+        "utils.iterate_generic",
         "utils.host_resize_handle",
         # Legacy application-specific callback `app` at PF_UtilCallbacks+0xC8
         # (issue #362 selector families: PIN-era effects such as Drop_Shadow
