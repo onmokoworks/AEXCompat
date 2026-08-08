@@ -1419,3 +1419,47 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
     }
     Ok(payload)
 }
+
+/// Encodes values obtained from parameter discovery for a session launch.
+/// Numeric defaults are constrained to the descriptor's declared host range,
+/// matching the value an exposed UI control can actually send. An arbitrary
+/// default that the plug-in could not PRINT is left unassigned: the worker has
+/// already copied that plug-in-owned default before applying assignments.
+/// Explicit per-frame values continue to use [`encode_interactive_payload`]
+/// and remain fail-closed instead of being silently normalized.
+pub fn encode_default_interactive_payload(
+    parameters: &[InteractiveParameter],
+) -> io::Result<String> {
+    encode_interactive_payload(&normalize_default_interactive_parameters(parameters))
+}
+
+/// Returns the sendable subset of discovery defaults used at session launch.
+/// Callers that intentionally resend those defaults on each frame (such as the
+/// sweep) must use the same normalized values so launch and frame validation do
+/// not disagree.
+pub fn normalize_default_interactive_parameters(
+    parameters: &[InteractiveParameter],
+) -> Vec<InteractiveParameter> {
+    parameters
+        .iter()
+        .filter(|item| !(item.kind == "arbitrary_data" && item.debug_summary.is_none()))
+        .cloned()
+        .map(|mut item| {
+            if matches!(item.kind.as_str(), "integer" | "float" | "path")
+                && item.value.is_finite()
+                && item.minimum.is_finite()
+                && item.maximum.is_finite()
+                && item.minimum <= item.maximum
+            {
+                item.value = item.value.clamp(item.minimum, item.maximum);
+            } else if !matches!(item.kind.as_str(), "integer" | "float" | "path") {
+                // These fields share descriptor storage with the typed value
+                // and are not part of color/component/arbitrary transport.
+                item.minimum = 0.0;
+                item.maximum = 0.0;
+                item.value = 0.0;
+            }
+            item
+        })
+        .collect()
+}

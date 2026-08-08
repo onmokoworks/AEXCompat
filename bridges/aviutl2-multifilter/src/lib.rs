@@ -26,7 +26,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use aexcompat_broker::image_render::{
-    InteractiveParameter, RenderGpuBackend, RenderPixelFormat, encode_interactive_payload,
+    InteractiveParameter, RenderGpuBackend, RenderPixelFormat, encode_default_interactive_payload,
     inspect_experimental_in_place,
 };
 use aexcompat_broker::plugin_dependency_closure::{
