@@ -29,6 +29,8 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <string_view>
+#include <vector>
 
 namespace contract = aexcompat::abi::x86_64_windows;
 namespace boot = aexcompat::worker_runtime::effect_bootstrap;
@@ -226,6 +228,17 @@ void the_utility_table_is_wired_one_to_one() {
   check(contract::UTILS_ANSI_SQRT_OFFSET == 312, "ansi.sqrt sits at 312");
   check(contract::UTILS_ANSI_ASIN_OFFSET == 344, "ansi.asin sits at 344");
   check(contract::UTILS_ANSI_ACOS_OFFSET == 352, "ansi.acos sits at 352");
+  // The eight ANSI slots the contract left out until issue #981. Same defect
+  // shape as 472/480 above: no offset meant no binding, no binding meant a
+  // null in the table, and a plug-in calling one jumped to address 0.
+  check(contract::UTILS_ANSI_ATAN_OFFSET == 208, "ansi.atan sits at 208");
+  check(contract::UTILS_ANSI_ATAN2_OFFSET == 216, "ansi.atan2 sits at 216");
+  check(contract::UTILS_ANSI_EXP_OFFSET == 240, "ansi.exp sits at 240");
+  check(contract::UTILS_ANSI_FLOOR_OFFSET == 256, "ansi.floor sits at 256");
+  check(contract::UTILS_ANSI_FMOD_OFFSET == 264, "ansi.fmod sits at 264");
+  check(contract::UTILS_ANSI_LOG_OFFSET == 280, "ansi.log sits at 280");
+  check(contract::UTILS_ANSI_LOG10_OFFSET == 288, "ansi.log10 sits at 288");
+  check(contract::UTILS_ANSI_TAN_OFFSET == 320, "ansi.tan sits at 320");
 }
 
 void get_callback_addr_is_typed_bounded_and_clears_failures() {
@@ -248,16 +261,23 @@ void get_callback_addr_is_typed_bounded_and_clears_failures() {
         "get_callback_addr rejects a null output pointer");
 }
 
-void production_utility_builder_is_offset_indexed() {
+// Every named source assigned a distinguishable, non-null, aligned stand-in,
+// filled in reverse binding order: the result must still follow the generated
+// ABI offsets, which is what proves construction is independent of initializer
+// position (issue #792). One filler convention so the two callers below compare
+// against the same values.
+aexcompat::pf_utility_callbacks::Sources every_named_source() {
   aexcompat::pf_utility_callbacks::Sources sources{};
-  // Populate named sources in reverse binding order. The result must still
-  // follow the generated ABI offsets, proving construction is independent of
-  // initializer position (issue #792).
   for (std::size_t reverse = aexcompat::pf_utility_callbacks::BINDINGS.size();
        reverse > 0; --reverse) {
     const auto& binding = aexcompat::pf_utility_callbacks::BINDINGS[reverse - 1];
     sources.*(binding.source) = reinterpret_cast<void*>((reverse + 1) * sizeof(void*));
   }
+  return sources;
+}
+
+void production_utility_builder_is_offset_indexed() {
+  const auto sources = every_named_source();
   const auto callbacks = aexcompat::pf_utility_callbacks::build(sources);
   for (const auto& binding : aexcompat::pf_utility_callbacks::BINDINGS) {
     const auto index = aexcompat::pf_utility_callbacks::index_of(binding.offset);
@@ -265,6 +285,99 @@ void production_utility_builder_is_offset_indexed() {
     check(callbacks[index] == sources.*(binding.source),
           "named utility source is installed at its own generated offset");
   }
+}
+
+// The negative coverage for the scan the worker's
+// `--self-test-utility-callback-table` route runs: that route can only report
+// what the shipping wiring produces, which is (correctly) no hole, so the
+// behavior on a hole is pinned here instead.
+//
+// `bindings_cover_contract_once` is a static_assert over the bindings and the
+// two tests above populate every source themselves, so neither can see the
+// failure mode that produced #777 and #981: a slot nobody assigned, installed
+// as a null pointer no host code reads.
+void unwired_installed_slots_are_named_by_their_generated_offset() {
+  namespace utils = aexcompat::pf_utility_callbacks;
+  const auto installed = [](const boot::AbiHooks& abi) {
+    boot::State state;
+    boot::install_callback_tables(state, abi);
+    return boot::unwired_installed_offsets(state);
+  };
+
+  const auto names_only = [](const std::vector<boot::UnwiredSlot>& slots,
+                             const char* block, std::size_t offset) {
+    return slots.size() == 1 && std::string_view(slots.front().block) == block &&
+        slots.front().offset == offset;
+  };
+
+  boot::AbiHooks complete{};
+  complete.utility_callbacks = utils::build(every_named_source());
+  for (std::size_t index = 0; index < complete.input_callbacks.size(); ++index)
+    complete.input_callbacks[index] =
+        reinterpret_cast<void*>((index + 1) * sizeof(void*));
+  static const std::array<void*, contract::UTILS_COLOR_CALLBACKS_SIZE / sizeof(void*)>
+      color = [] {
+        std::array<void*, contract::UTILS_COLOR_CALLBACKS_SIZE / sizeof(void*)> value{};
+        for (std::size_t index = 0; index < value.size(); ++index)
+          value[index] = reinterpret_cast<void*>((index + 1) * sizeof(void*));
+        return value;
+      }();
+  complete.color_callbacks = color.data();
+  complete.color_callbacks_size = sizeof(color);
+  complete.basic_suite = reinterpret_cast<void*>(0x1000);
+  complete.effect_ref = reinterpret_cast<void*>(0x2000);
+  check(installed(complete).empty(),
+        "a fully assigned AbiHooks installs no null callback");
+
+  // One utility source left out, the way #981's eight were: the answer has to
+  // name that slot and only that slot, block included - ten of the twelve inter
+  // offsets are also valid utility offsets, so the number alone is ambiguous.
+  boot::AbiHooks holed = complete;
+  utils::Sources one_missing = every_named_source();
+  one_missing.ansi_fmod = nullptr;
+  holed.utility_callbacks = utils::build(one_missing);
+  check(names_only(installed(holed), "utils", contract::UTILS_ANSI_FMOD_OFFSET),
+        "a single unassigned utility source is named in the utils block");
+
+  // The inter table is the same defect one struct field over, and a short brace
+  // list in the production builder is not a compile error, so it has to be
+  // caught here too.
+  boot::AbiHooks inter_hole = complete;
+  inter_hole.input_callbacks.back() = nullptr;
+  check(names_only(installed(inter_hole), "inter",
+                   contract::INPUT_CALLBACK_OFFSETS.back()),
+        "an unassigned inter callback is named in the inter block");
+
+  // The color block is copied whole or not at all, so a size the installer
+  // refuses leaves every entry zero - every pointer in the block is reported.
+  boot::AbiHooks color_mismatch = complete;
+  color_mismatch.color_callbacks_size = sizeof(color) - sizeof(void*);
+  check(installed(color_mismatch).size() ==
+            contract::UTILS_COLOR_CALLBACKS_SIZE / sizeof(void*),
+        "a color block the installer refused reports every pointer in it");
+
+  // And a block that was copied with one null inside it, which an all-or-
+  // nothing check would miss.
+  auto holed_color = color;
+  holed_color.back() = nullptr;
+  boot::AbiHooks color_hole = complete;
+  color_hole.color_callbacks = holed_color.data();
+  check(names_only(installed(color_hole), "utils.color_callbacks",
+                   sizeof(color) - sizeof(void*)),
+        "a null inside an installed color block is named at its own offset");
+
+  // The in_data links the same aggregate initializer supplies. `pica_basicP` is
+  // how a plug-in acquires every suite it uses and `effect_ref` is the last
+  // AbiHooks member, so a short or reordered initializer drops that one first.
+  boot::AbiHooks no_basic_suite = complete;
+  no_basic_suite.basic_suite = nullptr;
+  check(names_only(installed(no_basic_suite), "in", contract::IN_PICA_BASICP_OFFSET),
+        "a null pica_basicP is named in the in_data block");
+
+  boot::AbiHooks no_effect_ref = complete;
+  no_effect_ref.effect_ref = nullptr;
+  check(names_only(installed(no_effect_ref), "in", contract::IN_EFFECT_REF_OFFSET),
+        "a null effect_ref is named in the in_data block");
 }
 
 }  // namespace
@@ -275,6 +388,7 @@ int main() {
   the_utility_table_is_wired_one_to_one();
   get_callback_addr_is_typed_bounded_and_clears_failures();
   production_utility_builder_is_offset_indexed();
+  unwired_installed_slots_are_named_by_their_generated_offset();
   if (failures == 0)
     std::cout << "{\"pf_sampling_wiring_selftest\":\"passed\",\"callback_diagnostics\":"
               << aexcompat::callback_diagnostics::snapshot_json() << "}\n";

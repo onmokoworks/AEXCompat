@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "generated/aex_abi_contract.hpp"
 
@@ -21,7 +22,14 @@ struct State {
 };
 
 struct AbiHooks {
-  std::array<void*, 12> input_callbacks{};
+  // Sized from the contract rather than a literal 12 so the array and the
+  // offsets `install_callback_tables` writes cannot drift apart. It does not
+  // make a short brace list a compile error - aggregate initialization
+  // value-initializes the tail - so the case where the contract grows past the
+  // initializer in `make_bootstrap_abi_hooks` is caught at runtime, by
+  // `unwired_installed_offsets` below.
+  std::array<void*, abi::x86_64_windows::INPUT_CALLBACK_OFFSETS.size()>
+      input_callbacks{};
   std::array<void*, abi::x86_64_windows::UTILITY_CALLBACK_OFFSETS.size()>
       utility_callbacks{};
   const void* color_callbacks{};
@@ -88,6 +96,42 @@ struct Result {
 // self-tests can exercise the exact wiring a plug-in observes through
 // in_data->utils without dispatching a selector (issue #220).
 void install_callback_tables(State& state, const AbiHooks& abi);
+
+/// One slot `install_callback_tables` left null, named by the block it belongs
+/// to. The offset alone would be ambiguous: ten of the twelve inter offsets are
+/// also valid utility offsets, so 112 is both `inter.reserved_2` and
+/// `utils.new_world` and an operator handed the bare number would audit the
+/// wrong assignment list.
+struct UnwiredSlot {
+  /// Which installed block, in the generated contract's own naming: "in",
+  /// "inter", "utils", or "utils.color_callbacks".
+  const char* block;
+  /// Byte offset within that block.
+  std::size_t offset;
+};
+
+/// Every generated callback offset a plug-in would dereference that
+/// `install_callback_tables` left null, read back out of the installed bytes.
+///
+/// The compile-time half of the invariant is `bindings_cover_contract_once`:
+/// every generated utility offset has exactly one named source. Nothing proves
+/// the caller assigned that source, nothing makes a short `input_callbacks`
+/// brace list a compile error, and nothing catches an install loop that wrote
+/// the wrong stride. Any of those leaves a null pointer no host code ever
+/// reads, so the defect surfaces only when a plug-in calls through it and jumps
+/// to address 0 - #777 as a 16-bit sampling crash, #981 as three FRAME_SETUP
+/// crashes the SEH guard reported as error 512.
+///
+/// Reads the buffers rather than the `AbiHooks` it was built from, so a
+/// regression in the install loop itself is in scope too. Covers everything
+/// `install_callback_tables` writes: the inter and utility tables, the color
+/// block pointer by pointer, and the `utils` / `pica_basicP` / `effect_ref`
+/// links in in_data. It reports the `utils` link as null but does not check
+/// that it points at this `State`'s own block, which is the caller's to decide
+/// - `verify_production_utility_callback_table` does. A `PF_UtilCallbacks`
+/// member the generated contract never names is outside both the install and
+/// this answer (#991).
+std::vector<UnwiredSlot> unwired_installed_offsets(const State& state);
 
 Result run(State& state, EffectEntry entry, const AbiHooks& abi,
            const Request& request, const RuntimeHooks& hooks);

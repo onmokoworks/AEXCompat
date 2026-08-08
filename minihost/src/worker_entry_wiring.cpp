@@ -183,6 +183,10 @@ bool world_lifetimes_balanced();
 // Host identity and entry-owned helpers that stay in l2_main.
 extern OpaqueHostObject g_effect;
 bool is_render_worker();
+// Asks the production `make_bootstrap_abi_hooks` whether it left a utility
+// callback null. Defined beside it in l2_main so the answer comes from the
+// assignment list that ships, not from one a test wrote (issue #981).
+bool verify_production_utility_callback_table();
 void* aegp_comp_item_handle();
 bool suite_leases_balanced();
 uint32_t suite_acquire_count();
@@ -596,6 +600,7 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_pf_batch_sampling_suite, &verify_pf_ae_channel_native_provider,
         &verify_aegp_layer_render_options_suite2,
         &verify_utils_handle_callbacks_wired,
+        &verify_production_utility_callback_table,
         &aexcompat::flt_blur::selftest, &aexcompat::aefx_ace::selftest,
         &aexcompat::worker_runtime::persistent_data::selftest,
         &aexcompat::worker_runtime::selftest_native_stdout_routing}});

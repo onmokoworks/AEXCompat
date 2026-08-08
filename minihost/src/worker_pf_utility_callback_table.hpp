@@ -43,6 +43,14 @@ struct Sources {
   void* ansi_strcpy{};
   void* ansi_asin{};
   void* ansi_acos{};
+  void* ansi_atan{};
+  void* ansi_atan2{};
+  void* ansi_exp{};
+  void* ansi_floor{};
+  void* ansi_fmod{};
+  void* ansi_log{};
+  void* ansi_log10{};
+  void* ansi_tan{};
   void* get_platform_data{};
   void* get_pixel_data8{};
   void* get_pixel_data16{};
@@ -60,7 +68,7 @@ struct Binding {
   void* Sources::*source;
 };
 
-inline constexpr std::array<Binding, 43> BINDINGS{{
+inline constexpr std::array<Binding, 51> BINDINGS{{
     {contract::UTILS_BEGIN_SAMPLING_OFFSET, &Sources::begin_sampling},
     {contract::UTILS_SUBPIXEL_SAMPLE_OFFSET, &Sources::subpixel_sample},
     {contract::UTILS_AREA_SAMPLE_OFFSET, &Sources::area_sample},
@@ -94,6 +102,14 @@ inline constexpr std::array<Binding, 43> BINDINGS{{
     {contract::UTILS_ANSI_STRCPY_OFFSET, &Sources::ansi_strcpy},
     {contract::UTILS_ANSI_ASIN_OFFSET, &Sources::ansi_asin},
     {contract::UTILS_ANSI_ACOS_OFFSET, &Sources::ansi_acos},
+    {contract::UTILS_ANSI_ATAN_OFFSET, &Sources::ansi_atan},
+    {contract::UTILS_ANSI_ATAN2_OFFSET, &Sources::ansi_atan2},
+    {contract::UTILS_ANSI_EXP_OFFSET, &Sources::ansi_exp},
+    {contract::UTILS_ANSI_FLOOR_OFFSET, &Sources::ansi_floor},
+    {contract::UTILS_ANSI_FMOD_OFFSET, &Sources::ansi_fmod},
+    {contract::UTILS_ANSI_LOG_OFFSET, &Sources::ansi_log},
+    {contract::UTILS_ANSI_LOG10_OFFSET, &Sources::ansi_log10},
+    {contract::UTILS_ANSI_TAN_OFFSET, &Sources::ansi_tan},
     {contract::UTILS_GET_PLATFORM_DATA_OFFSET, &Sources::get_platform_data},
     {contract::UTILS_GET_PIXEL_DATA8_OFFSET, &Sources::get_pixel_data8},
     {contract::UTILS_GET_PIXEL_DATA16_OFFSET, &Sources::get_pixel_data16},
@@ -130,6 +146,11 @@ inline std::array<void*, contract::UTILITY_CALLBACK_OFFSETS.size()> build(
   return callbacks;
 }
 
+// A source this table names but nobody assigns installs a null pointer, which
+// `bindings_cover_contract_once` below cannot see. That half of the invariant
+// belongs to `effect_bootstrap::unwired_installed_offsets`, which reads the
+// installed bytes rather than this array, and is asked of the shipping wiring
+// by the worker's `--self-test-utility-callback-table` route.
 static_assert(BINDINGS.size() == contract::UTILITY_CALLBACK_OFFSETS.size());
 static_assert(bindings_cover_contract_once(),
               "every generated utility callback offset must have exactly one named source");

@@ -160,6 +160,19 @@ CALLBACK_TABLES = {
         "utils.ansi_strcpy",
         "utils.ansi_asin",
         "utils.ansi_acos",
+        # The rest of the ANSI block (issue #981). Eleven of its nineteen
+        # entries were emitted, so the host wired eleven and handed plug-ins a
+        # null pointer for the other eight; a plug-in calling one of them
+        # jumped to address 0, exactly as the 16-bit sampling pair did in
+        # issue #777.
+        "utils.ansi_atan",
+        "utils.ansi_atan2",
+        "utils.ansi_exp",
+        "utils.ansi_floor",
+        "utils.ansi_fmod",
+        "utils.ansi_log",
+        "utils.ansi_log10",
+        "utils.ansi_tan",
         "utils.get_platform_data",
         "utils.get_pixel_data8",
         "utils.get_pixel_data16",

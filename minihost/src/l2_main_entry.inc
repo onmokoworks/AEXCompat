@@ -560,6 +560,18 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
   sources.ansi_strcpy = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_strcpy);
   sources.ansi_asin = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_asin);
   sources.ansi_acos = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_acos);
+  // The rest of the ANSI block (issue #981). These eight had implementations in
+  // worker_pf_ansi_runtime.cpp and no contract offset to hang them on, so the
+  // table handed plug-ins a null pointer: Basic_3D's FRAME_SETUP calls fmod and
+  // Bulge's and Spherize's call floor, and each jumped to address 0.
+  sources.ansi_atan = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_atan);
+  sources.ansi_atan2 = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_atan2);
+  sources.ansi_exp = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_exp);
+  sources.ansi_floor = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_floor);
+  sources.ansi_fmod = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_fmod);
+  sources.ansi_log = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_log);
+  sources.ansi_log10 = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_log10);
+  sources.ansi_tan = reinterpret_cast<void*>(&aexcompat::pf_ansi::ansi_tan);
   sources.get_platform_data = reinterpret_cast<void*>(&diag_get_platform_data);
   sources.get_pixel_data8 = reinterpret_cast<void*>(&diag_get_pixel_data8);
   sources.get_pixel_data16 = reinterpret_cast<void*>(&diag_get_pixel_data16);
@@ -589,6 +601,39 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
    &g_color_suite8, sizeof(g_color_suite8),
    &g_basic_suite, &g_effect};
 }
+
+// Asks `unwired_installed_offsets` (see its declaration for what the answer
+// covers) of the production wiring, rather than of an AbiHooks a test filled in
+// itself. This route is the one caller that can: the assignment list lives in
+// the worker's own translation unit, so nothing outside it can reach the
+// pointers that ship.
+//
+// `make_bootstrap_abi_hooks` resets the callback diagnostics on entry, which is
+// why this stays a self-test route - it runs before any plug-in is loaded and
+// nothing else has recorded a call yet.
+namespace aexcompat::l2_detail {
+bool verify_production_utility_callback_table() {
+  namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  boot::State state{};
+  boot::install_callback_tables(state, ::make_bootstrap_abi_hooks());
+  void* utils{};
+  std::memcpy(&utils, state.input.data() + contract::IN_UTILS_OFFSET, sizeof(utils));
+  if (utils != state.utils.data()) {
+    std::cerr << "utility_callback_table: in_data->utils does not point at the "
+                 "installed block\n" << std::flush;
+    return false;
+  }
+  const auto unwired = boot::unwired_installed_offsets(state);
+  // Name each hole, block and all. The verdict alone would leave an operator
+  // bisecting the assignment list by hand, which is the work this route exists
+  // to skip, and a bare offset would send them to the wrong list.
+  for (const auto& slot : unwired)
+    std::cerr << "utility_callback_table: unwired block=" << slot.block
+              << " offset=" << slot.offset << "\n" << std::flush;
+  return unwired.empty();
+}
+}  // namespace aexcompat::l2_detail
 
 aexcompat::worker_runtime::effect_bootstrap::RuntimeHooks make_bootstrap_runtime_hooks() {
   return {&invoke_entry_seh, &reset_effect_lifetime,

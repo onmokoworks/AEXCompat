@@ -130,3 +130,24 @@ def test_layer_render_options_suite2_is_a_render_worker_route() -> None:
         completed = _run_route(name, "--self-test-aegp-layer-render-options-suite2")
         assert completed.returncode != 0, name
         assert completed.stdout.strip() == "", name
+
+
+def test_utility_callback_table_has_no_unwired_slot_on_all_workers() -> None:
+    """The production `in_data->utils` wiring, asked of the shipping workers.
+
+    `bindings_cover_contract_once` proves at compile time that every generated
+    offset has a named source; nothing proves `make_bootstrap_abi_hooks`
+    assigned it, and an unassigned one installs a null pointer that no host code
+    reads. It surfaces only when a plug-in calls through it and jumps to address
+    0 - #777 as a 16-bit sampling crash, #981 as three FRAME_SETUP crashes the
+    SEH guard reported as error 512. The route is the only caller that can see
+    the assignment list, because it lives in the worker's own translation unit.
+
+    `_all_workers` asserts the verdict, and the route puts the offset of every
+    hole on stderr; there is nothing further to assert here that would not be
+    one build's constant compared against itself.
+    """
+    for _ in _all_workers(
+        "--self-test-utility-callback-table", "utility_callback_table"
+    ):
+        pass

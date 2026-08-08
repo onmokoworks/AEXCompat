@@ -71,3 +71,24 @@ authored; no Adobe header is included or redistributed by `minihost/`.
 AEGP Memory Suite v1 follows the same boundary for its eight-entry callback
 table, 32-bit size/flag values, opaque handles, and UTF-16 payload ownership.
 All storage and synchronization are independently implemented in `minihost/`.
+
+The `in_data->utils` ANSI block crossed the same boundary twice. The 2026-07-13
+observation carried eleven of its nineteen entries, so the host wired eleven and
+left the rest null; issue #981 added the remaining eight offsets (`atan`,
+`atan2`, `exp`, `floor`, `fmod`, `log`, `log10`, `tan`) by extending
+`instruments/abi-layout-probe`, rebuilding it against the external SDK, and
+folding the numbers it printed into the observation. The probe's full output was
+diffed against the committed document first, so the only differences it
+introduced are those eight entries. The functions themselves were already
+independently written in `minihost/src/worker_pf_ansi_runtime.cpp`; nothing but
+numeric offsets crossed.
+
+That rerun is now the document's standing contract rather than a one-off:
+`tests/test_abi_layout_observation_matches_probe.py` runs the compiled probe and
+requires every value it prints to equal the committed observation, and CI builds
+the probe on any run that provisioned the SDK. The document still carries two
+things the probe does not print - `utils.app`, a legacy slot at
+PF_UtilCallbacks+0xC8 that no SDK header declares (issue #362), and this
+provenance note - and the test names them as the only permitted additions. What
+neither covers is a PF_UtilCallbacks member nothing has taught the probe to
+emit; issue #991 tracks the ones that are still outside it.
