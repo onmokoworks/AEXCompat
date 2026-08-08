@@ -27,6 +27,22 @@ jobs:
       # 内容ハッシュで吸収する (#664)。
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
+      # minihost の locale pin をジョブ環境に持ち上げる (#942)。
+      #
+      # minihost/CMakeLists.txt は各コンパイルを `cmake -E env VSLANG=1033`
+      # 経由で走らせて cl の /showIncludes を英語に固定している。configure 時に
+      # 検出した prefix と build 時の出力が食い違うと ninja がヘッダ依存を
+      # 0 件記録するため (#651/#713)。
+      #
+      # ところが sccache はクライアント/サーバ構成で、コンパイルは常駐サーバが
+      # 起動する。サーバが cl に渡すのはサーバ自身の環境なので、呼び出しごとの
+      # VSLANG は届かない。実測では prefix が
+      # `メモ: インクルード ファイル:` になり、179 個すべてで依存が消えた
+      # (`Verify minihost header dependency tracking` が検出)。
+      #
+      # ジョブ環境に置けば sccache-action が起動するサーバが継承し、そこから
+      # 起動される cl にも届く。
+      VSLANG: "1033"
       SDK_RELEASE_TAG: ci-sdk-ae25.2
       SDK_ASSET: AfterEffectsSDK-ae25.2-win.zip
       SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
