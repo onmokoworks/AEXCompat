@@ -295,6 +295,56 @@ bool verify_aegp_layer_suite1_slots() {
     ok = false;
   }
   g_aegp_comp_idle_roundtrip_mode = saved_mode;
+
+  const void* version8_raw = nullptr;
+  const bool version8_acquired =
+      compat_acquire_suite("AEGP Layer Suite", 8, &version8_raw) == 0;
+  if (version8_acquired) {
+    const auto* version8 = static_cast<void* const*>(version8_raw);
+    const std::array<std::pair<std::size_t, void*>, 21> version8_wired{{
+        {0, reinterpret_cast<void*>(&aegp_get_comp_num_layers)},
+        {1, reinterpret_cast<void*>(&aegp_get_comp_layer_by_index)},
+        {2, reinterpret_cast<void*>(&aegp_get_active_layer)},
+        {3, reinterpret_cast<void*>(&aegp_get_layer_index)},
+        {4, reinterpret_cast<void*>(&aegp_get_layer_source_item)},
+        {5, reinterpret_cast<void*>(&aegp_get_layer_parent_comp)},
+        {9, reinterpret_cast<void*>(&aegp_get_layer_flags)},
+        {10, reinterpret_cast<void*>(&aegp_set_layer_flag)},
+        {14, reinterpret_cast<void*>(&aegp_get_layer_in_point)},
+        {15, reinterpret_cast<void*>(&aegp_get_layer_duration)},
+        {16, reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration)},
+        {21, reinterpret_cast<void*>(&aegp_get_layer_transfer_mode)},
+        {26, reinterpret_cast<void*>(&aegp_get_layer_masked_bounds)},
+        {27, reinterpret_cast<void*>(&aegp_get_layer_object_type)},
+        {33, reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time)},
+        {34, reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time)},
+        {36, reinterpret_cast<void*>(&aegp_get_layer_id)},
+        {37, reinterpret_cast<void*>(&aegp_get_layer_to_world_xform)},
+        {40, reinterpret_cast<void*>(&aegp_get_layer_parent)},
+        {41, reinterpret_cast<void*>(&aegp_set_layer_parent)},
+        {42, reinterpret_cast<void*>(&aegp_delete_layer)},
+    }};
+    ok = ok && version8 && version8_raw == g_aegp_layer_suite3.data();
+    if (version8) {
+      for (const auto& [slot, implementation] : version8_wired)
+        ok = ok && version8[slot] == implementation;
+      const auto& version8_stubs =
+          aexcompat::worker_runtime::unsupported_suite_slots<
+              aexcompat::worker_runtime::UnsupportedSuiteId::aegp_layer_8, 43>();
+      const auto version8_claimed = [&version8_wired](std::size_t slot) {
+        for (const auto& entry : version8_wired)
+          if (entry.first == slot) return true;
+        return false;
+      };
+      for (std::size_t slot = 0; slot < version8_stubs.size(); ++slot)
+        if (!version8_claimed(slot))
+          ok = ok && version8[slot] == version8_stubs[slot];
+      ok = ok && version8[6] != reinterpret_cast<void*>(&aegp_get_layer_name);
+    }
+    ok = compat_release_suite("AEGP Layer Suite", 8) == 0 && ok;
+  } else {
+    ok = false;
+  }
   return finish(ok);
 }
 

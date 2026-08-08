@@ -13,11 +13,11 @@ named after the struct so the two do not read as the same thing.
 `Unmult.aex` asks for version 5 and reported `PF_Err_INTERNAL_STRUCT_DAMAGED`
 while the host refused the acquire (issue #712).
 
-The native self-test acquires versions 5, 11, and 14. It compares four slot
+The native self-test acquires versions 5, 8, 11, and 14. It compares four slot
 pairs straddling both insertions, requires every unclaimed version 5 slot to be
-exactly the unsupported stub, and pins version 11 slot 7 to its exact stub so
-the later four-argument GetLayerName cannot be copied into the legacy
-three-argument slot.
+exactly the unsupported stub, checks the complete public Suite3 version 8 slot
+map, and pins legacy GetLayerName slots to their exact stubs so the later
+four-argument form cannot be copied into a three-argument slot.
 """
 
 import json
