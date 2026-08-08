@@ -211,6 +211,21 @@ void the_utility_table_is_wired_one_to_one() {
   check(area16 != nullptr, "utils.area_sample16 is wired");
   check(contract::UTILS_SUBPIXEL_SAMPLE16_OFFSET == 472, "subpixel_sample16 sits at 472");
   check(contract::UTILS_AREA_SAMPLE16_OFFSET == 480, "area_sample16 sits at 480");
+  void* iterate_origin_non_clip{};
+  void* iterate_generic_callback{};
+  std::memcpy(&iterate_origin_non_clip,
+              state.utils.data() + contract::UTILS_ITERATE_ORIGIN_NON_CLIP_SRC_OFFSET,
+              sizeof(iterate_origin_non_clip));
+  std::memcpy(&iterate_generic_callback,
+              state.utils.data() + contract::UTILS_ITERATE_GENERIC_OFFSET,
+              sizeof(iterate_generic_callback));
+  check(iterate_origin_non_clip != nullptr,
+        "utils.iterate_origin_non_clip_src is wired");
+  check(iterate_generic_callback != nullptr, "utils.iterate_generic is wired");
+  check(contract::UTILS_ITERATE_ORIGIN_NON_CLIP_SRC_OFFSET == 448,
+        "iterate_origin_non_clip_src sits at 448");
+  check(contract::UTILS_ITERATE_GENERIC_OFFSET == 456,
+        "iterate_generic sits at 456");
   for (const auto [offset, name] : std::array{
            std::pair{contract::UTILS_GET_CALLBACK_ADDR_OFFSET, "utils.get_callback_addr"},
            std::pair{contract::UTILS_ANSI_COS_OFFSET, "utils.ansi_cos"},

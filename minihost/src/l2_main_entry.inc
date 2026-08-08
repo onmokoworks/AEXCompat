@@ -580,6 +580,9 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
   sources.host_unlock_handle = reinterpret_cast<void*>(&diag_unlock_handle);
   sources.host_dispose_handle = reinterpret_cast<void*>(&diag_dispose_handle);
   sources.host_get_handle_size = reinterpret_cast<void*>(&diag_handle_size);
+  sources.iterate_origin_non_clip_src =
+      reinterpret_cast<void*>(&iterate_origin_non_clip8);
+  sources.iterate_generic = reinterpret_cast<void*>(&iterate_generic);
   sources.host_resize_handle = reinterpret_cast<void*>(&diag_resize_handle);
   sources.app = reinterpret_cast<void*>(&diag_host_app);
   const auto utility_callbacks = aexcompat::pf_utility_callbacks::build(sources);

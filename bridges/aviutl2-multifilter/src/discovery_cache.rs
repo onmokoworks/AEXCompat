@@ -1809,6 +1809,11 @@ struct CacheEntry {
     ok: bool,
     sha: String,
     smart: bool,
+    /// Exact PF_OutFlags2 observed during discovery. Zero means an older cache
+    /// entry that predates this field; its existing `smart` decision is kept
+    /// until background re-verification fills the flags in.
+    #[serde(default)]
+    out_flags2: u32,
     #[serde(default)]
     params: Vec<InteractiveParameter>,
     /// The host build that produced this entry. Held per entry, not per file, so
@@ -2747,6 +2752,7 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         ok: false,
         sha: String::new(),
         smart: false,
+        out_flags2: 0,
         params: Vec::new(),
         build,
         stale: false,

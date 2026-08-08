@@ -1112,6 +1112,28 @@ bool verify_aegp_resizer_3d_chain() {
       g_aegp_item_suite1[12] == reinterpret_cast<void*>(&aegp_get_item_current_time) &&
       g_aegp_item_suite1[13] == reinterpret_cast<void*>(&aegp_get_item_dimensions) &&
       g_aegp_item_suite1[18] == reinterpret_cast<void*>(&aegp_set_item_current_time);
+  AegpTime in_point{-1, 1};
+  AegpTime duration{-1, 1};
+  const AegpTime saved_layer_in_point = g_aegp_layer_in_points[2];
+  g_aegp_layer_in_points[2] = {30, 30};
+  ok = ok && aegp_get_layer_in_point(&g_aegp_layers[2], 0, &in_point) == 0 &&
+      in_point.value == 0 && in_point.scale == 30 &&
+      aegp_get_layer_duration(&g_aegp_layers[2], 0, &duration) == 0 &&
+      duration.value == 300 && duration.scale == 30;
+  in_point = {-1, 1};
+  duration = {-1, 1};
+  ok = ok && aegp_get_layer_in_point(&g_aegp_layers[2], 1, &in_point) == 0 &&
+      in_point.value == 30 && in_point.scale == 30 &&
+      aegp_get_layer_duration(&g_aegp_layers[2], 1, &duration) == 0 &&
+      duration.value == 300 && duration.scale == 30;
+  const AegpTime time_sentinel{-2, 7};
+  in_point = time_sentinel;
+  duration = time_sentinel;
+  ok = ok && aegp_get_layer_in_point(&g_aegp_layers[2], 2, &in_point) != 0 &&
+      in_point.value == time_sentinel.value && in_point.scale == time_sentinel.scale &&
+      aegp_get_layer_duration(&g_aegp_layers[2], 2, &duration) != 0 &&
+      duration.value == time_sentinel.value && duration.scale == time_sentinel.scale;
+  g_aegp_layer_in_points[2] = saved_layer_in_point;
   AegpMatrix4 matrix{};
   ok = ok && aegp_get_layer_to_world_xform(&g_aegp_layers[2], &time, &matrix) == 0;
   for (std::size_t row = 0; row < 4; ++row) {

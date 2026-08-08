@@ -105,9 +105,11 @@ uv run python -m pytest -q
     (「CI (GitHub Actions)」の節を参照)。ローカルでは minihost の Ninja ビルド、
     worker の複製配置、probe ビルド、入力 fixture 生成 (workflow
     `ae-sdk-tests.yml` の該当 step と同じ手順) の後にフラグを付けて実行する。
-    加えて `abi_layout_probe` が要る (issue #981):
-    `tools/build-*.ps1` は `target\pf-*-probe-build` を configure するので
-    `target\instruments-build` は作られない。
+    加えて `abi_layout_probe` が要る (issue #981)。`tools/build-*.ps1` は
+    `target\pf-*-probe-build` を configure するので、この probe は別に
+    ビルドする。`tools\refresh-aex-abi-layout-evidence.ps1` を走らせると
+    `target\abi-layout-probe-build` にビルドされる (観測 JSON も再生成される)
+    ほか、ビルドだけなら:
     ```powershell
     cmake -S instruments -B target\instruments-build -G Ninja -DCMAKE_BUILD_TYPE=Release
     cmake --build target\instruments-build --target abi_layout_probe

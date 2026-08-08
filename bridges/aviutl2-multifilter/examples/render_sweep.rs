@@ -68,7 +68,7 @@ use std::time::{Duration, Instant};
 
 use aexcompat_aviutl2_multifilter::{
     DiagnosticDiscovery, DiagnosticScan, PluginName, discover_records_for_diagnostics,
-    layer_slots_of, pf_error_name, plugin_name, scan_for_diagnostics,
+    layer_slots_of, pf_error_name, plugin_name, scan_for_diagnostics, smart_render_route_supported,
 };
 use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::render_session::{
@@ -364,17 +364,21 @@ impl Outcome {
     }
 }
 
-/// The secondary layer handed to a plug-in that declares one: its first layer
-/// slot, carrying the structured map, unless the run is the no-layer control.
+/// The secondary layer handed to a plug-in that declares one: every layer slot
+/// carries the same structured map unless the run is the no-layer control.
+/// Supplying only the first slot makes a multi-layer effect observe a mixture
+/// of a real layer and an empty checkout, which is not a useful render probe.
 fn probe_layers(
     record: &DiagnosticDiscovery,
     options: &Options,
     pixels: &[u8],
 ) -> Vec<SessionLayer> {
+    if options.no_layer {
+        return Vec::new();
+    }
     layer_slots_of(&record.parameters)
-        .first()
-        .filter(|_| !options.no_layer)
-        .map(|&slot| SessionLayer {
+        .into_iter()
+        .map(|slot| SessionLayer {
             slot,
             width: options.width,
             height: options.height,
@@ -386,7 +390,6 @@ fn probe_layers(
             // sweep takes the shipping shape.
             dynamic: true,
         })
-        .into_iter()
         .collect()
 }
 
@@ -416,15 +419,21 @@ fn sweep_one(
         return Outcome::bare("no_search_roots");
     }
 
-    let smart = record.smart && !options.force_classic;
+    let smart =
+        smart_render_route_supported(record.smart, record.out_flags2) && !options.force_classic;
     let layers = probe_layers(record, options, layer_pixels);
     // The bridge overlays each frame's current config values onto the exposed
     // defaults and sends them with the frame; a sweep that instead relied on the
     // open-time baseline would drive a path the bridge never drives (a frame
     // with no `parameters` attribute takes different worker handling - issue
     // #883's UPDATE_PARAMS_UI among it). The sweep has no host config to read,
-    // so it sends the discovered values unchanged.
-    let parameters = (!options.plugin_defaults).then_some(&record.parameters[..]);
+    // so it sends the discovered defaults after the same transport
+    // normalization used at session open.
+    let normalized_parameters =
+        aexcompat_broker::image_render::normalize_default_interactive_parameters(
+            &record.parameters,
+        );
+    let parameters = (!options.plugin_defaults).then_some(&normalized_parameters[..]);
 
     let session = RenderSession::open(SessionOpenRequest {
         repository,
@@ -566,6 +575,10 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
         "missing_suites",
         "unsupported_suite_calls",
         "callback_history",
+        // Present only with AEXCOMPAT_EXTENDED_DIAG; this keeps one-off host
+        // callback evidence available in the sweep artifact without exposing
+        // it during ordinary corpus runs.
+        "stderr_tail",
         "load_failure",
         "plugin_kind",
         // What the worker refused to hand out, parsed from its own stderr.
@@ -693,6 +706,9 @@ fn plugin_record(
         "discovery": {
             "ok": record.ok,
             "smart": record.smart,
+            "out_flags2": record.out_flags2,
+            "smart_route_supported":
+                smart_render_route_supported(record.smart, record.out_flags2),
             "parameter_count": record.parameters.len(),
             "layer_slots": layer_slots_of(&record.parameters),
             "failure_classification": record.failure_classification,

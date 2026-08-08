@@ -142,7 +142,7 @@ impl AudioRenderSession {
         if geometry.section_bytes() as u64 > SECTION_HARD_CAP_BYTES {
             return Err(invalid("audio session section exceeds the hard cap"));
         }
-        let payload = encode_interactive_payload(request.parameters.unwrap_or_default())?;
+        let payload = encode_default_interactive_payload(request.parameters.unwrap_or_default())?;
 
         let (request_read, request_write) = inheritable_pipe(false)?;
         let (response_read, response_write) = inheritable_pipe(true)?;

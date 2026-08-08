@@ -38,6 +38,8 @@ enum class Callback : std::size_t {
   Ansi,
   CheckoutParam,
   CheckinParam,
+  IterateGeneric,
+  EffectSequenceData,
   Count,
 };
 
@@ -69,7 +71,8 @@ inline constexpr std::array<const char*, static_cast<std::size_t>(Callback::Coun
                     "begin_sampling", "end_sampling", "get_callback_addr", "blend", "convolve", "copy",
                     "fill", "premultiply", "transfer_rect", "transform_world",
                     "new_world", "dispose_world", "handle", "platform_data", "pixel_data",
-                    "app", "ansi", "checkout_param", "checkin_param"}};
+                    "app", "ansi", "checkout_param", "checkin_param",
+                    "iterate_generic", "effect_sequence_data"}};
 inline constexpr std::array<const char*, static_cast<std::size_t>(Reason::Count)>
     REASON_NAMES{{"none", "no_active_state", "invalid_arguments",
                   "temporal_checkout_denied", "malformed_request", "capacity_exceeded",
