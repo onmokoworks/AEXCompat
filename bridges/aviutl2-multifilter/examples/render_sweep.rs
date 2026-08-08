@@ -398,18 +398,19 @@ fn sweep_one(
     layer_pixels: &[u8],
 ) -> Outcome {
     if !record.ok {
-        // Discovery never got the plug-in's parameters, so there is nothing to
-        // open a session on. Its own classification is the whole answer, and a
-        // coarse one: the cache keeps a single string where the inspect's
-        // diagnostics had the exit code, the plug-in kind and the load failure
-        // (issue #960).
-        return Outcome::bare(&format!(
+        let mut outcome = Outcome::bare(&format!(
             "not_discovered:{}",
-            record
-                .failure_classification
-                .as_deref()
-                .unwrap_or("unknown")
+            discovery_failure_bucket(
+                record.failure_diagnostics.as_ref(),
+                record.failure_classification.as_deref(),
+            )
         ));
+        if let Some(diagnostics) = &record.failure_diagnostics {
+            outcome
+                .detail
+                .insert("discovery_diagnostics".to_owned(), diagnostics.clone());
+        }
+        return outcome;
     }
     if record.search_roots.is_empty() {
         return Outcome::bare("no_search_roots");
@@ -524,6 +525,26 @@ fn sweep_one(
     }
     attach_close(&mut outcome, close, options.close_report);
     outcome
+}
+
+fn discovery_failure_bucket(diagnostics: Option<&Value>, classification: Option<&str>) -> String {
+    if classification == Some("module_audit_failure") {
+        return "module_audit_failure".to_owned();
+    }
+    let exit_code = diagnostics
+        .and_then(|value| value.get("exit_code"))
+        .and_then(Value::as_i64);
+    match exit_code {
+        Some(11) => "exit_11_load_library".to_owned(),
+        Some(14) => "exit_14_module_audit".to_owned(),
+        Some(12) => diagnostics
+            .and_then(|value| value.get("plugin_kind"))
+            .and_then(Value::as_str)
+            .map(|kind| format!("exit_12_{kind}"))
+            .unwrap_or_else(|| "exit_12".to_owned()),
+        Some(code) => format!("exit_{code}"),
+        None => classification.unwrap_or("unknown").to_owned(),
+    }
 }
 
 /// Folds the session's close report into a plug-in's evidence: which stage the
@@ -674,6 +695,7 @@ fn plugin_record(
             "parameter_count": record.parameters.len(),
             "layer_slots": layer_slots_of(&record.parameters),
             "failure_classification": record.failure_classification,
+            "failure_diagnostics": record.failure_diagnostics,
             "cluster_fallback": record.cluster_fallback,
         },
         "bucket": outcome.bucket,
@@ -777,4 +799,31 @@ fn write_report(path: &Path, report: &Value) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_buckets_preserve_exit_12_plugin_kind() {
+        let diagnostics = json!({
+            "classification": "nonzero_exit",
+            "exit_code": 12,
+            "plugin_kind": "aegp_candidate"
+        });
+        assert_eq!(
+            discovery_failure_bucket(Some(&diagnostics), Some("nonzero_exit")),
+            "exit_12_aegp_candidate"
+        );
+    }
+
+    #[test]
+    fn discovery_buckets_name_load_library_failure() {
+        let diagnostics = json!({"classification": "nonzero_exit", "exit_code": 11});
+        assert_eq!(
+            discovery_failure_bucket(Some(&diagnostics), Some("nonzero_exit")),
+            "exit_11_load_library"
+        );
+    }
 }

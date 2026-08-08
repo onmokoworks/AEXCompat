@@ -1846,6 +1846,10 @@ struct CacheEntry {
     /// it to a negative cache entry (#328).
     #[serde(default)]
     failure_classification: Option<String>,
+    /// Path-free, broker-normalized diagnostics from the most recent failed
+    /// discovery attempt. Older cache entries deserialize with `None`.
+    #[serde(default)]
+    failure_diagnostics: Option<serde_json::Value>,
     /// This spelling is retained only as a fallback after an alias re-key. It
     /// must not keep the alias lookup hot while its walked spelling is present.
     #[serde(default)]
@@ -2750,6 +2754,7 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         attempts: 0,
         closure: CachedClosure::default(),
         failure_classification: None,
+        failure_diagnostics: None,
         alias_fallback: false,
         alias_target: None,
         closure_identity: None,
@@ -2814,11 +2819,22 @@ fn merge_cache_entries(
 /// Extract the broker's already-normalized worker classification from the
 /// diagnostic JSON embedded in an inspection error. Missing or malformed
 /// diagnostics stay unknown and therefore retain the old safe behavior.
-fn inspection_failure_classification(error: &std::io::Error) -> Option<String> {
+fn inspection_failure_diagnostics(error: &std::io::Error) -> Option<serde_json::Value> {
     let message = error.to_string();
-    let payload = message.split_once("diagnostics=")?.1;
-    serde_json::from_str::<serde_json::Value>(payload)
-        .ok()?
+    let payload = [
+        "AEX parameter inspection worker failed safely: ",
+        "diagnostics=",
+    ]
+    .into_iter()
+    .find_map(|marker| message.split_once(marker).map(|(_, payload)| payload))?;
+    serde_json::Deserializer::from_str(payload)
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()
+}
+
+fn inspection_failure_classification(error: &std::io::Error) -> Option<String> {
+    inspection_failure_diagnostics(error)?
         .get("classification")?
         .as_str()
         .map(str::to_owned)

@@ -28,6 +28,7 @@ mod tests {
             attempts: 0,
             closure: CachedClosure::default(),
             failure_classification: None,
+            failure_diagnostics: None,
             alias_fallback: false,
             alias_target: None,
             closure_identity: None,
@@ -1847,12 +1848,29 @@ mod tests {
     #[test]
     fn inspection_errors_preserve_the_broker_failure_classification() {
         let error = std::io::Error::other(
-            r#"inspection failed: diagnostics={"classification":"crashed","exit_code":3221225477}"#,
+            r#"AEX parameter inspection worker failed safely: {"classification":"crashed","exit_code":3221225477}"#,
         );
         assert_eq!(
             inspection_failure_classification(&error).as_deref(),
             Some("crashed")
         );
+        assert_eq!(
+            inspection_failure_diagnostics(&error).and_then(|value| value
+                .get("exit_code")
+                .and_then(serde_json::Value::as_u64)
+                .map(|code| code as u32)),
+            Some(3_221_225_477)
+        );
+    }
+
+    #[test]
+    fn inspection_errors_parse_diagnostics_before_a_trailing_report() {
+        let error = std::io::Error::other(
+            r#"AEX parameter inspection worker failed safely: {"classification":"nonzero_exit","exit_code":12,"plugin_kind":"aegp_candidate"}, report={"status":"failed"}"#,
+        );
+        let diagnostics = inspection_failure_diagnostics(&error).expect("diagnostics");
+        assert_eq!(diagnostics["exit_code"], 12);
+        assert_eq!(diagnostics["plugin_kind"], "aegp_candidate");
     }
 
     /// The same entry does converge as soon as a re-check succeeds.
