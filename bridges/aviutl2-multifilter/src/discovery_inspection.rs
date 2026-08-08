@@ -607,34 +607,62 @@ fn normalize_parameters_for_cache(parameters: &mut [InteractiveParameter]) {
     }
 }
 
-/// Discovers the given AEX with low bounded parallelism (to keep each discovery
-/// under the worker deadline — high concurrency causes contention false-timeouts),
-/// caching every result. Stops promptly when `DISCOVERY_SHUTDOWN` is set (plugin
-/// unload); unprocessed paths stay misses and are retried next launch.
-///
-/// Two phases with the same worker budget (`MAX_DISCOVERY_PARALLELISM`)
-/// throughout (issue #405):
-///
-/// 1. Prepare, work-stealing per plug-in: read + hash and resolve the
-///    dependency closure (the pre-inspect half of the legacy path), yielding
-///    the closure identity each plug-in clusters on.
-/// 2. Inspect, work-stealing per *task*: plug-ins sharing one closure
-///    identity form a cluster task swept by a single DiscoverySession
-///    (design §8); singletons and failed resolutions keep the per-plugin
-///    one-shot inspect.
-///
-/// Diagnostics entry into the crate's real discovery pass: the same
-/// `discover_all` the AviUtl2 registration runs, callable from the
-/// measurement examples so a timing run exercises the code that ships
-/// instead of a reimplementation. Not part of the bridge API. (Removed with
-/// the staged paths in #870 while `discovery_ab_diag` kept calling it —
-/// issue #872.)
+/// The three fields [`discover_records_for_diagnostics`] flattens to for a
+/// caller that only counts outcomes, kept because `discovery_ab_diag` reports
+/// exactly those. (Removed with the staged paths in #870 while that example
+/// kept calling it — issue #872.)
 #[doc(hidden)]
 pub fn discover_all_for_diagnostics(
     repository: &Path,
     paths: &[PathBuf],
     dependency_dirs: Vec<PathBuf>,
 ) -> Vec<(PathBuf, bool, Option<String>)> {
+    discover_records_for_diagnostics(repository, paths, dependency_dirs)
+        .into_iter()
+        .map(|record| (record.path, record.ok, record.failure_classification))
+        .collect()
+}
+
+/// One plug-in's discovery outcome with everything a render sweep needs to open
+/// a session on it afterwards (issue #957): the parameters the plug-in declared,
+/// which render path it advertises, and the search roots its cluster keyed on.
+///
+/// The cache entry itself is not exposed: these are the fields a sweep reads,
+/// copied out, so widening `CacheEntry` does not widen this.
+#[doc(hidden)]
+pub struct DiagnosticDiscovery {
+    pub path: PathBuf,
+    /// The plug-in was inspected and its parameters are the declared ones.
+    pub ok: bool,
+    pub sha256: String,
+    pub byte_size: u64,
+    /// `PF_OutFlag2_SUPPORTS_SMART_RENDER`; which render path a session opens on.
+    pub smart: bool,
+    /// The PiPL `catg` property (issue #871), read from the bytes without loading.
+    pub category: Option<String>,
+    pub parameters: Vec<InteractiveParameter>,
+    /// The in-place DLL search roots, in resolution order.
+    pub search_roots: Vec<PathBuf>,
+    pub failure_classification: Option<String>,
+    /// `reason/resolution` of a cluster-session fallback, when this entry came
+    /// out of one (issue #405).
+    pub cluster_fallback: Option<String>,
+}
+
+/// Diagnostics entry into the crate's real discovery pass: the same
+/// `discover_all` the AviUtl2 registration runs — same bounded parallelism,
+/// same clustering, same fallbacks — callable from the measurement examples so
+/// a sweep exercises the code that ships instead of a reimplementation. Not
+/// part of the bridge API.
+///
+/// Neither reads nor writes the discovery cache file, so a sweep cannot demote
+/// the entries a running AviUtl2 registration depends on.
+#[doc(hidden)]
+pub fn discover_records_for_diagnostics(
+    repository: &Path,
+    paths: &[PathBuf],
+    dependency_dirs: Vec<PathBuf>,
+) -> Vec<DiagnosticDiscovery> {
     let dependency = DependencyConfig {
         dirs: dependency_dirs,
         module_limit: None,
@@ -643,7 +671,20 @@ pub fn discover_all_for_diagnostics(
     let build = build_fingerprint(repository, &dependency);
     discover_all(repository, paths, &dependency, build)
         .into_iter()
-        .map(|(path, entry)| (path, entry.ok, entry.failure_classification))
+        .map(|(path, entry)| DiagnosticDiscovery {
+            path,
+            ok: entry.ok,
+            sha256: entry.sha,
+            byte_size: entry.len,
+            smart: entry.smart,
+            category: entry.category,
+            parameters: entry.params,
+            search_roots: entry.closure.roots.iter().map(PathBuf::from).collect(),
+            failure_classification: entry.failure_classification,
+            cluster_fallback: entry.cluster_fallback.map(|fallback| {
+                format!("{}/{}", fallback.reason, fallback.resolution)
+            }),
+        })
         .collect()
 }
 

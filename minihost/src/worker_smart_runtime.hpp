@@ -61,16 +61,6 @@ struct State {
   // unknown layer.
   int32_t param_count{};
   uint32_t empty_layer_param_checkouts{};
-  // The world handed back for one of those. A PF_EffectWorld is 120 bytes and
-  // all-zero is exactly an empty layer: no flags, null data, zero rowbytes,
-  // zero width and height, and an empty extent. Handing back null with
-  // PF_Err_NONE instead would invent a contract AE does not have - a plug-in
-  // that reads `world->width` after a successful checkout would fault, and
-  // that pattern is in the SDK samples. Owned by the state so its lifetime is
-  // the session's. Aligned like the worlds the render subsystem builds, whose
-  // buffers get natural alignment from where they live; a byte array beside
-  // two 32-bit members would not.
-  alignas(8) std::array<std::byte, 120> empty_layer_world{};
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
   int32_t pixel_aspect_numerator{1};

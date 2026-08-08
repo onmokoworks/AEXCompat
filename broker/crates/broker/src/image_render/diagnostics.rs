@@ -460,6 +460,37 @@ pub fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::Dynami
         .map_err(|error| invalid(format!("{role} image decode failed: {error}")))
 }
 
+/// How much of the worker's stderr the extended trace carries out. The tail
+/// rather than the head: the interesting end of a failing selector is the last
+/// thing it did, and the head is the same start-up lines every run.
+const MAX_STDERR_TAIL_BYTES: usize = 64 * 1024;
+
+/// The tail of the worker's stderr, or `None` unless `AEXCOMPAT_EXTENDED_DIAG`
+/// is set. Cut on a line boundary so the first line is whole, and truncated
+/// from the front with a marker rather than silently.
+fn extended_diagnostics_stderr_tail(stderr: &str) -> Option<String> {
+    if std::env::var_os("AEXCOMPAT_EXTENDED_DIAG").is_none() {
+        return None;
+    }
+    if stderr.len() <= MAX_STDERR_TAIL_BYTES {
+        return Some(stderr.to_owned());
+    }
+    // Cut forward to the next line rather than at the byte: the index lands on
+    // a char boundary (it follows a newline) and on something a reader can
+    // parse. Indexing the byte slice is what keeps the search itself from
+    // needing a boundary. No newline past the cut leaves an empty tail, which
+    // is the honest answer for a single enormous line.
+    let cut = stderr.len() - MAX_STDERR_TAIL_BYTES;
+    let start = stderr.as_bytes()[cut..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(stderr.len(), |newline| cut + newline + 1);
+    Some(format!(
+        "[truncated to the last {MAX_STDERR_TAIL_BYTES} bytes]\n{}",
+        &stderr[start..]
+    ))
+}
+
 /// Diagnostics for a dispatched worker run, including the kill evidence from
 /// Job Object accounting (issue #21): why a dead worker died (timeout versus
 /// allocations failing at the memory cap) and how much memory it peaked at.
@@ -478,6 +509,15 @@ pub(crate) fn isolated_worker_diagnostics(
         .as_object_mut()
         .expect("worker_diagnostics returns an object");
     object.insert("kill_reason".into(), json!(isolated.kill_reason));
+    // The worker's own trace, when the operator asked for one. Everything above
+    // is derived from this stream, and a derivation only answers the questions
+    // it was written for: a plug-in failing inside a selector leaves its account
+    // in the host-callback trace, which nothing else carries out of the worker.
+    // Off unless AEXCOMPAT_EXTENDED_DIAG is set, because the trace is unbounded
+    // in shape (it can carry paths a report should not) and large.
+    if let Some(tail) = extended_diagnostics_stderr_tail(&isolated.stderr) {
+        object.insert("stderr_tail".into(), json!(tail));
+    }
     object.insert(
         "memory_limit_reached".into(),
         json!(isolated.memory_limit_reached),
@@ -583,6 +623,7 @@ fn worker_diagnostics(
     let mut plugin_kind: Option<&str> = None;
     let mut minidump: Option<String> = None;
     let load_failure = load_failure_marker(stderr, exit_code);
+    let mut suite_acquire_failures = suite_acquire_failures(stderr);
 
     for line in stderr.lines() {
         plugin_kind = plugin_kind.or_else(|| match line.trim() {
@@ -664,6 +705,15 @@ fn worker_diagnostics(
         "last_completed_stage": last_completed_stage,
         "missing_suites": [],
         "missing_suites_truncated": false,
+        // What the worker refused to hand out, read off its own stderr rather
+        // than out of its final report. `missing_suites` comes from the report
+        // and is filled by `propagate_missing_suites`, which the inspection and
+        // image-render paths call and the render session's close does not - and
+        // a session that ends on a frame error often has no parsable report at
+        // all, so on exactly the runs a sweep is classifying, the suite a
+        // plug-in could not acquire was reaching nobody (issue #957).
+        "suite_acquire_failures": Value::Array(std::mem::take(&mut suite_acquire_failures.0)),
+        "suite_acquire_failures_truncated": suite_acquire_failures.1,
         "unsupported_suite_calls": [],
         "unsupported_suite_calls_truncated": false,
         "suite_call_slot_probe": null,
@@ -673,6 +723,65 @@ fn worker_diagnostics(
         "minidump": minidump,
         "load_failure": load_failure,
     })
+}
+
+/// How many distinct suites a single run may report as unacquirable. A plug-in
+/// probing versions downward asks for several in a row, and a malformed stream
+/// must not be able to grow the diagnostic without bound.
+const MAX_SUITE_ACQUIRE_FAILURES: usize = 32;
+
+
+/// The suites the worker refused, from its `stage:suite_acquire_failed` lines,
+/// and whether the list was cut short. Deduplicated on (name, version): a
+/// plug-in that retries the same acquire every frame would otherwise fill the
+/// list with one fact.
+///
+/// The name is held to the same shape the report side accepts, through the same
+/// predicate, so a suite name and a line of a plug-in's own chatter cannot be
+/// confused; anything else is dropped rather than passed through.
+fn suite_acquire_failures(stderr: &str) -> (Vec<Value>, bool) {
+    let mut failures: Vec<(String, i64)> = Vec::new();
+    let mut truncated = false;
+    for line in stderr.lines() {
+        let Some(body) = line.trim().strip_prefix("stage:suite_acquire_failed ") else {
+            continue;
+        };
+        let Some((name, version)) = body.split_once(" version=") else {
+            continue;
+        };
+        let Some(name) = name.strip_prefix("name=") else {
+            continue;
+        };
+        // Dropping a line is the same loss as running out of room for it, so
+        // it sets the same flag: a name or a version this cannot vouch for is
+        // still a suite the worker refused, and a list that hides its own gaps
+        // reads as a complete one.
+        let Ok(version) = version.trim().parse::<i64>() else {
+            truncated = true;
+            continue;
+        };
+        if !schema_safe_suite_name(name) || !(0..=MAX_SUITE_VERSION).contains(&version) {
+            truncated = true;
+            continue;
+        }
+        let entry = (name.to_owned(), version);
+        if failures.contains(&entry) {
+            continue;
+        }
+        // Reporting the cut, not just making it: a bounded list read as a
+        // complete one turns "the sweep did not look further" into "there was
+        // nothing further", which is the reading this field exists to prevent.
+        if failures.len() >= MAX_SUITE_ACQUIRE_FAILURES {
+            truncated = true;
+            break;
+        }
+        failures.push(entry);
+    }
+    let failures = failures
+        .into_iter()
+        .map(|(name, version)| json!({ "name": name, "version": version }))
+        .collect();
+    (failures, truncated)
 }
 
 fn load_failure_marker(stderr: &str, exit_code: u32) -> Option<Value> {

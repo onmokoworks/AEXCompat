@@ -315,9 +315,9 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   // when it asked about a layer parameter its project leaves unset (issue
   // #898).
   //
-  // The registration carries the state's own empty world, so a plug-in that
-  // checks pixels out of it gets a well-formed layer with nothing in it rather
-  // than either a fault or a null pointer behind a success code.
+  // The registration carries no world, and `checkout_pixels` answers the
+  // follow-up with a null one - see the paragraph there for why that shape and
+  // not a zeroed world (issues #958, #962).
   if (index >= 1 && index <= runtime.param_count) {
     ++runtime.empty_layer_param_checkouts;
     const std::array<int32_t, 4> empty{0, 0, 0, 0};
@@ -352,15 +352,39 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
   // hands an effect a layer parameter with no source as an empty layer, not as
   // a failed call. Refusing instead ended DeepGlow2's SmartRender (issue #898).
   //
-  // What comes back is the state's own zeroed world, not null: PF_Err_NONE
-  // beside a null out-pointer is not a shape AE produces, and a plug-in that
-  // reads the world after a successful checkout would fault on it.
+  // What comes back is null rather than a world, which is what this host
+  // answered before a zeroed world was substituted for it on the reasoning
+  // that PF_Err_NONE beside a null out-pointer is not a shape AE produces and
+  // a plug-in reading the world after a successful checkout would fault on it.
+  // That reasoning was never measured, and measuring it (issue #958) shows the
+  // answer is not a constant either way. All four shapes, one frame each, at
+  // the same session:
+  //
+  //   PreRender refuses the parameter          DeepGlow2 4   3DGlasses 4
+  //   PreRender empty, pixels refused          DeepGlow2 4   3DGlasses 4
+  //   PreRender empty, pixels null             DeepGlow2 OK  3DGlasses 516
+  //   PreRender empty, pixels zeroed world     DeepGlow2 512 3DGlasses OK
+  //
+  // So one plug-in reads a world that exists and has no pixels as a broken
+  // layer, and the other reads no world at all as a broken one. Null is what
+  // ships because it is the shape the SDK's own samples defend against - they
+  // test the returned pointer before using it - and because the substitution
+  // traded one plug-in for the other without knowing it had: 3DGlasses answers
+  // 516 on the build that rendered DeepGlow2 too, so it is not a regression
+  // from restoring this, and DeepGlow2 is not one from the substitution only
+  // because nothing measured it. Which shape AE actually produces is an oracle
+  // question (Project Direction 4), and until it is answered this is a choice
+  // between two plug-ins rather than a fix (issue #962).
+  //
+  // A well-formed 1x1 transparent world would satisfy both and is deliberately
+  // not what this does: it would hand an effect a layer this host invented,
+  // and a wrong pixel that renders is worse than an error that does not.
   if (checkout->empty_layer_param) {
     if (checkout->checked_out)
       return finish_callback(Callback::CheckoutPixels, 4, Reason::AlreadyCheckedOut);
     ++runtime.empty_layer_param_pixel_checkouts;
     checkout->checked_out = true;
-    *world = runtime.empty_layer_world.data();
+    *world = nullptr;
     return finish_callback(Callback::CheckoutPixels, 0);
   }
   if (!checkout->world)
@@ -594,6 +618,43 @@ bool checkout_intersection_self_test() {
       checked_out == input_world.data() &&
       checkin_pixels(nullptr, 0) == 0 &&
       pixel_checkouts_balanced() && passed;
+
+  // A layer parameter this host has no world for: PreRender answers an empty
+  // rect and SmartRender answers PF_Err_NONE with a null world. Both halves
+  // are pinned here because both are what a plug-in reads, and the pair is
+  // what decides whether a real effect renders - DeepGlow2 reads the null as
+  // "no layer" and renders, and answered PF_Err_INTERNAL_STRUCT_DAMAGED for
+  // the whole frame during the spell when a zeroed world stood here instead
+  // (issues #958, #962). Nothing pinned the shape while it changed.
+  runtime.gpu_render_dispatched = false;
+  runtime.param_count = 9;
+  std::array<std::byte, kCheckoutResultBytes> empty_result{};
+  const uint32_t empty_before = runtime.empty_layer_param_checkouts;
+  const uint32_t empty_pixels_before = runtime.empty_layer_param_pixel_checkouts;
+  passed = pre_checkout_layer(nullptr, 5, 21, nullptr, 7, 1, 30,
+                              empty_result.data()) == 0 &&
+      runtime.empty_layer_param_checkouts == empty_before + 1 && passed;
+  std::array<int32_t, 4> empty_answer{1, 1, 1, 1}, empty_maximum{1, 1, 1, 1};
+  std::memcpy(empty_answer.data(), empty_result.data(), sizeof(empty_answer));
+  std::memcpy(empty_maximum.data(), empty_result.data() + 16,
+              sizeof(empty_maximum));
+  const std::array<int32_t, 4> nothing{0, 0, 0, 0};
+  checked_out = input_world.data();
+  passed = empty_answer == nothing && empty_maximum == nothing &&
+      checkout_pixels(nullptr, 21, &checked_out) == 0 &&
+      checked_out == nullptr &&
+      runtime.empty_layer_param_pixel_checkouts == empty_pixels_before + 1 &&
+      // The checkout is spent like any other, so the balance still has to
+      // close: a null world is an answer, not a skipped call.
+      !pixel_checkouts_balanced() &&
+      checkin_pixels(nullptr, 21) == 0 &&
+      pixel_checkouts_balanced() && passed;
+  // A parameter index past what the plug-in declared is still unknown; the
+  // empty answer is for the range it did declare, not for anything asked.
+  passed = pre_checkout_layer(nullptr, 5, 22, nullptr, 7, 1, 30,
+                              empty_result.data()) == 0 &&
+      pre_checkout_layer(nullptr, 10, 23, nullptr, 7, 1, 30,
+                         empty_result.data()) == 4 && passed;
   return passed;
 }
 

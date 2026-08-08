@@ -2,7 +2,8 @@
 /// `kind == "layer"`) in declaration order. Taken from the raw discovery
 /// parameters: `build_item` never maps a layer into a config item, so the
 /// registered `defaults` cannot contain one.
-fn layer_slots_of(parameters: &[InteractiveParameter]) -> Vec<u32> {
+#[doc(hidden)]
+pub fn layer_slots_of(parameters: &[InteractiveParameter]) -> Vec<u32> {
     parameters
         .iter()
         .filter(|parameter| parameter.kind == "layer")
@@ -616,12 +617,31 @@ enum FrameTrouble<'a> {
     Refused(&'a str),
 }
 
-/// The `PF_Err` name for a code AE defines, so a reader does not have to look
-/// up a bare number. Codes outside the enum - a plug-in's own, or one of the
-/// host's negative internal ones - keep just their number.
-fn pf_error_name(code: i64) -> Option<&'static str> {
+/// The name AE's own headers give a selector's return code, so a reader does not
+/// have to look up a bare number. Codes outside both enumerations - a plug-in's
+/// own, or one of the host's negative internal ones - keep just their number.
+///
+/// The 512 block is `PF_Err`, not an effect's private codes: `AE_Effect.h`
+/// defines `PF_FIRST_ERR` as 512 and numbers `PF_Err_INTERNAL_STRUCT_DAMAGED`
+/// onward from it by ordinal. Issue #704 recorded the opposite - "the SDK's
+/// PF_Err / A_Err enumerations do not have this value", with a hypothesis that
+/// Adobe's own effects define private codes based at 512 - because `A_Err`,
+/// which stops at 13, was the enumeration consulted. Its 41 plug-ins answering
+/// 512 are answering `PF_Err_INTERNAL_STRUCT_DAMAGED`.
+///
+/// Below 512 only what a *selector* can return is named. `PF_Err` defines
+/// exactly `NONE` (0), `OUT_OF_MEMORY` (4) and the 512 block, so a small code
+/// is otherwise the plug-in's own and keeps just its number. The one exception
+/// is 13: `A_Err_MISSING_SUITE` reaches a selector's return through the SDK's
+/// own suite-acquire helper, and #704 recorded four AE effects answering it.
+/// The rest of `A_Err` (1..=6, 22..=24) is what an AEGP suite call answers, not
+/// a selector, and naming those here would label a plug-in's own code 2 as
+/// `A_Err_STRUCT` and send a reader after a host failure that never happened.
+#[doc(hidden)]
+pub fn pf_error_name(code: i64) -> Option<&'static str> {
     Some(match code {
         4 => "PF_Err_OUT_OF_MEMORY",
+        13 => "A_Err_MISSING_SUITE",
         512 => "PF_Err_INTERNAL_STRUCT_DAMAGED",
         513 => "PF_Err_INVALID_INDEX",
         514 => "PF_Err_UNRECOGNIZED_PARAM_TYPE",

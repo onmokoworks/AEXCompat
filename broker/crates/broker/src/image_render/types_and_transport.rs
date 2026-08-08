@@ -73,7 +73,7 @@ pub(crate) fn runtime_backend(backend: RenderGpuBackend) -> Option<RuntimeBacken
 }
 
 impl RenderPixelFormat {
-    pub(crate) fn report_name(self) -> &'static str {
+    pub fn report_name(self) -> &'static str {
         match self {
             Self::Argb8 => "argb8",
             Self::Argb16 => "argb16",

@@ -3086,16 +3086,25 @@ int32_t __cdecl aegp_get_new_stream_value_v2(
   // comparison above this line dereferenced null for exactly the handles the
   // check exists to reject, turning a diagnostic into a crash.
   if (!value || !legacy_effect_stream_parent_live(*value)) return 4;
-  // The id has to name the caller the stream was opened for, read through the
-  // same substitution the open used: an unregistered plug-in passes 0 and its
-  // streams were borrowed under the host's id, so 0 answers for that one and
-  // for nothing else. A negative id stays malformed, as at every other entry
-  // point here (issue #909).
-  const bool owner_matches =
-      plugin_id >= 0 &&
-      (plugin_id == 0 ? kHostPossessionId : plugin_id) == value->owner_plugin_id;
-  if (!owner_matches || value->value_live || !time || time->scale == 0 ||
-      !output)
+  // Who may read a stream: the id that opened it, or 0. A negative id is
+  // malformed, as at every other entry point here, and a different positive id
+  // is a caller naming itself as someone else - the case
+  // `verify_aegp_effect_stack` pins by opening under 7 and requiring 8 to be
+  // refused.
+  //
+  // 0 is admitted because it is not a claim to be anyone: an unregistered
+  // plug-in has no id of its own, and the open already substituted the host's
+  // for it. DeepGlow2 opens its matte stream under one id and reads it under
+  // 0, so requiring equality refused the read and ended the frame the stream
+  // was opened to answer (issue #958). #909 removed the equality outright for
+  // that reason and a later round restored it whole for symmetry with the
+  // write side; neither is right, because the write side has an owner to
+  // protect and this side has a caller with no id to give. Writes keep the
+  // exact match.
+  const bool caller_may_read =
+      plugin_id == 0 || plugin_id == value->owner_plugin_id;
+  if (plugin_id < 0 || !caller_may_read || value->value_live || !time ||
+      time->scale == 0 || !output)
     return 4;
   const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
   const auto* parameter = find_effect_parameter(instance, value->param_index);
@@ -3160,10 +3169,14 @@ int32_t __cdecl aegp_set_stream_value_v2(
     int32_t plugin_id, void* stream, AegpStreamValue* input) {
   aexcompat::scene_transaction::MutationLock mutation_lock;
   auto* value = legacy_effect_stream(stream);
-  // The same substitution the read side uses, and for the same reason: an
-  // unregistered caller's streams are recorded under the host's id, so
-  // comparing its 0 against that raw would have let it read a stream it may
-  // not write. This is still an exact match against what the open recorded.
+  // A write names its caller. 0 is admitted on the read side because it is not
+  // a claim to be anyone, and that is exactly why it is not enough here: the
+  // read hands out a value, the write changes one, and a change has to be
+  // attributable to the id that owns the stream. So 0 is substituted with the
+  // host's id and matched exactly against what the open recorded - which
+  // means a caller whose open recorded some other id can read its own stream
+  // under 0 and not write to it under 0. Nothing observed needs that write;
+  // when something does, it will need an owner, not a wider rule.
   if (!value || !legacy_effect_stream_parent_live(*value) || plugin_id < 0 ||
       (plugin_id == 0 ? kHostPossessionId : plugin_id) != value->owner_plugin_id ||
       !value->value_live || !input ||
