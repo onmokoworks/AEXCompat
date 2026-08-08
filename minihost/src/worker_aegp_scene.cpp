@@ -2488,6 +2488,7 @@ int32_t __cdecl aegp_dispose_stream(void* stream) {
 std::array<void*, 14> g_aegp_project_suite6{};
 std::array<void*, 41> g_aegp_comp_suite10{};
 std::array<void*, 28> g_aegp_comp_suite4{};
+std::array<void*, 17> g_aegp_comp_suite1{};
 std::array<void*, 44> g_aegp_comp_suite11{};
 std::array<void*, 44> g_aegp_comp_suite12{};
 // `AEGP_LayerSuite1` (acquired as version 5, frozen in AE 5.0) is the oldest
@@ -2516,6 +2517,7 @@ std::array<void*, 22> g_aegp_keyframe_suite5{};
 static_assert(sizeof(g_aegp_project_suite6) == 14 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite10) == 41 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite4) == 28 * sizeof(void*));
+static_assert(sizeof(g_aegp_comp_suite1) == 17 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite11) == 352);
 static_assert(sizeof(g_aegp_comp_suite12) == 352);
 static_assert(sizeof(g_aegp_layer_suite5) == 368);
@@ -2617,6 +2619,19 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_comp_suite4[0] = reinterpret_cast<void*>(&aegp_get_comp_from_item);
     g_aegp_comp_suite4[1] = reinterpret_cast<void*>(&aegp_get_item_from_comp);
     *suite = g_aegp_comp_suite4.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
+  // Acquisition version 4 is the public, frozen AE 5.0 `AEGP_CompSuite1`
+  // shape. Only callbacks with signatures matching that legacy declaration
+  // are wired; every other slot remains an exact diagnostic stub.
+  if (named("AEGP Comp Suite") && version == 4) {
+    g_aegp_comp_suite1 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_comp_4, 17>();
+    g_aegp_comp_suite1[0] = reinterpret_cast<void*>(&aegp_get_comp_from_item);
+    g_aegp_comp_suite1[1] = reinterpret_cast<void*>(&aegp_get_item_from_comp);
+    g_aegp_comp_suite1[3] = factory.comp_bg_color;
+    g_aegp_comp_suite1[5] = reinterpret_cast<void*>(&aegp_get_comp_framerate);
+    *suite = g_aegp_comp_suite1.data();
     return SceneSuiteAcquireResult::acquired;
   }
 

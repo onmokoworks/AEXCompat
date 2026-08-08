@@ -174,6 +174,7 @@ extern AegpCollectionSuite g_aegp_collection_suite;
 extern std::array<void*, 14> g_aegp_project_suite6;
 extern std::array<void*, 41> g_aegp_comp_suite10;
 extern std::array<void*, 28> g_aegp_comp_suite4;
+extern std::array<void*, 17> g_aegp_comp_suite1;
 extern std::array<void*, 44> g_aegp_comp_suite11;
 extern std::array<void*, 44> g_aegp_comp_suite12;
 extern std::array<void*, 46> g_aegp_layer_suite5;

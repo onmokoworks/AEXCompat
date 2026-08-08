@@ -1054,6 +1054,7 @@ bool verify_aegp_resizer_3d_chain() {
   const void* layer_suite = nullptr;
   const void* stream_suite = nullptr;
   const void* comp_suite = nullptr;
+  const void* comp_suite1 = nullptr;
   const void* item_suite = nullptr;
   const int32_t saved_camera_index = g_aegp_active_camera_layer_index;
   int32_t saved_width = 0, saved_height = 0;
@@ -1080,6 +1081,12 @@ bool verify_aegp_resizer_3d_chain() {
       acquire_suite("AEGP Comp Suite", 9, &comp_suite) == 0 &&
       comp_suite == g_aegp_comp_suite4.data() &&
       g_aegp_comp_suite4[1] == reinterpret_cast<void*>(&aegp_get_item_from_comp) &&
+      acquire_suite("AEGP Comp Suite", 4, &comp_suite1) == 0 &&
+      comp_suite1 == g_aegp_comp_suite1.data() &&
+      g_aegp_comp_suite1[0] == reinterpret_cast<void*>(&aegp_get_comp_from_item) &&
+      g_aegp_comp_suite1[1] == reinterpret_cast<void*>(&aegp_get_item_from_comp) &&
+      g_aegp_comp_suite1[3] != nullptr &&
+      g_aegp_comp_suite1[5] == reinterpret_cast<void*>(&aegp_get_comp_framerate) &&
       acquire_suite("AEGP Item Suite", 10, &item_suite) == 0 &&
       item_suite == &g_aegp_legacy_item_suite6 &&
       reinterpret_cast<void**>(&g_aegp_legacy_item_suite6)[16] ==
@@ -1238,7 +1245,15 @@ bool verify_aegp_resizer_3d_chain() {
       aegp_get_item_dimensions(g_hooks.pf_layer, &width, &height) != 0 &&
       width == -2 && height == -3;
 
+  const auto& comp_suite1_stubs =
+      aexcompat::worker_runtime::unsupported_suite_slots<
+          aexcompat::worker_runtime::UnsupportedSuiteId::aegp_comp_4, 17>();
+  for (std::size_t slot = 0; slot < comp_suite1_stubs.size(); ++slot) {
+    if (slot != 0 && slot != 1 && slot != 3 && slot != 5)
+      ok = ok && g_aegp_comp_suite1[slot] == comp_suite1_stubs[slot];
+  }
   ok = release_suite("AEGP Item Suite", 10) == 0 && ok;
+  ok = release_suite("AEGP Comp Suite", 4) == 0 && ok;
   ok = release_suite("AEGP Comp Suite", 9) == 0 && ok;
   ok = release_suite("AEGP Stream Suite", 7) == 0 && ok;
   ok = release_suite("AEGP Layer Suite", 14) == 0 && ok;
