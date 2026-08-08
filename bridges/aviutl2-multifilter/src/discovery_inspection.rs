@@ -681,9 +681,9 @@ pub fn discover_records_for_diagnostics(
             parameters: entry.params,
             search_roots: entry.closure.roots.iter().map(PathBuf::from).collect(),
             failure_classification: entry.failure_classification,
-            cluster_fallback: entry.cluster_fallback.map(|fallback| {
-                format!("{}/{}", fallback.reason, fallback.resolution)
-            }),
+            cluster_fallback: entry
+                .cluster_fallback
+                .map(|fallback| format!("{}/{}", fallback.reason, fallback.resolution)),
         })
         .collect()
 }

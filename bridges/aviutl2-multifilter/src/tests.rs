@@ -4036,7 +4036,10 @@ mod tests {
 
         // Directly in the scan folder, and under no scan folder at all: both
         // fall back to the file name rather than to an empty or absolute one.
-        assert_eq!(plugin_name(&root.join("Glow.aex"), &[root.clone()]).relative, "Glow.aex");
+        assert_eq!(
+            plugin_name(&root.join("Glow.aex"), &[root.clone()]).relative,
+            "Glow.aex"
+        );
         let foreign = plugin_name(Path::new(r"D:\Elsewhere\Glow.aex"), &[root]);
         assert_eq!(foreign.relative, "Glow.aex");
         assert_eq!(foreign.basename, "Glow.aex");

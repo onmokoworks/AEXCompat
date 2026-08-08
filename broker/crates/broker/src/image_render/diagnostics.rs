@@ -730,7 +730,6 @@ fn worker_diagnostics(
 /// must not be able to grow the diagnostic without bound.
 const MAX_SUITE_ACQUIRE_FAILURES: usize = 32;
 
-
 /// The suites the worker refused, from its `stage:suite_acquire_failed` lines,
 /// and whether the list was cut short. Deduplicated on (name, version): a
 /// plug-in that retries the same acquire every frame would otherwise fill the
