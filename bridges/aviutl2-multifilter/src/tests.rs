@@ -516,7 +516,10 @@ mod tests {
 
         // The same bytes re-verified by a newer host: same meta, new build.
         let updated = HashMap::from([(key.clone(), discovered(5, 64, build(2)))]);
-        assert!(save_cache_at(&path, &updated), "the update save reaches disk");
+        assert!(
+            save_cache_at(&path, &updated),
+            "the update save reaches disk"
+        );
 
         let reloaded = load_cache_at(&path);
         assert_eq!(
@@ -2515,9 +2518,14 @@ mod tests {
     /// no usable name and fails closed.
     #[test]
     fn pipl_category_unwraps_adobe_zstrings() {
-        let zstring =
-            pipl_blob(&[(b"gtac", b"\x3E$$$/MediaCore/FiltersAndEffects/Category/Simulation=Simulation")]);
-        assert_eq!(pipl_category_of_blob(&zstring).as_deref(), Some("Simulation"));
+        let zstring = pipl_blob(&[(
+            b"gtac",
+            b"\x3E$$$/MediaCore/FiltersAndEffects/Category/Simulation=Simulation",
+        )]);
+        assert_eq!(
+            pipl_category_of_blob(&zstring).as_deref(),
+            Some("Simulation")
+        );
         let nameless = pipl_blob(&[(b"gtac", b"\x08$$$/Abcd")]);
         assert_eq!(pipl_category_of_blob(&nameless), None);
     }
@@ -2576,7 +2584,8 @@ mod tests {
         // root dir (24) → "PiPL" string (12) → id dir (24) → lang dir (24)
         // → leaf (16) → blob.
         let mut rsrc = Vec::new();
-        let (root, name_str, id_dir, lang_dir, leaf, data) = (0u32, 24u32, 36u32, 60u32, 84u32, 100u32);
+        let (root, name_str, id_dir, lang_dir, leaf, data) =
+            (0u32, 24u32, 36u32, 60u32, 84u32, 100u32);
         let mut dir = |entries: &[(u32, u32)], named: u16| {
             let mut out = vec![0u8; 12];
             out.extend(named.to_le_bytes());
@@ -2790,19 +2799,41 @@ mod tests {
         /// is selected through the inherited process environment.
         static BEHAVIOR_LOCK: Mutex<()> = Mutex::new(());
 
+        /// Locates the session-protocol fixture, building it only when the
+        /// broker workspace has not produced it yet.
+        ///
+        /// Shelling out unconditionally was expensive twice over (#940): the
+        /// nested build ran once per test that needed a fixture, and its
+        /// `-p dummy-workers` selection resolves features differently from the
+        /// `--workspace` build that owns the same `broker/target/debug`, so the
+        /// two kept invalidating each other's fingerprints. Prefer whatever is
+        /// already there; the build stays as a fallback so a bare `cargo test`
+        /// against this bridge alone still works.
         fn build_session_fixture() -> PathBuf {
+            static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../broker/Cargo.toml");
-            let status = std::process::Command::new(env!("CARGO"))
-                .args(["build", "--manifest-path"])
-                .arg(&manifest)
-                .args(["-p", "dummy-workers", "--bin", "session_protocol_worker"])
-                .status()
-                .expect("run cargo build for the session protocol fixture");
-            assert!(status.success(), "session protocol fixture build failed");
-            manifest
+            let fixture = manifest
                 .parent()
                 .expect("workspace root")
-                .join("target/debug/session_protocol_worker.exe")
+                .join("target/debug/session_protocol_worker.exe");
+            if fixture.is_file() {
+                return fixture;
+            }
+            BUILT.get_or_init(|| {
+                let status = std::process::Command::new(env!("CARGO"))
+                    .args(["build", "--manifest-path"])
+                    .arg(&manifest)
+                    .args(["-p", "dummy-workers", "--bin", "session_protocol_worker"])
+                    .status()
+                    .expect("run cargo build for the session protocol fixture");
+                assert!(status.success(), "session protocol fixture build failed");
+            });
+            assert!(
+                fixture.is_file(),
+                "session protocol fixture was not produced: {}",
+                fixture.display()
+            );
+            fixture
         }
 
         /// A temp repository whose `target/minihost-build/aex_render_worker.exe`
@@ -2947,40 +2978,39 @@ mod tests {
                 std::env::set_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR", "crash_on_inspect");
                 std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
             }
-                let (root, one, two) = cluster_repository();
-                let results =
-                    discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
-                unsafe {
-                    std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
-                    std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
-                }
-                assert_eq!(results.len(), 2, "every plug-in gets a result");
-                let first = results
-                    .iter()
-                    .find(|(path, _)| path == &one)
-                    .map(|(_, entry)| entry)
-                    .expect("the first member has an entry");
-                let second = results
-                    .iter()
-                    .find(|(path, _)| path == &two)
-                    .map(|(_, entry)| entry)
-                    .expect("the second member has an entry");
-                // The member the session died on is a structured failure...
-                assert_eq!(
-                    first.failure_classification.as_deref(),
-                    Some("cluster_session_invalidated"),
-                    "in-place session failure"
-                );
-                let fallback = first.cluster_fallback.as_ref().expect("fallback note");
-                assert_eq!(fallback.at_member, 0);
-                assert_eq!(fallback.resolution, "invalidated");
-                assert!(!first.ok, "a dead session is never rounded to success");
-                // ...and the remaining member was re-inspected per-plugin,
-                // which fails here (no L2 worker by design) but carries the
-                // note.
-                let fallback = second.cluster_fallback.as_ref().expect("fallback note");
-                assert_eq!(fallback.at_member, 0);
-                assert_eq!(fallback.resolution, "one_shot_fallback");
+            let (root, one, two) = cluster_repository();
+            let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+                std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
+            }
+            assert_eq!(results.len(), 2, "every plug-in gets a result");
+            let first = results
+                .iter()
+                .find(|(path, _)| path == &one)
+                .map(|(_, entry)| entry)
+                .expect("the first member has an entry");
+            let second = results
+                .iter()
+                .find(|(path, _)| path == &two)
+                .map(|(_, entry)| entry)
+                .expect("the second member has an entry");
+            // The member the session died on is a structured failure...
+            assert_eq!(
+                first.failure_classification.as_deref(),
+                Some("cluster_session_invalidated"),
+                "in-place session failure"
+            );
+            let fallback = first.cluster_fallback.as_ref().expect("fallback note");
+            assert_eq!(fallback.at_member, 0);
+            assert_eq!(fallback.resolution, "invalidated");
+            assert!(!first.ok, "a dead session is never rounded to success");
+            // ...and the remaining member was re-inspected per-plugin,
+            // which fails here (no L2 worker by design) but carries the
+            // note.
+            let fallback = second.cluster_fallback.as_ref().expect("fallback note");
+            assert_eq!(fallback.at_member, 0);
+            assert_eq!(fallback.resolution, "one_shot_fallback");
             std::fs::remove_dir_all(&root).unwrap();
         }
 
@@ -3733,11 +3763,13 @@ mod tests {
             "an interrupted pass has to admit it"
         );
         assert!(
-            !discovery_summary(12, 3, false, DiscoveryPassKind::Background).contains("stopped early"),
+            !discovery_summary(12, 3, false, DiscoveryPassKind::Background)
+                .contains("stopped early"),
             "a complete pass must not claim it"
         );
         assert!(
-            discovery_summary(0, 576, true, DiscoveryPassKind::Background).contains("stopped early"),
+            discovery_summary(0, 576, true, DiscoveryPassKind::Background)
+                .contains("stopped early"),
             "the all-rejected wording carries it too"
         );
     }
@@ -3770,7 +3802,8 @@ mod tests {
         for (effects, rejected) in [(0usize, 576usize), (570, 6), (0, 0), (12, 0)] {
             assert_eq!(
                 discovery_is_alarming(effects, rejected),
-                discovery_summary(effects, rejected, false, DiscoveryPassKind::Background).contains("worker is likely failing"),
+                discovery_summary(effects, rejected, false, DiscoveryPassKind::Background)
+                    .contains("worker is likely failing"),
                 "({effects}, {rejected})"
             );
         }
@@ -3801,7 +3834,10 @@ mod tests {
         // that wording belongs to the background pass alone.
         let sync_cut = discovery_summary(12, 3, true, DiscoveryPassKind::FirstLaunch);
         assert!(sync_cut.contains("stopped early"), "{sync_cut}");
-        assert!(sync_cut.contains("continues in the background"), "{sync_cut}");
+        assert!(
+            sync_cut.contains("continues in the background"),
+            "{sync_cut}"
+        );
         assert!(!sync_cut.contains("next launch"), "{sync_cut}");
         assert!(
             discovery_summary(12, 3, true, DiscoveryPassKind::Background)
@@ -4190,7 +4226,10 @@ mod tests {
             toml::Value::Array(vec!["C:\\plugins".into(), "D:\\more".into()]),
             "{text}"
         );
-        assert_eq!(reloaded["dependency_module_limit"], toml::Value::Integer(40));
+        assert_eq!(
+            reloaded["dependency_module_limit"],
+            toml::Value::Integer(40)
+        );
     }
 
     /// Clearing a field removes its key: an absent key already means "use the
@@ -4368,12 +4407,15 @@ mod tests {
     #[test]
     fn the_dialog_template_is_well_formed() {
         let template = build_dialog_template();
-        let words: &[u16] = unsafe {
-            std::slice::from_raw_parts(template.as_ptr().cast(), template.len() * 2)
-        };
+        let words: &[u16] =
+            unsafe { std::slice::from_raw_parts(template.as_ptr().cast(), template.len() * 2) };
         // Header: style, exstyle, then the item count at u16 index 4.
         let style = (words[0] as u32) | ((words[1] as u32) << 16);
-        assert_ne!(style & DS_SETFONT, 0, "the font block below is only read with DS_SETFONT");
+        assert_ne!(
+            style & DS_SETFONT,
+            0,
+            "the font block below is only read with DS_SETFONT"
+        );
         let declared = words[4] as usize;
         // Count the DLGITEMTEMPLATE headers by walking the stream: after the
         // header (menu=0, class=0, title, pointsize, face), each item starts
