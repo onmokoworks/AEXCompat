@@ -48,12 +48,16 @@ def test_sdk_frozen_utility_suite_hwnd_slots_compile() -> None:
 
 static_assert(kAEGPUtilitySuiteVersion6 == 13);
 static_assert(kAEGPUtilitySuiteVersion3 == 7);
+static_assert(kAEGPUtilitySuiteVersion2 == 5);
 static_assert(sizeof(AEGP_UtilitySuite6) == 33 * sizeof(void*));
 static_assert(offsetof(AEGP_UtilitySuite6, AEGP_RegisterWithAEGP) == 9 * sizeof(void*));
 static_assert(offsetof(AEGP_UtilitySuite6, AEGP_GetMainHWND) == 10 * sizeof(void*));
 static_assert(sizeof(AEGP_UtilitySuite3) == 25 * sizeof(void*));
 static_assert(offsetof(AEGP_UtilitySuite3, AEGP_RegisterWithAEGP) == 7 * sizeof(void*));
 static_assert(offsetof(AEGP_UtilitySuite3, AEGP_GetMainHWND) == 8 * sizeof(void*));
+static_assert(sizeof(AEGP_UtilitySuite2) == 19 * sizeof(void*));
+static_assert(offsetof(AEGP_UtilitySuite2, AEGP_RegisterWithAEGP) == 7 * sizeof(void*));
+static_assert(offsetof(AEGP_UtilitySuite2, AEGP_GetMainHWND) == 8 * sizeof(void*));
 int main() { return 0; }
 '''
     with tempfile.TemporaryDirectory() as directory:
@@ -83,6 +87,7 @@ def test_suite_entry_guards_and_utility13_native_contract(canonical_release_work
     assert json.loads(result.stdout) == {
         "suite_entry_utility13": "passed",
         "utility_v7_acquired": True,
+        "utility_v5_acquired": True,
         "unsupported_slots_diagnosed": True,
         "normal_effect_available": True,
         "versions_12_14_rejected": True,

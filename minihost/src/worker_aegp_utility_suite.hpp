@@ -35,6 +35,18 @@ struct UtilitySuite3 {
 static_assert(sizeof(UtilitySuite3) == 25 * sizeof(void*));
 static_assert(offsetof(UtilitySuite3, register_with_aegp) == 7 * sizeof(void*));
 static_assert(offsetof(UtilitySuite3, get_main_hwnd) == 8 * sizeof(void*));
+struct UtilitySuite2 {
+  // AEGP_UtilitySuite2 (acquisition version 5, frozen in AE 6.0) publishes
+  // 19 slots. Its two host callbacks retain the Suite1 positions; the ten
+  // added palette/floater functions remain fail-closed and diagnostic.
+  void* unsupported[7]{};
+  decltype(&register_with_aegp) register_with_aegp;
+  decltype(&get_main_hwnd) get_main_hwnd;
+  void* unsupported_tail[10]{};
+};
+static_assert(sizeof(UtilitySuite2) == 19 * sizeof(void*));
+static_assert(offsetof(UtilitySuite2, register_with_aegp) == 7 * sizeof(void*));
+static_assert(offsetof(UtilitySuite2, get_main_hwnd) == 8 * sizeof(void*));
 struct UtilitySuite1 {
   // AEGP_UtilitySuite1 (acquisition version 3, frozen in AE 5.0) publishes 9
   // slots with RegisterWithAEGP at slot 7 and GetMainHWND at slot 8 (issue
@@ -61,12 +73,14 @@ static_assert(offsetof(UtilitySuite5, get_main_hwnd) == 9 * sizeof(void*));
 
 extern UtilitySuite g_utility_suite;
 extern UtilitySuite3 g_utility_suite3;
+extern UtilitySuite2 g_utility_suite2;
 extern UtilitySuite1 g_utility_suite1;
 extern UtilitySuite5 g_utility_suite5;
 
 struct UtilitySuiteSelftestResult {
   bool passed{};
   bool utility_v7_acquired{};
+  bool utility_v5_acquired{};
   bool unsupported_slots_diagnosed{};
 };
 
