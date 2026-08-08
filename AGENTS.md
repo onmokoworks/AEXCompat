@@ -46,12 +46,19 @@
 ## 4. Review / CI / merge gate
 
 1. レビューはPRを開く前にローカルで完結させる。作業diffにローカルのエージェントレビューをかけ、指摘に対応し、修正後のdiffへ再度かける。指摘は妥当性を自分で判断し、盲従しない。**受理した未対応の指摘がゼロ**になるまでこのループを抜けず、PRはループを抜けてから開く。却下した指摘は理由とともにPR本文へ書く。ローカルループはPRに痕跡を残さないので、これが無いとownerがレビューの有無を検証できない。
-2. PRにbotレビューを要求しない。`@codex review` コメント、レビューループskill、そしてbotのverdictをmerge条件にするmerge guardは廃止済みで復活させない。廃止したのはbot verdictのゲートであって、guardが併せ持っていたhead拘束 (下のmerge手順) とownerの再確認 (次項) は規律として残る。PR側のゲートはCIとownerレビューだけである。
-3. PRの全review threadを取得し、`isResolved` とoutdatedを確認する。未解決のowner指摘が一つでもあればCIがgreenでもmergeしない。解決とは「返信した上でthreadをresolveした」ことを指す。返信threadを持たないownerコメント (top-levelコメント、本文付きCOMMENTEDレビュー) は、新規のtop-levelコメントで明示的にackして解決する。**後続のpushも後続のCI greenもowner指摘を解決しない**。着手前から存在する未対応のownerコメントも同様にmergeをblockする。merge直前にownerの新しいコメントが無いか再確認する。
-4. 前項のownerゲートを満たした上で、GitHub Actionsがlatest headでgreenになるまでmergeしない。古いheadのgreenを新headのgreenとみなさない。mergeは `gh pr merge <PR> --merge --delete-branch --match-head-commit <greenになったSHA>` で行い、確認からmerge呼び出しの間に入ったpushでmergeが失敗するようにする。課金制限、usage limit、runner不調などの外部障害はコードの成功と混同せず、明示的にblockedとして報告する。
-5. CI失敗を修正する場合は、まずログとannotationで根因を確認し、承認された小さな修正だけを行う。
-6. 新規・更新テストが製品ソースを読み、特定の識別子・コメント・式のsubstringだけをassertしている場合は、behavioral evidenceとして受理しない。凍結evidence・schema・workflow自体のcontract検査を例外とする場合はPR本文で理由を明示する。self-testが固定のsuccess JSONを返し、外側がそれを照合するだけでは不十分で、具体的な出力・状態遷移・失敗条件または代表的mutationを検出できることを確認する。
-7. merge後に次のIssueへ進む。merge前の別Issue着手は禁止。
+2. **PR headに載る変更は、すべて第1項のループを通っていなければならない**。ループはPRを開いた時点で終わらない。merge時点で未レビューの変更がheadに残っていてはならず、CI失敗の修正もowner指摘への対応も追加実装も同じ扱いである。
+   - **レビュー済みの境界を記録する**。ループを抜けたらレビュー済みの状態をcommitし、そのHEAD SHAをPR本文 (却下指摘と同じ場所) に記録する。抜けるたびに更新する。初回のループはPRより前に回るので、その分はPRを開くときに本文へ書く。文脈に置くだけではセッションを跨いだ時点で未レビュー分を計算できなくなり、ownerも境界をheadと突き合わせて検証できない。
+   - **レビュー対象は未レビューの変更全体**とし、commit単位で見ない。`git diff <記録したSHA>` (working tree込み) を対象にする。後のcommitが前の修正を巻き戻す類の相互作用は、commitを個別に見ても現れない。
+   - **自分がheadを動かす操作 (push、force-push) の前に**、未レビュー分を通す。
+   - **base branchの取り込みは二段で扱う**。操作の前に既存の未レビュー分を通し、操作で新たに生じたconflict解決の結果を操作の直後にもう一度通す。解決結果は操作するまで存在せず、事前レビューでは捕まえられない。取り込みで継承したbase branch側の既merge済みの内容はレビュー対象ではなく、二度目のパスはconflict解決の結果だけを見る。パスを抜けたら取り込み後のHEAD SHA (mergeならmerge commit) を記録し直す。更新しないと継承分が以後のdiffに残り続ける。
+   - **conflict解決の読み方**。取り込みはrebaseよりmergeを優先する。merge commitのcombined diff (`git show <merge commit>`) はどちらの親にも無い行を `++` で出すので、自分が書き足した解決を分離できる (`--stat` を付けると分離が効かず継承分まで並ぶ)。ただし片側を無修正で採用した解決 (`--theirs` 等) は `--cc` がhunkごと省略するため何も表示されない。捨てた側まで見るには `git show --remerge-diff <merge commit>` を併せて使う。rebaseを使った場合、`git diff <記録したSHA>` にbase branchから継承した既merge済みの内容が混ざって分離できないので、conflictしたpathを控えて個別に読む。
+   - **head側が先に動いた場合** (GitHub UI上のsuggestion適用など) は、`git pull --ff-only origin <branch>` で手元のbranchへ取り込んでから、気づいた直後に通す。`git fetch` はremote-tracking refを更新するだけでworking treeに入らず、`git diff <記録したSHA>` に現れない。fast-forwardできずabortしたら手元に未pushのcommitがあるので、`git merge origin/<branch>` で取り込み、base branchの取り込みと同じ二段で扱う。abortに気づかずdiffを見ると、取り込めていない変更を「未レビュー分なし」と誤読する。通すまでmergeへ進まない。
+3. PRにbotレビューを要求しない。`@codex review` コメント、レビューループskill、そしてbotのverdictをmerge条件にするmerge guardは廃止済みで復活させない。廃止したのはbot verdictのゲートであって、guardが併せ持っていたhead拘束 (第5項) とownerの再確認 (第4項) は規律として残る。PR上でbotの判定を待つゲートは無く、PR側のゲートはCIとownerレビューだけである (第2項のローカルループはPR側のゲートではないが、免除されるわけでもない)。
+4. PRの全review threadを取得し、`isResolved` とoutdatedを確認する。未解決のowner指摘が一つでもあればCIがgreenでもmergeしない。解決とは「返信した上でthreadをresolveした」ことを指す。返信threadを持たないownerコメント (top-levelコメント、本文付きCOMMENTEDレビュー) は、新規のtop-levelコメントで明示的にackして解決する。**後続のpushも後続のCI greenもowner指摘を解決しない**。着手前から存在する未対応のownerコメントも同様にmergeをblockする。merge直前にownerの新しいコメントが無いか再確認する。
+5. 第4項のownerゲートを満たした上で、GitHub Actionsがlatest headでgreenになるまでmergeしない。古いheadのgreenを新headのgreenとみなさない。mergeは `gh pr merge <PR> --merge --delete-branch --match-head-commit <greenになったSHA>` で行い、確認からmerge呼び出しの間に入ったpushでmergeが失敗するようにする。失敗したらheadが動いているので、第2項へ戻る。課金制限、usage limit、runner不調などの外部障害はコードの成功と混同せず、明示的にblockedとして報告する。
+6. CI失敗を修正する場合は、まずログとannotationで根因を確認し、claimコメントで宣言したscopeに収まる小さな修正だけを行う。修正も第2項の対象で、pushする前にローカルループを通す。
+7. 新規・更新テストが製品ソースを読み、特定の識別子・コメント・式のsubstringだけをassertしている場合は、behavioral evidenceとして受理しない。凍結evidence・schema・workflow自体のcontract検査を例外とする場合はPR本文で理由を明示する。self-testが固定のsuccess JSONを返し、外側がそれを照合するだけでは不十分で、具体的な出力・状態遷移・失敗条件または代表的mutationを検出できることを確認する。
+8. merge後に次のIssueへ進む。merge前の別Issue着手は禁止。
 
 ## 5. 定期的な棚卸し
 
