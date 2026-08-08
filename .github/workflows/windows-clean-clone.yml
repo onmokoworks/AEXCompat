@@ -23,10 +23,8 @@ jobs:
     timeout-minutes: 120
     env:
       PYTHONUTF8: "1"
-      # built_artifact テストが動かす broker/harness を debug から取る (#945)。
-      # `cargo build --workspace` が既に両方を生成しているので、release で
-      # もう一度 aexcompat-broker / host-core / harness を作る必要がない。
-      # 既定は release のままで、tools/ の手動ゲートは影響を受けない。
+      # built_artifact テストの broker/harness を、下の `cargo build --workspace`
+      # が作る debug から取る。release に戻すと同じクレートを二度作る (#945)。
       AEXCOMPAT_CARGO_PROFILE: debug
       # mtime 復元 (#935) が拾えなかった、実際に変更されたクレートを sccache が
       # 内容ハッシュで吸収する (#664)。
@@ -101,21 +99,17 @@ jobs:
           }
           "AFTER_EFFECTS_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # `cargo check` は後続の build/test と型検査が丸ごと重なる: check が出す
-      # rmeta は codegen に使い回されないので、同じコードを二度検査していた
-      # だけだった (#940)。代わりに fixture の build をここまで前倒しして、
-      # コンパイルエラーが SDK 取得や probe ビルドより前に出る位置を保つ。
-      #
-      # dummy-workers の fixture をテスト実行と同じ feature 解決でビルドして
-      # おくことで、テスト側が `cargo build -p ...` を起動して外側のビルドと
-      # fingerprint を奪い合わずに済む (#937)。
+      # ここを `cargo check` に戻さない: rmeta は codegen に使い回されず、後続の
+      # build/test と同じコードを二度検査するだけになる (#940)。テスト実行と同じ
+      # feature 解決で fixture を作るので、テスト側が `cargo build -p ...` を
+      # 起動して fingerprint を奪い合わない (#937)。SDK 取得・probe ビルドより
+      # 前に置くのはコンパイルエラーを先に出すため。
       - name: Build the workspace fixtures
         working-directory: broker
         run: cargo build --workspace --locked
 
-      # broker の外にある Cargo ルートは長らく型検査されるだけで、テストが
-      # 1 本も実行されていなかった (#899)。guest workspace は libclang を
-      # 必要とし runner に無いため #917 に分離した。
+      # broker 外の Cargo ルートもテストを実行する (#899)。guest workspace は
+      # runner に無い libclang が要るので #917 へ分離してある。
       - name: Test AviUtl2 multifilter bridge
         run: cargo test --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
       - name: Test YMM4 native bridge
@@ -152,9 +146,8 @@ jobs:
           cmake --build target\instruments-build --target trace_writer_selftest || exit /b 1
           dir /b target\instruments-build\trace_writer_selftest.exe
 
-      # 一部の built_artifact テストは worker を multi-config 時代の固定パス
-      # から探すため、同一バイナリを複製して満たす。これらのテストは frozen hash を
-      # 照合しないので複製で問題ない。
+      # 一部の built_artifact テストは worker を multi-config 時代の固定パスから
+      # 探す。frozen hash を照合しないので同一バイナリの複製で満たせる。
       - name: Mirror workers into expected build layouts
         shell: cmd
         run: |
@@ -172,20 +165,17 @@ jobs:
           uv run python tools\generate-oracle-rgba-input.py --width 37 --height 23 --alpha-mode opaque --out target\gpu-effects\opencl-input.png || exit /b 1
           uv run python tools\png-to-rgba-raw.py --png target\gpu-effects\opencl-input.png --out target\gpu-effects\opencl-input.rgba || exit /b 1
 
-      # 各 probe は自分だけの source (instruments\pf-*-probe) と build
-      # ディレクトリ (target\pf-*-probe-build) を持ち、出力を共有しないので
-      # 同時に走らせられる。直列だと 1 本あたり約 3.4 秒 x 24 本で 86 秒
-      # かかっていた (#940)。並列だと出力が混ざって読めないので probe ごとに
-      # 捕まえ、落ちたものだけまとめて出す。cmd の for ループと違い最初の
-      # 失敗で打ち切らないため、1 回の実行で全滅か 1 本かが分かる。
+      # probe ごとに source (instruments\pf-*-probe) と build ディレクトリ
+      # (target\pf-*-probe-build) が独立し出力を共有しないので並列に走らせられる
+      # (#940)。並列だと出力が混ざるため probe 単位で捕まえ、最初の失敗で打ち
+      # 切らずに落ちたものだけまとめて出す。
       - name: Build probe AEX set
         if: steps.sdk.outcome == 'success'
         shell: pwsh
         run: |
           $repository = $PWD.Path
-          # pwsh の PSModulePath のままだと子の Windows PowerShell 5.1 が
-          # 自分のモジュールを見つけられない。cmd 版が先頭に足していたのと
-          # 同じ 2 つを入れる (プロセス環境なので子プロセスに継承される)。
+          # pwsh の PSModulePath のままだと子の Windows PowerShell 5.1 が自分の
+          # モジュールを見つけられないので、5.1 用の 2 つを先頭に足す。
           $env:PSModulePath = "$env:ProgramFiles\WindowsPowerShell\Modules;$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules;$env:PSModulePath"
           $probes = @(
             'build-pf-sampling-probe'
@@ -241,15 +231,10 @@ jobs:
 
       # #356: parameter-animation の統合テストは native worker と AEX fixture を
       # これらの正確なパスから探し、無ければ黙って return する。成果物の不在を
-      # カバレッジと取り違えないよう、fail-closed に検査してから workspace の
-      # テストに入る。
-      #
-      # 以前はここで `cargo test -p aexcompat-broker --test parameter_animation`
-      # も走らせていたが、この test target は `cargo test --workspace` にも
-      # 含まれており同じ 2 件を二度実行していた。しかも `-p` の狭い選択は
-      # `--workspace` と feature 解決が違うので aexcompat-broker と
-      # aexcompat-host-core を作り直していた (#948)。検査をテストより前に
-      # 置けば「workspace 実行の時点で成果物があった」と順序で言い切れる。
+      # カバレッジと取り違えないよう、下の workspace テストより前に fail-closed で
+      # 検査する。ここに `-p` 指定のテスト実行を足さない: test target は
+      # `cargo test --workspace` に含まれており、`-p` の狭い選択は feature 解決が
+      # 違うので aexcompat-broker と host-core を作り直す (#948)。
       - name: Check native parameter-animation coverage inputs
         if: steps.sdk.outcome == 'success'
         shell: pwsh
@@ -280,8 +265,7 @@ jobs:
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
 
-      # SDK と built artifact を揃えた 1 回の実行で全部を賄う。分かれていた頃は
-      # ae-sdk-tests が source-only 集合をそのまま再実行していた (#681)。
+      # SDK と built artifact を揃えた 1 回の実行で全部を賄う (#681)。
       # cmd で実行する: pwsh の step から spawn すると、テストが起動する
       # powershell.exe (5.1) が pwsh 用の PSModulePath を継承してしまい、
       # Get-FileHash 等の組み込み cmdlet を解決できなくなる。
