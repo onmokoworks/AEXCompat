@@ -78,6 +78,12 @@ struct State {
   // own (issues #958, #962).
   alignas(8) std::array<std::byte, 120> empty_layer_world{};
   bool empty_layer_world_live{};
+  /// Allocates `empty_layer_world` through the host's own new-world path and
+  /// returns whether it did. Installed by the dispatch, which is the layer that
+  /// may reach the world registry; called on the first checkout that needs the
+  /// layer and not before, so a frame whose plug-in never asks for one pays
+  /// neither the allocation nor its share of the registry's budget.
+  bool (*allocate_empty_layer)(void* world_storage){};
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
   int32_t pixel_aspect_numerator{1};

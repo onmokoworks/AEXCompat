@@ -12,6 +12,26 @@
 namespace aexcompat::worker_runtime::smart_dispatch {
 namespace {
 
+// What the empty-layer allocation needs, set by the dispatch and read by the
+// hook it installs. Thread-local for the same reason the smart runtime's own
+// state is: one worker can render on more than one thread.
+struct EmptyLayerGeometry {
+  int32_t width{};
+  int32_t height{};
+  int32_t pixel_format{};
+};
+thread_local EmptyLayerGeometry g_empty_layer;
+
+// `clear_pixels`, because an empty layer is transparent rather than absent.
+// Failure leaves the caller without a world, and `checkout_pixels` fails closed
+// on that rather than handing back an uninitialized struct.
+bool allocate_empty_layer_world(void* world_storage) {
+  return g_empty_layer.width > 0 && g_empty_layer.height > 0 &&
+      world_registry::new_world(nullptr, g_empty_layer.width, g_empty_layer.height,
+                                /*clear_pixels=*/1, g_empty_layer.pixel_format,
+                                world_storage) == 0;
+}
+
 constexpr int32_t kSmartPreRender = 23;
 constexpr int32_t kSmartRender = 24;
 constexpr int32_t kSmartRenderGpu = 31;
@@ -207,21 +227,22 @@ bool dispatch(const Request& request, const Hooks& hooks,
   // before the transport that backs it is prepared.
   runtime.input_world = plan.missing_input ? nullptr : request.input_world->data();
   // The layer a plug-in gets when it checks out a layer parameter this host has
-  // no layer for. Allocated here, through the host's own new-world path, so the
-  // world registry owns it and the host's own callbacks resolve it: copying or
-  // sampling an empty layer is an ordinary thing for a plug-in to do, and
-  // `PF_COPY` resolves its arguments through that registry (issue #962).
-  // `clear_pixels` because an empty layer is transparent, not absent.
+  // no layer for, as a hook the runtime calls on the first checkout that needs
+  // one. Through the host's own new-world path, so the world registry owns it
+  // and the host's own callbacks resolve it: copying or sampling an empty layer
+  // is an ordinary thing for a plug-in to do, and `PF_COPY` resolves its
+  // arguments through that registry (issue #962).
   //
-  // Allocation failure leaves it dead and `checkout_pixels` fails closed on it.
-  const int32_t empty_layer_format = plan.float32
-      ? world_registry::kPixelFormatArgb128
+  // On first need rather than here, because that registry is bounded (256 MB,
+  // 64 worlds) and shared with the plug-in's own PF_NEW_WORLD: a full frame
+  // taken on every dispatch is a full frame taken from an effect building a
+  // scratch pyramid, on frames where nothing asks for an empty layer at all.
+  g_empty_layer.width = plan.width;
+  g_empty_layer.height = plan.height;
+  g_empty_layer.pixel_format = plan.float32 ? world_registry::kPixelFormatArgb128
       : (plan.deep16 ? world_registry::kPixelFormatArgb64
                      : world_registry::kPixelFormatArgb32);
-  runtime.empty_layer_world_live =
-      world_registry::new_world(nullptr, plan.width, plan.height,
-                                /*clear_pixels=*/1, empty_layer_format,
-                                runtime.empty_layer_world.data()) == 0;
+  runtime.allocate_empty_layer = &allocate_empty_layer_world;
   std::cerr << "stage:smart_pre_render_begin\n" << std::flush;
   result.pre_error = (!plan.gpu_negotiation || result.gpu_setup_error == 0)
       ? hooks.guarded_call(request.entry, kSmartPreRender, request.input->data(),

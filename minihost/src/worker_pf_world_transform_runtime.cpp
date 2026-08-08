@@ -66,17 +66,62 @@ bool bounded_argb8(void* world, unsigned char*& pixels, int32_t& rowbytes,
       g_context.hooks.bounded_argb8_world(world, pixels, rowbytes, width, height);
 }
 
-// The requested rectangle intersected with the world. False only when there is
-// no world to intersect with; anything else clips, including a rectangle that
-// lands wholly outside, which clips to empty.
-bool clip_legacy_rect(const LegacyRect* requested, int32_t width, int32_t height,
-                      LegacyRect& result) {
-  if (width <= 0 || height <= 0) return false;
-  const LegacyRect wanted = requested ? *requested : LegacyRect{0, 0, width, height};
-  result.left = std::clamp(wanted.left, 0, width);
-  result.top = std::clamp(wanted.top, 0, height);
-  result.right = std::clamp(wanted.right, result.left, width);
-  result.bottom = std::clamp(wanted.bottom, result.top, height);
+// The two rectangles a copy actually runs over, clipped together so the
+// correspondence between them survives: source (left+i, top+j) goes to
+// destination (left+i, top+j), so whatever is trimmed off one leading edge is
+// trimmed off the other, and the two extents end up equal.
+//
+// False only when a world has no pixels to copy between; a pair that shares no
+// region clips to empty, which the caller answers as a copy of nothing. Both
+// results are inside their worlds, which is what lets the memcpys below index
+// with them.
+bool copy_correspondence(const LegacyRect* source_rect,
+                         const DispatchWorldFormat& source,
+                         const LegacyRect* destination_rect,
+                         const DispatchWorldFormat& destination,
+                         LegacyRect& src, LegacyRect& dst) {
+  if (source.width <= 0 || source.height <= 0 || destination.width <= 0 ||
+      destination.height <= 0)
+    return false;
+  const LegacyRect wanted_src =
+      source_rect ? *source_rect : LegacyRect{0, 0, source.width, source.height};
+  const LegacyRect wanted_dst = destination_rect
+      ? *destination_rect
+      : LegacyRect{0, 0, destination.width, destination.height};
+  // In 64-bit arithmetic: a caller's rectangle is not bounded, and the shifts
+  // below add and subtract across it.
+  const int64_t lead_x = std::max<int64_t>({0, -static_cast<int64_t>(wanted_src.left),
+                                            -static_cast<int64_t>(wanted_dst.left)});
+  const int64_t lead_y = std::max<int64_t>({0, -static_cast<int64_t>(wanted_src.top),
+                                            -static_cast<int64_t>(wanted_dst.top)});
+  const int64_t src_left = static_cast<int64_t>(wanted_src.left) + lead_x;
+  const int64_t src_top = static_cast<int64_t>(wanted_src.top) + lead_y;
+  const int64_t dst_left = static_cast<int64_t>(wanted_dst.left) + lead_x;
+  const int64_t dst_top = static_cast<int64_t>(wanted_dst.top) + lead_y;
+  const int64_t width = std::min<int64_t>(
+      {static_cast<int64_t>(wanted_src.right) - src_left,
+       static_cast<int64_t>(wanted_dst.right) - dst_left,
+       static_cast<int64_t>(source.width) - src_left,
+       static_cast<int64_t>(destination.width) - dst_left});
+  const int64_t height = std::min<int64_t>(
+      {static_cast<int64_t>(wanted_src.bottom) - src_top,
+       static_cast<int64_t>(wanted_dst.bottom) - dst_top,
+       static_cast<int64_t>(source.height) - src_top,
+       static_cast<int64_t>(destination.height) - dst_top});
+  // A leading edge past its world's far side leaves nothing to copy, and so
+  // does a negative extent; both come back as an empty rectangle rather than as
+  // an origin outside the world.
+  if (width <= 0 || height <= 0 || src_left >= source.width ||
+      src_top >= source.height || dst_left >= destination.width ||
+      dst_top >= destination.height) {
+    src = {};
+    dst = {};
+    return true;
+  }
+  src = {static_cast<int32_t>(src_left), static_cast<int32_t>(src_top),
+         static_cast<int32_t>(src_left + width), static_cast<int32_t>(src_top + height)};
+  dst = {static_cast<int32_t>(dst_left), static_cast<int32_t>(dst_top),
+         static_cast<int32_t>(dst_left + width), static_cast<int32_t>(dst_top + height)};
   return true;
 }
 
@@ -582,22 +627,28 @@ int32_t __cdecl copy_world8(void*, void* source_world, void* destination_world,
     return kPfErrBadCallbackParam;
   auto* source = static_cast<unsigned char*>(source_info.data);
   auto* destination = static_cast<unsigned char*>(destination_info.data);
-  // Clipped to each world rather than refused against it. AE's PF_COPY takes a
-  // rectangle that may run past its world and copies the part that overlaps: an
-  // effect splitting a stereo pair asks for the right half of a full-width
-  // source into a half-width destination, and refusing that answered
-  // PF_Err_BAD_CALLBACK_PARAM for the whole frame (3DGlasses, issue #962). The
-  // copy below already takes the smaller of the two extents, so clipping is
-  // what the rest of this function was written for; only the admission was not.
-  // A rectangle that is inverted or lands wholly outside clips to nothing,
-  // which the `copy_width <= 0` early-out answers as a no-op, and both memcpys
-  // stay inside their worlds because both rects are inside them by construction.
+  // Clipped to both worlds at once rather than refused against either. AE's
+  // PF_COPY takes rectangles that may run past their worlds and copies the part
+  // that overlaps: an effect splitting a stereo pair asks for the right half of
+  // a full-width source into a half-width destination, and refusing that
+  // answered PF_Err_BAD_CALLBACK_PARAM for the whole frame (3DGlasses, issue
+  // #962).
+  //
+  // At once, because the copy is a correspondence: source (left+i, top+j) goes
+  // to destination (left+i, top+j), so trimming one rectangle's leading edge
+  // has to trim the other's by the same amount or the pixels land at the wrong
+  // offset - a shifted copy rather than an error, which is the worse of the two
+  // (the sweep that produced this change measures buckets, not pixels, and
+  // would not have caught it).
   LegacyRect src{}, dst{};
-  if (!clip_legacy_rect(source_rect, source_info.width, source_info.height, src) ||
-      !clip_legacy_rect(destination_rect, destination_info.width, destination_info.height, dst))
+  if (!copy_correspondence(source_rect, source_info, destination_rect,
+                           destination_info, src, dst))
     return kPfErrBadCallbackParam;
-  const int32_t copy_width = std::min(src.right - src.left, dst.right - dst.left);
-  const int32_t copy_height = std::min(src.bottom - src.top, dst.bottom - dst.top);
+  const int32_t copy_width = src.right - src.left;
+  const int32_t copy_height = src.bottom - src.top;
+  // Disjoint after clipping: the caller named a region the two worlds do not
+  // share, which is a copy of nothing rather than a fault, and is what AE does
+  // with the same rectangles.
   if (copy_width <= 0 || copy_height <= 0) return 0;
   const std::size_t row_size = static_cast<std::size_t>(copy_width) * pixel_bytes;
   std::vector<unsigned char> temporary;
@@ -648,6 +699,84 @@ bool verify_bad_callback_param_contract() {
       copy_world8(nullptr, &source, &destination, nullptr, nullptr);
   g_fail_next_allocation_for_self_test.store(false);
   return allocation_result == 4 && destination_pixels == destination_before;
+}
+
+// What PF_COPY does with a rectangle that does not fit its world. AE clips such
+// a rectangle and copies the overlap; this host refused it, which ended a frame
+// for an effect splitting a stereo pair (issue #962). Clipping has to keep the
+// correspondence between the two rectangles, so the cases below check where the
+// pixels land and not only that the call succeeded - clipping each rectangle on
+// its own passes a "did it return 0" test while copying to the wrong column.
+bool verify_copy_world_clipping() {
+  DispatchWorldFormatScope formats;
+  constexpr int32_t kWide = 4, kNarrow = 2, kRows = 1;
+  // Distinct per column so a shifted copy is visible: 10, 20, 30, 40 in red.
+  std::array<uint8_t, kWide * 4> source_pixels{};
+  for (int32_t column = 0; column < kWide; ++column) {
+    source_pixels[static_cast<std::size_t>(column) * 4] = 255;
+    source_pixels[static_cast<std::size_t>(column) * 4 + 1] =
+        static_cast<uint8_t>((column + 1) * 10);
+  }
+  std::array<uint8_t, kNarrow * 4> destination_pixels{};
+  LocalEffectWorld source{}, destination{};
+  source.data = source_pixels.data();
+  source.rowbytes = kWide * 4;
+  source.width = kWide;
+  source.height = kRows;
+  destination.data = destination_pixels.data();
+  destination.rowbytes = kNarrow * 4;
+  destination.width = kNarrow;
+  destination.height = kRows;
+  if (!formats.register_world(&source, kPixelFormatArgb32) ||
+      !formats.register_world(&destination, kPixelFormatArgb32))
+    return false;
+  const auto red = [&](int32_t column) {
+    return destination_pixels[static_cast<std::size_t>(column) * 4 + 1];
+  };
+
+  // The stereo case: the right half of a wide source into a narrow
+  // destination. Refused before, and the two source columns have to land in
+  // destination order.
+  const LegacyRect right_half{kNarrow, 0, kWide, kRows};
+  const LegacyRect whole_destination{0, 0, kNarrow, kRows};
+  bool ok = copy_world8(nullptr, &source, &destination, &right_half,
+                        &whole_destination) == 0 &&
+      red(0) == 30 && red(1) == 40;
+
+  // A leading edge outside its world. The pair shifts together: the copy maps
+  // source (left + i) to destination (left + i), so trimming the destination's
+  // out-of-world first column trims the source's first column with it, and
+  // source column 1 lands at destination column 0. Clipping the two rectangles
+  // on their own instead would put source column 0 there - a copy shifted by
+  // one, returning success.
+  destination_pixels.fill(0);
+  const LegacyRect from_origin{0, 0, kWide, kRows};
+  const LegacyRect one_left{-1, 0, kNarrow - 1, kRows};
+  ok = copy_world8(nullptr, &source, &destination, &from_origin, &one_left) == 0 &&
+      red(0) == 20 && red(1) == 0 && ok;
+
+  // Wholly outside, and inverted: a copy of nothing, and nothing written.
+  destination_pixels.fill(0);
+  const LegacyRect past_the_end{kWide + 8, 0, kWide + 16, kRows};
+  const LegacyRect inverted{2, 0, 1, kRows};
+  ok = copy_world8(nullptr, &source, &destination, &past_the_end,
+                   &whole_destination) == 0 &&
+      copy_world8(nullptr, &source, &destination, &inverted,
+                  &whole_destination) == 0 &&
+      red(0) == 0 && red(1) == 0 && ok;
+
+  // An extent large enough to overflow 32-bit arithmetic is clipped, not
+  // wrapped, and PF_COPY_HQ admits everything PF_COPY does - a plug-in that
+  // branches on quality must not get one answer at draft and a refusal at the
+  // quality a final renders at.
+  destination_pixels.fill(0);
+  const LegacyRect enormous{-2147483647 - 1, -2147483647 - 1, 2147483647, 2147483647};
+  ok = copy_world8(nullptr, &source, &destination, &enormous, &enormous) == 0 && ok;
+  destination_pixels.fill(0);
+  ok = copy_world_hq(nullptr, &source, &destination, &right_half,
+                     &whole_destination) == 0 &&
+      red(0) == 30 && red(1) == 40 && ok;
+  return ok;
 }
 
 int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode_flags,
@@ -1255,14 +1384,18 @@ int32_t __cdecl copy_world_hq(void* effect_ref, void* source_world, void* destin
   if (!resolve_dispatch_world_format(source_world, source_info) ||
       !resolve_dispatch_world_format(destination_world, destination_info))
     return kPfErrBadCallbackParam;
+  // The same clipping PF_COPY does, so the two entry points admit the same
+  // rectangles. Refusing here while `copy_world8` clipped would have left a
+  // plug-in that branches on `in_data->quality` - the ordinary
+  // `PF_Quality_HI ? PF_COPY_HQ : PF_COPY` shape - working at draft and failing
+  // the whole frame at the quality a final renders at (issue #962).
+  //
+  // The equal-extent check that stood here is what `copy_correspondence`
+  // guarantees, so it is not repeated: it comes back with the two rectangles
+  // already the same size.
   LegacyRect source_bounds{}, destination_bounds{};
-  if (!normalize_legacy_rect(source_rect, source_info.width, source_info.height, source_bounds) ||
-      !normalize_legacy_rect(destination_rect, destination_info.width, destination_info.height,
-                             destination_bounds) ||
-      source_bounds.right - source_bounds.left !=
-          destination_bounds.right - destination_bounds.left ||
-      source_bounds.bottom - source_bounds.top !=
-          destination_bounds.bottom - destination_bounds.top)
+  if (!copy_correspondence(source_rect, source_info, destination_rect,
+                           destination_info, source_bounds, destination_bounds))
     return kPfErrBadCallbackParam;
   return copy_world8(effect_ref, source_world, destination_world,
                      &source_bounds, &destination_bounds);
