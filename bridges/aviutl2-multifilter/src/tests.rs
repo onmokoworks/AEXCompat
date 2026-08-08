@@ -60,8 +60,10 @@ mod tests {
         ));
         assert!(!smart_render_route_supported(true, SMART | MUTABLE));
         assert!(!smart_render_route_supported(false, SMART | MUTABLE));
-        assert!(smart_render_route_supported(true, 0),
-                "an older cache keeps its previous Smart route until reinspection");
+        assert!(
+            smart_render_route_supported(true, 0),
+            "an older cache keeps its previous Smart route until reinspection"
+        );
     }
 
     // --- keep_best: never lose a working effect to a transient failure -------
