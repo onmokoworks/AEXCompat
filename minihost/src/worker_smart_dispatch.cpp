@@ -206,6 +206,22 @@ bool dispatch(const Request& request, const Hooks& hooks,
   // publishing it early would also widen the GPU world registry's view of it
   // before the transport that backs it is prepared.
   runtime.input_world = plan.missing_input ? nullptr : request.input_world->data();
+  // The layer a plug-in gets when it checks out a layer parameter this host has
+  // no layer for. Allocated here, through the host's own new-world path, so the
+  // world registry owns it and the host's own callbacks resolve it: copying or
+  // sampling an empty layer is an ordinary thing for a plug-in to do, and
+  // `PF_COPY` resolves its arguments through that registry (issue #962).
+  // `clear_pixels` because an empty layer is transparent, not absent.
+  //
+  // Allocation failure leaves it dead and `checkout_pixels` fails closed on it.
+  const int32_t empty_layer_format = plan.float32
+      ? world_registry::kPixelFormatArgb128
+      : (plan.deep16 ? world_registry::kPixelFormatArgb64
+                     : world_registry::kPixelFormatArgb32);
+  runtime.empty_layer_world_live =
+      world_registry::new_world(nullptr, plan.width, plan.height,
+                                /*clear_pixels=*/1, empty_layer_format,
+                                runtime.empty_layer_world.data()) == 0;
   std::cerr << "stage:smart_pre_render_begin\n" << std::flush;
   result.pre_error = (!plan.gpu_negotiation || result.gpu_setup_error == 0)
       ? hooks.guarded_call(request.entry, kSmartPreRender, request.input->data(),

@@ -66,6 +66,20 @@ bool bounded_argb8(void* world, unsigned char*& pixels, int32_t& rowbytes,
       g_context.hooks.bounded_argb8_world(world, pixels, rowbytes, width, height);
 }
 
+// The requested rectangle intersected with the world. False only when there is
+// no world to intersect with; anything else clips, including a rectangle that
+// lands wholly outside, which clips to empty.
+bool clip_legacy_rect(const LegacyRect* requested, int32_t width, int32_t height,
+                      LegacyRect& result) {
+  if (width <= 0 || height <= 0) return false;
+  const LegacyRect wanted = requested ? *requested : LegacyRect{0, 0, width, height};
+  result.left = std::clamp(wanted.left, 0, width);
+  result.top = std::clamp(wanted.top, 0, height);
+  result.right = std::clamp(wanted.right, result.left, width);
+  result.bottom = std::clamp(wanted.bottom, result.top, height);
+  return true;
+}
+
 bool normalize_legacy_rect(const LegacyRect* requested, int32_t width, int32_t height,
                            LegacyRect& result) {
   if (width <= 0 || height <= 0) return false;
@@ -568,9 +582,19 @@ int32_t __cdecl copy_world8(void*, void* source_world, void* destination_world,
     return kPfErrBadCallbackParam;
   auto* source = static_cast<unsigned char*>(source_info.data);
   auto* destination = static_cast<unsigned char*>(destination_info.data);
+  // Clipped to each world rather than refused against it. AE's PF_COPY takes a
+  // rectangle that may run past its world and copies the part that overlaps: an
+  // effect splitting a stereo pair asks for the right half of a full-width
+  // source into a half-width destination, and refusing that answered
+  // PF_Err_BAD_CALLBACK_PARAM for the whole frame (3DGlasses, issue #962). The
+  // copy below already takes the smaller of the two extents, so clipping is
+  // what the rest of this function was written for; only the admission was not.
+  // A rectangle that is inverted or lands wholly outside clips to nothing,
+  // which the `copy_width <= 0` early-out answers as a no-op, and both memcpys
+  // stay inside their worlds because both rects are inside them by construction.
   LegacyRect src{}, dst{};
-  if (!normalize_legacy_rect(source_rect, source_info.width, source_info.height, src) ||
-      !normalize_legacy_rect(destination_rect, destination_info.width, destination_info.height, dst))
+  if (!clip_legacy_rect(source_rect, source_info.width, source_info.height, src) ||
+      !clip_legacy_rect(destination_rect, destination_info.width, destination_info.height, dst))
     return kPfErrBadCallbackParam;
   const int32_t copy_width = std::min(src.right - src.left, dst.right - dst.left);
   const int32_t copy_height = std::min(src.bottom - src.top, dst.bottom - dst.top);

@@ -139,6 +139,8 @@ void State::clear_transient() {
   empty_checkout_pixel_denials = 0;
   empty_layer_param_checkouts = 0;
   empty_layer_param_pixel_checkouts = 0;
+  empty_layer_world = {};
+  empty_layer_world_live = false;
   // Set fresh by every dispatch, but a session that ends before that would
   // otherwise carry the previous one's declared count into the range
   // `pre_checkout_layer` accepts.
@@ -382,9 +384,14 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
   if (checkout->empty_layer_param) {
     if (checkout->checked_out)
       return finish_callback(Callback::CheckoutPixels, 4, Reason::AlreadyCheckedOut);
+    // The dispatch allocates it through the host's own new-world path before
+    // the selector runs. Without one there is nothing to hand back that the
+    // host's other callbacks would accept, so fail closed.
+    if (!runtime.empty_layer_world_live)
+      return finish_callback(Callback::CheckoutPixels, 4, Reason::MissingWorld);
     ++runtime.empty_layer_param_pixel_checkouts;
     checkout->checked_out = true;
-    *world = nullptr;
+    *world = runtime.empty_layer_world.data();
     return finish_callback(Callback::CheckoutPixels, 0);
   }
   if (!checkout->world)
@@ -620,12 +627,13 @@ bool checkout_intersection_self_test() {
       pixel_checkouts_balanced() && passed;
 
   // A layer parameter this host has no world for: PreRender answers an empty
-  // rect and SmartRender answers PF_Err_NONE with a null world. Both halves
-  // are pinned here because both are what a plug-in reads, and the pair is
-  // what decides whether a real effect renders - DeepGlow2 reads the null as
-  // "no layer" and renders, and answered PF_Err_INTERNAL_STRUCT_DAMAGED for
-  // the whole frame during the spell when a zeroed world stood here instead
-  // (issues #958, #962). Nothing pinned the shape while it changed.
+  // rect and SmartRender hands back the session's empty layer. Both halves are
+  // pinned because both are what a plug-in reads, and the pair decides whether
+  // a real effect renders. Two other shapes stood here and each broke one:
+  // a null pointer behind PF_Err_NONE (3DGlasses) and a 120-byte zeroed world
+  // describing a 0x0 layer (DeepGlow2 answered PF_Err_INTERNAL_STRUCT_DAMAGED
+  // for the whole frame). Nothing pinned the shape while it changed twice
+  // (issues #958, #962).
   runtime.gpu_render_dispatched = false;
   runtime.param_count = 9;
   std::array<std::byte, kCheckoutResultBytes> empty_result{};
@@ -639,16 +647,24 @@ bool checkout_intersection_self_test() {
   std::memcpy(empty_maximum.data(), empty_result.data() + 16,
               sizeof(empty_maximum));
   const std::array<int32_t, 4> nothing{0, 0, 0, 0};
+  // No empty layer allocated - the session's dispatch is what allocates one -
+  // so the checkout fails closed rather than answering with a pointer to an
+  // uninitialized struct.
   checked_out = input_world.data();
   passed = empty_answer == nothing && empty_maximum == nothing &&
-      checkout_pixels(nullptr, 21, &checked_out) == 0 &&
-      checked_out == nullptr &&
+      !runtime.empty_layer_world_live &&
+      checkout_pixels(nullptr, 21, &checked_out) == 4 && passed;
+  // With one, that is what comes back, and the checkout is spent like any
+  // other: an empty layer is an answer, not a skipped call.
+  runtime.empty_layer_world_live = true;
+  checked_out = nullptr;
+  passed = checkout_pixels(nullptr, 21, &checked_out) == 0 &&
+      checked_out == runtime.empty_layer_world.data() &&
       runtime.empty_layer_param_pixel_checkouts == empty_pixels_before + 1 &&
-      // The checkout is spent like any other, so the balance still has to
-      // close: a null world is an answer, not a skipped call.
       !pixel_checkouts_balanced() &&
       checkin_pixels(nullptr, 21) == 0 &&
       pixel_checkouts_balanced() && passed;
+  runtime.empty_layer_world_live = false;
   // A parameter index past what the plug-in declared is still unknown; the
   // empty answer is for the range it did declare, not for anything asked.
   passed = pre_checkout_layer(nullptr, 5, 22, nullptr, 7, 1, 30,

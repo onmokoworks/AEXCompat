@@ -3,6 +3,7 @@
 #include "worker_handle_runtime.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
+#include "worker_world_registry.hpp"
 #include <algorithm>
 #include <cstring>
 
@@ -34,6 +35,13 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
   auto& state = smart::state();
   state.input_world = nullptr; state.output_world = nullptr;
   state.map_world = nullptr; state.hosted_layers.clear();
+  // The empty-layer world is the host's own allocation, so the host returns it.
+  // Leaving it live would read as an unbalanced world lifetime, which is the
+  // accounting that catches a plug-in leaking one.
+  if (state.empty_layer_world_live) {
+    world_registry::dispose_world(nullptr, state.empty_layer_world.data());
+    state.empty_layer_world_live = false;
+  }
   std::vector<unsigned char> logical_input, logical_output;
   if (!render::copy_packed_world(r.source->data(), r.rowbytes, r.width, r.height,
                                   r.pixel_bytes, logical_input) ||

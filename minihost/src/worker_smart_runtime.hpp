@@ -61,6 +61,23 @@ struct State {
   // unknown layer.
   int32_t param_count{};
   uint32_t empty_layer_param_checkouts{};
+  // The layer handed back for one of those: the session's own geometry with
+  // nothing in it. A layer parameter with no layer is transparent, not absent -
+  // that is what an unset matte or an unconnected second view composites as -
+  // so the answer is a real PF_EffectWorld the plug-in can measure, sample and
+  // copy, whose every pixel is zero.
+  //
+  // Allocated by the dispatch through the host's own new-world path, so the
+  // world registry owns it and every host callback resolves it. The two shapes
+  // tried before this each broke a real plug-in: a null pointer behind
+  // PF_Err_NONE, which 3DGlasses answers PF_Err_BAD_CALLBACK_PARAM to, and a
+  // 120-byte zeroed world describing a 0x0 layer, which DeepGlow2 answers
+  // PF_Err_INTERNAL_STRUCT_DAMAGED to. A hand-built full-size world fails too,
+  // for a host reason rather than a plug-in one: `PF_COPY` resolves its
+  // arguments through the registry and refuses a world the registry does not
+  // own (issues #958, #962).
+  alignas(8) std::array<std::byte, 120> empty_layer_world{};
+  bool empty_layer_world_live{};
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
   int32_t pixel_aspect_numerator{1};
