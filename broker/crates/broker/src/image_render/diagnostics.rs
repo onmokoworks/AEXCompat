@@ -966,22 +966,31 @@ fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Va
         .get("callback_history")
         .and_then(Value::as_array)
         .map(|entries| {
-            entries.iter().rev().take(32).rev().filter_map(|entry| {
-                let sequence = entry.get("sequence")?.as_u64()?;
-                let callback = entry.get("callback")?.as_str()?;
-                let result = entry.get("result")?.as_i64()?;
-                let reason = entry.get("reason")?.as_str()?;
-                if callback.len() > 64 || reason.len() > 64 ||
-                    result < i32::MIN as i64 || result > i32::MAX as i64 {
-                    return None;
-                }
-                Some(json!({
-                    "sequence": sequence,
-                    "callback": callback,
-                    "result": result,
-                    "reason": reason,
-                }))
-            }).collect()
+            entries
+                .iter()
+                .rev()
+                .take(32)
+                .rev()
+                .filter_map(|entry| {
+                    let sequence = entry.get("sequence")?.as_u64()?;
+                    let callback = entry.get("callback")?.as_str()?;
+                    let result = entry.get("result")?.as_i64()?;
+                    let reason = entry.get("reason")?.as_str()?;
+                    if callback.len() > 64
+                        || reason.len() > 64
+                        || result < i32::MIN as i64
+                        || result > i32::MAX as i64
+                    {
+                        return None;
+                    }
+                    Some(json!({
+                        "sequence": sequence,
+                        "callback": callback,
+                        "result": result,
+                        "reason": reason,
+                    }))
+                })
+                .collect()
         })
         .unwrap_or_default();
     diagnostics["callback_history"] = Value::Array(history);
