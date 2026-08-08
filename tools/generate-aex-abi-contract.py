@@ -168,6 +168,8 @@ CALLBACK_TABLES = {
         "utils.host_unlock_handle",
         "utils.host_dispose_handle",
         "utils.host_get_handle_size",
+        "utils.iterate_origin_non_clip_src",
+        "utils.iterate_generic",
         "utils.host_resize_handle",
         # Legacy application-specific callback `app` at PF_UtilCallbacks+0xC8
         # (issue #362 selector families: PIN-era effects such as Drop_Shadow
@@ -393,8 +395,8 @@ def render_rust(data: dict[str, Any], source: Path) -> str:
         f"pub const {name}: usize = {value};" for name, value in constants(data)
     )
     tables = "\n".join(
-        f"pub const {table_name}: [usize; {len(field_names)}] = ["
-        + ", ".join(f"{ident(name)}_OFFSET" for name in field_names)
+        f"pub const {table_name}: [usize; {len(field_names)}] = [\n"
+        + "".join(f"    {ident(name)}_OFFSET,\n" for name in field_names)
         + "];"
         for table_name, field_names in CALLBACK_TABLES.items()
     )

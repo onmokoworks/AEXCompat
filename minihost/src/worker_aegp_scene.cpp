@@ -19,8 +19,8 @@
 #include <iterator>
 #include <limits>
 #include <numeric>
-#include <utility>
 #include <thread>
+#include <utility>
 
 using aexcompat::scene_runtime::scene_runtime_state;
 using aexcompat::scene_model::Identity;
@@ -1426,14 +1426,15 @@ int32_t __cdecl aegp_get_layer_object_type(void* layer, int32_t* type) {
 }
 int32_t __cdecl aegp_get_layer_in_point(void* layer, int32_t time_mode, AegpTime* time) {
   const int32_t index = aegp_layer_attribute_index(layer);
-  if (index < 0 || time_mode != 1 || !time) return 4;
+  if (index < 0 || (time_mode != 0 && time_mode != 1) || !time) return 4;
   *time = g_aegp_layer_in_points[static_cast<std::size_t>(index)];
+  if (time_mode == 0) time->value = 0;
   ++g_aegp_layer_attribute_calls;
   return 0;
 }
 int32_t __cdecl aegp_get_layer_duration(void* layer, int32_t time_mode, AegpTime* time) {
   const int32_t index = aegp_layer_attribute_index(layer);
-  if (index < 0 || time_mode != 1 || !time) return 4;
+  if (index < 0 || (time_mode != 0 && time_mode != 1) || !time) return 4;
   *time = g_aegp_layer_durations[static_cast<std::size_t>(index)];
   ++g_aegp_layer_attribute_calls;
   return 0;
@@ -2544,6 +2545,9 @@ int32_t __cdecl aegp_get_num_threads(int32_t* count) {
   if (!count) return 516;
   const unsigned int detected = std::thread::hardware_concurrency();
   *count = static_cast<int32_t>(detected == 0 ? 1 : detected);
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:aegp_get_num_threads count=" << *count
+              << " -> 0\n" << std::flush;
   return 0;
 }
 

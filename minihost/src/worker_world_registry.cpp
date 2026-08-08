@@ -2,6 +2,7 @@
 
 #include "gpu_memory_world_transport.hpp"
 #include "trace_writer.hpp"
+#include "worker_extended_diag.hpp"
 
 #include <array>
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <iostream>
 #include <mutex>
 #include <new>
 #include <unordered_map>
@@ -24,6 +26,13 @@ extern aexcompat::TraceWriter* g_trace_writer;
 
 namespace aexcompat::world_registry {
 namespace {
+
+int32_t finish_aegp_world_call(const char* operation, int32_t result) {
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:aegp_world_" << operation << " -> " << result
+              << '\n' << std::flush;
+  return result;
+}
 
 // Map the internal pixel-format tag to a trace-contract pixel_format string
 // (contracts/trace/host_trace_event.schema.json). Unrecognized tags fall back
@@ -217,19 +226,25 @@ int32_t __cdecl dispose_world(void*, void* world) {
 }
 
 int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
-  if (!world || !pixel_format) return 4;
+  const auto finish = [](int32_t result, int32_t format) {
+    if (aexcompat::l2_detail::extended_diag_enabled())
+      std::cerr << "extended_diag:pf_world_get_pixel_format format=" << format
+                << " -> " << result << '\n' << std::flush;
+    return result;
+  };
+  if (!world || !pixel_format) return finish(4, 0);
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     const auto found = g_worlds.find(world_pixels(world));
     if (found != g_worlds.end()) {
       *pixel_format = found->second.pixel_format;
-      return 0;
+      return finish(0, *pixel_format);
     }
   }
   world_safety::DispatchWorldFormat resolved{};
-  if (!resolve_dispatch_world_format(world, resolved)) return 4;
+  if (!resolve_dispatch_world_format(world, resolved)) return finish(4, 0);
   *pixel_format = resolved.pixel_format;
-  return 0;
+  return finish(0, *pixel_format);
 }
 
 bool owns_world(void* world) {
@@ -453,8 +468,8 @@ int32_t __cdecl aegp_world_new_owned(int32_t plugin_id, int32_t type,
        (type == 3 ? kPixelFormatArgb128 : 0));
   const uint64_t pixel_bytes = type == 1 ? 4 : (type == 2 ? 8 :
       (type == 3 ? 16 : 0));
-  if (plugin_id != 1 || !output || !pixel_format || width <= 0 || height <= 0)
-    return 4;
+  if (plugin_id < 0 || !output || !pixel_format || width <= 0 || height <= 0)
+    return finish_aegp_world_call("new", 4);
   const uint64_t rowbytes = static_cast<uint64_t>(width) * pixel_bytes;
   const uint64_t size = rowbytes * static_cast<uint64_t>(height);
   if (rowbytes > static_cast<uint64_t>((std::numeric_limits<int32_t>::max)()) ||
@@ -480,14 +495,15 @@ int32_t __cdecl aegp_world_new_owned(int32_t plugin_id, int32_t type,
   ++g_live_owned_aegp_worlds;
   ++g_owned_aegp_worlds_created;
   *output = handle;
-  return 0;
+  return finish_aegp_world_call("new", 0);
 }
 
 int32_t __cdecl aegp_world_dispose(void** handle) {
-  if (!handle) return 4;
+  if (!handle) return finish_aegp_world_call("dispose", 4);
   std::lock_guard<std::mutex> lock(g_mutex);
   const auto found = g_aegp_views.find(handle);
-  if (found == g_aegp_views.end() || !found->second.disposable) return 4;
+  if (found == g_aegp_views.end() || !found->second.disposable)
+    return finish_aegp_world_call("dispose", 4);
   const bool owned = found->second.owned_aegp;
   g_aegp_views.erase(found);
   if (owned) {
@@ -497,33 +513,36 @@ int32_t __cdecl aegp_world_dispose(void** handle) {
     --g_live_platform_references;
     ++g_platform_references_disposed;
   }
-  return 0;
+  return finish_aegp_world_call("dispose", 0);
 }
 
 int32_t __cdecl aegp_world_get_type(void** handle, int32_t* type) {
   AegpWorldView view{};
   world_safety::LocalEffectWorld world{};
-  if (!type || !snapshot_aegp_view(handle, view, world)) return 4;
+  if (!type || !snapshot_aegp_view(handle, view, world))
+    return finish_aegp_world_call("get_type", 4);
   *type = aegp_world_type_from_format(view.pixel_format);
-  return *type ? 0 : 4;
+  return finish_aegp_world_call("get_type", *type ? 0 : 4);
 }
 
 int32_t __cdecl aegp_world_get_size(void** handle, int32_t* width,
                                     int32_t* height) {
   AegpWorldView view{};
   world_safety::LocalEffectWorld world{};
-  if (!width || !height || !snapshot_aegp_view(handle, view, world)) return 4;
+  if (!width || !height || !snapshot_aegp_view(handle, view, world))
+    return finish_aegp_world_call("get_size", 4);
   *width = world.width;
   *height = world.height;
-  return 0;
+  return finish_aegp_world_call("get_size", 0);
 }
 
 int32_t __cdecl aegp_world_get_rowbytes(void** handle, uint32_t* rowbytes) {
   AegpWorldView view{};
   world_safety::LocalEffectWorld world{};
-  if (!rowbytes || !snapshot_aegp_view(handle, view, world)) return 4;
+  if (!rowbytes || !snapshot_aegp_view(handle, view, world))
+    return finish_aegp_world_call("get_rowbytes", 4);
   *rowbytes = static_cast<uint32_t>(world.rowbytes);
-  return 0;
+  return finish_aegp_world_call("get_rowbytes", 0);
 }
 
 int32_t aegp_world_get_base_addr(void** handle, int32_t required_type,
@@ -537,21 +556,25 @@ int32_t aegp_world_get_base_addr(void** handle, int32_t required_type,
 }
 
 int32_t __cdecl aegp_world_get_base_addr8(void** handle, void** base) {
-  return aegp_world_get_base_addr(handle, 1, base);
+  return finish_aegp_world_call("get_base_addr8",
+                                aegp_world_get_base_addr(handle, 1, base));
 }
 int32_t __cdecl aegp_world_get_base_addr16(void** handle, void** base) {
-  return aegp_world_get_base_addr(handle, 2, base);
+  return finish_aegp_world_call("get_base_addr16",
+                                aegp_world_get_base_addr(handle, 2, base));
 }
 int32_t __cdecl aegp_world_get_base_addr32(void** handle, void** base) {
-  return aegp_world_get_base_addr(handle, 3, base);
+  return finish_aegp_world_call("get_base_addr32",
+                                aegp_world_get_base_addr(handle, 3, base));
 }
 
 int32_t __cdecl aegp_world_fill_pf_world(void** handle, void* output) {
   AegpWorldView view{};
   world_safety::LocalEffectWorld world{};
-  if (!output || !snapshot_aegp_view(handle, view, world)) return 4;
+  if (!output || !snapshot_aegp_view(handle, view, world))
+    return finish_aegp_world_call("fill_pf_world", 4);
   std::memcpy(output, &world, sizeof(world));
-  return 0;
+  return finish_aegp_world_call("fill_pf_world", 0);
 }
 
 int32_t __cdecl aegp_world_fast_blur(double radius, uint32_t mode_flags,

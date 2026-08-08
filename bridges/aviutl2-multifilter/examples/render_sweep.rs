@@ -364,17 +364,21 @@ impl Outcome {
     }
 }
 
-/// The secondary layer handed to a plug-in that declares one: its first layer
-/// slot, carrying the structured map, unless the run is the no-layer control.
+/// The secondary layer handed to a plug-in that declares one: every layer slot
+/// carries the same structured map unless the run is the no-layer control.
+/// Supplying only the first slot makes a multi-layer effect observe a mixture
+/// of a real layer and an empty checkout, which is not a useful render probe.
 fn probe_layers(
     record: &DiagnosticDiscovery,
     options: &Options,
     pixels: &[u8],
 ) -> Vec<SessionLayer> {
+    if options.no_layer {
+        return Vec::new();
+    }
     layer_slots_of(&record.parameters)
-        .first()
-        .filter(|_| !options.no_layer)
-        .map(|&slot| SessionLayer {
+        .into_iter()
+        .map(|slot| SessionLayer {
             slot,
             width: options.width,
             height: options.height,
@@ -386,7 +390,6 @@ fn probe_layers(
             // sweep takes the shipping shape.
             dynamic: true,
         })
-        .into_iter()
         .collect()
 }
 
@@ -566,6 +569,10 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
         "missing_suites",
         "unsupported_suite_calls",
         "callback_history",
+        // Present only with AEXCOMPAT_EXTENDED_DIAG; this keeps one-off host
+        // callback evidence available in the sweep artifact without exposing
+        // it during ordinary corpus runs.
+        "stderr_tail",
         "load_failure",
         "plugin_kind",
         // What the worker refused to hand out, parsed from its own stderr.

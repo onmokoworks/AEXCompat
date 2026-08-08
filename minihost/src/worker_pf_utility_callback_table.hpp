@@ -51,6 +51,8 @@ struct Sources {
   void* host_unlock_handle{};
   void* host_dispose_handle{};
   void* host_get_handle_size{};
+  void* iterate_origin_non_clip_src{};
+  void* iterate_generic{};
   void* host_resize_handle{};
   void* app{};
 };
@@ -60,7 +62,7 @@ struct Binding {
   void* Sources::*source;
 };
 
-inline constexpr std::array<Binding, 43> BINDINGS{{
+inline constexpr std::array<Binding, 45> BINDINGS{{
     {contract::UTILS_BEGIN_SAMPLING_OFFSET, &Sources::begin_sampling},
     {contract::UTILS_SUBPIXEL_SAMPLE_OFFSET, &Sources::subpixel_sample},
     {contract::UTILS_AREA_SAMPLE_OFFSET, &Sources::area_sample},
@@ -102,6 +104,9 @@ inline constexpr std::array<Binding, 43> BINDINGS{{
     {contract::UTILS_HOST_UNLOCK_HANDLE_OFFSET, &Sources::host_unlock_handle},
     {contract::UTILS_HOST_DISPOSE_HANDLE_OFFSET, &Sources::host_dispose_handle},
     {contract::UTILS_HOST_GET_HANDLE_SIZE_OFFSET, &Sources::host_get_handle_size},
+    {contract::UTILS_ITERATE_ORIGIN_NON_CLIP_SRC_OFFSET,
+     &Sources::iterate_origin_non_clip_src},
+    {contract::UTILS_ITERATE_GENERIC_OFFSET, &Sources::iterate_generic},
     {contract::UTILS_HOST_RESIZE_HANDLE_OFFSET, &Sources::host_resize_handle},
     {contract::UTILS_APP_OFFSET, &Sources::app},
 }};

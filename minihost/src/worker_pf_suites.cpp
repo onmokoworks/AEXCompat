@@ -629,13 +629,18 @@ int32_t __cdecl iterate_generic(int32_t iterations, void* refcon,
   constexpr int32_t kMaxIterations = 16'777'216;
   if (!callback || (iterations != kOncePerProcessor &&
                     (iterations <= 0 || iterations > kMaxIterations)))
-    return kPfErrBadCallbackParam;
+    return finish_callback(aexcompat::callback_diagnostics::Callback::IterateGeneric,
+                           kPfErrBadCallbackParam,
+                           aexcompat::callback_diagnostics::Reason::InvalidArguments);
   const int32_t actual_iterations = iterations == kOncePerProcessor ? 1 : iterations;
   for (int32_t index = 0; index < actual_iterations; ++index) {
     const int32_t error = callback(refcon, 0, index, actual_iterations);
-    if (error != 0) return error;
+    if (error != 0)
+      return finish_callback(aexcompat::callback_diagnostics::Callback::IterateGeneric,
+                             error,
+                             aexcompat::callback_diagnostics::Reason::CallbackError);
   }
-  return 0;
+  return finish_callback(aexcompat::callback_diagnostics::Callback::IterateGeneric, 0);
 }
 
 struct IterateInteractionTestState {
