@@ -68,7 +68,7 @@ use std::time::{Duration, Instant};
 
 use aexcompat_aviutl2_multifilter::{
     DiagnosticDiscovery, DiagnosticScan, PluginName, discover_records_for_diagnostics,
-    layer_slots_of, pf_error_name, plugin_name, scan_for_diagnostics,
+    layer_slots_of, pf_error_name, plugin_name, scan_for_diagnostics, smart_render_route_supported,
 };
 use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::render_session::{
@@ -419,7 +419,8 @@ fn sweep_one(
         return Outcome::bare("no_search_roots");
     }
 
-    let smart = record.smart && !options.force_classic;
+    let smart =
+        smart_render_route_supported(record.smart, record.out_flags2) && !options.force_classic;
     let layers = probe_layers(record, options, layer_pixels);
     // The bridge overlays each frame's current config values onto the exposed
     // defaults and sends them with the frame; a sweep that instead relied on the
@@ -700,6 +701,9 @@ fn plugin_record(
         "discovery": {
             "ok": record.ok,
             "smart": record.smart,
+            "out_flags2": record.out_flags2,
+            "smart_route_supported":
+                smart_render_route_supported(record.smart, record.out_flags2),
             "parameter_count": record.parameters.len(),
             "layer_slots": layer_slots_of(&record.parameters),
             "failure_classification": record.failure_classification,

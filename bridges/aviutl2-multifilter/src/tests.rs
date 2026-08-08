@@ -21,6 +21,7 @@ mod tests {
             ok: true,
             sha: "aa".into(),
             smart: true,
+            out_flags2: 1 << 10,
             params: Vec::new(),
             build,
             stale: false,
@@ -44,6 +45,23 @@ mod tests {
             smart: false,
             ..discovered(mtime_secs, len, build)
         }
+    }
+
+    #[test]
+    fn smart_route_rejects_mutable_sequence_without_threading() {
+        const SMART: u32 = 1 << 10;
+        const THREADED: u32 = 1 << 27;
+        const MUTABLE: u32 = 1 << 28;
+        assert!(smart_render_route_supported(true, SMART));
+        assert!(smart_render_route_supported(true, SMART | THREADED));
+        assert!(smart_render_route_supported(
+            true,
+            SMART | THREADED | MUTABLE
+        ));
+        assert!(!smart_render_route_supported(true, SMART | MUTABLE));
+        assert!(!smart_render_route_supported(false, SMART | MUTABLE));
+        assert!(smart_render_route_supported(true, 0),
+                "an older cache keeps its previous Smart route until reinspection");
     }
 
     // --- keep_best: never lose a working effect to a transient failure -------
