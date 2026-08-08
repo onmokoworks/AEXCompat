@@ -128,13 +128,19 @@ jobs:
 
       # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
       # フラット配置する (single-config)。
+      #
+      # AEXCOMPAT_COMPILE_CACHE で sccache を通す (#942)。ランナーは毎回 work
+      # ディレクトリを消すので、minihost/src に一切触れていない PR でも 179 個の
+      # 翻訳単位を一から compile していた。sccache は既に RUSTC_WRAPPER として
+      # 動いており GHA cache を backend にしているが、Rust 側は 106 件中 87 件が
+      # crate-type 理由で非キャッシュ対象なので、実際に効く余地はこちらにある。
       - name: Build minihost workers (Ninja)
         shell: cmd
         run: |
           for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
           if not defined VSROOT exit /b 1
           call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          cmake -S minihost -B target\minihost-build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
+          cmake -S minihost -B target\minihost-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAEXCOMPAT_COMPILE_CACHE=sccache || exit /b 1
           cmake --build target\minihost-build || exit /b 1
           dir /b target\minihost-build\aex_*.exe
       # ヘッダ依存が実際に記録されているかを確認する (#657)。cl の /showIncludes

@@ -40,9 +40,30 @@ project(AEXCompatMinihost LANGUAGES CXX)
 # A launcher the operator already chose (ccache and friends) wins: replacing it
 # would silently disable their tooling, and only this generator+compiler pair
 # has the localization hazard to begin with.
+#
+# `AEXCOMPAT_COMPILE_CACHE` names a compiler cache (sccache, ccache) to run
+# inside that pin rather than instead of it. CI passes it because the runner
+# wipes its work directory every run, so all 179 translation units here compile
+# from scratch even on a branch that never touched minihost/src (#942). Setting
+# CMAKE_CXX_COMPILER_LAUNCHER directly would work too, but it would take the
+# VSLANG pin with it and bring back the #713/#708 locale corruption.
+set(AEXCOMPAT_COMPILE_CACHE "" CACHE STRING
+    "Compiler cache to run each compile through (e.g. sccache). Empty disables it.")
 if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja" AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
   set(CMAKE_CXX_COMPILER_LAUNCHER
       "${CMAKE_COMMAND}" -E env "VSLANG=${AEXCOMPAT_VSLANG}")
+  if(AEXCOMPAT_COMPILE_CACHE)
+    find_program(AEXCOMPAT_COMPILE_CACHE_PROGRAM "${AEXCOMPAT_COMPILE_CACHE}")
+    # Fail rather than build uncached: a caller who asked for a cache and
+    # silently did not get one would read the timings as "caching does not
+    # help here" and draw the wrong conclusion.
+    if(NOT AEXCOMPAT_COMPILE_CACHE_PROGRAM)
+      message(FATAL_ERROR
+              "AEXCOMPAT_COMPILE_CACHE=${AEXCOMPAT_COMPILE_CACHE} was not found on PATH")
+    endif()
+    list(APPEND CMAKE_CXX_COMPILER_LAUNCHER "${AEXCOMPAT_COMPILE_CACHE_PROGRAM}")
+    message(STATUS "minihost compiles run through ${AEXCOMPAT_COMPILE_CACHE_PROGRAM}")
+  endif()
 endif()
 
 # Read every source as UTF-8 instead of as the operator's code page (issue
