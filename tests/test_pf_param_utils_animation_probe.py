@@ -3,12 +3,13 @@ import os
 import subprocess
 from pathlib import Path
 
+from _render_session import HARNESS
+
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools/build-pf-param-utils-animation-probe.ps1"
 PROBE = ROOT / "target/pf-param-utils-animation-probe-build/Release/pf_param_utils_animation_probe.aex"
-HARNESS = ROOT / "broker/target/release/aexcompat-harness.exe"
 
 
 def _worker():

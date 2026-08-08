@@ -23,6 +23,11 @@ jobs:
     timeout-minutes: 120
     env:
       PYTHONUTF8: "1"
+      # built_artifact テストが動かす broker/harness を debug から取る (#945)。
+      # `cargo build --workspace` が既に両方を生成しているので、release で
+      # もう一度 aexcompat-broker / host-core / harness を作る必要がない。
+      # 既定は release のままで、tools/ の手動ゲートは影響を受けない。
+      AEXCOMPAT_CARGO_PROFILE: debug
       # mtime 復元 (#935) が拾えなかった、実際に変更されたクレートを sccache が
       # 内容ハッシュで吸収する (#664)。
       RUSTC_WRAPPER: sccache
@@ -115,16 +120,6 @@ jobs:
         run: cargo test --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
       - name: Test YMM4 native bridge
         run: cargo test --manifest-path bridges/ymm4-native/Cargo.toml --locked
-
-      # built_artifact テストは broker CLI と harness の両方を release で参照する。
-      # harness が無いと assert_artifact_fresh が 27 件落ちる (#925)。
-      # 1 回の呼び出しで両方を選ぶ: パッケージ選択を分けると feature 解決が
-      # 変わり、2 本目が 1 本目のビルドした aexcompat-broker と host-core を
-      # 丸ごと作り直していた (#940)。bin 名はワークスペース内で一意なので
-      # --bin を並べれば -p なしで両方に届く。
-      - name: Build the broker CLI and harness (release)
-        working-directory: broker
-        run: cargo build --release --locked --bin broker --bin aexcompat-harness
 
       # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
       # フラット配置する (single-config)。

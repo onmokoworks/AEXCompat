@@ -13,10 +13,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _render_session import BROKER
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-BROKER = ROOT / "broker" / "target" / "release" / "broker.exe"
 WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
 AEX = ROOT / "target" / "pf-sampling-probe-build" / "Release" / "pf_sampling_probe.aex"
 GENERATOR = ROOT / "tools" / "generate-oracle-rgba-input.py"
