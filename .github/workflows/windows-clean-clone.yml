@@ -111,9 +111,23 @@ jobs:
       # broker の外にある Cargo ルートは長らく型検査されるだけで、テストが
       # 1 本も実行されていなかった (#899)。guest workspace は libclang を
       # 必要とし runner に無いため #917 に分離した。
+      #
+      # 両ブリッジは `aexcompat-broker` を path 依存で参照しているが、自分の
+      # ワークスペースの target dir を使うため、直前の `cargo build --workspace`
+      # が置いたものを使えず各自コンパイルしていた (#951)。target dir を
+      # 共有させて再利用させる。
+      #
+      # `bridges/*/target` を参照しているコード・スクリプト・テストは無い。
+      # feature 統合結果がワークスペース間で違えば別 variant が並ぶだけで
+      # 削減にならないが、fingerprint が違えば共存するので broker 側の成果物を
+      # 壊す方向にはならない (この見立て自体が実測対象)。
       - name: Test AviUtl2 multifilter bridge
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}\broker\target
         run: cargo test --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
       - name: Test YMM4 native bridge
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}\broker\target
         run: cargo test --manifest-path bridges/ymm4-native/Cargo.toml --locked
 
       # built_artifact テストは broker CLI と harness の両方を release で参照する。
