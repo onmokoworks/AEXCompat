@@ -103,6 +103,7 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     case UnsupportedSuiteId::aegp_comp_26: return {"AEGP Comp Suite", 26};
     case UnsupportedSuiteId::aegp_comp_21: return {"AEGP Comp Suite", 21};
     case UnsupportedSuiteId::aegp_comp_9: return {"AEGP Comp Suite", 9};
+    case UnsupportedSuiteId::aegp_comp_4: return {"AEGP Comp Suite", 4};
     case UnsupportedSuiteId::aegp_layer_15: return {"AEGP Layer Suite", 15};
     case UnsupportedSuiteId::aegp_layer_11: return {"AEGP Layer Suite", 11};
     case UnsupportedSuiteId::aegp_layer_14: return {"AEGP Layer Suite", 14};

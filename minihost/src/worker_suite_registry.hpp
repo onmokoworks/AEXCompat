@@ -33,6 +33,7 @@ enum class UnsupportedSuiteId : uint8_t {
   aegp_comp_26,
   aegp_comp_21,
   aegp_comp_9,
+  aegp_comp_4,
   aegp_layer_15,
   aegp_layer_11,
   aegp_layer_14,
