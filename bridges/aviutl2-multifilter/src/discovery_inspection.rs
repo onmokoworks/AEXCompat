@@ -101,13 +101,12 @@ fn finish_one_shot_in_place(
     }
     match inspect_experimental_in_place(repository, plugin, &entry.sha, roots.clone()) {
         Ok((params, diagnostics)) => {
-            // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
-            entry.smart = diagnostics
+            entry.out_flags2 = diagnostics
                 .get("advertised_out_flags2")
                 .and_then(|value| value.as_u64())
-                .unwrap_or(0)
-                & (1 << 10)
-                != 0;
+                .unwrap_or(0) as u32;
+            // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
+            entry.smart = entry.out_flags2 & (1 << 10) != 0;
             entry.params = params;
             normalize_parameters_for_cache(&mut entry.params);
             entry.ok = true;
@@ -269,13 +268,12 @@ fn fill_entry_from_inspect_report(entry: &mut CacheEntry, report: &serde_json::V
     let Ok(params) = parameters_from_inspect_report(report) else {
         return;
     };
-    // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
-    entry.smart = report
+    entry.out_flags2 = report
         .get("out_flags2")
         .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
-        & (1 << 10)
-        != 0;
+        .unwrap_or(0) as u32;
+    // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
+    entry.smart = entry.out_flags2 & (1 << 10) != 0;
     entry.params = params;
     normalize_parameters_for_cache(&mut entry.params);
     entry.ok = true;
@@ -655,6 +653,28 @@ pub fn discover_all_for_diagnostics(
         .collect()
 }
 
+/// Whether a SmartFX advertisement is internally usable for render routing.
+/// Adobe documents MUTABLE_RENDER_SEQUENCE_DATA_SLOWER as the opt-in escape
+/// hatch for a threaded renderer. A mutable-only advertisement has no render
+/// thread contract to clone, and old BCC3DO effects return
+/// PF_Interrupt_CANCEL immediately after their first Smart input checkout on
+/// that path. Select their supported classic path up front; this is capability
+/// negotiation, not an error fallback.
+#[doc(hidden)]
+pub fn smart_render_route_supported(advertised_smart: bool, out_flags2: u32) -> bool {
+    if !advertised_smart {
+        return false;
+    }
+    // Preserve pre-field cache entries until normal background re-verification
+    // records the exact flags. Zero cannot be a current Smart advertisement.
+    if out_flags2 == 0 {
+        return true;
+    }
+    const THREADED: u32 = 1 << 27;
+    const MUTABLE: u32 = 1 << 28;
+    out_flags2 & MUTABLE == 0 || out_flags2 & THREADED != 0
+}
+
 /// One plug-in's discovery outcome with everything a render sweep needs to open
 /// a session on it afterwards (issue #957): the parameters the plug-in declared,
 /// which render path it advertises, and the search roots its cluster keyed on.
@@ -670,6 +690,7 @@ pub struct DiagnosticDiscovery {
     pub byte_size: u64,
     /// `PF_OutFlag2_SUPPORTS_SMART_RENDER`; which render path a session opens on.
     pub smart: bool,
+    pub out_flags2: u32,
     /// The PiPL `catg` property (issue #871), read from the bytes without loading.
     pub category: Option<String>,
     pub parameters: Vec<InteractiveParameter>,
@@ -710,6 +731,7 @@ pub fn discover_records_for_diagnostics(
             sha256: entry.sha,
             byte_size: entry.len,
             smart: entry.smart,
+            out_flags2: entry.out_flags2,
             category: entry.category,
             parameters: entry.params,
             search_roots: entry.closure.roots.iter().map(PathBuf::from).collect(),
@@ -1012,7 +1034,7 @@ fn register_discovered(
         plugin: plugin.to_path_buf(),
         dependency: dependency.clone(),
         sha: entry.sha.clone(),
-        smart: entry.smart,
+        smart: smart_render_route_supported(entry.smart, entry.out_flags2),
         closure_identity: entry.closure_identity.clone(),
         // From the raw discovery parameters, NOT from `defaults`: `build_item`
         // maps only value-carrying kinds (float/integer/color) into config
