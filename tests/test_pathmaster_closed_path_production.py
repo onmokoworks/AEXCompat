@@ -2,9 +2,10 @@ import json
 import subprocess
 from pathlib import Path
 
+from _render_session import HARNESS
+
 
 ROOT = Path(__file__).resolve().parents[1]
-HARNESS = ROOT / "broker" / "target" / "release" / "aexcompat-harness.exe"
 FIXTURE = ROOT / "target" / "sdk-fixtures" / "pathmaster" / "PathMaster.aex"
 INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"
 REQUEST = ROOT / "tools" / "sdk-fixtures" / "pathmaster-hard-edge-request.json"

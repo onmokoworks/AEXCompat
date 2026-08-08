@@ -6,8 +6,9 @@ import subprocess
 import zlib
 from pathlib import Path
 
+from _render_session import HARNESS
+
 ROOT = Path(__file__).resolve().parents[1]
-HARNESS = ROOT / "broker" / "target" / "release" / "aexcompat-harness.exe"
 FIXTURE = ROOT / "target" / "sdk-fixtures" / "shifter" / "Shifter.aex"
 INPUT = ROOT / "target" / "ae-oracle-colorgrid-input.png"
 
