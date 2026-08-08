@@ -19,8 +19,8 @@
 #include <iterator>
 #include <limits>
 #include <numeric>
-#include <utility>
 #include <thread>
+#include <utility>
 
 using aexcompat::scene_runtime::scene_runtime_state;
 using aexcompat::scene_model::Identity;
@@ -2544,6 +2544,9 @@ int32_t __cdecl aegp_get_num_threads(int32_t* count) {
   if (!count) return 516;
   const unsigned int detected = std::thread::hardware_concurrency();
   *count = static_cast<int32_t>(detected == 0 ? 1 : detected);
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:aegp_get_num_threads count=" << *count
+              << " -> 0\n" << std::flush;
   return 0;
 }
 

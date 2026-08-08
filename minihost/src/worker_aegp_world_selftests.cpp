@@ -136,6 +136,12 @@ bool verify_world_suite3(const Hooks& h) {
         !base || aegp_world_dispose(owned) != 0 || aegp_world_get_type(owned, &actual_type) == 0 ||
         aegp_world_dispose(owned) == 0) return reject(h, "owned-contract");
   }
+  void** pf_owned = nullptr;
+  void** rejected_owned = nullptr;
+  if (aegp_world_new_owned(0, 1, 2, 2, &pf_owned) != 0 || !pf_owned ||
+      aegp_world_dispose(pf_owned) != 0 ||
+      aegp_world_new_owned(-1, 1, 2, 2, &rejected_owned) == 0 || rejected_owned)
+    return reject(h, "owned-plugin-id-contract");
   void** blur_world = nullptr; void* blur_base = nullptr;
   if (aegp_world_new_owned(1, 1, 5, 5, &blur_world) != 0 ||
       aegp_world_get_base_addr8(blur_world, &blur_base) != 0 || !blur_base) return reject(h, "blur-new");

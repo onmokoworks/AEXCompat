@@ -4,6 +4,7 @@
 #include "worker_pf_helper_runtime.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_ui_event_execution.hpp"
+#include "worker_extended_diag.hpp"
 
 #include <algorithm>
 #include <array>
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <iostream>
 #include <utility>
 #include <vector>
 #include <new>
@@ -208,8 +210,14 @@ int32_t __cdecl app_get_language(char* language) {
 int32_t __cdecl app_get_font_style(int16_t, char*, int16_t*, int16_t*, int16_t*) { return 4; }
 int32_t __cdecl app_set_cursor(int16_t) { return 4; }
 int32_t __cdecl app_is_render_engine(uint8_t* render_engine) {
-  if (!render_engine) return 4;
+  if (!render_engine) {
+    if (extended_diag_enabled())
+      std::cerr << "extended_diag:app_is_render_engine -> 4\n" << std::flush;
+    return 4;
+  }
   *render_engine = 1;  // The SDK includes no-UI hosts in render-engine semantics.
+  if (extended_diag_enabled())
+    std::cerr << "extended_diag:app_is_render_engine value=1 -> 0\n" << std::flush;
   return 0;
 }
 int32_t __cdecl app_color_picker(const char* title, const float* sample_color,
@@ -285,11 +293,17 @@ int32_t __cdecl ui_transform_point_simple(void*, void* context, int32_t* point) 
 }
 
 int32_t __cdecl app_get_personal_info(char* info) {
-  if (!info) return 4;
+  if (!info) {
+    if (extended_diag_enabled())
+      std::cerr << "extended_diag:app_get_personal_info -> 4\n" << std::flush;
+    return 4;
+  }
   std::memset(info, 0, 64 * 3);
   std::memcpy(info, "AEXCompat", sizeof("AEXCompat"));
   std::memcpy(info + 64, "onmokoworks", sizeof("onmokoworks"));
   std::memcpy(info + 128, "SDK fixture", sizeof("SDK fixture"));
+  if (extended_diag_enabled())
+    std::cerr << "extended_diag:app_get_personal_info -> 0\n" << std::flush;
   return 0;
 }
 
