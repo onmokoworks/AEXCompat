@@ -10,6 +10,7 @@
 #include "worker_aegp_scene_transaction.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_suite_registry.hpp"
+#include "worker_pf_suites_internal.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -19,6 +20,7 @@
 #include <limits>
 #include <numeric>
 #include <utility>
+#include <thread>
 
 using aexcompat::scene_runtime::scene_runtime_state;
 using aexcompat::scene_model::Identity;
@@ -2514,7 +2516,9 @@ std::array<void*, 17> g_aegp_effect_suite2{};
 std::array<void*, 17> g_aegp_effect_suite3{};
 std::array<void*, 22> g_aegp_effect_suite4{};
 std::array<void*, 22> g_aegp_stream_suite2{};
+std::array<void*, 22> g_aegp_stream_suite3{};
 std::array<void*, 23> g_aegp_stream_suite6{};
+std::array<void*, 2> g_aegp_iterate_suite1{};
 std::array<void*, 22> g_aegp_keyframe_suite5{};
 static_assert(sizeof(g_aegp_project_suite6) == 14 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite10) == 41 * sizeof(void*));
@@ -2531,8 +2535,17 @@ static_assert(sizeof(g_aegp_effect_suite4) == 176);
 static_assert(sizeof(g_aegp_effect_suite2) == 136);
 static_assert(sizeof(g_aegp_effect_suite3) == 136);
 static_assert(sizeof(g_aegp_stream_suite2) == 176);
+static_assert(sizeof(g_aegp_stream_suite3) == 176);
 static_assert(sizeof(g_aegp_stream_suite6) == 184);
+static_assert(sizeof(g_aegp_iterate_suite1) == 16);
 static_assert(sizeof(g_aegp_keyframe_suite5) == 176);
+
+int32_t __cdecl aegp_get_num_threads(int32_t* count) {
+  if (!count) return 516;
+  const unsigned int detected = std::thread::hardware_concurrency();
+  *count = static_cast<int32_t>(detected == 0 ? 1 : detected);
+  return 0;
+}
 
 SceneSuiteAcquireResult scene_acquire_suite(
     const char* name, int32_t version, const void** suite) noexcept {
@@ -2942,6 +2955,23 @@ SceneSuiteAcquireResult scene_acquire_suite(
     *suite = g_aegp_stream_suite6.data();
     return SceneSuiteAcquireResult::acquired;
   }
+  if (named("AEGP Stream Suite") && version == 8) {
+    g_aegp_stream_suite3 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_stream_8, 22>();
+    g_aegp_stream_suite3[3] = reinterpret_cast<void*>(&aegp_get_new_layer_stream);
+    g_aegp_stream_suite3[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v6);
+    g_aegp_stream_suite3[5] = reinterpret_cast<void*>(&aegp_get_new_effect_stream_by_index);
+    g_aegp_stream_suite3[6] =
+        reinterpret_cast<void*>(&aexcompat::l2_detail::get_new_mask_stream);
+    g_aegp_stream_suite3[7] = reinterpret_cast<void*>(&aegp_dispose_stream);
+    g_aegp_stream_suite3[8] = reinterpret_cast<void*>(&aegp_get_stream_name);
+    g_aegp_stream_suite3[12] = reinterpret_cast<void*>(&aegp_get_stream_type);
+    g_aegp_stream_suite3[13] = reinterpret_cast<void*>(&aegp_get_new_stream_value);
+    g_aegp_stream_suite3[14] = reinterpret_cast<void*>(&aegp_dispose_stream_value);
+    g_aegp_stream_suite3[15] = reinterpret_cast<void*>(&aegp_set_effect_stream_value);
+    *suite = g_aegp_stream_suite3.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
   if (named("AEGP Stream Suite") && version == 7) {
     g_aegp_stream_suite2 =
         unsupported_suite_slots<UnsupportedSuiteId::aegp_stream_7, 22>();
@@ -2969,6 +2999,14 @@ SceneSuiteAcquireResult scene_acquire_suite(
         g_aegp_keyframe_suite5[slot] = factory.keyframe_callbacks[slot];
     }
     *suite = g_aegp_keyframe_suite5.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
+  if (named("AEGP Iterate Suite") && version == 1) {
+    g_aegp_iterate_suite1 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_iterate_1, 2>();
+    g_aegp_iterate_suite1[0] = reinterpret_cast<void*>(&aegp_get_num_threads);
+    g_aegp_iterate_suite1[1] = reinterpret_cast<void*>(&iterate_generic);
+    *suite = g_aegp_iterate_suite1.data();
     return SceneSuiteAcquireResult::acquired;
   }
 

@@ -565,6 +565,7 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
         "active_stage",
         "missing_suites",
         "unsupported_suite_calls",
+        "callback_history",
         "load_failure",
         "plugin_kind",
         // What the worker refused to hand out, parsed from its own stderr.

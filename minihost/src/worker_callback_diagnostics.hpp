@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <string>
 
@@ -85,6 +86,22 @@ struct Entry {
   std::array<std::atomic<uint32_t>, static_cast<std::size_t>(Reason::Count)> reasons{};
 };
 
+struct HistoryEntry {
+  uint64_t sequence{};
+  Callback callback{};
+  int32_t result{};
+  Reason reason{};
+};
+
+inline constexpr std::size_t HISTORY_CAPACITY = 32;
+inline std::array<HistoryEntry, HISTORY_CAPACITY>& history_entries() {
+  static std::array<HistoryEntry, HISTORY_CAPACITY> value{};
+  return value;
+}
+inline std::mutex& history_mutex() { static std::mutex value; return value; }
+inline uint64_t& history_next_sequence() { static uint64_t value{}; return value; }
+inline std::size_t& history_count() { static std::size_t value{}; return value; }
+
 inline std::array<Entry, static_cast<std::size_t>(Callback::Count)>& entries() {
   static std::array<Entry, static_cast<std::size_t>(Callback::Count)> value{};
   return value;
@@ -98,6 +115,10 @@ inline void reset() noexcept {
     entry.last_result.store(0, std::memory_order_relaxed);
     for (auto& reason : entry.reasons) reason.store(0, std::memory_order_relaxed);
   }
+  std::lock_guard<std::mutex> lock(history_mutex());
+  history_entries() = {};
+  history_next_sequence() = 0;
+  history_count() = 0;
 }
 
 inline void increment_saturating(std::atomic<uint32_t>& value) noexcept {
@@ -118,7 +139,32 @@ inline int32_t record(Callback callback, int32_t result, Reason reason = Reason:
     increment_saturating(entry.failures);
     increment_saturating(entry.reasons[static_cast<std::size_t>(reason)]);
   }
+  {
+    std::lock_guard<std::mutex> lock(history_mutex());
+    const uint64_t sequence = history_next_sequence()++;
+    history_entries()[sequence % HISTORY_CAPACITY] =
+        {sequence, callback, result, reason};
+    if (history_count() < HISTORY_CAPACITY) ++history_count();
+  }
   return result;
+}
+
+inline std::string history_json() {
+  std::lock_guard<std::mutex> lock(history_mutex());
+  std::ostringstream out;
+  out << '[';
+  const uint64_t next = history_next_sequence();
+  const uint64_t first = next - history_count();
+  for (uint64_t sequence = first; sequence < next; ++sequence) {
+    if (sequence != first) out << ',';
+    const auto& entry = history_entries()[sequence % HISTORY_CAPACITY];
+    out << "{\"sequence\":" << entry.sequence << ",\"callback\":\""
+        << CALLBACK_NAMES[static_cast<std::size_t>(entry.callback)]
+        << "\",\"result\":" << entry.result << ",\"reason\":\""
+        << REASON_NAMES[static_cast<std::size_t>(entry.reason)] << "\"}";
+  }
+  out << ']';
+  return out.str();
 }
 
 inline std::string snapshot_json() {
@@ -151,7 +197,8 @@ inline std::string snapshot_json() {
 }
 
 inline std::string report_field_json() {
-  return ",\"callback_diagnostics\":" + snapshot_json();
+  return ",\"callback_diagnostics\":" + snapshot_json() +
+      ",\"callback_history\":" + history_json();
 }
 
 }  // namespace aexcompat::callback_diagnostics
