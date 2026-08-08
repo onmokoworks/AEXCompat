@@ -1,4 +1,5 @@
 #include "worker_aegp_compat_selftests.hpp"
+#include "worker_pf_suites_internal.hpp"
 #include "worker_parameter_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_mask_runtime.hpp"
@@ -1053,6 +1054,8 @@ bool verify_aegp_projector_levels() {
 bool verify_aegp_resizer_3d_chain() {
   const void* layer_suite = nullptr;
   const void* stream_suite = nullptr;
+  const void* stream_suite3 = nullptr;
+  const void* iterate_suite1 = nullptr;
   const void* comp_suite = nullptr;
   const void* comp_suite1 = nullptr;
   const void* item_suite = nullptr;
@@ -1079,6 +1082,14 @@ bool verify_aegp_resizer_3d_chain() {
       acquire_suite("AEGP Stream Suite", 7, &stream_suite) == 0 &&
       stream_suite == g_aegp_stream_suite2.data() &&
       g_aegp_stream_suite2[16] == reinterpret_cast<void*>(&aegp_get_layer_stream_value_v2) &&
+      acquire_suite("AEGP Stream Suite", 8, &stream_suite3) == 0 &&
+      stream_suite3 == g_aegp_stream_suite3.data() &&
+      g_aegp_stream_suite3[3] == reinterpret_cast<void*>(&aegp_get_new_layer_stream) &&
+      g_aegp_stream_suite3[12] == reinterpret_cast<void*>(&aegp_get_stream_type) &&
+      acquire_suite("AEGP Iterate Suite", 1, &iterate_suite1) == 0 &&
+      iterate_suite1 == g_aegp_iterate_suite1.data() &&
+      g_aegp_iterate_suite1[0] == reinterpret_cast<void*>(&aegp_get_num_threads) &&
+      g_aegp_iterate_suite1[1] == reinterpret_cast<void*>(&iterate_generic) &&
       acquire_suite("AEGP Comp Suite", 9, &comp_suite) == 0 &&
       comp_suite == g_aegp_comp_suite4.data() &&
       g_aegp_comp_suite4[1] == reinterpret_cast<void*>(&aegp_get_item_from_comp) &&
@@ -1274,6 +1285,8 @@ bool verify_aegp_resizer_3d_chain() {
   ok = release_suite("AEGP Item Suite", 10) == 0 && ok;
   ok = release_suite("AEGP Comp Suite", 4) == 0 && ok;
   ok = release_suite("AEGP Comp Suite", 9) == 0 && ok;
+  ok = release_suite("AEGP Iterate Suite", 1) == 0 && ok;
+  ok = release_suite("AEGP Stream Suite", 8) == 0 && ok;
   ok = release_suite("AEGP Stream Suite", 7) == 0 && ok;
   ok = release_suite("AEGP Layer Suite", 14) == 0 && ok;
   g_aegp_active_camera_layer_index = saved_camera_index;

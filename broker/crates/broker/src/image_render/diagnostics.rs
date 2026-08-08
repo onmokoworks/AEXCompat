@@ -716,6 +716,7 @@ fn worker_diagnostics(
         "suite_acquire_failures_truncated": suite_acquire_failures.1,
         "unsupported_suite_calls": [],
         "unsupported_suite_calls_truncated": false,
+        "callback_history": [],
         "suite_call_slot_probe": null,
         "suite_timeline": [],
         "suite_timeline_truncated": false,
@@ -961,6 +962,29 @@ fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Va
     }
     diagnostics["unsupported_suite_calls"] = Value::Array(calls);
     diagnostics["unsupported_suite_calls_truncated"] = Value::Bool(truncated);
+    let history = worker_report
+        .get("callback_history")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries.iter().rev().take(32).rev().filter_map(|entry| {
+                let sequence = entry.get("sequence")?.as_u64()?;
+                let callback = entry.get("callback")?.as_str()?;
+                let result = entry.get("result")?.as_i64()?;
+                let reason = entry.get("reason")?.as_str()?;
+                if callback.len() > 64 || reason.len() > 64 ||
+                    result < i32::MIN as i64 || result > i32::MAX as i64 {
+                    return None;
+                }
+                Some(json!({
+                    "sequence": sequence,
+                    "callback": callback,
+                    "result": result,
+                    "reason": reason,
+                }))
+            }).collect()
+        })
+        .unwrap_or_default();
+    diagnostics["callback_history"] = Value::Array(history);
 }
 
 fn probe_hex(value: &Value) -> Option<&str> {

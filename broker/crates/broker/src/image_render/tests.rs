@@ -2458,7 +2458,13 @@ mod tests {
 
         propagate_unsupported_suite_calls(
             &mut diagnostics,
-            &json!({"unsupported_suite_calls": reported}),
+            &json!({
+                "unsupported_suite_calls": reported,
+                "callback_history": [
+                    {"sequence": 4, "callback": "iterate", "result": 0, "reason": "none"},
+                    {"sequence": 5, "callback": "checkout_output", "result": 4, "reason": "invalid_arguments"}
+                ]
+            }),
         );
         let calls = diagnostics["unsupported_suite_calls"].as_array().unwrap();
         assert_eq!(calls.len(), MAX_UNSUPPORTED_SUITE_CALLS);
@@ -2475,6 +2481,8 @@ mod tests {
             1
         );
         assert!(!diagnostics.to_string().contains("private"));
+        assert_eq!(diagnostics["callback_history"].as_array().unwrap().len(), 2);
+        assert_eq!(diagnostics["callback_history"][1]["sequence"], 5);
     }
 
     #[test]

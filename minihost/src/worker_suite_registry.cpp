@@ -117,6 +117,8 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     case UnsupportedSuiteId::aegp_effect_3: return {"AEGP Effect Suite", 3};
     case UnsupportedSuiteId::aegp_stream_11: return {"AEGP Stream Suite", 11};
     case UnsupportedSuiteId::aegp_stream_7: return {"AEGP Stream Suite", 7};
+    case UnsupportedSuiteId::aegp_stream_8: return {"AEGP Stream Suite", 8};
+    case UnsupportedSuiteId::aegp_iterate_1: return {"AEGP Iterate Suite", 1};
     case UnsupportedSuiteId::aegp_keyframe_5: return {"AEGP Keyframe Suite", 5};
     case UnsupportedSuiteId::aegp_utility_5: return {"AEGP Utility Suite", 5};
     case UnsupportedSuiteId::aegp_utility_7: return {"AEGP Utility Suite", 7};
