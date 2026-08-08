@@ -2041,6 +2041,22 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   // So is a negative caller id.
   ok = ok && g_hooks.get_new_stream_value_v2(-1, amount, 1, &time, 1, &unused) != 0;
 
+  // A stream opened under an id and read under 0. This is what an
+  // unregistered plug-in does - it has no id of its own to give back, and 0
+  // is not a claim to be anyone - and requiring the read to name the open's
+  // id refused it, ending the frame DeepGlow2 had opened its matte stream to
+  // answer (issue #958). A different id is still refused, which is the half
+  // `verify_aegp_effect_stack` pins; without this half, restoring the strict
+  // rule leaves every self-test green.
+  void* under_seven = nullptr;
+  scene_runtime::AegpStreamValue borrowed{};
+  ok = ok && g_hooks.get_new_effect_stream_v2(7, effect, 1, &under_seven) == 0 &&
+      under_seven &&
+      g_hooks.get_new_stream_value_v2(8, under_seven, 1, &time, 1, &unused) != 0 &&
+      g_hooks.get_new_stream_value_v2(0, under_seven, 1, &time, 1, &borrowed) == 0;
+  ok = g_hooks.dispose_stream_value_v2(&borrowed) == 0 && ok;
+  ok = g_hooks.dispose_stream_v2(under_seven) == 0 && ok;
+
   // Disposing the effect handle does not change what its streams answer:
   // they outlive it, and the mark belongs to the instance.
   ok = ok && g_hooks.dispose_effect(effect) == 0 &&

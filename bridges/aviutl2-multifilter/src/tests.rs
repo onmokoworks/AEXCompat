@@ -3998,14 +3998,51 @@ mod tests {
     #[test]
     fn known_pf_errors_are_named_and_unknown_ones_are_not() {
         assert_eq!(pf_error_name(4), Some("PF_Err_OUT_OF_MEMORY"));
+        assert_eq!(pf_error_name(13), Some("A_Err_MISSING_SUITE"));
         assert_eq!(pf_error_name(512), Some("PF_Err_INTERNAL_STRUCT_DAMAGED"));
         assert_eq!(
             pf_error_name(518),
             Some("PF_Err_CANNOT_PARSE_KEYFRAME_TEXT")
         );
         assert_eq!(pf_error_name(0), None);
+        // A_Err's own ordinals are what a suite call answers, not a selector.
+        // Naming them here would label a plug-in's own small code as a host
+        // failure it never had.
+        assert_eq!(pf_error_name(2), None);
+        assert_eq!(pf_error_name(7), None);
+        assert_eq!(pf_error_name(12), None);
+        assert_eq!(pf_error_name(24), None);
         assert_eq!(pf_error_name(-3), None);
         assert_eq!(pf_error_name(519), None);
+    }
+
+    /// A sweep report names each plug-in twice, and both spellings are joined
+    /// on by something (issue #957): a basename, and a `/`-separated path
+    /// relative to the scan folder that tells two same-named AEX apart. The
+    /// separator is not the platform's, so a report written on Windows joins
+    /// against the same key anywhere.
+    #[test]
+    fn a_swept_plugin_is_named_by_basename_and_by_its_path_under_the_scan_folder() {
+        let root = PathBuf::from(r"C:\Plug-ins");
+        let nested = plugin_name(&root.join(r"Effects\Cyco\Glow.aex"), &[root.clone()]);
+        assert_eq!(nested.basename, "Glow.aex");
+        assert_eq!(nested.relative, "Effects/Cyco/Glow.aex");
+
+        // Same file name, different folder: the relative spelling separates
+        // them where the basename alone would collapse two rows into one.
+        let sibling = plugin_name(&root.join(r"Effects\Other\Glow.aex"), &[root.clone()]);
+        assert_eq!(sibling.basename, nested.basename);
+        assert_ne!(sibling.relative, nested.relative);
+
+        // Directly in the scan folder, and under no scan folder at all: both
+        // fall back to the file name rather than to an empty or absolute one.
+        assert_eq!(
+            plugin_name(&root.join("Glow.aex"), &[root.clone()]).relative,
+            "Glow.aex"
+        );
+        let foreign = plugin_name(Path::new(r"D:\Elsewhere\Glow.aex"), &[root]);
+        assert_eq!(foreign.relative, "Glow.aex");
+        assert_eq!(foreign.basename, "Glow.aex");
     }
 
     /// One line when the trouble starts, then one every

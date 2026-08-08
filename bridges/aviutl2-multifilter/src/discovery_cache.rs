@@ -1324,6 +1324,105 @@ struct Scan {
     limits: ScanLimits,
 }
 
+/// What the registration's folder resolution and scan saw, for a sweep that has
+/// to enumerate the same AEX the AviUtl2 registration would (issue #957).
+#[doc(hidden)]
+pub struct DiagnosticScan {
+    /// The folders scanned, after the env override / config / defaults order.
+    pub dirs: Vec<PathBuf>,
+    /// The AEX to sweep: every `*.aex` found, minus the configured `ignore`.
+    pub plugins: Vec<PathBuf>,
+    /// How many `*.aex` the walk saw in total, ignored ones included.
+    pub seen: usize,
+    /// The dependency search folders the discovery pass will admit.
+    pub dependency_dirs: Vec<PathBuf>,
+    /// Why this walk was not exhaustive, if it was not. A sweep that reports a
+    /// plug-in count has to carry this: an unreadable folder or a tree past
+    /// [`MAX_SCAN_DEPTH`] silently shrinks the denominator (issue #660).
+    pub incomplete_reason: Option<String>,
+}
+
+/// Resolves scan folders, ignore list and dependency folders exactly as
+/// `RegisterPlugin` does, then walks them (issue #957). `dirs`, when given,
+/// replaces the resolved folders and nothing else — a sweep aimed at one
+/// folder still honours the configured `ignore` and dependency folders, since
+/// those are what the registration it is measuring would apply.
+#[doc(hidden)]
+pub fn scan_for_diagnostics(dirs: Option<Vec<PathBuf>>) -> DiagnosticScan {
+    let config = load_config();
+    let (resolved, complete) = match dirs {
+        Some(dirs) => (dirs, true),
+        None => resolve_scan_dirs(&config),
+    };
+    let scan = collect_aex(&resolved, &config.ignore);
+    let mut limits = scan.limits;
+    limits.unresolved_root |= !complete;
+    DiagnosticScan {
+        dirs: resolved,
+        plugins: scan.plugins,
+        seen: scan.seen.len(),
+        dependency_dirs: resolve_dependency_config(&config).dirs,
+        incomplete_reason: limits.describe(),
+    }
+}
+
+/// How a sweep names one plug-in in its report (issue #957).
+#[doc(hidden)]
+pub struct PluginName {
+    /// The file name alone.
+    pub basename: String,
+    /// The path relative to the scan folder it was found under, joined with
+    /// `/`, so the same tree names the same plug-in the same way on any
+    /// machine and no absolute path is recorded.
+    ///
+    /// It is not unique on its own: two scan folders can each hold an
+    /// `Effects/Foo.aex`. [`PluginName::root`] says which one, kept beside it
+    /// rather than folded into it so a reader joining a path against a scan
+    /// folder still gets a path (`tools/aex_sweep_checkpoint.py` does exactly
+    /// that, and a prefixed spelling stops resolving).
+    pub relative: String,
+    /// Which scan folder `relative` is under, by index into the resolved list.
+    /// `None` when the plug-in was under none of them.
+    pub root: Option<usize>,
+}
+
+/// Names a plug-in relative to the scan folder it came from, which tells two
+/// same-named AEX in different folders apart without recording an absolute
+/// path. A plug-in under none of the folders keeps its file name alone.
+///
+/// The separator is `/` rather than the platform's: the report is meant to be
+/// shareable, and a reader joining on this must not have to know which host
+/// wrote it.
+#[doc(hidden)]
+pub fn plugin_name(plugin: &Path, roots: &[PathBuf]) -> PluginName {
+    let basename = plugin
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "?".to_owned());
+    let under = roots
+        .iter()
+        .enumerate()
+        .find_map(|(index, root)| Some((index, plugin.strip_prefix(root).ok()?)));
+    let relative = under
+        .map(|(_, relative)| {
+            relative
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(part) => Some(part.to_string_lossy()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .filter(|relative| !relative.is_empty())
+        .unwrap_or_else(|| basename.clone());
+    PluginName {
+        basename,
+        relative,
+        root: under.map(|(index, _)| index),
+    }
+}
+
 /// Recursively scans `dirs`. An incomplete scan (a folder that could not be read,
 /// a tree deeper than [`MAX_SCAN_DEPTH`]) must not be used to conclude an AEX is
 /// gone: pruning its cache entry would leave the effect unregistered on the next

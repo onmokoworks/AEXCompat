@@ -61,16 +61,29 @@ struct State {
   // unknown layer.
   int32_t param_count{};
   uint32_t empty_layer_param_checkouts{};
-  // The world handed back for one of those. A PF_EffectWorld is 120 bytes and
-  // all-zero is exactly an empty layer: no flags, null data, zero rowbytes,
-  // zero width and height, and an empty extent. Handing back null with
-  // PF_Err_NONE instead would invent a contract AE does not have - a plug-in
-  // that reads `world->width` after a successful checkout would fault, and
-  // that pattern is in the SDK samples. Owned by the state so its lifetime is
-  // the session's. Aligned like the worlds the render subsystem builds, whose
-  // buffers get natural alignment from where they live; a byte array beside
-  // two 32-bit members would not.
+  // The layer handed back for one of those: the session's own geometry with
+  // nothing in it. A layer parameter with no layer is transparent, not absent -
+  // that is what an unset matte or an unconnected second view composites as -
+  // so the answer is a real PF_EffectWorld the plug-in can measure, sample and
+  // copy, whose every pixel is zero.
+  //
+  // Allocated by the dispatch through the host's own new-world path, so the
+  // world registry owns it and every host callback resolves it. The two shapes
+  // tried before this each broke a real plug-in: a null pointer behind
+  // PF_Err_NONE, which 3DGlasses answers PF_Err_BAD_CALLBACK_PARAM to, and a
+  // 120-byte zeroed world describing a 0x0 layer, which DeepGlow2 answers
+  // PF_Err_INTERNAL_STRUCT_DAMAGED to. A hand-built full-size world fails too,
+  // for a host reason rather than a plug-in one: `PF_COPY` resolves its
+  // arguments through the registry and refuses a world the registry does not
+  // own (issues #958, #962).
   alignas(8) std::array<std::byte, 120> empty_layer_world{};
+  bool empty_layer_world_live{};
+  /// Allocates `empty_layer_world` through the host's own new-world path and
+  /// returns whether it did. Installed by the dispatch, which is the layer that
+  /// may reach the world registry; called on the first checkout that needs the
+  /// layer and not before, so a frame whose plug-in never asks for one pays
+  /// neither the allocation nor its share of the registry's budget.
+  bool (*allocate_empty_layer)(void* world_storage){};
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
   int32_t pixel_aspect_numerator{1};
