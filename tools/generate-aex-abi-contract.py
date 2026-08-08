@@ -395,8 +395,8 @@ def render_rust(data: dict[str, Any], source: Path) -> str:
         f"pub const {name}: usize = {value};" for name, value in constants(data)
     )
     tables = "\n".join(
-        f"pub const {table_name}: [usize; {len(field_names)}] = ["
-        + ", ".join(f"{ident(name)}_OFFSET" for name in field_names)
+        f"pub const {table_name}: [usize; {len(field_names)}] = [\n"
+        + "".join(f"    {ident(name)}_OFFSET,\n" for name in field_names)
         + "];"
         for table_name, field_names in CALLBACK_TABLES.items()
     )
