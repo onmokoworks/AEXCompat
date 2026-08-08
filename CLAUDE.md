@@ -132,22 +132,35 @@ and bounded image input/output are now the main implementation path.
 - The After Effects installation is an exclusive machine resource. Before any
   capture or aerender run, verify no AfterFX/aerender/aerendercore process is
   running; if one is, another session owns it — wait instead of killing it.
-- Every PR goes through the Codex review loop before merging. Post an
-  "@codex review" comment explicitly at PR creation AND after every new
-  commit. Opening a PR does fire an automatic first review, but when it finds
-  nothing that review signals clean only with a non-mergeable +1 reaction on
-  the PR body (no SHA-bound text comment; see PR #44), which the merge guard
-  will not accept. An explicit "@codex review" yields a SHA-bound "Didn't find
-  any major issues" text clean, so triggering from the start avoids waiting on
-  a reaction and re-triggering later. Address findings and repeat until Codex
-  replies that text clean for the latest commit, then merge; never merge
-  without it (the `codex-review-loop` skill automates this loop).
-- Repo-owner review comments (`onmokoworks`, `naari3`) outrank Codex and are
-  handled first: the owner catches issues Codex misses. Never merge while an
-  owner review comment on the PR is unresolved, even if Codex is clean —
-  address and reply first. Before every merge, re-check the PR for a newer
-  owner review or comment, since an owner review and a Codex "clean" can land
-  seconds apart.
+- Review happens locally, before the PR exists. Run a local agent review over
+  the working diff (`/code-review` or an equivalent adversarial agent pass),
+  fix what it finds, and re-run it on the amended diff. The loop ends when a
+  fresh review of the current diff leaves no finding you accepted unaddressed.
+  Judge each finding on its merits rather than obeying it; a finding you reject
+  goes in the PR body with its reason, since a local loop leaves no other trace
+  for the owner to check. Do not open the PR mid-loop, and do not skip a
+  re-review because "the fix was small": the regressions this catches are the
+  ones introduced while addressing an earlier finding.
+- Once the local loop is clean, open the PR. Do not request a bot review on it,
+  and do not reinstate a merge guard that gates on a bot verdict: no "@codex
+  review" comment, no review-loop skill. What that guard also carried (the
+  head-bound merge and the owner re-check below) stays. The PR-side gates are
+  CI and owner review.
+- Merge when CI is green on the PR head and no owner comment is unresolved. A
+  green run on an older head does not count; re-check after every push, and
+  merge with
+  `gh pr merge <PR> --merge --delete-branch --match-head-commit <the SHA CI went green on>`
+  so a push that lands between the check and the merge call fails the merge
+  instead of slipping in unverified. External failures (billing/usage limits,
+  runner outages) are not success: report them as blocked instead of merging.
+- Repo-owner review comments (`onmokoworks`, `naari3`) still outrank
+  everything. Never merge while an owner comment on the PR is unresolved, even
+  if CI is green. Resolution means the review thread is answered and marked
+  resolved; a comment that carries no reply thread (a top-level comment, or a
+  bodied COMMENTED review) is resolved by an explicit acknowledgement in a new
+  top-level comment. A later push and a later green CI run resolve nothing on
+  their own. Owner comments that predate your work block the merge too.
+  Re-check for a newer owner comment immediately before merging.
 
 ## Canonical Verification
 

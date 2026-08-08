@@ -27,7 +27,7 @@
 
 ## 2. 一件一worktree・一件一PR
 
-1. 通常は現在のmain/作業branchで作業してよい。ただし無関係な未コミット変更がある、危険なrebase/buildを伴う、別作業との同時実行が必要、またはユーザーが指定した場合は、`AEXCompat-issue<N>-<slug>` worktreeと `codex/issue<N>-<slug>` branchへ隔離する。
+1. 通常は現在のmain/作業branchで作業してよい。ただし無関係な未コミット変更がある、危険なrebase/buildを伴う、別作業との同時実行が必要、またはユーザーが指定した場合は、`AEXCompat-issue<N>-<slug>` worktreeと `issue<N>-<slug>` branchへ隔離する。
 2. 既存のユーザー変更をrevert、reset、checkout、clean、上書きしない。
 3. 一つのIssueに対する変更、テスト、docsを一つのPRにまとめる。無関係なリファクタや別Issueの修正を混ぜない。
 4. claimしたIssueを実装したPRは必ず `Closes #N` とする。`Refs #M` は依存Issue・関連Issueにだけ使い、claim対象の代用にしない。PR本文は `\n` という文字列を本文生成に渡さず、実改行で書く。
@@ -45,12 +45,13 @@
 
 ## 4. Review / CI / merge gate
 
-1. PRの全review threadを取得し、`isResolved` とoutdatedを確認する。未解決のP1/P2、owner指摘、Codex指摘が一つでもあればmergeしない。
-2. latest headに対するCodex reviewとowner reviewを確認する。古いheadのcleanを新headのcleanとみなさない。
-3. ~~GitHub Actionsがgreenになるまでmergeしない。課金制限、usage limit、runner不調などの外部障害はコードの成功と混同せず、明示的にblockedとして報告する。~~ 現状 billing limit によりCIが回らないため、修正されるまでCIは確認しない。
-4. CI失敗を修正する場合は、まずログとannotationで根因を確認し、承認された小さな修正だけを行う。
-5. 新規・更新テストが製品ソースを読み、特定の識別子・コメント・式のsubstringだけをassertしている場合は、behavioral evidenceとして受理しない。凍結evidence・schema・workflow自体のcontract検査を例外とする場合はPR本文で理由を明示する。self-testが固定のsuccess JSONを返し、外側がそれを照合するだけでは不十分で、具体的な出力・状態遷移・失敗条件または代表的mutationを検出できることを確認する。
-6. merge後に次のIssueへ進む。merge前の別Issue着手は禁止。
+1. レビューはPRを開く前にローカルで完結させる。作業diffにローカルのエージェントレビューをかけ、指摘に対応し、修正後のdiffへ再度かける。指摘は妥当性を自分で判断し、盲従しない。**受理した未対応の指摘がゼロ**になるまでこのループを抜けず、PRはループを抜けてから開く。却下した指摘は理由とともにPR本文へ書く。ローカルループはPRに痕跡を残さないので、これが無いとownerがレビューの有無を検証できない。
+2. PRにbotレビューを要求しない。`@codex review` コメント、レビューループskill、そしてbotのverdictをmerge条件にするmerge guardは廃止済みで復活させない。廃止したのはbot verdictのゲートであって、guardが併せ持っていたhead拘束 (下のmerge手順) とownerの再確認 (次項) は規律として残る。PR側のゲートはCIとownerレビューだけである。
+3. PRの全review threadを取得し、`isResolved` とoutdatedを確認する。未解決のowner指摘が一つでもあればCIがgreenでもmergeしない。解決とは「返信した上でthreadをresolveした」ことを指す。返信threadを持たないownerコメント (top-levelコメント、本文付きCOMMENTEDレビュー) は、新規のtop-levelコメントで明示的にackして解決する。**後続のpushも後続のCI greenもowner指摘を解決しない**。着手前から存在する未対応のownerコメントも同様にmergeをblockする。merge直前にownerの新しいコメントが無いか再確認する。
+4. 前項のownerゲートを満たした上で、GitHub Actionsがlatest headでgreenになるまでmergeしない。古いheadのgreenを新headのgreenとみなさない。mergeは `gh pr merge <PR> --merge --delete-branch --match-head-commit <greenになったSHA>` で行い、確認からmerge呼び出しの間に入ったpushでmergeが失敗するようにする。課金制限、usage limit、runner不調などの外部障害はコードの成功と混同せず、明示的にblockedとして報告する。
+5. CI失敗を修正する場合は、まずログとannotationで根因を確認し、承認された小さな修正だけを行う。
+6. 新規・更新テストが製品ソースを読み、特定の識別子・コメント・式のsubstringだけをassertしている場合は、behavioral evidenceとして受理しない。凍結evidence・schema・workflow自体のcontract検査を例外とする場合はPR本文で理由を明示する。self-testが固定のsuccess JSONを返し、外側がそれを照合するだけでは不十分で、具体的な出力・状態遷移・失敗条件または代表的mutationを検出できることを確認する。
+7. merge後に次のIssueへ進む。merge前の別Issue着手は禁止。
 
 ## 5. 定期的な棚卸し
 
@@ -79,4 +80,3 @@
 - Issue番号、PR番号、branch名、blocked理由などの時限情報をこのファイルに固定しない。
 - 現在の正本は、棚卸し時点のGitHub状態とユーザーが指定した対象である。
 - 主worktreeの既存未コミット変更を保全する必要がある場合は、開始時のstatusで確認し、必要なら隔離worktreeを選ぶ。
-~~
