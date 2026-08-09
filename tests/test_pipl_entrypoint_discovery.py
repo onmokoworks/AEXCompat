@@ -44,6 +44,7 @@ def test_native_plugin_data_self_test_passes_all_effect_workers(name):
         "plugin_data_entrypoint": "passed",
         "v2": True,
         "v1_fallback": True,
+        "multi_effect": True,
         "bounded": True,
         "fail_closed": True,
     }

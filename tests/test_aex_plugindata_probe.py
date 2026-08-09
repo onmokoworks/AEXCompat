@@ -49,73 +49,75 @@ def _result(registrations, **overrides):
     return base
 
 
-def test_arithmetic_like_registration_fails_api_version_and_reserved():
-    # Arithmetic.aex registers api 13.29 with reserved 0 (observed).
+def test_arithmetic_like_registration_passes_current_worker_rules():
+    # Arithmetic.aex registers api 13.29 with reserved 0 (observed); the worker
+    # accepts 13.29 and does not validate reserved_info (issue #326).
     verdict = probe.worker_verdict(_result([_registration()]))
-    assert not verdict["accepted"]
-    assert set(verdict["reasons"]) == {"api_version", "reserved_info"}
+    assert verdict["accepted"]
+    assert verdict["reasons"] == []
 
 
-def test_cycore_like_registration_passes_current_worker_rules():
-    # CycoreFXHD/Threshold.aex registers api 13.28 with reserved 8 (observed),
-    # the only combination the current worker accepts.
+def test_bundle_registering_api_13_29_is_accepted():
+    # The AE2026 bundle (VR*, Fast_Blur, Sharpen) registers 13.29.
     verdict = probe.worker_verdict(
-        _result([_registration(api_minor=28, reserved_info=8, entrypoint="MainEntry")])
+        _result([_registration(api_minor=29, reserved_info=8, entrypoint="MainEntry")])
     )
     assert verdict["accepted"]
     assert verdict["reasons"] == []
 
 
-def test_multiple_callbacks_are_rejected():
-    # Effects/Threshold.aex registers twice (EffectMainExtra/2, observed).
-    verdict = probe.worker_verdict(_result([_registration(), _registration()]))
-    assert not verdict["accepted"]
-    assert "callback_count" in verdict["reasons"]
+def test_multi_effect_bundle_is_accepted_first_wins():
+    # Fast_Blur registers twice (EffectMainExtra / EffectMainExtra2); the worker
+    # keeps the first and accepts the rest (issue #326).
+    verdict = probe.worker_verdict(
+        _result([
+            _registration(entrypoint="EffectMainExtra"),
+            _registration(entrypoint="EffectMainExtra2"),
+        ])
+    )
+    assert verdict["accepted"]
+    assert verdict["reasons"] == []
 
 
-def test_zero_callbacks_are_rejected():
+def test_zero_registrations_are_rejected():
     verdict = probe.worker_verdict(_result([]))
     assert not verdict["accepted"]
-    assert "callback_count" in verdict["reasons"]
+    assert "no_registration" in verdict["reasons"]
 
 
-def test_reserved_values_seen_in_the_wild_are_each_scored():
-    # Observed reserved values: 0 (155), 1 (24), 8 (31), 9 (5).
-    for reserved in (0, 1, 9):
-        verdict = probe.worker_verdict(
-            _result([_registration(api_minor=28, reserved_info=reserved)])
-        )
-        assert verdict["reasons"] == ["reserved_info"]
-    verdict = probe.worker_verdict(_result([_registration(api_minor=28, reserved_info=8)]))
-    assert verdict["accepted"]
+def test_reserved_values_seen_in_the_wild_are_not_scored():
+    # Observed reserved values: 0, 1, 8, 9 - none is validated by the worker.
+    for reserved in (0, 1, 8, 9):
+        verdict = probe.worker_verdict(_result([_registration(reserved_info=reserved)]))
+        assert verdict["accepted"], reserved
 
 
 def test_api_version_boundary_matches_worker_cap():
-    # The worker accepts api <= 13.28 only.
+    # The worker accepts api <= 13.29.
     assert probe.worker_verdict(
-        _result([_registration(api_major=12, api_minor=99, reserved_info=8)])
+        _result([_registration(api_major=12, api_minor=99)])
     )["accepted"]
     assert probe.worker_verdict(
-        _result([_registration(api_minor=28, reserved_info=8)])
+        _result([_registration(api_minor=29)])
     )["accepted"]
     assert "api_version" in probe.worker_verdict(
-        _result([_registration(api_minor=29, reserved_info=8)])
+        _result([_registration(api_minor=30)])
     )["reasons"]
     assert "api_version" in probe.worker_verdict(
-        _result([_registration(api_major=14, api_minor=0, reserved_info=8)])
+        _result([_registration(api_major=14, api_minor=0)])
     )["reasons"]
 
 
 def test_non_effect_kind_is_rejected():
     verdict = probe.worker_verdict(
-        _result([_registration(kind_code="AEgx", api_minor=28, reserved_info=8)])
+        _result([_registration(kind_code="AEgx")])
     )
     assert "kind" in verdict["reasons"]
 
 
 def test_unexported_entrypoint_symbol_is_rejected():
     verdict = probe.worker_verdict(
-        _result([_registration(api_minor=28, reserved_info=8)], entrypoint_exported=False)
+        _result([_registration()], entrypoint_exported=False)
     )
     assert verdict["reasons"] == ["entrypoint_not_exported"]
 
