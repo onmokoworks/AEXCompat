@@ -153,10 +153,15 @@ bool bounded_typed_world(void* world, int32_t pixel_bytes,
   // back with world_flags 0x02000000 (bit 0 clear) - so requiring the DEEP bit
   // for a float iterate rejected a valid AE float world and failed the callback
   // with missing_world (issue #1035, observed on Cartoon's iterateFloat). Keep
-  // the 8-vs-16 distinction on the DEEP bit; accept float regardless of it. A
-  // float walk's buffer safety comes from the rowbytes >= width * 16 guarantee
-  // below, which no 8- or 16-bit buffer (rowbytes width*4 / width*8) can satisfy,
-  // so only genuinely float-sized worlds ever reach the float branch.
+  // the 8-vs-16 distinction on the DEEP bit; accept float regardless of it.
+  // Dropping the bit does not weaken buffer safety: that never came from the
+  // DEEP bit (this function cannot see the real allocation) but from the
+  // rowbytes >= width * pixel_bytes and rowbytes <= 4096 * 16 bounds below,
+  // which cap every per-row walk at the declared stride for the whole declared
+  // height. A caller that passes a shallower world to the float suite (its own
+  // pixel_bytes choice) is read at its declared stride, in bounds, just with
+  // the wrong depth semantics - the same latitude the pre-change code gave an
+  // 8-bit world handed to the 8-bit suite.
   const bool depth_matches = pixel_bytes == 4 ? (flags & 1) == 0
       : pixel_bytes == 8 ? (flags & 1) != 0 : true;
   return pixels && (pixel_bytes == 4 || pixel_bytes == 8 || pixel_bytes == 16) &&
