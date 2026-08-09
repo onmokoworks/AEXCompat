@@ -38,7 +38,12 @@ void probe_arbitrary_scan(EffectEntry, BufferIn&, BufferOut&, Definitions&);
 bool interpolate_arbitrary_values(EffectEntry, BufferIn&, BufferOut&, Definitions&);
 bool roundtrip_arbitrary_values(EffectEntry, BufferIn&, BufferOut&, Definitions&);
 bool validate_requested_assignments(const parameters::RequestedAssignments&);
-void initialize_parameter_definitions(Definitions&);
+// layer_width/height convert POINT/POINT_3D percentage defaults to pixels, per
+// the SDK's PF_PointDef contract (`x_dephault` is "percentage of layer width").
+// Zero (the default, used by the audio/UI paths that render no point) keeps the
+// raw value, preserving those untested paths (issue #326-adjacent, #1061 chain).
+void initialize_parameter_definitions(Definitions&, int32_t layer_width = 0,
+                                      int32_t layer_height = 0);
 bool apply_requested_assignments(Definitions&,
                                  const parameters::RequestedAssignments&);
 double requested_value(const parameters::RequestedAssignments&, const wchar_t*);
