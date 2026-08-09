@@ -2503,6 +2503,54 @@ mod tests {
     }
 
     #[test]
+    fn callback_denials_are_unique_and_identifier_shape_checked() {
+        let trace = "stage:callback_denied callback=transform_world reason=transfer_mode value=2\n\
+             stage:callback_denied callback=transform_world reason=transfer_mode value=2\n\
+             stage:callback_denied callback=transform_world reason=transfer_mode value=-3\n\
+             stage:callback_denied callback=transform_world reason=transfer_mode\n\
+             stage:callback_denied callback=transform_world reason=extent_over_4096\n\
+             stage:callback_denied callback=transform_world reason=C:\\private\\x\n\
+             stage:callback_denied callback=Transform reason=transfer_mode\n\
+             stage:callback_denied reason=transfer_mode callback=transform_world\n\
+             stage:callback_denied callback=transform_world reason=ok value=oops\n\
+             stage:callback_denied callback=transform_world reason=ok value=99999999999\n\
+             stage:callback_denied callback=transform_world reason=ok value=1 extra=1\n\
+             stage:callback_denied callback=transform_world\n";
+        let diagnostics = worker_diagnostics(trace, false, "nonzero_exit", 1, 2);
+        let denials = diagnostics["callback_denials"].as_array().unwrap();
+        assert_eq!(
+            denials,
+            &[
+                json!({"callback": "transform_world", "reason": "transfer_mode", "value": 2}),
+                json!({"callback": "transform_world", "reason": "transfer_mode", "value": -3}),
+                json!({"callback": "transform_world", "reason": "transfer_mode"}),
+                json!({"callback": "transform_world", "reason": "extent_over_4096"}),
+            ]
+        );
+        assert_eq!(diagnostics["callback_denials_truncated"], true);
+        assert!(!diagnostics.to_string().contains("private"));
+        assert!(diagnostics["stage_events"].as_array().unwrap().is_empty());
+        assert_eq!(diagnostics["failure_stage"], Value::Null);
+    }
+
+    #[test]
+    fn callback_denials_cap_reports_truncation_without_malformed_lines() {
+        let mut trace = String::new();
+        for index in 0..(MAX_CALLBACK_DENIALS + 3) {
+            trace.push_str(&format!(
+                "stage:callback_denied callback=transform_world reason=reason_{index}\n"
+            ));
+        }
+        let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+        assert_eq!(
+            diagnostics["callback_denials"].as_array().unwrap().len(),
+            MAX_CALLBACK_DENIALS
+        );
+        assert_eq!(diagnostics["callback_denials_truncated"], true);
+        assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
+    }
+
+    #[test]
     fn callback_addr_denials_cap_reports_truncation_without_malformed_lines() {
         let mut trace = String::new();
         for index in 0..(MAX_CALLBACK_ADDR_DENIALS + 3) {

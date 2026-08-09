@@ -779,15 +779,46 @@ bool verify_copy_world_clipping() {
   return ok;
 }
 
+namespace {
+
+// Answers a refused TRANSFORM_WORLD naming the condition that refused it.
+// The numeric 516 alone cannot: this function refuses for a dozen reasons, and
+// a plug-in that passes the answer through as its frame error (Tile, issue
+// #995) was attributable only by rebuilding the worker with prints. Always on,
+// like `stage:callback_addr_denied`; every reason is a lower-case identifier,
+// which is the shape the broker's parser vouches for.
+int32_t transform_world_denied(const char* reason) {
+  std::cerr << "stage:callback_denied callback=transform_world reason=" << reason
+            << "\n" << std::flush;
+  return kPfErrBadCallbackParam;
+}
+
+// For a check where one scalar is the whole story - which transfer mode, how
+// many matrices - the marker carries the value the plug-in passed. The value
+// is plug-in-authored, so it rides in a numeric-only field the broker's
+// parser range-checks against the emitted C types, never in the identifier.
+int32_t transform_world_denied(const char* reason, int64_t value) {
+  std::cerr << "stage:callback_denied callback=transform_world reason=" << reason
+            << " value=" << value << "\n" << std::flush;
+  return kPfErrBadCallbackParam;
+}
+
+}  // namespace
+
 int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode_flags,
                                 int32_t field,
                                 const void* source_world, const void* composite_mode,
                                 const void* mask_world, const void* matrices,
                                 int32_t matrix_count, uint8_t source_to_destination,
                                 const LegacyRect* destination_rect, void* destination_world) {
-  if (!effect_ref || !source_world || !composite_mode || !matrices ||
-      matrix_count != 1 || source_to_destination > 1 || quality < 0 || quality > 1 ||
-      mode_flags > 1 || field < 0 || field > 2) return kPfErrBadCallbackParam;
+  if (!effect_ref || !source_world || !composite_mode || !matrices)
+    return transform_world_denied("null_argument");
+  if (matrix_count != 1) return transform_world_denied("matrix_count", matrix_count);
+  if (source_to_destination > 1)
+    return transform_world_denied("source_to_destination_flag");
+  if (quality < 0 || quality > 1) return transform_world_denied("quality_range", quality);
+  if (mode_flags > 1) return transform_world_denied("mode_flags_range", mode_flags);
+  if (field < 0 || field > 2) return transform_world_denied("field_range", field);
   int32_t transfer_mode{};
   uint8_t opacity{}, rgb_only{};
   uint16_t opacity16{};
@@ -795,31 +826,36 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
   std::memcpy(&opacity, static_cast<const std::byte*>(composite_mode) + 8, sizeof(opacity));
   std::memcpy(&rgb_only, static_cast<const std::byte*>(composite_mode) + 9, sizeof(rgb_only));
   std::memcpy(&opacity16, static_cast<const std::byte*>(composite_mode) + 10, sizeof(opacity16));
-  if (transfer_mode != 0 || rgb_only > 1 || opacity16 > 32768)
-    return kPfErrBadCallbackParam;
+  if (transfer_mode != 0) return transform_world_denied("transfer_mode", transfer_mode);
+  if (rgb_only > 1) return transform_world_denied("rgb_only_range");
+  if (opacity16 > 32768) return transform_world_denied("opacity16_range", opacity16);
   std::array<double, 9> matrix{};
   std::memcpy(matrix.data(), matrices, sizeof(matrix));
   if (!std::all_of(matrix.begin(), matrix.end(),
                    [](double value) { return std::isfinite(value); }))
-    return kPfErrBadCallbackParam;
+    return transform_world_denied("matrix_not_finite");
   DispatchWorldFormat source_info{}, destination_info{};
-  if (!resolve_dispatch_world_format(source_world, source_info) ||
-      !resolve_dispatch_world_format(destination_world, destination_info) ||
-      source_info.pixel_format != destination_info.pixel_format)
-    return kPfErrBadCallbackParam;
+  if (!resolve_dispatch_world_format(source_world, source_info))
+    return transform_world_denied("source_world_unresolved");
+  if (!resolve_dispatch_world_format(destination_world, destination_info))
+    return transform_world_denied("destination_world_unresolved");
+  if (source_info.pixel_format != destination_info.pixel_format)
+    return transform_world_denied("pixel_format_mismatch");
   const int32_t pixel_bytes = source_info.pixel_format == kPixelFormatArgb32 ? 4 :
       (source_info.pixel_format == kPixelFormatArgb64 ? 8 :
        (source_info.pixel_format == kPixelFormatArgb128 ? 16 : 0));
-  if (!pixel_bytes || source_info.width > 4096 || source_info.height > 4096 ||
-      destination_info.width > 4096 || destination_info.height > 4096 ||
-      source_info.rowbytes < static_cast<int64_t>(source_info.width) * pixel_bytes ||
+  if (!pixel_bytes) return transform_world_denied("pixel_format_unknown");
+  if (source_info.width > 4096 || source_info.height > 4096 ||
+      destination_info.width > 4096 || destination_info.height > 4096)
+    return transform_world_denied("extent_over_4096");
+  if (source_info.rowbytes < static_cast<int64_t>(source_info.width) * pixel_bytes ||
       destination_info.rowbytes < static_cast<int64_t>(destination_info.width) * pixel_bytes)
-    return kPfErrBadCallbackParam;
+    return transform_world_denied("rowbytes_underrun");
   const double determinant = matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7]) -
       matrix[1] * (matrix[3] * matrix[8] - matrix[5] * matrix[6]) +
       matrix[2] * (matrix[3] * matrix[7] - matrix[4] * matrix[6]);
   if (source_to_destination && std::abs(determinant) < 1e-12)
-    return kPfErrBadCallbackParam;
+    return transform_world_denied("matrix_singular");
   std::array<double, 9> sampling_matrix = matrix;
   if (source_to_destination) {
     sampling_matrix = {{
@@ -847,7 +883,7 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
   LegacyRect bounds{};
   if (!normalize_legacy_rect(destination_rect, destination_info.width,
                              destination_info.height, bounds))
-    return kPfErrBadCallbackParam;
+    return transform_world_denied("destination_rect_invalid");
   const std::size_t packed_row = static_cast<std::size_t>(source_info.width) * pixel_bytes;
   std::vector<unsigned char> source_copy, mask_copy;
   int32_t mask_rowbytes{}, mask_width{}, mask_height{}, mask_offset_x{}, mask_offset_y{};
@@ -866,7 +902,7 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
       std::memcpy(&mask_flags, mask_bytes + kEffectWorldSize + 8, sizeof(mask_flags));
       if (!mask_data || mask_width <= 0 || mask_height <= 0 || mask_width > 4096 ||
           mask_height > 4096 || mask_rowbytes < static_cast<int64_t>(mask_width) * pixel_bytes ||
-          (mask_flags & ~3u) != 0) return kPfErrBadCallbackParam;
+          (mask_flags & ~3u) != 0) return transform_world_denied("mask_invalid");
       const std::size_t mask_packed_row = static_cast<std::size_t>(mask_width) * pixel_bytes;
       mask_copy.resize(mask_packed_row * mask_height);
       for (int32_t y = 0; y < mask_height; ++y)
