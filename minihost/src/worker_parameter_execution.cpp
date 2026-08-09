@@ -642,7 +642,20 @@ bool validate_requested_assignments(const parameters::RequestedAssignments& requ
 }
 
 void initialize_parameter_definitions(
-    std::vector<std::array<std::byte, parameters::kDefinitionSize>>& definitions) {
+    std::vector<std::array<std::byte, parameters::kDefinitionSize>>& definitions,
+    int32_t layer_width, int32_t layer_height) {
+  // A POINT/POINT_3D default is a percentage of the layer size (SDK
+  // PF_PointDef `x_dephault` /* percentage */); the value the plug-in reads
+  // (`x_value`) is in pixels. Convert here so an effect that derives geometry
+  // from a corner default - Corner Pin's 100% corner, Bezier Warp's control
+  // points - sees the layer's actual extent rather than the raw percentage
+  // read as pixels (issue #326 chain: Corner Pin returned a 100x100 FRAME_SETUP
+  // extent for a 256x144 layer). Zero dims keep the raw percentage for the
+  // point-less audio/UI paths.
+  const auto point_pixels = [&](double percent, int32_t extent) {
+    return layer_width > 0 && layer_height > 0
+        ? percent / 100.0 * extent : percent;
+  };
   for (std::size_t i = 0; i < runtime().records.size(); ++i) {
     definitions[i + 1] = runtime().records[i].raw;
     if (runtime().records[i].type == 0)
@@ -659,11 +672,24 @@ void initialize_parameter_definitions(
     else if (runtime().records[i].type == 3)
       write<int32_t>(definitions[i + 1], 56, static_cast<int32_t>(std::round(runtime().records[i].default_components[0] * 65536.0)));
     else if (runtime().records[i].type == 6) {
-      write<int32_t>(definitions[i + 1], 56, static_cast<int32_t>(std::round(runtime().records[i].default_components[0] * 65536.0)));
-      write<int32_t>(definitions[i + 1], 60, static_cast<int32_t>(std::round(runtime().records[i].default_components[1] * 65536.0)));
-    } else if (runtime().records[i].type == 18)
+      // Fixed (16.16) pixels: clamp to the same +/-32768 pixel range the point
+      // override path parses (worker_l2_payload_parsers) so a pathological
+      // percentage scaled by the extent cannot overflow the int32 value.
+      const auto to_fixed = [](double pixels) {
+        return static_cast<int32_t>(
+            std::round(std::clamp(pixels, -32768.0, 32767.0) * 65536.0));
+      };
+      write<int32_t>(definitions[i + 1], 56,
+          to_fixed(point_pixels(runtime().records[i].default_components[0], layer_width)));
+      write<int32_t>(definitions[i + 1], 60,
+          to_fixed(point_pixels(runtime().records[i].default_components[1], layer_height)));
+    } else if (runtime().records[i].type == 18) {
+      // x is % of width, y and z are both % of _height_ (SDK PF_Point3DDef).
+      const std::array<int32_t, 3> extents{layer_width, layer_height, layer_height};
       for (int component = 0; component < 3; ++component)
-        write<double>(definitions[i + 1], 56 + component * 8, runtime().records[i].default_components[component]);
+        write<double>(definitions[i + 1], 56 + component * 8,
+            point_pixels(runtime().records[i].default_components[component], extents[component]));
+    }
     else if (runtime().records[i].type == 12) {
       const int32_t index = static_cast<int32_t>(runtime().records[i].default_value);
       int32_t mask_id = 0;

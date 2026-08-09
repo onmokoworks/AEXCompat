@@ -699,7 +699,12 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     hosted_worlds.resize(external_layers->size());
   }
   std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
-  initialize_parameter_definitions(definitions);
+  // POINT/POINT_3D defaults are percentages of the layer size (SDK
+  // PF_PointDef); the input world's extent is what turns them into pixels.
+  initialize_parameter_definitions(
+      definitions,
+      read<int32_t>(input_world, aexcompat::abi::x86_64_windows::LAYER_WIDTH_OFFSET),
+      read<int32_t>(input_world, aexcompat::abi::x86_64_windows::LAYER_HEIGHT_OFFSET));
   if (!initialize_arbitrary_values(entry, input, command_output, definitions)) return -5;
   ArbitraryValuesScope arbitrary_scope{entry, &input, &command_output, &definitions};
   if (requested && !apply_arbitrary_text_assignments(entry, input, command_output, definitions, *requested)) return -5;
@@ -1076,7 +1081,10 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       g_params.size() + 1, external_layers ? external_layers->size() : 0);
   auto& definitions = parameter_state.definitions;
   std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
-  initialize_parameter_definitions(definitions);
+  initialize_parameter_definitions(
+      definitions,
+      read<int32_t>(input_world, aexcompat::abi::x86_64_windows::LAYER_WIDTH_OFFSET),
+      read<int32_t>(input_world, aexcompat::abi::x86_64_windows::LAYER_HEIGHT_OFFSET));
   if (!initialize_arbitrary_values(entry, input, command_output, definitions)) return result;
   ArbitraryValuesScope arbitrary_scope{entry, &input, &command_output, &definitions};
   if (!aexcompat::worker_runtime::smart_setup::prepare_parameters(
