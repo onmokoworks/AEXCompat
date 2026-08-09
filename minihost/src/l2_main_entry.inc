@@ -322,7 +322,8 @@ int32_t __cdecl timeline_get_audio_data(
 int32_t utility_callback_result(aexcompat::callback_diagnostics::Callback callback,
                                 int32_t result,
                                 aexcompat::callback_diagnostics::Reason failure_reason =
-                                    aexcompat::callback_diagnostics::Reason::CallbackError) {
+                                    aexcompat::callback_diagnostics::Reason::CallbackError,
+                                const std::string& detail = {}) {
   using aexcompat::callback_diagnostics::Reason;
   const auto reason = result == 0 ? Reason::None : failure_reason;
   aexcompat::callback_diagnostics::record(callback, result, reason);
@@ -336,6 +337,7 @@ int32_t utility_callback_result(aexcompat::callback_diagnostics::Callback callba
                 << aexcompat::callback_diagnostics::REASON_NAMES[
                        static_cast<std::size_t>(reason)]
                 << ')';
+    if (!detail.empty()) std::cerr << ' ' << detail;
     std::cerr << '\n' << std::flush;
   }
   return result;
@@ -455,10 +457,27 @@ int32_t __cdecl diag_get_callback_addr(void* effect_ref, int32_t quality,
   // their directly instrumented implementations.
   if (result == 0 && callback && id == 9)
     *callback = reinterpret_cast<void*>(&diag_copy_world);
+  std::string request_text;
+  if (result != 0 || extended_diag_enabled()) {
+    std::ostringstream request;
+    request << "id=" << id << " quality=" << quality << " mode=" << mode_flags;
+    request_text = request.str();
+  }
+  if (result != 0 && callback) {
+    // Which callback id was refused, always on like
+    // `stage:suite_acquire_failed`: on a frame that fails with 516 this is the
+    // whole diagnosis, and without it the requested id is recoverable only by
+    // disassembling the plug-in (issue #985, Bulge asking for id -5). A null
+    // out pointer is excluded: that refusal is the plug-in's own argument bug,
+    // and recording its id would file a capability gap against a callback the
+    // host may well implement.
+    std::cerr << "stage:callback_addr_denied " << request_text << "\n" << std::flush;
+  }
   return utility_callback_result(aexcompat::callback_diagnostics::Callback::GetCallbackAddr,
       result,
       !callback ? aexcompat::callback_diagnostics::Reason::InvalidArguments
-                : aexcompat::callback_diagnostics::Reason::Unsupported);
+                : aexcompat::callback_diagnostics::Reason::Unsupported,
+      request_text);
 }
 int32_t __cdecl diag_get_platform_data(void* effect_ref, int32_t which, void* data) {
   return utility_callback_result(aexcompat::callback_diagnostics::Callback::PlatformData,

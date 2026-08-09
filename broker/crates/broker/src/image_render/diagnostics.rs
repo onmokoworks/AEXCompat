@@ -637,6 +637,7 @@ fn worker_diagnostics(
     let mut minidump: Option<String> = None;
     let load_failure = load_failure_marker(stderr, exit_code);
     let mut suite_acquire_failures = suite_acquire_failures(stderr);
+    let mut callback_addr_denials = callback_addr_denials(stderr);
 
     for line in stderr.lines() {
         plugin_kind = plugin_kind.or_else(|| match line.trim() {
@@ -752,6 +753,13 @@ fn worker_diagnostics(
         // plug-in could not acquire was reaching nobody (issue #957).
         "suite_acquire_failures": Value::Array(std::mem::take(&mut suite_acquire_failures.0)),
         "suite_acquire_failures_truncated": suite_acquire_failures.1,
+        // The utility `get_callback_addr` requests the worker refused, read off
+        // its `stage:callback_addr_denied` lines the same way. A refused id is
+        // what a `frame_error:516` frame otherwise cannot attribute: the
+        // plug-in answers PF_Err_BAD_CALLBACK_PARAM and says nothing, and the
+        // requested id was recoverable only by disassembly (issue #985).
+        "callback_addr_denials": Value::Array(std::mem::take(&mut callback_addr_denials.0)),
+        "callback_addr_denials_truncated": callback_addr_denials.1,
         "unsupported_suite_calls": [],
         "unsupported_suite_calls_truncated": false,
         "callback_history": [],
@@ -820,6 +828,66 @@ fn suite_acquire_failures(stderr: &str) -> (Vec<Value>, bool) {
         .map(|(name, version)| json!({ "name": name, "version": version }))
         .collect();
     (failures, truncated)
+}
+
+/// How many distinct refused `get_callback_addr` requests a single run may
+/// report. One id per call site is the observed shape; the bound exists so a
+/// plug-in probing ids in a loop cannot grow the diagnostic without bound.
+const MAX_CALLBACK_ADDR_DENIALS: usize = 32;
+
+/// The utility `get_callback_addr` requests the worker refused, from its
+/// `stage:callback_addr_denied` lines, and whether the list was cut short.
+/// Deduplicated on (id, quality, mode): a plug-in that retries the same
+/// request every frame would otherwise fill the list with one fact.
+///
+/// stderr is mixed worker/plug-in output, so the line is held to the exact
+/// shape the worker emits - three named integer fields and nothing else.
+/// Anything that does not parse is dropped and flagged rather than passed
+/// through, for the same reason `suite_acquire_failures` does it: a value
+/// this cannot vouch for must not reach a shareable report.
+fn callback_addr_denials(stderr: &str) -> (Vec<Value>, bool) {
+    let mut denials: Vec<(i64, i64, i64)> = Vec::new();
+    let mut truncated = false;
+    for line in stderr.lines() {
+        let Some(body) = line.trim().strip_prefix("stage:callback_addr_denied ") else {
+            continue;
+        };
+        let mut fields = body.split_whitespace();
+        let mut field = |key: &str, low: i64, high: i64| -> Option<i64> {
+            fields
+                .next()?
+                .strip_prefix(key)?
+                .parse::<i64>()
+                .ok()
+                .filter(|value| (low..=high).contains(value))
+        };
+        // The worker prints `id` and `quality` as int32 and `mode` as uint32;
+        // a value outside those ranges is a fabricated line, not a denial.
+        let parsed = (|| {
+            Some((
+                field("id=", i32::MIN.into(), i32::MAX.into())?,
+                field("quality=", i32::MIN.into(), i32::MAX.into())?,
+                field("mode=", 0, u32::MAX.into())?,
+            ))
+        })();
+        let (Some(entry), None) = (parsed, fields.next()) else {
+            truncated = true;
+            continue;
+        };
+        if denials.contains(&entry) {
+            continue;
+        }
+        if denials.len() >= MAX_CALLBACK_ADDR_DENIALS {
+            truncated = true;
+            break;
+        }
+        denials.push(entry);
+    }
+    let denials = denials
+        .into_iter()
+        .map(|(id, quality, mode)| json!({ "id": id, "quality": quality, "mode": mode }))
+        .collect();
+    (denials, truncated)
 }
 
 fn load_failure_marker(stderr: &str, exit_code: u32) -> Option<Value> {

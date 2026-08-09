@@ -590,6 +590,14 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
         // that ends on a frame error often has no parsable report at all - so
         // this is the field that actually answers "which suite was missing".
         "suite_acquire_failures",
+        // Both lists are bounded, and a capped list read as a complete one
+        // turns "the sweep did not look further" into "there was nothing
+        // further" - the flags have to travel with the lists they qualify.
+        "suite_acquire_failures_truncated",
+        // Which `get_callback_addr` ids the worker refused, same source. For a
+        // `frame_error:516` this is often the whole diagnosis (issue #985).
+        "callback_addr_denials",
+        "callback_addr_denials_truncated",
     ] {
         worker.insert(
             key.to_owned(),
