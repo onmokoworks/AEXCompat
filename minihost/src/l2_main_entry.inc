@@ -883,6 +883,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
   aexcompat::aex_strings::StringTable aex_string_table;
   HMODULE current_module = nullptr;
   EffectEntry current_entry = nullptr;
+  PiplPluginKind current_entrypoint_kind = PiplPluginKind::Unknown;
   int32_t current_index = -1;
   int32_t current_global_error = -1;
   // GLOBAL_SETUP/GLOBAL_SETDOWN pairing state: the inspect column below ends
@@ -1172,6 +1173,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
       PiplEntrypoint pipl_entrypoint = discover_pipl_entrypoint(current_module);
       if (pipl_entrypoint.kind == PiplPluginKind::Missing)
         pipl_entrypoint = discover_plugin_data_entrypoint(current_module);
+      current_entrypoint_kind = pipl_entrypoint.kind;
       if (pipl_entrypoint.kind == PiplPluginKind::Effect)
         current_entry = reinterpret_cast<EffectEntry>(
             GetProcAddress(current_module, pipl_entrypoint.symbol.c_str()));
@@ -1185,10 +1187,16 @@ int run_discovery_session(const std::wstring& manifest_argument,
       } else {
         current_global_error = -1;
         error_kind = "entrypoint_unresolved";
+        // The one-shot path preserves this PiPL classification on stderr so
+        // callers can route genuine AEGPs to the AEGP initializer.  A
+        // DiscoverySession has no stderr-derived per-member diagnostics, so
+        // carry the same bounded classification in its partial report.
+        report_json = unresolved_entrypoint_report_json(pipl_entrypoint.kind);
       }
     } else if (!current_entry) {
       // Re-inspect of a plug-in whose entrypoint never resolved.
       error_kind = "entrypoint_unresolved";
+      report_json = unresolved_entrypoint_report_json(current_entrypoint_kind);
     } else {
       // Re-inspect of the current plug-in: set down only an unpaired setup
       // (the previous inspect column already set a successful one down),
@@ -1537,11 +1545,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     pipl_entrypoint = discover_plugin_data_entrypoint(module);
   if (pipl_entrypoint.kind != PiplPluginKind::Effect) {
     const char* plugin_kind =
-        pipl_entrypoint.kind == PiplPluginKind::Aegp
-            ? "aegp_candidate"
-            : (pipl_entrypoint.kind == PiplPluginKind::Invalid
-                   ? "invalid_pipl"
-                   : "unknown_no_effect_entrypoint");
+        unresolved_entrypoint_plugin_kind(pipl_entrypoint.kind);
     std::cerr << "plugin_kind:" << plugin_kind << "\n" << std::flush;
     return session.finish(12);
   }
