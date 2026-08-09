@@ -80,19 +80,30 @@ int32_t __cdecl floating_point_from_color(void* effect_ref, const void* definiti
   int32_t disk_id{}, type{};
   std::memcpy(&disk_id, bytes, sizeof(disk_id));
   std::memcpy(&type, bytes + kParamType, sizeof(type));
-  const auto found = std::find_if(g_params.begin(), g_params.end(), [disk_id](const ParamRecord& p) {
-    return p.disk_id == disk_id;
-  });
-  if (found == g_params.end()) return kPfInvalidIndex;
-  if (type != 5 || found->type != 5 || !found->has_color)
-    return kPfUnrecognizedParamType;
-
+  if (type != 5) return kPfUnrecognizedParamType;
   std::array<unsigned char, 4> value{};
   std::memcpy(value.data(), bytes + 56, value.size());
+  // Resolve which colour parameter this is. The disk id (PF_ParamDef.uu.id,
+  // offset 0) is unreliable: it is host-assigned in AE, but many effects leave
+  // it 0 for every parameter (Beam sets it 0 on its points and colours alike),
+  // so a lookup by id collides with the first zero-id parameter - a POINT for
+  // Beam - and answers PF_Err_UNRECOGNIZED_PARAM_TYPE for a valid colour
+  // (issue #1060). Match on the colour value among the type-5 parameters
+  // instead: the checked-out value is either a parameter's current or default
+  // colour, which identifies it without depending on the id.
+  const auto by_id = std::find_if(g_params.begin(), g_params.end(),
+      [disk_id](const ParamRecord& p) { return p.disk_id == disk_id; });
   const std::array<float, 4>* resolved = nullptr;
-  if (value == found->current_color) resolved = &found->current_float_color;
-  else if (value == found->default_color) resolved = &found->default_float_color;
-  else return kPfBadCallbackParam;
+  const auto match = [&](const ParamRecord& p) -> const std::array<float, 4>* {
+    if (p.type != 5 || !p.has_color) return nullptr;
+    if (value == p.current_color) return &p.current_float_color;
+    if (value == p.default_color) return &p.default_float_color;
+    return nullptr;
+  };
+  if (by_id != g_params.end()) resolved = match(*by_id);
+  if (!resolved)
+    for (const auto& p : g_params) if ((resolved = match(p))) break;
+  if (!resolved) return kPfBadCallbackParam;
 
   const PfColorParamPixelFloat result{(*resolved)[0], (*resolved)[1],
                                       (*resolved)[2], (*resolved)[3]};
