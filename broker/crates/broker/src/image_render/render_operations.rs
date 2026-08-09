@@ -1511,9 +1511,7 @@ pub fn inspect_experimental_cleanup_contained_in_place(
 }
 
 fn cleanup_contained_report_is_valid(diagnostics: &Value) -> bool {
-    diagnostics
-        .get("inspection_status")
-        .and_then(Value::as_str)
+    diagnostics.get("inspection_status").and_then(Value::as_str)
         == Some("parameters_inspected_cleanup_contained")
         && diagnostics
             .get("global_setup_error")

@@ -2759,6 +2759,9 @@ fn cleanup_contained_report_contract_rejects_mutations() {
         mutated[field] = replacement;
         assert!(!cleanup_contained_report_is_valid(&mutated), "{field}");
         mutated.as_object_mut().unwrap().remove(field);
-        assert!(!cleanup_contained_report_is_valid(&mutated), "missing {field}");
+        assert!(
+            !cleanup_contained_report_is_valid(&mutated),
+            "missing {field}"
+        );
     }
 }

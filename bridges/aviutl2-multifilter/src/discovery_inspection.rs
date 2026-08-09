@@ -518,15 +518,10 @@ fn discover_cluster_in_place(
                 // repeat the same uncontained setdown). Give each remaining
                 // member a fresh ordinary session so it must independently
                 // earn its own checkpoint before the one-shot fallback.
-                discover_cluster_in_place(
-                    repository,
-                    dependency,
-                    build,
-                    vec![(path, prepared)],
-                )
-                .into_iter()
-                .next()
-                .expect("one member yields one entry")
+                discover_cluster_in_place(repository, dependency, build, vec![(path, prepared)])
+                    .into_iter()
+                    .next()
+                    .expect("one member yields one entry")
             } else {
                 fallback_members_in_place(
                     repository,
@@ -611,10 +606,7 @@ fn discover_cluster_in_place(
             }
             Ok(InspectOutcome::CleanupCrashCheckpoint { authorization }) => {
                 let mut entry = prepared.entry;
-                match inspect_experimental_cleanup_contained_in_place(
-                    authorization,
-                    repository,
-                ) {
+                match inspect_experimental_cleanup_contained_in_place(authorization, repository) {
                     Ok((parameters, diagnostics)) => {
                         // The fallback is authorized by the authenticated
                         // in-flight checkpoint, but only its independently
@@ -887,14 +879,12 @@ fn discover_all(
     let planned: Vec<PlannedMember> = slots
         .iter()
         .map(|slot| {
-            slot.as_ref().map_or(
-                PlannedMember {
-                    identity: None,
-                },
-                |(_, prepared)| PlannedMember {
-                    identity: prepared.identity.clone(),
-                },
-            )
+            slot.as_ref()
+                .map_or(PlannedMember { identity: None }, |(_, prepared)| {
+                    PlannedMember {
+                        identity: prepared.identity.clone(),
+                    }
+                })
         })
         .collect();
     let tasks = shard_in_place_clusters(plan_tasks(&planned), parallelism);
