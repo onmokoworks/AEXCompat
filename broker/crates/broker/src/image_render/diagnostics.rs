@@ -134,6 +134,17 @@ fn dispatch_approved_image_with_dependencies(
     args_after_plugin: &[String],
     timeout: Option<Duration>,
 ) -> io::Result<crate::secure_launch::SecureLaunchResult> {
+    let mut dependency_search_dirs = search_root(plugin_path)?;
+    for dependency in &dependencies {
+        let parent = dependency
+            .path
+            .parent()
+            .ok_or_else(|| invalid("approved dependency has no parent directory"))?
+            .to_path_buf();
+        if !dependency_search_dirs.contains(&parent) {
+            dependency_search_dirs.push(parent);
+        }
+    }
     dispatch_secure_image(SecureImageDispatch {
         repository,
         worker_kind,
@@ -142,8 +153,8 @@ fn dispatch_approved_image_with_dependencies(
             expected_sha256: decode_sha256_hex(approved_sha256)?,
             expected_size: fs::metadata(plugin_path)?.len(),
         },
-        dependencies,
-        dependency_search_dirs: search_root(plugin_path)?,
+        dependencies: vec![],
+        dependency_search_dirs,
         args_before_plugin,
         args_after_plugin,
         timeout,
@@ -229,7 +240,7 @@ pub fn prepare_gpu_runtime_policy(
     let args_after_plugin = vec![
         approved_sha256.to_ascii_lowercase(),
         "--runtime-module-authorization-v1".to_owned(),
-        authorization.basename.clone(),
+        authorization.artifact.path.to_string_lossy().into_owned(),
     ];
     // The manifest rides as a sealed dependency next to the plug-in, exactly like
     // the params-inspect path, so the worker resolves it by basename. The caller's
@@ -253,8 +264,10 @@ pub fn prepare_gpu_runtime_policy(
     drop(authorization);
     if isolated.classification.as_str() != "ok" {
         return Err(invalid(format!(
-            "GPU module-audit preflight worker did not succeed (classification: {})",
-            isolated.classification.as_str()
+            "GPU module-audit preflight worker did not succeed (classification: {}, exit_code: {}, stderr: {})",
+            isolated.classification.as_str(),
+            isolated.exit_code,
+            isolated.stderr.trim()
         )));
     }
     let stdout = isolated.stdout.trim();

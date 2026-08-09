@@ -10,7 +10,8 @@ TRANSPORT = ROOT / "target/image-transport"
 WORKER_CWD = ROOT / "target"
 
 def _workers():
-    build = ROOT / "target/minihost-build-v18"
+    builds = [ROOT / "target/minihost-build-v18", ROOT / "target/minihost-build"]
+    build = next((candidate for candidate in builds if candidate.is_dir()), builds[0])
     return [build / "aex_render_worker.exe", build / "aex_smart_worker.exe"]
 
 def _run_sidecar(worker: Path, document, name="parameter-animation-test.json"):
@@ -51,6 +52,16 @@ def test_native_timeline_evaluation_and_param_utils():
                                    text=True, capture_output=True, timeout=30, check=False)
         assert completed.returncode == 0, completed.stderr or completed.stdout
         assert json.loads(completed.stdout)["parameter_animation_transport"] == "passed"
+
+def test_parameter_registry_accepts_more_than_1024_entries():
+    for worker in _workers():
+        assert worker.is_file(), f"missing VS2022 worker: {worker}"
+        completed = subprocess.run(
+            [str(worker), "--self-test-parameter-registry-capacity"],
+            cwd=WORKER_CWD, text=True, capture_output=True, timeout=30, check=False,
+        )
+        assert completed.returncode == 0, completed.stderr or completed.stdout
+        assert json.loads(completed.stdout)["parameter_registry_capacity"] == "passed"
 
 def test_strict_sidecar_accepts_schema_and_rejects_malformed_documents():
     worker = _workers()[0]

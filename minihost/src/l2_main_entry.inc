@@ -1194,25 +1194,22 @@ int worker_main_impl(int argc, wchar_t **argv) {
     return passed ? 0 : 73;
   }
   RuntimeHostHooks runtime_hooks{&sha256, &redirect_native_stdout,
-                                 &restore_native_stdout};
+                                  &restore_native_stdout};
   // GPU module-audit preflight (#290): authorize the AEXRMA1-listed GPU runtime
   // DLLs, load them via the transport backend, and emit the classified module
   // report the broker re-authenticates before a secure GPU dispatch. argv shape
   // mirrors the params-only manifest convention:
   //   --gpu-module-report-v1 <plugin> <sha256> --runtime-module-authorization-v1 <manifest>
-  if (argc == 6 && std::wstring(argv[1]) == L"--gpu-module-report-v1" &&
+  const bool gpu_module_report_has_dependency_dirs =
+      argc == 8 && std::wstring(argv[6]) == L"--dependency-dirs-v1";
+  if ((argc == 6 || gpu_module_report_has_dependency_dirs) &&
+      std::wstring(argv[1]) == L"--gpu-module-report-v1" &&
       std::wstring(argv[4]) == L"--runtime-module-authorization-v1") {
     namespace wr = aexcompat::worker_runtime;
     namespace tp = aexcompat::gpu_runtime::memory_world_transport;
     // Manifest backend id (1=cuda,2=opencl,3=directx,4=opengl) → transport
     // framework code (3=cuda,1=opencl,4=directx). OpenGL is inspect-only; a
     // smart-session GPU render never runs on it.
-    const uint32_t backend = wr::authorized_runtime_backend();
-    const int32_t framework = backend == 1   ? 3
-                              : backend == 2 ? 1
-                              : backend == 3 ? 4
-                                             : 0;
-    if (framework == 0) return 75;
     // Fail-closed identity gate and plugin load are owned by the common runtime
     // admission component. This keeps l2_main from becoming a second plugin-load
     // owner while retaining the GPU-specific audit/report lifecycle below.
@@ -1220,10 +1217,23 @@ int worker_main_impl(int argc, wchar_t **argv) {
     const int request_error = wr::prepare_runtime_request(
         argv[2], argv[3], true, argv[5], runtime_request);
     if (request_error != 0) return request_error;
+    if (gpu_module_report_has_dependency_dirs) {
+      const int dirs_error = wr::apply_dependency_search_dirs(argv[7], runtime_request);
+      if (dirs_error != 0) return dirs_error;
+    }
     RuntimeContext runtime_context;
     const int admission_error = wr::admit_runtime(
         runtime_hooks, runtime_request, runtime_context);
     if (admission_error != 0) return admission_error;
+    const uint32_t backend = wr::authorized_runtime_backend();
+    const int32_t framework = backend == 1   ? 3
+                              : backend == 2 ? 1
+                              : backend == 3 ? 4
+                                             : 0;
+    if (framework == 0) {
+      wr::release_runtime_context(runtime_context);
+      return 75;
+    }
     const auto release_admitted = [&] {
       wr::release_runtime_context(runtime_context);
     };
@@ -1529,7 +1539,30 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
          invocation.audio_session_mode, g_skip_about},
         make_bootstrap_runtime_hooks());
   };
-  const auto bootstrap = run_bootstrap(entry);
+  const auto bootstrap = [&] {
+    std::array<wchar_t, 32768> original_directory{};
+    std::array<wchar_t, 32768> gpu_module_path{};
+    const DWORD original_length = GetCurrentDirectoryW(
+        static_cast<DWORD>(original_directory.size()), original_directory.data());
+    const DWORD module_length = GetModuleFileNameW(
+        GetModuleHandleW(L"GPUFoundation.dll"), gpu_module_path.data(),
+        static_cast<DWORD>(gpu_module_path.size()));
+    bool changed_directory = false;
+    if (original_length > 0 && original_length < original_directory.size() &&
+        module_length > 0 && module_length < gpu_module_path.size()) {
+      for (DWORD cursor = module_length; cursor > 0; --cursor) {
+        if (gpu_module_path[cursor - 1] == L'\\' ||
+            gpu_module_path[cursor - 1] == L'/') {
+          gpu_module_path[cursor - 1] = L'\0';
+          changed_directory = SetCurrentDirectoryW(gpu_module_path.data()) != FALSE;
+          break;
+        }
+      }
+    }
+    auto result = run_bootstrap(entry);
+    if (changed_directory) SetCurrentDirectoryW(original_directory.data());
+    return result;
+  }();
   g_active_aex_string_table = nullptr;
   g_active_effect_module = nullptr;
   const int32_t global_error = bootstrap.global_error;
@@ -1875,6 +1908,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   std::cerr << "stage:global_setdown_begin\n" << std::flush;
   const int32_t setdown_error = effective_global_error == 0 && entry
       ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
+  dispose_all_live_handles();
   // Smart-worker fault-injection probes as a handler table (issue #171):
   // each requested mode runs its verifier in the same order as before.
   const struct SmartFaultProbe {
@@ -1912,7 +1946,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // A swap failure still gets the completion report below; only its exit code
   // is dedicated (25), so a terminal-audit rejection must not pre-empt it
   // with the generic module-audit code here.
-  if (!session.prepare_protocol_report() && !session_swap_failure)
+  const bool protocol_report_ready = session.prepare_protocol_report();
+  if (!protocol_report_ready && !session_swap_failure)
     return session.finish(14);
   if (is_render_worker()) {
   restore_native_stdout();
@@ -2039,6 +2074,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET),
       read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET)};
   emit_smart_completion_report(smart_inputs);
+  std::cout.flush();
   } else {
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
          global_error, params_error, setdown_error, output, about_message, lifecycle_errors, lifecycle_data_null);

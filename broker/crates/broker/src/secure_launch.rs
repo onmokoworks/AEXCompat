@@ -107,6 +107,9 @@ pub struct SecureLaunchRequest<'a> {
     /// broker's own environment and reads the minidump directory from
     /// `AEXCOMPAT_MINIDUMP_DIR`, which is what every production caller wants.
     pub launch_environment: LaunchEnvironment,
+    /// Explicit dependency-owned data files that a runtime resolves relative
+    /// to the authenticated worker executable.
+    pub staged_worker_assets: &'a [(PathBuf, PathBuf)],
 }
 
 /// In-place variant of `secure_launch` (issue #751): the plug-in loads from
@@ -128,6 +131,7 @@ pub fn secure_launch_in_place(
         request.require_module_audit,
         request.repository,
         &request.launch_environment,
+        request.staged_worker_assets,
         timeout,
         process_memory_limit,
     )
@@ -153,6 +157,7 @@ pub(crate) fn secure_launch_without_plugin(
         request.require_module_audit,
         request.repository,
         &request.launch_environment,
+        request.staged_worker_assets,
         timeout,
         process_memory_limit,
     )
@@ -195,14 +200,20 @@ fn secure_launch_impl(
     require_module_audit: bool,
     repository: &Path,
     launch_environment: &LaunchEnvironment,
+    staged_worker_assets: &[(PathBuf, PathBuf)],
     timeout: Option<Duration>,
     process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
-    let worker_stage =
+    let mut worker_stage =
         TrustedWorkerStage::create(worker_program, worker_expected_sha256, worker_expected_size)
             .map_err(|error| stage_error("trusted worker staging", error))?;
+    for (source, relative) in staged_worker_assets {
+        worker_stage
+            .stage_auxiliary_file(source, relative)
+            .map_err(|error| stage_error("trusted worker auxiliary staging", error))?;
+    }
     // Never expose the repository root as a worker CWD. The native sidecar
     // loader pins relative access to <cwd>/image-transport, which is the same
     // broker-owned <repository>/target/image-transport boundary as before.
@@ -382,12 +393,17 @@ fn secure_launch_session_impl(
 ) -> io::Result<SecureSessionProcess> {
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
-    let worker_stage = TrustedWorkerStage::create(
+    let mut worker_stage = TrustedWorkerStage::create(
         request.worker_program,
         request.worker_expected_sha256,
         request.worker_expected_size,
     )
     .map_err(|error| stage_error("trusted worker staging", error))?;
+    for (source, relative) in request.staged_worker_assets {
+        worker_stage
+            .stage_auxiliary_file(source, relative)
+            .map_err(|error| stage_error("trusted worker auxiliary staging", error))?;
+    }
     // Session workers share the same non-root CWD and transport boundary as
     // one-shot workers.
     let worker_cwd = request.repository.join("target");
@@ -440,6 +456,7 @@ fn secure_launch_impl(
     _require_module_audit: bool,
     _repository: &Path,
     _launch_environment: &LaunchEnvironment,
+    _staged_worker_assets: &[(PathBuf, PathBuf)],
     _timeout: Option<Duration>,
     _process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
@@ -464,6 +481,7 @@ mod tests {
             repository: Path::new("."),
             require_module_audit: false,
             launch_environment: LaunchEnvironment::default(),
+            staged_worker_assets: &[],
         }
     }
 

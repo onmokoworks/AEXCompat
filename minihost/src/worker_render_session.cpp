@@ -127,10 +127,18 @@ bool session_environment_requested() {
 }
 
 SessionChannels::~SessionChannels() {
+  close();
+}
+
+void SessionChannels::close() {
   if (view_) UnmapViewOfFile(view_);
+  view_ = nullptr;
   if (section_) CloseHandle(section_);
+  section_ = nullptr;
   if (request_pipe_) CloseHandle(request_pipe_);
+  request_pipe_ = nullptr;
   if (response_pipe_) CloseHandle(response_pipe_);
+  response_pipe_ = nullptr;
 }
 
 bool SessionChannels::open_from_environment(const SessionGeometry& geometry) {
@@ -489,8 +497,9 @@ struct SessionFrameOutput {
 // RenderSessionOutcome is defined in worker_invocation_orchestration.hpp so
 // the final dispatch owner can call the wrappers below across TUs.
 template <typename FrameFn>
-RenderSessionOutcome run_session_frame_loop(
-    EffectEntry entry, std::array<std::byte, kInSize>& input,
+void run_session_frame_loop(
+    RenderSessionOutcome& outcome, EffectEntry entry,
+    std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output,
     int32_t max_width, int32_t max_height, int32_t output_capacity_width,
     int32_t output_capacity_height, int32_t time_step, int32_t total_time,
@@ -516,7 +525,6 @@ RenderSessionOutcome run_session_frame_loop(
   // plug-in's own setup error is preserved in the final report).
   constexpr int32_t kSessionSequenceSetupFailed = -47;
 
-  RenderSessionOutcome outcome;
   const int32_t layer_slot_count =
       external_layers ? static_cast<int32_t>(external_layers->size()) : 0;
   // Non-const: an in-session grow (protocol §3, issue #262) raises the output
@@ -533,7 +541,7 @@ RenderSessionOutcome run_session_frame_loop(
   if (!channels.open_from_environment(geometry) ||
       !channels.static_header_matches(geometry)) {
     outcome.protocol_violation = true;
-    return outcome;
+    return;
   }
   // Refills every dynamic layer's private vector from its retained handle
   // (issue #674). Returns false on a short read or an unreadable handle, which
@@ -579,7 +587,7 @@ RenderSessionOutcome run_session_frame_loop(
           !GetHandleInformation(handle, &flags) ||
           GetFileType(handle) != FILE_TYPE_DISK) {
         outcome.protocol_violation = true;
-        return outcome;
+        return;
       }
       layer.rgba.resize(bytes);
       std::size_t collected = 0;
@@ -607,7 +615,7 @@ RenderSessionOutcome run_session_frame_loop(
       }
       if (!read_ok || collected != bytes) {
         outcome.protocol_violation = true;
-        return outcome;
+        return;
       }
     }
   }
@@ -1193,7 +1201,8 @@ RenderSessionOutcome run_session_frame_loop(
               !outcome.protocol_violation && !outcome.invariant_failure
           ? 0
           : -1;
-  return outcome;
+  channels.close();
+  return;
 }
 
 // Classic resident session: render_once(manage_sequence=false) per frame
@@ -1207,8 +1216,9 @@ RenderSessionOutcome run_render_session(
     const aexcompat::worker_render_session::SwapPluginHook* swap_hook) {
   // The output slot starts at the render dimensions; an expand grows it in place
   // mid-session (#262), so the initial output capacity equals max_width/height.
-  return run_session_frame_loop(
-      entry, input, output, max_width, max_height, max_width,
+  RenderSessionOutcome outcome;
+  run_session_frame_loop(
+      outcome, entry, input, output, max_width, max_height, max_width,
       max_height, time_step, total_time,
       time_scale, pixel_bytes, external_layers,
       [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
@@ -1243,6 +1253,7 @@ RenderSessionOutcome run_render_session(
         return frame;
       },
       swap_hook);
+  return outcome;
 }
 
 // SmartFX resident session frame loop (protocol v1.1): each frame runs
@@ -1261,8 +1272,8 @@ SmartRenderSessionOutcome run_smart_render_session(
     int32_t time_step, int32_t total_time, uint32_t time_scale,
     int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers) {
   SmartRenderSessionOutcome outcome;
-  outcome.session = run_session_frame_loop(
-      entry, input, output, max_width, max_height,
+  run_session_frame_loop(
+      outcome.session, entry, input, output, max_width, max_height,
       // Smart sessions (v1.1) render at fixed dimensions; no output expansion.
       max_width, max_height, time_step, total_time,
       time_scale, pixel_bytes, external_layers,

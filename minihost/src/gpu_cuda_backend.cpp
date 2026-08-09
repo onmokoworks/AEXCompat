@@ -44,13 +44,14 @@ struct CudaBackend::State {
   CuResult (__stdcall* host_free)(void*){};
   std::array<CuDevice, kMaxGpuDevices> devices{};
   std::array<CuContext, kMaxGpuDevices> contexts{};
+  std::array<bool, kMaxGpuDevices> owns_context{};
   uint32_t device_count{};
   uint32_t active_device_index{};
   uint32_t retained_count{};
   bool pushed{};
 };
 
-bool CudaBackend::begin(uint32_t active_device_index) {
+bool CudaBackend::begin(uint32_t active_device_index, void* borrowed_context) {
   if (active()) return true;
   State* state = new (std::nothrow) State;
   if (!state) return false;
@@ -91,12 +92,22 @@ bool CudaBackend::begin(uint32_t active_device_index) {
   state->device_count = static_cast<uint32_t>(discovered_count);
   state->active_device_index = active_device_index;
   for (uint32_t index = 0; index < state->device_count; ++index) {
-    if (state->device_get(&state->devices[index], static_cast<int32_t>(index)) != kCudaSuccess ||
-        state->primary_retain(&state->contexts[index], state->devices[index]) != kCudaSuccess) {
+    if (state->device_get(&state->devices[index], static_cast<int32_t>(index)) !=
+        kCudaSuccess) {
       end();
       return false;
     }
-    ++state->retained_count;
+    if (borrowed_context && index == active_device_index) {
+      state->contexts[index] = borrowed_context;
+    } else {
+      if (state->primary_retain(&state->contexts[index], state->devices[index]) !=
+          kCudaSuccess) {
+        end();
+        return false;
+      }
+      state->owns_context[index] = true;
+      ++state->retained_count;
+    }
   }
   if (state->context_push(state->contexts[active_device_index]) != kCudaSuccess) {
     end();
@@ -124,9 +135,10 @@ bool CudaBackend::end() {
         popped == state->contexts[state->active_device_index];
     state->pushed = false;
   }
-  while (state->retained_count > 0) {
+  for (uint32_t index = 0; index < state->device_count; ++index) {
+    if (!state->owns_context[index]) continue;
+    valid = state->primary_release(state->devices[index]) == kCudaSuccess && valid;
     --state->retained_count;
-    valid = state->primary_release(state->devices[state->retained_count]) == kCudaSuccess && valid;
   }
   if (state->module) FreeLibrary(state->module);
   delete state;

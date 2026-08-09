@@ -733,6 +733,7 @@ pub fn launch_system_opencl_probe(
         repository,
         require_module_audit: false,
         launch_environment: Default::default(),
+        staged_worker_assets: &[],
     };
     let result = secure_launch_without_plugin(request, Some(timeout), None)?;
     Ok(report_from_launch(result))

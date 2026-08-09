@@ -59,6 +59,7 @@ class DispatchWorldFormatScope {
   ~DispatchWorldFormatScope();
 
   bool register_world(const void* world, int32_t pixel_format);
+  bool register_gpu_world(const void* world, int32_t pixel_format);
 };
 
 bool resolve_dispatch_world_format(const void* world,

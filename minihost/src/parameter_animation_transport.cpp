@@ -1,4 +1,5 @@
 #include "parameter_animation_transport.hpp"
+#include "worker_parameter_limits.hpp"
 
 #include "strict_json.hpp"
 
@@ -22,7 +23,8 @@ using strict_json::json_member;
 using strict_json::json_number;
 using strict_json::json_string;
 
-constexpr std::size_t kMaxParams = 1024;
+constexpr std::size_t kMaxParams =
+    aexcompat::worker_runtime::parameters::kMaxParameterCount;
 
 }  // namespace
 

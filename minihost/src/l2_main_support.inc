@@ -175,7 +175,8 @@ constexpr std::size_t kInSize = 408;
 constexpr std::size_t kOutSize = 408;
 constexpr std::size_t kParamSize = 176;
 // Modern AE has no fixed parameter-count limit; retain a high bounded host cap.
-constexpr std::size_t kMaxParams = 1024;
+constexpr std::size_t kMaxParams =
+    aexcompat::worker_runtime::parameters::kMaxParameterCount;
 constexpr std::size_t kInAddParam = 16;
 constexpr std::size_t kInUtils = 176;
 constexpr std::size_t kInEffectRef = 184;

@@ -8,6 +8,7 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <exception>
 #include <iomanip>
 #include <sstream>
 
@@ -1194,11 +1195,20 @@ int32_t invoke_audited_effect_call_seh(
     void** params, void* world, void* extra,
     bool* invocation_completed_normally, int32_t* raw_return_code,
     uint32_t* out_exception_code, const char* selector) {
+  const auto invoke_cpp = [&]() -> int32_t {
+    try {
+      return audited_effect_call(
+          entry, command, input, output, params, world, extra,
+          invocation_completed_normally, raw_return_code);
+    } catch (const std::exception&) {
+      return kAuditFailure;
+    } catch (...) {
+      return kAuditFailure;
+    }
+  };
   int32_t result = 0;
   __try {
-    result = audited_effect_call(
-        entry, command, input, output, params, world, extra,
-        invocation_completed_normally, raw_return_code);
+    result = invoke_cpp();
   } __except(capture_seh_exception(GetExceptionInformation())) {
     *out_exception_code = GetExceptionCode();
     g_telemetry.selector = selector;

@@ -2723,4 +2723,20 @@ mod tests {
                 .contains("requires at least one dependency search directory")
         );
     }
+
+    #[test]
+    fn in_place_aegp_initialization_requires_search_dirs_before_file_access() {
+        let error = initialize_experimental_aegp_in_place(
+            std::path::Path::new("missing-repository"),
+            std::path::Path::new("missing-plugin.aex"),
+            &"0".repeat(64),
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires at least one dependency search directory")
+        );
+    }
 }
