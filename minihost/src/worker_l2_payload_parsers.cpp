@@ -4,6 +4,7 @@
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_parameter_runtime.hpp"
+#include "worker_parameter_limits.hpp"
 
 #include <array>
 #include <cstddef>
@@ -26,7 +27,8 @@ using RequestedAssignments = aexcompat::worker_runtime::parameters::RequestedAss
 using RequestedKind = aexcompat::worker_runtime::parameters::RequestedKind;
 
 namespace {
-constexpr std::size_t kMaxParams = 1024;
+constexpr std::size_t kMaxParams =
+    aexcompat::worker_runtime::parameters::kMaxParameterCount;
 auto& g_render_context_state = aexcompat::render::render_context_state();
 auto& g_full_resolution_width = g_render_context_state.full_resolution_width;
 auto& g_full_resolution_height = g_render_context_state.full_resolution_height;

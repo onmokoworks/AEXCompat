@@ -159,6 +159,7 @@
 namespace aexcompat::l2_detail {
 
 using aexcompat::parameter_selftests::verify_parameter_animation_transport;
+using aexcompat::parameter_selftests::verify_parameter_registry_capacity;
 using aexcompat::parameter_selftests::verify_pf_param_utils_suite3;
 using namespace aexcompat::pf_ae_channel;
 using namespace aexcompat::pf_state_runtime;
@@ -578,7 +579,8 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
        {&verify_aegp_installed_effect_catalog_suite4,
         &aexcompat::l2_detail::verify_aegp_layer_suite1_slots,
         &aexcompat::l2_detail::verify_aegp_loaded_plugin_effect_streams,
-        &verify_parameter_animation_transport, &verify_pf_param_utils_suite3,
+        &verify_parameter_animation_transport, &verify_parameter_registry_capacity,
+        &verify_pf_param_utils_suite3,
         &verify_pre_checkout_result_contract,
         &aexcompat::worker_runtime::smart::checkout_intersection_self_test,
         &aexcompat::render::smart_geometry_rect_self_test,

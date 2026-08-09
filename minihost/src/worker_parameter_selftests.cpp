@@ -1,10 +1,15 @@
 #include "worker_parameter_selftests.hpp"
+#include "worker_parameter_limits.hpp"
+#include "worker_invocation_orchestration.hpp"
 #include <windows.h>
 #include <bcrypt.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
+namespace aexcompat::l2_detail {
+int32_t __cdecl add_param(void*, int32_t, void*);
+}
 namespace aexcompat::parameter_selftests {
 namespace { Hooks g_hooks; }
 void configure(Hooks hooks) { g_hooks = hooks; }
@@ -209,6 +214,47 @@ bool verify_parameter_animation_transport() {
   parameter_state().records = saved_params;
   parameter_state().timelines = saved_timelines;
   parameter_state().keyframe_checkout_ledger.clear();
+  return ok;
+}
+
+bool verify_parameter_registry_capacity() {
+  auto& records = parameter_state().records;
+  const auto saved_params = records;
+  records.clear();
+  Definition definition{};
+  std::memcpy(definition.data() + kParamName, "capacity", 9);
+  bool ok = true;
+  for (std::size_t index = 1;
+       index <= worker_runtime::parameters::kMaxParameterCount; ++index) {
+    write<int32_t>(definition, 0, static_cast<int32_t>(index));
+    ok = ok && aexcompat::l2_detail::add_param(
+                   nullptr, static_cast<int32_t>(index), definition.data()) == 0;
+  }
+  ok = ok && records.size() ==
+                 worker_runtime::parameters::kMaxParameterCount &&
+       records[1264].index == 1265 &&
+       aexcompat::l2_detail::add_param(nullptr, -1, definition.data()) != 0;
+
+  wchar_t executable[] = L"worker";
+  wchar_t mode[] = L"--user-changed";
+  wchar_t plugin[] = L"plugin.aex";
+  wchar_t dependency_root[] = L"dependencies";
+  wchar_t accepted_slot[] = L"1265";
+  wchar_t rejected_slot[] = L"4097";
+  wchar_t* accepted_argv[]{executable, mode, plugin, dependency_root,
+                           accepted_slot};
+  wchar_t* rejected_argv[]{executable, mode, plugin, dependency_root,
+                           rejected_slot};
+  worker_runtime::invocation::InvocationState accepted{};
+  worker_runtime::invocation::InvocationState rejected{};
+  const worker_runtime::invocation::L2ModeHooks mode_hooks{
+      nullptr, worker_runtime::parameters::kMaxParameterCount};
+  ok = ok && worker_runtime::invocation::parse_l2_modes(
+                 5, accepted_argv, accepted, mode_hooks) == 0 &&
+       accepted.user_changed_param_slot == 1265 &&
+       worker_runtime::invocation::parse_l2_modes(
+           5, rejected_argv, rejected, mode_hooks) == 3;
+  records = saved_params;
   return ok;
 }
 }  // namespace aexcompat::parameter_selftests

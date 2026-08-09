@@ -58,6 +58,7 @@
 #include "l2_mode_execution.hpp"
 #include "parameter_animation_transport.hpp"
 #include "worker_parameter_runtime.hpp"
+#include "worker_parameter_limits.hpp"
 #include "worker_parameter_selftests.hpp"
 #include "worker_parameter_selftest_routing.hpp"
 #include "worker_pf_color_selftests.hpp"
