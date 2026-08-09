@@ -408,10 +408,10 @@ void the_extent_hint_comes_back_inside_the_new_buffer() {
   check(collapsed[0] <= 8 && collapsed[1] <= 6 && collapsed[2] <= 8 && collapsed[3] <= 6,
         "and lands inside it");
   // The rect keeps the frame it was written in. Translating it by the accepted
-  // origin was tried and withdrawn: this host's own PF_Iterate refuses an area
-  // wider than the input world, so an output-frame hint breaks the canonical
-  // iterate call for every expanding effect (issue #997 owns which frame AE
-  // uses).
+  // origin was tried and withdrawn when PF_Iterate still refused an area wider
+  // than the input world; since #1034 iterate clips such an area instead, so
+  // the frame choice is no longer forced from here - issue #997 alone owns
+  // which frame AE uses.
   check(same(extent_hint_within({0, 0, 37, 23}, 137, 123), {0, 0, 37, 23}),
         "an expand's hint stays in the input's frame, where iterate accepts it");
 }
