@@ -774,6 +774,9 @@ bool configure_component_suite_catalog() {
       {aexcompat::worker_runtime::persistent_data::kSuiteName,
        aexcompat::worker_runtime::persistent_data::kSuiteVersion3, nullptr,
        &aexcompat::worker_runtime::persistent_data::provide_suite3},
+      {aexcompat::worker_runtime::persistent_data::kSuiteName,
+       aexcompat::worker_runtime::persistent_data::kSuiteVersion4, nullptr,
+       &aexcompat::worker_runtime::persistent_data::provide_suite4},
   };
   return configure_host_suite_catalog(
       {component_suites, std::size(component_suites),

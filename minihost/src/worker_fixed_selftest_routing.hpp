@@ -52,6 +52,7 @@ struct SimpleHooks {
   bool (*aefx_ace_suite1)(){};
   bool (*aegp_persistent_data_suite3)(){};
   bool (*native_stdout_routing)(){};
+  bool (*aegp_persistent_data_suite4)(){};
 };
 
 struct Hooks {
