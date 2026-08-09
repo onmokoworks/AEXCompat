@@ -405,17 +405,44 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
   const bool has_source = source_world != nullptr;
   using aexcompat::callback_diagnostics::Callback;
   using aexcompat::callback_diagnostics::Reason;
+  // On a resolve_world failure the close report only records "missing_world",
+  // which does not say which side failed or why bounded_typed_world rejected it
+  // (issue #1035). Dump the rejected world's raw fields under extended diag so a
+  // trace can tell a depth/rowbytes mismatch from an unregistered world without
+  // disassembly. Env-gated, integer-only, path-free.
+  const auto diag_unresolved = [pixel_bytes](const char* side, void* world) {
+    if (!aexcompat::l2_detail::extended_diag_enabled()) return;
+    int32_t flags{}, rowbytes{}, width{}, height{};
+    void* pixels{};
+    if (world) {
+      auto* bytes = static_cast<const std::byte*>(world);
+      std::memcpy(&flags, bytes + 16, sizeof(flags));
+      std::memcpy(&pixels, bytes + 24, sizeof(pixels));
+      std::memcpy(&rowbytes, bytes + 32, sizeof(rowbytes));
+      std::memcpy(&width, bytes + 36, sizeof(width));
+      std::memcpy(&height, bytes + 40, sizeof(height));
+    }
+    std::cerr << "extended_diag:iterate_world_unresolved side=" << side
+              << " world=" << (world ? 1 : 0) << " pixels=" << (pixels ? 1 : 0)
+              << " w=" << width << " h=" << height << " rowbytes=" << rowbytes
+              << " flags=" << flags << " pixel_bytes=" << pixel_bytes << "\n"
+              << std::flush;
+  };
   if (!pixel_function)
     return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
                            Reason::InvalidArguments);
   if (has_source && !resolve_world(source_world, pixel_bytes, source, source_rowbytes,
-                                   source_width, source_height))
+                                   source_width, source_height)) {
+    diag_unresolved("src", source_world);
     return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
                            Reason::MissingWorld);
+  }
   if (!resolve_world(destination_world, pixel_bytes, destination,
-                     destination_rowbytes, destination_width, destination_height))
+                     destination_rowbytes, destination_width, destination_height)) {
+    diag_unresolved("dst", destination_world);
     return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
                            Reason::MissingWorld);
+  }
   const int32_t bound_width = has_source
       ? std::min(source_width, destination_width) : destination_width;
   const int32_t bound_height = has_source
@@ -837,6 +864,29 @@ bool verify_iterate_suites() {
             &interaction, &iterate_test_pixel, &typed_destination_world) != 73 ||
         interaction.pixel_calls != 2 || interaction.abort_calls != 1 ||
         interaction.progress != std::vector<int32_t>({11})) return false;
+  }
+
+  // A float world that leaves the DEEP bit clear must still resolve for a float
+  // iterate (issue #1035): AE builds the video-frame float worlds through its
+  // own PPix suite, and those come back with world_flags 0x02000000 (bit 0
+  // clear), the exact shape Cartoon's iterateFloat handed the host. The 8-vs-16
+  // distinction still rides the DEEP bit, but float acceptance must not, or a
+  // valid AE float world fails the callback with missing_world.
+  for (const int32_t float_flags : {0, 0x02000000}) {
+    std::array<unsigned char, 64> ae_source{}, ae_destination{};
+    LocalEffectWorld ae_source_world{}, ae_destination_world{};
+    ae_source_world.data = ae_source.data();
+    ae_source_world.rowbytes = 16;
+    ae_source_world.width = 1;
+    ae_source_world.height = 4;
+    ae_source_world.world_flags = float_flags;
+    ae_destination_world = ae_source_world;
+    ae_destination_world.data = ae_destination.data();
+    IterateInteractionTestState interaction{};
+    g_iterate_interaction_test = &interaction;
+    if (iterate_world_typed(input.data(), 10, 14, 16, &ae_source_world, &four_rows,
+            &interaction, &iterate_test_pixel, &ae_destination_world) != 0 ||
+        interaction.pixel_calls != 4) return false;
   }
 
   // A null source world selects the documented destination-only walk (issue

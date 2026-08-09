@@ -147,7 +147,18 @@ bool bounded_typed_world(void* world, int32_t pixel_bytes,
   std::memcpy(&height, bytes + 40, sizeof(height));
   int32_t flags{};
   std::memcpy(&flags, bytes + 16, sizeof(flags));
-  const bool depth_matches = pixel_bytes == 4 ? (flags & 1) == 0 : (flags & 1) != 0;
+  // The world_flags DEEP bit (bit 0) separates 8-bit from 16-bit; AE does not
+  // set it on 32-bit float worlds. The video-frame float path builds its input
+  // and output through AE's own PPix/pixel-format suites, and those worlds come
+  // back with world_flags 0x02000000 (bit 0 clear) - so requiring the DEEP bit
+  // for a float iterate rejected a valid AE float world and failed the callback
+  // with missing_world (issue #1035, observed on Cartoon's iterateFloat). Keep
+  // the 8-vs-16 distinction on the DEEP bit; accept float regardless of it. A
+  // float walk's buffer safety comes from the rowbytes >= width * 16 guarantee
+  // below, which no 8- or 16-bit buffer (rowbytes width*4 / width*8) can satisfy,
+  // so only genuinely float-sized worlds ever reach the float branch.
+  const bool depth_matches = pixel_bytes == 4 ? (flags & 1) == 0
+      : pixel_bytes == 8 ? (flags & 1) != 0 : true;
   return pixels && (pixel_bytes == 4 || pixel_bytes == 8 || pixel_bytes == 16) &&
       width > 0 && height > 0 && width <= 4096 && height <= 4096 &&
       static_cast<int64_t>(width) * height <= 16'777'216 &&
