@@ -505,7 +505,8 @@ void run_session_frame_loop(
     int32_t output_capacity_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
     const std::vector<ExternalLayerInput>* external_layers, FrameFn&& render_frame,
-    const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr) {
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr,
+    bool audio_passthrough = false) {
   using aexcompat::strict_json::JsonValue;
   using aexcompat::strict_json::StrictJsonParser;
   using aexcompat::strict_json::json_exact_keys;
@@ -524,6 +525,11 @@ void run_session_frame_loop(
   // response must read as continuation-impossible, not frame-local (the
   // plug-in's own setup error is preserved in the final report).
   constexpr int32_t kSessionSequenceSetupFailed = -47;
+  // A ui_action frame sent to an AUDIO_EFFECT_ONLY passthrough session
+  // (issue #1048): the event sequence has no render to ride on, and
+  // swallowing it silently would hide the gap. Frame-local; the session
+  // continues.
+  constexpr int32_t kSessionUiActionUnsupported = -48;
 
   const int32_t layer_slot_count =
       external_layers ? static_cast<int32_t>(external_layers->size()) : 0;
@@ -1043,6 +1049,59 @@ void run_session_frame_loop(
       activate_external_aux();
       write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
     }
+    // AUDIO_EFFECT_ONLY passthrough (issue #1048): an audio-only effect has no
+    // video selector to dispatch, and AE leaves its video untouched, so the
+    // frame is the input. The input slot is RGBA8 transport at every session
+    // depth, so a deep session expands each channel with the same scaling
+    // `build_argb_input` uses for the render input; the output slot is native
+    // RGBA at the session depth either way. The sequence lifecycle above
+    // still runs - AE opens a sequence for every applied effect, and a setup
+    // failure stays the genuine diagnostic it is for any other plug-in. No
+    // FRAME pair, no layers, no capture buffer.
+    if (audio_passthrough) {
+      // A custom-UI event is an explicit broker-requested action, not a
+      // render input; a passthrough that swallowed it would be a silent
+      // compatibility gap. Explicit frame-local refusal instead.
+      if (frame_ui) {
+        if (!respond_error(kSessionUiActionUnsupported)) {
+          outcome.protocol_violation = true;
+          break;
+        }
+        continue;
+      }
+      unsigned char* slot = channels.view() + output_offset;
+      const std::size_t channel_count =
+          static_cast<std::size_t>(max_width) * max_height * 4;
+      if (pixel_bytes == 4) {
+        std::memcpy(slot, frame_rgba.data(), frame_rgba.size());
+      } else if (pixel_bytes == 8) {
+        auto* deep = reinterpret_cast<uint16_t*>(slot);
+        for (std::size_t index = 0; index < channel_count; ++index)
+          deep[index] = static_cast<uint16_t>(
+              (static_cast<uint32_t>(frame_rgba[index]) * 32768u + 127u) / 255u);
+      } else {
+        auto* deep = reinterpret_cast<float*>(slot);
+        for (std::size_t index = 0; index < channel_count; ++index)
+          deep[index] = frame_rgba[index] / 255.0f;
+      }
+      record_output_checksum_detail(slot, max_width, max_height, pixel_bytes);
+      channels.write_header_u32(wrs::kHeaderFrameWidthOffset,
+                                static_cast<uint32_t>(max_width));
+      channels.write_header_u32(wrs::kHeaderFrameHeightOffset,
+                                static_cast<uint32_t>(max_height));
+      channels.write_header_u32(wrs::kHeaderOutputGenerationOffset,
+                                expected_generation);
+      outcome.width = max_width;
+      outcome.height = max_height;
+      outcome.rowbytes = max_width * pixel_bytes;
+      if (!respond_ok(max_width, max_height, max_width * pixel_bytes,
+                      static_cast<std::size_t>(max_width) * max_height * pixel_bytes,
+                      0, 0)) {
+        outcome.protocol_violation = true;
+        break;
+      }
+      continue;
+    }
     captured.clear();
     // Re-read every dynamic layer for this frame (issue #674). The broker
     // rewrites the file before it sends the frame message and waits for the
@@ -1213,7 +1272,8 @@ RenderSessionOutcome run_render_session(
     int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
     const std::vector<ExternalLayerInput>* external_layers,
-    const aexcompat::worker_render_session::SwapPluginHook* swap_hook) {
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook,
+    bool audio_passthrough) {
   // The output slot starts at the render dimensions; an expand grows it in place
   // mid-session (#262), so the initial output capacity equals max_width/height.
   RenderSessionOutcome outcome;
@@ -1252,7 +1312,7 @@ RenderSessionOutcome run_render_session(
             aexcompat::render::layer_origin_from_input_origin(classic_output.input_origin_y);
         return frame;
       },
-      swap_hook);
+      swap_hook, audio_passthrough);
   return outcome;
 }
 

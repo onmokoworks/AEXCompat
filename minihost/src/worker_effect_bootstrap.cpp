@@ -118,7 +118,10 @@ Result run(State& state, EffectEntry entry, const AbiHooks& abi,
   if (request.render_worker)
     hooks.configure_audio_admission(request.audio_invocation,
                                     (result.advertised_out_flags & (1u << 20)) != 0);
+  // Complementary reads of the same bit (PF_OutFlag_AUDIO_EFFECT_ONLY): edit
+  // them together or the passthrough gates drift (issue #1048).
   result.image_render_supported = (result.advertised_out_flags & (1u << 31)) == 0;
+  result.audio_effect_only = (result.advertised_out_flags & (1u << 31)) != 0;
   result.nop_render_advertised = (result.advertised_out_flags & (1u << 18)) != 0;
   result.input_write_advertised = (result.advertised_out_flags & (1u << 11)) != 0;
   result.expand_buffer_advertised = (result.advertised_out_flags & (1u << 9)) != 0;

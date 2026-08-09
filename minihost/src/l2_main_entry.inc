@@ -1626,6 +1626,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   const uint32_t advertised_out_flags = bootstrap.advertised_out_flags;
   const uint32_t advertised_out_flags2 = bootstrap.advertised_out_flags2;
   const bool image_render_supported = bootstrap.image_render_supported;
+  const bool audio_effect_only = bootstrap.audio_effect_only;
   const bool nop_render_advertised = bootstrap.nop_render_advertised;
   const bool input_write_advertised = bootstrap.input_write_advertised;
   const bool expand_buffer_advertised = bootstrap.expand_buffer_advertised;
@@ -1907,7 +1908,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     const auto dispatch = aexcompat::worker_runtime::invocation::run_classic_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,
          image_render_supported, depth_supported, smart_render_supported,
-         cluster_session_active ? &cluster_swap_hook : nullptr});
+         cluster_session_active ? &cluster_swap_hook : nullptr, audio_effect_only});
     if (dispatch.case_id_rejected) {
       dispose_arbitrary_defaults(entry, input, output);
       if (global_error == 0)
@@ -2154,8 +2155,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     if (session_swap_failure) return session.finish_integrated_report(25);
     if (session_protocol_violation) return session.finish(23);
     if (session_invariant_failure) return session.finish(24);
+    // An AUDIO_EFFECT_ONLY session succeeds by passthrough (issue #1048):
+    // there is no video selector to support, so its exit is decided by the
+    // session mechanics alone, like any other render.
     return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
-      image_render_supported && depth_supported && render_error == 0 && guards_intact &&
+      ((image_render_supported && depth_supported) || audio_effect_only) &&
+      render_error == 0 && guards_intact &&
       handle_lifetimes_balanced() && world_lifetimes_balanced() &&
       async_receipt_lifetimes_balanced() &&
       async_layer_requests_balanced() &&
