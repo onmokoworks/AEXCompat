@@ -1656,7 +1656,10 @@ mod tests {
             Some(DiscoveredPluginKind::Aegp)
         );
         assert_eq!(alias, None);
-        assert!(aliases.is_none(), "the conflicting alias was never consulted");
+        assert!(
+            aliases.is_none(),
+            "the conflicting alias was never consulted"
+        );
     }
 
     /// A spelling that already registers must not pay for the alias lookup.

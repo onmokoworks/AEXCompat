@@ -748,12 +748,7 @@ pub fn initialize_experimental_aegp(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
-    initialize_experimental_aegp_impl(
-        repository,
-        plugin_path,
-        approved_sha256,
-        Vec::new(),
-    )
+    initialize_experimental_aegp_impl(repository, plugin_path, approved_sha256, Vec::new())
 }
 
 /// In-place AEGP discovery variant. The AEGP image stays in its configured
