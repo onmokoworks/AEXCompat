@@ -799,32 +799,64 @@ pub fn discover_records_for_diagnostics(
     paths: &[PathBuf],
     dependency_dirs: Vec<PathBuf>,
 ) -> Vec<DiagnosticDiscovery> {
+    discover_records_for_diagnostics_with_progress(
+        repository,
+        paths,
+        dependency_dirs,
+        |_| {},
+    )
+}
+
+/// Diagnostic entry point with task-completion evidence. The callback runs
+/// after each shipping discovery task has produced its complete batch (one
+/// singleton or one cluster), so a long corpus pass can persist progress
+/// without changing clustering, worker deadlines, or failure classification.
+#[doc(hidden)]
+pub fn discover_records_for_diagnostics_with_progress(
+    repository: &Path,
+    paths: &[PathBuf],
+    dependency_dirs: Vec<PathBuf>,
+    on_completed: impl Fn(Vec<DiagnosticDiscovery>) + Sync,
+) -> Vec<DiagnosticDiscovery> {
     let dependency = DependencyConfig {
         dirs: dependency_dirs,
         module_limit: None,
         byte_limit: None,
     };
     let build = build_fingerprint(repository, &dependency);
-    discover_all(repository, paths, &dependency, build)
+    let report_completed = |completed: &[(PathBuf, CacheEntry)]| {
+        on_completed(
+            completed
+                .iter()
+                .cloned()
+                .map(|(path, entry)| diagnostic_discovery(path, entry))
+                .collect(),
+        );
+    };
+    discover_all_with_progress(repository, paths, &dependency, build, &report_completed)
         .into_iter()
-        .map(|(path, entry)| DiagnosticDiscovery {
-            path,
-            ok: entry.ok,
-            plugin_kind: entry.plugin_kind,
-            sha256: entry.sha,
-            byte_size: entry.len,
-            smart: entry.smart,
-            out_flags2: entry.out_flags2,
-            category: entry.category,
-            parameters: entry.params,
-            search_roots: entry.closure.roots.iter().map(PathBuf::from).collect(),
-            failure_classification: entry.failure_classification,
-            failure_diagnostics: entry.failure_diagnostics,
-            cluster_fallback: entry
-                .cluster_fallback
-                .map(|fallback| format!("{}/{}", fallback.reason, fallback.resolution)),
-        })
+        .map(|(path, entry)| diagnostic_discovery(path, entry))
         .collect()
+}
+
+fn diagnostic_discovery(path: PathBuf, entry: CacheEntry) -> DiagnosticDiscovery {
+    DiagnosticDiscovery {
+        path,
+        ok: entry.ok,
+        plugin_kind: entry.plugin_kind,
+        sha256: entry.sha,
+        byte_size: entry.len,
+        smart: entry.smart,
+        out_flags2: entry.out_flags2,
+        category: entry.category,
+        parameters: entry.params,
+        search_roots: entry.closure.roots.iter().map(PathBuf::from).collect(),
+        failure_classification: entry.failure_classification,
+        failure_diagnostics: entry.failure_diagnostics,
+        cluster_fallback: entry
+            .cluster_fallback
+            .map(|fallback| format!("{}/{}", fallback.reason, fallback.resolution)),
+    }
 }
 
 /// A panic in any task (arbitrary third-party AEX) is caught and turned into
@@ -835,6 +867,16 @@ fn discover_all(
     paths: &[PathBuf],
     dependency: &DependencyConfig,
     build: BuildFingerprint,
+) -> Vec<(PathBuf, CacheEntry)> {
+    discover_all_with_progress(repository, paths, dependency, build, &|_| {})
+}
+
+fn discover_all_with_progress(
+    repository: &Path,
+    paths: &[PathBuf],
+    dependency: &DependencyConfig,
+    build: BuildFingerprint,
+    on_completed: &(dyn Fn(&[(PathBuf, CacheEntry)]) + Sync),
 ) -> Vec<(PathBuf, CacheEntry)> {
     let parallelism = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -924,8 +966,12 @@ fn discover_all(
                                     )
                                 }))
                                 .unwrap_or_else(|_| negative_entry(&plugin, build));
+                            let completed = [(plugin, entry)];
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                on_completed(&completed);
+                            }));
                             if let Ok(mut results) = results.lock() {
-                                results.push((plugin, entry));
+                                results.extend(completed);
                             }
                         }
                         DiscoveryTask::Cluster(indices) => {
@@ -960,6 +1006,9 @@ fn discover_all(
                                         .map(|path| (path.clone(), negative_entry(&path, build)))
                                         .collect()
                                 });
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                on_completed(&cluster_results);
+                            }));
                             if let Ok(mut results) = results.lock() {
                                 results.extend(cluster_results);
                             }

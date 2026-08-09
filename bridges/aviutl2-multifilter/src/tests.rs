@@ -3083,7 +3083,19 @@ mod tests {
                 std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
             }
             let (root, one, two) = cluster_repository();
-            let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+            let completed = Mutex::new(Vec::<PathBuf>::new());
+            let results = discover_all_with_progress(
+                &root,
+                &[one.clone(), two.clone()],
+                &dependency(),
+                build(1),
+                &|batch| {
+                    completed
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .extend(batch.iter().map(|(path, _)| path.clone()));
+                },
+            );
             assert_eq!(results.len(), 2, "every plug-in gets a result");
             for (path, entry) in &results {
                 assert!(
@@ -3104,6 +3116,11 @@ mod tests {
                     "in-place discovery walks no closure"
                 );
             }
+            let mut completed = completed
+                .into_inner()
+                .unwrap_or_else(|error| error.into_inner());
+            completed.sort();
+            assert_eq!(completed, vec![one.clone(), two.clone()]);
             std::fs::remove_dir_all(&root).unwrap();
         }
 
@@ -3119,7 +3136,19 @@ mod tests {
                 std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
             }
             let (root, one, two) = cluster_repository();
-            let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+            let completed = Mutex::new(Vec::<(PathBuf, bool)>::new());
+            let results = discover_all_with_progress(
+                &root,
+                &[one.clone(), two.clone()],
+                &dependency(),
+                build(1),
+                &|batch| {
+                    completed
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .extend(batch.iter().map(|(path, entry)| (path.clone(), entry.ok)));
+                },
+            );
             unsafe {
                 std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
                 std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
@@ -3151,6 +3180,11 @@ mod tests {
             let fallback = second.cluster_fallback.as_ref().expect("fallback note");
             assert_eq!(fallback.at_member, 0);
             assert_eq!(fallback.resolution, "one_shot_fallback");
+            let mut completed = completed
+                .into_inner()
+                .unwrap_or_else(|error| error.into_inner());
+            completed.sort_by(|left, right| left.0.cmp(&right.0));
+            assert_eq!(completed, vec![(one.clone(), false), (two.clone(), false)]);
             std::fs::remove_dir_all(&root).unwrap();
         }
 
