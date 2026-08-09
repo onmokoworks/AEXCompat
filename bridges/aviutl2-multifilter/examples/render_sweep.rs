@@ -598,6 +598,10 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
         // `frame_error:516` this is often the whole diagnosis (issue #985).
         "callback_addr_denials",
         "callback_addr_denials_truncated",
+        // Host-callback refusals with the refusing condition (issue #995):
+        // the rest of the 516 bucket's diagnosis.
+        "callback_denials",
+        "callback_denials_truncated",
     ] {
         worker.insert(
             key.to_owned(),

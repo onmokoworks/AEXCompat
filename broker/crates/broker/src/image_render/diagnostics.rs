@@ -638,6 +638,7 @@ fn worker_diagnostics(
     let load_failure = load_failure_marker(stderr, exit_code);
     let mut suite_acquire_failures = suite_acquire_failures(stderr);
     let mut callback_addr_denials = callback_addr_denials(stderr);
+    let mut callback_denials = callback_denials(stderr);
 
     for line in stderr.lines() {
         plugin_kind = plugin_kind.or_else(|| match line.trim() {
@@ -760,6 +761,11 @@ fn worker_diagnostics(
         // requested id was recoverable only by disassembly (issue #985).
         "callback_addr_denials": Value::Array(std::mem::take(&mut callback_addr_denials.0)),
         "callback_addr_denials_truncated": callback_addr_denials.1,
+        // Host-callback refusals with the condition that refused them, same
+        // source. Which callback answered 516 is in the extended-diag trace;
+        // which of its checks said no is what this carries (issue #995).
+        "callback_denials": Value::Array(std::mem::take(&mut callback_denials.0)),
+        "callback_denials_truncated": callback_denials.1,
         "unsupported_suite_calls": [],
         "unsupported_suite_calls_truncated": false,
         "callback_history": [],
@@ -886,6 +892,84 @@ fn callback_addr_denials(stderr: &str) -> (Vec<Value>, bool) {
     let denials = denials
         .into_iter()
         .map(|(id, quality, mode)| json!({ "id": id, "quality": quality, "mode": mode }))
+        .collect();
+    (denials, truncated)
+}
+
+/// Bound and identifier shape shared by `callback_denials`. Both fields are
+/// worker-owned vocabulary: a lower-case identifier the emitting call site
+/// chose, never plug-in text.
+const MAX_CALLBACK_DENIALS: usize = 32;
+
+fn worker_denial_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// Host-callback refusals with the condition that refused them, from the
+/// worker's `stage:callback_denied callback=<name> reason=<identifier>` lines.
+/// The numeric error a refusal answers (usually 516) reaches the plug-in,
+/// which typically passes it through as its frame error and says nothing; the
+/// callback that refused is visible in the extended-diag trace, but *why* it
+/// refused was recoverable only by rebuilding the worker with prints
+/// (issue #995, Tile refused by one of transform_world's dozen checks).
+///
+/// Same discipline as the parsers above: exactly two fields of worker-owned
+/// identifier shape, dedup on the pair, bounded, and anything else is dropped
+/// and flagged rather than passed through.
+fn callback_denials(stderr: &str) -> (Vec<Value>, bool) {
+    let mut denials: Vec<(String, String, Option<i64>)> = Vec::new();
+    let mut truncated = false;
+    for line in stderr.lines() {
+        let Some(body) = line.trim().strip_prefix("stage:callback_denied ") else {
+            continue;
+        };
+        let mut fields = body.split_whitespace();
+        let parsed = (|| {
+            let callback = fields.next()?.strip_prefix("callback=")?;
+            let reason = fields.next()?.strip_prefix("reason=")?;
+            if !worker_denial_identifier(callback) || !worker_denial_identifier(reason) {
+                return None;
+            }
+            // Where one scalar is the whole story - which transfer mode, how
+            // many matrices - the marker carries the plug-in's value. The
+            // value is plug-in-authored, so it is admitted only as an integer,
+            // and only in the range the worker's call sites can emit (int32,
+            // uint32 and uint16 arguments): outside it, the line is a
+            // fabrication, not a denial.
+            let value =
+                match fields.next() {
+                    None => None,
+                    Some(field) => Some(field.strip_prefix("value=")?.parse::<i64>().ok().filter(
+                        |value| (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(value),
+                    )?),
+                };
+            Some((callback.to_owned(), reason.to_owned(), value))
+        })();
+        let (Some(entry), None) = (parsed, fields.next()) else {
+            truncated = true;
+            continue;
+        };
+        if denials.contains(&entry) {
+            continue;
+        }
+        if denials.len() >= MAX_CALLBACK_DENIALS {
+            truncated = true;
+            break;
+        }
+        denials.push(entry);
+    }
+    let denials = denials
+        .into_iter()
+        .map(|(callback, reason, value)| match value {
+            Some(value) => {
+                json!({ "callback": callback, "reason": reason, "value": value })
+            }
+            None => json!({ "callback": callback, "reason": reason }),
+        })
         .collect();
     (denials, truncated)
 }
