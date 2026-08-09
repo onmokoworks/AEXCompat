@@ -41,6 +41,8 @@
 //! - `crash_on_inspect`: dies on the first `inspect_plugin`.
 //! - `inspect_error_plugin_1`: answers `inspect_plugin` for plugin 1 with a
 //!   structured parameter-local error.
+//! - `inspect_entrypoint_aegp_plugin_1`: answers plugin 1 with the real
+//!   entrypoint-error shape and a partial AEGP classification report.
 
 #[cfg(windows)]
 mod worker {
@@ -1219,6 +1221,17 @@ mod worker {
                     "request_index": request_index,
                     "status": "error",
                     "error_kind": "selector_error"
+                })
+                .to_string()
+            } else if behavior == "inspect_entrypoint_aegp_plugin_1" && new_index == 1 {
+                json!({
+                    "v": 1,
+                    "type": "inspect_done",
+                    "plugin_index": plugin_index,
+                    "request_index": request_index,
+                    "status": "error",
+                    "error_kind": "entrypoint_unresolved",
+                    "report": { "plugin_kind": "aegp_candidate" }
                 })
                 .to_string()
             } else if behavior == "inspect_identity_changed_plugin_1" && new_index == 1 {

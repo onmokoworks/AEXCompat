@@ -298,6 +298,19 @@ using AegpEntry = int32_t(__cdecl*)(void*, int32_t, int32_t, int32_t, void**);
 // Ported from the reviewed/audited implementation on codex/issue84-pipl-entrypoint.
 enum class PiplPluginKind { Effect, Aegp, Unknown, Invalid, Missing };
 
+const char* unresolved_entrypoint_plugin_kind(PiplPluginKind kind) {
+  return kind == PiplPluginKind::Aegp
+             ? "aegp_candidate"
+             : (kind == PiplPluginKind::Invalid
+                    ? "invalid_pipl"
+                    : "unknown_no_effect_entrypoint");
+}
+
+std::string unresolved_entrypoint_report_json(PiplPluginKind kind) {
+  return std::string("{\"plugin_kind\":\"") +
+         unresolved_entrypoint_plugin_kind(kind) + "\"}";
+}
+
 struct PiplEntrypoint {
   PiplPluginKind kind{PiplPluginKind::Unknown};
   std::string symbol;
@@ -1083,6 +1096,17 @@ std::vector<unsigned char> synthetic_pipl(
 }
 
 bool verify_pipl_entrypoint_parser() {
+  if (std::string(unresolved_entrypoint_plugin_kind(PiplPluginKind::Aegp)) !=
+          "aegp_candidate" ||
+      std::string(unresolved_entrypoint_plugin_kind(PiplPluginKind::Invalid)) !=
+          "invalid_pipl" ||
+      std::string(unresolved_entrypoint_plugin_kind(PiplPluginKind::Effect)) !=
+          "unknown_no_effect_entrypoint" ||
+      unresolved_entrypoint_report_json(PiplPluginKind::Aegp) !=
+          "{\"plugin_kind\":\"aegp_candidate\"}" ||
+      unresolved_entrypoint_report_json(PiplPluginKind::Unknown) !=
+          "{\"plugin_kind\":\"unknown_no_effect_entrypoint\"}")
+    return false;
   const auto effect = synthetic_pipl({'T', 'K', 'F', 'e'}, "entryPointFunc");
   const auto parsed_effect = parse_pipl_entrypoint(effect.data(), effect.size());
   if (parsed_effect.kind != PiplPluginKind::Effect ||

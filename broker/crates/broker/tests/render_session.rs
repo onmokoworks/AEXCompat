@@ -3193,6 +3193,37 @@ mod windows_e2e {
     }
 
     #[test]
+    fn discovery_session_preserves_entrypoint_aegp_partial_report() {
+        let cluster = temp_cluster_repository();
+        let mut session =
+            open_discovery_session(&cluster, behavior("inspect_entrypoint_aegp_plugin_1"));
+        assert!(matches!(
+            session.inspect_plugin(0, 0).expect("first inspect"),
+            InspectOutcome::Inspected { .. }
+        ));
+        let outcome = session.inspect_plugin(1, 1).expect("AEGP classification");
+        let InspectOutcome::InspectError { error_kind, report } = outcome else {
+            panic!("expected entrypoint error, got {outcome:?}");
+        };
+        assert_eq!(error_kind, "entrypoint_unresolved");
+        assert_eq!(
+            report.expect("partial classification report")["plugin_kind"],
+            "aegp_candidate"
+        );
+        let repeated = session.inspect_plugin(1, 2).expect("repeat classification");
+        let InspectOutcome::InspectError { error_kind, report } = repeated else {
+            panic!("expected repeated entrypoint error, got {repeated:?}");
+        };
+        assert_eq!(error_kind, "entrypoint_unresolved");
+        assert_eq!(
+            report.expect("repeated partial report")["plugin_kind"],
+            "aegp_candidate"
+        );
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
     fn discovery_session_worker_death_is_detected_by_the_three_way_wait() {
         let cluster = temp_cluster_repository();
         let mut session = open_discovery_session(&cluster, behavior("crash_on_inspect"));
