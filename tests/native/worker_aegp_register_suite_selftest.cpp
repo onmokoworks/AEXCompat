@@ -4,6 +4,10 @@
 #include <cstddef>
 #include <string>
 
+namespace {
+int32_t __cdecl idle_hook(void*, void*, int32_t*) { return 0; }
+}
+
 int main() {
   using namespace aexcompat::l2_detail;
 
@@ -45,6 +49,12 @@ int main() {
   assert(pf_suite->register_update_menu_hook(1, nullptr, nullptr) == 4);
   assert(pf_suite->register_death_hook(1, nullptr, nullptr) == 4);
   assert(pf_suite->register_idle_hook(1, nullptr, nullptr) == 4);
+  assert(pf_suite->register_idle_hook(1, reinterpret_cast<void*>(&idle_hook),
+                                      nullptr) == 0);
+  assert(pf_suite->register_idle_hook(0, reinterpret_cast<void*>(&idle_hook),
+                                      nullptr) == 4);
+  assert(pf_suite->register_idle_hook(-1, reinterpret_cast<void*>(&idle_hook),
+                                      nullptr) == 4);
   assert(pf_suite->register_version_hook(1, nullptr, nullptr) == 4);
   assert(pf_suite->register_about_string_hook(1, nullptr, nullptr) == 4);
   assert(pf_suite->register_about_hook(1, nullptr, nullptr) == 4);
@@ -56,6 +66,7 @@ int main() {
   assert(pf_suite->register_interactive_artisan(
              {}, {}, 1, nullptr, nullptr, nullptr, nullptr) == 4);
   statistics = aegp_register_suite_statistics();
-  assert(statistics.unsupported_registration_calls == 11);
+  assert(statistics.transient_idle_hook_registrations == 1);
+  assert(statistics.unsupported_registration_calls == 10);
   return 0;
 }
