@@ -742,7 +742,11 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     }
   }
   if (requested) {
-    if (!apply_requested_assignments(definitions, *requested)) return -3;
+    if (!apply_requested_assignments(
+            definitions, *requested,
+            read<int32_t>(input_world, aexcompat::abi::x86_64_windows::LAYER_WIDTH_OFFSET),
+            read<int32_t>(input_world, aexcompat::abi::x86_64_windows::LAYER_HEIGHT_OFFSET)))
+      return -3;
   } else if (definitions.size() > 7) {
     write<int32_t>(definitions[1], 56, parameter_profile.amount);
     write<int32_t>(definitions[2], 56, parameter_profile.direction);
