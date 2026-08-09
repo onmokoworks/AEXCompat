@@ -38,6 +38,20 @@ int32_t unsupported_registration() {
 int32_t __cdecl reject_command_hook(int32_t, int32_t, int32_t, void*, void*) {
   return unsupported_registration();
 }
+
+int32_t __cdecl accept_transient_pf_idle_hook(
+    int32_t plugin_id, void* hook, void*) {
+  if (plugin_id <= 0 || !hook) return 4;
+  std::lock_guard<std::mutex> lock(g_register_suite_mutex);
+  if (g_register_suite_statistics.transient_idle_hook_registrations == UINT32_MAX)
+    return 4;
+  // PF discovery never schedules AEGP idle events. Accepting the registration
+  // is still a valid finite host lifecycle: this worker can finish before it
+  // becomes idle. Do not retain a plug-in-owned callback past GLOBAL_SETUP;
+  // clustered discovery may inspect a different module in the same process.
+  ++g_register_suite_statistics.transient_idle_hook_registrations;
+  return 0;
+}
 }  // namespace
 
 int32_t __cdecl aegp_get_unique_command(int32_t* command) {
@@ -165,7 +179,7 @@ AegpRegisterSuite g_pf_safe_aegp_register_suite{
     &reject_command_hook, &aegp_register_version_hook,
     &aegp_register_version_hook, &aegp_register_version_hook,
     &aegp_register_about_string_hook, &aegp_register_about_hook,
-    &aegp_register_artisan, &aegp_register_io, &aegp_register_version_hook,
+    &aegp_register_artisan, &aegp_register_io, &accept_transient_pf_idle_hook,
     &aegp_register_tracker, &aegp_register_interactive_artisan,
     &aegp_register_preset_localization_string};
 

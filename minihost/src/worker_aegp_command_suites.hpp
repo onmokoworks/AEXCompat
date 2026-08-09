@@ -54,6 +54,7 @@ int32_t __cdecl aegp_register_preset_localization_string(
 
 struct AegpRegisterSuiteStatistics {
   uint32_t preset_localization_calls{};
+  uint32_t transient_idle_hook_registrations{};
   uint32_t unsupported_registration_calls{};
 };
 
