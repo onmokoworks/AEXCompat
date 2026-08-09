@@ -810,7 +810,21 @@ PiplEntrypoint resolve_plugin_data_entrypoints(PluginDataEntry2 entry2,
 
 PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
   if (!module) return {PiplPluginKind::Unknown, {}};
-  const auto entry2 = reinterpret_cast<PluginDataEntry2>(
+  // PluginDataEntryFunction3 is the entry the AE 2026 bundle ships (VR*,
+  // Fast_Blur, Sharpen; issue #326). It is absent from the public 25.2 header,
+  // but a live probe (tools/aex_plugindata_probe.py) confirmed it takes the
+  // same (opaque, callback, SPBasic, host, version) entry signature and drives
+  // the v2 registration callback with identical argument layout - name,
+  // match_name, category, entrypoint, kind, api, reserved, support_url all
+  // arrive intact - so it resolves through the same v2 path. Preferred over
+  // v2 over v1. That callback layout is confirmed by the live probe across the
+  // whole AE2026 bundle; were some other build's v3 to drive a wider or
+  // narrower callback, record_plugin_data_registration bounds-checks every
+  // field and returns Unknown, so the worst case stays fail-closed (never a
+  // false Effect verdict, never a crash past the v2 SEH guard below).
+  const auto entry3 = reinterpret_cast<PluginDataEntry2>(
+      GetProcAddress(module, "PluginDataEntryFunction3"));
+  const auto entry2 = entry3 ? entry3 : reinterpret_cast<PluginDataEntry2>(
       GetProcAddress(module, "PluginDataEntryFunction2"));
   const auto entry1 = reinterpret_cast<PluginDataEntry1>(
       GetProcAddress(module, "PluginDataEntryFunction"));
@@ -828,6 +842,37 @@ int32_t __cdecl synthetic_plugin_data_entry2(
       reinterpret_cast<const unsigned char*>("AEXCompat Synthetic"),
       reinterpret_cast<const unsigned char*>("AEXCompat Tests"),
       reinterpret_cast<const unsigned char*>("entryPointFunc"),
+      static_cast<int32_t>('eFKT'), kPluginDataApiMajor, kPluginDataApiMinor,
+      kPluginDataReservedInfo,
+      reinterpret_cast<const unsigned char*>("https://example.invalid"));
+}
+
+// A multi-effect v2/v3 bundle (the Fast_Blur shape, issue #326): two
+// registrations in one entry, the first the effect the module is discovered
+// as. This pins the shared resolution path that a v3 bundle flows through
+// (multi-registration → first entrypoint); the v3 export lookup itself is a
+// GetProcAddress name a unit test cannot reach, so it is covered by the
+// render sweep, not here.
+int32_t __cdecl synthetic_plugin_data_entry_multi(
+    PluginDataOpaque* in_ptr, PluginDataCallback2 callback, void* basic_suite,
+    const char* host, const char* version) {
+  if (!callback || !basic_suite || !host || !version ||
+      std::strcmp(host, "AEXCompat") != 0 || std::strcmp(version, "2025") != 0)
+    return kPluginDataRejected;
+  const int32_t first = callback(in_ptr,
+      reinterpret_cast<const unsigned char*>("Primary Effect"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Primary"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Tests"),
+      reinterpret_cast<const unsigned char*>("EffectMainExtra"),
+      static_cast<int32_t>('eFKT'), kPluginDataApiMajor, kPluginDataApiMinor,
+      kPluginDataReservedInfo,
+      reinterpret_cast<const unsigned char*>("https://example.invalid"));
+  if (first != 0) return first;
+  return callback(in_ptr,
+      reinterpret_cast<const unsigned char*>("Secondary Effect"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Secondary"),
+      reinterpret_cast<const unsigned char*>("AEXCompat Tests"),
+      reinterpret_cast<const unsigned char*>("EffectMainExtra2"),
       static_cast<int32_t>('eFKT'), kPluginDataApiMajor, kPluginDataApiMinor,
       kPluginDataReservedInfo,
       reinterpret_cast<const unsigned char*>("https://example.invalid"));
@@ -856,6 +901,12 @@ bool verify_plugin_data_entrypoint() {
   const auto v1 = resolve_plugin_data_entrypoints(nullptr,
                                                   &synthetic_plugin_data_entry1);
   if (v1.kind != PiplPluginKind::Effect || v1.symbol != "EffectMain")
+    return false;
+  // A multi-effect bundle (Fast_Blur shape) resolves to its first registered
+  // entrypoint; PluginDataEntryFunction3 flows through this same v2 path.
+  const auto multi = resolve_plugin_data_entrypoints(
+      &synthetic_plugin_data_entry_multi, nullptr);
+  if (multi.kind != PiplPluginKind::Effect || multi.symbol != "EffectMainExtra")
     return false;
   PluginDataContext duplicate;
   // Duplicate registrations are accepted and ignored: both calls must succeed

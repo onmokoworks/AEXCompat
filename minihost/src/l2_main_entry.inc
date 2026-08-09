@@ -1248,7 +1248,7 @@ int worker_main_impl(int argc, wchar_t **argv) {
     const bool passed = verify_plugin_data_entrypoint();
     std::cout << "{\"plugin_data_entrypoint\":\""
               << (passed ? "passed" : "failed")
-              << "\",\"v2\":true,\"v1_fallback\":true,"
+              << "\",\"v2\":true,\"v1_fallback\":true,\"multi_effect\":true,"
                  "\"bounded\":true,\"fail_closed\":true}\n";
     return passed ? 0 : 73;
   }

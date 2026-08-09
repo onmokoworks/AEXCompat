@@ -11,9 +11,11 @@ actually registers is the ground truth for that decision.
 This probe loads one real .aex with a bounded DLL search scope (the plug-in's
 own folder plus, when present, the ancestor ``Support Files`` folder, mirroring
 the sealed dependency roots the broker uses), calls its
-``PluginDataEntryFunction`` / ``PluginDataEntryFunction2`` exactly once, and
-records every registration callback as JSON. It never calls the effect
-entrypoint, never renders, and never starts After Effects.
+``PluginDataEntryFunction3`` / ``PluginDataEntryFunction2`` /
+``PluginDataEntryFunction`` (preferred in that order, the same order the
+worker resolves) exactly once, and records every registration callback as
+JSON. It never calls the effect entrypoint, never renders, and never starts
+After Effects.
 
 Safety notes:
 
@@ -22,9 +24,10 @@ Safety notes:
   one plug-in cannot take down the sweep, exactly like the broker's isolated
   workers do.
 - ``worker_verdict`` only *mirrors* the worker's current validation rules for
-  comparison; it does not change them. Keep the constants in sync with
-  ``kPluginDataApiMajor`` / ``kPluginDataApiMinor`` /
-  ``kPluginDataReservedInfo`` in ``minihost/src/l2_main.cpp``.
+  comparison; it does not change them. Keep it in sync with
+  ``record_plugin_data_registration`` in ``minihost/src/l2_main_support.inc``:
+  ``kPluginDataApiMajor`` / ``kPluginDataApiMinor`` (13.29), reserved_info
+  unvalidated, and multi-registration accepted first-wins (issue #326).
 """
 
 from __future__ import annotations
@@ -42,8 +45,10 @@ from typing import Any
 # probe reports what real plug-ins register *against* these rules; it does not
 # relax them.
 WORKER_PLUGIN_DATA_API_MAJOR = 13
-WORKER_PLUGIN_DATA_API_MINOR = 28
-WORKER_PLUGIN_DATA_RESERVED_INFO = 8
+# The bundled AE effects register api 13.29 (Adobe builds against a newer
+# internal SDK than the public 25.2 headers); the worker's ceiling moved to
+# match (l2_main_support.inc, issue #326).
+WORKER_PLUGIN_DATA_API_MINOR = 29
 WORKER_HOST_NAME = b"AEXCompat"
 WORKER_HOST_VERSION = b"2025"
 
@@ -171,8 +176,17 @@ def probe_plugin_data(path: Path) -> dict[str, Any]:
         result["load_error"] = ctypes.get_last_error()
         return result
     try:
-        entry_addr = kernel32.GetProcAddress(module, b"PluginDataEntryFunction2")
-        variant = "v2"
+        # PluginDataEntryFunction3 is the entry the AE 2026 bundle ships (VR*,
+        # Fast_Blur, Sharpen); it is not in the public 25.2 header. Probed with
+        # the v2 callback signature to observe whether the registration values
+        # come through intact or are shifted - the ground truth for whether the
+        # worker can call it the same way (issue #326). v3 is preferred over v2
+        # over v1 the way the worker resolves them.
+        entry_addr = kernel32.GetProcAddress(module, b"PluginDataEntryFunction3")
+        variant = "v3"
+        if not entry_addr:
+            entry_addr = kernel32.GetProcAddress(module, b"PluginDataEntryFunction2")
+            variant = "v2"
         if not entry_addr:
             entry_addr = kernel32.GetProcAddress(module, b"PluginDataEntryFunction")
             variant = "v1"
@@ -182,7 +196,7 @@ def probe_plugin_data(path: Path) -> dict[str, Any]:
         result["export_variant"] = variant
 
         registrations: list[dict[str, Any]] = result["registrations"]
-        if variant == "v2":
+        if variant in ("v2", "v3"):
 
             @_CB2
             def callback(_ptr, name, match, category, entry, kind, major, minor, reserved, url):
@@ -213,9 +227,11 @@ def probe_plugin_data(path: Path) -> dict[str, Any]:
             result["status"] = "entry_error"
             return result
         # The worker's next step after accepting a registration is
-        # GetProcAddress on the registered symbol (Threshold.aex registers
-        # "MainEntry" but exports nothing by that name), so record it here.
-        if len(registrations) == 1 and registrations[0]["entrypoint"]:
+        # GetProcAddress on the FIRST registered symbol (Threshold.aex
+        # registers "MainEntry" but exports nothing by that name). Multi-effect
+        # bundles register more than once and the worker discovers them as the
+        # first, so score the first here too (issue #326).
+        if registrations and registrations[0]["entrypoint"]:
             symbol = registrations[0]["entrypoint"].encode("ascii", "ignore")
             result["entrypoint_exported"] = bool(kernel32.GetProcAddress(module, symbol))
         return result
@@ -258,9 +274,13 @@ def worker_verdict(result: dict[str, Any]) -> dict[str, Any]:
     if result["status"] == "entry_error":
         return {"accepted": False, "reasons": ["entry_error"]}
     registrations = result["registrations"]
-    if len(registrations) != 1:
-        reasons.append("callback_count")
-    if registrations:
+    # Multi-effect bundles (Fast_Blur registers two) are accepted first-wins by
+    # the worker (record_plugin_data_registration keeps the first and accepts
+    # the rest), so the verdict scores the FIRST registration, not a
+    # single-callback requirement (issue #326).
+    if not registrations:
+        reasons.append("no_registration")
+    else:
         reg = registrations[0]
         if not (
             _valid_text(reg["name"], True)
@@ -279,8 +299,10 @@ def worker_verdict(result: dict[str, Any]) -> dict[str, Any]:
             or (major == WORKER_PLUGIN_DATA_API_MAJOR and minor > WORKER_PLUGIN_DATA_API_MINOR)
         ):
             reasons.append("api_version")
-        if reg["reserved_info"] != WORKER_PLUGIN_DATA_RESERVED_INFO:
-            reasons.append("reserved_info")
+        # reserved_info is deliberately NOT scored: the worker stopped
+        # validating it (l2_main.cpp / l2_main_support.inc) because in the wild
+        # it is a plugin-defined opaque value (0/1/8/9 observed), not the SDK
+        # sample's constant (issue #326).
     if result.get("entrypoint_exported") is False:
         reasons.append("entrypoint_not_exported")
     return {"accepted": not reasons, "reasons": reasons}
