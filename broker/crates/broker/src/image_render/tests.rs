@@ -2475,6 +2475,71 @@ mod tests {
     }
 
     #[test]
+    fn callback_addr_denials_are_unique_and_shape_checked() {
+        let trace = "stage:callback_addr_denied id=-5 quality=1 mode=0\n\
+             stage:callback_addr_denied id=-5 quality=1 mode=0\n\
+             stage:callback_addr_denied id=-5 quality=0 mode=0\n\
+             stage:callback_addr_denied id=oops quality=1 mode=0\n\
+             stage:callback_addr_denied id=5 quality=1 mode=0 path=C:\\private\n\
+             stage:callback_addr_denied quality=1 id=5 mode=0\n\
+             stage:callback_addr_denied id=99999999999 quality=1 mode=0\n\
+             stage:callback_addr_denied id=1 quality=1 mode=-1\n";
+        let diagnostics = worker_diagnostics(trace, false, "nonzero_exit", 1, 2);
+        let denials = diagnostics["callback_addr_denials"].as_array().unwrap();
+        assert_eq!(
+            denials,
+            &[
+                json!({"id": -5, "quality": 1, "mode": 0}),
+                json!({"id": -5, "quality": 0, "mode": 0}),
+            ]
+        );
+        assert_eq!(diagnostics["callback_addr_denials_truncated"], true);
+        assert!(!diagnostics.to_string().contains("private"));
+        // The denial marker must not feed the stage state machine: it carries
+        // no _begin/_end suffix, so it can neither create events nor be
+        // blamed as a failure stage.
+        assert!(diagnostics["stage_events"].as_array().unwrap().is_empty());
+        assert_eq!(diagnostics["failure_stage"], Value::Null);
+    }
+
+    #[test]
+    fn callback_addr_denials_cap_reports_truncation_without_malformed_lines() {
+        let mut trace = String::new();
+        for index in 0..(MAX_CALLBACK_ADDR_DENIALS + 3) {
+            trace.push_str(&format!(
+                "stage:callback_addr_denied id={index} quality=1 mode=0\n"
+            ));
+        }
+        let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
+        assert_eq!(
+            diagnostics["callback_addr_denials"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_CALLBACK_ADDR_DENIALS
+        );
+        assert_eq!(diagnostics["callback_addr_denials_truncated"], true);
+    }
+
+    #[test]
+    fn callback_addr_denials_absent_lines_report_empty_untruncated() {
+        let diagnostics = worker_diagnostics(
+            "stage:classic_render_begin\nstage:classic_render_end error=516\n",
+            false,
+            "ok",
+            0,
+            2,
+        );
+        assert!(
+            diagnostics["callback_addr_denials"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
+    }
+
+    #[test]
     fn structured_worker_report_supplies_bounded_unique_unsupported_suite_calls() {
         let mut diagnostics = json!({});
         let mut reported = vec![
