@@ -763,14 +763,28 @@ pub const UTILS_ANSI_ACOS_OFFSET: usize = 352;
 pub const UTILS_ANSI_ACOS_SIZE: usize = 8;
 pub const UTILS_ANSI_ASIN_OFFSET: usize = 344;
 pub const UTILS_ANSI_ASIN_SIZE: usize = 8;
+pub const UTILS_ANSI_ATAN2_OFFSET: usize = 216;
+pub const UTILS_ANSI_ATAN2_SIZE: usize = 8;
+pub const UTILS_ANSI_ATAN_OFFSET: usize = 208;
+pub const UTILS_ANSI_ATAN_SIZE: usize = 8;
 pub const UTILS_ANSI_CEIL_OFFSET: usize = 224;
 pub const UTILS_ANSI_CEIL_SIZE: usize = 8;
 pub const UTILS_ANSI_COS_OFFSET: usize = 232;
 pub const UTILS_ANSI_COS_SIZE: usize = 8;
+pub const UTILS_ANSI_EXP_OFFSET: usize = 240;
+pub const UTILS_ANSI_EXP_SIZE: usize = 8;
 pub const UTILS_ANSI_FABS_OFFSET: usize = 248;
 pub const UTILS_ANSI_FABS_SIZE: usize = 8;
+pub const UTILS_ANSI_FLOOR_OFFSET: usize = 256;
+pub const UTILS_ANSI_FLOOR_SIZE: usize = 8;
+pub const UTILS_ANSI_FMOD_OFFSET: usize = 264;
+pub const UTILS_ANSI_FMOD_SIZE: usize = 8;
 pub const UTILS_ANSI_HYPOT_OFFSET: usize = 272;
 pub const UTILS_ANSI_HYPOT_SIZE: usize = 8;
+pub const UTILS_ANSI_LOG10_OFFSET: usize = 288;
+pub const UTILS_ANSI_LOG10_SIZE: usize = 8;
+pub const UTILS_ANSI_LOG_OFFSET: usize = 280;
+pub const UTILS_ANSI_LOG_SIZE: usize = 8;
 pub const UTILS_ANSI_POW_OFFSET: usize = 296;
 pub const UTILS_ANSI_POW_SIZE: usize = 8;
 pub const UTILS_ANSI_SIN_OFFSET: usize = 304;
@@ -781,6 +795,8 @@ pub const UTILS_ANSI_SQRT_OFFSET: usize = 312;
 pub const UTILS_ANSI_SQRT_SIZE: usize = 8;
 pub const UTILS_ANSI_STRCPY_OFFSET: usize = 336;
 pub const UTILS_ANSI_STRCPY_SIZE: usize = 8;
+pub const UTILS_ANSI_TAN_OFFSET: usize = 320;
+pub const UTILS_ANSI_TAN_SIZE: usize = 8;
 pub const UTILS_APP_OFFSET: usize = 200;
 pub const UTILS_APP_SIZE: usize = 8;
 pub const UTILS_AREA_SAMPLE16_OFFSET: usize = 480;
@@ -865,7 +881,7 @@ pub const INPUT_CALLBACK_OFFSETS: [usize; 12] = [
     INTER_RESERVED_1_OFFSET,
     INTER_RESERVED_2_OFFSET,
 ];
-pub const UTILITY_CALLBACK_OFFSETS: [usize; 45] = [
+pub const UTILITY_CALLBACK_OFFSETS: [usize; 53] = [
     UTILS_BEGIN_SAMPLING_OFFSET,
     UTILS_SUBPIXEL_SAMPLE_OFFSET,
     UTILS_AREA_SAMPLE_OFFSET,
@@ -899,6 +915,14 @@ pub const UTILITY_CALLBACK_OFFSETS: [usize; 45] = [
     UTILS_ANSI_STRCPY_OFFSET,
     UTILS_ANSI_ASIN_OFFSET,
     UTILS_ANSI_ACOS_OFFSET,
+    UTILS_ANSI_ATAN_OFFSET,
+    UTILS_ANSI_ATAN2_OFFSET,
+    UTILS_ANSI_EXP_OFFSET,
+    UTILS_ANSI_FLOOR_OFFSET,
+    UTILS_ANSI_FMOD_OFFSET,
+    UTILS_ANSI_LOG_OFFSET,
+    UTILS_ANSI_LOG10_OFFSET,
+    UTILS_ANSI_TAN_OFFSET,
     UTILS_GET_PLATFORM_DATA_OFFSET,
     UTILS_GET_PIXEL_DATA8_OFFSET,
     UTILS_GET_PIXEL_DATA16_OFFSET,

@@ -146,6 +146,22 @@ jobs:
           cmake --build target\instruments-build --target trace_writer_selftest || exit /b 1
           dir /b target\instruments-build\trace_writer_selftest.exe
 
+      # abi_layout_probe の static_assert は、生成 ABI コントラクトのオフセットを
+      # 実 SDK の struct レイアウトに固定している唯一の照合で、ビルドしない限り
+      # 誰も照合しない。ビルドしてさらに実行することで、
+      # test_abi_layout_observation_matches_probe.py が
+      # analysis/AE_ABI_LAYOUT_OBSERVATION_2026-07-13.json を probe の出力に
+      # 突き合わせる (#981)。configure は上のステップが済ませてある。
+      - name: Build ABI layout probe (Ninja)
+        if: steps.sdk.outcome == 'success'
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          if not defined VSROOT exit /b 1
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake --build target\instruments-build --target abi_layout_probe || exit /b 1
+          dir /b target\instruments-build\abi_layout_probe.exe
+
       # 一部の built_artifact テストは worker を multi-config 時代の固定パスから
       # 探す。frozen hash を照合しないので同一バイナリの複製で満たせる。
       - name: Mirror workers into expected build layouts

@@ -71,3 +71,25 @@ authored; no Adobe header is included or redistributed by `minihost/`.
 AEGP Memory Suite v1 follows the same boundary for its eight-entry callback
 table, 32-bit size/flag values, opaque handles, and UTF-16 payload ownership.
 All storage and synchronization are independently implemented in `minihost/`.
+
+The `in_data->utils` ANSI block crossed the same boundary twice. The 2026-07-13
+observation carried eleven of its nineteen entries, so the host wired eleven and
+left the rest null; issue #981 taught `instruments/abi-layout-probe` the
+remaining eight (`atan`, `atan2`, `exp`, `floor`, `fmod`, `log`, `log10`,
+`tan`) and re-ran `tools/refresh-aex-abi-layout-evidence.ps1`, so the document
+is what the probe printed rather than a hand-inserted edit, and its only
+difference from the previous refresh is those eight entries. The functions
+themselves were already independently written in
+`minihost/src/worker_pf_ansi_runtime.cpp`; nothing but numeric offsets crossed.
+
+`tests/test_abi_layout_observation_matches_probe.py` supplies the check the
+refresh runner itself does not have - the runner only ever rewrites the
+document - by running the compiled probe and requiring the committed document to
+equal its output. CI builds the probe on any run that provisioned the SDK, so a
+document refreshed against a different SDK, or edited by hand, fails there.
+Locally it is a built-artifact test (`tests/built_artifact_tests.txt`), so a
+plain `uv run python -m pytest -q` skips it: reaching the generator with a
+drifted document is caught in CI, not by the canonical local run. What neither
+covers is a `PF_UtilCallbacks` member nothing has taught the probe to emit -
+such a member is outside the probe, the document, and the host's install alike;
+issue #991 tracks the ones that are still there.
